@@ -902,10 +902,31 @@ ZERO cross-call state — no files, no statics, no caches, no cursors.**
   kill −9 in a REUSED worker whose window already closed on other tuples'
   masks (core serves unchecked; the belt catches finalists, escaped-
   residual-class values differ) can persist DIFFERENT bytes across
-  attempts — every completed redo is internally consistent, belt-verified,
-  and results-safe (the killed attempt's file is atomically overwritten;
-  the same-run_id conflict tripwire cannot trip across a fresh in-memory
-  store), and the class is pre-existing in kind (#1531's rust_metrics
+  attempts — every completed redo is internally consistent and
+  belt-verified. **STORE-PRELOAD CORRECTION (Verifier B checkpoint-1
+  audit C5 — the previous parenthetical here claimed "`ResultsStore`
+  starts empty / the same-run_id conflict tripwire cannot trip across a
+  fresh in-memory store"; BOTH halves are FALSE against production):**
+  `load_or_create_store` PRE-LOADS the existing Parquet into the store
+  when the file exists (`sweep_orchestrator.py:737-758` — "pre-loaded if
+  the file exists", the idempotence keystone: a resume re-flushes the
+  SAME rows instead of overwriting good results with an empty store), so
+  a redo whose killed attempt already flushed does NOT start from an
+  empty store. The REAL shape, which is the DESIGNED behavior: on a
+  redo-after-kill over a flushed-but-unsentineled file, a
+  DIVERGENT-build recompute that appends a different result under an
+  already-persisted run_id hits the LOUD same-run_id append-conflict
+  abort (`results_store.conflict` ERROR + `ResultsStoreError`,
+  results_store.py:487-490 — the F2 law; "one identity can only ever
+  mean one result", results_store.py:57) — divergence is REFUSED loudly,
+  never silently persisted, on exactly the kill-after-flush point. The
+  different-bytes-across-attempts class above is therefore confined to
+  kill points where NO flush landed (file absent ⇒ genuinely fresh
+  store) or where the redo path never revisits the persisted run_ids;
+  where the store pre-loads, the tripwire — far from "cannot trip" — is
+  the mechanism that CATCHES the divergent build (and the §7.2
+  kill-after-flush REDO cell is the proof a HEALTHY build never trips
+  it). The class is pre-existing in kind (#1531's rust_metrics
   carries the identical process-global-latch shape)
   (DEC-MARK-MANY-SENTINEL-001). There is no
   partial-batch durable state: the batch is RAM. A killed worker →
@@ -942,9 +963,46 @@ ZERO cross-call state — no files, no statics, no caches, no cursors.**
   untouched Python grid iteration (the core never orders tuples — stated);
   the golden exists so that invariant is TESTED, not assumed.
 - **Kernel panic** (`panic="abort"`): SIGABRT = worker death → pool-broken
-  quarantine → repeated deaths trip #1295's crash-loop breaker; the breaker
-  RUNBOOK gains "`BRUTEX_SWEEP_RUST_CORE=0` / `BRUTEX_SWEEP_RUST_ENUM=0` is
-  remediation lever #1 for repeated worker SIGABRTs" (grounding/perfmax
+  quarantine. **PANIC-RECOVERY RE-ROUTE (Verifier B checkpoint-1 audit
+  C6 — the previous routing to "#1295's crash-loop breaker" is
+  WITHDRAWN: that breaker is #1295's G12 checkpoint-CORRUPTION counter,
+  structurally blind to routed crash-loop classes — it counts checkpoint
+  corruption events, not worker deaths, so it CANNOT fire for a panic;
+  #1295 is additionally UNMERGED, §11 F7).** The mechanisms that
+  ACTUALLY fire for a repeated panic, verified in-tree:
+  (a) *parallel lane* — a SIGABRT'd worker breaks the pool; the parent
+  catches `BrokenProcessPool` distinctly and QUARANTINES the poison
+  tuple(s) durably + reversibly (`_quarantine_broken_pool`,
+  sweep_parallel.py:1340-1343 + :1297-1299; sidecar
+  `<root>/.sweep_quarantine.json`, sweep_parallel.py:630; finished
+  siblings drained, then the run fails LOUDLY with
+  `SweepWorkerPoolBrokenError` naming tuple(s) + sidecar + remediation —
+  DEC-SWEEP-STALL-OOM-GUARDS-001; a resume skips the quarantined
+  tuple(s) as the DISTINCT `tuples_quarantined_prior` counter, so a
+  repeated panic converges to visible per-tuple loss, never a loop);
+  a panic that surfaces as a caught EXCEPTION (the seam's mapped
+  `kernel_panic_exception` below) instead rides the per-tuple
+  `SweepComboError` catch → failed marker → `TUPLE_FAILED` audit line
+  (sweep_parallel.py:891-897 catch; `SUPERVISOR_ACTION_TUPLE_FAILED`
+  append at sweep_parallel.py:1585-1596 — skip + continue);
+  (b) *daemon lane* — under `brutex sweep-supervisor` a sequential-arm
+  SIGABRT is a child crash; the `ProcessSupervisor` restart policy does
+  the crash-loop accounting (consecutive-crash streak vs
+  `policy.max_restarts`, uptime-reset, backoff —
+  `orchestrator/supervisor.py:530-575`) and terminally GIVES UP loudly
+  (`SupervisorOutcome.GAVE_UP`, supervisor.py:295/:564, with the
+  CRITICAL `SUPERVISOR_GAVE_UP` Telegram alert, telegram.py:161 —
+  DEC-SUPERVISOR-CRASHLOOP-ALERT-001; consumed by the sweep-daemon CLI
+  at cli.py:7180).
+  **Remediation lever #1 is RE-HOMED accordingly:** the runbook line
+  "`BRUTEX_SWEEP_RUST_CORE=0` / `BRUTEX_SWEEP_RUST_ENUM=0` is
+  remediation lever #1 for repeated worker SIGABRTs" attaches to the
+  `SweepWorkerPoolBrokenError` quarantine runbook (the #1608 sidecar
+  remediation text — the operator surface a broken-pool incident
+  actually lands on) AND to the supervisor GAVE_UP alert/runbook for the
+  daemon lane — NOT to #1295's corruption counter. Every later "§3
+  crash-loop-breaker runbook" reference in this document reads as THIS
+  re-homed pair (grounding/perfmax
   graft; NO auto-env-flip — the open_questions Q5 stance: auto-downgrade
   trades engine-choice determinism for unattended survival and is an
   operator policy call, explicitly not taken here). **Honest containment
@@ -982,7 +1040,9 @@ ZERO cross-call state — no files, no statics, no caches, no cursors.**
   `except Exception` into a resume livelock with the abort alert unsent.
   (c) *Supervised-daemon parity (F23):* under `brutex sweep-supervisor`
   (relaunch on ANY nonzero exit) a deterministic SIGABRT tuple on the
-  SEQUENTIAL arm is a relaunch crash-loop → breaker → GAVE_UP with every
+  SEQUENTIAL arm is a relaunch crash-loop → the supervisor's
+  restart-cap accounting (orchestrator/supervisor.py:530-575, NOT
+  #1295's corruption counter — audit C6) → GAVE_UP with every
   LATER tuple permanently uncomputed — stated honestly: mapping restores
   per-tuple-skip parity ONLY where an exception (not an abort) surfaces;
   an abort cannot be caught. On the PARALLEL arm the pool quarantine
@@ -992,6 +1052,50 @@ ZERO cross-call state — no files, no statics, no caches, no cursors.**
   the supervisor treats differently from crash exits is recorded as a
   NAMED FOLLOW-UP for the supervisor's owner (P2 — `sweep_supervisor.py`
   is a not-ours file, §11), never silently claimed here.
+
+### 3.1 Audit-chain law on the Rust-core arm (Verifier B checkpoint-1 audit C42)
+
+How the core arm preserves the Golden-Rule-#8 audit laws — stated as
+design LAW, each leg verified against the shipping mechanism:
+
+- **Buffer-and-replay; Python owns the JSONL chain.** The Rust core
+  returns COUNTERS/EVENT DATA only (`scans_run`, engagement/fallback
+  reasons, totals — §1.3); it NEVER writes an audit line, computes an
+  `entry_hash`, or holds the chain file. Audit entries are buffered by
+  the PYTHON driver and appended at the EXISTING per-tuple cadence
+  (3 audit lines/tuple, engine-blind payloads — the §13 invariant): on
+  the parallel lane this is literally today's shipping shape — workers
+  collect into `BufferedAuditCollector` (`orchestrator/audit.py:683`;
+  "the worker never opens the real chain", sweep_parallel.py:865-868)
+  and the parent replays "real chain FIRST (in enumeration order)"
+  (sweep_parallel.py:1578-1580) — the core arm changes NOTHING about
+  who appends, when, or in what order.
+- **NaN sanitization BEFORE payload serialization (the allow_nan=False
+  law).** The chain's canonical payload serializer already REFUSES
+  non-finite floats (`_canonical_json`, `orchestrator/audit.py:176-203`
+  — `allow_nan=False`, a NaN/Infinity payload raises instead of writing
+  invalid JSON), mirroring the engine's canonical-JSON sites
+  (stage1a.py:1020-1046, sweep_cache.py:356,
+  DEC-RUN-IDENTITY-GUARD-PARITY-001). The core arm therefore MUST
+  sanitize before the boundary: any core-returned value that can be
+  non-finite is either structurally finite by the §1.3 envelope law
+  (bit1 `python_required` trips on any non-finite fold value — the
+  float row is unread) or is EXCLUDED from audit payloads; audit
+  payloads stay engine-blind (§13), so no raw kernel float ever reaches
+  `_canonical_json` unvetted. A defect here fails LOUDLY at append time
+  (the serializer raise), never a silently-poisoned chain.
+- **TWO hash algorithms, TWO purposes — never conflated.** The audit
+  chain's integrity hash is **SHA-256** (`entry_hash = sha256(seq ‖
+  prev_hash ‖ ts_utc ‖ actor ‖ action ‖ subject ‖
+  canonical_json(payload))`, `orchestrator/audit.py:19-22` +
+  `compute_hash`, audit.py:270-283) — tamper-evidence for the
+  hash-chained JSONL (Golden Rule #8; breaking the chain fails CI). The
+  run-identity hash is **blake3** (the Golden-Rule-#4 formula;
+  `fno_math.blake3_hash ≡ blake3` pinned by
+  DEC-RUN-IDENTITY-GUARD-PARITY-001) — reproducibility keying of runs
+  and stores. The conversion touches NEITHER algorithm, and no design
+  text may cite one where the other is meant: chain integrity = SHA-256,
+  run/dedup identity = blake3.
 
 ---
 
@@ -1496,24 +1600,69 @@ this design.
   defined against; under the default env this arm DELIBERATELY shares the
   Rust drawdown provenance (that IS the shipping object; arm (a) carries the
   independence). Every `ResultMetrics` field is bit-compared across all
-  three (ints exact; floats via `struct.pack('<d')`; None-bits exact). Any
-  core-vs-oracle mismatch ⇒ the ORACLE metrics ship for that mask,
-  `sweep_rust_core.kernel_autoreverted` ERROR (once), process latch, and the
-  REST of the tuple continues on today's spine (lazily constructing
-  `ResidentTradeSim`) — order and bytes preserved because both engines are
-  bit-identical and yield order is positional. An oracle-vs-oracle
-  disagreement (pre-existing-bug tripwire) ⇒ ship the OFF-arm value + latch
-  + a distinct ERROR reason.
+  three (ints exact; floats via `struct.pack('<d')`; None-bits exact).
+  **THREE-WAY MISMATCH DISAMBIGUATION PRECEDENCE (Verifier B
+  checkpoint-1 audit C32 — supersedes the previous two-outcome text,
+  whose oracle-vs-oracle arm shipped the OFF-arm value + LATCHED the
+  kernel: latching on a mismatch the kernel did not cause punishes the
+  wrong component and silently picks sides in a harness defect):**
+  evaluated per burn-in mask IN THIS ORDER —
+  **(1) oracle-vs-oracle mismatch** (arm (a), the mechanised-pure Python
+  oracle, disagrees with arm (b), the OFF-arm spine — regardless of what
+  the kernel returned) = a HARNESS/ENVIRONMENT defect (a pre-existing
+  spine bug, a poisoned wheel, a broken oracle) → **ABORT the burn-in
+  LOUDLY, NO autorevert latch**: the tuple fails as a per-tuple
+  `SweepComboError` with the distinct reason
+  `burnin_oracle_disagreement` (⇒ the #1291 TUPLE_FAILED skip path +
+  one ERROR event) — no value is shipped for that mask, because
+  shipping either arm's value would silently choose sides in a defect
+  the kernel is not evidence about, and latching would misattribute it
+  to the kernel;
+  **(2) kernel-vs-BOTH-oracles mismatch** (arms (a) and (b) agree with
+  each other, kernel differs) = a KERNEL defect → the agreed ORACLE
+  metrics ship for that mask, `sweep_rust_core.kernel_autoreverted`
+  ERROR (once), process latch, and the REST of the tuple continues on
+  today's spine (lazily constructing `ResidentTradeSim`) — order and
+  bytes preserved because both engines are bit-identical and yield
+  order is positional;
+  **(3) partial/mixed** (kernel agrees with exactly one arm; or any
+  comparison combination not classified above) = treated as (1),
+  CONSERVATIVE — a state where the two oracles do not both indict the
+  kernel is not clean evidence for an autorevert, and is never a state
+  to silently ship from. §7.1 pins one golden per precedence class
+  (stubbed (1)/(2)/(3) states ⇒ the exact outcome + event above).
   - *Enumeration burn-in, work-bounded, WIDTH-KEYED (round-5), MASK-COUNT-
     FLOORED (external fold, fix-forward item 4):* the shadow window is
     keyed on a **MASK-COUNT floor, not a range count** — ranges remain the
     comparison UNIT, but the window stays open until
     `SWEEP_ENUM_SELF_CHECK_MASKS = 2^16` (65,536) core-enumerated masks
     have been shadowed **per process PER KERNEL WIDTH**, hard-capped at
-    `SWEEP_ENUM_SELF_CHECK_RANGES_CAP = 64` ranges (a degenerate-cap
-    stream that cannot reach the mask floor within 64 ranges warns once,
-    `enum_shadow_floor_unmet`, and joins the flip-ADR residual list beside
-    class (v)). Round-7 rationale — the round-3 dilution class on the
+    `SWEEP_ENUM_SELF_CHECK_RANGES_CAP = 256` ranges. **RANGES-CAP
+    RE-BOUND 64 → 256 (Verifier B checkpoint-1 audit C51 — at the old
+    64-range cap the 2^16 floor was UNREACHABLE at default caps on
+    exactly the production grids it was derived for):** at the default
+    enum work-cells cap a call's effective mask yield on the heavy 1m
+    production shapes is ⌊2^28 / n_bars⌋ ≈ **483 masks/call @555k bars
+    and ≈ 444 @604k** (this bullet's own round-7 arithmetic below), so
+    64 ranges × 444–483 ≈ **28.4k–30.9k masks < 65,536** — the floor
+    could NEVER be met there, `enum_shadow_floor_unmet` would have fired
+    on EVERY 1m grid, and the shadow (the ONLY production net for the
+    in-range kept-set residual) would permanently under-arm on the
+    shapes that matter most. The floor and the accumulate-ACROSS-calls
+    law are UNCHANGED (they are the coverage guarantee); the CAP is
+    re-derived from them: reaching 2^16 masks at the heaviest production
+    yield (≈444/call @604k bars) needs ⌈65,536 / 444⌉ = **148 ranges**,
+    so 256 gives ≈1.7× headroom while still bounding a
+    genuinely-DEGENERATE tiny-range stream (256 ranges of pathological
+    small windows cost ≤ 256 × (2.4 µs + n_bars × 0.257 ns) — trivially
+    sub-second even @604k bars, and the FULL floor's cost is unchanged
+    because the shadow's cost is priced in MASKS, not ranges — the
+    ~1.1 s @48k / ~9.5 s @555k figures below stand). A stream that
+    cannot reach the mask floor within 256 ranges warns once,
+    `enum_shadow_floor_unmet`, and joins the flip-ADR residual list
+    beside class (v) — that warn is now the signal of a genuinely
+    degenerate stream, not the guaranteed outcome of every 1m
+    production tuple. Round-7 rationale — the round-3 dilution class on the
     range-count axis: a "range" is one `enumerate_prefilter` call's
     window, and §3's work-cells cap binds FIRST on every window with
     n_bars ≥ ~256 (2^28/48k ≈ 5,592 masks/range; 2^28/555k ≈ 483), so the
@@ -1951,7 +2100,7 @@ this design.
   with a CORRECT kept set and CORRECT Σ enumerated (the one-line
   mis-bucketing bug: a min-hits drop incremented into `conflict_pruned`
   or vice versa) escapes every permanent production net EXCEPT the
-  2^16-mask-floor (64-range-cap) enum shadow — store bytes and
+  2^16-mask-floor (256-range-cap — audit C51) enum shadow — store bytes and
   `FlushResult.content_hash` do not move (belt, spot-check,
   content-hash poison teeth all blind), and the round-4
   total-reconciliation belt asserts ONLY `next_rank == n_masks` and
@@ -2108,7 +2257,42 @@ this design.
   parameterisation (the #1186 same-file extraction precedent). Its own
   revertable commit/PR BEFORE any Rust, with byte-neutrality proof: all
   goldens UNMODIFIED, 100% line+branch, weekly-mutmut zero-survivor on
-  compute.py, exact-value pins for every moved expression.
+  compute.py, exact-value pins for every moved expression, **and the
+  ORDER-SENSITIVITY DIFFERENTIAL GATE below (Verifier B checkpoint-1
+  audit C23 — MANDATORY, lands BEFORE the Slice-0 PR opens)**.
+  **Slice-0 ORDER-SENSITIVITY ORACLE (Verifier B checkpoint-1 audit
+  C23 — MANDATED).** The named Slice-0 gates above are all
+  fixed-input gates (frozen goldens + exact-value pins on frozen
+  expressions + mutmut over the frozen suite): an UNFAITHFUL
+  fold/combine decomposition of the SEQUENTIAL Welford/Pébay moment
+  accumulations (`brutex/metrics/compute.py:32-33` module contract;
+  the third/fourth-central-moment online updates live in
+  `_accumulate_moments`, `compute.py:121-122`) could pass every one of
+  them on the fixture inputs yet silently change production bytes on an
+  input shape the fixtures never exercise. Slice-0 acceptance therefore
+  ADDITIONALLY MANDATES a hypothesis DIFFERENTIAL property gate:
+  `combine_metrics_from_folds(_fold_trades(trades, …), …)` must equal
+  the pre-decomposition `_compute_metrics_impl(trades, …)`
+  (`brutex/metrics/compute.py:569` — the internal metrics impl this
+  decomposition refactors; the oracle arm is the VERBATIM pre-Slice-0
+  body, captured as a test-local copy or via the merge-base source so
+  the comparison is never decomposition-vs-itself) at **struct.pack
+  BYTE equality per float field** (`struct.pack("<d", x)` — signed
+  zeros + NaN payloads included, the #1531 burn-in comparison idiom;
+  int fields compare `==`), over hypothesis-GENERATED trade sequences
+  that MUST include: (a) adversarial ORDERINGS (sorted ascending /
+  descending / interleaved-sign permutations of the same multiset —
+  the fold order the sequential Welford walk is sensitive to), (b)
+  fold/combine SPLITS at every boundary (split index swept 0..n —
+  degenerate empty-left/empty-right folds included) in whatever
+  decomposition the fold layer admits, (c) single-element folds
+  (n=1 chains), and (d) the negative / zero / denormal pnl classes
+  (pnl_paisa < 0, == 0, and float-denormal-producing magnitude ratios
+  feeding the moment accumulator). This gate lands IN the Slice-0 PR's
+  test set BEFORE that PR opens (it is part of Slice-0's Definition of
+  Ready, not a follow-up), and is the Slice-0 instance of the §7 O2
+  cross-arm oracle discipline — the later Rust fold_block arm (Slice 2)
+  re-verifies against the SAME oracle through the §5 burn-in.
   **COORDINATOR RULING RECEIVED (2026-07-09): the compute.py Slice-0 zone
   is GRANTED**, under three binding conditions carried verbatim into the
   Slice-0 PR: (1) BEHAVIOR-IDENTICAL — a pure parameterisation, zero
@@ -2364,10 +2548,18 @@ this design.
    so the golden's teeth are against any future Rust index consumer
    that keeps the EARLIER index (which today passes every existing
    golden yet diverges — zero prior coverage); a **MASK-SERIALIZATION
-   golden (Verifier B F5):** the frozen u128-mask JSON bytes corpus (e)
-   pinning that every mask in `combo_digest`/walk-forward-hash JSON is
-   the 32-nibble HEX STRING (spec.rs:219 / `mask:%032x`), NEVER a bare
-   JSON int (see the §12 SERIALIZER LAW); a
+   golden (Verifier B F5, RE-SPECIFIED per checkpoint-1 audit C3+C9):**
+   the frozen u128-mask JSON bytes corpus (e) pins that the SHIPPING
+   serialization bytes REPRODUCE EXACTLY on the conversion tree —
+   `combo_digest`'s canonical payload with its bare-int `"mask": int(mask)`
+   (sweep_cache.py:389-391) and the walk-forward hash's bare-int
+   `"mask": required_mask` (sweep_driver.py:977+) FROZEN AS SHIPPED
+   (bare-int is the frozen shipping behavior, not a pattern to copy),
+   plus the run_id's 32-nibble hex `mask:%032x` (spec.rs:219) — while
+   any serialization surface the conversion INTRODUCES must be the hex
+   string (the golden is "the exact shipping digest bytes reproduce",
+   NOT "hex everywhere" — the previous wording would have re-keyed
+   SweepCache + WF identities; see the §12 re-scoped SERIALIZER LAW); a
    stubbed WRONG-total enum return ⇒
    `enum_total_mismatch` + spine serves + pinned bytes (round-4);
    `tests/golden/fixtures/` diff EMPTY incl. the
@@ -2510,7 +2702,7 @@ this design.
    raised ⇒ the same shape un-refuses (the knob flows through both
    formulas); enum-burn-in width duals — a process that consumed the u64
    shadow WINDOW (the fix-forward-item-4 MASK-COUNT floor: 2^16 masks,
-   64-range hard cap — never the superseded 4-range window) then engaging
+   256-range hard cap per audit C51 — never the superseded 4-range window) then engaging
    a [64,128)-bit tuple opens a FRESH u128 window
    (`reset_enum_self_check_for_tests(width=…, masks_remaining=…,
    ranges_cap_remaining=…)` duals — the superseding signature, §5);
@@ -2820,7 +3012,7 @@ this design.
 | R1 | **compute.py zone/coordination** — the fold/combine decomposition sits outside our declared zone | Slice 0 lands ALONE first, tiny + pure-parameterisation, its own revertable commit with goldens+mutmut byte-neutrality proof; coordinator sign-off **GRANTED for the Slice-0 compute.py zone (2026-07-09, §11 ruling (b) — the originally-bundled sign-off request SPLIT: the Q7 rust/-zone ruling, gap #18, is now ALSO CLOSED — coordinator ruling 2026-07-08, re-confirmed 2026-07-09; the sweep-core rust/ edit zone = the NEW sweep_core module under rust/fno-math + the four trade_sim.rs pub(crate) visibility promotions, trading-core fenced OFF — see the §11 ruling (a) block for the verbatim ruling)**; the file is in NO other phase's zone (verified); *[HISTORY — superseded by the grant, retained per the final-lock fix round]* the pre-grant refusal fallback was Slice 1 only + a Slice-2 re-scope round |
 | R2 | **Float divergence in the ported folds** (Welford order, Neumaier downside sum, percentile lerp, −0.0 accumulation) | ONLY 9 f64 columns exist; summation-algorithm law (§4 — builtin-sum ports as Neumaier, the round-1 catch) + token-for-token port + per-expression review checklist; CPython-generated exact-value consts incl. compensation vectors; ≥10⁶-case differential harness — now with an EXECUTABLE lane (§7.10: seeded generator suite, 10⁴/PR + full-sweep on-branch gate + weekly); 64-mask dual-oracle burn-in with the MECHANISED-pure arm (flag-served rows in-window, round-2); PERMANENT finalist belt (every persisted finalist VALUE oracle-checked forever — batch arm: the served object; bounded arm: the rebuild PLUS the round-4 serve reconciliation, so stream-vs-rebuild serve nondeterminism on a finalist's rank-bearing columns is caught deterministically) + flag-inclusive sampled population spot-check (candidate-finalists compared too, round-4); twin-run gate before any flip |
 | R3 | **Sort-stability / signed-zero tie divergence** in p95/p5 | stable `sort_by` == stable `sorted` (never sort_unstable); −0.0 ties preserve input order in both; adversarial −0.0 property; NaN structurally excluded + `python_required` belt |
-| R4 | **Panic/SIGABRT** (`panic="abort"`) from unvalidated input, overflow, alloc | boundary validation in pure Result cores; i128 accumulators + envelope flags (no unchecked hot-loop arithmetic); the crate's existing no-unwrap/no-expect deny lints PLUS (round-4) a MODULE-scoped `#![deny(clippy::indexing_slicing)]` mandated on `sweep_core.rs` — the crate has NO indexing lint today (`lib.rs:30-35` denies unwrap/expect/print/dbg/unsafe only) and a crate-wide flip is NOT retrofit-able (trade_sim.rs has 17 direct-index sites, metrics.rs 3, both consumed UNCHANGED), so out-of-bounds indexing in the new index-heavy surfaces (CNS unranking, columnar emit) is mechanized-lint-netted at module scope (`get()`/checked accessors in all new code; a CI grep pin asserts the deny attribute is PRESENT in sweep_core.rs), review-convention + fuzz remaining the net for the pre-existing kernels; fuzz; chunk-capped allocations; whole-chunk precondition pre-detect in the Python wrapper; #1291 quarantine + #1295 breaker + the runbook kill-switch lever |
+| R4 | **Panic/SIGABRT** (`panic="abort"`) from unvalidated input, overflow, alloc | boundary validation in pure Result cores; i128 accumulators + envelope flags (no unchecked hot-loop arithmetic); the crate's existing no-unwrap/no-expect deny lints PLUS (round-4) a MODULE-scoped `#![deny(clippy::indexing_slicing)]` mandated on `sweep_core.rs` — the crate has NO indexing lint today (`lib.rs:30-35` denies unwrap/expect/print/dbg/unsafe only) and a crate-wide flip is NOT retrofit-able (trade_sim.rs has 17 direct-index sites, metrics.rs 3, both consumed UNCHANGED), so out-of-bounds indexing in the new index-heavy surfaces (CNS unranking, columnar emit) is mechanized-lint-netted at module scope (`get()`/checked accessors in all new code; a CI grep pin asserts the deny attribute is PRESENT in sweep_core.rs), review-convention + fuzz remaining the net for the pre-existing kernels; fuzz; chunk-capped allocations; whole-chunk precondition pre-detect in the Python wrapper; #1291 quarantine + the C6 re-homed recovery pair (broken-pool quarantine / supervisor GAVE_UP — §3) + the runbook kill-switch lever |
 | R5 | **Silent vacuous parity** (stale wheel / mis-wired arm serving Python while claiming Rust) | new-SYMBOL `_EXPECTED_COMPILED_SYMBOLS` handshake + `SWEEP_CORE_ABI_VERSION` in-band per block + engaged-event golden assertions + the hash-MOVES poison twin |
 | R6 | **Belt mismatch mid-grid** — tuple restart churn on a genuinely-divergent build | restart is bounded (once per process — latch), deterministic, APPEND-FREE (belt pre-pass runs before the first store append — no ResultsStore run-id conflict), audit-shape-preserving (re-entry below SWEEP_START; 3 lines/tuple pinned), results-safe (Python spine authoritative), and **TERMINATING by construction (round-2): the OFF-arm disambiguation routes a PRE-EXISTING spine-vs-pure-oracle divergence to a no-restart distinct-ERROR branch (the core is not at fault, the served bytes ARE today's bytes), and the belt/spot-check are core-arm-only so the restarted spine pass runs no compare — a second mismatch is structurally impossible, never an unbounded loop**; one ERROR event; the soak window before any default-ON flip is the operational net |
 | R7 | **Memory at k=6** — kept-mask list ~O(10⁷) Python ints per tuple | identical to today's survivor-list shape; Rust side transient per range; `plan_rank_memory` + bounded watermark untouched; streaming kept iterator + optional bounded-arm routing named as measured Slice-3+ levers |
@@ -2833,7 +3025,8 @@ Secondary (tracked): warn-once flood discipline (per-(tuple, reason) memo);
 core-native reads (same disclosure ResidentTradeSim already carries —
 documented, not silent); enum burn-in cost (mask-count-floored per fix-forward item 4: ~2^16
 shadowed masks per process per engaged width — ≈1.1 s @48k / ≈9.5 s @555k,
-64-range hard cap; stated in §5); metrics burn-in + belt + spot-check cost (quantified per §5/§9 —
+256-range hard cap (audit C51 — the 64-range cap made the floor unreachable
+on 1m production shapes); stated in §5); metrics burn-in + belt + spot-check cost (quantified per §5/§9 —
 the round-1 addition); the per-tuple (vs per-call) env read documented +
 pinned.
 
@@ -3235,7 +3428,150 @@ stall-after-restart line (§5 note (d)).
 | frozen goldens | synthetic identity fields ("deadbeef"/"snap0001"/"ind-v1") | commit-independent literals stay frozen |
 | 400-case vocab key | trading-core evaluator | untouched crate ⇒ untouched key |
 | `_indicator_version()` | trading-core version string | fno-math not included ⇒ no re-key from this work |
-| mask encoding in identity JSON (`combo_digest` / WF hash) | **32-nibble HEX STRING** (`mask:%032x`; spec.rs:219 precedent) — NEVER a bare JSON int | **MASK-SERIALIZER LAW (Verifier B F5):** serde_json's u64 cap ALIASES a bare-int u128 mask `m` with `m + 2^64` ⇒ a silent false-skip on identity collision. Dormant at the 60-bit vocabulary, but the law closes it structurally: NO bare JSON integer past u64 anywhere in run-identity/digest serialization — every mask serializes as the 32-nibble hex string on BOTH arms; the frozen u128-mask JSON bytes corpus (e) is the golden (§7.1), and a grep pin refuses any new bare-int mask serialization in sweep_core.rs/`sweep_core.py` |
+| mask encoding in identity JSON | SHIPPING bytes FROZEN per surface: `combo_digest` + WF hash keep their bare-int `"mask"` (sweep_cache.py:389-391 / sweep_driver.py:977+ — frozen shipping behavior); run_id keeps hex `mask:%032x` (spec.rs:219); every NEW conversion-introduced surface = 32-nibble HEX STRING | **MASK-SERIALIZER LAW (Verifier B F5; RE-SCOPED per checkpoint-1 audit C3+C9 — the previous "every mask serializes as the hex string on BOTH arms" was SELF-CONTRADICTORY with corpus (e), which freezes the SHIPPING bare-int digest bytes; as written it would have RE-KEYED every SweepCache dedup entry + WF identity):** the hazard is serde_json's u64 cap ALIASING a bare-int u128 mask `m` with `m + 2^64` ⇒ a silent false-skip — a RUST-side hazard only (Python's `json.dumps` serializes arbitrary-precision ints exactly, so the shipping Python sites carry NO aliasing). The re-scoped law: (a) the shipping serialization bytes are FROZEN per corpus (e) — the Rust arm must reproduce the existing bytes exactly, INCLUDING the existing bare-int sites; (b) those sites STAY PYTHON (never ported — §2 table); (c) NO NEW bare-int mask serialization surface may be introduced by the conversion — every mask on any NEW surface serializes as the 32-nibble hex string; the corpus-(e) golden (§7.1, re-specified) + a grep pin refusing any new bare-int mask serialization in sweep_core.rs/`sweep_core.py` enforce it |
+
+### 12.1 Identity-protocol laws (Verifier B checkpoint-1 audit C1)
+
+Four register additions, each binding on the twin/baseline proving
+protocol (§7.2) and the slice PRs:
+
+1. **WHEEL-PROVENANCE law (twin proof).** Both twin arms must run the
+   SAME `fno_math` wheel BUILD — not merely the same version string. The
+   twin protocol RECORDS in the proof transcript: the wheel file's
+   sha256, the build flags (the committed profile,
+   `rust/fno-math/Cargo.toml` `[profile.release]`), and the wheel's
+   `__source_digest__` (the build-time blake3 source stamp,
+   `rust/fno-math/src/lib.rs:78-87` / `brutex/wheel_digest.py` —
+   DEC-RUST-SOURCE-DIGEST-TWIN-001, the existing same-version-drift
+   catcher, reused here). A wheel import FALLBACK during a proof run —
+   pip-resolved instead of the locally-built wheel, or ANY import-path
+   substitution between arms — is a REFUSAL of the proof run, never a
+   silent alias.
+2. **DIRTY-TREE law (baseline/twin capture).** `code_commit_hash` is
+   only meaningful on a clean tree; the twin/baseline capture protocol
+   REFUSES a dirty working tree — `git status --porcelain` empty is a
+   recorded PRECONDITION step of every capture. Honest scope: ordinary
+   production runs OUTSIDE the proving protocol keep today's behavior
+   (no dirtiness check exists in the shipping run path today, and this
+   pack adds no silent new gate there — stated, not smuggled).
+3. **OUTPUT-ROOT WIPE law (operational, proving period).** WIPE the
+   sweep output roots (stores + sentinels + checkpoints) between
+   PROTOTYPE builds: a sentinel written by build A must never
+   skip-complete a tuple under build B during the proving period.
+   Within one COMMITTED build this is belt-and-braces (`_tuple_digest`
+   embeds `code_commit_sha`, so a new commit re-keys — the table row
+   above); between DIRTY/prototype builds sharing one commit SHA it is
+   the ONLY protection, which is why it is an operational instruction
+   here and law #2 refuses dirty capture runs outright.
+4. **DEC-ID DEFERRAL (deliberate).** The conversion's DEC id(s) are
+   minted in the IMPLEMENTATION PR ledger entries (Slice 0..4, each
+   with its own MIGRATION.md entry), NOT by this design pack — the pack
+   is documentation-only and pins no ledger number (the README states
+   the same). This is deliberate: a pack-minted id would collide with
+   the live ledger tail exactly as the renumbering precedents
+   (#1580/#1617) document.
+
+**The §B.4 identity question, answered (Verifier B register, pasted
+2026-07-09 — question quoted VERBATIM):**
+
+> "In the twin-run bit-identity proof, are both runs minted under ONE
+> code_commit_sha and ONE indicator_version (same checkout, same
+> wheels), with only the engine arm toggled — and if so, what MECHANISM
+> guarantees that every FUTURE behavioural change to the Rust sweep
+> core re-keys new runs? Concretely: (a) does the sweep-core crate's
+> version join _indicator_version() (the #1548 precedent says version
+> strings track the INDICATOR stack; a trade-sim/metrics crate is
+> arguably not an indicator — the single most consequential open
+> question); (b) if the answer is 'commit discipline alone', how is the
+> brutex-{__version__} wheel fallback (H-2) prevented from aliasing
+> wheel-swapped environments; (c) is a dirty-working-tree run refused
+> or '-dirty'-stamped (H-6)?"
+
+ANSWERS (design decisions; premise-corrected against the repo per
+Golden Rule #1):
+
+- **Yes to the preamble:** both twin runs are minted under ONE
+  `code_commit_sha` + ONE `indicator_version` (same checkout, same
+  wheels — law #1 above makes "same wheels" recorded evidence, not an
+  assumption), only the engine flag toggled (§7.2).
+- **(a) — NO, with the transmitted premise CORRECTED:** the relayed
+  answer's premise ("the fno-math crate version ALREADY moves
+  `_indicator_version()` by the #1548 precedent") is REFUTED by the
+  repo: `_indicator_version()` composes
+  `brutex-{__version__}+trading_core-{trading_core.__version__}`
+  (cli.py:6159-6166) — the TRADING-CORE version only; the #1548
+  precedent bumped trading-core 0.3.0→0.3.1, and fno-math (0.3.0,
+  rust/fno-math/Cargo.toml:11) does NOT appear in the string (the §12
+  table row above already records this). The precedent that actually
+  governs an fno-math kernel is #1531/#1546 (rust_metrics /
+  ResidentSweepSimU128): fno-math kernels ship under the BIT-IDENTITY
+  contract with NO `_indicator_version` change, re-keying via
+  `code_commit_hash` per commit. This conversion keeps that posture
+  (§13 pins "no `_indicator_version` change") BECAUSE byte-identity is
+  the ship gate — a behavioural change is a refused outcome, not a
+  re-key event. **The FORWARD RULE, recorded:** any FUTURE *sanctioned*
+  behaviour-affecting sweep-core change (one that is ALLOWED to move
+  bytes) MUST (i) bump the fno-math crate version, AND (ii) join a
+  version signal to run identity at that point — either extending
+  `_indicator_version()` with `fno_math-{fno_math.__version__}`
+  (exposed today: lib.rs:127) or minting a distinct identity component
+  — under its own DEC; review-enforced + ledger-noted. Until such a
+  change exists, commit discipline + bit-identity is the mechanism, and
+  it is sufficient because no sanctioned byte movement exists.
+- **(b) — therefore NOT commit-discipline-alone for the PROOF runs:**
+  law #1 (wheel sha256 + `__source_digest__` recorded; import-fallback
+  = refusal) closes the wheel-swapped-environment alias for every
+  proving run; the `brutex-{__version__}` fallback arm of
+  `_indicator_version()` (cli.py:6165-6166, taken only when the
+  trading_core wheel is absent) cannot silently alias a proof run
+  because the proof protocol records the wheels. Production runs
+  additionally have the doctor's `wheel_source_digest_fno_math` stage
+  (same-version behavioural-drift catcher) as the standing net.
+- **(c) — REFUSED, for capture runs:** law #2 (dirty tree =
+  precondition failure) — chosen over '-dirty'-stamping because a
+  stamped-dirty baseline is still an unreproducible baseline; ordinary
+  runs outside the protocol keep today's behavior (stated in law #2).
+
+### 12.2 Env-flag census (Verifier B checkpoint-1 audit C2 — B's census adopted verbatim in substance, every cell repo-verified where the flag exists today)
+
+**Design law (the exemplar rule):** every NEW flag/knob this conversion
+introduces follows the `BRUTEX_SWEEP_PER_TUPLE_SECONDS` EXEMPLAR —
+EAGER launch-time validation (resolved once at launch, never first
+parsed mid-run/per-call) with a LOUD CLEAN failure (CLI: caught
+`ValueError` → `EXIT_USER_ERROR` one-liner, cli.py:6564-6570; route:
+clean 400 — the `BRUTEX_PIPELINE_STRICT_GATE` fail-loud-parse-at-launch
+precedent), with exactly TWO sanctioned deviations: tristate ARM flags
+may fail SAFE (unrecognised ⇒ OFF + warn-once — the
+`BRUTEX_SWEEP_RUST_METRICS` disclosed pattern) and default-ON SAFETY
+flags fail ON + warn-once (the belt). The existing silent/mid-run
+defects below are NAMED as PRE-EXISTING — fixing them is NOT this
+conversion's scope; they are registered as observations for the
+coordinator.
+
+NEW flags (this conversion):
+
+| Flag | Class | Junk policy | Validation point |
+|---|---|---|---|
+| `BRUTEX_SWEEP_RUST_ENUM` | tristate arm (results-pinned-identical by the twin gates) | fail-SAFE OFF + warn-once (`env_flag_tristate` over `sweep_lookahead._TRUTHY`/`_FALSY`, imported never copied — §5) | read ONCE per `run_persisted_sweep` invocation (§5); never per-call |
+| `BRUTEX_SWEEP_RUST_CORE` | tristate arm (results-pinned-identical) | fail-SAFE OFF + warn-once (same vocabulary) | same §5 once-per-invocation read |
+| `BRUTEX_SWEEP_RUST_CORE_BELT` | tristate SAFETY (default ON) | INVERSE fail direction: unrecognised ⇒ **ON** + warn-once `belt_flag_unrecognised`; only explicit `_FALSY` disables (§5 round-1) | same §5 read |
+| `BRUTEX_SWEEP_CORE_WORK_CELLS` | numeric knob (liveness-only; results cap-invariant by the dual-knob matrix) | fail-LOUD parse + DUAL CLAMP (upper ≤ 2^27, lower ≥ 2^16, `work_cap_clamped` warn-once with `direction` — §3) | EAGER at launch resolve (the exemplar rule) — never first-parsed mid-tuple |
+| `BRUTEX_SWEEP_CORE_ENUM_CELLS` | numeric knob (liveness-only) | fail-LOUD parse + dual clamp (upper ≤ 2^30, lower ≥ 2^16 — §3) | same eager launch resolve |
+| `BRUTEX_SWEEP_CORE_ORACLE_NS_PER_BAR` | numeric knob (stall-budget pessimism input) | fail-LOUD parse + one-direction clamp (may only RAISE pessimism — §5 round-6 clamp spec) | same eager launch resolve |
+
+EXISTING flags, with their defect status (Verifier B's census —
+repo-verified; pre-existing, out of this conversion's fix scope):
+
+| Flag | Class | Junk policy (as shipped) | Validation point (as shipped) |
+|---|---|---|---|
+| `BRUTEX_SWEEP_PER_TUPLE_SECONDS` | launch-gate numeric — **the EXEMPLAR** | eager-LOUD: non-finite/non-positive raises `ValueError` naming the env (sweep_sla_guard.py:105-128) → clean `EXIT_USER_ERROR` "sweep-all config error" (cli.py:6564-6570) | launch-time, before the sweep body |
+| `BRUTEX_SWEEP_RUST_METRICS` | tristate arm | warn-once fail-safe OFF on unrecognised (`flag_unrecognised`, rust_metrics.py:30-31/:140-141) — ACCEPTABLE, disclosed | per-call read (documented #1531/#1532 posture) |
+| `BRUTEX_BAD_TICK_SCREEN` | tristate ARM, default ON | **SILENT-JUNK defect:** junk → stays ON with ZERO signal (only an explicit falsy literal disables; bad_tick.py:291-309) | read at screen construction |
+| `BRUTEX_SWEEP_LOOKAHEAD_GUARD` | tristate arm (opt-in instrumentation) | **SILENT-JUNK defect:** junk → silently OFF, no warn (sweep_lookahead.py:146-157 — deliberate fail-safe, but signal-free) | read at guard resolve |
+| `BRUTEX_LAKE_HEAL` | mode string (`auto`/`observe`) | **SILENT-JUNK defect (same class):** anything ≠ `observe` — junk included — is silently `auto` (lake_heal.py:177-198) | read at heal resolve |
+| `BRUTEX_SWEEP_MEM_BUDGET_BYTES` + `BRUTEX_SWEEP_BOUNDED_RANK` | capacity knobs | **MID-RUN-VALIDATED defect:** first parsed per-tuple inside `run_persisted_sweep` (`resolve_bounded_rank_mode()` / `resolve_mem_budget_bytes()` at sweep_run.py:1349-1350; sweep_mem_budget.py:106/:137) — junk wastes the WHOLE preload then grinds every tuple to `ValueError` | per-tuple, post-preload |
+| `BRUTEX_MAX_BLOOM_BYTES` | capacity knob | **IMPORT-TIME-RAW defect:** junk = raw `ValueError` traceback at module import (`MAX_BLOOM_BYTES = resolve_max_bloom_bytes()` at import, orchestrator/bloom.py:243/:208-231) — loud but not clean | import time |
+| `BRUTEX_SWEEP_STALL_SECONDS` / `BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC` | liveness knobs | invalid → default + LOUD warn (DEC-SWEEP-STALL-OOM-GUARDS-001; constructor refuses non-positive/non-finite) | driver construction |
 
 ## 13. Invariants preserved (review checklist)
 
@@ -4949,3 +5285,30 @@ absent in this design **by construction, PROVIDED:**
   `sweep_mem_budget.py:84/:312`). This boundary is stated honestly: the
   design deletes the ENUMERATION-scaled terms, not the kept-scaled
   ones.
+
+---
+
+## Verifier B checkpoint-1 audit fold — resolution log (2026-07-09, pack v5)
+
+The mandatory items of Verifier B's checkpoint-1 audit, folded item by
+item; every repo claim written here was re-verified against the real
+tree (file:line cited at each edit site). Items C1/C2/C4 additionally
+fold the coordinator's two addenda of 2026-07-09 (the launch-lane scope
+sync + Verifier B's verbatim transmitted texts) and the F6 register
+update (PR #1336).
+
+| Item | Severity | Resolution (where) |
+|---|---|---|
+| C23 | MANDATORY, Slice-0 | §6 Slice 0 gains the ORDER-SENSITIVITY DIFFERENTIAL GATE: hypothesis `combine(fold(trades)) ≡ _compute_metrics_impl(trades)` (compute.py:569; Welford/Pébay per compute.py:32-33/:121-122) at struct.pack byte equality, over adversarial orderings + splits at every boundary + single-element folds + negative/zero/denormal classes; lands BEFORE the Slice-0 PR opens; joined to the Slice-0 gates list. Mirrored to the running Slice-0 workflow's scratchpad copy immediately after the edit. |
+| C3 (+C9) | MAJOR | §12 MASK-SERIALIZER LAW re-scoped (no NEW bare-int surface; shipping bytes FROZEN incl. the bare-int `combo_digest`/WF sites — sweep_cache.py:389-391, sweep_driver.py:977+; the self-contradiction with corpus (e) removed) + the §7.1 corpus-(e) golden re-specified implementably ("the exact shipping digest bytes reproduce", not hex-everywhere). |
+| C5 | MAJOR | §3 kill−9 bullet corrected: `load_or_create_store` PRE-LOADS (sweep_orchestrator.py:737-758), so a divergent-build redo hits the LOUD same-run_id append-conflict abort (results_store.py:487-490 — the F2 law, the DESIGNED behavior); the false "starts empty / cannot trip" claim removed. |
+| C6 | MAJOR | §3 kernel-panic bullet re-routed off "#1295's crash-loop breaker" (the G12 checkpoint-CORRUPTION counter — blind to panics; #1295 UNMERGED) onto the mechanisms that ACTUALLY fire: parallel-lane `BrokenProcessPool` quarantine + `SweepComboError`→TUPLE_FAILED (sweep_parallel.py:891-897/:1340-1343/:1585-1596), daemon-lane supervisor restart-cap → GAVE_UP + CRITICAL alert (orchestrator/supervisor.py:295/:530-575, telegram.py:161); remediation lever #1 re-homed to those runbooks; the (c) supervised-daemon wording updated. |
+| C1 | MAJOR | §12.1: WHEEL-PROVENANCE law (wheel sha256 + build flags + `__source_digest__` recorded; import-fallback = refusal), DIRTY-TREE law (porcelain-empty precondition; ordinary runs honestly unchanged), OUTPUT-ROOT WIPE instruction (proving period), DEC-ID DEFERRAL named deliberate; the §B.4 question pasted VERBATIM + answered — with the transmitted answer-(a) premise CORRECTED against the repo (`_indicator_version()` = brutex+trading_core ONLY, cli.py:6159-6166; fno-math is NOT in the string — the forward rule mandates joining a version signal only with a future sanctioned byte-moving change, under its own DEC). |
+| C2 | MAJOR | §12.2 ENV-FLAG census: the six NEW conversion flags/knobs (two arm flags + belt + three numeric knobs) each classed with junk policy + eager validation point; Verifier B's existing-flag defect census adopted + repo-verified (BAD_TICK_SCREEN silent-ON bad_tick.py:291-309; LOOKAHEAD_GUARD silent-OFF sweep_lookahead.py:146-157; LAKE_HEAL silent-auto lake_heal.py:177-198; MEM_BUDGET/BOUNDED_RANK mid-run sweep_run.py:1349-1350; MAX_BLOOM_BYTES import-raw bloom.py:243; PER_TUPLE_SECONDS the exemplar cli.py:6564-6570; RUST_METRICS warn-once disclosed); pre-existing defects NAMED as out-of-scope observations for the coordinator. |
+| C42 | MINOR→FAIL 7 | NEW §3.1 AUDIT section: buffer-and-replay (BufferedAuditCollector audit.py:683; parent replays in enumeration order, sweep_parallel.py:1578-1580), core returns counters/events only — Python owns the JSONL chain at the 3-lines/tuple cadence; allow_nan=False law (audit.py:176-203); SHA-256 chain (audit.py:19-22/:270-283) vs blake3 run-identity — both algorithms + separate purposes stated. |
+| C32 | MINOR | §5 burn-in gains the THREE-WAY DISAMBIGUATION PRECEDENCE: (1) oracle-vs-oracle = harness/environment defect → burn-in abort, LOUD `burnin_oracle_disagreement` tuple failure, NO autorevert; (2) kernel-vs-both = kernel defect → autorevert latch + oracle ships; (3) partial/mixed = (1) conservative; supersedes the prior ship-OFF-arm+latch outcome; one golden per class pinned. |
+| C51 | MINOR | Enum-shadow ranges cap re-bounded 64 → 256 with honest arithmetic (default caps yield ≈444–483 masks/call @555k–604k bars ⇒ 64 ranges max ≈28.4k–30.9k < the 2^16 floor — structurally unreachable on the very shapes it was derived for; 256 ≥ the needed 148 with ~1.7× headroom); floor + accumulate-across-calls law unchanged; `enum_shadow_floor_unmet` becomes a genuine degenerate-stream signal. Downstream cap mentions updated (§7.4 width dual, cost line, §5 negative pin). |
+| C31 | MINOR (SPEC) | SPEC §4 rows 2/9/13 rewritten to the locked architecture (columnar `fold_block`, trades never cross, `enumerate_prefilter`) with since-corrected notes. |
+| C48 | MINOR (SPEC) | SPEC §5's quoted single-`f` blended formula gets the WITHDRAWN banner treatment, pointing at DESIGN §9 (round-5 SPLIT form) + §9.1 (binding two-term law). |
+| C4 | MAJOR partial → completed (SPEC) | SPEC gains the LAUNCH-SURFACE section: SLA-guard recalibration obligation (launch-lane scope-sync wording — the ONE common estimate model), the dashboard dropped-return keep-or-fix named OPEN → coordinator, the sweep-daemon lane named, F6/F24/F25/F28 pasted VERBATIM (attributed; F6 carries the PR #1336 register update + cite correction), and the NEW machine-readable per-arm throughput-calibration deliverable (named DISTINCT from the stall-detection floor). |
+

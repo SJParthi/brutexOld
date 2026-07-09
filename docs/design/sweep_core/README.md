@@ -49,12 +49,14 @@ Binding perf numbers live in EXACTLY two places: **DESIGN_FINAL §9/§9.1**
   SUPERSEDED by the locked in-crate design (DESIGN §1.1: a NEW `sweep_core`
   module inside `rust/fno-math`).
 - Pack v4 (2026-07-09) ADDS DESIGN_FINAL's "Slice-1 substrate + ordering pins (lever-discovery fold, 2026-07-09)" section — the LEX-vs-colex emission-order pin + LEX-RANK unranking mandate, the condition-major bitplane substrate, the prefix-AND LEX-DFS pruning constraints (item (c) marked UNVETTED design input), and the four streaming residual pins; cross-referenced from §6 Slice 1 and §5's enumeration burn-in bullet.
+- Pack v5 (2026-07-09) FOLDS Verifier B's checkpoint-1 audit mandatory items (resolution log at the end of DESIGN_FINAL): the Slice-0 ORDER-SENSITIVITY differential gate (C23, §6); the §12 MASK-SERIALIZER LAW re-scope + corpus-(e) golden re-spec (C3+C9 — shipping bare-int digest bytes FROZEN, hex only on NEW surfaces); the §3 kill−9 store-preload correction (C5 — the append-conflict tripwire is the designed catch, not "cannot trip"); the panic-recovery re-route off #1295's corruption counter onto the real quarantine/GAVE_UP mechanisms (C6); the §12.1 identity-protocol laws + the §B.4 verbatim Q&A with the answer-(a) premise repo-corrected (C1); the §12.2 env-flag census (C2); the §3.1 audit-chain law (C42 — SHA-256 chain vs blake3 identity, buffer-and-replay, allow_nan=False); the burn-in three-way mismatch precedence (C32); the enum-shadow ranges-cap re-bound 64→256 (C51); SPEC §4 rows 2/9/13 rewritten to the locked architecture (C31); the SPEC §5 blended-formula WITHDRAWN banner (C48); and the NEW SPEC §10 LAUNCH-SURFACE section (C4 + the launch-lane scope sync — SLA recalibration against the ONE common estimate model, the dashboard dropped-return open item routed to the coordinator, the daemon lane named, F6/F24/F25/F28 pasted verbatim with the PR #1336 F6 register update, and the per-arm throughput-calibration deliverable named DISTINCT from the stall-detection floor).
 
 ## PR ↔ MIGRATION crosswalk (stub)
 
 | PR | Branch | Content | MIGRATION.md |
 |---|---|---|---|
 | #1381 | `claude/rust-sweep-core` | Checkpoint-1 design/audit artifact pack (THIS directory; documentation-only) | Ledger entries PENDING — assigned by the implementation slices (Slice 0..4 land with their own DEC ids + MIGRATION.md entries; none exist yet) |
+| #1336 (external dependency — not this pack's) | `claude/dedup-c1-tuple-digest-identity` @ ec19300f | The F6 fix (gap-register #3): gate/overfit/stage3 config joined to all three identity tiers via ONE `sweep_identity._gate_config_fragment` (product-audit-1 lane) — UNMERGED; the conversion MUST build on post-#1336 identity semantics (SPEC §10.5 F6) | DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 (its own PR's ledger entry) |
 
 ## Headline honesty (binding — see DESIGN §9.1)
 

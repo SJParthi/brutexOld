@@ -425,18 +425,18 @@ resolution for each:
 | # | Operation (compute.py cite) | Divergence risk | Resolution |
 |---|---|---|---|
 | 1 | Integer trade aggregates (`net_pnl`, `gross_*`, counters, `//` floor-divs at `:665-673`) | Python bigint vs i64 overflow | i64 with `checked_*`; inputs pre-bounded by the #1182 price envelope (±i64::MAX/8) and the #1186 2⁵² equity envelope; any overflow → envelope-exit → Python-oracle fallback for that mask (the Phase-A fallback law), never a panic (profile keeps `panic=abort` + `overflow-checks=true`). **Floor divisions NEVER move to Rust (round-3 reconcile to DESIGN §4 row 1):** every `//` (expectancy, avg_*) is computed in the Python combine from Rust-returned exact i64 sums — no Rust floor-div-vs-truncation hazard exists anywhere in this design; the earlier "use `div_euclid`-style floor division explicitly" instruction described an abandoned in-Rust placement and is withdrawn (an implementer must not write a Rust floor-div at all). **`div_euclid` stays NAMED in the fold contract (Verifier B F3; RT-01 dormant):** Python `//` FLOORS, Rust `/` TRUNCATES (−7//2 = −4 vs −3 — a 1-paisa fork on ~half of losing combos); if a future change ever moves a floor-div into Rust it MUST be `i64::div_euclid`; the DESIGN §7.4 negative-numerator dual is the F3 break-oracle golden cell. |
-| 2 | `total_return_pct = 100.0 * net_pnl / start_equity` (`:623`) | operand conversion + operation ORDER | reproduce exact expression order: `100.0 * (net_pnl as f64) / (start as f64)`; int→f64 conversion is exact only ≤ 2⁵³ — net_pnl bounded by the 2⁵² envelope pre-guard (same guard as #1186); CPython computes `int * float` by converting the int to f64 with round-half-even — identical to Rust `as f64` semantics ONLY within the envelope; outside → oracle fallback. |
+| 2 | `total_return_pct = 100.0 * net_pnl / start_equity` (`:623`) | operand conversion + operation ORDER | **SINCE-CORRECTED to the locked architecture (Verifier B checkpoint-1 audit C31 — this row previously mandated the ABANDONED in-Rust reproduction `100.0 * (net_pnl as f64) / (start as f64)`, a wider-FFI shape where the kernel computed float metrics):** the expression is NEVER ported — `fold_block` returns the EXACT i64 `net_pnl` in `FOLD_INT_FIELDS` (DESIGN §1.3 columnar ABI) and Python's `combine_metrics_from_folds` runs today's LITERAL expression tokens over it (`start_equity_paisa` is a combine input). No Rust conversion of `net_pnl` to f64 exists for this metric, so the conversion/order hazard is structurally absent; the 2⁵² envelope survives only as the in-crate bit1 `python_required` integer-accumulation envelope (DESIGN §1.3), not as a float-expression guard. |
 | 3 | `growth ** (1.0 / span_years)` CAGR (`:643`) + `math.pow` in `_skewness` (`:416`) | **libm `pow` has NO correct-rounding guarantee** — #1186 explicitly classified these MUST-STAY-PYTHON | **ONE rule, no alternatives (round-3: the previously-shipped option narration was abandoned reasoning the DESIGN's decision log had already ruled resolved — deleted):** the kernel returns the RAW exact inputs (`net_pnl` → end_equity, raw `m2/m3/m4` moments; `span_years` never crosses the FFI — Python-computed per tuple) and Python's `combine_metrics_from_folds` runs today's LITERAL tokens for `cagr_pct` (incl. the OverflowError→inf clamp), `_skewness`, `_excess_kurtosis`, and every sqrt-derived verdict scalar (std/sortino/downside_dev tails). Zero cross-language `pow` anywhere; zero per-platform libm-equality claim needed; bit-identity by CONSTRUCTION — DESIGN §4 layer rule. |
 | 4 | Welford/Pébay moments `_accumulate_moments` (`:118`) | summation ORDER + the exact update formulas | port the EXACT update expressions (same operand order, same `+=`/`*` shapes, strictly sequential left-to-right over trades, NO pairwise/Kahan/SIMD reassociation); returns (n, mean, m2, m3, m4) as f64 — every step is +,−,×,/ (IEEE-correctly-rounded both languages, identical bit results for identical input order). Property-pinned vs the Python oracle over adversarial trade streams. |
 | 5 | `sorted(returns)` + percentile interpolation (`:728`) | sort stability + interpolation expression | f64 total-order: Python `sorted` on floats with no NaNs (returns are finite by envelope) == Rust `sort_by(partial_cmp)` on the same values; reproduce `_percentile`'s exact index/lerp expression token-for-token **FROM SOURCE (compute.py:272-280), never a paraphrase (fix-forward item 2): the real function's `len == 1` early return and `lower == upper` exact-index return are enumerated in DESIGN §4 row 12 with value-invisibility proofs — an always-lerp port is bit-identical, and the enumeration exists so the omission can never silently become load-bearing.** |
 | 6 | `downside_dev = sqrt(sum(r*r)/n)` (`:703`) | **`builtins.sum()` on Python ≥3.12 is NEUMAIER-COMPENSATED summation (CPython gh-100425), NOT a bare left fold** — a naive sequential Rust fold bit-differs on routine data (round-1 hostile-review MAJOR; empirically confirmed on 3.12: last-ulp divergence on ordinary 1000-value streams, 1.0-vs-0.0 on `[1e16, 1.0, −1e16]`) | port CPython's compensation loop token-for-token FROM SOURCE (running `f_result`, compensation `c`, the `\|f_result\| >= \|x\|` branch, and the GUARDED final add — CPython's return path is `if (c && isfinite(c)) f_result += c;`, NOT an unconditional `f_result + c` (round-5: the guard preserves a −0.0 result's sign and keeps an inf sum from becoming NaN; provably value-invisible for THIS fold's non-negative summands — `f_result` never −0.0, `c` never −0.0, non-finite `c` excluded by the bit1 envelope belt — but the GUARDED form is what ports, so the paraphrase is never the porting authority)) over squares in trade order matching the genexpr — the Neumaier loop is itself deterministic IEEE `+/−`/abs/compare arithmetic, so identical algorithm + identical order ⇒ identical bits; compensation-triggering differential vectors CPython-generated; `f64::sqrt` is IEEE-correctly-rounded in both (hardware sqrt) and stays in the Python combine per DESIGN §4. General law (DESIGN §4): every ported summation construct is CLASSIFIED by its exact CPython algorithm (bare `+=` fold / builtin-sum Neumaier / fsum Shewchuk-never-ported) before porting. **INT-START TRANSITION enumerated (fix-forward item 2):** `sum()`'s `start=0` int fast path consumes the FIRST float via PyNumber_Add OUTSIDE the compensation loop; value-invisible here (non-negative summands, `0 + x₀ == x₀` bit-exact) — enumerated in DESIGN §4 row 6 so a future sign-mixed port cannot silently rely on the unproven case. |
 | 7 | Drawdown family + ulcer (`_drawdown_stats`, `metrics.rs`) | already solved | reuse `drawdown_stats_checked` UNCHANGED inside the core (same 2⁵² envelope pre-guard, now checked in Rust with exact i64 arithmetic); the `sum_sq_pct` fold stays a strictly SEQUENTIAL per-BAR left-to-right f64 fold — do NOT collapse equal-value runs into multiplication (k×a ≠ a+a+…+a in f64); buffer reuse only changes allocation, never the fold order. |
 | 8 | Round-half-even | int→f64 conversions round-half-even in both languages; `round_money`(ROUND_HALF_UP, Decimal) appears ONLY in the finalist projector (stays Python) | no Rust surface touches Decimal rounding; assert in review that the core never re-derives a money display value. |
-| 9 | NaN handling | `_safe_ratio` returns None on zero denominators (`:155`) — None vs NaN is SEMANTIC downstream (spec V-review note in #1352) | represent Optional metrics as (value, present-bit) column pairs in the FFI result — NEVER NaN-encode a None (the SurvivorColumns None-BIT precedent); comparisons for burn-in use the #1531 `drawdown_compare_key` idiom: ints exact, floats by `struct.pack('<d')` bit pattern (Rust: `f64::to_le_bytes`), so +0.0 vs −0.0 divergence cannot hide behind float equality. |
+| 9 | NaN handling | `_safe_ratio` returns None on zero denominators (`:155`) — None vs NaN is SEMANTIC downstream (spec V-review note in #1352) | **SINCE-CORRECTED to the locked architecture (Verifier B checkpoint-1 audit C31 — this row previously specified "Optional metrics as (value, present-bit) column pairs in the FFI result", the abandoned wider-FFI shape where Optional METRICS crossed the boundary):** no Optional metric crosses the FFI at all — every `_safe_ratio`-derived None-able metric (profit_factor, payoff, sharpe/sortino tails, …) is computed in the PYTHON combine from the always-present exact fold columns (`FOLD_INT_FIELDS`/`FOLD_FLOAT_FIELDS`, DESIGN §1.3), so the None semantics are literally today's code, untouched. The FFI carries only the two per-mask FLAG bits (`zero_trade`, `python_required` — DESIGN §1.3), which are row-serving flags, not metric None-bits. What SURVIVES from the old row: NEVER NaN-encode a None anywhere (the SurvivorColumns None-BIT precedent governs the Python side), and burn-in comparisons use the #1531 `drawdown_compare_key` idiom — ints exact, floats by `struct.pack('<d')` bit pattern (Rust: `f64::to_le_bytes`), None-bits exact — so +0.0 vs −0.0 divergence cannot hide behind float equality. |
 | 10 | Signed zeros | `max()` running-max vs Rust `>` on +0.0/−0.0 | the #1186 precedent: running max via `>` matches Python `max()` on the +0.0-only domain (drawdown pcts are non-negative by construction); the burn-in bit-compare (which distinguishes signed zeros) is the net. |
 | 11 | Strict-`>`/`>=` gate + tie boundaries | `passes_gates` (ranking `:192`), `hit >= cfg.min_hits` (sweep_run `:1473`), `win/loss` classification `is_win`/`is_loss`, `end_equity < 1` ruin boundary (`:632`), `r < 0.0` downside filter (`:702`) | reproduce every comparison with the IDENTICAL operator on the IDENTICAL bit-value operand (bit-equal inputs ⇒ identical verdicts — no epsilon anywhere in this code); each boundary gets an exact-boundary test (value AT the threshold on both arms) + a mutation-killing test per the #1182 (e) convention. Gate verdicts that consume Python-computed fields (see #3) are computed AFTER the Python pow-pass, in Python, phase-1 — so the gate boundary semantics are literally today's code. |
 | 12 | FMA contraction / auto-vectorization low-bit drift (Verifier B) | LLVM could fuse `a*b+c` or reassociate reductions | rustc NEVER enables fast-math on stable: FP contraction (`fmul`+`fadd`→`fma`) and reduction reassociation require `reassoc`/`contract` fast-math flags rustc does not emit; `mul_add` is the only FMA door and is SOURCE-PINNED ABSENT (the #1186 grep pins `use rayon`/`.mul_add(` extended to `sweep_core.rs`). Build flags stay the crate's committed profile (`opt-level=3, lto="thin", codegen-units=1, panic="abort", overflow-checks=true` — `rust/fno-math/Cargo.toml:88-94`) with NO `-C target-feature`/RUSTFLAGS additions (verified none exist in-repo today); a CI grep-pin refuses `mul_add`, `fast-math`, `ffast-math`, `reassoc` tokens in the crate + workflow files. Auto-vectorization of INTEGER loops is allowed (bit-exact); FP folds are written as scalar sequential loops whose order LLVM must preserve (no reassoc flag ⇒ no reduction vectorisation). |
-| 13 | `math.fsum` | trial-stats sidecar uses fsum (`trial_stats`) | stays in Python (per-tuple, O(kept)); the core returns the raw per-kept sharpe column (with None-bits) and Python folds it EXACTLY as today. |
+| 13 | `math.fsum` | trial-stats sidecar uses fsum (`trial_stats`) | **SINCE-CORRECTED to the locked architecture (Verifier B checkpoint-1 audit C31 — this row previously had "the core returns the raw per-kept sharpe column (with None-bits)", a wider-FFI shape; no sharpe column exists in the locked `fold_block` ABI):** `math.fsum` stays in Python (per-tuple, O(kept), Shewchuk — NEVER ported, per the §4 summation-classification law), and the per-kept sharpe values it folds are themselves PYTHON-COMBINE products (sqrt/std tails computed in `combine_metrics_from_folds` from the raw fold moments — row 3) — so the entire trial-stats sidecar path is byte-identical today's code consuming Python-computed inputs; nothing sharpe-shaped crosses the FFI. |
 | 14 | span_years expression | `(last_ts − first_ts).total_seconds() / (MIN_PER_YEAR·60)` | computed ONCE per tuple in Python (as today, `sweep_driver.py:511`) and passed IN as a pre-computed f64 — never re-derived in Rust. |
 | 15 | Paisa minting + mask serialization (Verifier B F22 + F5, external fold) | `_ema_to_paisa` is repr-mediated (`Decimal(str(v))` → HALF_UP), NOT `(v*100).round()` — tie `v=1.005` mints 101 vs 100; u128 masks in `combo_digest`/WF-hash JSON alias `m` with `m+2^64` if serialized as bare ints (serde_json u64 cap) | BOTH stay Python / string-encoded by LAW (DESIGN §1.3 frozen-input laws + §12 MASK-SERIALIZER LAW): the paisa seam is ported BY NAME only against the frozen corpus-(f) tie cases (answer-key-invisible — its inputs are pre-snapped); every mask serializes as the 32-nibble HEX STRING (`mask:%032x`, spec.rs:219), never a bare JSON int — corpus-(e) bytes are the golden; grep pin refuses new bare-int mask serialization. |
 
@@ -455,10 +455,17 @@ same fold the new core consumes in-crate; purity is AST/import-pinned and
 runtime-poison-pinned) and (b) today's shipping OFF-arm
 (`metrics_from_trades` → `ResultMetrics`) over the same
 (Python-materialised) trades; every column the core returned is bit-compared
-(ints exact; floats via `struct.pack('<d')`; None-bits exact). A mismatch ships
-the ORACLE values for that mask, latches the core OFF for the process
-(`sweep_rust_core.kernel_autoreverted` ERROR, once), and the rest of the tuple
-runs on today's spine — results never depend on which engine computed them.
+(ints exact; floats via `struct.pack('<d')`; None-bits exact). Mismatch
+outcomes follow the DESIGN §5 THREE-WAY DISAMBIGUATION PRECEDENCE
+(Verifier B checkpoint-1 audit C32): (1) oracle-vs-oracle disagreement =
+harness/environment defect → LOUD burn-in abort
+(`burnin_oracle_disagreement` per-tuple failure), NO autorevert latch;
+(2) kernel-vs-BOTH-oracles = kernel defect → the agreed ORACLE values
+ship for that mask, the process latch flips
+(`sweep_rust_core.kernel_autoreverted` ERROR, once), and the rest of the
+tuple runs on today's spine; (3) partial/mixed = treated as (1),
+conservative — results never depend on which engine computed them, and
+no value ships from a state where the two oracles disagree.
 An honest limit stated up-front (as #1531 states it): the burn-in catches only
 wrongness that manifests within its window; beyond it, the golden/property/
 diffcheck(#1295 R45) layers are the net.
@@ -504,9 +511,20 @@ diffcheck(#1295 R45) layers are the net.
   production config the walk is ≈6.2 ns/mask·bar + ≈4.1 µs/trade, the
   BINDING §9.1 law above).
 - The **10–50 µs/combo band is DEMOTED (round-2) from a target to a
-  possible OUTPUT of the DESIGN §9 bottom-up blended formula** (`T_post ≈
-  enum + s·prefilter(n_bars) + f·per_kept(n_bars)`, with s = conflict-free
-  fraction and f = kept fraction STATED UNKNOWNS): it holds only where
+  possible OUTPUT of the DESIGN §9 bottom-up blended formula.**
+  **⚠️ WITHDRAWN FORM QUOTED BELOW (Verifier B checkpoint-1 audit C48 —
+  the same banner treatment the DESIGN got):** the single-`f` form this
+  bullet previously quoted as binding — `T_post ≈ enum +
+  s·prefilter(n_bars) + f·per_kept(n_bars)` — was WITHDRAWN by DESIGN
+  §9's round-5 ZERO-TRADE SPLIT (the single `f·PK` term conflated
+  trade-bearing and zero-trade kept masks, systematically overstating
+  the per-kept term on every min_hits=0 grid); the NORMATIVE forms are
+  the DESIGN §9 SPLIT formula row (`… + f_zero·PK_zero(n_bars) +
+  f_trade·PK_trade(n_bars)`, min_hits-scoped prefilter term) and, for
+  campaign math, ONLY the §9.1 BINDING two-term cost law. The
+  single-`f` expression must not be quoted from this spec as binding
+  (s = conflict-free fraction, f_zero/f_trade = the STATED-UNKNOWN kept
+  fractions): the band holds only where
   n_bars and f are small (e.g. @3k bars, f→0: ≈ 0.8–0.9 µs; @48k, f→0:
   ≈ 12.6 µs — prefilter-floor-bound), and it must NEVER be paired against
   a "today ≈ 0.58 ms" anchor (per-KEPT unit — the UNIT LAW above). A
@@ -811,3 +829,194 @@ Nothing in items 2–3 is implemented, promised, or scheduled by THIS change;
 they are recorded so the PR body can cite the standing plan without scope
 creep (Golden Rule #3: no silent expansion — each queue item needs its own
 DEC + review cycle).
+
+## 10. LAUNCH-SURFACE obligations (Verifier B checkpoint-1 audit C4 + the launch-lane scope sync, 2026-07-09)
+
+The conversion changes the per-tuple cost the LAUNCH surfaces were
+calibrated against; this section registers the launch-surface
+obligations + the transmitted findings, verbatim. Repo cites in
+Verifier B's quoted texts are B's own (taken against B's tree state);
+where this pack re-verified them against the current tree, the verified
+locations are given in brackets.
+
+### 10.1 SLA-guard recalibration obligation (flip time)
+
+The post-conversion per-tuple rate change invalidates the SLA launch
+guard's calibration: `check_sweep_sla` projects
+`tuple_count × SWEEP_PER_TUPLE_SECONDS` where the 30 s/tuple constant is
+an UNBENCHMARKED placeholder calibrated to PYTHON per-tuple time
+(sweep_sla_guard.py:63-71 — its own docstring says so), and
+`BRUTEX_SWEEP_PER_TUPLE_SECONDS` is the operator's calibration knob
+(sweep_sla_guard.py:71). A documented recalibration RUNBOOK STEP is
+mandatory at flip time (the Slice-4 flip ADR carries it). Per the
+launch-lane scope sync (DEC-SWEEP-PROD-LAUNCH-SURFACE-001 session,
+2026-07-09), the obligation reads: **recalibration executes against the
+ONE common estimate model (post-#1285 `sweep_sla_guard` / its successor
+— the k-aware weighted SLA model consolidated there), numbers supplied
+by the flip ADR; the dashboard launch surface
+(DEC-SWEEP-PROD-LAUNCH-SURFACE-001 lane) consumes the recalibrated
+model automatically and re-renders — no dashboard-side recalibration
+step exists or should exist.**
+
+### 10.2 Dashboard dropped-return decision — NAMED OPEN ITEM, routed to the coordinator
+
+The dashboard sweep lane DROPS `cmd_sweep_all`'s int exit code (F25
+below): `run_sweep_from_request` returns the exit code
+(sweep_runner.py:395-414) but the background job treats ANY non-raising
+return as success (`on_success` fires iff the work callable returns,
+pull_jobs.py:1122-1128), so an exit-6 TUPLE_FAILED sweep reads as a
+successful job. KEEP-OR-FIX is a genuinely open product decision — NOT
+this conversion's and NOT the launch lane's (confirmed by the
+launch-lane scope sync) — routed to the COORDINATOR as a named open
+item. The conversion neither widens nor narrows this hole (the exit
+vocabulary is byte-unchanged); it is registered because the
+post-conversion rate change makes the dashboard lane MORE attractive to
+operators, raising the hole's exposure.
+
+### 10.3 The sweep-daemon lane (named in the handoff)
+
+The handoff names FOUR launch surfaces: CLI `brutex sweep`, CLI
+`brutex sweep-all`, the SWEEP-DAEMON lane (`brutex sweep-daemon` /
+`sweep-supervisor` — the unattended relaunch loop, cli.py:7180 +
+orchestrator/supervisor.py), and the dashboard route (F25). The daemon
+lane carries the F24 structural constraint below (it can never pass
+`--acknowledge-sla-overrun`), so the §10.1 recalibration is a
+PRECONDITION of post-conversion unattended large-grid operation, not a
+nicety.
+
+### 10.4 Per-arm throughput CALIBRATION deliverable (launch-lane scope sync, 2026-07-09 — NEW REGISTERED CONVERSION DELIVERABLE)
+
+A machine-readable, importable per-arm throughput calibration ships
+with the conversion: a COMMON module (`brutex/engine/sweep_calibration.py`)
+or committed JSON exposing per arm (`"rust"` | `"python"`):
+
+- the TWO-TERM coefficients as PRIMARY truth — `walk_ns_per_mask_bar`,
+  `trade_cost_us_per_trade`, `c0_us` (per the DESIGN §9.1 pinned law);
+- a DERIVED convenience field `effective_mask_bars_per_second` at a
+  STATED reference density;
+- provenance fields: `{measured_utc, hardware_key
+  (tests/bench/baselines fingerprint format —
+  config/hardware_envelope.hardware_key), source_adr,
+  provenance: "measured" | "unbenchmarked_default"}`.
+
+Consumers (the #1285 SLA model, the launch display fallback) compute
+duration estimates FROM it and render provenance honestly (an
+`unbenchmarked_default` renders as such, never as a measurement).
+**NAMING DISTINCTNESS (mandated):** this calibration is for DURATION
+ESTIMATES and must be named so it can never be confused with the
+DEC-SWEEP-STALL-OOM-GUARDS-001 stall-detection floor
+(`STALL_MIN_MASK_BARS_PER_SEC = 2.5e8 mask·bars/s` — a conservative
+HANG-DETECTION bound that only sets the false-abort-margin ↔
+wedge-detection-latency trade-off, deliberately NOT a duration
+estimate). The two constants serve DISTINCT purposes and are stated
+side-by-side wherever either is documented: calibration = "how long
+will this grid take" (estimate, provenance-stamped); stall floor =
+"when is a worker provably wedged" (liveness bound, never results).
+
+### 10.5 Transmitted findings F6 / F24 / F25 / F28 (Verifier B register, pasted 2026-07-09 — verbatim, attributed)
+
+**F6 (HIGH, live):**
+
+> "Gap-register #3 BLOCKER (cache identity omits overfit+stage3) is a
+> LIVE same-key false-skip today; conversion must build on the Ruling-3
+> fix | sweep_orchestrator.py:682-703 | P2 fix; primary dependency
+> (RT-14)"
+
+Mechanism (coordinator-relayed summary): `_grid_descriptor` /
+`_tuple_cache_params` hash neither `grid.overfit` nor the stage3 knobs;
+dashboard + CLI share the same sweeps tree — a GATED re-run over an
+existing light-run tree resumes "already complete", the DSR gate is
+never applied, and /results serves ungated rows as institutional
+winners. [Cite correction, this pack's verification:
+`_grid_descriptor` / `_tuple_cache_params` live in
+**sweep_supervisor.py:288 / :350**, NOT sweep_orchestrator.py:682-703 —
+that range is the sibling `_tuple_digest` store-path descriptor, which
+ALSO omits `overfit`/`stage3_*` (verified: descriptor fields at
+sweep_orchestrator.py:682-703 vs `SweepGridConfig.overfit` at
+sweep_orchestrator.py:256 + `stage3_*` at :263-266) — so the false-skip
+spans all the identity tiers B names.] **Register update (coordinator,
+product-audit-1 branch-verified, 2026-07-09):** F6's fix is **PR #1336**
+(`claude/dedup-c1-tuple-digest-identity` @ ec19300f,
+DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) — closes the same-key
+false-skip at all three identity tiers (L2 `_tuple_digest`
+store+sentinel, L3 `tuple_cache_key`, L4 `grid_identity`) via ONE shared
+`sweep_identity._gate_config_fragment`, with exact-F6-shape regression
+pins (a gated re-run maps to a DISTINCT store+sentinel); fix owner =
+product-audit-1's identity PR-1 lane. **HONEST RESIDUAL + DEPENDENCY:
+#1336 is UNMERGED — F6 stays LIVE on main until it lands; THE CONVERSION
+MUST BUILD ON POST-#1336 IDENTITY SEMANTICS (a sequencing dependency
+alongside identity PR-1) or it inherits the false-skip.**
+
+**F24:**
+
+> "SLA launch guard — projection = tuple_count × SWEEP_PER_TUPLE_SECONDS
+> (30s UNBENCHMARKED, calibrated to PYTHON per-tuple time, exactly what
+> the conversion moves 1-2 orders); the unattended daemon can NEVER pass
+> --acknowledge-sla-overrun (default False, only manual argparse threads
+> it) → post-conversion large grids structurally un-launchable on the
+> daemon lane without recalibration/env-override runbook; guard runs
+> AFTER full preload+snapshot hash (refusal pays the whole preload);
+> launch-refusal surface only — cannot hide a byte break. Cites:
+> sweep_sla_guard.py:13-35,53-71,105-128; cli.py:1276-1289,5243,
+> 5547-5565,7937."
+
+[This pack re-verified the mechanism on the current tree:
+`SWEEP_PER_TUPLE_SECONDS = 30.0` + the UNBENCHMARKED docstring at
+sweep_sla_guard.py:63-71; the eager fail-loud env parse at :105-128;
+`--acknowledge-sla-overrun` argparse at cli.py:1421/:1871 with the
+`check_sweep_sla` call + clean EXIT_USER_ERROR at cli.py:6563-6572. B's
+cli.py line numbers differ from the current tree (tree drift) — the
+mechanisms are confirmed.] Resolution: §10.1 + §10.4.
+
+**F25 (the FOURTH launch surface):**
+
+> "the FOURTH launch surface — dashboard sweep route →
+> BackgroundPullJob.start(job_kind=SWEEP) → run_sweep_from_request →
+> cmd_sweep_all on a background thread INSIDE uvicorn: (1) GIL-held
+> batches freeze the ENTIRE dashboard per batch across a multi-day
+> sweep; (2) the exit-code vocabulary is INVISIBLE on this lane —
+> cmd_sweep_all's int return is DROPPED, on_success fires on ANY
+> non-raising return, so an exit-6 TUPLE_FAILED sweep reads as a
+> successful job (grid aborts DO surface — they raise); (3)
+> single-flight: a running sweep blocks every pull. Cites:
+> app.py:5883-5907; sweep_runner.py:395-413; pull_jobs.py:1083-1112;
+> cli.py:5735-5742."
+
+[Re-verified on the current tree: route → `run_sweep_from_request` at
+app.py:6170 with `job_kind=JOB_KIND_SWEEP` at app.py:6191;
+`run_sweep_from_request` returns `cmd_sweep_all`'s int at
+sweep_runner.py:395-414; `on_success` fires iff the work returns
+without raising, pull_jobs.py:1122-1128. (1) intersects the DESIGN §3
+GIL-hold cap sizing (the fold cap IS the dashboard-lane liveness
+lever); (2) is §10.2's open item; (3) is the standing #1593 kind-aware
+single-flight posture — unchanged by the conversion.]
+
+**F28 (the two DATA-preflight gates — position pinned):**
+
+> "the two DATA-preflight gates on cmd_sweep_all (zero-bar slice
+> preflight EXIT_USER_ERROR unless --allow-missing-slices; derived-TF
+> freshness refusal G1, NO escape flag by design) run AFTER the
+> one-preload, BEFORE the snapshot hash/grid build — a spec reshuffle
+> or Rust-side loading path dropping/reordering them silently launders
+> stale derived-TF bars into a canonical-looking identity (the snapshot
+> hash re-keys bytes but cannot know they are stale). The design's
+> data-plane section must pin: these two gates KEEP their position
+> (post-preload, pre-hash) and the Rust core CANNOT introduce any
+> loading path that bypasses them (it owns no lake I/O — restate the
+> F21 law here). Cites: cli.py:5424-5480,5487; sweep_preflight.py:79,145;
+> tf_autoderive.py:87."
+
+PINNED as demanded: the two gates (zero-bar slice preflight with the
+`--allow-missing-slices` escape, cli.py:6436-6451/:410; the G1
+derived-TF freshness refusal via `preflight_derived_freshness` +
+`lake_derived_freshness_verdicts`, cli.py:6469-6473 →
+sweep_preflight.py:145 / data/tf_autoderive.py:87 — NO escape flag by
+design) KEEP their position — post-preload, pre-snapshot-hash/grid-build
+— and the Rust core CANNOT introduce any loading path that bypasses
+them: **the core owns NO lake I/O (the F21 law, restated here) — bars
+reach it only as already-preloaded, already-gated in-memory columns from
+the Python driver**; any future loading-path change that reorders these
+gates is a REFUSED design change on this register. [B's
+sweep_preflight.py:79/:145 cites verified: `preflight_slices` /
+`preflight_derived_freshness`; B's cli.py line numbers drifted — current
+locations given above.]
