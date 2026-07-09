@@ -84,3 +84,25 @@ def test_legend_verbatim_substrings() -> None:
     assert "it does NOT remove curve-fitting" in html
     assert "passes ~50% of" in html
     assert "— = no stored data / not judged." in html
+
+
+def test_dsr_columns_are_honestly_labeled() -> None:
+    """DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the tuple-scoped DSR
+    is NEVER presented unlabeled — its header names the scope — and the
+    cascade's corrected figure sits beside it with its N + source tooltip.
+    """
+    html = _render_results_html()
+    assert '["deflated_sharpe", "DSR (tuple-N)"' in html
+    assert '["cascade_dsr", "DSR @ search N", cascadeDsrCell]' in html
+    assert "cascade filter-#2 DSR — deflated against N=" in html
+    # An unjudged combo reads an honest em-dash, never a fabricated 0.
+    assert 'if (r.cascade_dsr == null) return "—";' in html
+    # Both DSR columns sort numerically.
+    assert '"deflated_sharpe", "cascade_dsr"' in html
+
+
+def test_dsr_legend_honesty_sentences() -> None:
+    html = _render_results_html()
+    assert "DSR (tuple-N) is the persisted per-tuple Deflated Sharpe" in html
+    assert "an inflating under-count" in html
+    assert "DSR @ search N is the Stage-4 cascade's own filter-#2 figure" in html

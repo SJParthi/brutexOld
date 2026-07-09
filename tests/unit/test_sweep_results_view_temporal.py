@@ -52,7 +52,18 @@ TEMPORAL_ROW_KEYS = frozenset(
         "year_gate_reasons",
     }
 )
-CASCADE_ROW_KEYS = frozenset({"cascade_verdict", "cascade_rejected_at", "cascade_provisional"})
+CASCADE_ROW_KEYS = frozenset(
+    {
+        "cascade_verdict",
+        "cascade_rejected_at",
+        "cascade_provisional",
+        # DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the corrected
+        # cascade DSR + its run-level deflation stamps.
+        "cascade_dsr",
+        "cascade_dsr_n_trials",
+        "cascade_dsr_n_source",
+    }
+)
 
 
 def _run_id(seed: int) -> str:
@@ -200,6 +211,9 @@ class TestCascadeRowKeys:
             "cascade_verdict": None,
             "cascade_rejected_at": None,
             "cascade_provisional": None,
+            "cascade_dsr": None,
+            "cascade_dsr_n_trials": None,
+            "cascade_dsr_n_source": None,
         }
 
     def test_passed_and_provisional(self) -> None:
@@ -227,7 +241,34 @@ class TestCascadeRowKeys:
             "cascade_verdict": "ambiguous",
             "cascade_rejected_at": None,
             "cascade_provisional": None,
+            # A conflicting figure is never coin-flip-served (BLOCKER 5).
+            "cascade_dsr": None,
+            "cascade_dsr_n_trials": None,
+            "cascade_dsr_n_source": None,
         }
+
+    def test_dsr_keys_ride_the_marker(self) -> None:
+        """DEC-RESULTS-TRUST-HONESTY-001: the corrected DSR + its run-level
+        N/source stamps pass through verbatim (full precision, never rounded);
+        an unstamped (pre-change) marker reads honest None, never 0.
+        """
+        keys = _cascade_row_keys(
+            VerdictMarker(
+                passed=True,
+                rejected_at=None,
+                provisional=False,
+                dsr_corrected=0.0031218374618234,
+                dsr_n_trials=8_400_000,
+                dsr_n_source="leaderboard",
+            )
+        )
+        assert keys["cascade_dsr"] == 0.0031218374618234
+        assert keys["cascade_dsr_n_trials"] == 8_400_000
+        assert keys["cascade_dsr_n_source"] == "leaderboard"
+        bare = _cascade_row_keys(VerdictMarker(passed=True, rejected_at=None, provisional=False))
+        assert bare["cascade_dsr"] is None
+        assert bare["cascade_dsr_n_trials"] is None
+        assert bare["cascade_dsr_n_source"] is None
 
 
 class TestScanVerdictJoin:

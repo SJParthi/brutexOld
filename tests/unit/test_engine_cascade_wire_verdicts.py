@@ -33,7 +33,12 @@ def _rid(n: int) -> str:
 
 
 def _verdict(
-    n: int, *, passed: bool, rejected_at: FilterStage | None = None, provisional: bool = False
+    n: int,
+    *,
+    passed: bool,
+    rejected_at: FilterStage | None = None,
+    provisional: bool = False,
+    dsr_corrected: float | None = None,
 ) -> CandidateVerdict:
     return CandidateVerdict(
         candidate_id=_rid(n),
@@ -42,6 +47,7 @@ def _verdict(
         detail="synthetic",
         composite_score=0.5 if passed else None,
         provisional=provisional,
+        dsr_corrected=dsr_corrected,
     )
 
 
@@ -80,12 +86,23 @@ class TestLoadVerdictMarkersRealWriter:
         )
         path = cw.write_report(tmp_path, report)
         markers = load_verdict_markers(path)
+        # dsr_n_source="pool" is the REAL writer's run-level default
+        # (CascadeReport.dsr_n_source) threaded onto every marker of its group
+        # (DEC-RESULTS-TRUST-HONESTY-001) — consciously updated from the
+        # pre-change no-stamp expectation.
         assert markers == {
-            _rid(1): VerdictMarker(passed=True, rejected_at=None, provisional=True),
-            _rid(2): VerdictMarker(
-                passed=False, rejected_at=FilterStage.WALK_FORWARD.value, provisional=False
+            _rid(1): VerdictMarker(
+                passed=True, rejected_at=None, provisional=True, dsr_n_source="pool"
             ),
-            _rid(3): VerdictMarker(passed=True, rejected_at=None, provisional=False),
+            _rid(2): VerdictMarker(
+                passed=False,
+                rejected_at=FilterStage.WALK_FORWARD.value,
+                provisional=False,
+                dsr_n_source="pool",
+            ),
+            _rid(3): VerdictMarker(
+                passed=True, rejected_at=None, provisional=False, dsr_n_source="pool"
+            ),
         }
         assert report_group_count(path) == 2
 
@@ -102,7 +119,9 @@ class TestLoadVerdictMarkersRealWriter:
         path = cw.write_report(tmp_path, report)
         with capture_logs() as logs:
             markers = load_verdict_markers(path)
-        assert markers[_rid(7)] == VerdictMarker(passed=True, rejected_at=None, provisional=False)
+        assert markers[_rid(7)] == VerdictMarker(
+            passed=True, rejected_at=None, provisional=False, dsr_n_source="pool"
+        )
         assert not markers[_rid(7)].ambiguous
         assert not [e for e in logs if e["event"] == "cascade_wire.verdict_markers_ambiguous"]
 
@@ -141,7 +160,102 @@ class TestLoadVerdictMarkersRealWriter:
         path = tmp_path / "cascade-report.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         markers = load_verdict_markers(path)
-        assert markers[_rid(4)] == VerdictMarker(passed=True, rejected_at=None, provisional=False)
+        assert markers[_rid(4)] == VerdictMarker(
+            passed=True, rejected_at=None, provisional=False, dsr_n_source="pool"
+        )
+
+    def test_dsr_corrected_round_trips_on_pass_and_reject(self, tmp_path: Path) -> None:
+        """DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the verdict's own
+        filter-#2 DSR + the group's run-level N/source stamps ride the marker
+        on BOTH the pass and the reject arm — full precision, never rounded.
+        """
+        group = CascadeReport(
+            verdicts=(
+                _verdict(11, passed=True, dsr_corrected=0.9731218374618234),
+                _verdict(
+                    12,
+                    passed=False,
+                    rejected_at=FilterStage.DEFLATED_SHARPE,
+                    dsr_corrected=0.0031218374618234,
+                ),
+            ),
+            survivor_ids=(_rid(11),),
+            n_input=2,
+            n_survived=1,
+            stage_survivors={},
+            pool_pbo=None,
+            dsr_n_source="leaderboard",
+            dsr_n_trials=8_400_000,
+        )
+        path = cw.write_report(tmp_path, _report((("NIFTY", "1minute", group),)))
+        markers = load_verdict_markers(path)
+        assert markers[_rid(11)] == VerdictMarker(
+            passed=True,
+            rejected_at=None,
+            provisional=False,
+            dsr_corrected=0.9731218374618234,
+            dsr_n_trials=8_400_000,
+            dsr_n_source="leaderboard",
+        )
+        assert markers[_rid(12)].dsr_corrected == 0.0031218374618234
+        assert markers[_rid(12)].dsr_n_trials == 8_400_000
+        assert markers[_rid(12)].dsr_n_source == "leaderboard"
+
+    def test_pre_change_report_loads_none_dsr_never_zero(self, tmp_path: Path) -> None:
+        """An OLD report (no ``dsr_corrected`` verdict key, no run-level stamp
+        keys) loads honest ``None`` in all three dsr fields — never a
+        fabricated 0 (the additive-at-version-1 law).
+        """
+        payload: dict[str, Any] = json.loads(
+            cw.serialize_wire_report(
+                _report((("NIFTY", "1minute", _group(_verdict(5, passed=True))),))
+            )
+        )
+        report_obj = payload["groups"][0]["report"]
+        del report_obj["verdicts"][0]["dsr_corrected"]
+        del report_obj["dsr_n_trials"]
+        del report_obj["dsr_n_source"]
+        path = tmp_path / "cascade-report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        marker = load_verdict_markers(path)[_rid(5)]
+        assert marker.dsr_corrected is None
+        assert marker.dsr_n_trials is None
+        assert marker.dsr_n_source is None
+        assert marker.dsr_corrected != 0
+
+    def test_same_verdict_under_conflicting_dsr_populations_is_ambiguous(
+        self, tmp_path: Path
+    ) -> None:
+        """Two groups judging one run_id under DIFFERENT deflation populations
+        (different run-level N) collapse to AMBIGUOUS — a conflicting figure
+        is never coin-flip-served (the marker-equality law).
+        """
+
+        def _stamped(n_trials: int) -> CascadeReport:
+            return CascadeReport(
+                verdicts=(_verdict(13, passed=True, dsr_corrected=0.5),),
+                survivor_ids=(_rid(13),),
+                n_input=1,
+                n_survived=1,
+                stage_survivors={},
+                pool_pbo=None,
+                dsr_n_source="leaderboard",
+                dsr_n_trials=n_trials,
+            )
+
+        report = _report(
+            (
+                ("NIFTY", "1minute", _stamped(1_000)),
+                ("NIFTY", "5minute", _stamped(2_000)),
+            )
+        )
+        path = cw.write_report(tmp_path, report)
+        with capture_logs() as logs:
+            markers = load_verdict_markers(path)
+        assert markers[_rid(13)] is AMBIGUOUS_MARKER
+        assert markers[_rid(13)].dsr_corrected is None
+        warns = [e for e in logs if e["event"] == "cascade_wire.verdict_markers_ambiguous"]
+        assert len(warns) == 1
 
 
 class TestLoadVerdictMarkersDegrades:
@@ -204,6 +318,31 @@ class TestLoadVerdictMarkersDegrades:
                 b'{"groups": [{"report": {"verdicts": '
                 b'[{"candidate_id": "a", "passed": true, "provisional": "no"}]}}]}',
                 "non-bool-provisional",
+            ),
+            (
+                b'{"groups": [{"report": {"verdicts": '
+                b'[{"candidate_id": "a", "passed": true, "dsr_corrected": "0.5"}]}}]}',
+                "non-number-dsr-corrected",
+            ),
+            (
+                b'{"groups": [{"report": {"verdicts": '
+                b'[{"candidate_id": "a", "passed": true, "dsr_corrected": true}]}}]}',
+                "bool-dsr-corrected",
+            ),
+            (
+                b'{"groups": [{"report": {"dsr_n_trials": "many", "verdicts": '
+                b'[{"candidate_id": "a", "passed": true}]}}]}',
+                "non-int-dsr-n-trials",
+            ),
+            (
+                b'{"groups": [{"report": {"dsr_n_trials": true, "verdicts": '
+                b'[{"candidate_id": "a", "passed": true}]}}]}',
+                "bool-dsr-n-trials",
+            ),
+            (
+                b'{"groups": [{"report": {"dsr_n_source": 7, "verdicts": '
+                b'[{"candidate_id": "a", "passed": true}]}}]}',
+                "non-str-dsr-n-source",
             ),
         ],
     )

@@ -246,6 +246,11 @@
     sweep audit chain. Year-gating ADDS a calendar-aligned constraint on top of
     DSR/CPCV/WFO — it does NOT remove curve-fitting (at defaults it passes ~50% of
     pure noise over 7 years). — = no stored data / not judged.
+    DSR (tuple-N) is the persisted per-tuple Deflated Sharpe — deflated against ONE
+    grid cell's rank-time candidate count, an inflating under-count, so it is never
+    shown unlabeled; DSR @ search N is the Stage-4 cascade's own filter-#2 figure at
+    its recorded trial population (hover the cell for N + source; a "pool"-sourced
+    figure shares the under-count and pairs with the ~ provisional badge).
   </div>
 
   <div class="foot">
@@ -357,6 +362,17 @@ function yearGateBadge(r) {
   }
   return "—"; /* pre-extension row — no stored temporal data */
 }
+/* DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the corrected cascade DSR
+   cell — the cascade's own filter-#2 figure with its recorded N + source in
+   the tooltip. null = not judged by a cascade run (or a pre-change report) —
+   an honest "—", never a fabricated 0. */
+function cascadeDsrCell(r) {
+  if (r.cascade_dsr == null) return "—";
+  const n = r.cascade_dsr_n_trials == null ? "?" : num(r.cascade_dsr_n_trials);
+  const src = r.cascade_dsr_n_source ? esc(String(r.cascade_dsr_n_source)) : "unknown";
+  return '<span title="cascade filter-#2 DSR — deflated against N=' + n + ' (' + src + ')">'
+    + metric(r.cascade_dsr) + "</span>";
+}
 function cascadeBadge(r) {
   const v = r.cascade_verdict;
   if (!v) return "—"; /* not judged — absence is never "passed" */
@@ -386,6 +402,11 @@ const COLS = [
   ["profit_factor", "PF", (r) => metric(r.profit_factor)],
   ["win_rate", "Win %", (r) => pct(r.win_rate)],
   ["total_trades", "Trades", (r) => num(r.total_trades)],
+  /* The honesty law (DEC-RESULTS-TRUST-HONESTY-001): the tuple-scoped DSR is
+     NEVER presented unlabeled — its header names the inflating tuple-N scope;
+     the cascade's corrected figure sits beside it as "DSR @ search N". */
+  ["deflated_sharpe", "DSR (tuple-N)", (r) => metric(r.deflated_sharpe)],
+  ["cascade_dsr", "DSR @ search N", cascadeDsrCell],
   ["temporal_judged_years", "Years", yearStrip],
   ["max_year_share", "Yr share", (r) => pct(r.max_year_share)],
   ["year_gate_passed", "Yr gate", yearGateBadge],
@@ -398,7 +419,8 @@ const COLS = [
       : '<span class="cond none">(no conditions — enters every bar)</span>'],
 ];
 const NUMERIC = new Set(["rank", "net_pnl_rupees", "sharpe_ratio", "sortino_ratio",
-  "profit_factor", "win_rate", "total_trades", "max_year_share"]);
+  "profit_factor", "win_rate", "total_trades", "max_year_share",
+  "deflated_sharpe", "cascade_dsr"]);
 
 /* The 4 KPI cards: label + formatter. Values are the SAME num() strings as ever
    (DEC-SURFACE-TRIAL-001) — countUp writes the final exact string synchronously

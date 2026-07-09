@@ -798,20 +798,40 @@ def _cascade_row_keys(verdict: VerdictMarker | None) -> dict[str, Any]:
     reads ``null`` ("not judged", NEVER "passed"; the zero-illusion law).
     An :data:`~brutex.engine.cascade_wire.AMBIGUOUS_MARKER` (conflicting
     duplicate verdicts) reads ``"ambiguous"`` — a loud ``?`` chip, never a
-    coin-flip.
+    coin-flip; its dsr keys stay ``null`` (a conflicting figure is never
+    served). The three ``cascade_dsr*`` keys (DEC-RESULTS-TRUST-HONESTY-001,
+    audit BLOCKER 5) surface the cascade's OWN filter-#2 Deflated Sharpe —
+    the CORRECTED search-N figure when ``cascade_dsr_n_source`` reads
+    ``"leaderboard"``, the loudly-stamped legacy pool-N under-count when it
+    reads ``"pool"`` — beside the run-level ``cascade_dsr_n_trials`` N it was
+    deflated against; a pre-change report reads ``null`` in all three (never
+    a fabricated 0). Full precision, never rounded (CLAUDE.md §4).
     """
     if verdict is None:
-        return {"cascade_verdict": None, "cascade_rejected_at": None, "cascade_provisional": None}
+        return {
+            "cascade_verdict": None,
+            "cascade_rejected_at": None,
+            "cascade_provisional": None,
+            "cascade_dsr": None,
+            "cascade_dsr_n_trials": None,
+            "cascade_dsr_n_source": None,
+        }
     if verdict.ambiguous:
         return {
             "cascade_verdict": "ambiguous",
             "cascade_rejected_at": None,
             "cascade_provisional": None,
+            "cascade_dsr": None,
+            "cascade_dsr_n_trials": None,
+            "cascade_dsr_n_source": None,
         }
     return {
         "cascade_verdict": "passed" if verdict.passed else "rejected",
         "cascade_rejected_at": verdict.rejected_at,
         "cascade_provisional": verdict.provisional,
+        "cascade_dsr": verdict.dsr_corrected,
+        "cascade_dsr_n_trials": verdict.dsr_n_trials,
+        "cascade_dsr_n_source": verdict.dsr_n_source,
     }
 
 

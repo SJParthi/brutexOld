@@ -963,7 +963,11 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
     filter #5 was skipped (see :class:`~brutex.metrics.cascade.CascadeReport`).
     The per-verdict ``provisional`` key (R2-SR-F4) is ADDITIVE at
     ``REPORT_VERSION`` 1 — the same precedent as ``pool_pbo``; a pre-change
-    report simply lacks the key.
+    report simply lacks the key. The per-verdict ``dsr_corrected`` key
+    (DEC-RESULTS-TRUST-HONESTY-001, audit BLOCKER 5 — the cascade's OWN
+    filter-#2 DSR, kept on pass AND reject) rides the SAME additive
+    precedent: a pre-change report lacks the key and loads ``None``,
+    never a fabricated 0.
     """
     return {
         "n_input": report.n_input,
@@ -982,6 +986,7 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
                 "detail": verdict.detail,
                 "composite_score": verdict.composite_score,
                 "provisional": verdict.provisional,
+                "dsr_corrected": verdict.dsr_corrected,
             }
             for verdict in report.verdicts
         ],
@@ -1656,12 +1661,27 @@ class VerdictMarker:
     proven. ``ambiguous=True`` marks a run_id that appeared in MORE THAN ONE
     group with CONFLICTING verdicts — the join serves a loud ``?``, never a
     coin-flip chip (Golden Rule #1).
+
+    The three ``dsr_*`` fields (DEC-RESULTS-TRUST-HONESTY-001, audit
+    BLOCKER 5) are ADDITIVE with ``None`` defaults: ``dsr_corrected`` is the
+    verdict's own filter-#2 Deflated Sharpe (kept on pass AND reject; a
+    pre-change report loads ``None``, never a fabricated 0), and
+    ``dsr_n_trials`` / ``dsr_n_source`` are the RUN-level deflation stamps of
+    the report group that judged it (``"leaderboard"`` = the corrected
+    search-N; ``"pool"`` = the legacy under-count — the ``provisional``
+    flag's cause). Because the dsr fields participate in marker EQUALITY, two
+    groups judging one run_id under DIFFERENT deflation populations collapse
+    to :data:`AMBIGUOUS_MARKER` — a conflicting figure is never
+    coin-flip-served (the same law the verdict itself already rode).
     """
 
     passed: bool
     rejected_at: str | None
     provisional: bool
     ambiguous: bool = False
+    dsr_corrected: float | None = None
+    dsr_n_trials: int | None = None
+    dsr_n_source: str | None = None
 
 
 #: The single conflicting-duplicate marker (see :class:`VerdictMarker`).
@@ -1670,13 +1690,20 @@ AMBIGUOUS_MARKER: Final[VerdictMarker] = VerdictMarker(
 )
 
 
-def _verdict_marker_of(entry: object) -> tuple[str, VerdictMarker]:
+def _verdict_marker_of(
+    entry: object, *, dsr_n_trials: int | None, dsr_n_source: str | None
+) -> tuple[str, VerdictMarker]:
     """Parse ONE report verdict object into ``(candidate_id, marker)``.
 
     Raises :class:`ValueError` on any shape violation — the caller folds every
     such violation into the corrupt-report degrade (empty map + one WARN).
     ``provisional`` defaults ``False`` when ABSENT (a pre-R2-SR-F4 report — the
-    additive-at-version-1 law above).
+    additive-at-version-1 law above); ``dsr_corrected`` defaults ``None`` when
+    ABSENT (a pre-DEC-RESULTS-TRUST-HONESTY-001 report — never a fabricated
+    0), but a PRESENT non-number is damage (raise → corrupt degrade). The
+    run-level *dsr_n_trials* / *dsr_n_source* stamps arrive from the caller
+    (they live on the GROUP report object, not the verdict entry) and are
+    stamped onto the marker verbatim.
     """
     if not isinstance(entry, dict):
         raise ValueError("verdict entry is not a JSON object")
@@ -1684,15 +1711,43 @@ def _verdict_marker_of(entry: object) -> tuple[str, VerdictMarker]:
     passed = entry.get("passed")
     rejected_at = entry.get("rejected_at")
     provisional = entry.get("provisional", False)
+    dsr_corrected = entry.get("dsr_corrected")
     if (
         not isinstance(candidate, str)
         or not candidate
         or not isinstance(passed, bool)
         or not (rejected_at is None or isinstance(rejected_at, str))
         or not isinstance(provisional, bool)
+        or not (
+            dsr_corrected is None
+            or (isinstance(dsr_corrected, int | float) and not isinstance(dsr_corrected, bool))
+        )
     ):
         raise ValueError(f"malformed verdict entry (candidate_id={candidate!r})")
-    return candidate, VerdictMarker(passed=passed, rejected_at=rejected_at, provisional=provisional)
+    return candidate, VerdictMarker(
+        passed=passed,
+        rejected_at=rejected_at,
+        provisional=provisional,
+        dsr_corrected=None if dsr_corrected is None else float(dsr_corrected),
+        dsr_n_trials=dsr_n_trials,
+        dsr_n_source=dsr_n_source,
+    )
+
+
+def _group_dsr_stamps(report: dict[str, object]) -> tuple[int | None, str | None]:
+    """Extract one group report's run-level ``(dsr_n_trials, dsr_n_source)`` stamps.
+
+    ABSENT keys read ``None`` (a pre-stamp report — the additive precedent);
+    a PRESENT wrong-typed value is damage and raises :class:`ValueError`
+    (→ the corrupt-report degrade, exactly like a malformed verdict entry).
+    """
+    n_trials = report.get("dsr_n_trials")
+    n_source = report.get("dsr_n_source")
+    if n_trials is not None and (isinstance(n_trials, bool) or not isinstance(n_trials, int)):
+        raise ValueError("cascade report dsr_n_trials is not an integer")
+    if n_source is not None and not isinstance(n_source, str):
+        raise ValueError("cascade report dsr_n_source is not a string")
+    return n_trials, n_source
 
 
 def _parse_verdict_markers(payload: object) -> dict[str, VerdictMarker]:
@@ -1719,8 +1774,11 @@ def _parse_verdict_markers(payload: object) -> dict[str, VerdictMarker]:
         verdicts = report.get("verdicts")
         if not isinstance(verdicts, list):
             raise ValueError("cascade report group has no 'verdicts' list")
+        dsr_n_trials, dsr_n_source = _group_dsr_stamps(report)
         for entry in verdicts:
-            candidate, marker = _verdict_marker_of(entry)
+            candidate, marker = _verdict_marker_of(
+                entry, dsr_n_trials=dsr_n_trials, dsr_n_source=dsr_n_source
+            )
             prior = markers.get(candidate)
             if prior is None:
                 markers[candidate] = marker
