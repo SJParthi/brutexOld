@@ -314,8 +314,10 @@ class TestAppendAndLookup:
         """C5 guard is only reached on a real diff — an identical row stays a no-op."""
         store = ResultsStore(path=Path("unused.parquet"))
         row = _row(run_id=_rid(1), deflated_sharpe=0.97)
-        assert store.append(row) is True
-        assert store.append(row) is False
+        first_append = store.append(row)
+        assert first_append is True
+        second_append = store.append(row)
+        assert second_append is False
 
     def test_get_hit_and_miss(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))

@@ -6,21 +6,51 @@ orchestrator (``_tuple_digest`` store address,
 DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001). Extracted to a leaf because
 :mod:`brutex.engine.sweep_supervisor` already imports FROM
 :mod:`brutex.engine.sweep_orchestrator`, so the orchestrator cannot import
-the fragment back from the supervisor without a cycle. :class:`SweepGridConfig`
-is imported ONLY under ``TYPE_CHECKING`` (the body does pure attribute reads,
-never constructs it), so at runtime this leaf imports nothing from the
-orchestrator — the edge stays acyclic.
+the fragment back from the supervisor without a cycle.
+
+The fragment's input is typed against the minimal :class:`_GateConfigInput`
+Protocol below — the gate/Stage-3 attributes it actually reads — so this leaf
+imports NOTHING from :mod:`brutex.engine.sweep_orchestrator` (not even under
+``TYPE_CHECKING``). The module-import graph is therefore provably acyclic to
+BOTH the runtime and static analysers (an earlier ``TYPE_CHECKING`` back-import
+of :class:`SweepGridConfig` tripped CodeQL's ``py/unsafe-cyclic-import`` even
+though ``from __future__ import annotations`` made it a no-op at runtime).
+:class:`SweepGridConfig` satisfies the Protocol structurally, so the two call
+sites pass their grid unchanged and the frozen ``grid_identity`` /
+``tuple_cache_key`` / ``_tuple_digest`` goldens are byte-unmoved.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
-if TYPE_CHECKING:
-    from brutex.engine.sweep_orchestrator import SweepGridConfig
+from brutex.ranking import OverfitGateConfig
 
 
-def _gate_config_fragment(grid: SweepGridConfig) -> dict[str, Any] | None:
+class _GateConfigInput(Protocol):
+    """Structural view of the knobs :func:`_gate_config_fragment` folds.
+
+    Captures ONLY the gate + Stage-3 attributes the fragment reads, so the leaf
+    needs no import of the orchestrator-owned :class:`SweepGridConfig` (which
+    imports FROM here). Members are read-only ``property`` declarations so a
+    FROZEN :class:`SweepGridConfig` (its attributes are read-only) satisfies the
+    Protocol structurally — a writable attribute member would be invariant and
+    reject the frozen dataclass.
+    """
+
+    @property
+    def overfit(self) -> OverfitGateConfig | None: ...
+    @property
+    def stage3_enable(self) -> bool: ...
+    @property
+    def stage3_top_k(self) -> int: ...
+    @property
+    def stage3_max_fevals(self) -> int: ...
+    @property
+    def stage3_max_restarts(self) -> int: ...
+
+
+def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
     """Return the canonical GATE-config identity fragment, or ``None`` at defaults.
 
     Coordinator Ruling 3 (DEC-SWEEP-UNKILLABLE-CORE-001): the overfit gate +
