@@ -277,3 +277,166 @@ class TestCrossSumValidation:
         """The judged list is a DENOMINATOR, not a bucket constraint: an
         unjudged sliver year's trades still store honestly."""
         _validate(temporal_judged_years_json='["2021"]')
+
+
+# ── The finalist fold + segmented-dd walk (the producer side) ────────────────
+
+from datetime import UTC, datetime, timedelta, timezone  # noqa: E402
+
+from brutex.engine.period_stats import fold_period_stats  # noqa: E402
+from brutex.metrics.types import ClosedTrade  # noqa: E402
+from brutex.strategies.types import Side  # noqa: E402
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _trade(pnl: int, exit_ist: datetime) -> ClosedTrade:
+    """One closed trade exiting at the given IST instant (entry 1 bar before)."""
+    exit_utc = exit_ist.replace(tzinfo=_IST).astimezone(UTC)
+    return ClosedTrade(
+        pnl_paisa=pnl,
+        mfe_paisa=max(pnl, 0),
+        mae_paisa=max(-pnl, 0),
+        holding_bars=1,
+        entry_ts=exit_utc - timedelta(minutes=5),
+        exit_ts=exit_utc,
+        direction=Side.BUY,
+    )
+
+
+class TestFoldPeriodStats:
+    def test_empty_trades_yield_empty_maps(self) -> None:
+        stats = fold_period_stats([], start_equity_paisa=10_000_000)
+        assert stats.by_year == {}
+        assert stats.by_quarter == {}
+        assert stats.by_month == {}
+
+    def test_fold_matches_hand_built_buckets(self) -> None:
+        trades = [
+            _trade(50_000, datetime(2021, 1, 5, 10, 0)),
+            _trade(-30_000, datetime(2021, 2, 10, 11, 0)),
+            _trade(-160_000, datetime(2021, 4, 20, 12, 0)),
+            _trade(16_550, datetime(2022, 11, 3, 13, 0)),
+        ]
+        stats = fold_period_stats(trades, start_equity_paisa=10_000_000)
+        assert stats.by_month == {
+            "2021-01": (1, 50_000, 1, 0),
+            "2021-02": (1, -30_000, 0, 30_000),
+            "2021-04": (1, -160_000, 0, 160_000),
+            "2022-11": (1, 16_550, 1, 0),
+        }
+        assert stats.by_quarter == {
+            "2021Q1": (2, 20_000, 1, 30_000),
+            "2021Q2": (1, -160_000, 0, 160_000),
+            "2022Q4": (1, 16_550, 1, 0),
+        }
+        # Year dd: 2021 peak 10_050_000 → trough 9_860_000 = 190_000 — MORE
+        # than any month's or quarter's dd (the walk carries the peak WITHIN
+        # the year across its months).
+        assert stats.by_year == {
+            "2021": (3, -140_000, 1, 190_000),
+            "2022": (1, 16_550, 1, 0),
+        }
+
+    def test_year_dd_exceeds_every_month_dd(self) -> None:
+        """The non-rollup counter-example (design Q3): two consecutive losing
+        months each dd 100, the YEAR dd is 200 — neither max nor sum of month
+        dds reproduces it in general."""
+        trades = [
+            _trade(-100, datetime(2021, 11, 3, 10, 0)),
+            _trade(-100, datetime(2021, 12, 3, 10, 0)),
+        ]
+        stats = fold_period_stats(trades, start_equity_paisa=1_000)
+        assert stats.by_month["2021-11"][3] == 100
+        assert stats.by_month["2021-12"][3] == 100
+        assert stats.by_year["2021"][3] == 200
+
+    def test_boundary_spanning_drawdown_is_split(self) -> None:
+        """The peak RESETS at each period start: a Dec→Jan drawdown of 200
+        reads 100 in each year — systematically UNDERSTATED per-period (the
+        row's global max_drawdown_paisa stays the risk authority)."""
+        trades = [
+            _trade(-100, datetime(2021, 12, 20, 10, 0)),
+            _trade(-100, datetime(2022, 1, 10, 10, 0)),
+        ]
+        stats = fold_period_stats(trades, start_equity_paisa=1_000)
+        assert stats.by_year == {
+            "2021": (1, -100, 0, 100),
+            "2022": (1, -100, 0, 100),
+        }
+
+    def test_recovery_inside_a_period_moves_the_peak(self) -> None:
+        """Standard dd walk within one month: peak follows new highs."""
+        trades = [
+            _trade(-50, datetime(2021, 6, 1, 10, 0)),
+            _trade(200, datetime(2021, 6, 2, 10, 0)),  # new peak 1_150
+            _trade(-80, datetime(2021, 6, 3, 10, 0)),  # dd 80 from the new peak
+        ]
+        stats = fold_period_stats(trades, start_equity_paisa=1_000)
+        assert stats.by_month["2021-06"] == (3, 70, 1, 80)
+
+    def test_input_order_is_irrelevant(self) -> None:
+        """The fold re-sorts by exit_ts (stable) — deterministic regardless."""
+        trades = [
+            _trade(-100, datetime(2021, 12, 20, 10, 0)),
+            _trade(300, datetime(2021, 3, 1, 10, 0)),
+            _trade(-100, datetime(2022, 1, 10, 10, 0)),
+        ]
+        forward = fold_period_stats(trades, start_equity_paisa=1_000)
+        backward = fold_period_stats(list(reversed(trades)), start_equity_paisa=1_000)
+        assert forward == backward
+
+    def test_dd_is_invariant_to_the_equity_base(self) -> None:
+        """peak − equity subtracts the base away — threaded for basis-law
+        fidelity, never a tunable (docstring law)."""
+        trades = [
+            _trade(-100, datetime(2021, 12, 20, 10, 0)),
+            _trade(40, datetime(2022, 1, 10, 10, 0)),
+        ]
+        a = fold_period_stats(trades, start_equity_paisa=1_000)
+        b = fold_period_stats(trades, start_equity_paisa=10_000_000)
+        assert a == b
+
+    def test_exit_attribution_books_to_the_exit_period(self) -> None:
+        """A trade entered in June exiting in July belongs WHOLLY to July."""
+        exit_utc = datetime(2021, 7, 1, 10, 0, tzinfo=_IST).astimezone(UTC)
+        trade = ClosedTrade(
+            pnl_paisa=500,
+            mfe_paisa=500,
+            mae_paisa=0,
+            holding_bars=100,
+            entry_ts=datetime(2021, 6, 28, 10, 0, tzinfo=_IST).astimezone(UTC),
+            exit_ts=exit_utc,
+            direction=Side.BUY,
+        )
+        stats = fold_period_stats([trade], start_equity_paisa=1_000)
+        assert set(stats.by_month) == {"2021-07"}
+
+    def test_ist_boundary_attribution(self) -> None:
+        """A 2021-12-31 23:00 IST exit is 17:30 UTC the same IST day — the
+        IST date (not the UTC date) picks the bucket."""
+        stats = fold_period_stats(
+            [_trade(10, datetime(2022, 1, 1, 1, 0))],  # 01:00 IST Jan 1 = Dec 31 UTC
+            start_equity_paisa=1_000,
+        )
+        assert set(stats.by_year) == {"2022"}
+
+    def test_fold_output_always_validates(self) -> None:
+        """Cross-sum consistency BY CONSTRUCTION: encoding the fold's maps
+        passes the store validator against the same trades' totals."""
+        trades = [
+            _trade(50_000, datetime(2021, 1, 5, 10, 0)),
+            _trade(-30_000, datetime(2021, 2, 10, 11, 0)),
+            _trade(0, datetime(2021, 3, 1, 11, 0)),  # scratch: neither win nor loss
+            _trade(16_550, datetime(2022, 11, 3, 13, 0)),
+        ]
+        stats = fold_period_stats(trades, start_equity_paisa=10_000_000)
+        validate_period_stats(
+            stats_by_year_json=encode_period_stats(stats.by_year),
+            stats_by_quarter_json=encode_period_stats(stats.by_quarter),
+            stats_by_month_json=encode_period_stats(stats.by_month),
+            temporal_judged_years_json=encode_judged_years([2021, 2022]),
+            total_trades=len(trades),
+            net_pnl_paisa=sum(t.pnl_paisa for t in trades),
+            winning_trades=sum(1 for t in trades if t.pnl_paisa > 0),
+        )

@@ -50,19 +50,26 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Final
 
+from brutex.engine.session_lens import ist_trade_date
+
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
+
+    from brutex.metrics.types import ClosedTrade
 
 __all__ = [
     "PERIOD_CELL_LEN",
     "PeriodCell",
+    "PeriodStats",
     "decode_judged_years",
     "decode_period_stats",
     "encode_judged_years",
     "encode_period_stats",
+    "fold_period_stats",
     "month_key",
     "quarter_key",
     "quarter_of_month",
@@ -326,4 +333,112 @@ def validate_period_stats(
         encode_period_stats(quarters),
         encode_period_stats(months),
         encode_judged_years(judged),
+    )
+
+
+# ── The finalist fold + segmented-dd walk (the producer side) ────────────────
+
+
+class _PeriodTracker:
+    """One horizon's running fold: cells + the intra-period-reset dd walk."""
+
+    __slots__ = ("cells", "current_key", "max_dd", "n", "peak", "pnl", "wins")
+
+    def __init__(self) -> None:
+        self.cells: dict[str, PeriodCell] = {}
+        self.current_key: str | None = None
+        self.n = 0
+        self.pnl = 0
+        self.wins = 0
+        self.peak = 0
+        self.max_dd = 0
+
+    def roll(self, key: str, equity_before: int) -> None:
+        """Enter *key* — finalize the previous period, reset the peak."""
+        if key == self.current_key:
+            return
+        self.finalize()
+        self.current_key = key
+        self.n = 0
+        self.pnl = 0
+        self.wins = 0
+        # The period's opening equity IS its initial peak (peak reset at the
+        # boundary — a drawdown running into this period is SPLIT here).
+        self.peak = equity_before
+        self.max_dd = 0
+
+    def add(self, pnl_paisa: int, equity_after: int) -> None:
+        """Fold one trade closed inside the current period."""
+        self.n += 1
+        self.pnl += pnl_paisa
+        if pnl_paisa > 0:
+            self.wins += 1
+        drawdown = self.peak - equity_after
+        self.max_dd = max(self.max_dd, drawdown)
+        self.peak = max(self.peak, equity_after)
+
+    def finalize(self) -> None:
+        """Write the open period's cell (no-op before the first roll)."""
+        if self.current_key is not None:
+            self.cells[self.current_key] = (self.n, self.pnl, self.wins, self.max_dd)
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodStats:
+    """One finalist's per-period cells at all three stored horizons.
+
+    Produced by :func:`fold_period_stats`; cross-sum-consistent BY CONSTRUCTION
+    (all three horizons fold the same trades), so encoding these maps always
+    satisfies :func:`validate_period_stats` against the same trades' totals.
+    """
+
+    by_year: dict[str, PeriodCell]
+    by_quarter: dict[str, PeriodCell]
+    by_month: dict[str, PeriodCell]
+
+
+def fold_period_stats(trades: Sequence[ClosedTrade], *, start_equity_paisa: int) -> PeriodStats:
+    """Fold a finalist's closed trades into month/quarter/year cells — O(trades).
+
+    ONE chronological pass (trades ordered by ``exit_ts`` — re-sorted stably
+    here so the walk is deterministic for any input order) over the
+    realized-at-exit equity sequence, segmented CONCURRENTLY by IST month /
+    quarter / year with a peak reset at each period boundary — the per-period
+    ``max_dd_paisa`` semantics of the module docstring (boundary-SPLIT,
+    non-rollup, trade-close granular). Attribution is EXIT-year/-month: a
+    boundary-straddling trade books wholly to its exit period (the
+    ``combo_aggregates.aggregate_combo`` law — property-pinned equal).
+
+    Parameters
+    ----------
+    trades
+        The finalist's re-simulated :class:`~brutex.metrics.types.ClosedTrade`
+        stream (may be empty ⇒ three empty maps).
+    start_equity_paisa
+        The equity base anchoring the walk (the ``build_equity_curve`` law).
+        Per-period dd is INVARIANT to this constant offset (peak − equity
+        subtracts it away) — it is threaded for basis-law fidelity, never a
+        tunable.
+    """
+    ordered = sorted(trades, key=lambda trade: trade.exit_ts)
+    trackers = (_PeriodTracker(), _PeriodTracker(), _PeriodTracker())
+    running = start_equity_paisa
+    for trade in ordered:
+        exit_date = ist_trade_date(trade.exit_ts)
+        keys = (
+            year_key(exit_date.year),
+            quarter_key(exit_date.year, quarter_of_month(exit_date.month)),
+            month_key(exit_date.year, exit_date.month),
+        )
+        for tracker, key in zip(trackers, keys, strict=True):
+            tracker.roll(key, running)
+        running += trade.pnl_paisa
+        for tracker in trackers:
+            tracker.add(trade.pnl_paisa, running)
+    for tracker in trackers:
+        tracker.finalize()
+    return PeriodStats(
+        by_year=trackers[0].cells,
+        by_quarter=trackers[1].cells,
+        by_month=trackers[2].cells,
     )

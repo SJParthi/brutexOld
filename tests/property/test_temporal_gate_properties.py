@@ -165,3 +165,105 @@ def test_triple_fold_matches_an_independent_dict_fold(
     assert triple.profitable_judged_years == len(positives)
     assert triple.sum_pos_year_pnl_paisa == sum(positives)
     assert triple.max_pos_year_pnl_paisa == (max(positives) if positives else 0)
+
+
+# ── Engine-side laws (the fold + the projector capture) ─────────────────────
+
+from datetime import UTC, datetime, timedelta, timezone  # noqa: E402
+
+from brutex.engine.period_stats import fold_period_stats  # noqa: E402
+from brutex.metrics.types import ClosedTrade  # noqa: E402
+from brutex.strategies.types import Side  # noqa: E402
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+@st.composite
+def _trade_streams(draw: st.DrawFn) -> list[ClosedTrade]:
+    """Chronological closed-trade streams across 2020..2023 (exit-ordered)."""
+    n = draw(st.integers(min_value=0, max_value=30))
+    base = datetime(2020, 1, 6, 10, 0, tzinfo=_IST).astimezone(UTC)
+    offsets = sorted(
+        draw(
+            st.lists(
+                st.integers(min_value=0, max_value=4 * 365 * 24 * 60),
+                min_size=n,
+                max_size=n,
+            )
+        )
+    )
+    pnls = draw(st.lists(st.integers(-(10**9), 10**9), min_size=n, max_size=n))
+    return [
+        ClosedTrade(
+            pnl_paisa=pnl,
+            mfe_paisa=max(pnl, 0),
+            mae_paisa=max(-pnl, 0),
+            holding_bars=1,
+            entry_ts=base + timedelta(minutes=offset),
+            exit_ts=base + timedelta(minutes=offset),
+            direction=Side.BUY,
+        )
+        for offset, pnl in zip(offsets, pnls, strict=True)
+    ]
+
+
+@given(trades=_trade_streams())
+def test_fold_cross_sums_hold_by_construction(trades: list[ClosedTrade]) -> None:
+    """year == Σ its months and quarter == Σ its months (n/pnl/wins), and the
+    month totals equal the trade totals — the store validator's laws hold for
+    EVERY fold output."""
+    stats = fold_period_stats(trades, start_equity_paisa=10_000_000)
+    for cells, prefix_len in ((stats.by_year, 4), (stats.by_quarter, None)):
+        for key, (n, pnl, wins, _dd) in cells.items():
+            if prefix_len is not None:
+                months = [m for m in stats.by_month if m.startswith(key)]
+            else:
+                year, quarter = key[:4], int(key[5])
+                months = [
+                    m
+                    for m in stats.by_month
+                    if m.startswith(year) and (int(m[5:7]) - 1) // 3 + 1 == quarter
+                ]
+            assert n == sum(stats.by_month[m][0] for m in months)
+            assert pnl == sum(stats.by_month[m][1] for m in months)
+            assert wins == sum(stats.by_month[m][2] for m in months)
+    assert sum(c[0] for c in stats.by_month.values()) == len(trades)
+    assert sum(c[1] for c in stats.by_month.values()) == sum(t.pnl_paisa for t in trades)
+    assert sum(c[2] for c in stats.by_month.values()) == sum(1 for t in trades if t.pnl_paisa > 0)
+
+
+@given(trades=_trade_streams())
+def test_per_period_dd_never_exceeds_the_global_dd(trades: list[ClosedTrade]) -> None:
+    """Every per-period max_dd (all three horizons) is <= the global
+    realized-at-exit drawdown over the whole stream — the boundary-SPLIT
+    understatement direction is one-sided."""
+    stats = fold_period_stats(trades, start_equity_paisa=0)
+    running = 0
+    peak = 0
+    global_dd = 0
+    for trade in sorted(trades, key=lambda t: t.exit_ts):
+        running += trade.pnl_paisa
+        global_dd = max(global_dd, peak - running)
+        peak = max(peak, running)
+    for cells in (stats.by_year, stats.by_quarter, stats.by_month):
+        for _key, (_n, _pnl, _wins, dd) in cells.items():
+            assert dd <= global_dd
+
+
+@given(trades=_trade_streams())
+def test_projector_year_fold_equals_the_rank_time_reduction(
+    trades: list[ClosedTrade],
+) -> None:
+    """The stored per-year pnl cells reduce (via triple_from_year_pnls) to the
+    SAME triple the rank-time exit-year fold produces — the two folds can
+    never diverge (the aggregate_combo exit-attribution law)."""
+    from brutex.engine.session_lens import ist_trade_date
+
+    stats = fold_period_stats(trades, start_equity_paisa=10_000_000)
+    stored_pnls = {int(key): cell[1] for key, cell in stats.by_year.items()}
+    rank_time: dict[int, int] = {}
+    for trade in trades:
+        year = ist_trade_date(trade.exit_ts).year
+        rank_time[year] = rank_time.get(year, 0) + trade.pnl_paisa
+    judged = range(2019, 2026)
+    assert triple_from_year_pnls(stored_pnls, judged) == triple_from_year_pnls(rank_time, judged)

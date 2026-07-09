@@ -81,6 +81,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.ranking import MIN_TRADES, OverfitGateConfig
+from brutex.ranking.temporal import TemporalRobustnessConfig
 from brutex.strategies.types import FibAnchorKind, Side
 from brutex.universe import is_engine_sweep_symbol
 from brutex.vocabulary import ProximityParams
@@ -215,6 +216,20 @@ class SweepGridConfig:
         Stage-3 multiple-testing overfit gate (DEC-RANKING-OVERFIT-001) runs per
         leaderboard. ``None`` (the default) keeps the legacy ranking. Each tuple's
         own backtested-combo count is its authoritative trial count ``N``.
+    temporal
+        Opt-in :class:`~brutex.ranking.temporal.TemporalRobustnessConfig`,
+        forwarded to every tuple's ``SweepRunConfig`` — the temporal-robustness
+        year gate + per-period finalist-stats capture
+        (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001). ``None`` (the default) is
+        byte-identical legacy behaviour. IDENTITY-SAFE by construction: like
+        ``overfit``, this field enters NONE of ``_tuple_digest`` /
+        ``_grid_descriptor`` / ``_tuple_cache_params`` (explicit field
+        enumerations — a pure rejection gate changes WHICH rows persist, never
+        any row's bytes; regression-pinned). INHERITED HAZARD, disclosed: the
+        completion-sentinel resume also excludes it, so toggling the gate does
+        NOT redo completed tuples — a resumed grid can mix gate regimes per
+        tuple (visible in the per-tuple SWEEP_START audit payloads;
+        remediation = a fresh results root).
     unsafe_allow_out_of_scope_instruments
         Layer-1 engine-scope escape hatch (DEC-ENGINE-SCOPE-GUARD-001; default
         ``False``): when False, every instrument must satisfy
@@ -254,6 +269,7 @@ class SweepGridConfig:
     top_k: int | None = None
     min_hits: int = MIN_TRADES
     overfit: OverfitGateConfig | None = None
+    temporal: TemporalRobustnessConfig | None = None
     #: Stage-3 refinement pass (DEC-STAGE3-WIRE-001, ADR-0007 §5 slice 5) —
     #: DEFAULT-OFF. When enabled, after every grid tuple persists, the launcher
     #: runs the BIPOP-CMA-ES refinement over each (instrument, tf, mode)
@@ -503,6 +519,7 @@ class SweepTuple:
             top_k=grid.top_k,
             min_hits=grid.min_hits,
             overfit=grid.overfit,
+            temporal=grid.temporal,
         )
 
 

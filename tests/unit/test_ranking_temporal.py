@@ -457,3 +457,132 @@ class TestYearGateDiagnostic:
         d = year_gate_diagnostic({2020: 100, 2021: 100}, [2020, 2020, 2021])
         assert d.n_judged_years == 2
         assert d.passed is True
+
+
+# ── The rank_combos temporal seam (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) ────────
+# Lives in this test_ranking*.py file so the ranking package gate + the
+# discovery gate both collect the new brutex/ranking/__init__.py branches.
+
+from brutex.metrics.compute import ResultMetrics  # noqa: E402
+from brutex.ranking import RankedCombo, rank_combos  # noqa: E402
+
+from tests.fakes.metrics_fixtures import make_result_metrics  # noqa: E402
+
+#: A passes-every-hard-door triple over 7 judged years (4/7 profitable,
+#: share 500/1000 = 0.5) and its lucky-year twin (1/7, share 1.0).
+_STEADY = _triple(4, 500, 1_000)
+_LUCKY = _triple(1, 5_000_000, 5_000_000)
+
+
+def _candidates(n: int = 3) -> list[tuple[int, ResultMetrics]]:
+    """n gate-passing candidates with distinct masks + sharpes."""
+    return [(1 << i, make_result_metrics(sharpe_ratio=1.0 + i * 0.25)) for i in range(n)]
+
+
+def _gate_input(
+    triples: list[TemporalTriple | None] | None,
+    *,
+    mode: str = MODE_GATE,
+    stats: TemporalGateStats | None = None,
+) -> TemporalGateInput:
+    return TemporalGateInput(
+        cfg=TemporalRobustnessConfig(mode=mode),
+        n_judged_years=7,
+        triples=triples,
+        stats=stats,
+    )
+
+
+class TestRankCombosTemporalSeam:
+    def test_default_none_is_the_legacy_ranking(self) -> None:
+        candidates = _candidates()
+        assert [rc.mask for rc in rank_combos(candidates)] == [
+            rc.mask for rc in rank_combos(candidates, temporal=None)
+        ]
+
+    def test_gate_mode_filters_survivors(self) -> None:
+        candidates = _candidates(3)
+        ranked = rank_combos(candidates, temporal=_gate_input([_STEADY, _LUCKY, _STEADY]))
+        assert sorted(rc.mask for rc in ranked) == [1 << 0, 1 << 2]
+
+    def test_observe_mode_filters_nothing_but_counts(self) -> None:
+        candidates = _candidates(3)
+        stats = TemporalGateStats()
+        ranked = rank_combos(
+            candidates,
+            temporal=_gate_input([_STEADY, _LUCKY, _STEADY], mode=MODE_OBSERVE, stats=stats),
+        )
+        assert sorted(rc.mask for rc in ranked) == [1 << 0, 1 << 1, 1 << 2]
+        assert stats.observed_kills == 1
+        assert stats.killed == 0
+
+    def test_ranking_order_matches_legacy_over_the_surviving_set(self) -> None:
+        """The gate removes candidates BEFORE z-normalisation — the survivors'
+        relative order equals ranking the survivor subset alone."""
+        candidates = _candidates(4)
+        gated = rank_combos(candidates, temporal=_gate_input([_STEADY, _LUCKY, _STEADY, _STEADY]))
+        survivors_only = [candidates[0], candidates[2], candidates[3]]
+        legacy = rank_combos(survivors_only)
+        assert [rc.mask for rc in gated] == [rc.mask for rc in legacy]
+        assert [rc.composite_score for rc in gated] == [rc.composite_score for rc in legacy]
+
+    def test_missing_triples_payload_raises(self) -> None:
+        with pytest.raises(ValueError, match="never become a silent pass-all"):
+            rank_combos(_candidates(), temporal=_gate_input(None))
+
+    def test_length_mismatch_raises(self) -> None:
+        with pytest.raises(ValueError, match="desynchronised"):
+            rank_combos(_candidates(3), temporal=_gate_input([_STEADY]))
+
+    def test_none_triple_on_a_survivor_raises_naming_the_mask(self) -> None:
+        with pytest.raises(ValueError, match="no TemporalTriple"):
+            rank_combos(_candidates(2), temporal=_gate_input([_STEADY, None]))
+
+    def test_none_triple_on_a_hard_door_reject_is_tolerated(self) -> None:
+        """A candidate the hard doors already killed never reaches the triple
+        lookup — its missing fold is unobservable (and Stage-1B-dropped masks
+        never reach ranking at all)."""
+        candidates = [
+            (1, make_result_metrics()),
+            (2, make_result_metrics(total_trades=5, winning_trades=3, losing_trades=2)),
+        ]
+        ranked = rank_combos(candidates, temporal=_gate_input([_STEADY, None]))
+        assert [rc.mask for rc in ranked] == [1]
+
+    def test_abstention_keeps_every_survivor(self) -> None:
+        stats = TemporalGateStats()
+        bundle = TemporalGateInput(
+            cfg=TemporalRobustnessConfig(),
+            n_judged_years=1,  # below the default floor of 2 → whole-gate abstain
+            triples=[_LUCKY, _LUCKY],
+            stats=stats,
+        )
+        ranked = rank_combos(_candidates(2), temporal=bundle)
+        assert len(ranked) == 2
+        assert stats.abstained is True
+
+    def test_empty_candidates_with_temporal(self) -> None:
+        assert rank_combos([], temporal=_gate_input([])) == []
+
+    def test_dsr_pool_is_untouched_by_the_gate(self) -> None:
+        """THE fatal-flaw fix pin at the unit level: survivors' deflated_sharpe
+        is bit-identical gate-on vs gate-off — the overfit pool N/V sees the
+        FULL candidate population either way."""
+        from brutex.ranking import OverfitGateConfig
+
+        candidates = _candidates(5)
+        overfit = OverfitGateConfig(dsr_min=0.0)
+        triples: list[TemporalTriple | None] = [_STEADY, _LUCKY, _STEADY, _LUCKY, _STEADY]
+        gated = rank_combos(candidates, overfit=overfit, temporal=_gate_input(triples))
+        ungated = rank_combos(candidates, overfit=overfit)
+        gated_dsr = {rc.mask: rc.deflated_sharpe for rc in gated}
+        ungated_dsr = {rc.mask: rc.deflated_sharpe for rc in ungated}
+        assert set(gated_dsr) == {1 << 0, 1 << 2, 1 << 4}
+        for mask, dsr in gated_dsr.items():
+            assert dsr == ungated_dsr[mask]  # bit-identical, never re-deflated
+
+
+def test_ranked_combo_type_reexport_sanity() -> None:
+    """Belt: the seam returns ordinary RankedCombo objects (no new type)."""
+    ranked = rank_combos(_candidates(1), temporal=_gate_input([_STEADY]))
+    assert isinstance(ranked[0], RankedCombo)

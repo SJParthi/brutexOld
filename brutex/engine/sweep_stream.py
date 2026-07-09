@@ -57,6 +57,7 @@ from brutex.ranking import (
     overfit_gate_positions,
     passes_gates,
 )
+from brutex.ranking.temporal import TemporalGateInput, TemporalTriple, apply_temporal_gate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -98,6 +99,14 @@ class SurvivorColumns:
         (``total_trades`` / ``skewness`` / ``kurtosis``) the opt-in overfit
         gate needs (spec V8). MUST match the tuple's ``overfit`` config —
         :func:`rank_survivor_columns` refuses a mismatch loudly.
+    with_temporal
+        ``True`` retains the three temporal-gate triple columns
+        (``profitable_judged_years`` i8 / ``max_pos_year_pnl_paisa`` i64 /
+        ``sum_pos_year_pnl_paisa`` i64 — 17 B/kept, counted INSIDE
+        :meth:`owned_nbytes` so the memory watermark stays honest;
+        DEC-SWEEP-TEMPORAL-ROBUSTNESS-001). MUST match the tuple's
+        ``temporal`` config — :func:`rank_survivor_columns` refuses a
+        mismatch loudly in BOTH directions.
     """
 
     __slots__ = (
@@ -111,13 +120,18 @@ class SurvivorColumns:
         "_sharpe_none",
         "_skew",
         "_skew_none",
+        "_t_maxpos",
+        "_t_prof",
+        "_t_sumpos",
         "_terms",
         "_trades",
         "_with_overfit",
+        "_with_temporal",
     )
 
-    def __init__(self, *, with_overfit: bool) -> None:
+    def __init__(self, *, with_overfit: bool, with_temporal: bool = False) -> None:
         self._with_overfit = with_overfit
+        self._with_temporal = with_temporal
         self._n = 0
         self._mask_hi = array("Q")
         self._mask_lo = array("Q")
@@ -132,6 +146,13 @@ class SurvivorColumns:
         self._skew_none = bytearray()
         self._kurt = array("d")
         self._kurt_none = bytearray()
+        # Temporal triple columns (same empty-when-disabled discipline). The
+        # signed-char profitable count bounds judged years at 127 — a real
+        # window spans single-digit years; a wider count would OverflowError
+        # LOUDLY at append, never truncate silently.
+        self._t_prof = array("b")
+        self._t_maxpos = array("q")
+        self._t_sumpos = array("q")
 
     @property
     def n_kept(self) -> int:
@@ -142,6 +163,11 @@ class SurvivorColumns:
     def with_overfit(self) -> bool:
         """Whether the Deflated-Sharpe input columns are being retained."""
         return self._with_overfit
+
+    @property
+    def with_temporal(self) -> bool:
+        """Whether the temporal-gate triple columns are being retained."""
+        return self._with_temporal
 
     @staticmethod
     def _append_optional(
@@ -161,7 +187,9 @@ class SurvivorColumns:
             _append_bit(none_bits, index, False)
             values.append(value)
 
-    def append(self, mask: int, metrics: ResultMetrics) -> None:
+    def append(
+        self, mask: int, metrics: ResultMetrics, *, temporal: TemporalTriple | None = None
+    ) -> None:
         """Retain one kept mask's ranking columns; the caller then drops *metrics*.
 
         O(1) amortised. The gate verdict + the 7 composite term inputs are
@@ -169,15 +197,33 @@ class SurvivorColumns:
         shared :func:`~brutex.ranking.passes_gates` /
         :func:`~brutex.ranking.composite_term_inputs` the batch rank uses — the
         stored float64s are therefore bit-identical to what
-        :func:`~brutex.ranking.rank_combos` would derive later.
+        :func:`~brutex.ranking.rank_combos` would derive later. With
+        ``with_temporal=True`` the mask's :class:`~brutex.ranking.temporal.
+        TemporalTriple` is REQUIRED (the fail-loud wiring guard — a missing
+        fold must never become a silent pass-all) and its three ints are
+        retained columnar; the triple object itself is dropped by the caller.
 
         Raises
         ------
         ValueError
-            If *mask* is outside ``[0, 2**128)`` (the two-u64-limb store).
+            If *mask* is outside ``[0, 2**128)`` (the two-u64-limb store), or
+            *temporal* presence disagrees with ``with_temporal`` (either
+            direction — a wiring bug, refused loudly).
         """
         if not 0 <= mask < _MASK_LIMIT:
             raise ValueError(f"SurvivorColumns.append: mask {mask!r} outside [0, 2**128)")
+        if self._with_temporal and temporal is None:
+            raise ValueError(
+                f"SurvivorColumns.append: with_temporal=True but mask 0x{mask:032x} "
+                f"carries no TemporalTriple — a missing per-mask fold (wiring bug), "
+                f"never a silent pass-all"
+            )
+        if not self._with_temporal and temporal is not None:
+            raise ValueError(
+                "SurvivorColumns.append: a TemporalTriple was supplied but the columns "
+                "were built with with_temporal=False — the triple would be dropped "
+                "silently (wiring bug)"
+            )
         index = self._n
         self._mask_hi.append(mask >> 64)
         self._mask_lo.append(mask & _U64_MASK)
@@ -189,6 +235,10 @@ class SurvivorColumns:
             self._trades.append(metrics.total_trades)
             self._append_optional(self._skew, self._skew_none, index, metrics.skewness)
             self._append_optional(self._kurt, self._kurt_none, index, metrics.kurtosis)
+        if self._with_temporal and temporal is not None:
+            self._t_prof.append(temporal.profitable_judged_years)
+            self._t_maxpos.append(temporal.max_pos_year_pnl_paisa)
+            self._t_sumpos.append(temporal.sum_pos_year_pnl_paisa)
         self._n = index + 1
 
     def mask_at(self, index: int) -> int:
@@ -239,11 +289,22 @@ class SurvivorColumns:
             return None
         return self._kurt[index]
 
+    def temporal_at(self, index: int) -> TemporalTriple:
+        """The retained :class:`TemporalTriple` at *index* (temporal columns) — O(1)."""
+        return TemporalTriple(
+            profitable_judged_years=self._t_prof[index],
+            max_pos_year_pnl_paisa=self._t_maxpos[index],
+            sum_pos_year_pnl_paisa=self._t_sumpos[index],
+        )
+
     def owned_nbytes(self) -> int:
         """EXACT logical payload bytes of every owned column — the watermark figure.
 
         ``Σ len(array) × itemsize + Σ len(bit-set)`` — O(#columns) = O(1) per
-        call, independent of ``n_kept``. HONEST scope (Golden Rule #10): this
+        call, independent of ``n_kept``. The temporal triple columns are
+        counted here too (17 B/kept when retained —
+        DEC-SWEEP-TEMPORAL-ROBUSTNESS-001), so the memory watermark stays
+        honest. HONEST scope (Golden Rule #10): this
         is the columns' logical payload, not process RSS — ``array``
         over-allocation slack and CPython object headers are excluded (both are
         small constants here; the ``MemoryError`` global-stop backstop is
@@ -257,6 +318,9 @@ class SurvivorColumns:
             self._trades,
             self._skew,
             self._kurt,
+            self._t_prof,
+            self._t_maxpos,
+            self._t_sumpos,
         )
         payload = sum(len(column) * column.itemsize for column in arrays)
         bits = (
@@ -306,6 +370,7 @@ def rank_survivor_columns(
     *,
     overfit: OverfitGateConfig | None,
     top_k: int,
+    temporal: TemporalGateInput | None = None,
 ) -> BoundedRankResult:
     """Rank the columnar survivors and select the top-K — bit-identical to batch.
 
@@ -338,12 +403,25 @@ def rank_survivor_columns(
     top_k
         The finalist count to select (``>= 1`` — the memory-budget plan refuses
         ``top_k=None`` before this path can engage).
+    temporal
+        Opt-in :class:`~brutex.ranking.temporal.TemporalGateInput` activating
+        the temporal year gate (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — applied to
+        the hard-door survivors BEFORE the overfit gate through the SAME
+        :func:`~brutex.ranking.temporal.apply_temporal_gate` core the batch
+        rank uses (bounded == batch bit-identically). The triples are read from
+        the columns' own retained arrays, so ``temporal.triples`` MUST be
+        ``None`` here; ``columns.with_temporal`` must agree with the config in
+        BOTH directions (a mismatch means the triple columns were never
+        retained — or were retained and would be silently ignored — refused
+        loudly, never degraded).
 
     Raises
     ------
     ValueError
         If ``top_k < 1``, if *overfit* is set but *columns* was built without
-        the overfit columns, or if two rank-reaching survivors share a mask
+        the overfit columns, if *temporal* presence disagrees with
+        ``columns.with_temporal`` (either direction) or carries an unexpected
+        ``triples`` payload, or if two rank-reaching survivors share a mask
         (the shared duplicate-mask guard, byte-identical message).
     """
     if top_k < 1:
@@ -354,7 +432,35 @@ def rank_survivor_columns(
             "were built with with_overfit=False (the total_trades/skewness/kurtosis "
             "deflation inputs were not retained)"
         )
+    if temporal is not None and not columns.with_temporal:
+        raise ValueError(
+            "rank_survivor_columns: temporal gate requested but the SurvivorColumns "
+            "were built with with_temporal=False (the per-mask year-fold triples "
+            "were not retained) — refused, never a silent pass-all"
+        )
+    if temporal is None and columns.with_temporal:
+        raise ValueError(
+            "rank_survivor_columns: the SurvivorColumns retained temporal triples "
+            "but no temporal gate config was supplied — the triples would be "
+            "silently ignored (wiring bug)"
+        )
+    if temporal is not None and temporal.triples is not None:
+        raise ValueError(
+            "rank_survivor_columns: TemporalGateInput.triples must be None on the "
+            "bounded path — the triples live in the SurvivorColumns arrays"
+        )
     positions = columns.gate_survivor_positions()
+    # Temporal year gate (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): filters the
+    # hard-door SURVIVORS only, BEFORE the overfit gate — the DSR pool below
+    # stays the FULL kept population (columns.sharpe_values()), untouched.
+    if temporal is not None and positions:
+        kept_relative_temporal = apply_temporal_gate(
+            [columns.temporal_at(position) for position in positions],
+            cfg=temporal.cfg,
+            n_judged_years=temporal.n_judged_years,
+            stats=temporal.stats,
+        )
+        positions = [positions[relative] for relative in kept_relative_temporal]
     dsr_by_survivor: list[float] | None = None
     if overfit is not None and positions:
         outcome = overfit_gate_positions(

@@ -463,6 +463,44 @@ def _add_sweep_grid_args(
             "per leaderboard (DEC-RANKING-OVERFIT-001); off by default"
         ),
     )
+    # ── Temporal-robustness year gate (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) ──
+    # The shipped default is OBSERVE (capture + count would-be kills, filter
+    # nothing) so per-period stats accumulate from day one; the observe→gate
+    # flip is one env var / flag after the operator inspects the first real
+    # grid's strips. Precedence: flag > $BRUTEX_TEMPORAL > observe; junk env
+    # fails loud pre-sweep (the BRUTEX_LOG_LEVEL pattern).
+    parser.add_argument(
+        "--temporal-mode",
+        choices=("off", "observe", "gate"),
+        default=None,
+        dest="temporal_mode",
+        help=(
+            "Temporal-robustness year gate mode (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): "
+            "'observe' (default; capture per-period stats + count would-be kills, filter "
+            "nothing), 'gate' (filter one-lucky-year combos pre-rank), 'off' (no capture, "
+            "byte-identical legacy). Overrides $BRUTEX_TEMPORAL."
+        ),
+    )
+    parser.add_argument(
+        "--temporal-min-profitable-frac",
+        type=float,
+        default=None,
+        dest="temporal_min_profitable_frac",
+        help=(
+            "P1: min fraction of judged years with positive pnl (default 0.5 — "
+            ">= 4 of 7; requires --temporal-mode observe|gate)"
+        ),
+    )
+    parser.add_argument(
+        "--temporal-max-year-share",
+        type=float,
+        default=None,
+        dest="temporal_max_year_share",
+        help=(
+            "P2: max share of the positive pnl mass one judged year may carry "
+            "(default 0.6; requires --temporal-mode observe|gate)"
+        ),
+    )
     # ── Stage-3 BIPOP-CMA-ES refinement pass (DEC-STAGE3-WIRE-001) ──
     # Defaults are None so SweepGridConfig stays the ONE source of the engine
     # defaults (top-K 10,000 · 200 fevals/restart · 3 restarts — ADR-0007
@@ -6214,6 +6252,66 @@ def _parse_paisa_list(raw: str) -> list[int | None]:
     return out
 
 
+#: The temporal-gate mode env var (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — the
+#: process-wide lever behind ``--temporal-mode``; junk fails LOUD pre-sweep.
+TEMPORAL_MODE_ENV = "BRUTEX_TEMPORAL"
+#: The legal mode tokens; ``"off"`` disables capture AND gate entirely.
+_TEMPORAL_MODE_TOKENS: tuple[str, ...] = ("off", "observe", "gate")
+#: The SHIPPED rollout default (design graft 2): capture ON + would-be kills
+#: counted/audited, NOTHING filtered — the operator sees kills before
+#: candidates die; the observe→gate flip is one env var + a ledger note.
+_TEMPORAL_DEFAULT_MODE = "observe"
+
+
+def resolve_temporal_config(
+    temporal_mode: str | None,
+    temporal_min_profitable_frac: float | None,
+    temporal_max_year_share: float | None,
+) -> Any:
+    """EAGERLY resolve the sweep's temporal-gate config (fail-loud, pre-sweep).
+
+    DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: precedence is ``--temporal-mode`` >
+    ``$BRUTEX_TEMPORAL`` (case-insensitive; the ``BRUTEX_LOG_LEVEL`` pattern) >
+    the shipped ``observe`` default. ``"off"`` returns ``None`` (byte-identical
+    legacy sweep — and REFUSES stray threshold flags: a silently-ignored knob
+    is a config lie); ``observe``/``gate`` return a validated
+    :class:`~brutex.ranking.temporal.TemporalRobustnessConfig` with any
+    explicit threshold overrides applied. Junk — an unknown env token or an
+    out-of-range threshold — raises :class:`CliUserError` (one clean
+    ``[brutex] …`` line + ``EXIT_USER_ERROR``, never a traceback, never a
+    silent fallback), BEFORE any lake I/O.
+    """
+    from brutex.ranking.temporal import TemporalRobustnessConfig
+
+    if temporal_mode is not None:
+        mode = temporal_mode
+    else:
+        raw = os.environ.get(TEMPORAL_MODE_ENV, "").strip().lower()
+        mode = raw if raw else _TEMPORAL_DEFAULT_MODE
+    if mode not in _TEMPORAL_MODE_TOKENS:
+        raise CliUserError(
+            f"invalid {TEMPORAL_MODE_ENV}/--temporal-mode value {mode!r}; "
+            f"choose one of {', '.join(_TEMPORAL_MODE_TOKENS)}"
+        )
+    if mode == "off":
+        if temporal_min_profitable_frac is not None or temporal_max_year_share is not None:
+            raise CliUserError(
+                "--temporal-min-profitable-frac/--temporal-max-year-share require "
+                "--temporal-mode observe|gate (the temporal gate is off — a "
+                "silently-ignored threshold is refused, never dropped)"
+            )
+        return None
+    kwargs: dict[str, Any] = {"mode": mode}
+    if temporal_min_profitable_frac is not None:
+        kwargs["min_profitable_years_fraction"] = temporal_min_profitable_frac
+    if temporal_max_year_share is not None:
+        kwargs["max_single_year_pnl_share"] = temporal_max_year_share
+    try:
+        return TemporalRobustnessConfig(**kwargs)
+    except ValueError as exc:
+        raise CliUserError(f"invalid temporal gate config: {exc}") from exc
+
+
 def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-tested engine
     *,
     lake_root: Path | None,
@@ -6238,6 +6336,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     fib_anchors: str = "prev_day",
     overfit_gate: bool = False,
     dsr_min: float = 0.95,
+    temporal_mode: str | None = None,
+    temporal_min_profitable_frac: float | None = None,
+    temporal_max_year_share: float | None = None,
     options_sim: bool = True,
     options_expiry: str = "weekly",
     options_broker: str = "groww",
@@ -6293,6 +6394,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.orchestrator.audit import AuditWriter
     from brutex.ranking import OverfitGateConfig
     from brutex.strategies.types import Side
+
+    # Temporal-gate config (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — resolved
+    # EAGERLY, before any lake I/O: a junk $BRUTEX_TEMPORAL / threshold is a
+    # clean one-line CliUserError exit, never a mid-launch traceback and never
+    # a silent fallback. The shipped default is OBSERVE (capture + count,
+    # filter nothing).
+    temporal_config = resolve_temporal_config(
+        temporal_mode, temporal_min_profitable_frac, temporal_max_year_share
+    )
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -6519,6 +6629,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         grid_kwargs["max_combos"] = max_combos
     if overfit_gate:
         grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
+    if temporal_config is not None:
+        # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: identity-safe (never enters
+        # _tuple_digest / run identity — the overfit precedent), so this
+        # threading changes WHICH rows persist, never any row's bytes.
+        grid_kwargs["temporal"] = temporal_config
     if scope.overridden:
         # Layer-1 opt-out rides the SAME operator decision as the Layer-2
         # override (DEC-ENGINE-SCOPE-GUARD-001) — set ONLY when symbols were
@@ -8952,6 +9067,9 @@ def _dispatch(argv: list[str] | None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            temporal_mode=args.temporal_mode,
+            temporal_min_profitable_frac=args.temporal_min_profitable_frac,
+            temporal_max_year_share=args.temporal_max_year_share,
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
@@ -9006,6 +9124,9 @@ def _dispatch(argv: list[str] | None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            temporal_mode=args.temporal_mode,
+            temporal_min_profitable_frac=args.temporal_min_profitable_frac,
+            temporal_max_year_share=args.temporal_max_year_share,
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
