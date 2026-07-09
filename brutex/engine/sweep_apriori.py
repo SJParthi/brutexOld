@@ -77,13 +77,34 @@ deterministic redo) when the PURE-INTEGER work estimate
 ``len(candidates) * n_bars`` **strictly exceeds** ``max_mask_bars`` (a mask·bar
 count; STRICT ``>`` — an exactly-at-limit cell is ALLOWED, never trips).
 
+The trip DECISION is a pure function of the SETTLED RAW per-level candidate
+counts: for EVERY level ``j in 1..k`` an AUTHORITATIVE check runs on the settled
+raw ``|C_j|`` (``|C_j| × n_bars > max_mask_bars``) the instant that level's
+candidate list is complete — the singleton set at ``k == 1``, the raw join output
+``|C_j|`` at each intermediate level ``j in 2..k-1`` BEFORE hit-filtering, and the
+WHOLE raw ``|C_k|`` at the final level BEFORE any ``root_mod`` shard filtering. The
+breaker thus guards the candidate ENUMERATION cost (the ``|C_j|`` masks that must
+be hit-counted), NOT the post-hit-filter frequent frontier ``|F_j|`` (a smaller,
+different quantity). Because the final check is on the whole pre-shard ``|C_k|``,
+the trip is also SHARD-INVARIANT — every ``root_mod`` shard of a cell trips
+identically on the whole-cell budget.
+
+The incremental :data:`_BUDGET_CHECK_STRIDE` check is a pure DECISION-PRESERVING
+memory optimization layered ON TOP: it fires the SAME authoritative check on the
+running ``|C_j|`` every ``_BUDGET_CHECK_STRIDE`` appends so a giant list is never
+fully materialised, and since ``candidates`` only ever appends, a strided fire is
+always a strictly-EARLIER raise of the identical authoritative decision. The trip
+is therefore STRIDE-INVARIANT: whether a cell trips is independent of
+:data:`_BUDGET_CHECK_STRIDE`, only how many candidates are materialised before the
+raise depends on it (pinned by ``test_budget_check_stride_invariance``).
+
 There is NO float division, NO ``time.time()``, NO seconds / rate anywhere in
-the trip path: the breaker is a single integer comparison, so the SAME inputs +
-config produce the SAME trip — including the SAME failure set — **bit-identically
-Python↔Rust** (Golden Rule #7 idempotence). The wall-clock runaway backstop is
-the SEPARATE, EXISTING #1608 parallel-sweep stall watchdog (non-identity-bearing,
-crash-equivalent / deterministic-redo); this deterministic breaker never touches
-it.
+the trip path: the breaker is a single integer comparison on settled raw counts,
+so the SAME inputs + config produce the SAME trip — including the SAME failure
+set — **bit-identically Python↔Rust** (Golden Rule #7 idempotence). The
+wall-clock runaway backstop is the SEPARATE, EXISTING #1608 parallel-sweep stall
+watchdog (non-identity-bearing, crash-equivalent / deterministic-redo); this
+deterministic breaker never touches it.
 
 The default limit :data:`DEFAULT_MAX_MASK_BARS` = ``1_159_200_000_000`` mask·bar
 is a **MODELED / container-measured / UNVERIFIED-on-M4** figure (Golden Rule
@@ -180,17 +201,19 @@ DEFAULT_MAX_MASK_BARS: Final[int] = 1_159_200_000_000
 #: the sorted-array frontier can represent.
 _U64_BITS: Final[int] = 64
 
-#: Stride between incremental breaker checks during candidate accumulation, so a
-#: degenerate cell trips BEFORE a giant list is fully materialised. The EXACT
-#: value only shifts WHICH running count fires an incremental ``on_count``; the
-#: post-loop ``_budget_check(len(...))`` is authoritative for the raise/return
-#: decision (it always runs on the true final count), so a ``±1`` mutation is
-#: result-equivalent — observing a difference would need ``>= 65_536`` candidates
-#: AND an assertion on the intermediate-check cadence, but that cadence is only
-#: ever asserted with the constant monkeypatched to ``4``
-#: (``test_budget_check_stride_cadence``), never against this literal. Hence the
-#: ``no mutate`` — a genuinely-equivalent, un-killable mutant (proven, not
-#: papered over: DEC-SWEEP-APRIORI-TUPLE-001 mutmut de-survivor round).
+#: Stride between incremental breaker checks during candidate accumulation — a
+#: pure DECISION-PRESERVING MEMORY optimization, so a degenerate cell trips BEFORE
+#: a giant list is fully materialised. The trip DECISION is now a pure function of
+#: the SETTLED RAW per-level candidate counts (the authoritative post-join
+#: ``_budget_check(len(candidates))`` runs on the SAME raw ``|C_j|`` this strided
+#: check accumulates, at EVERY level), and ``candidates`` only ever appends, so by
+#: monotonicity a strided fire is always a strictly-EARLIER raise of the identical
+#: authoritative decision — the trip is STRIDE-INVARIANT (whether a cell trips is
+#: independent of this value; only HOW MANY candidates are materialised before the
+#: raise depends on it). This constant is therefore GENUINELY result-equivalent to
+#: mutate (a ``±1`` mutation cannot change any cell's raise/return verdict — proven
+#: by ``test_budget_check_stride_invariance``, not papered over:
+#: DEC-SWEEP-APRIORI-TUPLE-001 stride-invariance fix). Hence the ``no mutate``.
 _BUDGET_CHECK_STRIDE: Final[int] = 65_536  # pragma: no mutate
 
 #: The pair level. Conflict-pruning is applied ONLY when building level-2
@@ -587,6 +610,15 @@ def generate_apriori_candidates(
             drop_conflicts=(j == _PAIR_LEVEL),
             on_count=_budget_check,
         )
+        # AUTHORITATIVE breaker check on the SETTLED RAW |C_j| — the SAME quantity
+        # the strided ``on_count`` check accumulates, BEFORE hit-filtering. The
+        # breaker guards the candidate ENUMERATION cost (the |C_j| masks that must
+        # be hit-counted), NOT the post-filter frontier |F_j|; checking |F_j| here
+        # instead made the trip DECISION depend on _BUDGET_CHECK_STRIDE (a
+        # degenerate level with |C_j| over budget but |F_j| under budget tripped at
+        # small stride yet passed at large stride) — breaking Python↔Rust
+        # failure-set bit-identity (Golden Rule #7).
+        _budget_check(len(candidates))
         cand_masks = [_mask_of(tpl) for tpl in candidates]
         counts = counter(cand_masks)
         frequent = [
@@ -596,13 +628,14 @@ def generate_apriori_candidates(
         ]
         frontier_tuples = [tpl for tpl, _ in frequent]
         frontier_masks = np.array(sorted(mask for _, mask in frequent), dtype=np.uint64)
-        _budget_check(len(frontier_tuples))
 
     # Final level k: build C_k (NOT hit-filtered — the caller's Stage-1B does that),
-    # apply the shard-ownership filter, and emit in lex-by-position order.
+    # check the breaker on the WHOLE settled raw |C_k| BEFORE any shard-ownership
+    # filtering (so the trip is shard-INVARIANT + whole-cell: every root_mod shard
+    # trips identically on the whole-cell budget), then emit the shard-owned masks
+    # in lex-by-position order.
     final_candidates = _join_and_prune(
         frontier_tuples, frontier_masks, drop_conflicts=(k == _PAIR_LEVEL), on_count=_budget_check
     )
-    owned_masks = [_mask_of(tpl) for tpl in final_candidates if tpl[0] % big_w == w]
-    _budget_check(len(owned_masks))
-    return owned_masks
+    _budget_check(len(final_candidates))
+    return [_mask_of(tpl) for tpl in final_candidates if tpl[0] % big_w == w]

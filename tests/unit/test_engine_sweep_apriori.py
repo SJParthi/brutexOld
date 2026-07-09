@@ -328,6 +328,117 @@ def test_breaker_trips_before_materialising_giant_list(monkeypatch: pytest.Monke
         )
 
 
+# ────────────────────────── stride invariance ──────────────────────────
+# THE anti-regression pin for DEC-SWEEP-APRIORI-TUPLE-001: the breaker trip
+# DECISION is a pure function of the SETTLED RAW per-level candidate counts
+# ``|C_j|`` and is INDEPENDENT of ``_BUDGET_CHECK_STRIDE`` (Golden Rule #7 —
+# Python↔Rust failure-set bit-identity). This test FAILS on the pre-fix code,
+# where an intermediate level checked the hit-filtered ``|F_j|`` (not the raw
+# ``|C_j|``) so a degenerate cell tripped at small stride only.
+
+#: ``(label, bar_bits, condition_bits, k, min_hits, n_bars, max_mask_bars)``. A
+#: fuzz of degenerate + dense cells straddling the budget from both sides
+#: (some raise, some don't) so the raising SET is a genuine non-trivial subset.
+#:
+#: The minimal repro ``repro_12singlebit_k3`` — 12 single-bit bars, ``k=3``,
+#: ``min_hits=1`` — has ``|C_2| = C(12, 2) − 3 conflict pairs = 63`` (so
+#: ``63 × 12 = 756 > 600`` trips on the RAW ``|C_j|``), but NO pair co-occurs on
+#: any single-bit bar, so ``|F_2| = 0`` and a ``|F_j|``-based check would NOT
+#: trip. On the pre-fix a00ed1a it therefore raises at ``stride=1`` (raw ``|C_j|``
+#: caught by the incremental check) but NOT at ``stride=100`` (the post-loop check
+#: sees the under-budget ``|F_j|``), so the raising set differs across strides and
+#: this test fails; after the fix every stride raises it.
+_STRIDE_INVARIANCE_CELLS: list[tuple[str, list[int], list[int], int, int, int, int]] = [
+    ("repro_12singlebit_k3", [1 << i for i in range(12)], list(range(12)), 3, 1, 12, 600),
+    ("repro_10singlebit_k3", [1 << i for i in range(10)], list(range(10)), 3, 1, 10, 200),
+    ("repro_10singlebit_k4", [1 << i for i in range(10)], list(range(10)), 4, 1, 10, 5000),
+    ("loose_never_trips", [1 << i for i in range(12)], list(range(12)), 3, 1, 12, 10**18),
+    ("dense_k2_final_trips", [0b11111111] * 20, [0, 2, 4, 6, 7], 2, 0, 20, 1),
+    ("dense_k3_intermediate", [0b111111000000] * 15, [6, 7, 8, 9, 10, 11], 3, 0, 15, 10),
+    ("dense_k3_final_only", [0b111111000000] * 15, [6, 7, 8, 9, 10, 11], 3, 0, 15, 250),
+    ("dense_k3_generous", [0b111111000000] * 15, [6, 7, 8, 9, 10, 11], 3, 0, 15, 10**18),
+]
+
+#: The stride values swept — {1, 2, 100, 65536 (the production literal), a huge
+#: value}. Small strides fire the incremental check often (catching the raw
+#: ``|C_j|`` early); strides ``>= |C_j|`` never fire it (only the authoritative
+#: post-join checks decide) — the two must reach the IDENTICAL trip verdict.
+_STRIDE_INVARIANCE_STRIDES: list[int] = [1, 2, 100, 65_536, 10**9]
+
+#: The cells expected to raise (independently derived from the raw ``|C_j|``
+#: budget arithmetic in the docstrings above), pinned so an accidental "never
+#: raises at any stride" regression (a vacuously-invariant empty set) is caught.
+_STRIDE_INVARIANCE_EXPECTED_RAISERS: frozenset[str] = frozenset(
+    {
+        "repro_12singlebit_k3",
+        "repro_10singlebit_k3",
+        "dense_k2_final_trips",
+        "dense_k3_intermediate",
+        "dense_k3_final_only",
+    }
+)
+
+
+def _cell_raises(cell: tuple[str, list[int], list[int], int, int, int, int]) -> bool:
+    _label, bar_bits, bits, k, min_hits, n_bars, cap = cell
+    try:
+        generate_apriori_candidates(
+            bar_bits,
+            condition_bits=bits,
+            k=k,
+            min_hits=min_hits,
+            n_bars=n_bars,
+            max_mask_bars=cap,
+        )
+        return False
+    except SweepAprioriBudgetError:
+        return True
+
+
+def test_budget_check_stride_invariance(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The SET of cells that raise the breaker MUST be identical across every
+    # _BUDGET_CHECK_STRIDE — the trip decision is a pure function of the settled
+    # raw per-level |C_j|, never of the stride. FAILS on the pre-fix a00ed1a
+    # (where the minimal-repro cells raise at small stride but not large).
+    raisers_by_stride: dict[int, frozenset[str]] = {}
+    for stride in _STRIDE_INVARIANCE_STRIDES:
+        monkeypatch.setattr(sweep_apriori, "_BUDGET_CHECK_STRIDE", stride)
+        raisers_by_stride[stride] = frozenset(
+            cell[0] for cell in _STRIDE_INVARIANCE_CELLS if _cell_raises(cell)
+        )
+
+    # Every stride agrees on the raising set (the invariance property).
+    reference = raisers_by_stride[_STRIDE_INVARIANCE_STRIDES[0]]
+    for stride, raisers in raisers_by_stride.items():
+        assert raisers == reference, (
+            f"stride {stride} raised {sorted(raisers)} but stride "
+            f"{_STRIDE_INVARIANCE_STRIDES[0]} raised {sorted(reference)} — "
+            f"the trip decision is stride-DEPENDENT"
+        )
+    # …and that shared set is exactly the raw-|C_j|-derived expectation (not a
+    # vacuous empty set that would make the invariance trivially true).
+    assert reference == _STRIDE_INVARIANCE_EXPECTED_RAISERS
+
+
+def test_minimal_repro_cell_raises_at_every_stride(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Explicit: the confirmed minimal repro (12 single-bit bars, k=3, min_hits=1,
+    # n_bars=12, max_mask_bars=600 → raw |C_2| = 63, 63 × 12 = 756 > 600) raises
+    # at ALL stride values after the fix (on a00ed1a it raised only at stride < 63).
+    repro = _STRIDE_INVARIANCE_CELLS[0]
+    assert repro[0] == "repro_12singlebit_k3"
+    for stride in _STRIDE_INVARIANCE_STRIDES:
+        monkeypatch.setattr(sweep_apriori, "_BUDGET_CHECK_STRIDE", stride)
+        with pytest.raises(SweepAprioriBudgetError):
+            generate_apriori_candidates(
+                [1 << i for i in range(12)],
+                condition_bits=list(range(12)),
+                k=3,
+                min_hits=1,
+                n_bars=12,
+                max_mask_bars=600,
+            )
+
+
 # ────────────────────────── mutation hardening ──────────────────────────
 # Deterministic boundary pins that KILL the mutmut survivors on the hit-filter
 # `>=` boundaries, the breaker's strict `>`, and the incremental-check stride
@@ -356,8 +467,12 @@ class TestMutationHardening:
     ``*``→``/`` mutant is a bare SyntaxError mutmut mis-reports as survived), the
     ``apriori_enabled`` string default removed, and the always-equal-length k==1
     zip replaced by a direct comprehension — leaving exactly ONE justified
-    ``# pragma: no mutate`` (the ``_BUDGET_CHECK_STRIDE`` ±1, result-equivalent
-    because the post-loop ``_budget_check`` is authoritative).
+    ``# pragma: no mutate`` (the ``_BUDGET_CHECK_STRIDE`` ±1, GENUINELY
+    result-equivalent because the trip decision is a pure function of the settled
+    raw per-level candidate counts ``|C_j|`` — a strided fire is only a
+    strictly-earlier raise of the SAME authoritative decision, so mutating the
+    stride cannot change any cell's raise/return verdict, pinned by
+    ``test_budget_check_stride_invariance``).
     """
 
     def test_f1_singleton_frequent_at_exactly_min_hits(self) -> None:
