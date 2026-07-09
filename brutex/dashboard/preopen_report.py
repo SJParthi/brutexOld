@@ -43,23 +43,21 @@ import bisect
 import io
 import re
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import groupby
 from pathlib import Path
+from types import EllipsisType
 from typing import Any, Final, Literal
 
 import duckdb
 import structlog
 
-from brutex.calendars.nse import HolidayDataUnavailableError
-from brutex.calendars.observed_sessions import (
-    is_trading_day_checked_observed,
-    load_observed_holidays,
-)
+from brutex.calendars.nse import previous_trading_session
+from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _INTRADAY_BASE_INTERVAL,
@@ -170,6 +168,12 @@ REPORT_BASES: Final[tuple[ReportBasis, ...]] = ("day", "minute")
 #: share (CLAUDE.md §11 COMMON).
 REPORT_EXCLUDED_SEGMENTS: Final[frozenset[str]] = frozenset({FNO_CANDLE_LAKE_SEGMENT})
 
+#: Cap on ``preopen.prev_close_noncontiguous`` WARNs emitted per report build
+#: (DEC-PREOPEN-PREVDAY-COMMON-001) — deduped per symbol; everything past the
+#: cap rolls into ONE ``preopen.prev_close_noncontiguous_suppressed`` summary
+#: (mirrors the /movers #1535 capped-warn precedent, state kept function-local).
+_HOLE_WARN_CAP: Final[int] = 20
+
 
 def resolve_report_datasets(
     lake_root: Path,
@@ -231,56 +235,33 @@ def resolve_report_datasets(
 def _previous_trading_day(day: date, *, observed: AbstractSet[date] = frozenset()) -> date | None:
     """The NSE trading session immediately before *day* (per the shared calendar).
 
-    Walks back one calendar day at a time from ``day - 1`` until the STRICT
-    :func:`brutex.calendars.observed_sessions.is_trading_day_checked_observed`
-    is satisfied — the checked calendar AND NOT an *observed* overlay day
-    (DEC-CALENDAR-OBSERVED-SESSIONS-001 — an observably-untraded day is NOT a
-    session, so the anchor steps over it exactly like a holiday; remove-only,
-    default empty = byte-identical back-compat) — so weekends and listed
-    NSE/BSE holidays are stepped over (they are NOT trading sessions) and a
-    special weekend session (e.g. a Budget-Day Saturday) IS honoured. The walk
-    always terminates: any covered weekday outside the holiday list is a
-    trading day and the DETECTOR-written overlay is capped at 8 days/year
-    (write-time — ``classify_month_drift``; a hand-edited sidecar still loads a
-    FINITE set), so the immediately-preceding session is at most a handful of
-    days back (bounded constant work, not unbounded).
+    DEC-PREOPEN-PREVDAY-COMMON-001: a THIN delegator over the ONE COMMON
+    :func:`brutex.calendars.nse.previous_trading_session` primitive (CLAUDE.md
+    §11 COMMON — the #1535/#1539-named follow-up, now CLOSED; the private walk
+    this module used to carry is DELETED). Name + signature are KEPT so every
+    existing caller/test survives verbatim. *observed* is the REMOVE-ONLY
+    observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): an
+    observably-untraded day is stepped over exactly like a holiday; the default
+    empty set is byte-identical back-compat (delegation-equivalence pinned
+    against a verbatim copy of the old walk over the full covered span).
 
-    LOUD out-of-coverage handling (DEC-CALENDAR-EXCHANGE-SPLIT-001 pack): when
-    the walk reaches a weekday OUTSIDE the published holiday span (e.g. a report
-    for the 2020-01-01 pull floor walking into 2019, or a post-coverage 2027+
-    date), the checked calendar raises rather than silently guessing "trading
-    day" — this helper catches that, emits ONE ``calendar.coverage_exhausted``
-    structlog warning, and returns ``None``. The caller
-    (:func:`_daily_prev_close_contiguous`) treats ``None`` as prev-close-ABSENT,
-    so the row is honestly SKIPPED (the locked "correct-or-absent, never wrong"
-    contract) instead of anchoring on an unverified session — never a silent
+    ABSTAIN, never guess: when the back-walk crosses the published-holiday
+    coverage floor the primitive emits ONE
+    ``calendar.previous_session_coverage_exhausted`` warning (the COMMON event
+    — the legacy ``calendar.coverage_exhausted`` twin this module emitted is
+    RETIRED, a sanctioned observability rename) and returns ``None``; the
+    callers treat ``None`` as prev-close-ABSENT so the row is honestly SKIPPED
+    (the locked "correct-or-absent, never wrong" contract) — never a silent
     guess, never a crash/500.
 
-    Honest limit (Golden Rule #10): a Diwali **Muhurat** date is classified as a
-    holiday by the calendar, so it is treated as a NON-session here.
-    A symbol whose 1-day lake happens to carry a Muhurat daily bar may therefore
-    have the day-after-Diwali row conservatively SKIPPED by
-    :func:`_daily_prev_close_contiguous` (the "correct-or-absent, never wrong"
-    rule) — recorded in the decision ledger, not a silent wrong number.
+    Honest limit (Golden Rule #10): a Diwali **Muhurat** date is classified as
+    a holiday by the calendar, so it is a NON-session here. A symbol whose lake
+    carries a Muhurat bar may therefore have the day-after-Diwali row
+    conservatively SKIPPED by BOTH contiguity guards (the "correct-or-absent,
+    never wrong" rule) — recorded in the decision ledger, not a silent wrong
+    number.
     """
-    probe = day - timedelta(days=1)
-    while True:
-        try:
-            if is_trading_day_checked_observed(probe, observed=observed):
-                return probe
-        except HolidayDataUnavailableError:
-            _LOG.warning(
-                "calendar.coverage_exhausted",
-                report_day=day.isoformat(),
-                probe_day=probe.isoformat(),
-                detail=(
-                    "holiday list exhausted while walking back to the prior trading "
-                    "session; PREV. CLOSE will be reported ABSENT for this day "
-                    "(correct-or-absent, never a guess)"
-                ),
-            )
-            return None
-        probe -= timedelta(days=1)
+    return previous_trading_session(day, observed=observed)
 
 
 def _daily_prev_close_contiguous(
@@ -289,6 +270,8 @@ def _daily_prev_close_contiguous(
     day: date,
     *,
     observed: AbstractSet[date] = frozenset(),
+    expected_session: date | None | EllipsisType = ...,
+    on_hole: Callable[[date, date], None] | None = None,
 ) -> Decimal | None:
     """Daily-basis PREV. CLOSE that REFUSES to anchor across a MISSING daily bar.
 
@@ -321,15 +304,36 @@ def _daily_prev_close_contiguous(
     calendar walk is a bounded constant); a safety net, never a data fix — the
     1-day series is filled by re-pulling (DEC-DHAN-429-RETRY-001 #466) + the
     windows table (#465) + the auto-retry layer (DEC-INGEST-AUTO-RETRY-001).
+
+    Seams (DEC-PREOPEN-PREVDAY-COMMON-001, shared with the minute mirror):
+    *expected_session* is the Ellipsis-sentinel prior-session seam — the
+    default ``...`` computes :func:`_previous_trading_day(day, observed=…)`
+    internally (the historical behaviour), while a caller holding a memoised
+    walk result passes it directly (``build_preopen_rows``'s per-report
+    O(unique days) memo). *on_hole* is the observability seam: invoked as
+    ``on_hole(expected, nearest_lake_session)`` EXACTLY when the anchor is
+    refused because the nearest earlier daily bar is NOT the calendar's prior
+    session (a lake hole) — never on the first-session, coverage-abstain, or
+    zero-close refusals, and never when ``None``. The refusal VALUE contract
+    is unchanged (payload byte-identical; its refusals already skip).
     """
     idx = bisect.bisect_left(daily_dates, day)
     if idx == 0:
         return None
-    expected = _previous_trading_day(day, observed=observed)
+    expected = (
+        _previous_trading_day(day, observed=observed)
+        if expected_session is ...
+        else expected_session
+    )
     # ``None`` = the calendar's coverage ran out while walking back (already
-    # WARNed loudly by the helper): the prior session cannot be verified, so
-    # the anchor is honestly ABSENT and the row is skipped — never a guess.
-    if expected is None or daily_dates[idx - 1] != expected:
+    # WARNed loudly by the COMMON primitive): the prior session cannot be
+    # verified, so the anchor is honestly ABSENT and the row is skipped —
+    # never a guess, and never an ``on_hole`` (there is no verified hole).
+    if expected is None:
+        return None
+    if daily_dates[idx - 1] != expected:
+        if on_hole is not None:
+            on_hole(expected, daily_dates[idx - 1])
         return None
     close = daily[expected]
     if close == 0:
@@ -338,37 +342,67 @@ def _daily_prev_close_contiguous(
 
 
 def _minute_prev_close_contiguous(
-    minute_last: dict[date, Decimal], trading_dates: list[date], day: date
+    minute_last: dict[date, Decimal],
+    trading_dates: list[date],
+    day: date,
+    *,
+    observed: AbstractSet[date] = frozenset(),
+    expected_session: date | None | EllipsisType = ...,
+    on_hole: Callable[[date, date], None] | None = None,
 ) -> Decimal | None:
     """Minute-basis PREV. CLOSE that REFUSES to anchor across a data hole.
 
-    The "previous close" for *day* is the **immediately preceding trading
-    session's** last 1-minute close. The authoritative trading-session list is
-    the symbol's own **1-day** series (*trading_dates*, sorted) — one bar per
-    session, far more robust than the minute feed and able to tell a genuine
-    holiday gap (absent from BOTH series) apart from a *missing 1-minute window*
-    (present in the 1-day series, absent from the minute feed). The expected
-    prior session is the latest 1-day date strictly before *day*; the anchor is
-    valid ONLY when that exact session also has 1-minute data in *minute_last*.
+    The "previous close" for *day* is the **immediately preceding NSE trading
+    session's** last 1-minute close — and the authority on WHICH session that
+    is, is the SHARED checked NSE calendar (:func:`_previous_trading_day`),
+    exactly like the daily mirror :func:`_daily_prev_close_contiguous`
+    (DEC-PREOPEN-PREVDAY-COMMON-001). The symbol's own **1-day** series
+    (*trading_dates*, sorted) is only the LAKE's evidence of which sessions it
+    holds; it is NOT its own calendar — the pre-fix rule anchored on
+    ``trading_dates[idx − 1]`` with zero real-calendar check, so a real NSE
+    session missing from BOTH series read as "a genuine holiday" and the row
+    fabricated a %CHNG across the hole (the confirmed repro: a 2024-01-03
+    Wednesday hole printed a fabricated +10.0% for 2024-01-04, and the
+    Top-mover category would have crowned it). The anchor is now valid ONLY
+    when the nearest earlier 1-day date IS the calendar's prior session AND
+    that exact session has 1-minute data in *minute_last*:
 
-    When the prior session's minute window is MISSING from the lake this returns
-    ``None`` so the caller SKIPS the row rather than silently anchoring on a
-    stale far-earlier close — the fake-mover bug where a missing prior-day
-    window produced a wildly wrong %CHNG (e.g. a −7.88% on JUBLINGREA whose
-    prior 1-minute window had not been fetched), exactly the rows the Top-mover
-    category then surfaced (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001). Also ``None``
-    on the first known session (no prior 1-day date) or a zero prior close.
-    O(log N) via :func:`bisect.bisect_left` over the pre-sorted *trading_dates*.
+    * ``idx == 0`` (no 1-day bar strictly before *day*) → ``None`` (first
+      session).
+    * The calendar ABSTAINS (*expected_session* ``None`` — coverage exhausted,
+      already WARNed by the COMMON primitive) → ``None``, no *on_hole*.
+    * ``trading_dates[idx − 1] != expected`` (a lake hole — the prior NSE
+      session has no 1-day bar) → ``on_hole(expected, trading_dates[idx − 1])``
+      then ``None``: the row is honestly ABSENT, never a stale-anchored number.
+    * The prior session's minute window is MISSING (``minute_last`` lacks the
+      expected session — the JUBLINGREA case, DEC-PREOPEN-PREVCLOSE-
+      CONTIGUITY-001) or its close is zero → ``None`` (byte-preserved skip).
+
+    Seams as in the daily mirror: *expected_session* ``...`` computes the walk
+    internally, a memo-holding caller passes it; *on_hole* fires ONLY on the
+    verified-hole refusal. O(log N) via :func:`bisect.bisect_left` (the
+    calendar walk is a bounded constant).
 
     Used ONLY when a 1-day series exists for the symbol; a pure-minute symbol
-    with no 1-day partition keeps the DEC-PREOPEN-MINUTE-BASIS-001 fallback (the
-    previous AVAILABLE minute session) since there is no calendar to verify
-    against — the honest limit is recorded in the decision ledger.
+    with no 1-day partition keeps the DEC-PREOPEN-MINUTE-BASIS-001 fallback
+    (the previous AVAILABLE minute session, deliberately calendar-blind — a
+    chosen, ledger-recorded honest limit, not an oversight).
     """
     idx = bisect.bisect_left(trading_dates, day)
     if idx == 0:
         return None
-    close = minute_last.get(trading_dates[idx - 1])
+    expected = (
+        _previous_trading_day(day, observed=observed)
+        if expected_session is ...
+        else expected_session
+    )
+    if expected is None:
+        return None
+    if trading_dates[idx - 1] != expected:
+        if on_hole is not None:
+            on_hole(expected, trading_dates[idx - 1])
+        return None
+    close = minute_last.get(expected)
     if close is None or close == 0:
         return None
     return close
@@ -404,14 +438,63 @@ def build_preopen_rows(
     when its open exists, a non-zero prior close exists, and the day is in range.
     Per-symbol reads are wrapped so one un-queryable symbol can NEVER 500 the
     export (DEC-PREOPEN-SPACE-SYMBOL-001). Rows sorted by ``(day, symbol)``.
+
+    DEC-PREOPEN-PREVDAY-COMMON-001: BOTH calendar-verified bases (the daily
+    guard AND the minute guard — the minute basis was calendar-blind before)
+    share ONE function-local prior-session memo, so the calendar back-walk runs
+    O(unique report days) per build (never O(rows); no globals — NOT an
+    O(1)-total claim). A hole refusal (the prior NSE session missing from the
+    lake) rides the existing skip ``continue`` — the row is honestly ABSENT,
+    never a fabricated %CHNG, never a raise/500 — and is surfaced as ONE
+    ``preopen.prev_close_noncontiguous`` WARN per symbol (capped at
+    :data:`_HOLE_WARN_CAP` per build, with one
+    ``preopen.prev_close_noncontiguous_suppressed`` summary past the cap).
     """
     rows: list[PreOpenRow] = []
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
-    # report and threaded into the daily-basis prior-session walk, so an observably
+    # report and threaded into BOTH bases' prior-session walk, so an observably
     # untraded day (an overlay entry) is stepped over like a holiday instead of the
-    # row being skipped for a "missing" daily bar. Remove-only; the loader never
+    # row being skipped for a "missing" bar. Remove-only; the loader never
     # raises (missing/corrupt sidecar -> empty overlay = the pre-change behaviour).
     observed = load_observed_holidays(lake_root)
+    # Prior-session memo: ONE calendar back-walk per unique report day, shared
+    # by BOTH bases across every symbol (function-local, never a global).
+    expected_by_day: dict[date, date | None] = {}
+
+    def _expected_session(day: date) -> date | None:
+        if day not in expected_by_day:
+            expected_by_day[day] = _previous_trading_day(day, observed=observed)
+        return expected_by_day[day]
+
+    # Non-contiguity WARN state: dedupe per symbol, cap the emitted warns per
+    # build, and roll everything past the cap into ONE summary event.
+    hole_symbols: set[str] = set()
+    holes_suppressed = 0
+
+    def _warn_hole(
+        symbol: str, exchange: str, segment: str, day: date, expected: date, found: date
+    ) -> None:
+        nonlocal holes_suppressed
+        if symbol in hole_symbols:
+            return
+        hole_symbols.add(symbol)
+        if len(hole_symbols) > _HOLE_WARN_CAP:
+            holes_suppressed += 1
+            return
+        _LOG.warning(
+            "preopen.prev_close_noncontiguous",
+            basis=basis,
+            symbol=symbol,
+            exchange=exchange,
+            segment=segment,
+            day=day.isoformat(),
+            expected_session=expected.isoformat(),
+            nearest_lake_session=found.isoformat(),
+            detail=(
+                "row skipped — prior NSE session missing from the lake; re-pull the missing session"
+            ),
+        )
+
     for exchange, segment, symbol in datasets:
         # Resilience (DEC-PREOPEN-SPACE-SYMBOL-001): one un-queryable symbol must
         # NEVER 500 the whole multi-symbol export — a ``ValueError`` (the candle-
@@ -429,12 +512,14 @@ def build_preopen_rows(
                 minute_last = _intraday_last_close_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
                 )
-                # The 1-day series is the trading-session CALENDAR used to detect a
-                # missing prior-day 1-minute window so PREV. CLOSE never anchors
-                # across a data hole (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001). When a
-                # symbol has NO 1-day partition there is no calendar to verify
-                # against, so we keep the DEC-PREOPEN-MINUTE-BASIS-001 fallback (the
-                # previous AVAILABLE minute session).
+                # The 1-day series is the LAKE's session evidence; the checked NSE
+                # calendar is the authority on the prior session, so PREV. CLOSE
+                # never anchors across a data hole — a missing prior-day 1-minute
+                # window (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001) OR a real NSE
+                # session absent from BOTH series (DEC-PREOPEN-PREVDAY-COMMON-001).
+                # When a symbol has NO 1-day partition at all we keep the
+                # DEC-PREOPEN-MINUTE-BASIS-001 fallback (the previous AVAILABLE
+                # minute session) — the documented calendar-blind honest limit.
                 daily = _daily_close_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
                 )
@@ -463,10 +548,34 @@ def build_preopen_rows(
         for day in sorted(opens):
             if day < start or day > end:
                 continue
+
+            def _on_hole(
+                expected: date,
+                found: date,
+                *,
+                _symbol: str = symbol,
+                _exchange: str = exchange,
+                _segment: str = segment,
+                _day: date = day,
+            ) -> None:
+                _warn_hole(_symbol, _exchange, _segment, _day, expected, found)
+
             if basis != "minute":
-                anchor = _daily_prev_close_contiguous(daily, daily_dates, day, observed=observed)
+                anchor = _daily_prev_close_contiguous(
+                    daily,
+                    daily_dates,
+                    day,
+                    expected_session=_expected_session(day),
+                    on_hole=_on_hole,
+                )
             elif daily_dates:
-                anchor = _minute_prev_close_contiguous(minute_last, daily_dates, day)
+                anchor = _minute_prev_close_contiguous(
+                    minute_last,
+                    daily_dates,
+                    day,
+                    expected_session=_expected_session(day),
+                    on_hole=_on_hole,
+                )
             else:
                 anchor = prev_by_day.get(day)
             if anchor is None or anchor == 0:
@@ -483,6 +592,13 @@ def build_preopen_rows(
                     pct_chng=chng / anchor * Decimal(100),
                 )
             )
+    if holes_suppressed:
+        _LOG.warning(
+            "preopen.prev_close_noncontiguous_suppressed",
+            basis=basis,
+            suppressed_symbols=holes_suppressed,
+            cap=_HOLE_WARN_CAP,
+        )
     rows.sort(key=lambda r: (r.day, r.symbol))
     return rows
 
