@@ -8,15 +8,26 @@ the precedent suite — this is the HONEST functional validation that:
   is resolved EAGERLY pre-sweep to a clean ``EXIT_USER_ERROR`` (nothing ran, no
   false ``_emit_pull_halt_alert`` abort alert), while a VALID budget resolves to
   the identical behaviour (the sweep completes exit 0);
-* RES-5 — a lock-conflict ``CatalogError`` at ``Catalog.open`` (a second
-  concurrent sweep-all over the same output dir) is converted to a clean
-  "another sweep is running" refusal (``EXIT_USER_ERROR``), while any OTHER
-  ``CatalogError`` (genuine catalog corruption) still surfaces LOUDLY (re-raised,
-  never masked as contention).
+* RES-5 — the PRIMARY concurrent-sweep exclusion is a REAL cross-process sweep
+  single-flight flock held for the whole sweep: a REAL second process holding it
+  makes ``cmd_sweep_all`` refuse with a clean ``EXIT_USER_ERROR`` (no false abort
+  alert), and a killed holder releases it so a fresh sweep completes. The narrower
+  secondary fail-safe (a lock-conflict ``CatalogError`` at ``Catalog.open`` during
+  the short preload window) is still converted to the same clean refusal, while any
+  OTHER ``CatalogError`` (genuine catalog corruption) surfaces LOUDLY (re-raised,
+  never masked as contention);
+* RES-4 (daemon consumer) — the sweep-daemon's ``_checkpoint_view`` classifies an
+  undecodable (invalid-UTF-8) checkpoint as FRESH and NEVER crashes the daemon
+  (its ``except`` catches ``ValueError``, of which ``UnicodeDecodeError`` is one).
 """
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import sys
+import textwrap
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -24,7 +35,8 @@ from typing import Any
 
 import pytest
 from brutex import cli
-from brutex.data.catalog import Catalog, CatalogError
+from brutex.data.catalog import Catalog
+from brutex.data.errors import CatalogError
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
@@ -243,3 +255,112 @@ def test_non_lock_catalog_error_still_surfaces_loudly(
 
     with pytest.raises(CatalogError, match="database is corrupt"):
         _sweep_all(lake_root, catalog_path, results_root)
+
+
+# ──────────────────── RES-5 (real single-flight lock) ────────────────────
+
+_HOLD_SWEEP_LOCK_SRC = textwrap.dedent(
+    """
+    import fcntl, os, sys
+    from pathlib import Path
+
+    # Hold ONLY the sweep flock (not the catalog), so cmd_sweep_all's catalog
+    # preload succeeds and the refusal comes from the sweep single-flight lock.
+    lock = Path(sys.argv[1]) / ".locks" / "sweep_singleflight.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.ftruncate(fd, 0)
+    os.write(fd, b"sweep-all:peer")
+    print("held", flush=True)
+    sys.stdin.readline()
+    """
+)
+
+
+def test_second_concurrent_sweep_refuses_while_first_holds_the_lock_then_reruns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RES-5 real lock (two REAL processes): while a peer process holds the sweep
+    single-flight lock for the output root, ``cmd_sweep_all`` refuses cleanly
+    (``EXIT_USER_ERROR``, "another sweep is already running", NO false abort alert).
+    Once the peer is KILLED (kernel-released flock — no stale lock), a fresh
+    ``cmd_sweep_all`` acquires the lock and completes (exit 0)."""
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    results_root.mkdir(parents=True, exist_ok=True)
+    fired: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", fired.append)
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_SWEEP_LOCK_SRC, str(results_root)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "held"  # peer holds the sweep lock
+
+        rc = _sweep_all(lake_root, catalog_path, results_root)
+
+        assert rc == cli.EXIT_USER_ERROR
+        captured = capsys.readouterr()
+        assert "another sweep is already running on this output dir" in captured.err
+        assert "sweep-all done" not in captured.out  # the second sweep never ran
+        assert fired == []  # a concurrent-sweep refusal is NOT a false abort alert
+    finally:
+        # Hard-kill the holder (no graceful __exit__) — the kernel releases its flock.
+        os.kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=30)
+        if child.stdin is not None:
+            child.stdin.close()
+        if child.stdout is not None:
+            child.stdout.close()
+
+    # The peer is reaped → its flock is released → a fresh sweep now completes.
+    rc2 = _sweep_all(lake_root, catalog_path, results_root)
+    assert rc2 == 0
+    assert "sweep-all done" in capsys.readouterr().out
+
+
+# ──────────────────── RES-4 (daemon checkpoint consumer) ────────────────────
+
+
+def test_daemon_checkpoint_view_degrades_on_invalid_utf8_never_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RES-4 sibling consumer: the sweep-daemon's ``_checkpoint_view`` reads the shared
+    checkpoint file directly (``json.loads(read_text(...))``). An undecodable
+    (invalid-UTF-8) checkpoint makes ``read_text`` raise ``UnicodeDecodeError`` (a
+    ``ValueError``, NOT ``OSError``/``JSONDecodeError``/``SweepCheckpointError``).
+    Before the fix the daemon crashed RAW; now ``ValueError`` is in the catch, so the
+    daemon degrades to "no checkpoint" (FRESH) and runs its one cycle cleanly."""
+    results_root = tmp_path / "sweeps"
+    checkpoint = results_root / "checkpoint" / "sweep-all.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    # Invalid UTF-8 on disk (external corruption / bitrot) — 0xFF is never valid UTF-8.
+    checkpoint.write_bytes(b'{"version": 1, "sweep_id": "sweep-1"\xff}')
+
+    # Stub the heavy grid sweep — this test targets ONLY the daemon's checkpoint read.
+    calls: list[int] = []
+
+    def _fake_sweep_all(**_kwargs: Any) -> int:
+        calls.append(1)
+        return cli.EXIT_OK
+
+    monkeypatch.setattr(cli, "cmd_sweep_all", _fake_sweep_all)
+
+    rc = cli.cmd_sweep_daemon(
+        schedule="24h",
+        once=True,
+        max_cycles=None,
+        tz_offset_minutes=None,
+        lake_root=tmp_path / "lake",
+        results_root=results_root,
+    )
+
+    assert rc == cli.EXIT_OK  # the daemon did NOT crash on the undecodable checkpoint
+    assert calls == [1]  # it got PAST _checkpoint_view and ran one cycle
+    out = capsys.readouterr().out
+    assert "sweep-daemon --once: running one cycle now" in out
