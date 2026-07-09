@@ -2137,6 +2137,27 @@ def cmd_lake_audit_unique(
             f"skipped (unreadable): {census.files_skipped}"
             f"  (engine-index: {census.engine_files_skipped})"
         )
+        # A skipped file makes the census INCOMPLETE, so the rc=1 red must NAME
+        # its cause — an ENGINE-index skip is the operator's data; a purely
+        # reference/F&O skip is NOT, and must never be misread as engine
+        # corruption (DEC-AUDIT-CENSUS-HONESTY-001, coordinator sign-off).
+        if census.files_skipped:
+            if census.engine_files_skipped:
+                print(
+                    "scan INCOMPLETE: ENGINE-INDEX DATA UNREADABLE — "
+                    f"{census.engine_files_skipped} engine-index file(s) "
+                    "(NIFTY/BANKNIFTY/SENSEX) could not be read; this rc=1 red "
+                    "IS your engine data (see the engine verdict below)."
+                )
+            else:
+                print(
+                    "scan INCOMPLETE: "
+                    f"{census.files_skipped} reference/non-engine file(s) "
+                    "unreadable (REFERENCE_ONLY / F&O) — ENGINE indexes "
+                    "(NIFTY/BANKNIFTY/SENSEX) verified CLEAN; this rc=1 red is "
+                    "the incomplete scan, NOT engine corruption. "
+                    f"first unreadable: {census.first_skipped_path}"
+                )
         label, _, rest = census.engine_detail.partition(": ")
         if not census.engine_clean:
             verdict = "UNREADABLE" if census.engine_files_skipped else "POISONED"

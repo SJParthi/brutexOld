@@ -246,6 +246,12 @@ class LakeScanReport:
     files_by_segment: tuple[tuple[str, int], ...] = ()
     engine_files: int = 0
     engine_files_skipped: int = 0
+    #: The FIRST unreadable/skipped file encountered in scan order (bars first,
+    #: then options), or ``None`` when nothing was skipped. Named on the human
+    #: ``brutex lake audit-unique`` disambiguation line so a cron/operator that
+    #: never sees the ``lake.invariant.scan_skip`` stderr log still knows WHICH
+    #: file left the census incomplete (DEC-AUDIT-CENSUS-HONESTY-001).
+    first_skipped_path: str | None = None
 
 
 def _utc_aware(ts: datetime) -> datetime:
@@ -640,6 +646,13 @@ def scan_lake_invariants(
     files_skipped = 0
     engine_files = 0
     engine_files_skipped = 0
+    first_skipped: list[str] = []
+
+    def _note_first_skip(skipped: Path) -> None:
+        """Remember the FIRST skipped file (O(1) — used to NAME it in the CLI)."""
+        if not first_skipped:
+            first_skipped.append(str(skipped))
+
     files_by_segment: dict[str, int] = {}
     symbol_dirs: dict[tuple[str, str], set[str]] = {}
     per_series: dict[tuple[str, str, str, str], list[tuple[PartitionCoords, Path]]] = {}
@@ -650,6 +663,7 @@ def scan_lake_invariants(
             parsed = parse_partition_path(path, lake_root=lake_root)
         except PartitionError:
             files_skipped += 1
+            _note_first_skip(path)
             continue
         coords = PartitionCoords(
             exchange=cast(str, parsed["exchange"]),
@@ -676,6 +690,7 @@ def scan_lake_invariants(
             except parquet_read_skip_errors() as exc:
                 _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
                 files_skipped += 1
+                _note_first_skip(path)
                 if (coords.exchange, coords.segment, coords.symbol) in ENGINE_INDEX_COORDS:
                     # A skipped ENGINE-index file (unreadable / schema-drifted) is
                     # NEVER classified — so it must flip the census verdict, else
@@ -742,6 +757,7 @@ def scan_lake_invariants(
                     except parquet_read_skip_errors() as exc:
                         _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
                         option_files_skipped += 1
+                        _note_first_skip(path)
                         _pause(per_file_pause)
                         continue
                     _pause(per_file_pause)
@@ -769,6 +785,7 @@ def scan_lake_invariants(
         files_by_segment=tuple(sorted(files_by_segment.items())),
         engine_files=engine_files,
         engine_files_skipped=engine_files_skipped,
+        first_skipped_path=first_skipped[0] if first_skipped else None,
     )
     _LOG.info(
         "lake.invariant.scan_complete",
@@ -823,6 +840,10 @@ class LakeCensus:
     files_scanned: int
     files_skipped: int = 0
     engine_files_skipped: int = 0
+    #: The FIRST unreadable/skipped file (mirrors
+    #: :attr:`LakeScanReport.first_skipped_path`) — carried through so the CLI
+    #: can NAME it on the disambiguation line without a second scan.
+    first_skipped_path: str | None = None
 
 
 def _engine_relevant(finding: LakeFinding) -> bool:
@@ -950,6 +971,7 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
         files_scanned=report.files_scanned + report.option_files_scanned,
         files_skipped=report.files_skipped + report.option_files_skipped,
         engine_files_skipped=engine_skipped,
+        first_skipped_path=report.first_skipped_path,
     )
 
 

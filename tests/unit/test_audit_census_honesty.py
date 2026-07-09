@@ -179,6 +179,29 @@ class TestCensusEngineSkipFold:
         assert census.files_skipped == 0
         assert census.engine_files_skipped == 0
 
+    def test_first_skipped_path_captured_first_in_scan_order(self, tmp_path: Path) -> None:
+        """``first_skipped_path`` names the FIRST unreadable file (report + census).
+
+        Two unreadable engine files are planted; series are scanned in sorted
+        order (``BANKNIFTY`` before ``NIFTY``), so the BANKNIFTY skip wins — and
+        the second skip exercises the ``_note_first_skip`` already-set arm.
+        """
+        banknifty = _partition(tmp_path, symbol="BANKNIFTY")
+        nifty = _partition(tmp_path, symbol="NIFTY")
+        _plant_garbage(banknifty)
+        _plant_garbage(nifty)
+        report = scan_lake_invariants(tmp_path)
+        assert report.files_skipped == 2
+        assert report.first_skipped_path == str(banknifty)
+        census = build_lake_census(report)
+        assert census.first_skipped_path == str(banknifty)
+
+    def test_clean_lake_first_skipped_path_is_none(self, tmp_path: Path) -> None:
+        _seed_clean(tmp_path)
+        report = scan_lake_invariants(tmp_path)
+        assert report.first_skipped_path is None
+        assert build_lake_census(report).first_skipped_path is None
+
     def test_json_payload_surfaces_skip_counts(self, tmp_path: Path) -> None:
         _plant_garbage(_partition(tmp_path, symbol="NIFTY"))
         payload = census_to_dict(build_lake_census(scan_lake_invariants(tmp_path)), mode="auto")
@@ -201,6 +224,9 @@ class TestCliAuditUniqueSkipHonesty:
         out = capsys.readouterr().out
         assert "skipped (unreadable): 1  (engine-index: 1)" in out
         assert "engine indexes (NIFTY / BANKNIFTY / SENSEX): UNREADABLE — " in out
+        # The rc=1 red must NAME its cause as the ENGINE data (never ambiguous).
+        assert "scan INCOMPLETE: ENGINE-INDEX DATA UNREADABLE — " in out
+        assert "this rc=1 red IS your engine data" in out
 
     def test_engine_schema_drift_non_green(self, tmp_path: Path) -> None:
         _plant_schema_drift(_partition(tmp_path, symbol="NIFTY"))
@@ -225,12 +251,19 @@ class TestCliAuditUniqueSkipHonesty:
     ) -> None:
         """A reference-lake skip still leaves the census INCOMPLETE → rc=1, engine verdict CLEAN."""
         _seed_clean(tmp_path)
-        _plant_garbage(_partition(tmp_path, segment="CASH", symbol="RELIANCE"))
+        poisoned = _partition(tmp_path, segment="CASH", symbol="RELIANCE")
+        _plant_garbage(poisoned)
         rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path)])
         assert rc == cli.EXIT_USER_ERROR
         out = capsys.readouterr().out
         assert "skipped (unreadable): 1  (engine-index: 0)" in out
         assert "engine indexes (NIFTY / BANKNIFTY / SENSEX): CLEAN — " in out
+        # The rc=1 red must be explicitly attributed to a REFERENCE/non-engine
+        # file — never misreadable as engine corruption — and NAME the file.
+        assert "scan INCOMPLETE: 1 reference/non-engine file(s) unreadable" in out
+        assert "(REFERENCE_ONLY / F&O)" in out
+        assert "verified CLEAN" in out and "NOT engine corruption" in out
+        assert f"first unreadable: {poisoned}" in out
 
     def test_clean_lake_still_rc_ok_no_regression(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
