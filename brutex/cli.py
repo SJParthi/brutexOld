@@ -8802,6 +8802,7 @@ def _run_results_depth_adapter(
         f"[brutex] results-depth — tuples={report.tuples_processed} "
         f"skipped_current={report.tuples_skipped_current} "
         f"missing_store={report.tuples_missing_store} errored={report.tuples_errored} "
+        f"resilience_errored={report.resilience_errored} "
         f"captured={report.combos_captured} parity_failed={report.combos_parity_failed} "
         f"pool={report.pool} gate_passers={report.gate_passers} "
         f"baselines={report.baselines_written} "

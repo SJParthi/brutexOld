@@ -43,6 +43,7 @@ def _report(**overrides: Any) -> ResultsDepthReport:
         "tuples_missing_store": 0,
         "tuples_errored": 0,
         "resilience_backfilled": 0,
+        "resilience_errored": 0,
         "combos_captured": 7,
         "combos_parity_failed": 0,
         "combos_zero_trades": 1,
@@ -105,8 +106,8 @@ class TestProviderWiring:
         out = capsys.readouterr().out
         assert (
             "[brutex] results-depth — tuples=1 skipped_current=2 missing_store=0 "
-            "errored=0 captured=7 parity_failed=0 pool=6 gate_passers=4 "
-            "baselines=1 top100=written entries=4"
+            "errored=0 resilience_errored=0 captured=7 parity_failed=0 pool=6 "
+            "gate_passers=4 baselines=1 top100=written entries=4"
         ) in out
 
     def test_failed_top100_reads_failed_in_the_report_line(

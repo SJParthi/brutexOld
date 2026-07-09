@@ -89,7 +89,6 @@ from brutex.engine.combo_aggregates import ComboAggregate, aggregate_combo
 from brutex.engine.minute_path import MinuteIndex
 from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.resilience_streaks import (
-    ResilienceStreaks,
     fold_resilience,
     load_resilience_stamp,
     read_captured_trades,
@@ -129,6 +128,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
     from brutex.engine.results_store import ResultRow
     from brutex.engine.session_lens import SessionLens
+    from brutex.engine.trade_capture import ComboCapture
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
     from brutex.engine.top100_artifact import MarginRoiProvider, ReasonProvider
 
@@ -209,7 +209,12 @@ class ResultsDepthReport:
     the current store bytes); ``resilience_backfilled`` the adoption-backfill
     tuples (trio current but the resilience sidecar re-folded from disk — no
     re-sim); ``tuples_missing_store`` grid tuples with no store on disk (not
-    swept / quarantined); ``tuples_errored`` per-tuple fence trips. Capture counters
+    swept / quarantined); ``resilience_errored`` the tuples whose
+    resilience-ONLY fold/write failed (a NESTED fence, DISTINCT from
+    ``tuples_errored``): the tuple STILL folds/pools/ranks into the top100
+    carrying an honest ``resilience=None`` annotation, so a resilience defect
+    never drops a finalist from the ranking (the annotation-only guarantee is
+    airtight); ``tuples_errored`` per-tuple TRIO fence trips. Capture counters
     (``combos_*`` / ``vix_missing_trades``) cover FRESH builds only — a
     skipped tuple's captures were counted by the run that built them. Pool
     counters (``pool`` / ``gate_passers`` / ``excluded_*`` / ``parity_excluded``
@@ -221,6 +226,7 @@ class ResultsDepthReport:
     tuples_missing_store: int
     tuples_errored: int
     resilience_backfilled: int
+    resilience_errored: int
     combos_captured: int
     combos_parity_failed: int
     combos_zero_trades: int
@@ -253,6 +259,7 @@ class _Tallies:
     tuples_missing_store: int = 0
     tuples_errored: int = 0
     resilience_backfilled: int = 0
+    resilience_errored: int = 0
     combos_captured: int = 0
     combos_parity_failed: int = 0
     combos_zero_trades: int = 0
@@ -373,22 +380,23 @@ def _build_tuple_sidecars(
     stamper: TradeReferenceStamper | None,
     store_hash: str,
     tallies: _Tallies,
-) -> None:
-    """Capture + aggregate + persist one STALE tuple's sidecar trio + resilience.
+) -> list[ComboCapture]:
+    """Capture + aggregate + persist one STALE tuple's sidecar TRIO.
 
-    The resilience fold (:mod:`brutex.engine.resilience_streaks`) runs BESIDE
-    ``aggregate_combo`` over the SAME already-materialised ``capture.trades``
-    (one extra linear pass, O(trades) time, run-END only — ZERO hot-path
-    diffs), sharing the ONE hoisted ``fp`` fingerprint; its sibling
-    ``.resilience.parquet`` + own stamp are written right after the trio (never
-    through :func:`write_tuple_sidecars` — structurally collision-free).
+    Writes ONLY the trio (captures + aggregates); the sibling resilience
+    sidecar is written SEPARATELY by :func:`_write_fresh_resilience` under its
+    OWN nested fence in the pass loop, so a resilience-only fold/write defect
+    degrades that tuple's annotation to ``None`` WITHOUT dropping it from the
+    top100 pool (the annotation-only guarantee is airtight — a resilience
+    failure is never a ranking effect). Returns the per-row captures (already
+    materialised in RAM) so the resilience fold reuses them with NO re-sim and
+    NO extra disk read.
     """
     bar_bits = build_bar_bits(
         bars, proximity=tuple_.proximity, prior_n=grid.prior_n, fib_anchor=tuple_.fib_anchor
     )
-    captures = []
+    captures: list[ComboCapture] = []
     aggs: list[ComboAggregate] = []
-    resiliences: list[ResilienceStreaks] = []
     for row in rows:
         capture = capture_combo(
             row,
@@ -411,24 +419,14 @@ def _build_tuple_sidecars(
         if capture.vix_missing_trades > 0:
             _warn_vix_miss(row.run_id, capture.vix_missing_trades, tallies)
         captures.append(capture)
-        fp = trade_fingerprint(capture.trades)
         aggs.append(
             aggregate_combo(
                 capture,
                 row,
                 lens=context.lens,
                 composite_score=None,
-                fingerprint=fp,
+                fingerprint=trade_fingerprint(capture.trades),
                 start_equity_paisa=grid.start_equity_paisa,
-            )
-        )
-        resiliences.append(
-            fold_resilience(
-                row.run_id,
-                capture.trades,
-                parity_ok=capture.parity_ok,
-                start_equity_paisa=grid.start_equity_paisa,
-                fingerprint=fp,
             )
         )
     composites = _composites_for({row.run_id: row for row in rows}, aggs)
@@ -439,7 +437,68 @@ def _build_tuple_sidecars(
         [agg.to_record() for agg in aggs],
         store_content_hash=store_hash,
     )
-    write_resilience_sidecar(paths, resiliences, store_content_hash=store_hash)
+    return captures
+
+
+def _write_fresh_resilience(
+    paths: SidecarPaths,
+    rows: Sequence[ResultRow],
+    captures: Sequence[ComboCapture],
+    *,
+    start_equity_paisa: int,
+    store_hash: str,
+) -> int:
+    """Fold + write the sibling resilience sidecar from the FRESH RAM captures.
+
+    Runs BESIDE the trio (one extra linear pass, O(trades) time, run-END only —
+    ZERO hot-path diffs) over the SAME already-materialised ``capture.trades``.
+    The fingerprint is the deterministic :func:`trade_fingerprint` of the trades
+    (byte-identical to the agg's shared fingerprint AND to the adoption
+    backfill's persisted ``agg.fingerprint``). Isolated from the trio so a
+    resilience defect degrades the annotation, never the ranking. Returns the
+    number of records folded.
+    """
+    records = [
+        fold_resilience(
+            row.run_id,
+            capture.trades,
+            parity_ok=capture.parity_ok,
+            start_equity_paisa=start_equity_paisa,
+            fingerprint=trade_fingerprint(capture.trades),
+        )
+        for row, capture in zip(rows, captures, strict=True)
+    ]
+    write_resilience_sidecar(paths, records, store_content_hash=store_hash)
+    return len(records)
+
+
+def _run_resilience_step(
+    build: Callable[[], int], *, store_path: Path, tallies: _Tallies
+) -> int | None:
+    """Nested resilience-ONLY fence — degrade the annotation, never the ranking.
+
+    The resilience fold + sidecar write is the ONLY step allowed to fail
+    WITHOUT dropping the tuple from the top100 pool: a generic failure counts
+    ``resilience_errored`` + logs ``results_depth.resilience_failed`` and
+    returns ``None`` (the caller then pools the tuple with an honest
+    ``resilience=None`` annotation). Global stops (``KeyboardInterrupt`` /
+    ``SystemExit`` / ``MemoryError``) re-raise raw, exactly like the outer
+    per-tuple TRIO fence — the DISTINCT counter keeps ``tuples_errored`` a pure
+    ranking-effect signal.
+    """
+    try:
+        return build()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        tallies.resilience_errored += 1
+        _LOG.error(
+            "results_depth.resilience_failed",
+            store=str(store_path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
 
 
 def _backfill_resilience(paths: SidecarPaths, *, store_hash: str, start_equity_paisa: int) -> int:
@@ -513,18 +572,26 @@ def _pool_tuple(
     tallies: _Tallies,
     pool: list[Top100Candidate],
     twins: list[TwinCandidate],
+    resilience_available: bool,
 ) -> None:
     """Fold one tuple's (row ⋈ agg) join into the global candidate pool.
 
     ONE code path for fresh AND resumed tuples: the pool is always read back
     from the on-disk sidecars, so what gets ranked is what was PERSISTED
     (write-then-verify, and a resumed tuple contributes identically).
+
+    ``resilience_available`` is ``False`` iff THIS tuple's resilience
+    fold/write failed in the nested fence — the read is then SKIPPED entirely
+    so a STALE sidecar (a valid stamp for a PRIOR store hash — ``read_resilience
+    _records`` verifies size, never the store hash) can never leak the wrong
+    finalist's annotation; every candidate carries an honest ``resilience=None``
+    and the tuple STILL pools/ranks (the annotation-only guarantee is airtight).
     """
     agg_by_id = {agg.run_id: agg for agg in _load_agg_records(paths)}
     # ONE bounded read of the sibling resilience sidecar per tuple (the
     # _load_agg_records precedent); an absent/stale sidecar → {} → each
     # candidate carries an honest ``resilience=None`` (annotation-only).
-    resilience_by_id = read_resilience_records(paths)
+    resilience_by_id = read_resilience_records(paths) if resilience_available else {}
     tuple_ref = f"{tuple_.instrument}/{tuple_.tf.label}/{store_stem}"
     candidates: list[Top100Candidate] = []
     for row in rows:
@@ -681,20 +748,34 @@ def run_results_depth_pass(
                     store=str(store_path),
                     run_ids=stamp.run_ids,
                 )
+                resilience_ok = True
             elif trio_current:
                 # ADOPTION BACKFILL: the trio is current but the resilience
                 # sidecar is absent/stale — re-fold it from disk, NO re-sim.
-                folded = _backfill_resilience(
-                    paths, store_hash=store_hash, start_equity_paisa=grid.start_equity_paisa
+                # Nested resilience fence: a fold/write defect degrades the
+                # annotation (resilience=None) but the tuple STILL pools/ranks.
+                folded = _run_resilience_step(
+                    lambda: _backfill_resilience(
+                        paths, store_hash=store_hash, start_equity_paisa=grid.start_equity_paisa
+                    ),
+                    store_path=store_path,
+                    tallies=tallies,
                 )
-                tallies.resilience_backfilled += 1
-                _LOG.info(
-                    "results_depth.resilience_backfilled",
-                    store=str(store_path),
-                    records=folded,
-                )
+                resilience_ok = folded is not None
+                if resilience_ok:
+                    tallies.resilience_backfilled += 1
+                    _LOG.info(
+                        "results_depth.resilience_backfilled",
+                        store=str(store_path),
+                        records=folded,
+                    )
             else:
-                _build_tuple_sidecars(
+                # The TRIO build stays in the OUTER fence (a trio failure drops
+                # the tuple, exactly as ``aggregate_combo`` always could); the
+                # resilience fold/write is a SEPARATE nested-fenced step over the
+                # returned RAM captures — a resilience defect degrades only the
+                # annotation, never the ranking.
+                captures = _build_tuple_sidecars(
                     tuple_,
                     rows,
                     paths,
@@ -711,6 +792,20 @@ def run_results_depth_pass(
                     store=str(store_path),
                     rows=len(rows),
                 )
+                resilience_ok = (
+                    _run_resilience_step(
+                        lambda: _write_fresh_resilience(
+                            paths,
+                            rows,
+                            captures,
+                            start_equity_paisa=grid.start_equity_paisa,
+                            store_hash=store_hash,
+                        ),
+                        store_path=store_path,
+                        tallies=tallies,
+                    )
+                    is not None
+                )
             _pool_tuple(
                 tuple_,
                 rows,
@@ -719,6 +814,7 @@ def run_results_depth_pass(
                 tallies=tallies,
                 pool=pool,
                 twins=twins,
+                resilience_available=resilience_ok,
             )
             if tuple_.instrument not in instruments_pooled:
                 instruments_pooled.append(tuple_.instrument)
@@ -801,6 +897,7 @@ def run_results_depth_pass(
         tuples_missing_store=tallies.tuples_missing_store,
         tuples_errored=tallies.tuples_errored,
         resilience_backfilled=tallies.resilience_backfilled,
+        resilience_errored=tallies.resilience_errored,
         combos_captured=tallies.combos_captured,
         combos_parity_failed=tallies.combos_parity_failed,
         combos_zero_trades=tallies.combos_zero_trades,
@@ -822,6 +919,8 @@ def run_results_depth_pass(
         tuples_skipped_current=report.tuples_skipped_current,
         tuples_missing_store=report.tuples_missing_store,
         tuples_errored=report.tuples_errored,
+        resilience_backfilled=report.resilience_backfilled,
+        resilience_errored=report.resilience_errored,
         combos_captured=report.combos_captured,
         combos_parity_failed=report.combos_parity_failed,
         pool=report.pool,

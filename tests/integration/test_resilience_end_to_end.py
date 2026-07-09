@@ -196,7 +196,17 @@ def test_adoption_backfill_rebuilds_without_resim(
     assert paths.resilience.read_bytes() == pristine  # type: ignore[attr-defined]
 
 
-def test_fence_swallows_a_fold_failure(swept: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resilience_failure_degrades_annotation_not_ranking(
+    swept: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resilience-ONLY fold failure degrades the annotation, NEVER the ranking.
+
+    The nested resilience fence (FIX 1): a generic fold/write defect counts the
+    DISTINCT ``resilience_errored`` (NOT ``tuples_errored``), the trio is still
+    built + pooled, and every top100 entry STILL appears carrying an honest
+    ``resilience=None`` (``stats_live=False``) — the airtight annotation-only
+    guarantee (a resilience bug can never drop a finalist from the ranking).
+    """
     import brutex.engine.results_depth_pass as mod
 
     def _boom(*args: object, **kwargs: object) -> object:
@@ -205,12 +215,60 @@ def test_fence_swallows_a_fold_failure(swept: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(mod, "fold_resilience", _boom)
     with capture_logs() as logs:
         report = _run_pass(swept)
-    assert report.tuples_errored == 1  # counted, never fails the sweep
-    assert report.tuples_processed == 0
-    assert any(e["event"] == "results_depth.tuple_error" for e in logs)
+
+    # (b) the shared TRIO fence is untouched; (c) the DISTINCT counter fired.
+    assert report.tuples_errored == 0
+    assert report.resilience_errored == 1
+    # The trio still built + pooled — the tuple was NEVER dropped.
+    assert report.tuples_processed == 1
+    assert report.pool > 0
+    assert report.top100_written is True
+    assert any(e["event"] == "results_depth.resilience_failed" for e in logs)
+    assert not any(e["event"] == "results_depth.tuple_error" for e in logs)
+
+    # (a) the tuple STILL appears in top100 — every entry carries resilience=None.
+    run_id = grid_identity(_grid())
+    runs_dir = sweep_run_dir(swept, run_id).parent
+    artifact = load_top100(runs_dir, run_id)
+    assert artifact is not None
+    assert artifact.entries  # the finalists survived the resilience failure
+    for entry in artifact.entries:
+        block = entry["resilience"]
+        assert isinstance(block, dict)
+        assert block["stats_live"] is False
+        assert block["losing_streak_p95"] is None
 
 
-def test_memory_error_re_raises(swept: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resilience_failure_next_run_backfills_clean(
+    swept: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a resilience-only failure the trio is current — the next run backfills.
+
+    A failed resilience write left NO sidecar, so the trio-current re-run takes
+    the adoption-backfill path (NO re-sim) and the annotation self-heals.
+    """
+    import brutex.engine.results_depth_pass as mod
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("fold exploded")
+
+    monkeypatch.setattr(mod, "fold_resilience", _boom)
+    first = _run_pass(swept)
+    assert first.resilience_errored == 1
+
+    monkeypatch.undo()  # fold_resilience healthy again
+    second = _run_pass(swept)
+    assert second.resilience_backfilled == 1
+    assert second.resilience_errored == 0
+    assert second.tuples_processed == 0  # trio was current — NO re-sim
+    paths = _paths(swept)
+    assert load_resilience_stamp(paths) is not None  # type: ignore[arg-type]
+
+
+def test_memory_error_from_resilience_step_re_raises(
+    swept: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(d) A ``MemoryError`` from the resilience step propagates raw (global stop)."""
     import brutex.engine.results_depth_pass as mod
 
     def _oom(*args: object, **kwargs: object) -> object:
