@@ -142,6 +142,11 @@
   </div>
 
   <div class="count" id="scCount">no rows loaded yet — awaiting real run artifact</div>
+  <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+       the artifact order is its R30 preset (default min_dd_first), which
+       deliberately DIFFERS from /results (Rank-by metric, descending);
+       loadRows fills the live preset via textContent — no sort is changed. -->
+  <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
 
   <div id="scPanel"></div>
   <div class="tablewrap">
@@ -192,9 +197,9 @@
       return Array.isArray(v) ? v.join(' × ') : '—';
     }
     if (col.type === 'vix') {
-      return v && typeof v === 'object' && v.lo !== undefined
-        ? String(v.lo) + '–' + String(v.hi)
-        : 'null'; // R31 honest NULL — never a silent zero
+      /* [W3-R4]: the ONE shared compact band cell — a null-lo/hi writer band
+         reads "not stamped" (R31 honest NULL), never "null–null". */
+      return window.BXOneclick.vixBandCellText(v);
     }
     if (v === null || v === undefined) { return '—'; }
     if (col.money) { return money(v); }
@@ -269,9 +274,15 @@
     var wrap = byId('scShowAllWrap');
     wrap.hidden = state.showAll || sorted.length <= RENDER_CAP;
     // Count line: the DENOMINATOR is the payload's row_count — never an
-    // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3).
+    // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3);
+    // the NUMERATOR is the count actually RENDERED — when the render cap
+    // truncated the table it says so ([W2-5] DEC-ONECLICK-TOP100-OBJECT-
+    // ROOT-001: "500 of 500 shown" over a 200-row table was a lie).
     var total = state.rowCount === null ? '?' : String(state.rowCount);
-    var line = String(sorted.length) + ' of ' + total + ' shown';
+    var line = String(cap) + ' of ' + total + ' shown';
+    if (cap < sorted.length) {
+      line += ' (render cap ' + String(RENDER_CAP) + ' — use Show all)';
+    }
     if (applied.null_vix_excluded > 0) {
       line += ' ' + window.BXScreener.nullVixNote(applied.null_vix_excluded);
     }
@@ -313,6 +324,14 @@
         if (payload.status === 'ok' || payload.status === 'partial') {
           state.rows = payload.rows || [];
           state.rowCount = payload.row_count === undefined ? null : payload.row_count;
+          // [11] sort-basis label: name the ACTUAL artifact preset (fallback
+          // to the default name when the payload carries none) — label only.
+          byId('scSortBasis').textContent =
+            'sort basis: artifact preset '
+            + (typeof payload.preset === 'string' && payload.preset
+              ? payload.preset : 'min_dd_first (default)')
+            + ' — differs from /results (Rank-by metric, descending);'
+            + ' column clicks re-sort this page only';
           byId('scDetail').textContent =
             payload.status === 'partial'
               ? 'PARTIAL artifact: ' + String(payload.detail)

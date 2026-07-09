@@ -112,7 +112,7 @@ def expiry_year_in_window(year: int) -> bool:
 
     The ONE window predicate (CLAUDE.md §11 COMMON) applied by
     :func:`parse_expiry_token` — since DEC-MOVERS-FUTURES-HYPHEN-PARSE-001
-    (MIGRATION.md #1631) the futures movers' formerly shape-stricter local twin
+    (MIGRATION.md #1646) the futures movers' formerly shape-stricter local twin
     is DELETED and :mod:`brutex.dashboard.movers_futures` delegates to this
     module's canonical grammar, so there is exactly ONE parser and ONE junk-year
     window (DEC-FNO-EXPIRY-YEAR-PIVOT-001).
