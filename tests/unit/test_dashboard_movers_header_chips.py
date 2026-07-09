@@ -189,3 +189,34 @@ class TestModuleInclude:
             "bx-movers-chips.js must load (non-defer) AFTER bx-format.js (it "
             "resolves the shared bxFixed2 global) and BEFORE the inline script"
         )
+
+
+class TestLoadSupersedeGuard:
+    """The loadGen re-entrancy guard (round 2 — the executed S1 repro).
+
+    A STALLED response for a superseded coordinate must never repaint a newer
+    paint: pre-guard, a stalled ``expiry=Next`` response landing after a fast
+    Far paint rendered next-tier rows under the Far selection with the Expiry
+    chip cross-labeled "25-Jul-2024 (far tier)". The EXECUTED regression pin
+    is the Chromium probe ``tests/browser/test_refuter_r2_chips_probes.py``
+    (S1); these pin the guard's presence at every await resume point.
+    """
+
+    def test_load_generation_declared_and_taken(self) -> None:
+        html = _html()
+        assert "let loadGen = 0;" in html
+        assert "const gen = ++loadGen;" in html
+
+    def test_every_await_resume_point_rechecks_generation(self) -> None:
+        html = _html()
+        # One check per await in load(): the fetch, the 5xx-detail body read,
+        # the success body read — plus the catch arm (a superseded failure
+        # must not clobber a newer paint with the preview/error shell).
+        assert html.count("if (gen !== loadGen) return;") == 4
+        fetch_at = html.index('const r = await fetch("/api/v1/movers?"')
+        first_check = html.index("if (gen !== loadGen) return;")
+        assert fetch_at < first_check, "the first re-check must follow the fetch await"
+        body_read = html.index("const bodyText = await r.text();")
+        assert html.index("if (gen !== loadGen) return;", body_read) - body_read < 120, (
+            "the success body read must re-check the generation before JSON.parse/paint"
+        )

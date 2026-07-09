@@ -20,7 +20,7 @@
 
 _Last updated: 2026-07-09 (DEC-MOVERS-HEADER-CHIPS-001, MIGRATION.md #1635 —
 the `/movers` header made READABLE (operator-flagged UX, DISPLAY zone only;
-the web.dhan.co screenshots as the visual bar): labeled CHIPS replace the
+the operator's reference broker screenshots as the visual bar): labeled CHIPS replace the
 dense Options stats micro-text — Put/Call Ratio (OI) + (Vol) as the honest
 RATIO OF SUMS across every chain on screen (the P/C sums + "ratio of sums"
 stated on the chip title; clicking opens the pre-existing per-underlying PCR
@@ -35,7 +35,7 @@ lake's payload byte-identical, futures + spot payloads zero byte diff); the
 semantics prose moves into a collapsible default-COLLAPSED ⓘ "What am I
 looking at?" explainer on ALL THREE tabs (the pinned all-exchanges folding
 phrase relocated verbatim); the expiry-tier/cadence dropdowns become
-Dhan-style TABS that WRITE the retained permanently-hidden selects — query
+broker-screen-style TABS that WRITE the retained permanently-hidden selects — query
 tokens + warm-grid cache keys BYTE-IDENTICAL; futures/options rows gain a
 client-derived colored BUILDUP pill (price↑OI↑ Long Buildup · price↓OI↑
 Short Buildup · price↑OI↓ Short Covering · price↓OI↓ Long Unwinding — off
@@ -52,6 +52,15 @@ goldens + substring pins + Chromium browser truth (the amber-badge reveal
 names the seeded null-OI leg end-to-end; the Next tab issues exactly one
 `expiry=Next` request) + server 100.00% on `movers_pcr.py`/
 `movers_options.py`; every pre-existing pinned suite green UNTOUCHED.
+ROUND 2 folded (refuter-confirmed): the retired-vendor-word guard RED — the retired
+vendor word reworded vendor-neutral on every live-surface site (the
+ledger keeps the provenance; guard GREEN) — and the executed S1
+stale-response race: a stalled superseded `expiry=` response repainted a
+newer paint with the Expiry chip cross-labeled — closed by the `loadGen`
+re-entrancy guard re-checked after EVERY await in `load()` (the
+gbPollGen precedent; stale success/5xx/preview arms all dropped), the
+round-2 Chromium probes ADOPTED as pins
+(`tests/browser/test_refuter_r2_chips_probes.py`).
 READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change.)
 Earlier: 2026-07-09 (DEC-MOVERS-DB-PROVENANCE-VERIFY-001, MIGRATION.md
@@ -1915,7 +1924,7 @@ hostile-review pass._
 - **Active branch:** `claude/movers-stored-freshness-guard-v2` (**DEC-MOVERS-HEADER-CHIPS-001,
   MIGRATION.md #1635** — the `/movers` header chips redesign on the PR #1358 club vehicle (which also carries
   #1632 freshness guard + #1633 time-snap UX + #1634 provenance/verify; operator-flagged UX, DISPLAY zone only, the
-  web.dhan.co screenshots as the visual bar): (1) labeled CHIPS replace the dense Options stats micro-text — the
+  operator's reference broker screenshots as the visual bar): (1) labeled CHIPS replace the dense Options stats micro-text — the
   Put/Call Ratio (OI)/(Vol) chips show the RATIO OF SUMS across every chain on screen (plain int sums of the raw
   wire fields; the OI-weighted aggregate honestly titled "P … / C … · ratio of sums across N chain(s)" — NOT the
   mean of the per-underlying ratios, whose truth stays in the PCR panel, now the click-to-open DETAIL behind the
@@ -1963,7 +1972,27 @@ hostile-review pass._
   end-to-end, the Next tab issuing exactly ONE `expiry=Next` request + repaint, the PCR-chip panel toggle;
   console-clean harness law); server arms in `test_movers_pcr.py` + `test_dashboard_movers_options.py`
   (back-compat, sorted names, empty-symbol law, cap 50, the byte-identity key-set + absent-key wire pins); every
-  pre-existing pinned suite green UNTOUCHED (zero pinned-test edits). READ-ONLY dashboard — ENGINE UNCHANGED —
+  pre-existing pinned suite green UNTOUCHED (zero pinned-test edits). ROUND-2 refuter fold (the verbatim gate
+  run + executed Chromium repro): (a) the retired-vendor-word guard RED — round 1 wrote the retired vendor word onto the
+  LIVE scanned surface (bx-movers-chips.js ×2, the movers.html tabs comment, CLAUDE.md ×4; a HARD ci.yml
+  rollup gate) — reworded vendor-neutral ("classic broker-screen price×OI quadrant" /
+  "Broker-screen-style … TABS" / "the operator's reference broker screenshots"; the ledger keeps the
+  provenance on its exempt history surface; zero code-behaviour diff, guard GREEN); (b) the S1
+  stale-response race — `load()` had NO supersede guard, so a STALLED `expiry=Next` response landing after a
+  fast Far paint repainted next-tier rows under the Far selection with the Expiry chip cross-labeled
+  "25-Jul-2024 (far tier)" (renderChips reads the LIVE select tier word over the stale payload's rows; the
+  latent pill/exchange/date overwrite class made first-class by the one-click tabs) — closed by the `loadGen`
+  re-entrancy guard (the #1558 round-10 gbPollGen precedent): `const gen = ++loadGen` + a `gen === loadGen`
+  re-check after EVERY await (fetch · 5xx-detail read · success body read) and in the catch arm, so a stale
+  success never repaints and a stale failure never clobbers a newer paint with the error/preview shell;
+  HONEST: paints are serialised, requests are not (a superseded fetch still completes, bounded one per
+  abandoned click). The round-2 probe file is ADOPTED (`tests/browser/test_refuter_r2_chips_probes.py`): S1
+  rewritten from the executed CONFIRMED repro into the fixed-behaviour pin (the Far paint survives the late
+  Next response un-clobbered), S2 (gated flip with the reveal OPEN — #chipDetail computed-hidden + cleared)
+  and S3 (hostile `oi_missing_symbols`/`display_underlying` markup inert through the reveal; the impossible
+  "2026-02-31" ISO renders the payload's literal, no fabricated date) executed green pre-fix and stay as
+  pins; `TestLoadSupersedeGuard` substring pins hold the guard at every await resume point. READ-ONLY
+  dashboard — ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; `movers_pcr.py` +
   `movers_options.py` 100.00% line+branch measured; ruff/ruff-format/`mypy --strict`/pyright clean on every
   touched python file; `node --check` clean.)
@@ -4506,11 +4535,14 @@ hostile-review pass._
   chips (ratio-of-sums honesty; the amber Coverage badge's click reveals the
   missing-OI legs via the ONE additive emit-on-nonempty
   `pcr[].oi_missing_symbols` key, cap 50, true count in `oi_missing_legs`),
-  the default-collapsed ⓘ explainer on all three tabs, Dhan-style expiry/track
+  the default-collapsed ⓘ explainer on all three tabs, broker-screen-style expiry/track
   TABS writing the retained hidden selects (query semantics byte-identical),
   and client-derived Buildup pills on futures/options rows; the strike-
   centered CE|PE chain view is the named follow-up
-  `DEC-MOVERS-OPTION-CHAIN-VIEW-001`; READ-ONLY dashboard, DISPLAY zone only;
+  `DEC-MOVERS-OPTION-CHAIN-VIEW-001`; round-2 refuter fold: the live-surface
+  vendor wording reworded vendor-neutral (retired-vendor-word guard GREEN) + the S1
+  stale-response race closed by the `loadGen` supersede guard, round-2
+  Chromium probes adopted as pins; READ-ONLY dashboard, DISPLAY zone only;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the
   full blurb)
   Earlier: `claude/movers-db-provenance-verify`

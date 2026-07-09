@@ -25,7 +25,7 @@
  * * bxExpiryChipText — "16-Jun-2026 (near tier)" when every chain shares ONE
  *   expiry; "<tier> tier (varies by underlying)" otherwise; a malformed ISO
  *   ABSTAINS to the tier-only wording (never a wrong date).
- * * bxBuildup — the Dhan-style price×OI quadrant: price↑OI↑ Long Buildup ·
+ * * bxBuildup — the classic broker-screen price×OI quadrant: price↑OI↑ Long Buildup ·
  *   price↓OI↑ Short Buildup · price↑OI↓ Short Covering · price↓OI↓ Long
  *   Unwinding; a missing / non-finite / exactly-flat input is null (an
  *   honest "—" — no four-quadrant claim on flat or absent data).
@@ -167,7 +167,7 @@ function bxExpiryChipText(pcrRows, tierWord) {
   return words === null ? tier : words + " (" + tier + ")";
 }
 
-/* The Dhan-style buildup quadrant off the row's price %-change + OI change.
+/* The broker-screen-style buildup quadrant off the row's price %-change + OI change.
  * null (an honest "—") when EITHER input is not a finite number or is
  * exactly 0 — a flat/missing side supports no quadrant claim. */
 function bxBuildup(pctChange, oiDelta) {

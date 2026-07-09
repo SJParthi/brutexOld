@@ -158,7 +158,7 @@
         <span id="pills"></span>
         <span class="spacer"></span>
         <select id="exchange" title="Exchange"><option>NSE</option><option>BSE</option></select>
-        <!-- Dhan-style expiry-tier / cadence-track TABS (DEC-MOVERS-HEADER-CHIPS-001):
+        <!-- Broker-screen-style expiry-tier / cadence-track TABS (DEC-MOVERS-HEADER-CHIPS-001):
              the visible control; the two <select>s below STAY IN THE DOM permanently
              hidden — every read site ($("expiry").value / $("track").value in load(),
              refreshProvenance(), renderChips()) is untouched and the tabs WRITE them,
@@ -414,6 +414,17 @@ let baseNote = "";
    the operator opened. */
 let pcrDetailOpen = false;
 let missingOiOpen = false;
+/* Load-supersede guard (DEC-MOVERS-HEADER-CHIPS-001 round 2 — the gbPollGen
+   re-entrancy precedent): every load() takes a fresh generation and re-checks
+   it after EVERY await, so a STALLED response for a superseded coordinate can
+   never repaint a newer paint. The executed S1 repro without it: a stalled
+   expiry=Next response landing after a fast Far paint rendered next-tier rows
+   under the Far selection with the Expiry chip cross-labeled
+   "25-Jul-2024 (far tier)" — renderChips() reads the LIVE select for the tier
+   word while the rows came from the stale payload. Stale 5xx/preview arms are
+   dropped by the same check (a superseded failure must not clobber a newer
+   success either). */
+let loadGen = 0;
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): "params|bodyText"
    signature of the last fully-rendered NON-gated payload. A repeat fetch that
    round-trips to the byte-identical body for the SAME coordinate (repeat
@@ -1158,6 +1169,10 @@ async function load() {
      renderChips() on a successful payload (gated / preview / error paths
      stay chip-less). */
   $("chips").hidden = true; $("chipDetail").hidden = true; $("chipDetail").textContent = "";
+  /* Supersede: this call is now the ONLY one allowed to paint (loadGen law
+     above); every resume point below re-checks `gen === loadGen` and ABANDONS
+     silently when a newer load() has started. */
+  const gen = ++loadGen;
   syncControls();
   const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"100" });
   if ($("date").value) p.set("date", $("date").value);
@@ -1170,6 +1185,7 @@ async function load() {
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
     const r = await fetch("/api/v1/movers?"+p.toString());
+    if (gen !== loadGen) return;  /* superseded while in flight — never repaint (S1). */
     if (!r.ok) {
       /* A 5xx on a RUNNING dashboard is a genuine SERVER fault (today's one
          realistically-reachable producer: the PCR fold's lake-corruption 500,
@@ -1186,6 +1202,7 @@ async function load() {
       if (r.status >= 500) {
         let detail = "";
         try { detail = String(JSON.parse(await r.text()).detail || ""); } catch { detail = ""; }
+        if (gen !== loadGen) return;  /* superseded while reading the body — drop the stale error shell. */
         lastPayload = null;   /* a pill switch must re-fetch, never re-render the error shell. */
         lastRenderSig = null; /* a recovered fetch must always repaint over the error shell. */
         wasGated = false; lastGatedKey = null;
@@ -1201,6 +1218,7 @@ async function load() {
        client-side (DEC-DASHBOARD-JS-PERF-001 — the backend echoes no generation
        field; that echo is a reported follow-up, NOT added here). */
     const bodyText = await r.text();
+    if (gen !== loadGen) return;  /* superseded while reading the body — never repaint (S1). */
     const j = JSON.parse(bodyText);
     if (j.gated) {
       /* Prebuild gate (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2 + the phase-aware
@@ -1352,6 +1370,7 @@ async function load() {
     baseNote = j.note || "";
     refreshBaselineLegend(baseNote);
   } catch (e) {
+    if (gen !== loadGen) return;  /* a superseded failure must not clobber a newer paint. */
     lastPayload = null;  /* preview/failed: a pill switch falls back to a real fetch. */
     lastRenderSig = null;  /* a recovered fetch must always repaint over the preview. */
     wasGated = false; lastGatedKey = null;
