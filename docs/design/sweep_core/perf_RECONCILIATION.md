@@ -4,6 +4,13 @@ Date: 2026-07-09 · Host: sandbox x86 container, Intel Xeon @2.80 GHz, 4 vCPU, P
 (**NOT the §8 M4 Pro** — both disputed headline numbers were also produced in this container
 class, so container-local reconciliation is the valid comparison).
 
+Capture base: origin/main 665181f3 — `sweep_parallel.py:558` at capture; the pin lives at `:842`
+as of 95955a71; semantics unchanged. (Verifier A round-2.) `fit_results_pinned.json` is
+deliberately NOT stamped with this header: Verifier A round-2 proved that re-running
+`perf_reconcile_raw/fit_and_report3.py` against the committed grids reproduces its bytes
+BYTE-IDENTICAL, so its capture-base provenance lives here + in `perf_reconcile_raw/README.md`
+instead of inside the frozen JSON.
+
 ## 0. TL;DR verdict
 
 **Both sessions' NUMBERS were (approximately) right; both ATTRIBUTIONS were wrong.**

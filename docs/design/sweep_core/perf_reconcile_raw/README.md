@@ -1,1 +1,3 @@
 Raw measurement artifacts behind perf_RECONCILIATION.md / fit_results_pinned.json (grids + the scripts that produced them) — container caveat: the RATIOS are trustworthy, the ABSOLUTE timings are shared-vCPU sandbox numbers, NOT M4-Pro.
+
+Capture base: origin/main 665181f3 — sweep_parallel.py:558 at capture; the pin lives at :842 as of 95955a71; semantics unchanged. (Verifier A round-2.) ../fit_results_pinned.json is deliberately NOT stamped with this header: fit_and_report3.py re-run against the committed grids reproduces it BYTE-IDENTICAL (Verifier A round-2 proof), so the capture-base header lives here + in perf_RECONCILIATION.md instead of inside the frozen JSON.

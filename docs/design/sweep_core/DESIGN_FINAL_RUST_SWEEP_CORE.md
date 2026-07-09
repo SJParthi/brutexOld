@@ -2272,6 +2272,15 @@ this design.
   documented loud-degrade path (the autorevert ERROR event names the
   suspected sum-algorithm drift as a checkable cause). Mirrored in the
   §4 summation-algorithm law note.
+  (e) **ONE identity-safe grid-end engagement ROLLUP (Verifier A
+  round-2):** a single structlog INFO emitted at grid end carrying the
+  parent-summed counters — `tuples_engaged` / `refused_by_reason{}` /
+  `autoreverted` / `spot_check_sampled` — OUTSIDE the audit JSONL and
+  OUTSIDE run_id (byte-identity untouched), so a 2-4 day grid answers
+  "did the core help?" without log-grepping. Rationale: engagement is
+  otherwise loud PER-TUPLE but silent in AGGREGATE — a silent
+  starvation loop could deliver 1.0× with only scattered per-worker
+  warns.
 - **Named non-goals recorded for the queue (§10), not built:** hit-list
   intersection prefilter (the honest 1m-TF lever), streaming kept-mask
   iterator, Rust ranking, finalist projection from the core (Q6), Slice-3
@@ -4552,6 +4561,12 @@ register (13 items, coordinator severity-gate ruling 2026-07-09);
     ~14.0–14.5 ms @604k dense) + trades-never-cross-FFI with the measured
     1.04–1.16× half-port counterexample; FIX-M anomaly flagged DO-NOT-CITE.
     §9 grid row now points at the band; SPEC §1/§5 re-anchored.
+    [Since corrected by FL-4/FL-12/§9.1 (and FL-11 for the "R²≥0.993"
+    clause) — see the withdrawal register (the final-lock Register
+    FL-1..FL-12 below, whose supersession note retains this entry
+    VERBATIM as history while withdrawing its 5.9 d → 2–3.5 d
+    day-counts, "3.0–3.97×", and "R²≥0.993" figures). Verifier A
+    round-2 register hygiene — annotation only, history not rewritten.]
 15. **F7 (BRUTEX_SWEEP_STALL_SECONDS semantic collision #1295 vs #1291)** →
     §11 pending-rulings block: design binds via getattr to whatever the
     merged tree resolves; ruling required before the Slice-2 flip ADR.

@@ -3,6 +3,10 @@ re-run of the grid, with the real FIX-L k=2 median density (~1,532 trades/mask)
 added at every n_bars. Must be launched with RAYON_NUM_THREADS=1 in the env
 (before the first kernel call initialises rayon's pool)."""
 
+# Capture base: origin/main 665181f3 — sweep_parallel.py:558 at capture; the pin
+# lives at :842 as of 95955a71; semantics unchanged. (Verifier A round-2.)
+# Comment only — grid output bytes unchanged.
+
 from __future__ import annotations
 
 import os

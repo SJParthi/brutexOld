@@ -15,6 +15,10 @@ unpinned = json.loads((HERE / "grid2_unpinned_raw.json").read_text())
 
 p_cells = [c for c in pinned["cells"] if isinstance(c["target"], int)]
 u_cells = [c for c in unpinned["cells"] if isinstance(c["target"], int)]
+# Capture base: origin/main 665181f3 — sweep_parallel.py:558 at capture (the cite in the
+# "config" string below is capture-time provenance and is baked into the frozen
+# fit_results_pinned.json bytes — do NOT edit it); the pin lives at :842 as of 95955a71;
+# semantics unchanged. (Verifier A round-2.) Comment only — emitted JSON bytes unchanged.
 out: dict = {"config": "RAYON_NUM_THREADS=1 (production, sweep_parallel.py:558)"}
 
 TIERS = ("count", "raw", "wrapper")
