@@ -344,7 +344,7 @@ def test_cmd_sweep_all_runs_the_sweep_chain_inside_keep_awake(
     pause a multi-day sweep mid-flight.
     """
     import contextlib
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
     from brutex.observability import power_keepawake
 
@@ -353,7 +353,7 @@ def test_cmd_sweep_all_runs_the_sweep_chain_inside_keep_awake(
     marks: list[str] = []
 
     @contextlib.contextmanager
-    def _recording_keep_awake(reason: str) -> Iterator[None]:
+    def _recording_keep_awake(reason: str) -> Generator[None, None, None]:
         marks.append(f"enter:{reason}")
         try:
             yield
