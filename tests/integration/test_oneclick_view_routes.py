@@ -50,7 +50,7 @@ from fastapi.testclient import TestClient
 _REPO = Path(__file__).resolve().parents[2]
 _TEMPLATES = _REPO / "brutex" / "dashboard" / "templates"
 _STATIC = _REPO / "brutex" / "dashboard" / "static"
-_FIXTURE_RUNS = _REPO / "tests" / "fixtures" / "oneclick" / "runs"
+_FIXTURE_RUNS = _REPO / "tests" / "fixtures" / "oneclick" / "sweep_runs"
 
 _RUN_ID = "r-20260707-fixt01"
 _HOSTILE_RUN_ID = "r-hostile01"
@@ -72,7 +72,7 @@ def _client_no_lake() -> TestClient:
 def _client_with_corpus(tmp_path: Path) -> TestClient:
     lake = tmp_path / "lake"
     (lake / "sweeps").mkdir(parents=True)
-    shutil.copytree(_FIXTURE_RUNS, lake / "sweeps" / "runs")
+    shutil.copytree(_FIXTURE_RUNS, lake / "sweep_runs")
     store = SimpleNamespace(path=lake / "instruments.duckdb")
     return TestClient(build_app(DashboardState(), instrument_store=store))
 
@@ -522,13 +522,14 @@ class TestRoutesEndToEnd:
             assert client.get(path).status_code == 200
 
     def test_trades_route_source_badge_value_flows(self, tmp_path: Path) -> None:
-        """Production default: the AwaitingTradesReader — status awaiting,
-        source 'none', detail naming merge-integration (never fabricated)."""
+        """Production default (DEC-ONECLICK-SWEEP-RUNS-REBIND-001): the
+        TradeStoreReader — a pre-#1275 top100 without results-depth
+        references reads honest awaiting, source 'none' (never fabricated)."""
         client = _client_with_corpus(tmp_path)
         payload = client.get(f"/api/v1/oneclick/trades?run_id={_RUN_ID}&rank=1").json()
         assert payload["source"] == "none"
         assert payload["status"] == "awaiting"
-        assert "merge-integration" in payload["detail"]
+        assert "pre-#1275" in payload["detail"]
 
 
 # ---------------------------------------------------------------------------
