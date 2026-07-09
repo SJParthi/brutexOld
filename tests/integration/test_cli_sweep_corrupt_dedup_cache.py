@@ -134,3 +134,64 @@ def test_corrupt_dedup_cache_recovers_and_results_byte_identical(tmp_path: Path)
     assert _finalist_hashes(results_root) == ref_hashes
     # The corrupt env was quarantined aside (bytes preserved, never deleted).
     assert list((results_root / "dedup-cache").glob("exact.corrupt-*"))
+
+
+def test_audit_writer_open_failure_still_closes_dedup_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1 MINOR-2 (3-reviewer consensus): no LMDB env leak.
+
+    ``cmd_sweep_all`` opens the dedup ``SweepCache`` BEFORE the audit writers;
+    the cache is entered FIRST in the with-tuple so a raise from either
+    audit-writer open still closes the already-open LMDB env (the pre-change
+    ExitStack-era guarantee). Fails-before: with the cache entered LAST, a
+    raising ``AuditWriter.open`` left the env open — the close spy stayed empty.
+    """
+    from brutex.engine.sweep_cache import SweepCache
+    from brutex.orchestrator.audit import AuditWriter
+
+    lake_root, catalog_path = _build_lake(tmp_path)
+    closed: list[bool] = []
+    orig_close = SweepCache.close
+
+    def _spy_close(self: SweepCache) -> None:
+        closed.append(True)
+        orig_close(self)
+
+    def _audit_boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("simulated audit-writer open failure")
+
+    monkeypatch.setattr(SweepCache, "close", _spy_close)
+    monkeypatch.setattr(AuditWriter, "open", _audit_boom)
+    with pytest.raises(RuntimeError, match="simulated audit-writer open failure"):
+        cmd_sweep_all(**_sweep_kwargs(lake_root, catalog_path, tmp_path / "sweeps"))  # type: ignore[arg-type]
+    assert closed, "the already-open SweepCache LMDB env must be closed on entry failure"
+
+
+def test_raw_lmdb_error_from_cache_open_is_clean_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review round 1 NIT belt: a raw ``lmdb.Error`` escaping ``SweepCache.open``.
+
+    The attempt-2 mid-Bloom-rebuild window can surface a raw ``lmdb.Error``
+    (not the typed ``LmdbCorruptEnvError``); the CLI catch is widened to
+    ``(LmdbCorruptEnvError, lmdb.Error)`` so it reads a clean ``[brutex]
+    REFUSED:`` + ``EXIT_USER_ERROR``, never a traceback.
+    """
+    import lmdb
+    from brutex.cli import EXIT_USER_ERROR
+    from brutex.engine.sweep_cache import SweepCache
+
+    lake_root, catalog_path = _build_lake(tmp_path)
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise lmdb.Error("simulated raw lmdb fault escaping the attempt-2 reopen")
+
+    monkeypatch.setattr(SweepCache, "open", _boom)
+    rc = cmd_sweep_all(**_sweep_kwargs(lake_root, catalog_path, tmp_path / "sweeps"))  # type: ignore[arg-type]
+    assert rc == EXIT_USER_ERROR
+    err = capsys.readouterr().err
+    assert "[brutex] REFUSED:" in err
+    assert "simulated raw lmdb fault" in err

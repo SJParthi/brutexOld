@@ -949,3 +949,110 @@ class TestRunSweepGridCorruptStoreContained:
                 dedup=_dedup(),
                 audit=audit,
             )
+
+
+class TestRemediationFlagsRunnable:
+    """Review round 1 MAJOR-1: the remediation command chain must be RUNNABLE.
+
+    The prior string named a NONEXISTENT ``--out-root`` flag and skipped the
+    heal-plan step, so an operator copy-paste failed. These pins parse the
+    string's tokens against the REAL argparse surface (``brutex.cli.build_parser``)
+    so the string can never rot against the CLI again — mutant-killing:
+    reintroducing ``--out-root``, dropping ``--results-root``/``--recount``/
+    ``--emit-heal-plan``/``--execute``, or renaming either subcommand fails here.
+    """
+
+    @staticmethod
+    def _subparser_option_strings(command: str) -> set[str]:
+        """Every ``--flag`` the REAL *command* subparser accepts (live surface)."""
+        import argparse
+
+        from brutex.cli import build_parser
+
+        parser = build_parser()
+        sub = next(
+            action
+            for action in parser._actions  # pyright: ignore[reportPrivateUsage]
+            if isinstance(action, argparse._SubParsersAction)  # pyright: ignore[reportPrivateUsage]
+        )
+        assert command in sub.choices, f"remediation names a nonexistent command: {command}"
+        chosen = sub.choices[command]
+        return {
+            opt
+            for action in chosen._actions  # pyright: ignore[reportPrivateUsage]
+            for opt in action.option_strings
+        }
+
+    def test_every_flag_in_the_string_exists_on_the_named_parsers(self) -> None:
+        """ANY ``--`` token the string carries must exist on sweep-verify/sweep-heal."""
+        import re
+
+        flags = set(re.findall(r"--[a-z][a-z0-9-]*", TUPLE_STORE_CORRUPT_REMEDIATION, re.ASCII))
+        assert flags, "the remediation must name at least one CLI flag"
+        known = self._subparser_option_strings("sweep-verify") | self._subparser_option_strings(
+            "sweep-heal"
+        )
+        unknown = flags - known
+        assert not unknown, f"remediation names flags absent from the CLI: {sorted(unknown)}"
+
+    def test_verify_leg_parses_on_the_real_cli(self) -> None:
+        """The sweep-verify leg's exact flags parse (with the required grid dates)."""
+        from brutex.cli import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "sweep-verify",
+                "--results-root",
+                "res",
+                "--recount",
+                "--emit-heal-plan",
+                "--start",
+                "2024-01-02",
+                "--end",
+                "2024-01-10",
+            ]
+        )
+        assert args.recount is True
+        assert args.emit_heal_plan is True
+        assert args.results_root == Path("res")
+
+    def test_heal_leg_parses_on_the_real_cli(self) -> None:
+        """The sweep-heal leg's exact shape (positional plan + flags) parses."""
+        from brutex.cli import build_parser
+
+        args = build_parser().parse_args(
+            ["sweep-heal", "res/heal/plan.json", "--results-root", "res", "--execute"]
+        )
+        assert args.plan == Path("res/heal/plan.json")
+        assert args.results_root == Path("res")
+        assert args.execute is True
+
+    def test_out_root_is_not_a_real_flag_and_not_in_the_string(self) -> None:
+        """The exact round-1 defect, pinned dead: ``--out-root`` is fictional."""
+        from brutex.cli import build_parser
+
+        assert "--out-root" not in TUPLE_STORE_CORRUPT_REMEDIATION
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "sweep-verify",
+                    "--out-root",
+                    "res",
+                    "--start",
+                    "2024-01-02",
+                    "--end",
+                    "2024-01-10",
+                ]
+            )
+
+    def test_chain_load_bearing_tokens_pinned(self) -> None:
+        """The chain's load-bearing tokens, individually (mutant killers)."""
+        text = TUPLE_STORE_CORRUPT_REMEDIATION
+        assert "brutex sweep-verify" in text
+        assert "brutex sweep-heal" in text
+        assert "--results-root" in text
+        assert "--recount" in text
+        assert "--emit-heal-plan" in text
+        assert "--execute" in text
+        assert "/heal/" in text  # the plan location the verify leg writes
+        assert "move the corrupt store file aside" in text  # the manual fallback

@@ -1426,7 +1426,11 @@ class TestBuildStage2CascadeSpecs:
         selection invisibly, a false green).
         """
         pytest.importorskip("polars")
-        from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+        from brutex.engine.sweep_orchestrator import (
+            TUPLE_STORE_CORRUPT_REMEDIATION,
+            iter_sweep_tuples,
+            tuple_store_path,
+        )
 
         grid = _two_anchor_grid()
         first = next(iter_sweep_tuples(grid))
@@ -1436,7 +1440,14 @@ class TestBuildStage2CascadeSpecs:
         store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
         with pytest.raises(cw.CascadeWireError, match="UNREADABLE") as excinfo:
             cw.build_stage2_cascade_specs(tmp_path, grid, top_k=None)
-        assert str(store_path) in str(excinfo.value)
+        message = str(excinfo.value)
+        assert str(store_path) in message
+        # Review round 1 MINOR-1: the message carries the ONE shared RUNNABLE
+        # remediation chain (real flags — TestRemediationFlagsRunnable pins them
+        # against the live argparse surface), never the fictional --out-root.
+        assert TUPLE_STORE_CORRUPT_REMEDIATION in message
+        assert "--results-root" in message
+        assert "--out-root" not in message
 
 
 @dataclass(frozen=True)

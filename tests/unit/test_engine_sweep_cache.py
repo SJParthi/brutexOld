@@ -1015,3 +1015,64 @@ class TestCorruptEnvQuarantineRebuild:
         assert not any(e.get("event") == "sweep_cache.corrupt_quarantined" for e in logs)
         assert stale.exists()
         assert (cache_path / "exact").exists()
+
+    def test_rename_filenotfound_vanished_dir_recovers_fresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review round 1 belt: a VANISHED env dir at quarantine-rename time recovers.
+
+        Simulates a concurrent quarantine winning the race — by the time OUR
+        ``os.rename`` runs the corrupt env dir is GONE (``FileNotFoundError``).
+        Pre-belt this raw ``OSError`` propagated out of ``SweepCache.open`` as a
+        traceback (fails-before proven by reverting the belt); post-belt the
+        helper WARNs ``sweep_cache.quarantine_rename_failed`` and the reopen
+        creates a FRESH empty store — and the ``corrupt_quarantined`` WARN does
+        NOT fire (nothing was actually moved aside — no false claim).
+        """
+        import shutil
+
+        cache_path = tmp_path / "cache"
+        with SweepCache.open(cache_path, bloom_capacity=1000) as cache:
+            cache.record_digest(_digest(3, "NIFTY", "5m", "bull"))
+        _corrupt_exact_data_mdb(cache_path)
+
+        def _vanished(src: str | Path, dst: str | Path) -> None:
+            shutil.rmtree(src)  # the concurrent quarantine already moved it aside
+            raise FileNotFoundError(2, "No such file or directory", str(src))
+
+        monkeypatch.setattr("brutex.engine.sweep_cache.os.rename", _vanished)
+        with (
+            capture_logs() as logs,
+            SweepCache.open(cache_path, bloom_capacity=1000) as cache2,
+        ):
+            assert len(cache2._exact) == 0  # fresh empty store, open SUCCEEDED
+        assert any(e.get("event") == "sweep_cache.quarantine_rename_failed" for e in logs)
+        assert not any(e.get("event") == "sweep_cache.corrupt_quarantined" for e in logs)
+
+    def test_rename_oserror_in_place_second_failure_propagates_typed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review round 1 belt: a rename failure that LEAVES the corrupt env in place.
+
+        A ``PermissionError`` from the rename (EACCES — nothing moved) WARNs and
+        continues to the reopen, which re-detects the SAME corruption and the
+        SECOND failure propagates TYPED (``LmdbCorruptEnvError``) — never a raw
+        ``OSError``/``lmdb.Error`` traceback out of ``SweepCache.open``.
+        """
+        cache_path = tmp_path / "cache"
+        with SweepCache.open(cache_path, bloom_capacity=1000) as cache:
+            cache.record_digest(_digest(4, "NIFTY", "5m", "bull"))
+        _corrupt_exact_data_mdb(cache_path)
+
+        def _eacces(src: str | Path, dst: str | Path) -> None:
+            raise PermissionError(13, "Permission denied", str(src))
+
+        monkeypatch.setattr("brutex.engine.sweep_cache.os.rename", _eacces)
+        with (
+            capture_logs() as logs,
+            pytest.raises(LmdbCorruptEnvError),
+        ):
+            SweepCache.open(cache_path, bloom_capacity=1000)
+        assert any(e.get("event") == "sweep_cache.quarantine_rename_failed" for e in logs)
+        # The corrupt env is still IN PLACE (nothing moved, nothing deleted).
+        assert (cache_path / "exact" / "data.mdb").exists()

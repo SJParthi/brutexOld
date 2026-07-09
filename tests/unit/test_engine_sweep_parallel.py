@@ -2325,7 +2325,8 @@ class TestWorkerCorruptStoreContained:
         store_path = tuple_store_path(out, victim, grid)
         store_path.parent.mkdir(parents=True, exist_ok=True)
         store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
-        _run_parallel(tmp_path, grid, workers=2)
+        with capture_logs() as logs:
+            _run_parallel(tmp_path, grid, workers=2)
         entries = read_sup_entries(tmp_path / "sup.jsonl")
         actions = [e.action for e in entries]
         # The grid FINISHED (not a whole-grid abort) with the corrupt tuple contained.
@@ -2333,3 +2334,51 @@ class TestWorkerCorruptStoreContained:
         failed = [e for e in entries if e.action == "TUPLE_FAILED"]
         assert len(failed) == 1
         assert "ResultsStoreSchemaError" in failed[0].payload["error"]
+        # Remediation PARITY (review round 1): the PARENT fires the SAME
+        # remediation-carrying WARN the sequential/supervisor sites emit — the
+        # production multi-day path must not lose the heal instruction.
+        from brutex.engine.sweep_orchestrator import TUPLE_STORE_CORRUPT_REMEDIATION
+
+        corrupt = [e for e in logs if e.get("event") == "sweep_grid.tuple_store_corrupt"]
+        assert len(corrupt) == 1
+        assert "ResultsStoreSchemaError" in corrupt[0]["error"]
+        assert corrupt[0]["remediation"] == TUPLE_STORE_CORRUPT_REMEDIATION
+
+    def test_non_schema_failed_marker_fires_no_corrupt_warn(self, tmp_path: Path) -> None:
+        """The parity arm's FALSE branch: a plain failed marker stays generic.
+
+        Drives ``_apply_outcome``'s failed lane directly with a
+        SweepComboError-shaped marker (the worker's other failed class) and
+        asserts the remediation WARN does NOT fire — only the pre-existing
+        ``sweep_parallel.tuple_failed`` — so the discriminator can never
+        over-trigger on an ordinary combo failure.
+        """
+        grid = _grid()
+        out = tmp_path / "out"
+        tuple_ = next(iter_sweep_tuples(grid))
+        outcome = mod._Outcome(
+            index=0,
+            tuple_=tuple_,
+            kind="failed",
+            summary=None,
+            failed_error="SweepComboError: boom",
+            audit_records=(),
+        )
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+            )
+            acc = mod._Accumulator()
+            with capture_logs() as logs:
+                driver._apply(outcome, acc)
+        assert acc.tuples_failed == 1
+        assert any(e.get("event") == "sweep_parallel.tuple_failed" for e in logs)
+        assert not any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)

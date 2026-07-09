@@ -540,16 +540,17 @@ class SweepCache:
             # NOT an LMDB corruption and is NOT caught here — it still propagates
             # as before via `_open_exact_and_bloom`'s own env-leak guard.
             quarantined_to = cls._quarantine_corrupt_exact(exact_dir)
-            _LOG.warning(
-                "sweep_cache.corrupt_quarantined",
-                path=str(exact_dir),
-                quarantined_to=str(quarantined_to),
-                error_type=type(exc).__name__,
-                note=(
-                    "dedup accelerator rebuilt empty — affected tuples recompute, "
-                    "results byte-identical"
-                ),
-            )
+            if quarantined_to is not None:
+                _LOG.warning(
+                    "sweep_cache.corrupt_quarantined",
+                    path=str(exact_dir),
+                    quarantined_to=str(quarantined_to),
+                    error_type=type(exc).__name__,
+                    note=(
+                        "dedup accelerator rebuilt empty — affected tuples recompute, "
+                        "results byte-identical"
+                    ),
+                )
             bloom, exact = cls._open_exact_and_bloom(
                 exact_dir, resolved_capacity, bloom_fpr, resolved_map_mb
             )
@@ -591,7 +592,7 @@ class SweepCache:
         return bloom, exact
 
     @staticmethod
-    def _quarantine_corrupt_exact(exact_dir: Path) -> Path:
+    def _quarantine_corrupt_exact(exact_dir: Path) -> Path | None:
         """Atomically rename a corrupt exact-store dir aside; return the new path.
 
         The bytes are PRESERVED (renamed, never deleted — the lake_heal
@@ -604,9 +605,28 @@ class SweepCache:
         leaves the original path absent → the next open creates a fresh env; a
         crash BEFORE it re-detects the same corruption on the next open and
         re-quarantines it under a NEW nanosecond stamp.
+
+        **Rename-failure belt (review round 1):** an ``OSError`` from the rename
+        itself — e.g. ``FileNotFoundError`` when the env dir VANISHED under us (a
+        concurrent quarantine won the race) — logs one
+        ``sweep_cache.quarantine_rename_failed`` WARN and returns ``None`` so
+        :meth:`open` continues to the reopen attempt instead of dying on a raw
+        traceback: a vanished dir reopens FRESH (nothing left to quarantine); a
+        still-in-place corrupt env (``EACCES`` etc.) re-detects on the reopen and
+        the SECOND failure propagates TYPED as before.
         """
         quarantined = exact_dir.with_name(f"{exact_dir.name}.corrupt-{time.time_ns()}")
-        os.rename(exact_dir, quarantined)
+        try:
+            os.rename(exact_dir, quarantined)
+        except OSError as exc:
+            _LOG.warning(
+                "sweep_cache.quarantine_rename_failed",
+                path=str(exact_dir),
+                quarantined_to=str(quarantined),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return None
         return quarantined
 
     @staticmethod

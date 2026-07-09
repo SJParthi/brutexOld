@@ -164,6 +164,7 @@ from brutex.engine.combo_mask import count_combos
 from brutex.engine.results_store import ResultsStoreSchemaError
 from brutex.engine.sweep_mem_budget import MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
+    TUPLE_STORE_CORRUPT_REMEDIATION,
     SweepGridConfig,
     SweepTuple,
     count_sweep_tuples,
@@ -201,6 +202,15 @@ if TYPE_CHECKING:
     from brutex.data.models import CandleBar
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
+
+#: Prefix a worker's failed marker carries when the tuple failed on the G14
+#: CORRUPT-store class (the worker serialises the caught exception as
+#: ``f"{type(exc).__name__}: {exc}"``, so the class name is the stable,
+#: process-boundary-safe discriminator — the exception OBJECT never crosses the
+#: spawn boundary). Consumed by the parent's ``_apply_outcome`` failed lane to
+#: fire the remediation-carrying ``sweep_grid.tuple_store_corrupt`` WARN
+#: (DB-02 parity, review round 1).
+_STORE_CORRUPT_ERROR_PREFIX: Final[str] = f"{ResultsStoreSchemaError.__name__}: "
 
 # ────────────────────────────────────────────────────────────────────────
 # Config flag — AUTO-default (ADR-0016, DEC-MULTICORE-SWEEP-AUTODEFAULT-001)
@@ -1605,6 +1615,23 @@ class ParallelGridDriver:
                 tuple=label,
                 error=outcome.failed_error,
             )
+            # DB-02 remediation parity (review round 1 — the parallel lane is the
+            # production multi-day path and previously lost the heal instruction):
+            # when the worker's failed marker names the G14 ResultsStoreSchemaError
+            # (the worker serialises it as "<TypeName>: <msg>", so the store path is
+            # inside the error string), the parent ALSO fires the SAME
+            # remediation-carrying WARN the sequential/supervisor sites emit. The
+            # failed-marker mechanics above are byte-unchanged.
+            error_text = outcome.failed_error or ""
+            if error_text.startswith(_STORE_CORRUPT_ERROR_PREFIX):
+                _LOG.warning(
+                    "sweep_grid.tuple_store_corrupt",
+                    subject=self._subject,
+                    index=index,
+                    tuple=label,
+                    error=error_text,
+                    remediation=TUPLE_STORE_CORRUPT_REMEDIATION,
+                )
             return
 
         if outcome.kind == "no_bars":

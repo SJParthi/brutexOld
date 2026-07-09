@@ -6652,9 +6652,13 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # Open the Bloom→LMDB dedup cache FIRST so a corrupt ``data.mdb`` is handled
     # cleanly: SweepCache.open quarantines + rebuilds a FIRST corruption
     # transparently (the store is a rebuildable accelerator, Golden Rule #7); only
-    # a SECOND failure raises LmdbCorruptEnvError, which is a clean user-facing
-    # refusal here (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1631) —
-    # not a raw traceback deep inside the sweep span.
+    # a SECOND failure raises LmdbCorruptEnvError — or, for a mid-Bloom-rebuild
+    # cursor fault on that second attempt, a raw lmdb.Error (review round 1
+    # belt) — both a clean user-facing refusal here
+    # (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1631) — never a raw
+    # traceback deep inside the sweep span.
+    import lmdb
+
     from brutex.data.lmdb_membership import LmdbCorruptEnvError
 
     try:
@@ -6663,14 +6667,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             bloom_capacity=cache_knobs.bloom_capacity,
             map_size_mb=cache_knobs.map_size_mb,
         )
-    except LmdbCorruptEnvError as exc:
+    except (LmdbCorruptEnvError, lmdb.Error) as exc:
         print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
     with sweep_abort_alert(_emit_pull_halt_alert):
         with (
+            # ``cache`` is entered FIRST (review round 1 MINOR-2): the already-
+            # open LMDB env must be closed even when either audit-writer open
+            # below raises, restoring the pre-change ExitStack-era guarantee.
+            # No exit-order dependency exists in either direction — the audit
+            # writers' __exit__ only flush/close their own files and never touch
+            # the cache; SweepCache.__exit__ only closes its Bloom/LMDB pair.
+            cache,
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
-            cache,
         ):
             # Audit the scope override on the hash-chained launch log (Golden Rule
             # #8): a research launch that let out-of-scope symbols through is a

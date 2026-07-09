@@ -113,11 +113,21 @@ _ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
 #: failed until the operator heals it. Deliberately NOT auto-quarantined: a fresh
 #: empty store flushed over a still-populated grid-wide MASK dedup would silently
 #: drop the tuple's finalists (the #650 / sweep_heal C5 empty-flush wedge).
+#:
+#: The command chain is COPY-PASTE RUNNABLE against the real CLI (review round 1
+#: MAJOR-1 — the prior text named a nonexistent ``--out-root`` flag and skipped
+#: the required verify→emit-plan→heal steps): the ``--`` flags below are pinned
+#: against the LIVE argparse surface by
+#: ``tests/unit/test_engine_sweep_orchestrator.py::TestRemediationFlagsRunnable``
+#: so the string can never rot again.
 TUPLE_STORE_CORRUPT_REMEDIATION: Final[str] = (
-    "finalist store unreadable: run 'brutex sweep-verify --out-root <root>' then "
-    "'brutex sweep-heal' (quarantines the store AND wipes checkpoint/ and dedup-cache/ "
-    "so the tuple genuinely recomputes) — or move the store aside and wipe both "
-    "skip-tier dirs manually"
+    "finalist store unreadable — run 'brutex sweep-verify --results-root "
+    "<results-root> --recount --emit-heal-plan' with the SAME grid flags the "
+    "sweep ran with (writes the heal plan under <results-root>/heal/), then "
+    "'brutex sweep-heal <results-root>/heal/<plan>.json --results-root "
+    "<results-root> --execute' (quarantines the store AND wipes checkpoint/ and "
+    "dedup-cache/ so the tuple genuinely recomputes) — or move the corrupt store "
+    "file aside and wipe both skip-tier dirs manually"
 )
 
 #: Default ceiling on the number of tuples a grid may enumerate (the honest

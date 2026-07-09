@@ -1558,7 +1558,11 @@ def build_stage2_cascade_specs(
         One spec per non-empty grid tuple, in ``iter_sweep_tuples`` order.
     """
     from brutex.engine.results_store import ResultsStore, ResultsStoreSchemaError
-    from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+    from brutex.engine.sweep_orchestrator import (
+        TUPLE_STORE_CORRUPT_REMEDIATION,
+        iter_sweep_tuples,
+        tuple_store_path,
+    )
     from brutex.engine.sweep_run import _direction_label
 
     specs: list[CascadeTupleSpec] = []
@@ -1574,10 +1578,12 @@ def build_stage2_cascade_specs(
             # abort naming the file, NEVER a raw error and NEVER a silent skip
             # (dropping a tuple's finalists would change Stage-2 selection
             # invisibly — a false green; fabricating empty winners is equally
-            # forbidden, Golden Rule #1).
+            # forbidden, Golden Rule #1). The remediation is the ONE shared
+            # runnable command chain (review round 1 MINOR-1 — this site
+            # previously named sweep-verify/sweep-heal without the flags).
             raise CascadeWireError(
-                f"stage-2 finalist store UNREADABLE at {store_path}: {exc} — run "
-                f"'brutex sweep-verify' / 'brutex sweep-heal', then re-run the cascade"
+                f"stage-2 finalist store UNREADABLE at {store_path}: {exc} — "
+                f"{TUPLE_STORE_CORRUPT_REMEDIATION}; then re-run the cascade"
             ) from exc
         proximity_bps = (
             None
