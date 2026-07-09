@@ -217,19 +217,23 @@ class SweepComboError(BruteXError):
 
 
 class SweepAprioriBudgetError(SweepComboError):
-    """The Apriori pruned candidate set would exceed the per-cell wall-clock budget.
+    """The Apriori pruned candidate set would exceed the per-cell mask·bar budget.
 
     Raised by :func:`brutex.engine.sweep_apriori.generate_apriori_candidates`
-    (only when ``BRUTEX_SWEEP_APRIORI`` is enabled) when the projected SERIAL
-    backtest of the level-``k`` candidates
-    (``len(candidates) × n_bars / walk_rate``) exceeds
-    ``BRUTEX_SWEEP_APRIORI_CELL_BUDGET_S``. Subclassing :class:`SweepComboError`
-    rides the existing tuple-skip contract UNCHANGED — the grid drivers count it
-    in ``tuples_failed``, emit ``TUPLE_FAILED``, leave the tuple un-sentineled
-    for a deterministic redo, and exit non-zero — a LOUD refusal of a degenerate
-    cell rather than a silent multi-day run. The message NAMES the cell, ``k``,
-    the candidate count, the projected/budget seconds, and the remedies (raise
-    the budget, tighten ``min_hits``, reduce ``k``, or unset the flag).
+    (only when ``BRUTEX_SWEEP_APRIORI`` is enabled) when the PURE-INTEGER
+    work estimate ``len(candidates) * n_bars`` STRICTLY EXCEEDS
+    ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` (a mask·bar count — no float division,
+    no wall clock, so the trip is DETERMINISTIC and bit-identical Python↔Rust,
+    Golden Rule #7). Subclassing :class:`SweepComboError` rides the existing
+    tuple-skip contract UNCHANGED — the grid drivers count it in
+    ``tuples_failed``, emit ``TUPLE_FAILED``, leave the tuple un-sentineled for a
+    deterministic redo, and exit non-zero — a LOUD refusal of a degenerate cell
+    rather than a silent multi-day run. The message NAMES the cell, ``k``, the
+    candidate count, the ``mask·bar`` product / limit, and the remedies (raise
+    ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS``, tighten ``min_hits``, reduce ``k``, or
+    unset the flag). The wall-clock runaway backstop is the separate #1608 stall
+    watchdog (non-identity-bearing), which this deterministic breaker never
+    touches.
     """
 
 

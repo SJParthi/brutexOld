@@ -65,40 +65,52 @@ GRACEFULLY skips that tuple (TUPLE_FAILED) rather than crashing on a raw
 the flag to use the byte-identical brute-force path, which has no bit-width
 limit). Today's vocabulary is 60 bits, so production is unaffected.
 
-## The time-based breaker (honest, MODELED)
+## The deterministic mask·bar breaker (pure integer, MODELED limit)
 
 Apriori is a search accelerator, not a bound: a degenerate cell (tiny
 ``min_hits`` on a dense vocabulary) can still emit an enormous candidate set. A
-wall-clock breaker refuses such a cell LOUDLY rather than let it silently run
-for days: it raises :class:`brutex.engine.sweep_run.SweepAprioriBudgetError`
+breaker refuses such a cell LOUDLY rather than let it silently run for days: it
+raises :class:`brutex.engine.sweep_run.SweepAprioriBudgetError`
 (a :class:`~brutex.engine.sweep_run.SweepComboError` subclass, so the grid
 drivers' existing ``TUPLE_FAILED`` path catches it — counted, non-zero exit,
-deterministic redo) when the projected SERIAL backtest work
-``len(candidates) × n_bars / walk_rate`` exceeds ``cell_budget_s``.
+deterministic redo) when the PURE-INTEGER work estimate
+``len(candidates) * n_bars`` **strictly exceeds** ``max_mask_bars`` (a mask·bar
+count; STRICT ``>`` — an exactly-at-limit cell is ALLOWED, never trips).
 
-The default ``walk_rate`` (:data:`DEFAULT_WALK_RATE`) and budget
-(:data:`DEFAULT_CELL_BUDGET_S`) are **MODELED / container-measured /
-UNVERIFIED-on-M4** figures (Golden Rule #10) — a self-calibratable placeholder
-(the B1 self-calibration follow-up), not a measured M4-Pro throughput. Both are
-env-tunable (``BRUTEX_SWEEP_APRIORI_CELL_BUDGET_S`` /
-``BRUTEX_SWEEP_APRIORI_WALK_RATE``); an invalid value falls back to the default
-LOUDLY, a non-positive / non-finite value is refused.
+There is NO float division, NO ``time.time()``, NO seconds / rate anywhere in
+the trip path: the breaker is a single integer comparison, so the SAME inputs +
+config produce the SAME trip — including the SAME failure set — **bit-identically
+Python↔Rust** (Golden Rule #7 idempotence). The wall-clock runaway backstop is
+the SEPARATE, EXISTING #1608 parallel-sweep stall watchdog (non-identity-bearing,
+crash-equivalent / deterministic-redo); this deterministic breaker never touches
+it.
 
-What the breaker bounds — and does NOT (honest, Golden Rule #10): it projects the
-DOWNSTREAM SERIAL BACKTEST time of the emitted candidates
-(``len(candidates) × n_bars / walk_rate``) and trips on THAT. It does **not**
-directly bound the generator's OWN join CPU, nor the transient candidate-LIST
-memory below — it is a proxy that trips before a candidate set large enough to
-make the backtest infeasible is fully materialised (the incremental
-:data:`_BUDGET_CHECK_STRIDE` check). The generator's own join CPU is bounded in
-practice only by ``n = len(unique bits) <= 60``.
+The default limit :data:`DEFAULT_MAX_MASK_BARS` = ``1_159_200_000_000`` mask·bar
+is a **MODELED / container-measured / UNVERIFIED-on-M4** figure (Golden Rule
+#10): ≈ 2 h serial backtest × ``1.61e8`` mask·bar/s (≈ 6.2 ns per mask·bar), a
+self-calibratable placeholder (the B1 follow-up), NOT a measured M4-Pro
+throughput. It is env-tunable via the ONE knob
+``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` (a positive integer); an unset / blank
+value uses the default, an invalid (non-integer / non-positive) value falls back
+to the default LOUDLY.
+
+What the breaker bounds — and does NOT (honest, Golden Rule #10): it caps the
+mask·bar PRODUCT of the emitted candidates × the bar window and trips on THAT.
+It does **not** directly bound the generator's OWN join CPU, nor the transient
+candidate-LIST memory below — it is a proxy that trips before a candidate set
+large enough to make the backtest infeasible is fully materialised (the
+incremental :data:`_BUDGET_CHECK_STRIDE` check compares the RUNNING count times
+``n_bars``). The generator's own join CPU is bounded in practice only by
+``n = len(unique bits) <= 60``.
 
 ## The parity-completion caveat (Golden Rule #10)
 
 ON-vs-OFF leaderboard parity is **bit-identical for cells that BOTH paths run to
-completion**; a cell that trips the (default-OFF, time-based, MODELED) breaker is
-a LOUD ``TUPLE_FAILED`` (operator-visible, counted, non-zero exit), never a
-silent divergence.
+completion**; a cell that trips the (default-OFF, deterministic mask·bar) breaker
+is a LOUD ``TUPLE_FAILED`` (operator-visible, counted, non-zero exit), never a
+silent divergence. Because the trip is a pure-integer function of (candidate
+count, ``n_bars``, ``max_mask_bars``), the failure set itself is reproducible
+run-to-run AND Python↔Rust.
 
 ## Honest complexity + memory envelope (Golden Rule #10)
 
@@ -121,7 +133,6 @@ count.
 
 from __future__ import annotations
 
-import math
 import os
 from collections.abc import Callable, Sequence
 from typing import Final
@@ -135,15 +146,12 @@ from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.vocabulary.conflicts import has_conflict
 
 __all__ = [
-    "CELL_BUDGET_ENV",
-    "DEFAULT_CELL_BUDGET_S",
-    "DEFAULT_WALK_RATE",
+    "DEFAULT_MAX_MASK_BARS",
+    "MAX_MASK_BARS_ENV",
     "SWEEP_APRIORI_ENV",
-    "WALK_RATE_ENV",
     "apriori_enabled",
     "generate_apriori_candidates",
-    "resolve_cell_budget_s",
-    "resolve_walk_rate",
+    "resolve_max_mask_bars",
 ]
 
 _LOG = structlog.get_logger(__name__)
@@ -155,31 +163,35 @@ _LOG = structlog.get_logger(__name__)
 #: DEC-SWEEP-LOOKAHEAD-GUARD-001 posture).
 SWEEP_APRIORI_ENV: Final[str] = "BRUTEX_SWEEP_APRIORI"
 
-#: Env var overriding :data:`DEFAULT_CELL_BUDGET_S` (a positive float, seconds).
-CELL_BUDGET_ENV: Final[str] = "BRUTEX_SWEEP_APRIORI_CELL_BUDGET_S"
+#: The ONE env var overriding :data:`DEFAULT_MAX_MASK_BARS` (a positive INTEGER —
+#: the ``len(candidates) * n_bars`` mask·bar work cap the breaker trips on).
+MAX_MASK_BARS_ENV: Final[str] = "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS"
 
-#: Env var overriding :data:`DEFAULT_WALK_RATE` (a positive float, mask·bars/s).
-WALK_RATE_ENV: Final[str] = "BRUTEX_SWEEP_APRIORI_WALK_RATE"
-
-#: Default per-cell wall-clock budget for the projected SERIAL backtest of the
-#: emitted candidates (seconds). MODELED / container-measured / UNVERIFIED-on-M4
-#: (Golden Rule #10) — 2 h is a generous default headroom, not a measured SLA;
-#: env-tunable via :data:`CELL_BUDGET_ENV`, self-calibratable (B1 follow-up).
-DEFAULT_CELL_BUDGET_S: Final[float] = 7200.0
-
-#: Default modeled trade-sim throughput used to project serial backtest seconds
-#: from ``len(candidates) × n_bars`` (mask·bars per second). MODELED /
-#: container-measured / UNVERIFIED-on-M4 (Golden Rule #10); env-tunable via
-#: :data:`WALK_RATE_ENV`.
-DEFAULT_WALK_RATE: Final[float] = 1.61e8
+#: Default per-cell mask·bar work cap: the breaker trips when
+#: ``len(candidates) * n_bars`` STRICTLY exceeds this integer. ``1_159_200_000_000``
+#: is a MODELED / container-measured / UNVERIFIED-on-M4 figure (Golden Rule #10) —
+#: ≈ 2 h serial backtest × ``1.61e8`` mask·bar/s (≈ 6.2 ns per mask·bar), a
+#: self-calibratable placeholder (the B1 follow-up), NOT a measured M4-Pro
+#: throughput. A PURE INTEGER so the trip is deterministic + bit-identical
+#: Python↔Rust (Golden Rule #7); env-tunable via :data:`MAX_MASK_BARS_ENV`.
+DEFAULT_MAX_MASK_BARS: Final[int] = 1_159_200_000_000
 
 #: The single ``uint64`` limb width — the maximum (exclusive) condition-bit index
 #: the sorted-array frontier can represent.
 _U64_BITS: Final[int] = 64
 
 #: Stride between incremental breaker checks during candidate accumulation, so a
-#: degenerate cell trips BEFORE a giant list is fully materialised.
-_BUDGET_CHECK_STRIDE: Final[int] = 65_536
+#: degenerate cell trips BEFORE a giant list is fully materialised. The EXACT
+#: value only shifts WHICH running count fires an incremental ``on_count``; the
+#: post-loop ``_budget_check(len(...))`` is authoritative for the raise/return
+#: decision (it always runs on the true final count), so a ``±1`` mutation is
+#: result-equivalent — observing a difference would need ``>= 65_536`` candidates
+#: AND an assertion on the intermediate-check cadence, but that cadence is only
+#: ever asserted with the constant monkeypatched to ``4``
+#: (``test_budget_check_stride_cadence``), never against this literal. Hence the
+#: ``no mutate`` — a genuinely-equivalent, un-killable mutant (proven, not
+#: papered over: DEC-SWEEP-APRIORI-TUPLE-001 mutmut de-survivor round).
+_BUDGET_CHECK_STRIDE: Final[int] = 65_536  # pragma: no mutate
 
 #: The pair level. Conflict-pruning is applied ONLY when building level-2
 #: candidates; every higher level inherits conflict-freeness by subset-prune over
@@ -201,30 +213,32 @@ def apriori_enabled() -> bool:
     bool
         Whether the Apriori pruned candidate generator is enabled.
     """
-    return env_flag_tristate(os.environ.get(SWEEP_APRIORI_ENV, "")) is True
+    # Read with NO string default, then short-circuit on the unset (``None``)
+    # case, so ``env_flag_tristate`` is never handed a fabricated default: an
+    # UNSET var maps straight to ``False`` here. (A ``get(name, "")`` form left a
+    # genuinely-equivalent mutant — ``env_flag_tristate`` maps ``""`` and every
+    # non-truthy string alike to ``None`` → ``is True`` False — so the default's
+    # value was unobservable; this shape has no such default to mutate.)
+    raw = os.environ.get(SWEEP_APRIORI_ENV)
+    return raw is not None and env_flag_tristate(raw) is True
 
 
-def _resolve_positive_float_env(
+def _resolve_positive_int_env(
     name: str,
-    default: float,
+    default: int,
     event: str,
     env: dict[str, str] | None,
-) -> float:
-    """Resolve a positive-float env knob — unset/blank → *default*, invalid → LOUD.
+) -> int:
+    """Resolve a positive-INTEGER env knob — unset/blank → *default*, invalid → LOUD.
 
-    Mirrors the numeric-env idiom of
-    ``brutex.engine.sweep_parallel._resolve_positive_float_env``. This is a
-    DELIBERATE, reviewer-blessed deviation from Golden Rule #11 (COMMON — one
-    source of truth): it is kept a LOCAL ~12-line copy rather than extracted to a
-    shared leaf so this pure, light-import generator stays free of the heavy
-    parallel-sweep import graph (``sweep_parallel`` pulls in the whole
-    process-pool / supervisor surface). The duplication is a bounded numeric-env
-    idiom (jscpd passes), and the two copies have no shared invariant that could
-    drift dangerously. Reads *name* from *env* (default :data:`os.environ`):
-    unset/blank → *default*; a
-    finite ``float`` strictly ``> 0`` → that value; an INVALID value (non-float,
-    non-finite, or ``<= 0``) → *default*, logged at WARNING on *event* naming the
-    raw value via ``repr``. O(1).
+    The integer sibling of the numeric-env idiom used across the sweep. Kept a
+    LOCAL copy (a DELIBERATE, reviewer-blessed deviation from Golden Rule #11 —
+    COMMON) so this pure, light-import generator stays free of the heavy
+    parallel-sweep import graph. Reads *name* from *env* (default
+    :data:`os.environ`): unset/blank → *default*; an ``int`` strictly ``> 0`` →
+    that value; an INVALID value (non-integer OR ``<= 0``) → *default*, logged at
+    WARNING on *event* naming the raw value via ``repr``. Pure integer, no float,
+    no wall clock — O(1).
 
     Parameters
     ----------
@@ -239,51 +253,29 @@ def _resolve_positive_float_env(
 
     Returns
     -------
-    float
-        The resolved positive float.
+    int
+        The resolved positive integer.
     """
     source = os.environ if env is None else env
     raw = source.get(name)
     if raw is None or not raw.strip():
         return default
     try:
-        parsed = float(raw)
+        parsed = int(raw)
     except ValueError:
-        parsed = math.nan
-    if not math.isfinite(parsed) or parsed <= 0.0:
+        parsed = 0  # non-integer → the sentinel trips the non-positive guard below
+    if parsed <= 0:
         _LOG.warning(event, requested_env=repr(raw), fallback=default)
         return default
     return parsed
 
 
-def resolve_cell_budget_s(env: dict[str, str] | None = None) -> float:
-    """Resolve the per-cell wall-clock budget — env-tunable, invalid → LOUD default.
+def resolve_max_mask_bars(env: dict[str, str] | None = None) -> int:
+    """Resolve the per-cell mask·bar work cap — env-tunable, invalid → LOUD default.
 
-    Reads :data:`CELL_BUDGET_ENV`; unset/blank → :data:`DEFAULT_CELL_BUDGET_S`, a
-    valid positive float → that value, an invalid value → the default plus a LOUD
-    ``sweep.apriori.cell_budget_s.invalid`` WARNING. O(1).
-
-    Parameters
-    ----------
-    env
-        The environment mapping to read (``None`` → :data:`os.environ`).
-
-    Returns
-    -------
-    float
-        The resolved budget in seconds.
-    """
-    return _resolve_positive_float_env(
-        CELL_BUDGET_ENV, DEFAULT_CELL_BUDGET_S, "sweep.apriori.cell_budget_s.invalid", env
-    )
-
-
-def resolve_walk_rate(env: dict[str, str] | None = None) -> float:
-    """Resolve the modeled trade-sim throughput — env-tunable, invalid → LOUD default.
-
-    Reads :data:`WALK_RATE_ENV`; unset/blank → :data:`DEFAULT_WALK_RATE`, a valid
-    positive float → that value, an invalid value → the default plus a LOUD
-    ``sweep.apriori.walk_rate.invalid`` WARNING. O(1).
+    Reads :data:`MAX_MASK_BARS_ENV`; unset/blank → :data:`DEFAULT_MAX_MASK_BARS`, a
+    valid positive integer → that value, an invalid value → the default plus a LOUD
+    ``sweep.apriori.max_mask_bars.invalid`` WARNING. Pure integer — O(1).
 
     Parameters
     ----------
@@ -292,11 +284,11 @@ def resolve_walk_rate(env: dict[str, str] | None = None) -> float:
 
     Returns
     -------
-    float
-        The resolved throughput in mask·bars per second.
+    int
+        The resolved mask·bar limit.
     """
-    return _resolve_positive_float_env(
-        WALK_RATE_ENV, DEFAULT_WALK_RATE, "sweep.apriori.walk_rate.invalid", env
+    return _resolve_positive_int_env(
+        MAX_MASK_BARS_ENV, DEFAULT_MAX_MASK_BARS, "sweep.apriori.max_mask_bars.invalid", env
     )
 
 
@@ -376,7 +368,15 @@ def _join_and_prune(
         m = len(lasts)
         for i in range(m):
             for jj in range(i + 1, m):
-                candidate = (*prefix, lasts[i], lasts[jj])
+                # Tuple concatenation (not ``(*prefix, …)`` unpacking): byte-for-byte
+                # the same tuple, but avoids a ``*``→``/`` mutation that would be a
+                # bare SyntaxError (``(/prefix, …)``) — an uncompilable mutant mutmut
+                # cannot run and so mis-reports as SURVIVED (no test can execute a
+                # syntax error). ``prefix`` is always a tuple, so ``+`` appends the
+                # two new positions identically. (RUF005 would "fix" this back to
+                # the ``*``-unpacking form that re-introduces that syntax-error
+                # mutant, so it is deliberately suppressed here.)
+                candidate = prefix + (lasts[i], lasts[jj])  # noqa: RUF005
                 if not _all_subsets_frequent(candidate, frontier_masks):
                     continue
                 if drop_conflicts and has_conflict(_mask_of(candidate)):
@@ -388,23 +388,24 @@ def _join_and_prune(
     return candidates
 
 
-def _raise_budget(
-    cell_label: str, k: int, count: int, n_bars: int, projected_s: float, budget_s: float
-) -> None:
-    """Raise the wall-clock breaker as a ``SweepComboError`` subclass (LOUD).
+def _raise_budget(cell_label: str, k: int, count: int, n_bars: int, max_mask_bars: int) -> None:
+    """Raise the deterministic mask·bar breaker as a ``SweepComboError`` subclass (LOUD).
 
     Imports :class:`brutex.engine.sweep_run.SweepAprioriBudgetError` LAZILY at the
     raise site — the ONLY reference this pure module makes to the heavy
     ``sweep_run`` orchestrator — so there is no import cycle (``sweep_run``
-    imports this generator lazily too) and the module top stays light.
+    imports this generator lazily too) and the module top stays light. The message
+    NAMES the cell + the level ``k`` (a k=2 tuple reads ``k=2``, a k=5 tuple reads
+    ``k=5``), the candidate count, the pure-integer ``count x n_bars`` mask·bar
+    product and the limit it exceeds, and the remedies.
     """
     from brutex.engine.sweep_run import SweepAprioriBudgetError
 
     raise SweepAprioriBudgetError(
         f"apriori cell {cell_label!r}: k={k} would emit {count} candidate(s) over "
-        f"{n_bars} bars — projected serial backtest {projected_s:,.0f}s exceeds the "
-        f"per-cell budget {budget_s:,.0f}s. Remediation: raise "
-        f"{CELL_BUDGET_ENV}, tighten min_hits, reduce k, or unset "
+        f"{n_bars} bars — {count} x {n_bars} = {count * n_bars} mask·bar exceeds the "
+        f"per-cell limit {max_mask_bars} mask·bar. Remediation: raise "
+        f"{MAX_MASK_BARS_ENV}, tighten min_hits, reduce k, or unset "
         f"{SWEEP_APRIORI_ENV} to use the brute-force path."
     )
 
@@ -437,8 +438,7 @@ def generate_apriori_candidates(
     count_hits: Callable[[Sequence[int]], list[int]] | None = None,
     n_bars: int | None = None,
     root_mod: tuple[int, int] = (0, 1),
-    cell_budget_s: float | None = None,
-    walk_rate: float | None = None,
+    max_mask_bars: int | None = None,
     cell_label: str = "",
 ) -> list[int]:
     """Emit the Apriori-pruned level-``k`` candidate masks for one sweep cell.
@@ -472,8 +472,8 @@ def generate_apriori_candidates(
         sequence to per-mask hit counts. ``None`` builds the default
         ``lambda masks: count_supermasks(bar_bits, masks)``.
     n_bars
-        The bar-window length feeding the wall-clock breaker's work estimate.
-        ``None`` → ``len(bar_bits)``.
+        The bar-window length feeding the breaker's ``count * n_bars`` mask·bar
+        work estimate. ``None`` → ``len(bar_bits)``.
     root_mod
         A ``(w, W)`` sharding hook. The default ``(0, 1)`` owns the WHOLE
         level-``k`` set. When ``W > 1`` the RETURNED candidates are filtered to
@@ -482,10 +482,10 @@ def generate_apriori_candidates(
         frontiers ``F_1 … F_{k-1}`` are always computed WHOLE; the union over
         ``w in [0, W)`` reproduces the whole set and the shards are pairwise
         disjoint.
-    cell_budget_s
-        Per-cell wall-clock budget (seconds). ``None`` → :func:`resolve_cell_budget_s`.
-    walk_rate
-        Modeled trade-sim throughput (mask·bars/s). ``None`` → :func:`resolve_walk_rate`.
+    max_mask_bars
+        The per-cell mask·bar work cap (a positive integer). The breaker trips when
+        ``len(candidates) * n_bars`` STRICTLY exceeds it (deterministic, pure
+        integer, bit-identical Python↔Rust). ``None`` → :func:`resolve_max_mask_bars`.
     cell_label
         A human label for the cell, echoed in the breaker error message.
 
@@ -500,16 +500,16 @@ def generate_apriori_candidates(
     ValueError
         A condition bit is negative, ``k`` is outside
         ``[0, len(set(condition_bits))]``, ``root_mod`` is malformed, ``n_bars``
-        is negative, or an explicit *cell_budget_s* / *walk_rate* is non-positive
-        / non-finite (all caller-contract violations).
+        is negative, or an explicit *max_mask_bars* is ``<= 0`` (all
+        caller-contract violations).
     brutex.engine.sweep_run.SweepAprioriUnsupportedError
         A condition bit is ``>= 64`` (the u128-vocab guard) — a
         :class:`~brutex.engine.sweep_run.SweepComboError` subclass, so the flag
         ON over a future ``>= 64``-bit vocabulary GRACEFULLY skips the tuple
         (TUPLE_FAILED) rather than crashing the grid. Remedy: unset the flag.
     brutex.engine.sweep_run.SweepAprioriBudgetError
-        The projected serial backtest of the emitted candidates exceeds
-        *cell_budget_s* (a :class:`~brutex.engine.sweep_run.SweepComboError`
+        The mask·bar product ``len(candidates) * n_bars`` strictly exceeds
+        *max_mask_bars* (a :class:`~brutex.engine.sweep_run.SweepComboError`
         subclass — the grid drivers skip the tuple, count it, and exit non-zero).
     """
     unique_bits = sorted(set(condition_bits))
@@ -538,12 +538,9 @@ def generate_apriori_candidates(
     resolved_n_bars = len(bar_bits) if n_bars is None else n_bars
     if resolved_n_bars < 0:
         raise ValueError(f"generate_apriori_candidates: n_bars must be >= 0, got {resolved_n_bars}")
-    budget_s = resolve_cell_budget_s() if cell_budget_s is None else cell_budget_s
-    rate = resolve_walk_rate() if walk_rate is None else walk_rate
-    if not math.isfinite(budget_s) or budget_s <= 0.0:
-        raise ValueError(f"generate_apriori_candidates: cell_budget_s must be > 0, got {budget_s}")
-    if not math.isfinite(rate) or rate <= 0.0:
-        raise ValueError(f"generate_apriori_candidates: walk_rate must be > 0, got {rate}")
+    limit = resolve_max_mask_bars() if max_mask_bars is None else max_mask_bars
+    if limit <= 0:
+        raise ValueError(f"generate_apriori_candidates: max_mask_bars must be > 0, got {limit}")
 
     def _default_counter(masks: Sequence[int]) -> list[int]:
         return count_supermasks(bar_bits, masks)
@@ -551,29 +548,29 @@ def generate_apriori_candidates(
     counter = _default_counter if count_hits is None else count_hits
 
     def _budget_check(count: int) -> None:
-        projected = (count * resolved_n_bars) / rate
-        if projected > budget_s:
-            _raise_budget(cell_label, k, count, resolved_n_bars, projected, budget_s)
+        # Pure-integer trip: STRICT ``>`` — an exactly-at-limit cell is ALLOWED.
+        if count * resolved_n_bars > limit:
+            _raise_budget(cell_label, k, count, resolved_n_bars, limit)
 
     # ── k == 0: the single empty mask (owned by shard 0 only) ──
     if k == 0:
         return [0] if w == 0 else []
 
     singleton_bits = unique_bits  # ascending == lex order for length-1 tuples
-    singleton_masks = [1 << bit for bit in singleton_bits]
 
     # ── k == 1: every conflict-free singleton (singletons never conflict), NOT
-    #    hit-filtered — the caller's Stage-1B drops the sparse ones. ──
+    #    hit-filtered — the caller's Stage-1B drops the sparse ones. Built by a
+    #    direct comprehension over the bits (NOT a ``zip(bits, masks, strict=…)``:
+    #    that zipped two internally-constructed always-equal-length lists, so the
+    #    ``strict`` flag could never fire and a ``strict=False`` mutant was
+    #    genuinely equivalent). ──
     if k == 1:
-        owned = [
-            mask
-            for bit, mask in zip(singleton_bits, singleton_masks, strict=True)
-            if bit % big_w == w
-        ]
+        owned = [1 << bit for bit in singleton_bits if bit % big_w == w]
         _budget_check(len(owned))
         return owned
 
     # ── k >= 2: build the frequent singleton frontier F_1 ──
+    singleton_masks = [1 << bit for bit in singleton_bits]
     counts = counter(singleton_masks)
     frontier_tuples: list[tuple[int, ...]] = [
         (bit,) for bit, count in zip(singleton_bits, counts, strict=True) if count >= min_hits

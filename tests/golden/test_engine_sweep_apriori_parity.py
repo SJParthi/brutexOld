@@ -39,6 +39,7 @@ from brutex.engine.sweep_run import (
 )
 from brutex.engine.trial_stats import read_tuple_trial_stats, trial_stats_sidecar_path
 from brutex.orchestrator.audit import AuditWriter
+from brutex.ranking.overfit import OverfitGateConfig
 from brutex.strategies.types import Side
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -81,7 +82,7 @@ def _bars() -> list[CandleBar]:
     return out
 
 
-def _config(k: int) -> SweepRunConfig:
+def _config(k: int, overfit: OverfitGateConfig | None = None) -> SweepRunConfig:
     return SweepRunConfig(
         instrument="NIFTY",
         tf="1m",
@@ -96,17 +97,28 @@ def _config(k: int) -> SweepRunConfig:
         sl_paisa=80,
         tp_paisa=50,
         min_hits=_MIN_HITS,
+        overfit=overfit,
     )
 
 
 def _run(
-    tmp_path: Path, tag: str, bars: Sequence[CandleBar], k: int, digest: str | None
+    tmp_path: Path,
+    tag: str,
+    bars: Sequence[CandleBar],
+    k: int,
+    digest: str | None,
+    overfit: OverfitGateConfig | None = None,
 ) -> SweepRunSummary:
     store = ResultsStore(path=tmp_path / f"{tag}.parquet")
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
         return run_persisted_sweep(
-            bars, _config(k), store=store, dedup=dedup, audit=audit, trial_stats_digest=digest
+            bars,
+            _config(k, overfit),
+            store=store,
+            dedup=dedup,
+            audit=audit,
+            trial_stats_digest=digest,
         )
 
 
@@ -172,3 +184,119 @@ def test_pruning_actually_fires_and_kept_is_nonempty(
     # The brute-force path DID prune conflicts (so the two paths reach the same
     # kept set by different routes).
     assert off.conflict_pruned > 0
+
+
+# ─────────────── the DSR / overfit-gated parity (refuter MAJOR) ───────────────
+# The plain parity test above never sets ``cfg.overfit``, so the DSR-coupled path
+# (the 6th overfit gate + Deflated-Sharpe ranking term, whose ``N = len(kept)`` is
+# the prune-invariant that makes ON == OFF) was only proven by code-trace at the
+# merge gate. These tests drive a REAL ``OverfitGateConfig`` ACTIVE at k=3 (where
+# pruning fires) so the gate genuinely deflates/drops combos, across BOTH the
+# digest and legacy storage paths and the full dsr_min range from
+# deflating-nobody (0.0) to deflating-everybody (0.95).
+
+
+@pytest.mark.parametrize("dsr_min", [0.0, 0.5, 0.95])
+@pytest.mark.parametrize("digest", [None, "abad1deaabad1dea"])
+def test_leaderboard_byte_identical_on_vs_off_with_overfit_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dsr_min: float, digest: str | None
+) -> None:
+    """ON-vs-OFF byte-identity with the Stage-3 OVERFIT GATE ACTIVE (k=3).
+
+    Because Apriori's kept set equals the brute-force kept set, the overfit gate's
+    trial count ``N = len(kept)`` — and hence every combo's Deflated Sharpe and the
+    gate's keep/reject verdict — is identical ON vs OFF, so the persisted
+    leaderboard stays byte-identical WITH the DSR-coupled path exercised. Covered
+    across the streaming-digest and legacy (no-digest) storage paths and a gate
+    ranging from deflating-nobody (``dsr_min=0.0``) to deflating-everybody
+    (``dsr_min=0.95``).
+    """
+    pytest.importorskip("polars")  # flush needs the [data] extra
+    bars = _bars()
+    k = 3  # pruning fires at k >= 3
+    overfit = OverfitGateConfig(dsr_min=dsr_min)
+
+    monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    off = _run(off_dir, "cell", bars, k, digest, overfit)
+
+    monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+    on_dir = tmp_path / "on"
+    on_dir.mkdir()
+    on = _run(on_dir, "cell", bars, k, digest, overfit)
+
+    # THE gate: byte-identical persisted leaderboard, DSR-coupled path ACTIVE.
+    assert on.store_content_hash == off.store_content_hash
+    assert (on_dir / "cell.parquet").read_bytes() == (off_dir / "cell.parquet").read_bytes()
+    assert on.persisted == off.persisted
+    assert on.ranked == off.ranked
+    assert on.backtested == off.backtested
+
+    # ANTI-VACUOUS: pruning genuinely fired (Apriori enumerated strictly fewer than
+    # the brute-force C(8, 3)) while both paths backtested a non-empty kept pool —
+    # so the DSR N=len(kept) the gate deflates against is meaningfully shared.
+    assert on.enumerated < off.enumerated
+    assert off.enumerated == count_combos(k, len(set(_CONDITION_BITS)))
+    assert on.backtested > 0
+
+    # The digest path's exact-zero tally invariant (verify_structural enforces it).
+    if digest is not None:
+        stats = read_tuple_trial_stats(trial_stats_sidecar_path(on_dir / "cell.parquet"))
+        remainder = (
+            stats.n_enumerated
+            - stats.n_conflict_pruned
+            - stats.n_minhits_dropped
+            - stats.n_backtested
+        )
+        assert remainder == 0
+
+
+def test_overfit_gate_is_active_and_prune_invariant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overfit gate genuinely DROPS combos — ``ranked`` shrinks as ``dsr_min``
+    rises — and that shrink is byte-identical ON vs OFF (the DSR prune-invariance).
+
+    Proves the parametrized parity above is non-vacuous: the gate is not a no-op.
+    A mid ``dsr_min`` deflates SOME combos (``ranked`` strictly below the ungated
+    leaderboard) while keeping a non-empty persisted pool, and a high ``dsr_min``
+    deflates the WHOLE pool (``ranked == 0``) — with the ON and OFF paths agreeing
+    on every count at each threshold.
+    """
+    pytest.importorskip("polars")
+    bars = _bars()
+    k = 3
+
+    def both(dsr_min: float | None) -> tuple[SweepRunSummary, SweepRunSummary]:
+        overfit = None if dsr_min is None else OverfitGateConfig(dsr_min=dsr_min)
+        tag = "ng" if dsr_min is None else f"g{dsr_min}"
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        off_d = tmp_path / f"off_{tag}"
+        off_d.mkdir()
+        off_s = _run(off_d, "cell", bars, k, None, overfit)
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        on_d = tmp_path / f"on_{tag}"
+        on_d.mkdir()
+        on_s = _run(on_d, "cell", bars, k, None, overfit)
+        # Byte-identity holds at EVERY threshold (incl. the ungated baseline).
+        assert on_s.store_content_hash == off_s.store_content_hash
+        assert (on_d / "cell.parquet").read_bytes() == (off_d / "cell.parquet").read_bytes()
+        assert on_s.ranked == off_s.ranked
+        assert on_s.persisted == off_s.persisted
+        return on_s, off_s
+
+    no_gate, _ = both(None)
+    mid, _ = both(0.5)
+    strict, _ = both(0.95)
+
+    # The ungated pool is non-empty (anti-vacuous baseline).
+    assert no_gate.ranked > 0
+    assert no_gate.persisted > 0
+    # A mid dsr_min DEFLATES some combos: fewer rank than ungated, but not zero —
+    # a meaningful, non-empty gated leaderboard.
+    assert 0 < mid.ranked < no_gate.ranked
+    assert mid.persisted > 0
+    # A high dsr_min deflates the WHOLE pool: nothing clears the 6th gate.
+    assert strict.ranked == 0
+    assert strict.persisted == 0

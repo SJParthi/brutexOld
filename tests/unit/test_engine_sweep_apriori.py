@@ -13,12 +13,14 @@ tests pin:
 * the EMISSION order — a subsequence of the brute-force enumeration
   (lex-by-position);
 * determinism / purity, the ``root_mod`` shard union-and-disjointness, the
-  time-based breaker, the env resolvers, the ``<64``-bit guard, and the
-  ``k >= 3`` conflict-freeness that subset-prune guarantees for free.
+  deterministic pure-integer mask·bar breaker (strict ``>``), the env resolver,
+  the ``<64``-bit guard, and the ``k >= 3`` conflict-freeness that subset-prune
+  guarantees for free.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -26,15 +28,12 @@ import pytest
 from brutex.engine import sweep_apriori
 from brutex.engine.combo_mask import count_supermasks, iter_masks_k_of_bits
 from brutex.engine.sweep_apriori import (
-    CELL_BUDGET_ENV,
-    DEFAULT_CELL_BUDGET_S,
-    DEFAULT_WALK_RATE,
+    DEFAULT_MAX_MASK_BARS,
+    MAX_MASK_BARS_ENV,
     SWEEP_APRIORI_ENV,
-    WALK_RATE_ENV,
     apriori_enabled,
     generate_apriori_candidates,
-    resolve_cell_budget_s,
-    resolve_walk_rate,
+    resolve_max_mask_bars,
 )
 from brutex.engine.sweep_run import (
     SweepAprioriBudgetError,
@@ -190,11 +189,12 @@ def test_default_counter_matches_injected() -> None:
 
 def test_n_bars_defaults_to_len_bar_bits() -> None:
     bar_bits = _synthetic_bar_bits(5, n=42)
-    # A tiny budget with the default n_bars (=42) still trips → proves n_bars
-    # defaulted to len(bar_bits) (not 0, which would never trip).
+    # A tiny mask·bar cap with the default n_bars (=42) still trips → proves n_bars
+    # defaulted to len(bar_bits) (=42; count 8 × 42 = 336 > 1), not 0 (8 × 0 = 0,
+    # which would never trip).
     with pytest.raises(SweepAprioriBudgetError):
         generate_apriori_candidates(
-            bar_bits, condition_bits=_BITS, k=1, min_hits=0, cell_budget_s=1e-12, walk_rate=1.0
+            bar_bits, condition_bits=_BITS, k=1, min_hits=0, max_mask_bars=1
         )
 
 
@@ -290,8 +290,7 @@ def test_breaker_raises_named_sweepcomboerror() -> None:
             k=2,
             min_hits=0,
             n_bars=len(bar_bits),
-            cell_budget_s=1e-9,
-            walk_rate=1.0,
+            max_mask_bars=1,
             cell_label="NIFTY:1m:bull:k=2",
         )
     err = ei.value
@@ -300,23 +299,24 @@ def test_breaker_raises_named_sweepcomboerror() -> None:
     assert "NIFTY:1m:bull:k=2" in msg
     assert "k=2" in msg
     assert "1000 bars" in msg
-    assert CELL_BUDGET_ENV in msg
+    assert "mask·bar" in msg
+    assert MAX_MASK_BARS_ENV in msg
     assert SWEEP_APRIORI_ENV in msg
 
 
 def test_breaker_trips_before_materialising_giant_list(monkeypatch: pytest.MonkeyPatch) -> None:
     # A tiny stride makes the incremental in-join breaker fire early. With a
-    # generous budget the incremental check simply EXECUTES (covering the
-    # modulo branch); with a tiny budget it RAISES during accumulation.
+    # generous mask·bar cap the incremental check simply EXECUTES (covering the
+    # modulo branch); with a tiny cap it RAISES during accumulation.
     monkeypatch.setattr(sweep_apriori, "_BUDGET_CHECK_STRIDE", 4)
     bar_bits = [0b1111111111] * 20  # dense: many level-2 candidates
     bits = list(range(10))  # no conflicts among these (6..) but includes pairs; C(10,2)=45
-    # generous budget → no raise, incremental branch executed
+    # generous cap → no raise, incremental branch executed
     out = generate_apriori_candidates(
-        bar_bits, condition_bits=bits, k=2, min_hits=0, n_bars=len(bar_bits), walk_rate=1e18
+        bar_bits, condition_bits=bits, k=2, min_hits=0, n_bars=len(bar_bits), max_mask_bars=10**18
     )
     assert len(out) > 4  # crossed the stride at least once
-    # tiny budget → raises mid-accumulation
+    # tiny cap → raises mid-accumulation
     with pytest.raises(SweepAprioriBudgetError):
         generate_apriori_candidates(
             bar_bits,
@@ -324,8 +324,7 @@ def test_breaker_trips_before_materialising_giant_list(monkeypatch: pytest.Monke
             k=2,
             min_hits=0,
             n_bars=len(bar_bits),
-            cell_budget_s=1e-12,
-            walk_rate=1.0,
+            max_mask_bars=1,
         )
 
 
@@ -336,11 +335,29 @@ def test_breaker_trips_before_materialising_giant_list(monkeypatch: pytest.Monke
 
 
 class TestMutationHardening:
-    """Kill the surviving mutants on the frequency / breaker / stride boundaries.
+    """Kill EVERY surviving mutmut mutant on ``sweep_apriori.py`` (zero-survivor).
 
-    mutmut cannot run in this container (parso can't parse the repo's PEP-695
-    generics), so each pin was verified by MANUALLY applying its target mutant to
-    ``sweep_apriori.py`` and confirming the test fails, then reverting.
+    mutmut CAN run when scoped to this single file
+    (``mutmut run --paths-to-mutate brutex/engine/sweep_apriori.py --runner
+    "python3.12 -m pytest tests/unit/test_engine_sweep_apriori.py …"``) — parso
+    only parses the ``--paths-to-mutate`` file, so the repo's PEP-695 generics
+    elsewhere are irrelevant and the test-runner subprocess is plain pytest. The
+    module is wired into ``mutation.yml``'s per-module zero-survivor loop, so the
+    de-survivor round below (DEC-SWEEP-APRIORI-TUPLE-001) drove the measured
+    survivor set to ZERO: string-wrap (``"foo"``→``"XXfooXX"``) mutants on env-var
+    names / log-event names / error-message segments are killed by literal-value,
+    ``capture_logs`` event-name, and EXACT-message assertions; the numeric-default
+    constants by literal pins; the ``n_bars < 0`` boundary by an ``n_bars == 0``
+    allowed pin; the breaker's ``count * n_bars`` by a straddle case; the two
+    injected-counter ``strict=True`` zips by short-counter contract pins; the final
+    shard filter ``tpl[0] % W`` (lowest set bit) by an exact-shard-set pin. Three
+    genuinely-equivalent / uncompilable mutants were eliminated at the SOURCE
+    instead (never masked): the ``*prefix`` unpacking → tuple concatenation (its
+    ``*``→``/`` mutant is a bare SyntaxError mutmut mis-reports as survived), the
+    ``apriori_enabled`` string default removed, and the always-equal-length k==1
+    zip replaced by a direct comprehension — leaving exactly ONE justified
+    ``# pragma: no mutate`` (the ``_BUDGET_CHECK_STRIDE`` ±1, result-equivalent
+    because the post-loop ``_budget_check`` is authoritative).
     """
 
     def test_f1_singleton_frequent_at_exactly_min_hits(self) -> None:
@@ -377,21 +394,52 @@ class TestMutationHardening:
         )
         assert out == [triple]
 
-    def test_breaker_exactly_at_budget_does_not_trip(self) -> None:
-        # Pins the breaker's ``projected > budget_s`` (NOT ``>=``): count·n_bars/rate
-        # == budget_s EXACTLY (2·10/1.0 == 20.0), so the cell is ALLOWED — only a
-        # STRICTLY-over projection trips. Under a ``>=`` mutant this exactly-at-budget
-        # cell would raise SweepAprioriBudgetError.
+    def test_breaker_exactly_at_limit_does_not_trip(self) -> None:
+        # FROZEN FIXTURE (a) — EXACT BOUNDARY, strict ``>``: count * n_bars ==
+        # max_mask_bars EXACTLY (2 × 10 == 20), so the cell is ALLOWED — only a
+        # STRICTLY-over product trips. Under a ``>=`` mutant this exactly-at-limit
+        # cell would raise. Pure integer, deterministic Python↔Rust.
         out = generate_apriori_candidates(
             [(1 << 6) | (1 << 7)] * 10,
             condition_bits=[6, 7],
             k=1,
             min_hits=0,
             n_bars=10,
-            cell_budget_s=20.0,
-            walk_rate=1.0,
+            max_mask_bars=20,
         )
         assert out == [1 << 6, 1 << 7]  # returned normally, no raise
+
+    def test_breaker_one_over_limit_trips(self) -> None:
+        # FROZEN FIXTURE (a) — ONE OVER: count * n_bars == max_mask_bars + 1
+        # (2 × 10 == 20 > 19) → RAISES. Together with the exactly-at-limit fixture
+        # this pins the ``>`` vs ``>=`` boundary deterministically from both sides.
+        with pytest.raises(SweepAprioriBudgetError):
+            generate_apriori_candidates(
+                [(1 << 6) | (1 << 7)] * 10,
+                condition_bits=[6, 7],
+                k=1,
+                min_hits=0,
+                n_bars=10,
+                max_mask_bars=19,
+            )
+
+    def test_breaker_default_limit_exact_boundary(self) -> None:
+        # FROZEN FIXTURE (a) at the DEFAULT constant: with NO override, a product
+        # EXACTLY at DEFAULT_MAX_MASK_BARS does NOT trip, and DEFAULT + 1 DOES —
+        # exercising + pinning the default constant literal (count=1 over one bit ×
+        # n_bars = the default product; a mutated default flips exactly one of the
+        # two assertions).
+        one_bit = [6]
+        assert (
+            generate_apriori_candidates(
+                [0], condition_bits=one_bit, k=1, min_hits=0, n_bars=DEFAULT_MAX_MASK_BARS
+            )
+            == [1 << 6]  # 1 × DEFAULT == DEFAULT, not strictly over → allowed
+        )
+        with pytest.raises(SweepAprioriBudgetError):
+            generate_apriori_candidates(
+                [0], condition_bits=one_bit, k=1, min_hits=0, n_bars=DEFAULT_MAX_MASK_BARS + 1
+            )
 
     def test_budget_check_stride_cadence(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Pins the incremental in-join breaker cadence ``len(candidates) % STRIDE
@@ -411,6 +459,230 @@ class TestMutationHardening:
         )
         assert len(out) == 10
         assert recorded == [4, 8]
+
+    # ── literal-value pins: env-var NAMES + numeric DEFAULTS ──
+    # mutmut wraps a string constant ``"foo"`` → ``"XXfooXX"`` and bumps a number
+    # ±1; the resolver / env tests consume these constants SYMMETRICALLY (they set
+    # and read via the SAME symbol), so only a literal-value pin catches a changed
+    # constant. An operator sets ``BRUTEX_SWEEP_APRIORI`` literally, so the string
+    # value is load-bearing, not cosmetic.
+
+    def test_env_var_name_literals(self) -> None:
+        assert SWEEP_APRIORI_ENV == "BRUTEX_SWEEP_APRIORI"
+        assert MAX_MASK_BARS_ENV == "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS"
+
+    def test_default_max_mask_bars_constant(self) -> None:
+        # The default mask·bar cap literal (≈ 2 h × 1.61e8 mask·bar/s). A mutmut
+        # ``±1`` on this constant is caught here AND by
+        # ``test_breaker_default_limit_exact_boundary`` (which flips at DEFAULT ± 1).
+        assert DEFAULT_MAX_MASK_BARS == 1_159_200_000_000
+
+    def test_resolver_invalid_log_event_name(self) -> None:
+        # The structlog EVENT NAME an operator alerts on: a ``"XX…XX"`` wrap mutant
+        # renames it silently. ``capture_logs`` pins the exact emitted event.
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            resolve_max_mask_bars({MAX_MASK_BARS_ENV: "garbage"})
+        assert [entry["event"] for entry in logs] == ["sweep.apriori.max_mask_bars.invalid"]
+
+    # ── EXACT-message pins ──
+    # mutmut wraps each f-string SEGMENT ``"seg"`` → ``"XXsegXX"``; a full
+    # string-equality assertion catches ANY changed segment (the interpolated
+    # ``{…}`` fields are preserved by the wrap, so a substring assert on those
+    # would still pass — only exact equality kills the literal-text wraps).
+
+    def test_breaker_message_is_exact(self) -> None:
+        # k=1 over 8 bits → count=8; 8 × 10 = 80 > limit 79 → trips. No cell_label
+        # passed → the message carries the DEFAULT ``''`` (pinning that default too:
+        # a ``cell_label="XXXX"`` mutant would render ``'XXXX'``). Pure integers, so
+        # the exact message is stable + deterministic Python↔Rust.
+        with pytest.raises(SweepAprioriBudgetError) as ei:
+            generate_apriori_candidates(
+                [0] * 10,
+                condition_bits=list(range(8)),
+                k=1,
+                min_hits=0,
+                n_bars=10,
+                max_mask_bars=79,
+            )
+        assert str(ei.value) == (
+            "apriori cell '': k=1 would emit 8 candidate(s) over 10 bars — "
+            "8 x 10 = 80 mask·bar exceeds the per-cell limit 79 mask·bar. "
+            "Remediation: raise BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS, tighten "
+            "min_hits, reduce k, or unset BRUTEX_SWEEP_APRIORI to use the "
+            "brute-force path."
+        )
+
+    def test_unsupported_bit_message_is_exact(self) -> None:
+        with pytest.raises(SweepAprioriUnsupportedError) as ei:
+            generate_apriori_candidates([1], condition_bits=[0, 64], k=1, min_hits=0)
+        assert str(ei.value) == (
+            "generate_apriori_candidates: Apriori frontier requires <64-bit "
+            "masks (vocab bit 64 >= 64); unset BRUTEX_SWEEP_APRIORI for u128 "
+            "vocabularies."
+        )
+
+    def test_validation_error_messages_are_exact(self) -> None:
+        with pytest.raises(ValueError) as neg:
+            generate_apriori_candidates([1], condition_bits=[-1, 3], k=1, min_hits=0)
+        assert str(neg.value) == (
+            "generate_apriori_candidates: condition bit -1 is negative (out of range [0, 64))"
+        )
+        with pytest.raises(ValueError) as krange:
+            generate_apriori_candidates([1], condition_bits=[0, 1, 2], k=4, min_hits=0)
+        assert str(krange.value) == (
+            "generate_apriori_candidates: invalid k=4 for 3 unique bits (require 0 <= k <= n)"
+        )
+        with pytest.raises(ValueError) as rmod:
+            generate_apriori_candidates([1], condition_bits=_BITS, k=1, min_hits=0, root_mod=(3, 2))
+        assert str(rmod.value) == (
+            "generate_apriori_candidates: root_mod (3, 2) invalid (require W >= 1 and 0 <= w < W)"
+        )
+        with pytest.raises(ValueError) as nbars:
+            generate_apriori_candidates([1], condition_bits=_BITS, k=1, min_hits=0, n_bars=-1)
+        assert str(nbars.value) == ("generate_apriori_candidates: n_bars must be >= 0, got -1")
+        with pytest.raises(ValueError) as maxmb:
+            generate_apriori_candidates(
+                [1], condition_bits=_BITS, k=1, min_hits=0, max_mask_bars=-5
+            )
+        assert str(maxmb.value) == (
+            "generate_apriori_candidates: max_mask_bars must be > 0, got -5"
+        )
+
+    def test_n_bars_zero_is_allowed(self) -> None:
+        # Empty bar_bits → n_bars defaults to 0, which MUST be allowed (the guard is
+        # ``resolved_n_bars < 0``, NOT ``<= 0`` / ``< 1``). k=1 over [6, 7] returns
+        # both singleton masks; a ``<= 0`` / ``< 1`` mutant raises on the 0 default.
+        assert generate_apriori_candidates([], condition_bits=[6, 7], k=1, min_hits=0) == [64, 128]
+
+    def test_breaker_product_is_count_times_n_bars(self) -> None:
+        # Pins the pure-integer trip ``count * n_bars > limit`` (NOT ``count /
+        # n_bars`` / ``+`` / ``//``): count=8 (k=1 over 8 bits), n_bars=10 → 8 × 10
+        # = 80 > limit 50 TRIPS, while 8 / 10 = 0.8 (or 8 + 10 = 18, or 8 // 10 = 0)
+        # is ≤ 50 and would NOT trip. Asserting the RAISE kills the ``*``→``/`` (and
+        # ``+`` / ``//``) mutants.
+        with pytest.raises(SweepAprioriBudgetError):
+            generate_apriori_candidates(
+                [0] * 10,
+                condition_bits=list(range(8)),
+                k=1,
+                min_hits=0,
+                n_bars=10,
+                max_mask_bars=50,
+            )
+
+    def test_f1_counter_length_mismatch_is_strict(self) -> None:
+        # The F_1 frontier zip is ``strict=True``: an injected counter returning the
+        # WRONG number of counts is a caller-contract violation the strict flag
+        # catches LOUDLY. A ``strict=False`` mutant would silently TRUNCATE instead
+        # of raising — so this pin distinguishes the two.
+        def short_counter(masks: Sequence[int]) -> list[int]:
+            return [500] * (len(list(masks)) - 1)  # one count short
+
+        with pytest.raises(ValueError, match="zip"):
+            generate_apriori_candidates(
+                [0] * 10,
+                condition_bits=[6, 7],
+                k=2,
+                min_hits=0,
+                count_hits=short_counter,
+                n_bars=10,
+            )
+
+    def test_intermediate_counter_length_mismatch_is_strict(self) -> None:
+        # The INTERMEDIATE-frontier zip (the F_2 build feeding a k=3 join) is also
+        # ``strict=True``: a counter correct for the F_1 singletons but SHORT for the
+        # pair candidates trips the strict flag at the intermediate level (not F_1).
+        # A ``strict=False`` mutant would silently truncate.
+        calls: list[int] = []
+
+        def staged_counter(masks: Sequence[int]) -> list[int]:
+            m = list(masks)
+            calls.append(len(m))
+            if len(calls) == 1:
+                return [500] * len(m)  # F_1 singletons: correct length
+            return [500] * (len(m) - 1)  # intermediate pairs: one short
+
+        with pytest.raises(ValueError, match="zip"):
+            generate_apriori_candidates(
+                [0] * 10,
+                condition_bits=[6, 7, 8],
+                k=3,
+                min_hits=0,
+                count_hits=staged_counter,
+                n_bars=10,
+            )
+        assert calls[0] == 3  # F_1 zipped fine (correct length) — the trip is at F_2
+
+    def test_f1_counts_true_singleton_masks(self) -> None:
+        # The F_1 frontier must count each singleton against its TRUE mask
+        # (``1 << bit``): an INfrequent singleton (fires on < min_hits bars) is
+        # excluded from F_1, so no k=2 pair involving it is emitted. Under a
+        # ``1 >> bit`` mutant the mask collapses to 0 for every bit >= 1, and a 0
+        # mask's superset-count is the WHOLE bar window (``bar & 0 == 0`` for every
+        # bar) → the bit is wrongly deemed frequent and its pair LEAKS into the
+        # output. (This mutant is invisible to the dense-fixture parity tests, where
+        # every singleton is frequent either way — so it needs an explicit
+        # infrequent singleton.)
+        # bit 6 fires on all 12 bars; bit 7 on only 2 (< min_hits 5) → INfrequent →
+        # F_1 = {6}, and the k=2 join has a single frequent singleton → NO pair.
+        bar_bits = [1 << 6] * 10 + [(1 << 6) | (1 << 7)] * 2
+        out = generate_apriori_candidates(
+            bar_bits, condition_bits=[6, 7], k=2, min_hits=5, n_bars=len(bar_bits)
+        )
+        assert out == []
+
+    def test_shard_ownership_is_lowest_set_bit(self) -> None:
+        # Pins the final shard filter ``tpl[0] % W == w`` (the LOWEST set bit), NOT
+        # ``tpl[1]`` (the second bit): for a fixed (w=0, W=2) the owned masks are
+        # EXACTLY those whose lowest-set-bit index is even — computed INDEPENDENTLY.
+        # A ``tpl[1]`` mutant yields a different set (mask 192 = bits {6, 7} has
+        # lowest bit 6 (even → owned) but second bit 7 (odd → mis-dropped)), so the
+        # union/disjoint shard tests (which pass under ANY partition key) miss it.
+        bar_bits = _synthetic_bar_bits(11)
+        whole = generate_apriori_candidates(
+            bar_bits, condition_bits=[6, 7, 8, 9], k=2, min_hits=0, n_bars=len(bar_bits)
+        )
+        shard0 = generate_apriori_candidates(
+            bar_bits,
+            condition_bits=[6, 7, 8, 9],
+            k=2,
+            min_hits=0,
+            n_bars=len(bar_bits),
+            root_mod=(0, 2),
+        )
+        expected = [m for m in whole if ((m & -m).bit_length() - 1) % 2 == 0]
+        assert shard0 == expected
+        assert 192 in expected  # bits {6, 7}: lowest bit 6 even → owned (tpl[1]=7 would drop)
+
+    def test_breaker_names_level_low_and_high(self) -> None:
+        # FROZEN FIXTURE (b) — SEAM COVERAGE at a LOW and a HIGH level: a k=2 tuple
+        # and a k=5 tuple both trip the breaker, and the message NAMES the right
+        # level (``k=2`` / ``k=5``). Pins the per-level ``_budget_check`` seam at
+        # both ends of the frontier build (a low-k final-level trip and a high-k
+        # multi-level build), and that ``_raise_budget`` echoes the target ``k``.
+        with pytest.raises(SweepAprioriBudgetError) as low:
+            generate_apriori_candidates(
+                [(1 << 6) | (1 << 7)] * 10,
+                condition_bits=[6, 7],
+                k=2,
+                min_hits=0,
+                n_bars=10,
+                max_mask_bars=1,
+            )
+        assert "k=2" in str(low.value)
+
+        with pytest.raises(SweepAprioriBudgetError) as high:
+            generate_apriori_candidates(
+                [(1 << 6) | (1 << 7) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11)] * 10,
+                condition_bits=[6, 7, 8, 9, 10, 11],
+                k=5,
+                min_hits=0,
+                n_bars=10,
+                max_mask_bars=1,
+            )
+        assert "k=5" in str(high.value)
 
 
 # ────────────────────────── validation guards ──────────────────────────
@@ -453,16 +725,12 @@ def test_rejects_negative_n_bars() -> None:
         generate_apriori_candidates([1], condition_bits=_BITS, k=1, min_hits=0, n_bars=-1)
 
 
-@pytest.mark.parametrize("bad", [0.0, -1.0, float("inf"), float("nan")])
-def test_rejects_non_positive_budget(bad: float) -> None:
-    with pytest.raises(ValueError, match="cell_budget_s"):
-        generate_apriori_candidates([1], condition_bits=_BITS, k=1, min_hits=0, cell_budget_s=bad)
-
-
-@pytest.mark.parametrize("bad", [0.0, -1.0, float("inf"), float("nan")])
-def test_rejects_non_positive_walk_rate(bad: float) -> None:
-    with pytest.raises(ValueError, match="walk_rate"):
-        generate_apriori_candidates([1], condition_bits=_BITS, k=1, min_hits=0, walk_rate=bad)
+@pytest.mark.parametrize("bad", [0, -1, -1_000_000])
+def test_rejects_non_positive_max_mask_bars(bad: int) -> None:
+    # ``max_mask_bars`` is a positive INTEGER; ``<= 0`` is a caller-contract
+    # violation (no float / inf / nan path any more — pure integer).
+    with pytest.raises(ValueError, match="max_mask_bars"):
+        generate_apriori_candidates([1], condition_bits=_BITS, k=1, min_hits=0, max_mask_bars=bad)
 
 
 # ────────────────────────── env flag + resolvers ──────────────────────────
@@ -490,29 +758,23 @@ def test_apriori_enabled(monkeypatch: pytest.MonkeyPatch, raw: str | None, expec
     assert apriori_enabled() is expected
 
 
-def test_resolve_cell_budget_s_default_and_valid() -> None:
-    assert resolve_cell_budget_s({}) == DEFAULT_CELL_BUDGET_S
-    assert resolve_cell_budget_s({CELL_BUDGET_ENV: "  "}) == DEFAULT_CELL_BUDGET_S
-    assert resolve_cell_budget_s({CELL_BUDGET_ENV: "3600"}) == 3600.0
+def test_resolve_max_mask_bars_default_and_valid() -> None:
+    assert resolve_max_mask_bars({}) == DEFAULT_MAX_MASK_BARS
+    assert resolve_max_mask_bars({MAX_MASK_BARS_ENV: "  "}) == DEFAULT_MAX_MASK_BARS
+    assert resolve_max_mask_bars({MAX_MASK_BARS_ENV: "3600"}) == 3600
 
 
-def test_resolve_walk_rate_default_and_valid() -> None:
-    assert resolve_walk_rate({}) == DEFAULT_WALK_RATE
-    assert resolve_walk_rate({WALK_RATE_ENV: "2.5e8"}) == 2.5e8
-
-
-@pytest.mark.parametrize("bad", ["garbage", "nan", "inf", "-1", "0"])
+@pytest.mark.parametrize("bad", ["garbage", "3.5", "2.5e8", "nan", "inf", "-1", "0"])
 def test_resolve_invalid_falls_back_loudly(bad: str) -> None:
-    # Invalid / non-positive → the documented default, never a raise.
-    assert resolve_cell_budget_s({CELL_BUDGET_ENV: bad}) == DEFAULT_CELL_BUDGET_S
-    assert resolve_walk_rate({WALK_RATE_ENV: bad}) == DEFAULT_WALK_RATE
+    # Invalid (non-integer OR non-positive) → the documented default, never a raise.
+    # ``int("3.5")`` / ``int("2.5e8")`` raise → the non-integer fallback; ``"-1"`` /
+    # ``"0"`` are non-positive.
+    assert resolve_max_mask_bars({MAX_MASK_BARS_ENV: bad}) == DEFAULT_MAX_MASK_BARS
 
 
-def test_resolvers_read_os_environ_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(CELL_BUDGET_ENV, "1234.5")
-    monkeypatch.setenv(WALK_RATE_ENV, "9.9e7")
-    assert resolve_cell_budget_s() == 1234.5
-    assert resolve_walk_rate() == 9.9e7
+def test_resolver_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(MAX_MASK_BARS_ENV, "1234")
+    assert resolve_max_mask_bars() == 1234
 
 
 # ────────────────────────── internal helpers ──────────────────────────
@@ -669,11 +931,10 @@ def test_driver_reports_breaker_trip_as_tuple_failed(
         code_commit_sha="cc",
         min_hits=0,
     )
-    # Flag ON + a microscopic budget / unit walk-rate → any non-empty candidate
-    # set trips the breaker inside generate_apriori_candidates.
+    # Flag ON + a microscopic mask·bar cap → any non-empty candidate set trips the
+    # breaker inside generate_apriori_candidates.
     monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
-    monkeypatch.setenv(CELL_BUDGET_ENV, "1e-9")
-    monkeypatch.setenv(WALK_RATE_ENV, "1.0")
+    monkeypatch.setenv(MAX_MASK_BARS_ENV, "1")
 
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter.open(tmp_path / "grid.jsonl") as audit:

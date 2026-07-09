@@ -2,15 +2,15 @@
 
 DEC-SWEEP-APRIORI-TUPLE-001. The generator never holds the bar window — it calls
 the injected ``count_hits`` — so its allocation peak is driven by the FRONTIER
-size (bounded by the wall-clock breaker), NOT by the bar count. This bench pins
-that: for a FIXED cell (fixed ``condition_bits`` / ``k`` / ``min_hits``, hence a
-fixed frontier), the tracemalloc PEAK of
+size (bounded by the deterministic mask·bar breaker), NOT by the bar count. This
+bench pins that: for a FIXED cell (fixed ``condition_bits`` / ``k`` / ``min_hits``,
+hence a fixed frontier), the tracemalloc PEAK of
 :func:`brutex.engine.sweep_apriori.generate_apriori_candidates` must be FLAT as
 the bar count grows 100× (``1_000`` → ``100_000``).
 
 HONEST envelope (Golden Rule #10): a tracemalloc (Python-allocator) PEAK bound,
-NOT an RSS/absolute-memory claim; the modeled ``walk_rate`` / budget sizes are
-UNVERIFIED-on-M4 placeholders. The bar list itself is allocated by the CALLER
+NOT an RSS/absolute-memory claim; the modeled ``max_mask_bars`` limit is an
+UNVERIFIED-on-M4 placeholder. The bar list itself is allocated by the CALLER
 OUTSIDE the traced region (its ``O(bars)`` cost is not the generator's), and the
 injected counter returns a constant so the frontier is identical across arms.
 
@@ -61,7 +61,7 @@ def _peak_bytes(n_bars: int, counter: _Counter) -> int:
             min_hits=0,
             count_hits=counter,
             n_bars=n_bars,
-            walk_rate=1e18,  # generous → the breaker never trips
+            max_mask_bars=10**18,  # generous → the breaker never trips
         )
         peak = tracemalloc.get_traced_memory()[1]
     finally:
@@ -110,7 +110,7 @@ class TestAprioriPeakRamIsFlatInBarCount:
                     min_hits=0,
                     count_hits=_o_bars_counter(bar_bits),
                     n_bars=n,
-                    walk_rate=1e18,
+                    max_mask_bars=10**18,
                 )
                 return tracemalloc.get_traced_memory()[1]
             finally:
