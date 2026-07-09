@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from brutex.engine.resilience_streaks import resilience_payload
 
 _STATIC = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static"
 _ONECLICK_JS = _STATIC / "bx-oneclick.js"
@@ -207,6 +208,55 @@ class TestResilienceCellsDegrades:
             "This strategy had NO losing streaks in the backtest — treat any live "
             "cold run as unmapped territory and size down."
         )
+
+
+class TestResilienceRankOneCells:
+    """bxResilienceRankOneCells — the /operator rank-1 hooks, stats_live-gated
+    (defense-in-depth mirror of the panel; never a fabricated 0)."""
+
+    def test_live_row_renders_pct_and_days(self) -> None:
+        out = _node_call("O.bxResilienceRankOneCells(ARGS[0])", json.dumps(_LIVE_ROW))
+        assert out["worstStreakPct"] == "-12.5%"
+        assert out["uwDays"] == "30"
+
+    def test_null_row_gates_both_hooks_to_dash(self) -> None:
+        out = _node_call("O.bxResilienceRankOneCells(ARGS[0])", json.dumps(_NULL_ROW))
+        assert out["worstStreakPct"] == "—"
+        assert out["uwDays"] == "—"
+
+    def test_real_absent_payload_gates_both_hooks_to_dash(self) -> None:
+        """FIX B (mutation-killer): the PRODUCTION ``_absent_payload()`` (the
+        parity-failed wire shape) drives the /operator rank-1 hooks to "—" — a
+        None→0 drift on ``longest_underwater_days`` would render "0" here (the
+        ungated ``metricText`` path pre-fix) and FAIL.
+        """
+        row = {"metrics": {"max_consecutive_losses": 0}, "resilience": resilience_payload(None)}
+        out = _node_call("O.bxResilienceRankOneCells(ARGS[0])", json.dumps(row))
+        assert out["worstStreakPct"] == "—"
+        assert out["uwDays"] == "—"
+
+    def test_missing_resilience_key_gates_to_dash(self) -> None:
+        out = _node_call("O.bxResilienceRankOneCells(ARGS[0])", json.dumps({"metrics": {}}))
+        assert out["worstStreakPct"] == "—"
+        assert out["uwDays"] == "—"
+
+    def test_stats_live_gate_ignores_populated_fields_when_not_live(self) -> None:
+        """FIX B (gate mutation-killer): with ``stats_live !== true`` the hooks
+        must read "—" EVEN IF the (inconsistent) block carries numbers — proves
+        the gate, not per-field nullness, does the work. Dropping the gate makes
+        this render the fabricated numbers and FAIL.
+        """
+        row = {
+            "metrics": {"max_consecutive_losses": 3},
+            "resilience": {
+                "stats_live": False,
+                "worst_streak_pnl_pct": -5.0,
+                "longest_underwater_days": 12,
+            },
+        }
+        out = _node_call("O.bxResilienceRankOneCells(ARGS[0])", json.dumps(row))
+        assert out["worstStreakPct"] == "—"
+        assert out["uwDays"] == "—"
 
 
 class TestResilienceSelfLocate:

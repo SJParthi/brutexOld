@@ -350,6 +350,30 @@ function bxResilienceSelfLocate(n, row) {
 }
 
 /**
+ * The /operator rank-1 resilience hook strings (pure; setOc-rendered). Gated
+ * on stats_live — the defense-in-depth MIRROR of the /strategy panel's gate,
+ * so a NULL / absent / parity-failed record yields "—" for EVERY field and can
+ * never render a fabricated 0 (never trusts the wire payload's per-field null
+ * discipline alone). worst_streak_pnl_pct / longest_underwater_days come from
+ * row.resilience.* (the sibling block).
+ *
+ * @param {object} row - the top100 rank-1 row.
+ * @returns {{worstStreakPct: string, uwDays: string}} the cell strings.
+ */
+function bxResilienceRankOneCells(row) {
+  var r = row && row.resilience && typeof row.resilience === "object" ? row.resilience : null;
+  if (!r || r.stats_live !== true) {
+    return { worstStreakPct: "—", uwDays: "—" };
+  }
+  var pct = r.worst_streak_pnl_pct;
+  var days = r.longest_underwater_days;
+  return {
+    worstStreakPct: pct === null || pct === undefined ? "—" : String(pct) + "%",
+    uwDays: days === null || days === undefined ? "—" : String(days)
+  };
+}
+
+/**
  * Funnel write-precedence law (C-M2, pure): the live source may always
  * write; the manifest fill applies ONLY while NO sweep is running.
  *
@@ -707,15 +731,12 @@ function bxFunnelProvenance(source, runId) {
     setOc("r1_cpcv", metricText(m.cpcv_pass_pct));
     setOc("r1_trades", metricText(m.trades));
     setOc("r1_vix_band", vixBandText(row.vix_band));
-    // Losing-streak resilience rank-1 hooks (the sibling block; absent → "—").
-    var r = row.resilience && typeof row.resilience === "object" ? row.resilience : {};
-    setOc(
-      "r1_worst_streak_pct",
-      r.worst_streak_pnl_pct === null || r.worst_streak_pnl_pct === undefined
-        ? "—"
-        : String(r.worst_streak_pnl_pct) + "%"
-    );
-    setOc("r1_uw_days", metricText(r.longest_underwater_days));
+    // Losing-streak resilience rank-1 hooks (the sibling block; the pure
+    // builder is stats_live-gated, so a NULL/parity-failed record → "—",
+    // never a fabricated 0 — defense-in-depth mirror of the /strategy panel).
+    var rc = bxResilienceRankOneCells(row);
+    setOc("r1_worst_streak_pct", rc.worstStreakPct);
+    setOc("r1_uw_days", rc.uwDays);
   }
 
   /* Build the #combosBody rows from the top-100 artifact. Cells carry the
@@ -1303,6 +1324,7 @@ function bxFunnelProvenance(source, runId) {
     vixBandText: bxVixBandText,
     vixBandCellText: bxVixBandCellText,
     resilienceCells: bxResilienceCells,
+    resilienceRankOneCells: bxResilienceRankOneCells,
     resilienceSelfLocate: bxResilienceSelfLocate,
     resilienceGuide: bxResilienceGuide,
     istDateTime: bxIstDateTime,
@@ -1342,6 +1364,7 @@ if (typeof module !== "undefined" && module.exports) {
     bxVixBandText: bxVixBandText,
     bxVixBandCellText: bxVixBandCellText,
     bxResilienceCells: bxResilienceCells,
+    bxResilienceRankOneCells: bxResilienceRankOneCells,
     bxResilienceSelfLocate: bxResilienceSelfLocate,
     bxResilienceGuide: bxResilienceGuide,
     bxIstDateTime: bxIstDateTime
