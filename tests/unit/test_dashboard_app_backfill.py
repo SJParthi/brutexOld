@@ -359,7 +359,13 @@ def test_universe_summary_counts_wired_store(client: TestClient) -> None:
     """/api/v1/universe/summary tallies the wired store's single admitted index."""
     resp = client.get("/api/v1/universe/summary")
     assert resp.status_code == 200
-    assert resp.json() == {"index_count": 1, "stock_count": 0, "total": 1}
+    assert resp.json() == {
+        "index_count": 1,
+        "stock_count": 0,
+        "total": 1,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
 
 
 def test_universe_instruments_invalid_kind_400(client: TestClient) -> None:

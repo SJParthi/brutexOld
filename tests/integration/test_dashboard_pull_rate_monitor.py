@@ -211,6 +211,48 @@ class TestPullRateRoute:
         assert uni.status_code == 200
         assert "/static/bx-rate-monitor.js" in uni.text
 
+    def test_widget_req_sec_evidence_labelled_issued_admission(self) -> None:
+        """DEC-LABEL-TRUTH-001: the req/sec '1s' evidence is labelled ISSUED.
+
+        ``req_per_sec_count`` is the controller's trailing-1s ISSUE (admission)
+        count; the req/sec MAIN value is the meter-MEASURED completed rate
+        (#1022 ``meter_present`` split) — two different populations that
+        legitimately diverge under failures / in-flight calls. The widget's
+        caption + evidence blurb + header comment now say so, and the false
+        "the rates above ARE these trailing-window issue counts — req/sec ="
+        equation is gone. Words only — no field / payload / verdict change.
+
+        HONEST envelope (Golden Rule #10, the #1529/#1530 precedent): substring
+        PRESENCE pins on the served JS, not execution (no headless JS runner).
+        FAILS BEFORE: the issued-count wording was absent and the false
+        equation present.
+        """
+        state = DashboardState()
+        with _client(state) as c:  # type: ignore[attr-defined]
+            js = c.get("/static/bx-rate-monitor.js")
+        assert js.status_code == 200
+        # New caption: the issued/admission labelling beside the 1s count.
+        assert "issued (admission)" in js.text
+        # New blurb: only req/min//10min//hour are claimed AS their issue counts;
+        # req/sec 'achieved' is named a DIFFERENT (meter-measured) population.
+        assert (
+            "req/min, req/10min and req/hour ARE these trailing-window ISSUE counts" in js.text
+        )
+        assert "a " + "different population" in js.text
+        # Header comment rescope: req/sec is no longer claimed to BE the 1s count.
+        assert "ISSUED (admission) count" in js.text
+        # The old false-equation class of claim is ABSENT (fails-before: present).
+        assert "the rates above ARE these trailing-window issue counts" not in js.text
+        assert "req/sec = count in the" not in js.text
+        assert "literally the trailing-1s count" not in js.text
+        # Backend docstring reconciled the same way (words only — the payload
+        # field + the #1022 meter_present split are untouched).
+        from brutex.dashboard.pull_rate_view import PullRateView
+
+        doc = PullRateView.__doc__ or ""
+        assert "NOT the completed-rate evidence" in doc
+        assert "rps == this count over 1 s" not in doc
+
     def test_widget_serves_staleness_and_backoff(self) -> None:
         """DEC-PULL-UI-STALENESS-001: the SERVED widget carries the client staleness
         readout + the self-recovering backoff poll, and the SERVED /universe page

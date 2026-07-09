@@ -228,13 +228,19 @@ class UniverseSnapshotCache:
 
         On a hit the memoised dict is returned directly; on a miss the KPI counts
         are computed via :func:`~brutex.dashboard.universe_query.universe_summary`
-        over the snapshot's candidates + eligible set and memoised.
+        over the snapshot's candidates + eligible set and memoised. The snapshot's
+        already-read ``reference`` id set is threaded so the payload carries the
+        ADDITIVE ``reference_stock_count`` / ``stock_count_total`` keys the Stocks
+        badge splits on (DEC-LABEL-TRUTH-001) — no extra store query, and every
+        legacy key stays byte-identical.
         """
         snap = self._current(store)
         with self._lock:
             if snap.summary is not None:
                 return snap.summary
-        value = universe_summary(snap.candidates, fno_eligible=snap.eligible)
+        value = universe_summary(
+            snap.candidates, fno_eligible=snap.eligible, reference_only_ids=snap.reference
+        )
         with self._lock:
             if snap.summary is None:
                 snap.summary = value

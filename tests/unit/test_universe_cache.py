@@ -112,7 +112,13 @@ def test_empty_store_is_cached_at_stable_token(store: InstrumentStore) -> None:
     """An empty universe keys at ``(0, "")`` and is cached + served."""
     cache = UniverseSnapshotCache()
     assert cache._revision(store) == (0, "")
-    assert cache.summary(store) == {"index_count": 0, "stock_count": 0, "total": 0}
+    assert cache.summary(store) == {
+        "index_count": 0,
+        "stock_count": 0,
+        "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
     assert cache.instruments(store, kind=None) == []
     assert cache.instruments(store, kind="index") == []
     assert cache.instruments(store, kind="stock") == []
@@ -127,8 +133,48 @@ def test_summary_hit_returns_memoised_object(store: InstrumentStore) -> None:
     _seed(store, [_nifty()], run_id="r1", day=date(2024, 1, 2))
     cache = UniverseSnapshotCache()
     first = cache.summary(store)
-    assert first == {"index_count": 1, "stock_count": 0, "total": 1}
+    assert first == {
+        "index_count": 1,
+        "stock_count": 0,
+        "total": 1,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
     assert cache.summary(store) is first  # same object → served from the memo.
+
+
+def test_summary_threads_reference_ids_for_stock_split(store: InstrumentStore) -> None:
+    """DEC-LABEL-TRUTH-001: the snapshot's reference ids flow into the summary.
+
+    A REAL lean store with one F&O equity + one REFERENCE_ONLY constituent must
+    serve the additive ``reference_stock_count`` / ``stock_count_total`` split
+    the Stocks badge renders — with every legacy key byte-identical (on the
+    lean store the reference row is eligible-by-storage, so ``stock_count``
+    already counts it; the id-membership split is what names the subset).
+
+    FAILS BEFORE: the cache computed ``universe_summary`` WITHOUT the
+    snapshot's ``reference`` set → ``reference_stock_count`` was absent (and a
+    naive classify-diff would read 0 here even after adding the keys).
+    """
+    store.upsert_many(
+        [_nifty(), _equity(100), _equity(200)],
+        snapshot_date=date(2024, 1, 2),
+        run_id="r1",
+        csv_source_sha256="r1".ljust(64, "0"),
+        reference_only_of=lambda inst: inst.security_id == 200,
+    )
+    cache = UniverseSnapshotCache()
+    assert cache.summary(store) == {
+        "index_count": 1,
+        "stock_count": 2,  # lean-store legacy value — reference row eligible-by-storage
+        "total": 3,
+        "reference_stock_count": 1,
+        "stock_count_total": 2,
+    }
+    # The badge's population equals the Stocks tab's population (the label truth).
+    assert cache.summary(store)["stock_count_total"] == len(
+        cache.instruments(store, kind="stock")
+    )
 
 
 def test_instruments_per_kind_cached_independently(store: InstrumentStore) -> None:
@@ -168,12 +214,24 @@ def test_master_change_invalidates_and_rebuilds(store: InstrumentStore) -> None:
     cache = UniverseSnapshotCache()
     first = cache.summary(store)
     first_index = cache.instruments(store, kind="index")
-    assert first == {"index_count": 1, "stock_count": 0, "total": 1}
+    assert first == {
+        "index_count": 1,
+        "stock_count": 0,
+        "total": 1,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
 
     # A new snapshot day adds a stock → the (count, max fetched_at) token moves.
     _seed(store, [_nifty(), _equity(200)], run_id="r2", day=date(2024, 1, 3))
     second = cache.summary(store)
-    assert second == {"index_count": 1, "stock_count": 1, "total": 2}
+    assert second == {
+        "index_count": 1,
+        "stock_count": 1,
+        "total": 2,
+        "reference_stock_count": 0,
+        "stock_count_total": 1,
+    }
     assert second is not first  # rebuilt, not the stale memo.
     second_index = cache.instruments(store, kind="index")
     assert second_index is not first_index  # the per-kind memo was dropped too.
