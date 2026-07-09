@@ -293,10 +293,20 @@ def test_coverage_options_empty_when_no_lake_root(nolake_client: TestClient) -> 
 
 
 def test_preopen_symbols_empty_when_no_lake_root(nolake_client: TestClient) -> None:
-    """/api/v1/reports/preopen/symbols returns no symbols when no lake root is wired."""
+    """/api/v1/reports/preopen/symbols returns no symbols when no lake root is wired.
+
+    The payload keeps the SAME additive freshness-key shape as the real path
+    (DEC-STALENESS-CACHE-TRUTH-001 — a store without a filesystem lake has
+    trivially never observed a prebuild).
+    """
     resp = nolake_client.get("/api/v1/reports/preopen/symbols")
     assert resp.status_code == 200
-    assert resp.json() == {"symbols": []}
+    assert resp.json() == {
+        "symbols": [],
+        "basis": "day",
+        "basis_derived": True,
+        "derived_last_built": None,
+    }
 
 
 def test_db_candles_400_when_no_lake_root(nolake_client: TestClient) -> None:

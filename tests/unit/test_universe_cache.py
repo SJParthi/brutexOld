@@ -224,6 +224,68 @@ def test_public_master_revision_is_the_shared_token_source(store: InstrumentStor
     assert UniverseSnapshotCache._revision(store) == second
 
 
+# ── coverage_revision — the master_revision twin over coverage_ledger ───────────
+# (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1641)
+
+
+def _cov_record(underlying: str, year: int, *, fetched_at_iso: str) -> Any:
+    """One coverage_ledger cell with an explicit ``last_fetched_at``."""
+    from datetime import datetime
+
+    from brutex.data.coverage_ledger import CoverageRecord, classify_cell
+
+    return CoverageRecord(
+        exch_id="NSE",
+        underlying_symbol=underlying,
+        year=year,
+        expiries_pulled=2,
+        contracts_pulled=20,
+        status=classify_cell(2, 20, None),
+        last_run_id="run-1",
+        last_fetched_at=datetime.fromisoformat(fetched_at_iso),
+    )
+
+
+def test_coverage_revision_empty_store_is_stable_zero_token(store: InstrumentStore) -> None:
+    """An empty coverage_ledger keys at the stable ``(0, "")`` — and stays there."""
+    assert uc.coverage_revision(store) == (0, "")
+    # Unchanged table → byte-identical token (no thrash — the key is stable).
+    assert uc.coverage_revision(store) == (0, "")
+
+
+def test_coverage_revision_moves_on_upsert_and_on_newer_refetch(store: InstrumentStore) -> None:
+    """Every ``upsert_coverage`` write moves the token; an unchanged table does not.
+
+    The freshness signal the ``_nav_latency_key`` 4th component folds in
+    (DEC-STALENESS-CACHE-TRUTH-001): a NEW cell moves the count, an idempotent
+    re-upsert of the SAME cell with a newer ``last_fetched_at`` moves the MAX —
+    either way the composite key changes and the nav-latency caches recompute.
+    """
+    store.upsert_coverage(_cov_record("RELIANCE", 2024, fetched_at_iso="2026-05-30T09:15:00+00:00"))
+    first = uc.coverage_revision(store)
+    assert first[0] == 1 and first[1] != ""
+    # No write → the token is byte-identical (stable key, no cache thrash).
+    assert uc.coverage_revision(store) == first
+    # An idempotent re-upsert of the SAME cell with a newer stamp moves the MAX.
+    store.upsert_coverage(_cov_record("RELIANCE", 2024, fetched_at_iso="2026-05-30T10:15:00+00:00"))
+    second = uc.coverage_revision(store)
+    assert second[0] == 1
+    assert second != first
+    # A new cell moves the count.
+    store.upsert_coverage(_cov_record("TCS", 2024, fetched_at_iso="2026-05-30T10:15:00+00:00"))
+    third = uc.coverage_revision(store)
+    assert third[0] == 2
+    assert third != second
+
+
+def test_coverage_revision_defensive_none_row_is_zero_token() -> None:
+    """The shared ``_revision_token`` paranoid ``None``-row guard (both probes)."""
+    fake = SimpleNamespace(
+        connection=SimpleNamespace(execute=lambda _sql: SimpleNamespace(fetchone=lambda: None))
+    )
+    assert uc.coverage_revision(fake) == (0, "")
+
+
 # ── concurrent-install re-check branches (deterministic, no threads) ────────────
 
 

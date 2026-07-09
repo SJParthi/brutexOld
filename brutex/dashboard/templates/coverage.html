@@ -296,10 +296,15 @@ async function pollSpot() {
     const txt = await r.text();
     if (txt !== lastPayload.spot) {
       lastPayload.spot = txt;
-      const h = JSON.parse(txt).headline || {};
+      const body = JSON.parse(txt);
+      const h = body.headline || {};
       cSpot.classList.remove("err");
       setKpi(spotdsEl, num(h.datasets));
-      setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars");
+      /* Floor-stale suffix (DEC-STALENESS-CACHE-TRUTH-001): the payload's own
+         duty_degraded honesty field (SummaryCache.stamp_freshness) — a
+         pull-held stale snapshot is marked, never silently served as live. */
+      setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars"
+        + (body.duty_degraded === true ? " · stale" : ""));
     }
     return true;
   } catch (e) {

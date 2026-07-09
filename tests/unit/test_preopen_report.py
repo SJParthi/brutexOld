@@ -755,19 +755,21 @@ def test_build_minute_basis_no_minute_partition_is_empty(tmp_path: Path) -> None
 
 
 def test_minute_prev_close_contiguous_branches() -> None:
-    # The pure guard: PREV. CLOSE is the IMMEDIATELY-preceding 1-day session's
-    # last 1-minute close, valid ONLY when that session has minute data.
+    # The pure guard (DEC-STALENESS-CACHE-TRUTH-001 shape — checked calendar
+    # ALONE, no 1-day intermediary): PREV. CLOSE is the calendar's
+    # IMMEDIATELY-preceding NSE session's last 1-minute close, served ONLY when
+    # that exact session has minute data.
     d1, d2, d3 = date(2026, 6, 3), date(2026, 6, 4), date(2026, 6, 5)
-    trading_dates = [d1, d2, d3]
     minute_last = {d1: Decimal("630")}
-    # valid — the prior session (d1) has minute data → its last close.
-    assert _minute_prev_close_contiguous(minute_last, trading_dates, d2) == Decimal("630")
+    # valid — the calendar's prior session (d1) has minute data → its last close.
+    assert _minute_prev_close_contiguous(minute_last, d2) == Decimal("630")
     # missing — the prior session (d2) has NO minute data → None (skip, no fake anchor).
-    assert _minute_prev_close_contiguous(minute_last, trading_dates, d3) is None
-    # first session — no prior 1-day date (idx == 0) → None.
-    assert _minute_prev_close_contiguous(minute_last, trading_dates, d1) is None
+    assert _minute_prev_close_contiguous(minute_last, d3) is None
+    # first known session — the calendar's prior session (2026-06-02) has no
+    # minute data either → None (the old idx==0 refusal, now data-driven).
+    assert _minute_prev_close_contiguous(minute_last, d1) is None
     # zero prior close → None (never a /0 %CHNG).
-    assert _minute_prev_close_contiguous({d2: Decimal("0")}, [d2, d3], d3) is None
+    assert _minute_prev_close_contiguous({d2: Decimal("0")}, d3) is None
 
 
 def test_build_minute_basis_skips_row_when_prior_window_missing(tmp_path: Path) -> None:
@@ -869,15 +871,14 @@ def test_build_minute_basis_contiguous_uses_prior_session(tmp_path: Path) -> Non
 
 def test_minute_prev_close_contiguous_bridges_hole_before_fix_after_skips() -> None:
     # Real NSE sessions Wed/Thu/Fri (2024-07-03/04/05) are all trading days. The
-    # symbol's series is missing Thu 07-04 from BOTH partitions (a lake hole), so
-    # for Fri 07-05 the latest prior 1-day date is Wed 07-03 — NOT the calendar's
-    # true prior session Thu 07-04. OLD code: `trading_dates[idx-1]` == Wed → it
-    # anchored on Wed's stale close (a fake %CHNG bridging the missing Thu). NEW
-    # code: the calendar names Thu, Wed != Thu → None (skip).
+    # symbol's 1-minute series is missing Thu 07-04 (a lake hole), so for Fri
+    # 07-05 the calendar names Thu as the true prior session and `minute_last`
+    # has no entry for it → None (skip). The PRE-#1620 code anchored on Wed's
+    # stale close (a fake %CHNG bridging the missing Thu); the intent is
+    # preserved under the DEC-STALENESS-CACHE-TRUTH-001 calendar-alone rule.
     wed, fri = date(2024, 7, 3), date(2024, 7, 5)
-    trading_dates = [wed, fri]  # Thu 07-04 absent from the symbol's own series
     minute_last = {wed: Decimal("630")}
-    assert _minute_prev_close_contiguous(minute_last, trading_dates, fri) is None
+    assert _minute_prev_close_contiguous(minute_last, fri) is None
 
 
 def test_minute_prev_close_contiguous_holiday_gap_still_resolves() -> None:
@@ -886,9 +887,20 @@ def test_minute_prev_close_contiguous_holiday_gap_still_resolves() -> None:
     # Wed 08-14. A series holding Wed 08-14 + Fri 08-16 is CONTIGUOUS (the holiday
     # is not a hole), so the Fri row must resolve on Wed's close, not be skipped.
     wed, fri = date(2024, 8, 14), date(2024, 8, 16)
-    trading_dates = [wed, fri]
     minute_last = {wed: Decimal("500.25")}
-    assert _minute_prev_close_contiguous(minute_last, trading_dates, fri) == Decimal("500.25")
+    assert _minute_prev_close_contiguous(minute_last, fri) == Decimal("500.25")
+
+
+def test_minute_prev_close_contiguous_serves_when_1day_series_disagrees() -> None:
+    # The over-refusal upgrade (DEC-STALENESS-CACHE-TRUTH-001, the investigator's
+    # captured outcome-(b)): the 1-day series is NO LONGER consulted — a
+    # possibly-stale/holey 1-day series cannot veto an anchor whose correct value
+    # exists in the 1-minute data at the checked calendar's exact prior session.
+    # (Under the #1620 shape a trading_dates list missing 2024-01-11 refused this
+    # anchor even though minute_last[2024-01-11] existed.)
+    thu, fri = date(2024, 1, 11), date(2024, 1, 12)
+    minute_last = {thu: Decimal("125")}
+    assert _minute_prev_close_contiguous(minute_last, fri) == Decimal("125")
 
 
 def test_minute_prev_close_contiguous_coverage_floor_abstains() -> None:
@@ -896,10 +908,9 @@ def test_minute_prev_close_contiguous_coverage_floor_abstains() -> None:
     # `_previous_trading_day` LOUD-abstains (None), so the anchor is honestly
     # ABSENT (never a guessed session). 2020-01-01 walks into out-of-coverage 2019.
     floor_edge, prior = date(2020, 1, 1), date(2019, 12, 31)
-    trading_dates = [prior, floor_edge]
     minute_last = {prior: Decimal("100")}
     with capture_logs() as logs:
-        assert _minute_prev_close_contiguous(minute_last, trading_dates, floor_edge) is None
+        assert _minute_prev_close_contiguous(minute_last, floor_edge) is None
     assert any(e["event"] == "calendar.coverage_exhausted" for e in logs)
 
 
@@ -981,6 +992,115 @@ def test_build_minute_basis_holiday_gap_emits_row(tmp_path: Path) -> None:
     assert [r.day for r in rows] == [date(2024, 8, 16)]
     assert rows[0].prev_close == Decimal("201")  # Wed's last 1-minute close, holiday stepped over
     assert rows[0].iep == Decimal("210")
+
+
+# ── DEC-STALENESS-CACHE-TRUTH-001 — minute basis anchored on the checked calendar
+# ALONE (the 1-day intermediary + the previous-AVAILABLE fallback are REMOVED).
+# Fixture values = the investigator's executed repro (real NSE sessions
+# 2024-01-08…12; stale close 105 @ Wed 01-10, true prior close 125 @ Thu 01-11,
+# IEP 130 @ Fri 01-12 — the 23.81%-vs-4.00% pair).
+
+
+def test_build_minute_basis_serves_true_prior_close_despite_1day_hole(tmp_path: Path) -> None:
+    # The finder's shape (fails BEFORE this change): the 1-day series is missing
+    # the true prior session Thu 2024-01-11, but the 1-minute data for it is
+    # PRESENT. The #1620 shape required the 1-day series to CONFIRM the
+    # calendar's session, so it SKIPPED the Fri row even though the correct
+    # anchor (125) existed — an over-refusal. Now the checked calendar + the
+    # 1-minute data alone decide: the row SERVES the TRUE prior close 125 →
+    # %CHNG = (130 − 125) / 125 × 100 = 4.00 (never the stale-105-anchored
+    # 23.81%). Real data on the real calendar date — strictly better than
+    # absence, and never a fabricated value (Golden Rule #1).
+    _write(
+        tmp_path,
+        "FINDER",
+        "1day",
+        [
+            _bar(datetime(2024, 1, 10, 3, 45, tzinfo=UTC), open_="104", close="105"),
+            # Thu 2024-01-11 daily bar MISSING (the 1-day hole).
+            _bar(datetime(2024, 1, 12, 3, 45, tzinfo=UTC), open_="130", close="131"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "FINDER",
+        "1minute",
+        [
+            _bar(datetime(2024, 1, 10, 3, 45, tzinfo=UTC), open_="104", close="105"),  # Wed last
+            _bar(datetime(2024, 1, 11, 3, 45, tzinfo=UTC), open_="120", close="125"),  # Thu last
+            _bar(datetime(2024, 1, 12, 3, 45, tzinfo=UTC), open_="130", close="130.5"),  # Fri 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "FINDER")],
+        start=date(2024, 1, 12),
+        end=date(2024, 1, 12),
+        basis="minute",
+    )
+    assert [r.day for r in rows] == [date(2024, 1, 12)]
+    assert rows[0].prev_close == Decimal("125")  # the TRUE prior-session close
+    assert rows[0].iep == Decimal("130")
+    assert rows[0].pct_chng == Decimal("4")  # the finder's 4.00% — never 23.81%
+
+
+def test_build_minute_basis_cli_lake_hole_never_mis_anchors(tmp_path: Path) -> None:
+    # The captured 23.81% mis-anchor class (fails BEFORE this change — this is
+    # the SANCTIONED honesty behavior change of DEC-STALENESS-CACHE-TRUTH-001):
+    # a CLI-pulled / never-prebuilt lake has NO 1day partition at all, which put
+    # EVERY symbol on the calendar-blind previous-AVAILABLE fallback
+    # (`_prev_trading_close`). With a genuine 1-minute session hole at the true
+    # prior session (Thu 2024-01-11), that fallback bridged Fri's anchor onto
+    # Wed's stale close 105 → a served %CHNG of 23.81% where the truth is 4.00%.
+    # Now the row is SKIPPED (correct-or-absent) — never the bridged number.
+    _write(
+        tmp_path,
+        "CLILAKE",
+        "1minute",
+        [
+            _bar(datetime(2024, 1, 10, 3, 45, tzinfo=UTC), open_="104", close="105"),  # Wed last
+            # Thu 2024-01-11 1-minute session MISSING (the lake hole).
+            _bar(datetime(2024, 1, 12, 3, 45, tzinfo=UTC), open_="130", close="130.5"),  # Fri 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "CLILAKE")],
+        start=date(2024, 1, 12),
+        end=date(2024, 1, 12),
+        basis="minute",
+    )
+    # No 23.81% row — the hole is refused, never bridged (correct-or-absent).
+    assert rows == []
+
+
+def test_build_minute_basis_cli_lake_contiguous_serves(tmp_path: Path) -> None:
+    # The healthy CLI-lake twin: NO 1day partition, but the 1-minute series is
+    # contiguous (Thu present) → the Fri row serves the true prior close via the
+    # checked calendar — a pure-minute lake still reports, only the bridged-hole
+    # rows disappear (scopes the sanctioned change to exactly the wrong rows).
+    _write(
+        tmp_path,
+        "CLILAKE2",
+        "1minute",
+        [
+            _bar(datetime(2024, 1, 11, 3, 45, tzinfo=UTC), open_="120", close="125"),  # Thu last
+            _bar(datetime(2024, 1, 12, 3, 45, tzinfo=UTC), open_="130", close="130.5"),  # Fri 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "CLILAKE2")],
+        start=date(2024, 1, 12),
+        end=date(2024, 1, 12),
+        basis="minute",
+    )
+    assert [r.day for r in rows] == [date(2024, 1, 12)]
+    assert rows[0].prev_close == Decimal("125")
+    assert rows[0].pct_chng == Decimal("4")
 
 
 # ── DEC-PREOPEN-PREVCLOSE-CONTIGUITY-DAILY-001 — daily basis: no jump over a hole ─

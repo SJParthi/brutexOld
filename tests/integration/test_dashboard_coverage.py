@@ -890,6 +890,35 @@ class TestCoverageFreshnessStamps:
         third = client.get("/api/v1/coverage/spot").json()
         assert third["duty_degraded"] is False
 
+    def test_spot_coverage_page_renders_the_floor_stale_badge(self, store: Any) -> None:
+        """Item pin (DEC-STALENESS-CACHE-TRUTH-001): the /coverage/spot page RENDERS
+        the payload's own duty_degraded/snapshot_age_s honesty fields — an amber
+        badge, textContent-only, shown ONLY when the payload says so. Substring
+        presence (the accepted #1529/#1530 no-headless-JS-runner envelope);
+        fails before: no template consumed either field."""
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        page = client.get("/coverage/spot").text
+        # The badge element + its style hook.
+        assert 'id="stalechip"' in page
+        assert ".stalechip" in page
+        # The render logic keys on the payload's OWN honesty fields.
+        assert "duty_degraded === true" in page
+        assert "snapshot_age_s" in page
+        # The badge copy (age + throttle explanation + the documented worst case).
+        assert "refresh throttled during the pull" in page
+        assert "chips may lag up to ~4 min" in page
+        # textContent-only DOM writes for the badge (never innerHTML).
+        assert "staleChip.textContent" in page
+
+    def test_coverage_hub_spot_card_renders_the_stale_suffix(self, store: Any) -> None:
+        """Item pin (DEC-STALENESS-CACHE-TRUTH-001): the /coverage hub's spot card
+        appends an honest "· stale" suffix when the payload says duty_degraded.
+        Substring presence only (the #1529/#1530 envelope)."""
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        page = client.get("/coverage").text
+        assert "duty_degraded === true" in page
+        assert '" · stale"' in page
+
 
 class TestCompletenessScoreboard:
     """GET /api/v1/completeness/scoreboard{,.csv} + /completeness page

@@ -182,3 +182,29 @@ def test_reports_fno_only_selector_present() -> None:
     assert "allSymbols.filter(s => s.option_pullable)" in html, (
         "the selector does not filter on option_pullable"
     )
+
+
+def test_reports_1day_basis_freshness_note_present() -> None:
+    """The 1day-basis freshness note (DEC-STALENESS-CACHE-TRUTH-001, item 8a):
+    the day basis reads pipeline-DERIVED 1day partitions, so the page says when
+    they were last observed prebuilt — or that no prebuild was ever observed
+    (may lag the 1-minute truth). Substring presence only (the accepted
+    #1529/#1530 no-headless-JS-runner envelope); fails before: the page never
+    consumed derived_last_built."""
+    html = _render_reports_html()
+    # The note element + style hook.
+    assert 'id="basisnote"' in html, "the basis-note element is missing"
+    assert ".basisnote" in html, "the basis-note style is missing"
+    # The render keys on the API's additive freshness fields.
+    assert "derived_last_built" in html, "the page does not consume derived_last_built"
+    # Both copy arms (stamp known / never observed), textContent-only.
+    assert "1-day basis is pipeline-derived — last prebuilt " in html, (
+        "the last-prebuilt copy arm is missing"
+    )
+    assert "no prebuild observed on this lake" in html, "the never-observed copy arm is missing"
+    assert "prefer the minute basis or run a pipeline pull" in html, (
+        "the remediation copy is missing"
+    )
+    assert "basisNoteEl.textContent" in html, "the note must render via textContent"
+    # The note re-renders on a basis switch (never stale across the toggle).
+    assert "renderBasisNote();" in html, "syncBasisUI must re-render the note"
