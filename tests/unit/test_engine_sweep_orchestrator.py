@@ -984,16 +984,36 @@ class TestRemediationFlagsRunnable:
         }
 
     def test_every_flag_in_the_string_exists_on_the_named_parsers(self) -> None:
-        """ANY ``--`` token the string carries must exist on sweep-verify/sweep-heal."""
+        """Each LEG's ``--`` flags must exist on THAT leg's OWN subparser.
+
+        Round-2 NIT: the prior union check let a flag valid on one leg but written
+        into the OTHER leg's sentence still pass. Split the string at the
+        ``brutex sweep-heal`` boundary and assert per-leg containment, so a flag
+        in the wrong leg (e.g. ``--execute`` written into the verify sentence, or
+        ``--recount`` into the heal sentence) fails here.
+        """
         import re
 
-        flags = set(re.findall(r"--[a-z][a-z0-9-]*", TUPLE_STORE_CORRUPT_REMEDIATION, re.ASCII))
-        assert flags, "the remediation must name at least one CLI flag"
-        known = self._subparser_option_strings("sweep-verify") | self._subparser_option_strings(
-            "sweep-heal"
+        text = TUPLE_STORE_CORRUPT_REMEDIATION
+        split = text.index("brutex sweep-heal")
+        assert split > text.index("brutex sweep-verify"), "verify leg must precede heal leg"
+        verify_leg, heal_leg = text[:split], text[split:]
+
+        def _flags(segment: str) -> set[str]:
+            return set(re.findall(r"--[a-z][a-z0-9-]*", segment, re.ASCII))
+
+        verify_flags, heal_flags = _flags(verify_leg), _flags(heal_leg)
+        assert verify_flags, "the verify leg must name at least one CLI flag"
+        assert heal_flags, "the heal leg must name at least one CLI flag"
+
+        verify_known = self._subparser_option_strings("sweep-verify")
+        heal_known = self._subparser_option_strings("sweep-heal")
+        assert not (verify_flags - verify_known), (
+            f"verify leg names flags absent from sweep-verify: {sorted(verify_flags - verify_known)}"
         )
-        unknown = flags - known
-        assert not unknown, f"remediation names flags absent from the CLI: {sorted(unknown)}"
+        assert not (heal_flags - heal_known), (
+            f"heal leg names flags absent from sweep-heal: {sorted(heal_flags - heal_known)}"
+        )
 
     def test_verify_leg_parses_on_the_real_cli(self) -> None:
         """The sweep-verify leg's exact flags parse (with the required grid dates)."""

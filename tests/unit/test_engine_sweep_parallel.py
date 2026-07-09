@@ -2382,3 +2382,37 @@ class TestWorkerCorruptStoreContained:
         assert acc.tuples_failed == 1
         assert any(e.get("event") == "sweep_parallel.tuple_failed" for e in logs)
         assert not any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)
+
+
+class TestStoreCorruptPrefixIsComplete:
+    """R2-review-round-2 SHOULD-FIX 2: the cross-process corrupt-store prefix is COMPLETE.
+
+    ``_apply_outcome``'s remediation WARN keys on
+    ``error_text.startswith(_STORE_CORRUPT_ERROR_PREFIX)`` — a STRING coupling
+    across the spawn boundary, since a worker serialises its caught exception as
+    ``f"{type(exc).__name__}: {exc}"`` and the exception OBJECT never crosses the
+    pickle boundary. The exact ``"ResultsStoreSchemaError: "`` prefix is a COMPLETE
+    discriminator ONLY while ``ResultsStoreSchemaError`` has no subclasses: a
+    subclass would serialise under its OWN ``__name__`` and SILENTLY drop the
+    heal-instruction WARN. This pin fails loudly the moment such a subclass is
+    introduced (forcing either a widened discriminator or a conscious decision).
+    """
+
+    def test_results_store_schema_error_has_no_subclasses(self) -> None:
+        from brutex.engine.results_store import ResultsStoreSchemaError
+
+        assert ResultsStoreSchemaError.__subclasses__() == [], (
+            "ResultsStoreSchemaError gained a subclass — the parallel-lane "
+            "startswith(_STORE_CORRUPT_ERROR_PREFIX) discriminator "
+            "(sweep_parallel._apply_outcome) would silently drop the DB-02 "
+            "remediation WARN for it; widen the prefix match or split the class."
+        )
+
+    def test_prefix_matches_the_worker_serialisation_shape(self) -> None:
+        """The prefix EXACTLY matches ``f"{type(exc).__name__}: "`` for the class."""
+        from brutex.engine.results_store import ResultsStoreSchemaError
+
+        exc = ResultsStoreSchemaError("unreadable results store at /x: boom")
+        serialised = f"{type(exc).__name__}: {exc}"
+        assert serialised.startswith(mod._STORE_CORRUPT_ERROR_PREFIX)
+        assert mod._STORE_CORRUPT_ERROR_PREFIX == "ResultsStoreSchemaError: "

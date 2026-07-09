@@ -1623,6 +1623,14 @@ class ParallelGridDriver:
             # remediation-carrying WARN the sequential/supervisor sites emit. The
             # failed-marker mechanics above are byte-unchanged.
             error_text = outcome.failed_error or ""
+            # ASSUMPTION (pinned): ``ResultsStoreSchemaError`` has NO subclasses,
+            # so the exact ``"ResultsStoreSchemaError: "`` prefix is a COMPLETE
+            # discriminator for the DB-02 corrupt-store class across the spawn
+            # boundary. A future subclass would serialise under its OWN
+            # ``type(exc).__name__`` and SILENTLY drop this remediation WARN — that
+            # is forbidden by ``test_engine_sweep_parallel.py::
+            # TestStoreCorruptPrefixIsComplete`` (asserts ``__subclasses__() == []``),
+            # which fails loudly the moment a subclass is introduced.
             if error_text.startswith(_STORE_CORRUPT_ERROR_PREFIX):
                 _LOG.warning(
                     "sweep_grid.tuple_store_corrupt",

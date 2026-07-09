@@ -6823,6 +6823,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # behaviour is UNCHANGED (it ran per-leaderboard inside the sweep above).
         from brutex.engine.cascade_wire import (
             BarsContext,
+            CascadeWireError,
             build_stage2_cascade_specs,
             cascade_config_for_sweep,
             run_and_write_from_specs,
@@ -6832,50 +6833,70 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             stage3_manifest_record,
         )
 
-        # Stage-2 grid winners — each carries its OWN swept fib_anchor so Stage-4
-        # re-scores a non-prev-day survivor against its own Fib levels
-        # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
-        # pragma-free, unit-tested helper (review MAJOR 2).
-        cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
+        # A CascadeWireError raised anywhere in this cascade tail — a corrupt /
+        # old-schema finalist store reaching Stage-2 (DB-02,
+        # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632) OR a disk-full
+        # (ENOSPC) at the atomic manifest/report write
+        # (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1634) — is mapped to a
+        # clean CLI refusal here, exactly like the LmdbCorruptEnvError/CatalogError
+        # refusals earlier in this function: a `[brutex] REFUSED:` line + EXIT_USER_ERROR,
+        # NEVER a raw traceback on the shell (the function boundary already refused
+        # cleanly; this closes the CLI-exit gap — review round 2 MUST-FIX). Caught
+        # INSIDE the sweep_abort_alert span so a user-fixable data/disk refusal never
+        # fires the CRITICAL pull-halt Telegram alert (the refusal is not a pull-wide
+        # abort). The nightly SWEEP leg reads this EXIT_USER_ERROR as a chain-breaking
+        # REFUSED (sweep_binding.sweep_link_result), a cron-red exit >= 2 — no raw
+        # exception escapes cmd_sweep_all.
+        try:
+            # Stage-2 grid winners — each carries its OWN swept fib_anchor so Stage-4
+            # re-scores a non-prev-day survivor against its own Fib levels
+            # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
+            # pragma-free, unit-tested helper (review MAJOR 2).
+            cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
 
-        # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
-        # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
-        # manifest records stage-3 enablement + the refined-cell list.
-        cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
+            # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
+            # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
+            # manifest records stage-3 enablement + the refined-cell list.
+            cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
 
-        if cascade_specs:
-            # Freeze the per-leaderboard trial statistics into the manifest
-            # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
-            # the sidecars exactly ONCE here; the MANUAL replay reads only the
-            # frozen numbers, never the sidecars.
-            import dataclasses as _dataclasses
+            if cascade_specs:
+                # Freeze the per-leaderboard trial statistics into the manifest
+                # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
+                # the sidecars exactly ONCE here; the MANUAL replay reads only the
+                # frozen numbers, never the sidecars.
+                import dataclasses as _dataclasses
 
-            from brutex.engine.cascade_wire import build_leaderboard_trials
+                from brutex.engine.cascade_wire import build_leaderboard_trials
 
-            stage3_grid = (
-                _dataclasses.replace(grid, data_snapshot_hash=stage3_report.train_snapshot_hash)
-                if stage3_report.enabled and stage3_report.train_snapshot_hash is not None
-                else None
-            )
-            leaderboard_trials = build_leaderboard_trials(
-                out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
-            )
-            sweep_id = grid_identity(grid)
-            cascade_report = run_and_write_from_specs(
-                out_root,
-                sweep_id=sweep_id,
-                specs=cascade_specs,
-                bars_for=_bars_for,
-                bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
-                cascade_config=cascade_config_for_sweep(sweep_id),
-                stage3=stage3_manifest_record(stage3_report, results_root=out_root),
-                leaderboard_trials=leaderboard_trials,
-            )
-            print(
-                f"[brutex] cascade — pools={len(cascade_report.groups)} "
-                f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
-                f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
-            )
+                stage3_grid = (
+                    _dataclasses.replace(grid, data_snapshot_hash=stage3_report.train_snapshot_hash)
+                    if stage3_report.enabled and stage3_report.train_snapshot_hash is not None
+                    else None
+                )
+                leaderboard_trials = build_leaderboard_trials(
+                    out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
+                )
+                sweep_id = grid_identity(grid)
+                cascade_report = run_and_write_from_specs(
+                    out_root,
+                    sweep_id=sweep_id,
+                    specs=cascade_specs,
+                    bars_for=_bars_for,
+                    bars_context=BarsContext(
+                        exchange=exchange, segment=segment, start=start, end=end
+                    ),
+                    cascade_config=cascade_config_for_sweep(sweep_id),
+                    stage3=stage3_manifest_record(stage3_report, results_root=out_root),
+                    leaderboard_trials=leaderboard_trials,
+                )
+                print(
+                    f"[brutex] cascade — pools={len(cascade_report.groups)} "
+                    f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
+                    f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
+                )
+        except CascadeWireError as exc:
+            print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
         # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
         # The ONE run-end results-depth block — trade capture → aggregates →
         # sidecar trio → baselines → the global top-100 artifact — strictly
