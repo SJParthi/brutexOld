@@ -6390,7 +6390,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # UNREADABLE partition (corrupt/torn bytes surviving one retry, or a foreign
     # schema) is a LOUD refusal, never a silent drop — a skipped partition would
     # hole the data_snapshot_hash inputs and silently change run identity
-    # (Golden Rule #4; DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1633).
+    # (Golden Rule #4; DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1634).
     from brutex.data.errors import CatalogError
 
     slices: dict[tuple[str, str], list[Any]] = {}
@@ -6655,7 +6655,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # a SECOND failure raises LmdbCorruptEnvError — or, for a mid-Bloom-rebuild
     # cursor fault on that second attempt, a raw lmdb.Error (review round 1
     # belt) — both a clean user-facing refusal here
-    # (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1631) — never a raw
+    # (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1632) — never a raw
     # traceback deep inside the sweep span.
     import lmdb
 
@@ -6670,15 +6670,17 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     except (LmdbCorruptEnvError, lmdb.Error) as exc:
         print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
-    with sweep_abort_alert(_emit_pull_halt_alert):
+    # ``cache`` is entered FIRST (review round 1 MINOR-2): the already-open
+    # LMDB env must be closed even when either audit-writer open below raises,
+    # restoring the pre-change ExitStack-era guarantee. No exit-order
+    # dependency exists in either direction — the audit writers' __exit__ only
+    # flush/close their own files and never touch the cache;
+    # SweepCache.__exit__ only closes its Bloom/LMDB pair. ``cache`` rides the
+    # OUTER with line (not the parenthesized tuple below) so the usage is
+    # structurally obvious — CodeQL's unused-local query false-positived on
+    # the bare name inside the parenthesized with-tuple (alert 909).
+    with sweep_abort_alert(_emit_pull_halt_alert), cache:
         with (
-            # ``cache`` is entered FIRST (review round 1 MINOR-2): the already-
-            # open LMDB env must be closed even when either audit-writer open
-            # below raises, restoring the pre-change ExitStack-era guarantee.
-            # No exit-order dependency exists in either direction — the audit
-            # writers' __exit__ only flush/close their own files and never touch
-            # the cache; SweepCache.__exit__ only closes its Bloom/LMDB pair.
-            cache,
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
         ):
@@ -6835,9 +6837,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
         # A CascadeWireError raised anywhere in this cascade tail — a corrupt /
         # old-schema finalist store reaching Stage-2 (DB-02,
-        # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632) OR a disk-full
+        # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1633) OR a disk-full
         # (ENOSPC) at the atomic manifest/report write
-        # (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1634) — is mapped to a
+        # (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1635) — is mapped to a
         # clean CLI refusal here, exactly like the LmdbCorruptEnvError/CatalogError
         # refusals earlier in this function: a `[brutex] REFUSED:` line + EXIT_USER_ERROR,
         # NEVER a raw traceback on the shell (the function boundary already refused

@@ -246,7 +246,7 @@ def sweep_link_result(
 
     ``EXIT_OK`` → OK · ``EXIT_USER_ERROR`` → REFUSED (a preflight refusal OR a
     run-end refusal — e.g. a corrupt finalist store reaching the cascade / a
-    cascade-sidecar disk-full, MIGRATION.md #1632/#1634; the stderr text is
+    cascade-sidecar disk-full, MIGRATION.md #1633/#1635; the stderr text is
     not capturable in-process, so the detail points at stderr + the sweep
     audit) · ``EXIT_SWEEP_TUPLE_FAILED`` → FAILED with ``exit_hint=6`` (the
     pass-through) · anything else → FAILED. *counts* (``None`` = honestly

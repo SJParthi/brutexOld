@@ -106,7 +106,7 @@ _ACTION_GRID_COMPLETE: Final[str] = "GRID_SWEEP_COMPLETE"
 _ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
 
 #: Remediation string for a per-tuple CORRUPT / old-schema finalist store
-#: (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632). A store that raises
+#: (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1633). A store that raises
 #: :class:`~brutex.engine.results_store.ResultsStoreSchemaError` at LOAD is
 #: CONTAINED to a ``TUPLE_FAILED`` skip (exit 6), never a whole-grid abort — but
 #: it stays in place (un-quarantined, un-sentineled), so every resume re-counts it
@@ -1047,7 +1047,7 @@ def run_sweep_grid(
         # corrupt bar window) AND ResultsStoreSchemaError (a CORRUPT / old-schema
         # finalist store surfaced at its LOAD boundary) are the two per-tuple
         # containment classes — DELIBERATELY widened (DB-02,
-        # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632): one damaged
+        # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1633): one damaged
         # store must never abort the WHOLE grid on resume. Only the G14 schema
         # class is caught, NOT its parent ResultsStoreError (a run-identity
         # CONFLICT / missing-polars env fault keeps the documented global abort).

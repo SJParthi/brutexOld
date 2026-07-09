@@ -760,7 +760,7 @@ def run_supervised_grid(
                     kernel_cache=kernel_cache,
                 )
             except (SweepComboError, ResultsStoreSchemaError) as exc:
-                # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632):
+                # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1633):
                 # a CORRUPT / old-schema finalist store raised at its LOAD boundary
                 # on resume is CONTAINED to this tuple exactly like a SweepComboError,
                 # never a whole-grid abort. Only the G14 ResultsStoreSchemaError is

@@ -39,11 +39,15 @@ import hashlib
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from brutex.data.catalog import Catalog, open_catalog
 from brutex.data.errors import CatalogError
 from brutex.data.models import CatalogEntry
+
+if TYPE_CHECKING:  # pragma: no cover — type-only import (module avoids heavy imports)
+    import pyarrow as pa
 
 # A real DuckDB catalog underpins most of these tests; skip the module
 # when the P2 [data] extra is missing (same guard as test_data_lake_real).
@@ -669,7 +673,7 @@ class TestClosedGuardsAndIdempotentClose:
 
 # ────────────────────────────────────────────────────────────────────────
 # R2N-02 / R2N-04 + NEW-1(a): corrupt / torn partition reads at get_bars.
-# DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1633.
+# DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1634.
 # ────────────────────────────────────────────────────────────────────────
 
 _pl = pytest.importorskip("polars")
@@ -723,7 +727,7 @@ def _write_and_register(lake: Path, catalog_path: Path, bars: list[_CandleBar]) 
     )
 
 
-def _get_bars(catalog_path: Path, lake: Path, **kw: object) -> object:
+def _get_bars(catalog_path: Path, lake: Path, **kw: object) -> pa.Table:
     with Catalog.open(catalog_path) as cat:
         return cat.get_bars(
             lake_root=lake,

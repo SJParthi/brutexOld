@@ -853,7 +853,7 @@ def test_default_max_tuples_is_exposed() -> None:
 
 
 class TestRunSweepGridCorruptStoreContained:
-    """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632).
+    """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1633).
 
     A CORRUPT / old-schema finalist store raised at its LOAD boundary on resume is
     CONTAINED to a per-tuple ``TUPLE_FAILED`` (never a whole-grid abort), fires the
@@ -977,11 +977,10 @@ class TestRemediationFlagsRunnable:
         )
         assert command in sub.choices, f"remediation names a nonexistent command: {command}"
         chosen = sub.choices[command]
-        return {
-            opt
-            for action in chosen._actions  # pyright: ignore[reportPrivateUsage]
-            for opt in action.option_strings
-        }
+        options: set[str] = set()
+        for action in chosen._actions:  # pyright: ignore[reportPrivateUsage]
+            options.update(action.option_strings)
+        return options
 
     def test_every_flag_in_the_string_exists_on_the_named_parsers(self) -> None:
         """Each LEG's ``--`` flags must exist on THAT leg's OWN subparser.
