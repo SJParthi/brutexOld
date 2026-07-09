@@ -260,7 +260,12 @@ from brutex.dashboard.sweep_runner import (
     run_sweep_from_request,
     sweep_progress_file,
 )
-from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revision
+from brutex.dashboard.universe_cache import (
+    STORE_FAULT_TYPES,
+    UniverseSnapshotCache,
+    UniverseStoreOutageError,
+    master_revision,
+)
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
@@ -1876,6 +1881,29 @@ def build_app(
         )
         return out
 
+    def _store_outage_response(**extra: Any) -> JSONResponse:
+        """The honest 503 degrade for a COLD store outage (nothing last-known).
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001, the `store_error_payload` precedent: when
+        the instrument store is unreachable AND no last-known snapshot exists
+        (:class:`UniverseStoreOutageError`), the route serves explicit error
+        markers at 503 — never a raw 500 (the pre-fix per-poll traceback storm),
+        never a fabricated empty universe (Golden Rule #1). SANITIZED: the wire
+        carries only the stable generic markers — the full store fault detail is
+        WARN-logged server-side by the cache's once-per-outage latch. ``extra``
+        lets a route keep its envelope shape keys (e.g. ``kind``) beside the
+        markers.
+        """
+        return JSONResponse(
+            {
+                "available": False,
+                "error": "instrument store unavailable — retry shortly",
+                "error_type": "store_outage",
+                **extra,
+            },
+            status_code=503,
+        )
+
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
@@ -2305,9 +2333,20 @@ def build_app(
         DuckDB ``COUNT`` + ``MAX``) — and the three base reads on a miss — run on a
         threadpool worker, NEVER the uvicorn event loop, so a stalled lake volume
         cannot freeze the whole dashboard.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the 8th keystone site): a store OUTAGE
+        with a resident snapshot serves it labelled (the additive
+        ``revision_probe`` marker on a COPY — the memoised dict stays clean);
+        a COLD outage degrades to the honest 503 markers, never a raw 500.
         """
         store = _require_store()
-        return JSONResponse(await _run_lake(_universe_cache.summary, store))
+        try:
+            payload, served_last_known = await _run_lake(_universe_cache.summary_view, store)
+        except UniverseStoreOutageError:
+            return _store_outage_response()
+        if served_last_known:
+            return JSONResponse(_probe_outage_payload(payload, served_last_known=True))
+        return JSONResponse(payload)
 
     @app.get("/api/v1/universe/instruments")
     async def api_universe_instruments(
@@ -2327,7 +2366,15 @@ def build_app(
         O(1) repeat poll (DEC-UNIVERSE-BACKEND-CACHE-001): the base reads + the
         per-*kind* classified rows are cached behind ``_universe_cache``, keyed by
         the master's ``instruments``-table content token. A bad *kind* still surfaces
-        as a 400 (the classifier's ``ValueError`` is raised before any caching).
+        as a 400 (the classifier's ``ValueError`` is raised before any caching;
+        NO DuckDB exception subclasses ``ValueError``, so a store fault can never
+        masquerade as a bad request).
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the 8th keystone site): a store OUTAGE
+        with a resident snapshot serves its rows labelled (the additive
+        ``revision_probe`` marker on the route envelope); a COLD outage degrades
+        to the honest 503 markers, never a raw 500 per poll (the pre-fix
+        500-storm the scout reproduced).
         """
         store = _require_store()
         try:
@@ -2335,10 +2382,17 @@ def build_app(
             # per-kind base reads run on a threadpool worker, never the event loop
             # (the classifier's ValueError for a bad kind still propagates out of
             # run_in_threadpool → 400, before any caching).
-            rows = await _run_lake(lambda: _universe_cache.instruments(store, kind=kind))
+            rows, served_last_known = await _run_lake(
+                lambda: _universe_cache.instruments_view(store, kind=kind)
+            )
+        except UniverseStoreOutageError:
+            return _store_outage_response(instruments=[], kind=kind)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"instruments": rows, "kind": kind})
+        payload: dict[str, Any] = {"instruments": rows, "kind": kind}
+        if served_last_known:
+            payload = _probe_outage_payload(payload, served_last_known=True)
+        return JSONResponse(payload)
 
     @app.get("/api/v1/universe/index-constituents")
     async def api_universe_index_constituents(
@@ -4946,8 +5000,61 @@ def build_app(
         """
         gen = _summary_cache.generation
         count, latest = master_revision(store)
+        return _nav_latency_stable_key(name, *extra), revision_generation(
+            f"gen={gen}|m={count}:{latest}"
+        )
+
+    def _nav_latency_stable_key(name: str, *extra: object) -> str:
+        """The trio's STABLE cache key (route identity only — no freshness token).
+
+        Split out of :func:`_nav_latency_coords` (DEC-CACHE-SERVE-LAST-KNOWN-001)
+        so the store-outage arm can address the SAME key withOUT the
+        ``master_revision`` probe that just failed — the key doubles as
+        :meth:`~brutex.dashboard.movers_cache.MoversSnapshotCache.serve_last_known`'s
+        prefix (entries are stored at exactly this key, so the direct
+        ``key == prefix`` fallback resolves the last-known entry).
+        """
         extra_repr = "|".join(repr(item) for item in extra)
-        return f"{name}|{extra_repr}", revision_generation(f"gen={gen}|m={count}:{latest}")
+        return f"{name}|{extra_repr}"
+
+    def _nav_cached_or_last_known(
+        cache: MoversSnapshotCache,
+        name: str,
+        store: Any,
+        *extra: object,
+        compute: Callable[[], Any],
+    ) -> tuple[Any, bool, bool]:
+        """Resolve a nav-latency cached payload; a store-probe OUTAGE serves last-known.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the 8th keystone site's nav-trio arm —
+        the scout-confirmed ``_nav_latency_coords`` → ``master_revision`` unguarded
+        probe 500'd `/api/v1/coverage` + `/api/v1/universe/completeness` +
+        `/api/v1/universe/mapping-integrity` under the SAME store outage): the
+        composite freshness probe is guarded by :data:`STORE_FAULT_TYPES` — on a
+        probe fault the route's STABLE key resolves the last-known entry via
+        :meth:`~brutex.dashboard.movers_cache.MoversSnapshotCache.serve_last_known`
+        (once-per-outage WARN latch + recovery INFO live there; a cold outage
+        seeds ONE fresh compute at ``OUTAGE_GENERATION``). A compute that ITSELF
+        hits a store fault during the cold-outage seed raises the typed
+        :class:`UniverseStoreOutageError` the routes map to the honest 503
+        degrade — never a raw 500.
+
+        Returns ``(value, probe_outage, served_last_known)`` — the caller stamps
+        the additive ``revision_probe`` marker when ``probe_outage`` is ``True``
+        (a stale serve is never silent, Golden Rule #1).
+        """
+        try:
+            key, token_gen = _nav_latency_coords(name, store, *extra)
+        except STORE_FAULT_TYPES:
+            key = _nav_latency_stable_key(name, *extra)
+            try:
+                value, served_last_known = cache.serve_last_known(key, compute=compute)
+            except STORE_FAULT_TYPES as inner:
+                raise UniverseStoreOutageError(
+                    f"instrument store unreachable at the {name} probe with no last-known payload"
+                ) from inner
+            return value, True, served_last_known
+        return cache.get_or_compute(key, generation=token_gen, compute=compute), False, False
 
     @app.get("/api/v1/coverage")
     async def api_coverage() -> JSONResponse:
@@ -4999,11 +5106,27 @@ def build_app(
         # instead of a full O(datasets)+ledger rebuild per poll (the #920
         # storm class). The build runs ONLY on a miss, on the threadpool worker.
         def _cached_build() -> dict[str, Any]:
-            """Return the coverage payload, memoised behind the composite freshness token."""
-            key, token_gen = _nav_latency_coords("coverage", store, years)
-            return _coverage_cache.get_or_compute(key, generation=token_gen, compute=_build)
+            """Return the coverage payload, memoised behind the composite freshness token.
 
-        return JSONResponse(await _run_lake(_cached_build))
+            DEC-CACHE-SERVE-LAST-KNOWN-001: a store fault from the composite
+            probe serves the last-known payload LABELLED (the additive
+            ``revision_probe`` marker on a copy) instead of the pre-fix raw 500.
+            """
+            value, probe_outage, served = _nav_cached_or_last_known(
+                _coverage_cache, "coverage", store, years, compute=_build
+            )
+            if probe_outage:
+                payload: dict[str, Any] = _probe_outage_payload(value, served_last_known=served)
+                return payload
+            result: dict[str, Any] = value
+            return result
+
+        try:
+            return JSONResponse(await _run_lake(_cached_build))
+        except UniverseStoreOutageError:
+            # COLD outage (nothing last-known, the seed compute hit the same
+            # fault): the honest 503 markers, never a raw 500.
+            return _store_outage_response()
 
     @app.get("/api/v1/coverage/spot")
     async def api_coverage_spot() -> JSONResponse:
@@ -5249,16 +5372,31 @@ def build_app(
         # within one token is an O(1) handoff. A pull (generation) or an instrument load
         # (master revision) moves the token → recompute, never stale — with mid-pull
         # window-tick bumps riding the bounded, logged adaptive floor (#920).
-        def _cached_per_symbol() -> dict[str, dict[str, Any]]:
-            """Return the per-symbol completeness map, memoised behind the composite token."""
-            key, token_gen = _nav_latency_coords("universe-completeness", store)
-            return _universe_completeness_cache.get_or_compute(
-                key,
-                generation=token_gen,
+        def _cached_per_symbol() -> dict[str, Any]:
+            """Return the per-symbol completeness map, memoised behind the composite token.
+
+            DEC-CACHE-SERVE-LAST-KNOWN-001: a store fault from the composite
+            probe serves the last-known map LABELLED (the additive
+            ``revision_probe`` marker on a copy — symbols are instrument names,
+            so the marker key can never collide with a row) instead of the
+            pre-fix raw 500.
+            """
+            value, probe_outage, served = _nav_cached_or_last_known(
+                _universe_completeness_cache,
+                "universe-completeness",
+                store,
                 compute=lambda: _build_per_symbol_completeness(store, lake),
             )
+            if probe_outage:
+                payload: dict[str, Any] = _probe_outage_payload(value, served_last_known=served)
+                return payload
+            result: dict[str, Any] = value
+            return result
 
-        per_symbol = await _run_lake(_cached_per_symbol)
+        try:
+            per_symbol = await _run_lake(_cached_per_symbol)
+        except UniverseStoreOutageError:
+            return _store_outage_response()
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -5295,7 +5433,7 @@ def build_app(
             now=datetime.now(UTC),
         )
 
-    def _build_mapping_integrity_report_cached() -> MappingIntegrityReport:
+    def _build_mapping_integrity_report_cached() -> tuple[MappingIntegrityReport, bool, bool]:
         """Cache the mapping-integrity report behind the COMPOSITE freshness token.
 
         DEC-DASHBOARD-NAV-LATENCY-001. The JSON route polls this every 15 s and the CSV
@@ -5311,13 +5449,22 @@ def build_app(
         dropped the instant either signal moves — with mid-pull window-tick bumps riding
         the bounded, logged adaptive floor per DEC-NAV-CACHES-FLOOR-REKEY-001, which also
         moved the token from the key into the generation via ``_nav_latency_coords``).
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001: returns ``(report, probe_outage,
+        served_last_known)`` — a store fault from the composite probe serves the
+        last-known report (the JSON route stamps the ``revision_probe`` marker on
+        the serialized dict; the CSV download serves the report unlabelled — the
+        server-side WARN latch still fires); a COLD outage raises the typed
+        :class:`UniverseStoreOutageError` both routes map to the honest 503.
         """
-        key, token_gen = _nav_latency_coords("mapping-integrity", _require_store())
-        return _mapping_integrity_cache.get_or_compute(
-            key,
-            generation=token_gen,
+        report, probe_outage, served = _nav_cached_or_last_known(
+            _mapping_integrity_cache,
+            "mapping-integrity",
+            _require_store(),
             compute=_build_mapping_integrity_report,
         )
+        result: MappingIntegrityReport = report
+        return result, probe_outage, served
 
     @app.get("/api/v1/universe/mapping-integrity")
     async def api_universe_mapping_integrity() -> JSONResponse:
@@ -5331,11 +5478,20 @@ def build_app(
         This is the real-time, self-checking guarantee that the core spot↔options mapping is
         precise, surfaced as ``is_green`` + a drill-down. Pure delegation to
         :mod:`brutex.data.mapping_integrity` (its grouping + reconciliation are at 100%
-        line+branch); READ-ONLY, no pull. No store wired → 503.
+        line+branch); READ-ONLY, no pull. No store wired → 503. A store OUTAGE
+        (DEC-CACHE-SERVE-LAST-KNOWN-001) serves the last-known verdict labelled
+        with the additive ``revision_probe`` marker; a COLD outage degrades to
+        the honest 503 markers, never a raw 500.
         """
         _require_store()
-        report = await _run_lake(_build_mapping_integrity_report_cached)
-        return JSONResponse(report_to_dict(report))
+        try:
+            report, probe_outage, served = await _run_lake(_build_mapping_integrity_report_cached)
+        except UniverseStoreOutageError:
+            return _store_outage_response()
+        payload = report_to_dict(report)
+        if probe_outage:
+            payload = _probe_outage_payload(payload, served_last_known=served)
+        return JSONResponse(payload)
 
     @app.get("/api/v1/universe/mapping-integrity.csv")
     async def api_universe_mapping_integrity_csv() -> Response:
@@ -5348,10 +5504,20 @@ def build_app(
         :func:`brutex.dashboard.mapping_integrity_csv.mapping_integrity_to_csv` (a three-section
         human report; every cell formula-injection-safe via the shared
         :class:`~brutex.dashboard._csv_utils.FormulaSafeWriter`). READ-ONLY, no pull; no store
-        wired → 503.
+        wired → 503. A store OUTAGE (DEC-CACHE-SERVE-LAST-KNOWN-001) serves the
+        last-known report UNLABELLED (a CSV has no additive-marker surface — the
+        server-side WARN latch still names the outage); a COLD outage returns a
+        plain-text 503, never a raw 500.
         """
         _require_store()
-        report = await _run_lake(_build_mapping_integrity_report_cached)
+        try:
+            report, _probe_outage, _served = await _run_lake(_build_mapping_integrity_report_cached)
+        except UniverseStoreOutageError:
+            return Response(
+                content="instrument store unavailable — retry shortly",
+                media_type="text/plain; charset=utf-8",
+                status_code=503,
+            )
         return Response(
             content=mapping_integrity_to_csv(report),
             media_type="text/csv; charset=utf-8",
