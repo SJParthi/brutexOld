@@ -166,6 +166,61 @@ def resolve_mem_budget_bytes(environ: Mapping[str, str] | None = None) -> int:
     )
 
 
+def per_worker_mem_budget_bytes(total_bytes: int, sweep_concurrency: int) -> int:
+    """Divide the TOTAL rank-region budget across concurrent sweep workers.
+
+    DEC-SWEEP-SCALE-GUARDS-001 — the OOM fix. The budget resolved by
+    :func:`resolve_mem_budget_bytes` (or the ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``
+    override) is a WHOLE-MACHINE figure — historically consumed once per tuple
+    with NO awareness that the multi-core driver
+    (:mod:`brutex.engine.sweep_parallel`) runs up to *sweep_concurrency* tuples
+    CONCURRENTLY, each holding its own rank region. At the default 8-worker
+    auto-count on the CLAUDE.md §8 48 GB box the resolved TOTAL is ``48 GB × 1/6
+    = 8 GiB``, so eight k=5 tuples each projecting ~5.2 GB of batch retention
+    would demand ~42 GB simultaneously — an OOM the per-tuple gate never saw
+    because 5.2 GB sits JUST UNDER the whole-machine 8 GiB gate, so the bounded
+    columnar rank never engaged.
+
+    Dividing the TOTAL by the resolved worker count makes the per-tuple budget
+    ``8 GiB // 8 = 1 GiB``, so the concurrent aggregate (``workers × per-tuple``)
+    stays inside the same envelope the single-worker budget was picked for, AND a
+    k=5 tuple's 5.2 GB projection now exceeds its 1 GiB gate → the bounded rank
+    ENGAGES (result-safe: the bounded and batch ranks are pinned bit-identical).
+    Because the divisor applies identically to the RAM-derived default AND the
+    operator override, the ``BRUTEX_SWEEP_MEM_BUDGET_BYTES`` contract stays "a
+    TOTAL, divided the same way".
+
+    ``sweep_concurrency == 1`` (the sequential path — one tuple resident at a
+    time) returns *total_bytes* UNCHANGED, byte-for-byte today's per-tuple
+    budget. Integer division floors; a floor of ``1`` byte is enforced so a
+    pathological ``total // workers == 0`` can never disable the guard by
+    yielding a zero budget (which would refuse every non-empty tuple). O(1).
+
+    Parameters
+    ----------
+    total_bytes
+        The whole-machine rank-region budget (``> 0`` — from
+        :func:`resolve_mem_budget_bytes`).
+    sweep_concurrency
+        The resolved sweep worker count (``>= 1``) — ``1`` on the sequential
+        path, the driver's total worker budget on the parallel path (the writer
+        actor plus its EVAL processes; dividing by the total rather than the EVAL
+        count errs conservatively, never under-budgeting).
+
+    Raises
+    ------
+    ValueError
+        If *sweep_concurrency* is ``< 1`` — a caller bug (the worker count is
+        always ``>= 1``); a silently-wrong divisor must fail loud (Golden Rule #1).
+    """
+    if sweep_concurrency < 1:
+        raise ValueError(
+            f"per_worker_mem_budget_bytes: sweep_concurrency must be >= 1; "
+            f"got {sweep_concurrency!r}"
+        )
+    return max(1, total_bytes // sweep_concurrency)
+
+
 @dataclass(frozen=True, slots=True)
 class RankMemoryPlan:
     """One tuple's pre-flight rank-memory verdict (pure data — the runner acts on it).
@@ -389,6 +444,7 @@ __all__ = [
     "MEM_BUDGET_FRACTION",
     "BoundedRankMode",
     "RankMemoryPlan",
+    "per_worker_mem_budget_bytes",
     "plan_rank_memory",
     "resolve_bounded_rank_mode",
     "resolve_mem_budget_bytes",

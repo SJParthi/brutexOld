@@ -407,12 +407,20 @@ def run_sweep_from_request(  # pragma: no cover — orchestration shim over the 
     ``cmd_sweep_all`` itself — the orchestration is exercised end-to-end by the CLI
     integration tests; the dashboard route tests replace THIS function with an
     offline fake (no lake, no sweep) to keep the unit suite hermetic.
+
+    keep_awake (DEC-SWEEP-SCALE-GUARDS-001) holds the macOS host awake for the
+    whole dashboard-launched sweep — the dashboard job body's twin of the pull
+    pipeline's ``keep_awake`` guard, so an overnight one-click sweep never sleeps
+    mid-flight (``cmd_sweep_all`` also wraps its own body; the nested best-effort
+    guard is harmless — each ``caffeinate`` is independently released).
     """
     from brutex.cli import cmd_sweep_all
+    from brutex.observability.power_keepawake import keep_awake
 
-    return cmd_sweep_all(
-        **build_sweep_kwargs(request, lake_root=lake_root, results_root=results_root)
-    )
+    with keep_awake("brutex sweep (dashboard)"):
+        return cmd_sweep_all(
+            **build_sweep_kwargs(request, lake_root=lake_root, results_root=results_root)
+        )
 
 
 __all__ = [
