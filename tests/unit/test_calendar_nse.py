@@ -1488,3 +1488,71 @@ class TestPreviousTradingSession:
     def test_bad_exchange_raises_value_error_eagerly(self) -> None:
         with pytest.raises(ValueError, match="unknown exchange"):
             previous_trading_session(date(2024, 7, 10), exchange="LSE")
+
+    # ── observed-sessions overlay kwarg (DEC-PREOPEN-PREVDAY-COMMON-001) ──
+
+    def test_observed_default_is_byte_identical_parity(self) -> None:
+        # The new kwarg's default frozenset() keeps every existing caller
+        # byte-identical: explicit-empty == omitted for every walk shape
+        # (plain weekday / weekend / holiday cluster / Budget Saturday /
+        # coverage abstain).
+        for d in (
+            date(2024, 7, 10),
+            date(2025, 9, 29),
+            date(2024, 3, 26),
+            date(2025, 2, 3),
+        ):
+            assert previous_trading_session(d, observed=frozenset()) == previous_trading_session(d)
+        with capture_logs():
+            assert previous_trading_session(date(2020, 1, 1), observed=frozenset()) is None
+
+    def test_observed_member_trading_day_is_stepped_over(self) -> None:
+        # REMOVE-ONLY: an overlaid Tuesday 2026-05-12 (a derived trading day)
+        # stops being a session — the walk from Wed 2026-05-13 steps over it
+        # to Mon 2026-05-11, exactly like a holiday.
+        assert previous_trading_session(date(2026, 5, 13)) == date(2026, 5, 12)
+        assert previous_trading_session(
+            date(2026, 5, 13), observed=frozenset({date(2026, 5, 12)})
+        ) == date(2026, 5, 11)
+
+    def test_observed_is_remove_only_never_add(self) -> None:
+        # A member can only flip True -> False: overlaying a weekend/holiday
+        # (already a non-session) changes NOTHING, and the result with any
+        # overlay is never AFTER the un-overlaid result and never a member.
+        plain = previous_trading_session(date(2025, 9, 29))
+        assert plain == date(2025, 9, 26)
+        # Overlaying the in-between Saturday/Sunday is a no-op (False stays False).
+        weekend = frozenset({date(2025, 9, 27), date(2025, 9, 28)})
+        assert previous_trading_session(date(2025, 9, 29), observed=weekend) == plain
+        # Overlaying the answer itself pushes the walk STRICTLY further back.
+        overlaid = previous_trading_session(
+            date(2025, 9, 29), observed=frozenset({date(2025, 9, 26)})
+        )
+        assert overlaid == date(2025, 9, 25)
+        assert plain is not None and overlaid is not None
+        assert overlaid < plain
+
+    def test_observed_large_set_still_terminates(self) -> None:
+        # Termination with a LARGE overlay: every 2025 trading session
+        # overlaid -> the walk from 2026-01-01 crosses the whole year and
+        # lands on the last 2024 session (bounded by the coverage floor, so
+        # the loop can never spin forever).
+        all_2025 = frozenset(trading_days_between(date(2025, 1, 1), date(2025, 12, 31)))
+        assert len(all_2025) > 200
+        got = previous_trading_session(date(2026, 1, 1), observed=all_2025)
+        assert got == date(2024, 12, 31)
+
+    @pytest.mark.parametrize("exchange", [None, "NSE", "BSE"])
+    def test_observed_exchange_parity(self, exchange: str | None) -> None:
+        # NSE ≡ BSE ≡ None with an overlay too (the holiday sets are identical
+        # for every covered year; the overlay is exchange-agnostic data).
+        obs = frozenset({date(2026, 5, 12)})
+        assert previous_trading_session(
+            date(2026, 5, 13), exchange=exchange, observed=obs
+        ) == previous_trading_session(date(2026, 5, 13), observed=obs)
+
+    def test_bad_exchange_with_observed_still_raises_eagerly(self) -> None:
+        with pytest.raises(ValueError, match="unknown exchange"):
+            previous_trading_session(
+                date(2024, 7, 10), exchange="LSE", observed=frozenset({date(2024, 7, 9)})
+            )
