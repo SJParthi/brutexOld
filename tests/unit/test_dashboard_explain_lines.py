@@ -181,6 +181,45 @@ class TestTradeArithmetic:
         assert out["rows_counted"] == 0
         assert "sum of the 0 trades loaded below" in out["lines"][2]
 
+    def test_null_costs_rows_are_counted_at_zero_with_a_caveat_line(self) -> None:
+        """[W2-4] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: Ruling-18 NULL-BY-DESIGN
+        ``costs_paisa: null`` previously read "net ₹0.00 across 0 trades" +
+        a mislabeled non-integer line over REAL production rows. Null costs
+        now count at ₹0 with their OWN honest caveat; ok stays True (a
+        by-design null is not a defect)."""
+        rows = [
+            {"pnl_paisa": 150, "costs_paisa": None},
+            {"pnl_paisa": -30, "costs_paisa": None},
+            {"pnl_paisa": 80, "costs_paisa": None},
+        ]
+        out = _node_call("E.tradeArithmetic(ARGS[0])", json.dumps(rows))
+        assert out["ok"] is True
+        assert out["invalid_rows"] == 0
+        assert out["null_cost_rows"] == 3
+        assert out["rows_counted"] == 3
+        assert out["gross_pnl_paisa"] == 200
+        assert out["total_costs_paisa"] == 0
+        assert out["net_paisa"] == 200
+        assert out["lines"][0] == "Σ trade P&L = ₹2.00 across 3 trades"
+        assert out["lines"][3] == (
+            "3 row(s) carry null costs (by design until P5) — counted at ₹0.00, "
+            "so the net is GROSS of those costs"
+        )
+        assert not any("non-integer" in line for line in out["lines"])
+
+    def test_null_costs_and_genuine_invalid_rows_are_bucketed_separately(self) -> None:
+        rows = [
+            {"pnl_paisa": 100, "costs_paisa": None},  # by-design null — counted
+            {"pnl_paisa": 0.5, "costs_paisa": 0},  # genuine non-integer — excluded
+        ]
+        out = _node_call("E.tradeArithmetic(ARGS[0])", json.dumps(rows))
+        assert out["ok"] is False  # the genuine defect still flips ok
+        assert out["null_cost_rows"] == 1
+        assert out["invalid_rows"] == 1
+        assert out["rows_counted"] == 1
+        assert "null costs (by design until P5)" in out["lines"][3]
+        assert "non-integer" in out["lines"][4]
+
 
 class TestModeText:
     """bxModeText — the R33-toggle law (P4 owns the toggle; the table is P3's)."""
