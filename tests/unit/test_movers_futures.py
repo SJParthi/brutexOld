@@ -1052,7 +1052,7 @@ class TestStockDriftSpotRecovery:
         """Every exact-key probe resolves ⇒ the drift map is NEVER built (spy),
         no recovery log fires, and the rows are the pre-fold-in values
         byte-for-byte (index NIFTY + hyphenated stock alike)."""
-        import brutex.dashboard.movers_futures as mf
+        from brutex.dashboard import movers_futures as mf
 
         _write_hyphen_lake(tmp_path)
 
@@ -1134,7 +1134,7 @@ class TestSpotLtpResolver:
         """Two calls for the SAME drifted underlying: the drift map builds once,
         ONE log fires, and the second call re-probes the memoised recovered key
         (exactly like the exact key is re-probed per row today)."""
-        import brutex.dashboard.movers_futures as mf
+        from brutex.dashboard import movers_futures as mf
         from brutex.dashboard.movers_futures import _SpotLtpResolver
 
         _write_drifted_lake(tmp_path)
@@ -1161,7 +1161,7 @@ class TestSpotLtpResolver:
     ) -> None:
         """A genuinely spot-less underlying exhausts the ladder ONCE — the
         second call answers the memoised honest ``None`` with zero re-walk."""
-        import brutex.dashboard.movers_futures as mf
+        from brutex.dashboard import movers_futures as mf
         from brutex.dashboard.movers_futures import _SpotLtpResolver
 
         walks: list[str] = []
