@@ -2151,9 +2151,14 @@ def build_app(
         derived counts are cached behind ``_universe_cache``, keyed by the
         master's ``instruments``-table content token — a re-poll between two loads
         is a dict handoff, a new load rebuilds.
+
+        DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the cache's revision probe (a sync
+        DuckDB ``COUNT`` + ``MAX``) — and the three base reads on a miss — run on a
+        threadpool worker, NEVER the uvicorn event loop, so a stalled lake volume
+        cannot freeze the whole dashboard.
         """
         store = _require_store()
-        return JSONResponse(_universe_cache.summary(store))
+        return JSONResponse(await run_in_threadpool(_universe_cache.summary, store))
 
     @app.get("/api/v1/universe/instruments")
     async def api_universe_instruments(
@@ -2177,7 +2182,11 @@ def build_app(
         """
         store = _require_store()
         try:
-            rows = _universe_cache.instruments(store, kind=kind)
+            # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the cache's revision probe +
+            # per-kind base reads run on a threadpool worker, never the event loop
+            # (the classifier's ValueError for a bad kind still propagates out of
+            # run_in_threadpool → 400, before any caching).
+            rows = await run_in_threadpool(lambda: _universe_cache.instruments(store, kind=kind))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
@@ -2221,19 +2230,33 @@ def build_app(
         from brutex.universe_constituents import held_members
 
         store = _require_store()
-        eligible = store.fno_eligible_underlyings()
-        candidates = store.list_index_equity_instruments()
-        reference_only_ids = store.reference_only_security_ids()
-        # The bare engine symbols of EVERY single stock we hold — F&O-eligible AND
-        # admitted REFERENCE_ONLY NTM constituents (DEC-INDEX-CONSTITUENTS-FULL-001).
-        # Passing reference_only_ids classifies the non-F&O constituents as "stock"
-        # too, so the tick covers the index's FULL membership (not just the ~212 F&O
-        # names); the frontend "F&O only" toggle then narrows to the option-pullable
-        # rows. Reuse the COMMON classifier (CLAUDE.md §11) — no re-derived split.
-        stock_rows = list_underlyings(
-            candidates, kind="stock", fno_eligible=eligible, reference_only_ids=reference_only_ids
-        )
-        held_symbols = [row["symbol"] for row in stock_rows]
+
+        def _held_universe() -> tuple[list[Instrument], list[str]]:
+            """Read + classify the held single-stock universe off the event loop.
+
+            DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the three DuckDB store reads +
+            the COMMON classifier run on a threadpool worker (built + used on the
+            SAME thread so the store's RLock stays on one thread —
+            DEC-DASHBOARD-FASTREAD-001), never the uvicorn event loop.
+            """
+            eligible = store.fno_eligible_underlyings()
+            candidates = store.list_index_equity_instruments()
+            reference_only_ids = store.reference_only_security_ids()
+            # The bare engine symbols of EVERY single stock we hold — F&O-eligible AND
+            # admitted REFERENCE_ONLY NTM constituents (DEC-INDEX-CONSTITUENTS-FULL-001).
+            # Passing reference_only_ids classifies the non-F&O constituents as "stock"
+            # too, so the tick covers the index's FULL membership (not just the ~212 F&O
+            # names); the frontend "F&O only" toggle then narrows to the option-pullable
+            # rows. Reuse the COMMON classifier (CLAUDE.md §11) — no re-derived split.
+            stock_rows = list_underlyings(
+                candidates,
+                kind="stock",
+                fno_eligible=eligible,
+                reference_only_ids=reference_only_ids,
+            )
+            return candidates, [row["symbol"] for row in stock_rows]
+
+        candidates, held_symbols = await run_in_threadpool(_held_universe)
 
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
@@ -5532,10 +5555,6 @@ def build_app(
                     )
                 )
             lake_root = store_path.parent
-            # The current write-generation — a pull/materialize bumps it, so every
-            # cached candidate set computed at an older generation is dirty (the
-            # page never serves pre-pull data). Reused from the coverage cache.
-            generation = _summary_cache.generation
 
             def _resolve() -> dict[str, Any]:
                 """Cache-or-compute the candidate set, then rank to top_n + exchange.
@@ -5545,6 +5564,13 @@ def build_app(
                 ONLY on a miss / post-pull; a hit is an O(1) handoff + a cheap
                 in-memory rank (DEC-MOVERS-O1-LATENCY-001).
                 """
+                # The current write-generation — a pull/materialize bumps it, so every
+                # cached candidate set computed at an older generation is dirty (the
+                # page never serves pre-pull data). Reused from the coverage cache.
+                # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: read HERE on the threadpool
+                # worker — the probe stats the ledger + digests the sweeps tree (an
+                # O(dirs) read), which must never run on the uvicorn event loop.
+                generation = _summary_cache.generation
                 # Normalise the date so the candidate cache key is canonical. With NO
                 # explicit date, default to the LATEST available spot day
                 # (DEC-PULL-MOVERS-WARM-001), NOT today: a historical pull fills the lake
@@ -5868,10 +5894,12 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
         lake = lake_root.parent
-        gen = _summary_cache.generation
 
         def _resolve() -> dict[str, Any]:
             """Tag pullability off the event loop; discovery is generation-memoised."""
+            # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
+            # sweeps-tree digest) runs HERE on the threadpool worker, never the loop.
+            gen = _summary_cache.generation
             triples = _db_datasets_cache.get_or_compute(
                 preopen_datasets_key(report_basis),
                 generation=gen,
@@ -7017,11 +7045,12 @@ def build_app(
         # generation — a tab switch within one generation is an O(1) cached handoff, a
         # pull bumps the generation → rediscover. The build still runs on the threadpool
         # worker (the store read + dir-walks stay off the event loop) on a cache miss.
-        gen = _summary_cache.generation
+        # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
+        # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
         return JSONResponse(
             await run_in_threadpool(
                 lambda: _db_datasets_cache.get_or_compute(
-                    DB_DATASETS_KEY, generation=gen, compute=_datasets
+                    DB_DATASETS_KEY, generation=_summary_cache.generation, compute=_datasets
                 )
             )
         )
@@ -7041,11 +7070,12 @@ def build_app(
         if not isinstance(lake_root, Path):
             return None
         lake = lake_root.parent
-        gen = _summary_cache.generation
+        # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
+        # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
         index: FnoCascadeIndex = await run_in_threadpool(
             lambda: _fno_cascade_cache.get_or_compute(
                 FNO_CASCADE_KEY,
-                generation=gen,
+                generation=_summary_cache.generation,
                 compute=lambda: build_fno_cascade(list_fno_candle_datasets(lake)),
             )
         )
@@ -7166,15 +7196,16 @@ def build_app(
         if not isinstance(lake_root, Path):
             return None
         lake = lake_root.parent
-        gen = _summary_cache.generation
 
         def _build() -> SpotCascadeIndex:
             """Build the spot symbol→interval cascade from the non-F&O lake datasets."""
             return build_spot_cascade(filter_spot_datasets(list_candle_datasets(lake)))
 
+        # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
+        # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
         index: SpotCascadeIndex = await run_in_threadpool(
             lambda: _spot_cascade_cache.get_or_compute(
-                SPOT_CASCADE_KEY, generation=gen, compute=_build
+                SPOT_CASCADE_KEY, generation=_summary_cache.generation, compute=_build
             )
         )
         return index
