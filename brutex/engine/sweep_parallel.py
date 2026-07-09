@@ -818,14 +818,24 @@ class TupleWorkResult:
 class _WorkerContext:
     """Immutable per-pool context handed to each worker via the pool initializer.
 
-    Picklable (a frozen dataclass of a ``SweepGridConfig`` + a ``Path``); the
-    worker rebuilds its ``store_for`` factory from ``(root, grid)`` via
+    Picklable (a frozen dataclass of a ``SweepGridConfig`` + a ``Path`` + the
+    driver's worker count); the worker rebuilds its ``store_for`` factory from
+    ``(root, grid)`` via
     :func:`~brutex.engine.sweep_orchestrator.make_store_for`, so the un-picklable
-    parent closure never crosses the process boundary.
+    parent closure never crosses the process boundary. ``sweep_concurrency`` is
+    the driver's TOTAL worker budget (DEC-SWEEP-SCALE-GUARDS-001) — forwarded to
+    each ``run_one_tuple`` so the per-tuple rank-memory budget is the
+    whole-machine figure divided across the tuples running concurrently in the
+    pool, never the full budget per worker (which would OOM the box).
     """
 
     grid: SweepGridConfig
     root: Path
+    #: The driver's TOTAL worker budget — defaults to ``1`` (a single resident
+    #: tuple, byte-for-byte the old per-tuple budget) so a library/test
+    #: construction without it stays safe; the production driver always passes
+    #: its resolved ``workers`` explicitly (see :meth:`ParallelGridDriver.run`).
+    sweep_concurrency: int = 1
 
 
 #: The per-worker-PROCESS context, set ONCE by :func:`_worker_init`. A module
@@ -924,6 +934,10 @@ def _run_tuple_in_worker(
             audit=collector,
             skip_empty=True,
             store_quarantine=_worker_store_quarantine,
+            # Divide the rank-memory budget across the pool's concurrent tuples
+            # (DEC-SWEEP-SCALE-GUARDS-001) — the whole-machine budget per worker
+            # would OOM the box (8 concurrent k=5 tuples ≈ 42 GB on a 48 GB box).
+            sweep_concurrency=ctx.sweep_concurrency,
         )
     except SweepComboError as exc:
         return TupleWorkResult(
@@ -1274,7 +1288,7 @@ class ParallelGridDriver:
         pool_size = self._workers - 1
         max_inflight = pool_size * _INFLIGHT_MULTIPLIER
         heap_cap = pool_size * _HEAP_CAP_MULTIPLIER
-        ctx = _WorkerContext(grid=self._grid, root=self._root)
+        ctx = _WorkerContext(grid=self._grid, root=self._root, sweep_concurrency=self._workers)
         try:
             with ProcessPoolExecutor(
                 max_workers=pool_size,

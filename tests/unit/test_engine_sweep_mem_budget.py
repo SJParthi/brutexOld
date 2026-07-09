@@ -9,6 +9,7 @@ refusal NAMES both env knobs + concrete remedies).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 
 import pytest
@@ -21,6 +22,7 @@ from brutex.engine.sweep_mem_budget import (
     MEM_BUDGET_FRACTION,
     BoundedRankMode,
     RankMemoryPlan,
+    per_worker_mem_budget_bytes,
     plan_rank_memory,
     resolve_bounded_rank_mode,
     resolve_mem_budget_bytes,
@@ -257,3 +259,86 @@ class TestWatermarkMessage:
         # present in every PRE-FLIGHT refusal, pinned above).
         message = watermark_message(owned_bytes=2048, budget_bytes=1024, n_kept=17)
         assert BOUNDED_RANK_MODE_ENV not in message
+
+
+# ────── per_worker_mem_budget_bytes (DEC-SWEEP-SCALE-GUARDS-001, the OOM fix) ──────
+
+
+class TestPerWorkerMemBudget:
+    """The worker-aware budget divide — the OOM fix's arithmetic core."""
+
+    def test_single_worker_is_byte_unchanged(self) -> None:
+        # Pin (b): the sequential path (one resident tuple) divides by 1, so the
+        # per-tuple budget is byte-for-byte the pre-change whole-machine figure.
+        assert per_worker_mem_budget_bytes(8 * _GIB, 1) == 8 * _GIB
+
+    def test_eight_workers_divide_the_total(self) -> None:
+        # The 48 GiB §8 box: default total 8 GiB / 8 workers == 1 GiB per tuple.
+        assert per_worker_mem_budget_bytes(8 * _GIB, 8) == 1 * _GIB
+
+    def test_override_is_divided_the_same_way(self) -> None:
+        # The BRUTEX_SWEEP_MEM_BUDGET_BYTES override stays a TOTAL, divided the
+        # same way — an operator's 4 GiB total under 4 workers is 1 GiB/tuple.
+        assert per_worker_mem_budget_bytes(4 * _GIB, 4) == 1 * _GIB
+
+    def test_floor_is_one_byte_never_zero(self) -> None:
+        # A pathological total//workers == 0 must never yield a zero budget (that
+        # would refuse every non-empty tuple); the floor is 1 byte.
+        assert per_worker_mem_budget_bytes(3, 8) == 1
+
+    def test_integer_division_floors(self) -> None:
+        assert per_worker_mem_budget_bytes(10, 3) == 3
+
+    @pytest.mark.parametrize("bad", [0, -1, -8])
+    def test_rejects_non_positive_worker_count(self, bad: int) -> None:
+        with pytest.raises(ValueError, match="sweep_concurrency must be >= 1"):
+            per_worker_mem_budget_bytes(8 * _GIB, bad)
+
+    def test_eight_concurrent_k5_retention_stays_under_half_ram(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pin (a): the OOM guarantee. On the 48 GiB §8 box the default total is
+        # 8 GiB; under the bounded rank each of 8 concurrent tuples is capped at
+        # the per-worker budget, so the concurrent aggregate is well under half
+        # of RAM (8 × 1 GiB = 8 GiB ≤ 24 GiB) — never the ~42 GB the undivided
+        # budget allowed (8 × 5.21 GB).
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        total_ram = 48 * _GIB
+        workers = 8
+        per_tuple = per_worker_mem_budget_bytes(resolve_mem_budget_bytes({}), workers)
+        assert workers * per_tuple <= total_ram // 2
+
+    def test_k5_bounded_rank_engages_under_default_workers_but_not_single(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pin (c): a k=5 tuple's ~5.21 GB batch projection sat JUST UNDER the
+        # undivided 8 GiB gate, so the bounded rank NEVER engaged (silent OOM
+        # risk). Divided across 8 workers the gate is 1 GiB, so it now ENGAGES.
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        n_masks_k5 = math.comb(60, 5)  # 5,461,512 masks
+        projected = n_masks_k5 * BATCH_RANK_BYTES_PER_KEPT  # ~5.21 GB
+        total = resolve_mem_budget_bytes({})
+        assert total == 8 * _GIB
+        # The register's exact numbers: 5.21 GB projection under the 8 GiB gate.
+        assert 5 * _GIB < projected < 6 * _GIB
+
+        # Single worker (undivided): the projection is UNDER the gate → batch (never bounded).
+        single_plan = plan_rank_memory(
+            n_masks=n_masks_k5,
+            top_k=1000,
+            digest_path=True,
+            mode=BoundedRankMode.AUTO,
+            budget_bytes=per_worker_mem_budget_bytes(total, 1),
+        )
+        assert single_plan.bounded is False
+
+        # Default 8 workers (divided): the 1 GiB gate is exceeded → bounded ENGAGES.
+        parallel_plan = plan_rank_memory(
+            n_masks=n_masks_k5,
+            top_k=1000,
+            digest_path=True,
+            mode=BoundedRankMode.AUTO,
+            budget_bytes=per_worker_mem_budget_bytes(total, 8),
+        )
+        assert parallel_plan.bounded is True
+        assert parallel_plan.bounded_top_k == 1000

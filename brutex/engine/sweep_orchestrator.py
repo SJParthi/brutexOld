@@ -924,6 +924,7 @@ def run_one_tuple(
     kernel_cache: ResidentKernelCache | None = None,
     diffcheck: TupleDiffCheck | None = None,
     store_quarantine: StoreQuarantine | None = None,
+    sweep_concurrency: int = 1,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
 
@@ -980,6 +981,13 @@ def run_one_tuple(
         so the grid counts the tuple failed and CONTINUES (previously a
         corrupt store aborted the whole grid). ``None`` (default) re-raises
         the original error unchanged (byte-identical to before).
+    sweep_concurrency
+        The number of tuples the driver runs CONCURRENTLY
+        (DEC-SWEEP-SCALE-GUARDS-001), forwarded to
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` so its rank-memory
+        budget is divided across concurrent tuples. ``1`` (default) = the
+        sequential path (byte-for-byte the old per-tuple budget); the parallel
+        driver passes its total worker count.
 
     Returns
     -------
@@ -1027,6 +1035,11 @@ def run_one_tuple(
             # Enables the per-tuple trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001):
             # the digest is the same collision guard the store filename carries.
             trial_stats_digest=_tuple_digest(tuple_, grid),
+            # Worker-aware rank-memory budget (DEC-SWEEP-SCALE-GUARDS-001): the
+            # parallel driver passes its total worker count so the per-tuple budget
+            # is the whole-machine figure divided across concurrent tuples; the
+            # sequential path leaves the default 1 (byte-for-byte the old budget).
+            sweep_concurrency=sweep_concurrency,
         )
 
     try:

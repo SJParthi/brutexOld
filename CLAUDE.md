@@ -18,7 +18,64 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
+_Last updated: 2026-07-09 (T2 SWEEP-HARDENING integration train, branch
+`integration/t2-sweep-hardening` — based on T1's `integration/t1-sweep-core` (NOT main; the
+train PR diff shows T1+T2 until T1 lands — expected, disclosed). Folded so far: **#1285
+DEC-SWEEP-SCALE-GUARDS-001** (#1635) + **#1305 DEC-SWEEP-KEEPAWAKE-001** (MIGRATION.md
+#1636, renumbered from #1631 at the fold — every SWEEP entrypoint engages the macOS
+keep-awake guard: `cmd_sweep_all` wraps lake preload → grid → stage-3 → options-sim →
+cascade in ONE source-level `keep_awake("brutex sweep-all")` (the T2 composition: #1305's
+WIDER preload-covering span is THE wrap, superseting #1285's fix-3 span; T1's
+`sweep_run_core` G9 keep-awake nests inside it — harmless, independent caffeinates);
+`cmd_sweep` ("brutex sweep") + `cmd_sweep_daemon` ("brutex sweep-daemon", covering the
+between-cycle sleep) wrap their bodies; the dashboard sweep job inherits in-process, and
+#1285's `run_sweep_from_request` wrap is KEPT as a redundant-nested guard; best-effort,
+never raises; 6 new tests in `tests/unit/test_cli_sweep_keepawake.py`) + **#1306
+DEC-BACKUP-RETENTION-KNOB-GUARD-001** (MIGRATION.md #1637, renumbered from #1598 at the
+fold — the three `BRUTEX_BACKUP_KEEP_{DAILY,WEEKLY,MONTHLY}` retention knobs gain the <1
+loud-fallback guard so a 0/negative keep count can never silently DISABLE a restic
+retention tier through `forget --prune`; ops config leaf only, zero overlap with the sweep
+members — clean merge). #1285
+(MIGRATION.md #1635, renumbered from #1615 at the fold — the
+sweep scale-guards pack, THREE fixes as ONE change set, required before the institutional
+k=5 run: (1) CRITICAL worker-aware rank-memory budget (the OOM fix) —
+`sweep_mem_budget.resolve_mem_budget_bytes()` is a WHOLE-MACHINE figure (RAM×1/6 = 8 GiB on
+the §8 48 GB box) consumed once per tuple, but BLIND to the 8-worker `ProcessPoolExecutor`:
+8 concurrent k=5 tuples each retain ~5.21 GB (C(60,5)=5,461,512 masks × 1024 B/kept) ≈
+41.7 GB at once → OOM, and 5.21 GB sat JUST UNDER the undivided 8 GiB per-tuple gate so the
+bounded columnar rank NEVER engaged. NEW pure `per_worker_mem_budget_bytes(total,
+sweep_concurrency)` divides the TOTAL by the resolved worker count at the plan seam,
+threaded from the driver with NO global (`run_persisted_sweep(sweep_concurrency=)` ←
+`run_one_tuple(sweep_concurrency=)` ← `_WorkerContext.sweep_concurrency =
+ParallelGridDriver._workers`; sequential defaults 1 = byte-for-byte the old budget). Under
+8 workers a k=5 tuple plans against 8 GiB//8 = 1 GiB, so 5.21 GB > 1 GiB → the bounded rank
+ENGAGES (result-safe — bounded ≡ batch bit-identical) and 8×1 GiB = 8 GiB concurrent
+retention stays under RAM/2 = 24 GiB; the `BRUTEX_SWEEP_MEM_BUDGET_BYTES` override stays a
+TOTAL, divided the same way. (2) k-aware SLA projection — `check_sweep_sla` gains OPTIONAL
+per-(instrument, tf, k) `TupleCostCell`s driving `project_weighted_grid_cost`: per-tuple
+weight = C(n_bits, k) × N_bars, projected = `per_tuple_seconds × Σ(weight×mult) /
+reference_weight` (reference = the mean weight of the SMALLEST-k cells), so the 30 s
+calibration maps to the current average small-k tuple, a k=1-only grid projects EXACTLY the
+flat model's order, a k=5-heavy MIXED grid projects orders higher (the ~91,000×
+C(60,1)→C(60,5) spread), and the refusal NAMES the dominant tuples. Without cells it is
+byte-for-byte the flat model. HONEST: grid-RELATIVE and STILL UNBENCHMARKED (Golden Rule
+#10). (3) keep_awake on the sweep entry points — the dashboard job body
+(`run_sweep_from_request`) wraps its span in the existing `keep_awake` context; at
+`cmd_sweep_all` the member's explicit wrap is SUBSUMED by T1's `sweep_run_core` G9
+keep-awake hook (same entry_label, same span — a train-fold re-derivation, disclosed), so
+a 2-4-day overnight sweep never sleeps mid-flight on EITHER entry point; best-effort,
+non-darwin is a logged no-op. In-train re-derivations: `run_one_tuple` carries BOTH T1's
+`diffcheck`/`store_quarantine` seams AND the new `sweep_concurrency=`, threaded inside
+T1's G1 `_attempt()` retry body. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+REFERENCE_ONLY, no scope/vocab/rate change; touched engine modules 100% line+branch
+(seq-vs-parallel byte-identity goldens + suffix-independence gates pass unchanged);
+ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline.
+Main fold 2026-07-09: PR #1352 (DEC-ONECLICK-TOP100-OBJECT-ROOT-001) took ledger #1631,
+shifting the whole train tail to #1632–#1637 (renumbers noted in-entry).
+Review-round history is deliberately not narrated in this header — each member's
+per-round record lives ONLY in the §1 Active-branch blurb + its own
+MIGRATION.md entry.)
+Earlier: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
 ONE coordinator-confirmed fold of five member PRs in binding order: **#1330
 DEC-SWEEP-UNKILLABLE-CORE-001** (MIGRATION.md #1594 / ADR-0019 — the UNKILLABLE sweep run
 core; its single-flight mechanism `engine/sweep_singleflight.py` is the train-WINNING
@@ -1831,7 +1888,24 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
+- **Active branch:** `integration/t2-sweep-hardening` (**T2 SWEEP-HARDENING integration
+  train** — based on T1's `integration/t1-sweep-core` (NOT main — the PR diff shows T1+T2
+  until T1 lands, expected + disclosed). Folded so far: #1285 DEC-SWEEP-SCALE-GUARDS-001
+  (MIGRATION.md #1635, renumbered from #1615 at the fold) — the sweep scale-guards pack:
+  worker-aware rank-memory budget (`per_worker_mem_budget_bytes`, threaded driver →
+  `run_one_tuple(sweep_concurrency=)` → `run_persisted_sweep` inside T1's G1 `_attempt()`
+  retry body), k-aware SLA projection (`TupleCostCell` + `project_weighted_grid_cost`),
+  keep_awake on the dashboard sweep job body; plus #1305 DEC-SWEEP-KEEPAWAKE-001
+  (MIGRATION.md #1636, renumbered from #1631) — keep_awake on every sweep entrypoint
+  (`cmd_sweep_all` ONE wide source-level wrap covering the lake preload, with T1's
+  `sweep_run_core` G9 hook nested inside — a disclosed train-fold composition;
+  `cmd_sweep`; `cmd_sweep_daemon` incl. the between-cycle sleep; the dashboard job
+  inherits in-process and #1285's `run_sweep_from_request` wrap is kept
+  redundant-nested); plus #1306 DEC-BACKUP-RETENTION-KNOB-GUARD-001 (MIGRATION.md #1637,
+  renumbered from #1598) — the backup retention keep-knob <1 loud-fallback guard (ops
+  config leaf, clean merge). See the §1 header blurb for the full member one-liners.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
+  Earlier: `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
   coordinator-confirmed fold, in binding order, of #1330 DEC-SWEEP-UNKILLABLE-CORE-001
   (MIGRATION.md #1594 / ADR-0019; its single-flight mechanism WINS all competing variants) →
   #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1632) → #1336
@@ -4339,7 +4413,13 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/t1-sweep-core`
+- **Active feature branch:** `integration/t2-sweep-hardening`
+  (T2 SWEEP-HARDENING integration train — based on `integration/t1-sweep-core`; folds #1285
+  DEC-SWEEP-SCALE-GUARDS-001 (#1635, renumbered from #1615) + #1305
+  DEC-SWEEP-KEEPAWAKE-001 (#1636, renumbered from #1631) + #1306
+  DEC-BACKUP-RETENTION-KNOB-GUARD-001 (#1637, renumbered from #1598); see §1 Active branch
+  for the full blurb)
+  Earlier: `integration/t1-sweep-core`
   (T1 SWEEP-CORE integration train — folds #1330 DEC-SWEEP-UNKILLABLE-CORE-001 (#1594) +
   #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1632) + #1336
   DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 (#1633) + #1350

@@ -114,6 +114,7 @@ from brutex.engine.sweep_driver import (
 from brutex.engine.sweep_lookahead import maybe_guard_bars
 from brutex.engine.sweep_mem_budget import (
     BoundedRankMode,
+    per_worker_mem_budget_bytes,
     plan_rank_memory,
     resolve_bounded_rank_mode,
     resolve_mem_budget_bytes,
@@ -1171,6 +1172,7 @@ def run_persisted_sweep(
     audit: AuditSink,
     kernel: ResidentSweepKernel | None = None,
     trial_stats_digest: str | None = None,
+    sweep_concurrency: int = 1,
 ) -> SweepRunSummary:
     """Run a reproducible, deduped, audited K-of-bits sweep over ONE (instrument, TF).
 
@@ -1270,6 +1272,14 @@ def run_persisted_sweep(
         path. ``None`` (default) keeps the legacy probe semantics and writes
         no sidecar/sentinel (library callers; the launcher path supplies the
         digest via :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`).
+    sweep_concurrency
+        The number of tuples running CONCURRENTLY under the driver
+        (DEC-SWEEP-SCALE-GUARDS-001) — ``1`` (default) on the sequential path,
+        the parallel driver's total worker budget otherwise. The rank-memory
+        budget (:func:`~brutex.engine.sweep_mem_budget.per_worker_mem_budget_bytes`)
+        is the whole-machine figure divided by this count, so N concurrent
+        tuples' rank regions cannot together exceed the envelope the budget was
+        picked for. ``1`` is byte-for-byte the pre-change per-tuple budget.
 
     Returns
     -------
@@ -1350,12 +1360,19 @@ def run_persisted_sweep(
     # raw MemoryError crash. Mode `on`'s structural refusals (legacy path /
     # top_k=None) raise ValueError from plan_rank_memory — an explicit operator
     # forcing with an impossible shape is a config error, not a tuple condition.
+    # Worker-aware budget (DEC-SWEEP-SCALE-GUARDS-001): the resolved budget is a
+    # WHOLE-MACHINE figure; under the multi-core driver up to `sweep_concurrency`
+    # tuples each hold a rank region CONCURRENTLY, so the per-tuple budget must
+    # be the total divided by the worker count (else 8 concurrent k=5 tuples OOM
+    # the 48 GB §8 box while each one sits under the undivided 8 GiB gate). The
+    # BRUTEX_SWEEP_MEM_BUDGET_BYTES override stays a TOTAL, divided the same way;
+    # sweep_concurrency=1 (the sequential path) is byte-for-byte the old budget.
     plan = plan_rank_memory(
         n_masks=n_masks,
         top_k=cfg.top_k,
         digest_path=trial_stats_digest is not None,
         mode=resolve_bounded_rank_mode(),
-        budget_bytes=resolve_mem_budget_bytes(),
+        budget_bytes=per_worker_mem_budget_bytes(resolve_mem_budget_bytes(), sweep_concurrency),
     )
     if plan.refusal is not None:
         raise SweepMemoryBudgetError(f"{subject}: {plan.refusal}")
