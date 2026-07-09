@@ -53,6 +53,7 @@ and only these heal-time checks close that window.
 from __future__ import annotations
 
 import contextlib
+import os
 from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -65,6 +66,13 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import parquet_read_skip_errors
+from brutex.data.lake_stats_manifest import (
+    KIND_OPTIONS,
+    partition_stats_tracked,
+    record_partition_stats,
+    remove_partition_stats,
+    stats_manifest_enabled,
+)
 from brutex.data.models import OptionBar
 from brutex.data.partition import option_partition_stem, partition_for_timestamp
 from brutex.data.partition_lock import BoundedLockRegistry, partition_write_lock
@@ -251,7 +259,13 @@ class OptionParquetWriter:
     def _merge_partition(
         self, dest: Path, coordinate: OptionSeriesCoordinate, new_bars: list[OptionBar]
     ) -> int:
-        """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new rows.
+        """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new DISTINCT keys.
+
+        The return is the count of genuinely NEW ``(side, timestamp)`` keys —
+        post-``unique`` distinct minus the EXISTING file's distinct count,
+        never a physical-row delta (review round 3: the physical baseline
+        under-counted on a physically-duplicated partition and silently
+        dropped new bars). ``added == 0`` (pure re-pull) writes nothing.
 
         Thin delegate to :meth:`_merge_frame_locked` — the render callable runs
         INSIDE ``lake_write_guard`` (its allocation keeps the ENOSPC/OOM →
@@ -474,12 +488,15 @@ class OptionParquetWriter:
                 # cancel genuinely-new keys against that collapse — `added == 0` would
                 # then SKIP the rewrite and a reassignment heal's moved key would land
                 # NOWHERE while the source copy is removed (silent row LOSS — the
-                # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 hostile-review BLOCKER). int()
-                # coercion keeps the return concretely int even in the CI type-check
-                # env where polars is NOT installed (`[dev]`-only env, without the
-                # `[data]` extra) — there `.height` is Any (ignore_missing_imports)
-                # and an un-coerced return would trip mypy --strict's no-any-return.
-                before = int(existing.unique(subset=["side", "timestamp"]).height)
+                # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 hostile-review BLOCKER; the same
+                # defect was independently found + fixed by #1228's review round 3 —
+                # `n_unique` here is its cheaper equivalent of
+                # `unique(subset).height`). int() coercion keeps the return
+                # concretely int even in the CI type-check env where polars is NOT
+                # installed (`[dev]`-only env, without the `[data]` extra) — there
+                # the polars return is Any (ignore_missing_imports) and an
+                # un-coerced return would trip mypy --strict's no-any-return.
+                before = int(existing.n_unique(subset=["side", "timestamp"]))
                 dedup_dropped = int(existing.height) - before
                 combined = (
                     pl.concat([existing, new_df])
@@ -524,6 +541,12 @@ class OptionParquetWriter:
             if added > 0 or dedup_dropped > 0:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 _atomic_write_parquet(dest, combined)
+                # Stats-manifest upsert (DEC-LAKE-STATS-MANIFEST-001): bytes
+                # were RENDERED, so the shard — when one exists (lazy
+                # accretion) — is re-stamped under the still-held lock stack.
+                # The ``added == 0`` pure re-pull writes nothing and therefore
+                # touches no shard (the existing row stays stat-valid).
+                _record_option_stats(self._lake_root, dest=dest, frame=combined)
             return added
 
     def read_partition_frame(self, dest: Path) -> pl.DataFrame:
@@ -724,6 +747,15 @@ class OptionParquetWriter:
                 dest.unlink()
                 with contextlib.suppress(OSError):
                     dest.parent.rmdir()
+                # Stats-manifest row removal (DEC-LAKE-STATS-MANIFEST-001):
+                # the options twin of the bars writer's ``_remove_stats_hook``
+                # at ITS quarantine-MOVE branch — the unlinked file's shard
+                # row is dropped under the SAME held locks (best-effort;
+                # the last row's removal unlinks the whole shard). Without
+                # it the shard would fail the read-side file-set gate on
+                # every consult until a reseed (safe — fallback, never a
+                # wrong answer — but defeats the manifest for the series).
+                _remove_option_stats(self._lake_root, dest=dest)
                 return OptionHealResult(
                     path=dest,
                     changed=True,
@@ -733,6 +765,11 @@ class OptionParquetWriter:
                     dropped_removed=dropped_removed,
                 )
             _atomic_write_parquet(dest, deduped)
+            # Stats-manifest re-stamp (DEC-LAKE-STATS-MANIFEST-001): the heal
+            # rewrite rendered new bytes — upsert the row (post-dedup distinct
+            # count + fresh stat token) under the SAME held locks. The
+            # unchanged branch above returns earlier and touches nothing.
+            _record_option_stats(self._lake_root, dest=dest, frame=deduped)
             return OptionHealResult(
                 path=dest,
                 changed=True,
@@ -806,6 +843,92 @@ def _render_df(coordinate: OptionSeriesCoordinate, bars: Sequence[OptionBar]) ->
         pl.col("strike").cast(pl.Float64),
         pl.col("spot").cast(pl.Float64),
         pl.col("iv").cast(pl.Float64),
+    )
+
+
+def _record_option_stats(lake_root: Path, *, dest: Path, frame: pl.DataFrame) -> None:
+    """Best-effort stats-manifest upsert after an options-tree partition render.
+
+    DEC-LAKE-STATS-MANIFEST-001 write hook (the options twin of
+    ``ParquetWriter._record_stats_hook``): called by
+    :meth:`OptionParquetWriter._merge_frame_locked` (inside its rewrite
+    branch — ``added > 0`` OR the ``dedup_dropped > 0`` forced dedup
+    rewrite, so a merge-touch self-heal re-stamps the row too) and by the
+    :meth:`OptionParquetWriter.heal_partition` rewrite —
+    always INSIDE the still-held partition lock stack, so the ``os.stat``
+    token is the durable file's. ``rows`` is *frame*'s height — already the
+    post-``unique`` DISTINCT ``(side, timestamp)`` count — with bounds from
+    the rendered frame and ``raw_hash=None`` (the options writer computes
+    none; forensics-only field). The dataset key is the on-disk series dir
+    name VERBATIM (``{"series": dest.parent.name}``). LAZY ACCRETION, probed
+    FIRST (:func:`~brutex.data.lake_stats_manifest.partition_stats_tracked`,
+    review round 2): an unviewed series' write costs exactly ONE cheap O(1)
+    probe — a shard-path key digest + one failed ``os.stat`` — and never runs
+    the O(frame) bounds fold or the ``os.stat(dest)``. When the shard exists,
+    delegates to the best-effort
+    :func:`~brutex.data.lake_stats_manifest.record_partition_stats` — a shard
+    failure can never raise into the pull (a
+    :class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/`` creation on a
+    genuinely full disk deliberately propagates). Kill switch off ⇒ pure
+    no-op (not even the probe). A frame whose timestamp bounds are not
+    datetimes (defensive — an empty/null column) or a vanished-file stat is
+    logged and skipped.
+    """
+    if not stats_manifest_enabled():
+        return
+    key = {"series": dest.parent.name}
+    if not partition_stats_tracked(lake_root, KIND_OPTIONS, key):
+        # Lazy accretion, probe-FIRST (review round 2): an unviewed series
+        # pays only this probe — the O(frame) min/max fold and the
+        # os.stat(dest) below never run; seeding stays read-side only.
+        return
+    min_ts = frame["timestamp"].min()
+    max_ts = frame["timestamp"].max()
+    if not isinstance(min_ts, datetime) or not isinstance(max_ts, datetime):
+        _LOG.warning("lake.stats_manifest.bounds_underivable", partition=str(dest))
+        return
+    try:
+        stat = os.stat(dest)
+    except OSError as exc:
+        _LOG.warning(
+            "lake.stats_manifest.stat_failed",
+            partition=str(dest),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return
+    record_partition_stats(
+        lake_root,
+        kind=KIND_OPTIONS,
+        key=key,
+        dest=dest,
+        rows=int(frame.height),
+        min_ts=min_ts,
+        max_ts=max_ts,
+        raw_hash=None,
+        stat=stat,
+    )
+
+
+def _remove_option_stats(lake_root: Path, *, dest: Path) -> None:
+    """Best-effort stats-manifest row removal after a wholly-removed unlink.
+
+    DEC-LAKE-STATS-MANIFEST-001 heal hook — the options twin of
+    ``ParquetWriter._remove_stats_hook``: called by the
+    :meth:`OptionParquetWriter.heal_partition` wholly-removed
+    quarantine-MOVE branch (``kept == 0`` — the file was unlinked), under
+    the SAME held partition lock stack. Delegates to the lazy + best-effort
+    :func:`~brutex.data.lake_stats_manifest.remove_partition_stats` (absent
+    shard ⇒ no-op; the LAST row's removal unlinks the whole shard; a shard
+    failure logs + never raises into the heal). Kill switch off ⇒ pure
+    no-op. The dataset key is the on-disk series dir name VERBATIM
+    (``{"series": dest.parent.name}`` — same derivation as
+    :func:`_record_option_stats`).
+    """
+    if not stats_manifest_enabled():
+        return
+    remove_partition_stats(
+        lake_root, kind=KIND_OPTIONS, key={"series": dest.parent.name}, dest=dest
     )
 
 

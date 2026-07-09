@@ -111,10 +111,16 @@ from brutex.data.lake_invariants import (
     utc_aware,
 )
 from brutex.data.lake_manifest import invalidate_manifest
+from brutex.data.lake_stats_manifest import KIND_BARS, KIND_OPTIONS, remove_dataset_stats
 from brutex.data.models import CandleBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionWriterError
 from brutex.data.parquet_writer import ParquetWriter, PartitionHealResult
-from brutex.data.partition import BAR_DIR_NAME, option_partition_stem, partition_for_timestamp
+from brutex.data.partition import (
+    BAR_DIR_NAME,
+    PARTITION_PATH_COMPONENTS,
+    option_partition_stem,
+    partition_for_timestamp,
+)
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.spot_daily_resample import (
     DailyDeriveTarget,
@@ -180,6 +186,12 @@ MASS_HEAL_MIN_FILES: Final[int] = 20
 
 #: December — the year-rollover month for :func:`_first_day_after`.
 _DECEMBER: Final[int] = 12
+
+#: Number of components in a canonical options-tree partition path relative
+#: to the lake root: ``options / <series> / <YYYY>-<MM>.parquet`` (the flat
+#: layout ``option_parquet_writer`` renders). The bars-tree twin is
+#: :data:`~brutex.data.partition.PARTITION_PATH_COMPONENTS`.
+_OPTIONS_PATH_COMPONENTS: Final[int] = 3
 
 #: The bars/ intervals a drifted legacy dir MERGES into its canonical dir
 #: (both can carry vendor-authoritative rows). Every OTHER interval dir is
@@ -523,6 +535,51 @@ def _file_month(file: Path) -> tuple[int, int] | None:
         return None
 
 
+def _stats_dataset_coords(lake_root: Path, source: Path) -> tuple[str, dict[str, str]] | None:
+    """Derive *source*'s stats-manifest ``(kind, key)`` from its on-disk path.
+
+    DEC-LAKE-STATS-MANIFEST-001: a bars-tree partition
+    (``bars/<exch>/<seg>/<sym>/<tf>/<yyyy>/<mm>.parquet``) yields
+    ``("bars", {exchange, segment, symbol, interval})``; an options-tree
+    partition (``options/<series>/<YYYY>-<MM>.parquet``) yields
+    ``("options", {"series": ...})`` — every component VERBATIM as it appears
+    on disk (a #911-drift dir stays its own dataset). Any other shape —
+    outside the lake, wrong tree, wrong depth — returns ``None`` (the hook
+    abstains; only these two trees carry stats shards). O(1).
+    """
+    try:
+        rel = source.relative_to(lake_root)
+    except ValueError:
+        return None
+    parts = rel.parts
+    if len(parts) == PARTITION_PATH_COMPONENTS and parts[0] == BAR_DIR_NAME:
+        return (
+            KIND_BARS,
+            {"exchange": parts[1], "segment": parts[2], "symbol": parts[3], "interval": parts[4]},
+        )
+    if len(parts) == _OPTIONS_PATH_COMPONENTS and parts[0] == OPTIONS_DIR_NAME:
+        return (KIND_OPTIONS, {"series": parts[1]})
+    return None
+
+
+def _remove_dataset_stats_for(lake_root: Path, source: Path) -> None:
+    """Unlink the stats-manifest shard of the dataset *source* belongs to.
+
+    The heal-chokepoint twin of ``invalidate_manifest``
+    (DEC-LAKE-STATS-MANIFEST-001): a whole-file quarantine / TF
+    delete-and-rebuild removes stored rows the shard still counts, so the
+    WHOLE shard is dropped — the rebuild's writes flow back through the
+    writers' record hooks and the read-side seed re-accretes. Best-effort +
+    idempotent (:func:`~brutex.data.lake_stats_manifest.remove_dataset_stats`
+    never raises; kill switch off ⇒ no-op); an underivable path abstains.
+    """
+    coords = _stats_dataset_coords(lake_root, source)
+    if coords is None:
+        return
+    kind, key = coords
+    remove_dataset_stats(lake_root, kind=kind, key=key)
+
+
 def _quarantine_move(state: _BatchState, source: Path) -> Path:
     """Quarantine-COPY *source* then unlink it (a whole-file move, audited)."""
     dest = state.quarantine_path(source)
@@ -540,6 +597,12 @@ def _quarantine_move(state: _BatchState, source: Path) -> Path:
     # chokepoint: the whole-file quarantine AND the intraday-TF
     # delete-and-rebuild (`_rebuild_tf_months` moves each month through here).
     invalidate_manifest(state.lake_root)
+    # The stats manifest's twin hook (DEC-LAKE-STATS-MANIFEST-001): the moved
+    # file's dataset shard is unlinked WHOLE beside the dataset-manifest
+    # invalidation — a per-row edit would leave prefix sums lying about the
+    # months a delete-and-rebuild is about to replace. Best-effort +
+    # idempotent; re-accretes via the writers' record hooks + read-side seed.
+    _remove_dataset_stats_for(state.lake_root, source)
     state.quarantined_files += 1
     _LOG.warning("lake_heal.file_quarantined", source=str(source), quarantine=str(dest))
     _audit_append(

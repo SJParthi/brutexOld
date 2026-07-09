@@ -44,327 +44,12 @@ denominator; NO catalog/raw_hash/recall for options (uncatalogued; NOTHING
 derives from `options/`). Wiring: L1 reconcile-piggyback is STRUCTURALLY N/A
 for options (catalog-walk only — documented); L2 `heal_after_pull` gains
 `include_options` (default False) wired True at the F&O post-pull seam ONLY;
-L3 startup sweep rides automatically (zero change). HOSTILE-REVIEW FOLDS
-(round 1, refuter-confirmed, every fix mutant/pre-fix-verified): BLOCKER —
-`merge_partition_frame` baselined `added` on RAW physical rows, so a
-dup-poisoned canonical destination cancelled a genuinely-new moved key
-(`added==0` skipped the rewrite while the source removal ran — silent
-permanent row loss, second sweep clean); FIXED on the bars twin's law:
-unique-stored-key baseline + forced dedup rewrite on touch + the SAME pinned
-`lake.partition.dedup_healed` event (production `write()` byte-unchanged).
-MAJOR — one crafted Unicode-digit filename (`'²²'.isdigit()` True,
-`int('²²')` raises) crashed the WHOLE scan (all healing inert); `int()`
-guarded (bars `_file_month` twin) + ONLY the writer's canonical zero-padded
-stem parses (the same-month twin-file blind spot). MAJOR/MINOR test gaps —
-multi-destination-month reassignment (options + bars twin) + overlap-across-
-months pinned, truncation mutants killed. NITs: symlinked series dirs
-skipped LOUDLY (heal primitives would otherwise mutate outside the lake
-root); ONE `is_foreign_timestamp` predicate (4 copies killed, §11 COMMON);
-new options events carry `series=repr(…)` (#907). ROUND 2 (refuter-confirmed
-MAJOR): that scan-time symlink skip ALONE was BYPASSABLE — a symlinked
-`options/` ROOT (its series dirs are real, the per-series probe never fired)
-and a scan→heal TOCTOU dir swap were BOTH reproduced writing outside the
-lake from the default AUTO-ON sweep; containment is now ENFORCED at the
-writer MUTATION boundary (`OptionParquetWriter._assert_options_containment`
-inside both heal-side entries, resolved-path check at heal time, the
-`options` component deliberately NOT symlink-resolved; refusal = isolated
-`OptionWriterError`, batch continues, outside bytes untouched; a symlinked
-lake ROOT still passes — pinned) + the options ROOT symlink is skipped
-loudly at scan; 6 regressions all verified failing pre-fix; round-2 NITs:
-the "zero reads out of scope" L2 claim + the "healer's own dup pass
-quarantines" comment + the `_merge_partition` "byte-for-byte" docstring
-reworded honestly, `is_foreign_timestamp` added to `__all__`, the
-option-foreign month split now the O(rows) dict-group (bars twin's shape).
-ROUND 3 (refuter-confirmed): MAJOR — a source truncated to ZERO rows in the
-scan→heal window crashed the WHOLE heal batch (empty row mask →
-`pl.Series([])` dtype Null → polars `filter` TypeError, NOT in the
-per-finding isolation set; remaining findings unhealed, no report/alert/
-audit-batch line); `_option_foreign_frame`'s mask is now explicitly
-`pl.Boolean`, so the stale finding takes the documented empty-foreign SKIP
-(regression + reverted-mutant verified). MINOR — the L2 census's
-`include_bars=False` was a SURVIVING MUTANT (flipping it to True passed all
-122 tests, silently rescanning the whole bars tree unbounded + inflating
-the mass-rail denominator); now pinned by a census call-shape spy AND an
-in-span NON-target bars poison that must stay unfound/unhealed/uncounted
-(mutant re-applied + verified killed). Docs honesty: the F&O seam
-docstring's THIRD copy of the round-2-refuted "zero reads out of scope"
-claim reworded to the honest lake_heal wording; this blurb's "ONE …
-sibling read" singular corrected (one per affected month per series).
-ROUND 4 (refuter-confirmed MINOR): the options scan followed a SYMLINKED
-partition FILE out of the lake — only the root + series-DIR probes existed,
-and `read_partition_frame` had NO containment check (the round-2 rail
-guarded only the write/unlink boundaries) — so the healer's consistent
-read followed the link and the copy-forward leg IMPORTED outside rows into
-an in-lake canonical file (that dest passed containment — its parent is a
-REAL series dir; probe-reproduced: outside close=666.0 landed in-lake,
-findings=1 healed=0 errors=1 on every sweep, permanently non-converging).
-Fixed at BOTH ends: per-file `is_symlink()` scan skip (same loud
-`symlink_skipped` event, counted `option_files_skipped`) + the source READ
-now runs `_assert_options_containment` under its locks (joins the two
-mutation legs under the round-2 rail); 3 regressions all verified failing
-pre-fix. Round-4 NITs: the "(O(1) fast path)" min/max shorthand (really
-two vectorized O(rows) scans) + the two remaining in-module singular
-sibling-read docstring copies reworded honestly; the reassignment months
-`sorted()` order was pinned only by fixture-order luck — a descending
-fixture now kills the surviving `sorted→list` mutant; the ledger #1594 F5
-new-event miscount corrected.
-ROUND 5 (refuter-confirmed): MAJOR — a symlink-LOOP dest made
-`_assert_options_containment`'s `dest.resolve()` raise a bare
-`RuntimeError("Symlink loop from …")` on Python ≤3.12 — NOT in the
-per-finding isolation set, so ONE pre-planted loop as a reassignment
-TARGET (the scanner symlink-skips only the SOURCE, no TOCTOU needed)
-aborted the WHOLE heal batch (no report/stats/alert; reproduced
-end-to-end); both `resolve()` calls are now guarded `(OSError,
-RuntimeError)` → the documented isolated `OptionWriterError`, all three
-heal-side entries covered, batch continues (later findings still heal).
-MINOR — BOTH `_canonical_option_keys` `per_file_pause` arms were
-surviving mutants (deleting either passed every suite — the L3 throttle
-promise for targeted canonical reads had no teeth); now pinned by
-tick-count tests (success + error arms; the bars twin rides the same
-pin), all 3 mutants re-applied + verified killed. NITs: an out-of-scope
-symlinked option file is now silently scope-skipped (scope bound before
-the symlink probe — L2 no longer warns/counts it); the targeted
-canonical-sibling read takes the same symlink skip as the glob loop
-(warned, never read, overlap honestly None); a same-second second heal
-batch gets a `-NN`-serialed quarantine dir so the first batch's
-before-image is never overwritten (pre-existing #1175 machinery).
-ROUND 6 (refuter-confirmed): MINOR — the round-2 containment rail refused
-only a dest RESOLVING outside `<lake>/options/`, so a scan→heal swap of the
-flagged file (or its series dir) to a symlink targeting ANOTHER series'
-file STILL INSIDE the lake passed it — the heal read the other series' rows
-through the link and the copy-forward leg imported them into the flagged
-series (cross-series contamination, healed=1/errors=0, reproduced);
-`_assert_options_containment` now ALSO refuses a symlinked dest or series
-dir outright (all three heal-side entries; the lake-ROOT-via-symlink mount
-shape still passes — pinned; 3 regressions verified failing pre-fix).
-MINOR — the census `overlap_rows` None-guards (`(overlap_rows or 0) > 0`,
-options fold + bars twin) were SURVIVING MUTANTS (every census fixture fed
-0/1; None is reachable — an unreadable canonical sibling — and would have
-TypeError-crashed `brutex lake audit-unique` / doctor / the `/universe`
-chip); pinned by two garbage-canonical census folds, the mutant re-applied
-at both lines + verified killed. NITs: the ledger's `TestOptionForeignHeal`
-count corrected 13 → 17; §3's stale active-branch line reconciled to §1.
-ROUND 7 (refuter-confirmed): two SURVIVING MUTANTS + a log NIT. MINOR —
-`_option_foreign_frame`'s keep="first" (the "first physical copy of a
-duplicated foreign key wins" law) flipped to keep="last" passed the WHOLE
-covering set (no fixture planted a physically DUPLICATED foreign key with
-divergent values — G7's dup rides the HOME key, collapsed by
-`heal_partition`'s own unique(), never by this frame), silently flipping
-WHICH copy's OHLCV is reassigned home; pinned by a June source carrying
-the SAME July key twice (closes 111.0 then 222.0) — July must read
-[111.0], moved ONCE, the ONE quarantine copy holds all three physical
-rows, second sweep clean. MINOR — the "production write() stays
-unguarded / a deliberately-symlinked options tree keeps a working pull"
-stance had zero ACCEPT-side teeth (defaulting `_merge_frame_locked`'s
-`containment=True` passed every refusal-side test); pinned by a write
-through a symlinked options ROOT that must LAND at the target (fresh AND
-merge arms, no refusal). Both mutants re-applied + verified killed —
-each fails ONLY its new pin, 321 sibling tests green. NIT: the four
-option-tree log events' `partition=` field embedded the raw
-attacker-influenceable series dir name unescaped — now repr()'d (#907
-log-injection guard; the HealAction/audit copies stay raw JSON-encoded
-machine surfaces; bars partition fields stay catalogued relpaths).
-ROUND 8 (refuter-confirmed MINOR + NITs): the round-7 repr() guard covered
-the option FINDING events but NOT the sibling skip events carrying the
-SAME vendor-influenceable series name — the five option-tree
-`symlink_skipped`/`scan_skip` sites (series dir, partition file, the two
-targeted canonical-sibling reads) now log `path=repr(str(…))`, and the
-option writer's `lake.partition.dedup_healed` `partition=` joins the
-convention (superseding round-7's deliberate raw-`str(dest)` exclusion
-for the OPTION writer ONLY — its dest embeds the series dir; the BARS
-writer's twin emission, the `<lake>/options` ROOT skip and the bars-tree
-skips stay raw: catalogued/operator-controlled paths, raw shape pinned).
-NIT: the census OPTIONS row now folds by finding TYPE, never the
-"OPTIONS" label — a rogue bars finding whose `coords.segment` read
-"OPTIONS" (`PartitionCoords` is unvalidated; census input is any report)
-previously merged into the row and drove `clean` NEGATIVE; all 4 new
-regressions verified failing pre-fix. ROUND 9 (refuter-confirmed MINOR +
-NIT): the healer's `lake_heal.partition_error` — the one
-attacker-TRIGGERABLE log site (it fires on the containment refusal, a
-corrupt partition, or a lock timeout) — still embedded the raw
-vendor-influenceable series dir name: `_finding_token` returned bare
-`str(finding.path)` for the option findings; the option token now rides
-`repr()` in `_finding_token` itself, closing BOTH consumer sites at once
-(the `partition_error` `partition=` field AND the observe-mode
-`lake_heal.observe_only` `detail=` list); bars tokens stay raw
-(catalogued coordinates) and the drift token keeps its pinned raw shape;
-the sibling `error=str(exc)` field keeps the accepted raw
-exception-message convention. Regression seeds a REAL-writer series
-named with an embedded newline + bare ESC and pins the repr'd fields on
-both sites. NIT: the `log_lake_finding` docstring no longer claims a
-`series` field on the option-DUP event (it emits none — only its
-repr()'d `partition` token).
-ROUNDS 10-12 (REBUILT 2026-07-08 — an environment rollback lost the
-original commits; every defect re-reproduced pre-fix, every mutant
-re-applied + verified killed): ROUND 10 (MINORs, test-only pins) — the
-reassignment `HealAction.dropped` (dup collapse + keyed removals, the
-value the batch alert sums) had no dup-component teeth (a
-removed-only/zeroed mutant survived; pinned dropped == 3 exactly over a
-dup+reassign+overlap source) and the census OPTIONS row's `files` flipped
-to scanned+skipped survived (pinned scanned-only: a skipped file inflates
-neither `files` nor `clean`). ROUND 11 (MAJOR) — `lake_content_token`
-stat()-ed every `*.parquet`, so ONE dangling symlink (or a glob→stat
-deletion race) crashed the walk and the guarded L3 sweep went PERMANENTLY
-INERT (`lake_heal.sweep_failed` every boot, loud but never healing); the
-walk now lstat()s each entry under a per-entry OSError guard
-(`lake_heal.token_stat_skipped`, repr()'d path), token deterministic for
-identical content. ROUND 12 (MAJOR) — a `List(Utf8)`/`Struct` `side`
-column read back unhashable values, so the key-set builds raised
-`TypeError` — crashing the WHOLE scan (all healing inert) and, in the
-scan→heal window, aborting the WHOLE heal batch; NEW public
-`option_key_dtype_error` gates BOTH key columns BEFORE classification
-(side String/Null, timestamp Datetime/Null) at the scan loop + the
-canonical-sibling read (loud repr()'d scan_skip, counted skipped) and at
-`_heal_option_foreign` (isolated `OptionWriterError` — batch continues,
-report/stats/alert still emitted).
-ROUND 13 (refuter-confirmed MAJOR + MINOR, one root): the round-12 gate
-missed `heal_partition`'s OWN re-read — the merge legs run between the
-gated consistent read and that re-read (a WIDER swap window), so a
-mid-heal nested-dtype swap reached the ungated Python-hash removal mask
-and the bare `TypeError` STILL aborted the whole batch (reproduced
-end-to-end); the writer now runs the SAME `option_key_dtype_error` gate
-on its own re-read when `remove_keys` is given → the documented isolated
-`OptionWriterError`, batch continues (2 regressions verified failing
-pre-fix; dup heal + production `write()` byte-unchanged). NITs:
-`_option_file_month`'s year is bounded to `datetime.MINYEAR..MAXYEAR`
-(a 5+-digit/year-0 stem round-tripped the canonical check yet no
-datetime month routes there — the "only the writer's stem parses" claim
-now true as written); the census-files-with-skips gap was found ALREADY
-pinned by the round-10 test (mutant re-applied + verified killed — no
-change needed).
-ROUND 14 (refuter-confirmed MAJOR): the round-12 gate was not TOTAL —
-`option_key_dtype_error` indexed `frame.schema["side"]`/`["timestamp"]`,
-a bare `KeyError` on an ABSENT column, so a scan→heal swap of the
-flagged source to a valid parquet MISSING a key column (a bars-style
-timestamp-only file) escaped the per-finding isolation set at the
-healer's consistent read — the ONE site fed a FULL no-column-selection
-read — and aborted the WHOLE heal batch (reproduced end-to-end; the
-round-3/5/12/13 isolation-escape class the gate itself was meant to
-close). The gate now `schema.get()`s both columns and returns a
-"column missing — unclassifiable" verdict → the documented isolated
-`OptionWriterError` at both consumer sites at once; every other call
-site reads the key columns by name first (missing column →
-`PolarsError`, already loudly skipped/isolated). Regressions: the pure
-missing-side/missing-ts/neither gate verdicts + the parametrized e2e
-side-less AND timestamp-less swaps (errors=1 isolated, later same-batch
-dup still heals, on_report fires, swapped source byte-untouched, no
-quarantine) — verified failing pre-fix with the exact bare
-`KeyError: 'side'`. NIT: the ledger #1594 `TestOptionForeignHeal` count
-corrected again (said 21; carried 22 pre-round-14 — the round-13
-addition was uncounted — now 23).
-ROUND 15 (refuter-confirmed, 2 MAJORs — one root): polars' default
-`glob=True` treats a raw-path `pl.read_parquet` PATH as a glob while
-`_safe_segment` legally admits glob metachars in a series dir name —
-(a) the writer's merge read: a merge into `options/X[12]/…` with REAL
-siblings `X1`/`X2` glob-read the SIBLINGS as "existing", permanently
-DROPPING the literal partition's own stored row (silent loss, no
-quarantine) + IMPORTING the siblings' rows cross-series + falsely
-emitting `dedup_healed` — from the default AUTO-ON healer's
-copy-forward leg AND the production `write()` merge arm, no
-symlink/TOCTOU (the containment rail cannot see it); (b) the shared
-scanner seam `_read_key_columns`: a glob-named series was classified
-over OTHER files' bytes (phantom findings whose literal-read heal
-skips as stale → the L3 sentinel never stamps; wrong census numbers;
-the canonical-sibling overlap read rode the same seam). BOTH sites
-now pass `glob=False` (the healer's BytesIO reads were already
-immune; the bars seam twin covered free); the round-8 "a `[` name
-raises invalid glob pattern — gracefully scan-skipped" note is
-REFUTED (unbalanced-bracket-only) + reworded; 9 regressions all
-verified failing pre-fix. NITs: the 4 load-bearing `YYYY-MM` stem
-f-strings collapse onto ONE `partition.option_partition_stem` + the
-duplicated "unclassifiable option partition" message onto ONE
-`option_unclassifiable_message` (§11 COMMON); the merge's extra
-O(month-rows) unique() baseline pass per flush documented honestly
-(constant-factor, un-benched); two once-seen combined-suite failures
-were unreproducible (suspected sandbox transient — reported, not
-claimed fixed).
-ROUND 16 (refuter-confirmed MINOR + 2 NITs): MINOR — the L3
-`run_startup_sweep` mass-rail denominator fold (`scan.files_scanned +
-scan.option_files_scanned`) was a SURVIVING MUTANT: dropping the option
-term passed the entire 122-test covering suite (the only rail pin
-computed the denominator inside the TEST body and called
-`heal_findings()` directly, never through the L3 fold), and under the
-mutant an OPTIONS-ONLY lake read `files_scanned=0` → the ≥20-file
-small-lake guard DISARMED the >50% refusal rail and the default AUTO-ON
-boot sweep HEALED the mass-poisoned tree the rail exists to refuse
-(reproduced under the mutant: healed=11, refused_mass_heal=False). Now
-pinned at the L3 level: the 21-file/11-poisoned options-only fixture
-(extracted to ONE shared helper, §11 COMMON) driven through
-`run_startup_sweep` against the REAL un-monkeypatched 20-file threshold
-— refused, byte-untouched, sentinel unstamped, refusal event
-files_scanned==21 (mutant re-applied + verified killed by exactly the
-new pin; the production line itself was already correct — this closes
-the "option files in the mass-rail denominator … L3 rides
-automatically" claim's missing teeth). NITs: `partition_error`'s
-`error=str(exc)` re-admitted the RAW vendor-derived series path AROUND
-the round-9 token guard (`OptionWriterError` messages interpolate the
-dest — corrupt-partition + containment + unclassifiable verdicts) — the
-field now rides `repr(str(exc))` at THIS one attacker-triggerable site
-(supersedes the round-9 "the sibling error= field keeps the raw
-convention" clause for this site only; other lake_heal `error=` fields
-stay raw — operator-controlled/catalogued subjects; regression verified
-failing pre-fix); the reassignment audit/log `months` list was a FIFTH
-`YYYY-MM` f-string copy bypassing the round-15 `option_partition_stem`
-COMMON helper — collapsed onto it (byte-identical output).
-ROUND 17 (refuter-confirmed 2 MINORs + NITs): MINOR — the quarantine
-BEFORE-image write was the ONE heal-side mutation OUTSIDE the
-rounds-2/4/6 symlink-containment program: `<lake>/.quarantine`
-pre-planted as a symlink sent every AUTO-ON batch's forensic
-before-image outside the lake root BEFORE the in-lake source was
-rewritten/unlinked (voiding the "the quarantine copy IS the forensic
-before-image" guarantee; pre-existing #1175 machinery — this change
-set's own containment program made the asymmetry a gap);
-`heal_findings` now refuses the WHOLE batch untouched on a symlinked
-`.quarantine` (loud refusal event + audit line + alert; every finding
-counted an error so the L3 sentinel never stamps and the next boot
-re-attempts; zero-finding batches unaffected) and the `-NN` serial
-loop also serials past a DANGLING symlink at the stamp path; a
-probe→write swap inside ONE batch stays the documented TOCTOU
-envelope, not claimed closed. MINOR — the round-16 error-repr fold
-missed the two options-tree `scan_skip` sites: a polars read error
-MESSAGE embeds the RAW vendor-influenceable `options/<series>/` path
-(ColumnNotFoundError plan dump + polars-raised FileNotFoundError,
-empirically verified), so `error=` now rides `repr(str(exc))` at the
-glob-loop AND targeted-sibling read skips (bars/dtype-verdict fields
-stay raw); the claimed `token_stat_skipped` third site was REFUTED
-(CPython OSError.__str__ reprs its filename) but joins the convention
-as belt-and-braces. NIT: the L2 seam test comment's "never even read"
-overclaim reworded to its honest bytes+mtime envelope.
-ROUND 18 (refuter-confirmed MAJOR): an OUT-OF-RANGE (in-dtype) Datetime
-VALUE in an options partition crashed the WHOLE scan/heal — the
-rounds-12/13/14 gate validated only the DTYPE, so a hand-planted
-`2**62`-µs stamp passed it and `_count_foreign_rows`'s `min()` raised
-`OverflowError` OUTSIDE the per-file read try/except, propagating out of
-`scan_lake_invariants` entirely (reproduced end-to-end): the L3 boot
-sweep crashed with the sentinel NEVER stamped (every boot re-scanned and
-re-crashed — lake-wide healing permanently inert), the `/universe`
-lake-uniqueness route 500'd per census cache miss, the L2 options census
-died, and a scan→heal swap made the heal-side `to_list()` PANIC as
-`pyo3_runtime.PanicException` — a BaseException escaping BOTH the
-per-finding isolation set AND the L3 `except Exception` blanket (daemon
-killed past "boot never crashes"). Fault matrix probe-verified (polars
-1.42.1): aware-positive → OverflowError, naive/negative → ValueError,
-to_list → the panic always. FIXED at the COMMON chokepoints: the gate
-VALUE-probes min/max (contiguous months — a convertible min+max bounds
-every value; two vectorized O(rows) scans, not O(1)) → loud counted scan
-skip + isolated `OptionWriterError` heal/writer refusal + sibling
-overlap-None abstain; NEW `errors.datetime_out_of_range_errors()` (the
-FULL probe set incl. ValueError, consumption law documented) +
-`datetime_out_of_range_escape_errors()` (ValueError deliberately
-EXCLUDED from broad guards — the genuine-code-bug class keeps
-propagating); the BARS twin closed too (bars loop classification
-guarded, `_canonical_timestamps` abstains, the catalog reconcile's
-per-file skip widened — one planted file crashed every sweep-load
-reconcile); defense-in-depth: options residual guard,
-`_PER_FINDING_HEAL_ERRORS` += escape set, L3 blanket →
-`_SWEEP_GUARD_ERRORS = (Exception, *escape)`. 14 regression tests (16
-parametrized cases) across 5 suites, all verified failing pre-fix. NITs: the three bars `YYYY-MM`
-months-list f-string copies collapsed onto `option_partition_stem`
-(byte-identical); `_engine_offender`'s option arms documented as
-production-unreachable totality arms; the naive-source-vs-aware-
-canonical never-converging heal shape documented as the honest envelope
-(loud isolated refusal each sweep, no loss — a tz cast would EDIT stored
-values, deliberately not mechanised).
+L3 startup sweep rides automatically (zero change). Review-hardened across NINE refuter-confirmed
+hostile-review rounds (a silent-row-loss merge-baseline BLOCKER, symlink/
+TOCTOU containment MAJORs, isolation-escape crashes, surviving mutants,
+log-injection guards — every fix pre-fix/mutant-verified); the per-round
+record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1594 —
+this header deliberately carries the pointer, never the story.
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -374,6 +59,47 @@ NIFTY/BANKNIFTY/SENSEX; `lake_invariants.py`/`option_parquet_writer.py`/
 `lake_heal.py`/`partition.py`/`errors.py`/`catalog_reconcile.py` ALL 100%
 line+branch; ruff/ruff-format clean,
 mypy `--strict` + pyright at the pre-change baseline).
+Earlier: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
+write-time PER-FILE lake STATS manifest: NEW leaf
+`brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
+dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
+row counts + timestamp bounds + `mtime_ns:size` stat tokens captured under
+the still-held partition flock), the per-file stats/paging EXTENSION of the
+shipped DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-DISCOVERY manifest —
+claiming the #867/#1025 named future work: the `/db` candle +
+expired-options pagers serve totals / pages / stored-life spans
+MANIFEST-FIRST in O(page-files), served ONLY after full per-request
+revalidation (parse + key echo + sum invariant · file-SET equality ·
+per-file stat-token equality · month-bounds sanity; ANY failure ⇒ the
+byte-identical legacy live scan + one fallback log + read-side reseed;
+post-query TOCTOU re-stat; a manifest total is NEVER paired with a degraded
+page). Write hooks at all five partition-locked chokepoints (spot writer
+both branches + heal rewrite/quarantine + option writer merge/heal +
+`lake_heal._quarantine_move`) are best-effort + incremental + LAZILY
+accreted (absent shard = one cheap probe: key digest + one failed `os.stat`,
+probed FIRST — round 2; the prebuild storm costs one probe per write;
+seeding is read-side only), keyed on the NEW explicit
+`WriteResult.file_rewritten` (bytes RENDERED, never `bars_added`). Kill
+switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ byte-identical legacy scans
+(modulo the sanctioned unconditional ORDER BY tie-order pin).
+HONEST: a hit is O(page-files) Parquet work + an O(D) per-consult
+revalidation stat sweep (D = the ONE dataset's month files) — NOT literal
+O(1); the FIRST star-select click per (generation × file-state) also pays
+one O(D)-footer union-order DESCRIBE (memoised); the first view per dataset
+pays today's O(files) once (the seed), and a permanently-REJECTED seed
+(un-healed poison / 0-row parquet) is LATCHED per (dataset, generation) so
+the doomed scan never repays per click — review-hardened across the refuter
+rounds + the post-merge ENDGAME reconciles (LakeWriteHalt-safe reads ·
+probe-first hooks · bounded 16 MiB shard read · FIFO-shard hang fix · the
+EXECUTED m4pro run 28888100079 A/B gate + 3.0× paging strict-tier
+recalibration · the wired-and-executed zero-survivor mutation gate); the
+per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1614 — this header deliberately stopped narrating rounds after freezing at
+round 2 once (endgame round 2); a same-`(mtime_ns,size)` in-place
+overwrite stays the documented stat-token residual. Results-safe — never in run identity / partition bytes /
+`data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
+parity-pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; all five touched
+modules 100% line+branch).
 Earlier: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
 the sweep CLI log-volume guard: `brutex sweep`/`sweep-all`/`sweep-daemon` now
 configure the ONE COMMON structlog seam
@@ -2439,6 +2165,134 @@ hostile-review pass._
   (165/34) + `lake_heal.py` (621/180) + `catalog_reconcile.py` (75/20) + `errors.py` (50/0) + `partition.py` (83/24)
   ALL 100% line+branch; ruff/ruff-format clean, mypy
   `--strict` + pyright at the pre-change baseline).
+  Earlier: `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
+  write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
+  DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
+  O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
+  `partition_lock` + `lake_manifest` only — cycle discipline; one atomically-replaced 0o600 JSON shard per dataset
+  carrying per-file DISTINCT-identity-key row counts, timestamp bounds, and `mtime_ns:size` stat tokens captured
+  under the still-held partition flock). The `/db` candle + expired-options pagers serve totals / pages /
+  stored-life spans MANIFEST-FIRST — the page query binds ONLY the files the (bounds, direction, offset, limit)
+  window needs via a prefix-sum planner + rebased OFFSET — and ONLY after full per-request revalidation
+  (parse+version+key echo+sum invariant · file-SET equality walk · per-file stat-token equality · month-bounds
+  sanity vs the rel-path UTC month); ANY failure ⇒ the byte-identical legacy live scan + one
+  `lake.stats_manifest.fallback` log + best-effort read-side reseed; post-query TOCTOU re-stat of every touched
+  file; the degrade law reruns total+page+span together on the full legacy path — a manifest total is never paired
+  with a degraded page. Five write hooks (spot writer both branches keyed on the NEW `WriteResult.file_rewritten` —
+  bytes RENDERED, never `bars_added` · heal rewrite/quarantine · option writer merge/heal ·
+  `lake_heal._quarantine_move` shard unlink) are ALL inside the already-held partition locks, best-effort (never
+  raise into the pull; `LakeWriteHalt` from `.locks/` creation deliberately propagates), incremental (one row
+  upsert, never a rescan), and LAZILY accreted (absent shard = one cheap probe — a key digest + one failed
+  `os.stat`, probed FIRST via the public `partition_stats_tracked` so an unviewed write never stats dest / folds
+  frame bounds [round 2]; seeding is read-side only — the prebuild's ~10⁵-10⁶ derived-TF writes cost one probe
+  each). Kill switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ hooks +
+  reads no-op ⇒ byte-identical legacy scans (modulo the sanctioned tie-order pin below, which applies
+  unconditionally); shard flock via the COMMON `partition_write_lock` with fail-loud
+  `STATS_LOCK_TIMEOUT_S=5.0` (env `BRUTEX_STATS_LOCK_TIMEOUT_S`; 5+75 < 90 s write-deadline pin). SANCTIONED
+  behavior change: both pagers' ORDER BY gains the physical `filename, file_row_number` tiebreaker so an options
+  CE+PE same-minute tie has ONE total order on the pruned AND the full path. HONEST (Golden Rule #10): a hit is
+  O(page-files) Parquet work + an O(D) per-consult revalidation stat sweep (D = the dataset's month files, ~80) —
+  NOT literal O(1) (only the repeat TOTAL/span lookup is O(1) via the generation cache — a repeat PAGE click
+  re-pays the O(D) revalidation + O(page-files) read; the FIRST star-select click per (generation × file-state)
+  additionally pays ONE O(D)-footer union-order DESCRIBE, memoised on the file-state fingerprint — measured 72/72
+  files on that first click, 1 thereafter [the bench's 1-file figure is the warmed-memo click]); the FIRST view
+  per dataset/invalidation pays today's
+  O(files) scan once, and a permanently-REJECTED seed (un-healed poison / an out-of-band 0-row parquet — the
+  distinct `empty_file` reason) is LATCHED per (dataset, generation) so the doomed grouped scan never repays per
+  click, and the degrade-law LEGACY recount memoises under its own `legacytotal|` generation key so a
+  persistently-unprunable page (heterogeneous star union) recounts ONCE per generation, never per click [round 2];
+  a viewed dataset's write pays one bounded shard flock + small fsync'd JSON rewrite (the wall-clock A/B gate
+  asserting the median overhead under the 12 ms merge-budget floor is wired into the self-hosted bench-m4pro
+  workflow AND FIRST EXECUTED on the real M4-Pro tier 2026-07-07, actions run 28888100079: the A/B
+  merge-budget gate GREEN — the measured median overhead lives in that run's log; the SAME run measured the
+  O(page) paging click's strict wall-clock ratio at 1.53× (t_small=2.272 ms, t_large=3.485 ms — this entry's
+  OWN documented O(D) statx sweep, 66 extra month files), so the paging gate's strict-tier ceiling was
+  recalibrated 1.1× → 3.0× (`METADATA_SWEEP_STRICT_CEILING` in `tests/bench/_o1_tiers.py`, the
+  DEC-O1-CACHE-TIER-001 precedent; the shared-CI 8.0× default unchanged) while the deterministic
+  file-touch/fs-op-count probes — all green on the same run — remain the PRIMARY O(page) teeth
+  [round 4 history: the gate previously executed in NO workflow while this line presented it as an operative
+  pin — since wired AND executed, the ENDGAME round-1 reconcile of the stale "DORMANT / NOT yet executed"
+  wording that outlived the run]; the
+  deterministic byte-parity/anti-storm teeth run in shared CI; unviewed = one probe, pinned); a same-`(mtime_ns,size)`
+  in-place overwrite is the documented stat-token residual; the new module's mutation gate is WIRED into the
+  weekly Mutation workflow's per-module ZERO-survivor mutmut loop AND was EXECUTED in-session [round 8 — the
+  refuter caught the prior "rides the weekly Mutation workflow (not verified in-session)" wording while NO
+  `--paths-to-mutate` in mutation.yml named the module, an unwired gate presented as a deferred one: now wired
+  (`TestMutationWorkflowWiring` pins the pair) and measured — 473 pre-hardening mutants → 84 pending, killed by
+  the `TestMutationHardening` pins; round-8 enumeration 456 mutants / 0 survived / 0 suspicious. ENDGAME
+  round 2 re-measured 462 enumerated — 196/462 machine-verified 0-survivors in-session (the run was stopped at the session budget; the interim-shape run reached 353/462 with exactly ONE
+  survivor — the annotation mutant below, since eliminated; every restructured line's mutants were also
+  hand-applied + KILLED; the WIRED weekly Mutation gate enforces the full zero-survivor law) after PURGING the round-8 fd-sentinel / bounded-read / dead-`"unknown"`
+  line pragmas — the refuter proved they suppressed KILLABLE, NON-equivalent mutants (a `+1` fd sentinel
+  closes STDOUT on the absent path; a shortened read bound truncates an exactly-at-cap shard) while three doc
+  surfaces called the whole residue "provably-equivalent": the loader now returns `DatasetStats | str`
+  (the exactly-one-of-two contract STRUCTURAL in the type — the defensive dead `"unknown"` literal is gone),
+  the fd handoff is a plain `owned` boolean pinned by an `os.close` spy (`test_loader_fd_close_discipline`:
+  stuck-True double-closes, stuck-False leaks — an interim `fd: int | None` sentinel was itself caught by the
+  re-enumeration, its annotation-only `int & None` mutant unkillable since a local annotation is never
+  evaluated [PEP 526]), and the read bound is a cap-sized read + ONE-byte over-cap probe (still race-free,
+  still ≤ cap+1 bytes) pinned by the inside-the-JSON-padded exact-at-cap boundary test; the ONLY remaining
+  pragmas are the `field=` names feeding messages the loader's `except` clauses DISCARD — the genuinely
+  equivalent residue]. REVIEW ROUND 1 (refuter panel — every CONFIRMED finding fixed with
+  a fails-before regression): the option-writer CI 100% gate joined its new suite (was RED at 94.74%); the
+  read-side seed catches `LakeWriteHalt` (a disk-full seed can never 500 a /db read; write-hook propagation
+  untouched); deep-nested-JSON shards fail closed to the `parse` clause (RecursionError caught); the `file_set`
+  fallback rel lists are capped at 20 + true counts; provenance `db.stats_manifest.read` raised DEBUG→INFO;
+  `seed_dataset_stats` documented honestly as LAST-WRITER-WINS (clobber detected + reseeded next read, pinned);
+  the `BRUTEX_STATS_LOCK_TIMEOUT_S` × 90 s write-deadline interaction documented + doc-pinned (not clamped — leaf
+  discipline); the spec §10 hypothesis paging-equivalence + Σ-pages==total + concurrent-writer thread-fuzz
+  properties landed (multi-process soak / crash-loop stress / CLI cross-process leg stay named follow-ups).
+  REVIEW ROUND 2 (refuter panel — every CONFIRMED finding fixed at root cause): the degrade-law recount memo +
+  the probe-first hooks + the star-DESCRIBE disclosure above; the spec §10 bench (c) lake-size-flatness gate
+  landed (a served click's os.stat/os.scandir counts + touched files EXACTLY equal on a bare vs
+  48-dataset-padded lake — deterministic op-count teeth, no wall-clock flake); the seed-skip `missing` list
+  capped at the now-public `FALLBACK_REL_LOG_CAP` + true count; the kill-switch docstrings' "byte-identical"
+  overclaim softened; the #1614 GATES counts refreshed.
+  ROUND 3: the OverflowError timestamp class + plain-ValueError/UnicodeDecodeError shard-byte escapes fail
+  closed; the option-writer distinct-key merge baseline. ROUND 4: a star-projection column name carrying `"`
+  (an out-of-band parquet) now joins the fail-closed degrade ladder — legacy rerun + one `star_columns`
+  fallback log instead of a persistent per-click HTTP 400 on both pagers; the shard read is BOUNDED
+  (`MAX_SHARD_BYTES` 16 MiB, ~1000× a real shard — an out-of-band multi-GB shard fails closed `oversized` /
+  corrupt-unlink instead of being read whole where a MemoryError would raise into the pull); the A/B +
+  O(page) benches wired into bench-m4pro.yml (workflow-wiring pin test) + this blurb's stale "pins" wording
+  fixed; the route-level integration now proves manifest-served TOTALS on the wire via a fresh app (the
+  control run's shared count cache had cushioned the equality).
+  ROUND 6: a NON-REGULAR inode planted at the shard path (FIFO/device/socket) no longer HANGS the reader or
+  the partition-locked write/heal hooks forever — the loader opens `O_RDONLY | O_NONBLOCK` + `S_ISREG`-checks
+  the OPEN descriptor, the NEW fail-closed `not_regular` clause (read side legacy-falls-back + the seed's
+  `os.replace` heals the inode, wire-pinned; write side corrupt-unlinks; SIGALRM-watchdog regressions pin the
+  pre-fix >5 s hang on BOTH sites); the OPTIONS pager's `db.stats_manifest.read` provenance is now
+  content-asserted (a swapped `page_source` label mutant passed the whole suite before; the spot pin gains its
+  `kind` assertion). ROUND 7: the #1025 route-level count-cache pin regains its wire-level anti-STALENESS
+  teeth (two genuinely NEW `(side,timestamp)` option bars written through the PRODUCTION writer before the
+  generation bump — a stale serve answers the old total and fails — with the no-recount law still pinned); a
+  DIRECTORY planted at the shard path is healed via `shutil.rmtree` (`dir_shard_removed`, warn-only contract
+  kept) instead of re-emitting the `corrupt_unlinked`+`unlink_failed` warn pair on every later write; the
+  EMPTY-planned page (offset past the in-bound end) now runs the SAME post-query TOCTOU re-stat via the ONE
+  extracted `_stats_tokens_intact` helper (both call sites — no copy).
+  ENDGAME (post-merge refuter reconciles): round 1 — the stale "DORMANT / NOT yet executed" A/B-gate wording
+  reconciled to the EXECUTED m4pro run 28888100079 (A/B gate GREEN; the paging strict ceiling recalibrated
+  1.1× → 3.0× `METADATA_SWEEP_STRICT_CEILING` off its measured 1.53×), + the §1↔§3 active-branch consistency
+  pin. Round 2 — the killable-mutant pragma purge above; §2 Rule 5's stale "strict tier DORMANT until the
+  operator registers the runner" claim reconciled to the LIVE runner (+ the metadata-sweep allowance now named
+  beside the cache-tier one); the frozen `_Last updated:` header's per-round narration replaced with a
+  stale-proof pointer to this blurb + MIGRATION.md #1614; bench-m4pro.yml's paging-gate comments repointed
+  from the stale "ratio_ceiling() 1.1× tier" to the real `metadata_sweep_ceiling` 3.0× — each with a
+  deterministic doc-pin regression (`test_claude_md_branch_consistency.py` + `TestBenchWorkflowWiring`).
+  Round 3 — the Unicode-digit month-rel hole (MINOR, the ONLY tamper class that SERVED instead of failing
+  closed): the month-grammar regexes' Unicode-aware `\d` + `int()` accepted a planted `٢٠٢٣/١٢.parquet` as
+  (2023, 12) with valid bounds, passing ALL FOUR clauses while sorting lexicographically AFTER every ASCII rel
+  — the confirmed repro served a chronologically MISORDERED /db page (Jan-2024 where legacy serves Dec-2023);
+  fixed at root cause with `re.ASCII` grammar + a clause-1 STRUCTURAL chronology law (every rel must parse,
+  new fail-closed `rel_grammar` clause; the parsed (year, month) sequence must be strictly increasing —
+  subsuming the lexicographic sorted+unique check), each regression pinned fails-before incl. the end-to-end
+  misordered-page repro; plus the #1614 round-2 GATES exactness reconcile (474/148 + 221 → the measured
+  476/148 + 222; round-3 tree measures 482/152, 232 tests).
+  Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
+  Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +
+  `lake_heal.py` + `db_view.py` ALL 100% line+branch; ruff/ruff-format clean, `mypy --strict`
+  clean, pyright 0 errors in every touched/new file).
   Earlier: `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
   the sweep CLI log-volume guard: ONE `main()`-dispatch guard configures the COMMON
   `observability/logging.configure_logging` seam at INFO by default for
@@ -4554,14 +4408,21 @@ hostile-review pass._
    the raw 1.1× is too noisy to gate there without flaking), and the
    decreed strict **1.1×** tier is enforced where
    `BRUTEX_M4PRO_STRICT=1` on the dedicated self-hosted M4-Pro runner
-   (DEC-O1-STRICT-TIER-001; per `bench-m4pro.yml` that tier is DORMANT
-   until the operator registers the runner — the shared-CI tier is what
-   actually gates every push today), with a measured **3×** cache-tier
-   allowance for ratio tests whose big/small workloads cross a CPU
-   cache tier (DEC-O1-CACHE-TIER-001 — memory-tier physics, not an
-   algorithmic regression; `cache_tier_ceiling` never returns looser
-   than the shared default). Any regression past its tier's ceiling
-   fails CI.
+   (DEC-O1-STRICT-TIER-001; the runner is REGISTERED and LIVE —
+   2026-07-07, `bench-m4pro.yml` header + actions run 28888100079 — so
+   the strict tier EXECUTES on that workflow's path-triggered pushes,
+   while the shared-CI tier remains the gate on every push), with a
+   measured **3×** cache-tier allowance for ratio tests whose big/small
+   workloads cross a CPU cache tier (DEC-O1-CACHE-TIER-001 —
+   memory-tier physics, not an algorithmic regression;
+   `cache_tier_ceiling` never returns looser than the shared default)
+   and a measured **3×** metadata-sweep allowance for ratio tests whose
+   big/small workloads differ by a feature's own documented O(D)
+   metadata sweep (DEC-LAKE-STATS-MANIFEST-001 —
+   `metadata_sweep_ceiling` / `METADATA_SWEEP_STRICT_CEILING` in
+   `tests/bench/_o1_tiers.py`, calibrated off run 28888100079's
+   measured 1.53×; likewise never looser than the shared default). Any
+   regression past its tier's ceiling fails CI.
 6. **Rate-limit safety.** Groww publishes type-level limits (the
    **"Live Data"** group — Market Quote / LTP / OHLC — is **10 r/s,
    300/min**; `docs/groww/api-reference/01-introduction.md:130-134`).
@@ -4707,6 +4568,11 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/cool-cerf-tq8c27`
+  (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md #1594 — the options-tree
+  foreign-month + overlap heal; matches §1's Active branch line)
+  Earlier: `claude/dazzling-pasteur-jf8s3w`
+  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
+  PER-FILE lake STATS manifest; matches §1's Earlier line)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
@@ -4719,18 +4585,24 @@ hostile-review pass._
   `sweep_runs/` sibling root + the production `TradeStoreReader` over the
   #1275 results-depth sidecars; DISPLAY zone only; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/peaceful-newton-fehcc3`
+  (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 — the bulk Greeks
+  v1→v2 re-enrichment backfill: expired contracts + CLI-only lakes
+  re-stamped to the current formula/inputs; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/operator-page-real-rebuild`
   (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 — the Operator page (/)
   wired to the sweep-oneclick artifact contracts + NEW /screener + /strategy;
   DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
-  Earlier: `claude/peaceful-newton-fehcc3`
-  (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 — the bulk Greeks v1→v2
-  re-enrichment backfill for expired option contracts + CLI-fetch-only lakes;
-  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/sweep-stall-oom-guards`
   (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 — the parallel grid-sweep
   gains a heavy-grid-aware stall watchdog + a distinct `BrokenProcessPool`
   quarantine; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/intelligent-hamilton-qf3w38`
+  (DEC-SWEEP-NIGHTLY-AUTOMATION-001, MIGRATION.md #1612 — the R9 nightly
+  zero-click chain + R50 backup/restore + launchd scheduling; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active-branch chain for the
+  full blurb)
   Earlier: `claude/elegant-johnson-cgufi7`
   (DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1617 — renumbered
   #1538→#1557→#1581→#1598→#1610→#1617; the final hop past main's #1616

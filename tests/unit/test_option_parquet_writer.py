@@ -204,6 +204,64 @@ class TestWrite:
         assert df["open_interest"][0] is None
 
 
+class TestPoisonedPartitionMergeKeepsNewKeys:
+    """A physically-duplicated partition must never swallow genuinely-NEW keys.
+
+    Review round 3 (pre-existing writer defect, flagged by the
+    DEC-LAKE-STATS-MANIFEST-001 refuter panel): ``added`` was computed against
+    the PHYSICAL height of the existing file, so on a pre-uniqueness-era
+    poisoned partition (10 physical / 7 distinct ``(side, timestamp)`` keys) a
+    merge bringing 2 genuinely NEW keys computed ``9 − 10 = −1``, skipped the
+    write entirely, and silently DROPPED the new bars for that pull. The
+    baseline is now the DISTINCT key count — a clean partition (physical ==
+    distinct) is byte-identical.
+    """
+
+    def _poison_physical_dups(self, tmp_path: Path) -> Path:
+        """Store 7 distinct keys, then plant 3 physical duplicates (10/7)."""
+        w = _writer(tmp_path)
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=m) for m in range(7)])
+        (dest,) = (tmp_path / "options").rglob("*.parquet")
+        df = pl.read_parquet(dest)
+        pl.concat([df, df[0:3]]).write_parquet(dest)
+        assert pl.read_parquet(dest).height == 10  # 10 physical / 7 distinct
+        return dest
+
+    def test_new_keys_on_poisoned_partition_are_written(self, tmp_path: Path) -> None:
+        """FAILS on the physical baseline: ``added == −1``, write skipped, bars lost."""
+        dest = self._poison_physical_dups(tmp_path)
+        added = _writer(tmp_path).write(
+            partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=7), _bar(minute=8)]
+        )
+        assert added == 2  # exactly the genuinely-new distinct keys
+        stored = pl.read_parquet(dest)
+        minutes = sorted(ts.minute for ts in stored["timestamp"].to_list())
+        assert 7 in minutes and 8 in minutes  # the new bars are DURABLE
+        # The rewrite keep-first-collapsed the physical dups — the SAME rows
+        # heal_partition would keep (unique(keep="first", maintain_order=True)).
+        assert stored.height == 9
+        assert int(stored.n_unique(subset=["side", "timestamp"])) == 9
+
+    def test_pure_repull_on_poisoned_partition_self_heals_on_touch(self, tmp_path: Path) -> None:
+        """No new keys ⇒ ``added == 0`` (the old arithmetic returned −3) but the
+        touched dup-poisoned file is FORCE-rewritten to its keep-first collapse —
+        the merge-touch self-heal of the bars twin's law (DEC-LAKE-WRITE-UNIQUE-001;
+        the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 round-1 fold, emitting the pinned
+        ``lake.partition.dedup_healed`` event). The #1614 review's original pin
+        expected a byte-untouched no-write here — SUPERSEDED at merge time by the
+        forced self-heal semantics (a pure re-pull on a CLEAN partition stays a
+        no-write: ``test_idempotent_repull_writes_nothing`` +
+        ``test_pure_remerge_returns_zero_and_rewrites_nothing``)."""
+        dest = self._poison_physical_dups(tmp_path)
+        added = _writer(tmp_path).write(
+            partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0), _bar(minute=1)]
+        )
+        assert added == 0
+        stored = pl.read_parquet(dest)
+        assert stored.height == 7  # physical dups collapsed keep-first
+        assert int(stored.n_unique(subset=["side", "timestamp"])) == 7
+
+
 class TestAtomicWriteCleanup:
     def test_tmp_file_cleaned_up_on_replace_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
