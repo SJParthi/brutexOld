@@ -115,7 +115,7 @@
       <a href="/results" aria-current="page">Results</a>
       <a href="/reports">Reports</a>
     </nav>
-    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">loading</span></div>
+    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot" aria-hidden="true"></span><span id="livetxt">loading</span></div>
   </header>
 
   <main class="bx-wrap">
@@ -186,6 +186,10 @@
     <strong>never rounded</strong> (ranking integrity). The brute-force engine scope is
     <strong>NIFTY&nbsp;/&nbsp;BANKNIFTY&nbsp;/&nbsp;SENSEX</strong> (CLAUDE.md&nbsp;§3) — this
     page displays the results, it does not run the engine.
+    Legend: &ldquo;—&rdquo; = value not recorded · ▾/▴ marks the active sort column (click a
+    header to sort, click again to flip) · long &ldquo;Matched conditions&rdquo; cells clip —
+    hover for the full list · hover Sharpe/Sortino/PF/Win% for the full-precision stored
+    value · hover # for run-id / data-era / mode.
   </div>
 
   </main>
@@ -283,21 +287,28 @@ const NUMERIC = new Set(["rank", "net_pnl_rupees", "sharpe_ratio", "sortino_rati
    (DEC-SURFACE-TRIAL-001) — countUp writes the final exact string synchronously
    and only plays a transform-only settle pop when the value CHANGED. */
 const CARD_DEFS = [
-  ["combos ranked", (b) => num(b.total_rows)],
-  ["shown", (b) => num((b.rows || []).length)],
-  ["sweep files", (b) => num(b.store_count)],
-  ["skipped (unreadable)", (b) => num(b.skipped)],
+  /* [label, formatter, tooltip] — the third slot names each count's exact
+     payload semantics (static strings, set as the card's title DOM property). */
+  ["combos ranked", (b) => num(b.total_rows),
+    "total_rows: combos matching the active filters across every readable sweep store"],
+  ["shown", (b) => num((b.rows || []).length),
+    "rows on this page (top-N slice of total_rows)"],
+  ["sweep files", (b) => num(b.store_count),
+    "store_count: readable per-tuple ResultsStore files under <lake>/sweeps"],
+  ["skipped (unreadable)", (b) => num(b.skipped),
+    "skipped: store files that failed to parse — counted, never silently dropped"],
 ];
 
 function ensureCards() {
   if (cardVals) return;
   cardVals = [];
   cardsEl.textContent = "";
-  for (const [label] of CARD_DEFS) {
+  for (const [label, , tip] of CARD_DEFS) {
     /* Shared KPI components (bx-design.css .bx-kpi / .bx-kpi-v / .bx-microlabel);
        the value keeps the tabular-nums face + the value-gated .warn tint. */
     const card = document.createElement("div");
     card.className = "bx-kpi";
+    if (tip) card.title = tip;
     const v = document.createElement("span");
     v.className = "bx-kpi-v";
     const l = document.createElement("span");
@@ -384,6 +395,7 @@ function renderStoreError(board) {
   renderCardsUnknown();
   eraBanner.textContent = "";
   eraBanner.classList.remove("show");
+  eraBanner.removeAttribute("title");
   const errType = String(board.error_type || "unknown");
   const detail = String(board.error);
   const title = "results store error (" + errType + ")";
@@ -469,6 +481,7 @@ function renderTable() {
   ).join("");
   panel.innerHTML = '<table class="bx-table bx-table--dense bx-table--zebra"><thead><tr>'
     + head + "</tr></thead><tbody>" + body + "</tbody></table>";
+  applyRowTitles();
   /* Entrance stagger on FRESH data only — a sort click re-renders instantly
      (first-render-only guard: the flag is armed by load(), consumed here). */
   if (animateRows) {
@@ -478,6 +491,38 @@ function renderTable() {
       if (tb) BXUI.stagger(tb, String(++renderSeq), { rows: true, cap: 16 });
     }
   }
+}
+
+/* ── Full-precision + provenance tooltips (TradingView-depth polish) ──
+   A DOM post-pass over the just-rendered rows: titles are set via the element
+   `title` PROPERTY from the raw payload values (metric()/pct() round at display
+   only — _project_row passes Sharpe/Sortino/PF/win_rate through UNROUNDED, and
+   run_id/snapshot_era/mode/winning_trades/losing_trades were served but never
+   rendered), NEVER via string-built HTML attributes. tbody row order mirrors
+   the freshly-sorted ROWS array renderTable just rendered; a null metric gets
+   NO tooltip (never a fabricated value). O(rows ≤ 500) per render — the same
+   cost class as the innerHTML rebuild itself. */
+const CIDX = {};
+COLS.forEach(([k], i) => { CIDX[k] = i; });
+function applyRowTitles() {
+  const tb = panel.querySelector("tbody");
+  if (!tb) return;
+  Array.prototype.forEach.call(tb.rows, (tr, ri) => {
+    const r = ROWS[ri];
+    if (!r || tr.cells.length !== COLS.length) return;
+    tr.cells[CIDX.rank].title = "run_id: " + String(r.run_id)
+      + " · data era: " + String(r.snapshot_era) + " · mode: " + String(r.mode);
+    if (r.sharpe_ratio != null) tr.cells[CIDX.sharpe_ratio].title = String(r.sharpe_ratio);
+    if (r.sortino_ratio != null) tr.cells[CIDX.sortino_ratio].title = String(r.sortino_ratio);
+    if (r.profit_factor != null) tr.cells[CIDX.profit_factor].title = String(r.profit_factor);
+    if (r.win_rate != null) {
+      tr.cells[CIDX.win_rate].title = "raw win-rate fraction: " + String(r.win_rate);
+    }
+    if (r.winning_trades != null && r.losing_trades != null) {
+      tr.cells[CIDX.total_trades].title =
+        "wins: " + num(r.winning_trades) + " · losses: " + num(r.losing_trades);
+    }
+  });
 }
 
 /* Delegated sort (one listener on the persistent #panel — no per-th onclick
@@ -527,9 +572,14 @@ async function load() {
         + " census/heal pending (dup-train PR-3). Per-row era details are in the API"
         + " payload (snapshot_era).";
       eraBanner.classList.add("show");
+      /* The banner truncates each era hash to 12 chars — the FULL served
+         hashes ride the title (DOM property, capped ~500 chars). */
+      const fullEras = eras.map(String).join(", ");
+      eraBanner.title = fullEras.length > 500 ? fullEras.slice(0, 500) + "…" : fullEras;
     } else {
       eraBanner.textContent = "";
       eraBanner.classList.remove("show");
+      eraBanner.removeAttribute("title");
     }
     fillSelect(fInstrument, board.instruments);
     fillSelect(fTf, board.timeframes);

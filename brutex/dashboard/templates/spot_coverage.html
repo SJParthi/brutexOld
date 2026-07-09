@@ -133,7 +133,7 @@
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
-    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">polling</span></div>
+    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot" aria-hidden="true"></span><span id="livetxt">polling</span></div>
   </header>
 
   <nav class="subnav">
@@ -144,8 +144,11 @@
   </nav>
 
   <div class="band">
-    <div class="kpi"><span class="v" id="ds"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">spot datasets</span></div>
-    <div class="kpi"><span class="v" id="barz"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">spot bars</span></div>
+    <!-- The "—" KPI marker legend (static titles): resolveKpis() paints "—" only
+         on a KPI that never received data; a KPI that HAS data keeps its last
+         real value on a failed 4 s tick. -->
+    <div class="kpi"><span class="v" id="ds"><span class="bx-skel" aria-hidden="true"></span></span><span class="l" title="— = this surface has not answered yet (failed/pending tick — retrying every 4 s); a KPI that has data keeps its last real value">spot datasets</span></div>
+    <div class="kpi"><span class="v" id="barz"><span class="bx-skel" aria-hidden="true"></span></span><span class="l" title="— = this surface has not answered yet (failed/pending tick — retrying every 4 s); a KPI that has data keeps its last real value">spot bars</span></div>
     <span id="status"></span>
   </div>
 
@@ -215,13 +218,38 @@ function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
    the text (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A). */
 function completenessChip(r) {
   const c = r.completeness;
-  if (c === "settled") return el("span", "bx-chip ok", "SETTLED");
-  if (c === "pending") return el("span", "bx-chip warn", "PENDING " + num(r.windows_pending));
-  if (c === "failed") return el("span", "bx-chip bad", "FAILED " + num(r.windows_failed));
-  if (c === "derived") return el("span", "bx-chip info", "derived from 1m");
-  if (c === "ambiguous")
-    return el("span", "bx-chip warn", "shared symbol — see /coverage/windows");
-  return el("span", "bx-chip muted", "no ledger record");
+  /* Depth tooltips (TradingView-depth polish; title = DOM property only):
+     the SETTLED/PENDING/FAILED states carry the served ledger triple —
+     windows_settled (never rendered before) · windows_pending · windows_failed,
+     GUARANTEED int counts for exactly these three states (_classify_completeness).
+     The derived/ambiguous/no-record states carry None-by-design counts and get
+     STATIC scope legends instead — num(null) would fabricate a 0 (Golden Rule #1).
+     Chip TEXT is byte-unchanged (the skip-render memo compares response text). */
+  const ledgerTriple = () => "ledger windows — settled: " + num(r.windows_settled)
+    + " · pending: " + num(r.windows_pending) + " · failed: " + num(r.windows_failed);
+  let chip;
+  if (c === "settled") {
+    chip = el("span", "bx-chip ok", "SETTLED");
+    chip.title = ledgerTriple();
+  } else if (c === "pending") {
+    chip = el("span", "bx-chip warn", "PENDING " + num(r.windows_pending));
+    chip.title = ledgerTriple();
+  } else if (c === "failed") {
+    chip = el("span", "bx-chip bad", "FAILED " + num(r.windows_failed));
+    chip.title = ledgerTriple();
+  } else if (c === "derived") {
+    chip = el("span", "bx-chip info", "derived from 1m");
+    chip.title = "resampled from 1minute — the fetch ledger does not apply";
+  } else if (c === "ambiguous") {
+    chip = el("span", "bx-chip warn", "shared symbol — see /coverage/windows");
+    chip.title = "this symbol·interval appears under multiple exchange·segment directories"
+      + " — ledger counts cannot be attributed to one row; see /coverage/windows";
+  } else {
+    chip = el("span", "bx-chip muted", "no ledger record");
+    chip.title = "no ledger rows for this dataset (e.g. an externally copied lake)"
+      + " — an honest unknown, never implied-settled";
+  }
+  return chip;
 }
 
 /* One-shot row entrance on the FIRST data render only — a poll re-render
@@ -252,7 +280,9 @@ function renderSpot(rows) {
     ["Fetch windows ⓘ", "", "chip = ledger-settled within planned ranges — a trading-day gap audit is NOT claimed"],
   ].forEach(spec => {
     const th = el("th", spec[1] || null, spec[0]);
-    if (spec[2]) th.title = spec[2];
+    /* The ⓘ disclaimer was tooltip-only — mirror it into an aria-label so the
+       honest-scope caveat is reachable by screen readers too. */
+    if (spec[2]) { th.title = spec[2]; th.setAttribute("aria-label", spec[0] + " — " + spec[2]); }
     headRow.appendChild(th);
   });
   const thead = el("thead");

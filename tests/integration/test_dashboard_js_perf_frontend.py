@@ -346,11 +346,16 @@ _INNERHTML_SINK = re.compile(r"\.innerHTML\s*\+?=")
 #   git show aa034f266ba1a9828b7b1c1d46df084af6a42901:brutex/dashboard/templates/<name>
 # piped through the same regex. Hard-coded so the test stays hermetic (no git
 # subprocess at test time).
+#
+# TIGHTENED (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A polish): fetch_windows.html
+# + spot_coverage.html were converted to createElement/textContent-only DOM
+# building, MEASURED at 0 sinks under this same regex — the baseline ratchets
+# down to 0 so a re-introduced sink on those pages fails loudly.
 _BASELINE_INNERHTML_SINKS: dict[str, int] = {
     "coverage.html": 0,
-    "fetch_windows.html": 2,
+    "fetch_windows.html": 0,
     "expired_options.html": 2,
-    "spot_coverage.html": 2,
+    "spot_coverage.html": 0,
     "db.html": 27,
     "movers.html": 9,
     "v29.html": 10,

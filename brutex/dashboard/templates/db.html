@@ -128,6 +128,11 @@
      dedicated HONESTY channel token (--honest, muted gold — disclosed truth,
      distinct from warn/bad); the note TEXT is byte-unchanged. */
   .stepnote { color:var(--honest); font-size:11px; padding:6px 2px 0; }
+  /* Static marker legend under the candle grid (TradingView-depth polish) — a
+     DISTINCT class, deliberately NOT .stepnote: patchGridRows keys its
+     tbody-patch shape check on querySelector(".stepnote"), so reusing that
+     class would silently disable the in-place patch. Muted, never --honest. */
+  .gridlegend { color:var(--muted); font-size:11px; padding:6px 2px 0; }
   /* Click-to-copy cell flash — a brief green pulse on the copied cell. */
   @keyframes cellCopied { 0% { background:var(--green-dim); } 100% { background:transparent; } }
   td.copied { animation: cellCopied .6s ease both; color:var(--green-bright); }
@@ -266,7 +271,7 @@
     <div id="data"><div class="empty emptyart"><div class="art">🗄️</div><div>Select a table on the left to browse its <b>columns &amp; sample rows</b>.</div></div></div>
   </div>
 
-  <div id="copytoast">✓ copied to clipboard</div>
+  <div id="copytoast" role="status" aria-live="polite">✓ copied to clipboard</div>
 
 <!-- Shared half-up 2dp display formatter (DEC-STORED-DATA-VALIDATION-001):
      deliberately NON-defer so bxFixed2 is defined before the inline script
@@ -1025,7 +1030,7 @@ function tableControlsHtml(name) {
     + cols.map(c => '<option value="' + esc(c) + '"' + (c === f.c ? " selected" : "") + '>' + esc(c) + '</option>').join("") + '</select>'
     + '<select class="fop">' + OPS.map(o => '<option value="' + o[0] + '"' + (o[0] === f.op ? " selected" : "") + '>' + esc(o[1]) + '</option>').join("") + '</select>'
     + '<input class="fval" placeholder="value" value="' + esc(f.v) + '">'
-    + '<button class="rm" title="remove filter">✕</button></div>'
+    + '<button class="rm" title="remove filter" aria-label="remove filter">✕</button></div>'
   ).join("");
   return '<div class="qbar">'
     + '<div class="qrow"><span class="lab">Filters</span>'
@@ -1441,6 +1446,10 @@ function setRangeChip(body) {
   if (!rc) return;
   const txt = appliedRangeText(body);
   rc.textContent = txt;
+  /* Provenance tooltip for the value the chip already shows (static string,
+     DOM property — never string-built markup). */
+  rc.title = "server-resolved range actually served — blank From/To shows the "
+    + "dataset's true stored span, never echoes the input";
   rc.style.display = txt ? "" : "none";
 }
 
@@ -1479,13 +1488,82 @@ function candleGridHtml(body, err, notice) {
   const stepNote = body.strike_step_confidence === "observed"
     ? '<div class="stepnote">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
     : "";
-  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote;
+  /* Static marker legend (.gridlegend — see the CSS note: deliberately NOT
+     .stepnote, whose presence keys the tbody-patch shape check). Explains the
+     markers the grid already renders: the italic null cell, the moneyness
+     honesty cells, and the click-to-copy affordance. Static text only. */
+  const legend = '<div class="gridlegend">click any cell to copy · null (italic) = value not stored'
+    + ' · moneyness ? = no spot at bar · — = future/undecodable</div>';
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote + legend;
 }
 
 /* Publish the candle page window into the ONE delegated Prev/Next pager
    (DEC-DASHBOARD-JS-PERF-001) — no per-render listener re-attachment. */
 function setCandlePager(body) {
   setGridPager(body, 100, (off) => { cstate.offset = off; runCandleQuery(true); });
+}
+
+/* ── Full-precision + provenance tooltips on the candle grid (TradingView-depth
+   polish). A DOM post-pass over the ALREADY-rendered rows — titles are set via
+   the element `title` PROPERTY from the raw payload values (the display cells
+   are rounded by fmtCell; the payload arrives full precision per the PCT_COLS /
+   GREEK_DP comments above), never via string-built HTML attributes. Row/column
+   alignment is exact: gridRowsHtml emits one <td> per column, null included.
+   O(page) per render — the same cost class as the innerHTML render itself;
+   click-to-copy still copies td.textContent (the displayed label), unchanged. ── */
+function headProvenanceTitle(col) {
+  if (PCT_COLS.has(col)) {
+    return "server-derived per bar from the prior trading day's LAST 1-minute close "
+      + "— not a stored Parquet column; shown 2dp half-up, hover cells for the exact value";
+  }
+  if (col === "iv") return "stored as a fraction; shown as percent 2dp — hover cells for the stored fraction";
+  if (Object.prototype.hasOwnProperty.call(GREEK_DP, col)) {
+    return "display-rounded broker-style; stored full precision — hover cells for the exact value";
+  }
+  return "";
+}
+/* Static explanations of the served moneyness markers (DEC-FNO-MONEYNESS-LABEL-001
+   semantics restated — keyed off the label the server already sent, no new value). */
+function moneynessTitle(cell) {
+  if (cell.startsWith("ITM") || cell.startsWith("OTM")) {
+    return "strikes from ATM vs spot at this bar (sign: ITM −, OTM +, depth = strike count)";
+  }
+  if (cell === "ATM") return "at the money";
+  if (cell === "?") return "no underlying spot stored at this bar — moneyness unknown, never fabricated";
+  if (cell === "—") return "futures contract or undecodable symbol — moneyness not applicable";
+  return "";
+}
+function applyCandleGridTitles(body) {
+  const grid = document.getElementById("dbgrid");
+  if (!grid || !body) return;
+  const table = grid.querySelector(".gridwrap > table");
+  if (!table) return;
+  const cols = body.columns || [];
+  const rows = body.rows || [];
+  const ths = table.querySelectorAll("thead th");
+  cols.forEach((c, i) => {
+    const t = headProvenanceTitle(c);
+    if (t && ths[i]) ths[i].title = t;
+  });
+  const tbody = table.querySelector("tbody");
+  if (!tbody) return;
+  Array.prototype.forEach.call(tbody.rows, (tr, ri) => {
+    const row = rows[ri];
+    if (!row) return;
+    cols.forEach((c, i) => {
+      const cell = row[i];
+      const td = tr.cells[i];
+      if (cell == null || !td) return;
+      if (PCT_COLS.has(c) || Object.prototype.hasOwnProperty.call(GREEK_DP, c)) {
+        td.title = String(cell);   // the raw full-precision payload value
+      } else if (c === "iv") {
+        td.title = "stored fraction: " + String(cell);
+      } else if (c === "moneyness" && typeof cell === "string") {
+        const t = moneynessTitle(cell);
+        if (t) td.title = t;
+      }
+    });
+  });
 }
 
 /* FULL render: head + control bar + grid container. Used on entering candle mode
@@ -1496,6 +1574,7 @@ function setCandlePager(body) {
 function renderCandleView(body, err, notice) {
   dataEl.innerHTML = candleHeadHtml(body) + candleControlsHtml()
     + '<div id="dbgrid">' + candleGridHtml(body, err, notice) + '</div>';
+  if (!err && !notice) applyCandleGridTitles(body);
   setRangeChip(body);
   const dir = document.getElementById("cdir"); if (dir) dir.value = cstate.desc ? "desc" : "asc";
   /* AUTO-APPLY (DEC-DB-UX-PACK-001 Feature 2): the date inputs + the sort select
@@ -1548,6 +1627,7 @@ function updateCandleGrid(body, err) {
     && patchGridRows(grid, body.columns || [], body.rows || [],
       Number(body.total || 0), Number(body.offset || 0));
   if (!patched) grid.innerHTML = candleGridHtml(body, err);
+  if (!err) applyCandleGridTitles(body);
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
   setRangeChip(body);

@@ -91,7 +91,7 @@
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
-    <div class="live" id="live"><span class="dot"></span><span id="livetxt">polling</span></div>
+    <div class="live" id="live"><span class="dot" aria-hidden="true"></span><span id="livetxt">polling</span></div>
   </header>
 
   <nav class="subnav">
@@ -196,6 +196,11 @@ const wincEl = document.getElementById("winc");
 const failcEl = document.getElementById("failc");
 const liveTxt = document.getElementById("livetxt");
 const statusEl = document.getElementById("status");
+/* Row-order law tooltip (static, always on): expands the on-page CAPPED note so
+   the severity order (_WINDOW_STATUS_ORDER, server-side) is inspectable even on
+   an uncapped page. Title = DOM property, never string-built markup. */
+statusEl.title = "rows are severity-ordered: FAILED → EMPTY → SUCCESS → SKIPPED → PLANNED; "
+  + "the cap drops only the tail — counts above stay complete";
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -216,7 +221,17 @@ const STATUS_SEV = { SUCCESS: "ok", FAILED: "bad", EMPTY: "warn", SKIPPED: "mute
 function winStatus(r) {
   const v = String(r.status == null ? "" : r.status).toUpperCase();
   const cell = el("td");
-  cell.appendChild(el("span", "bx-chip bx-chip--sm solid " + (STATUS_SEV[v] || "muted"), v || "—"));
+  const chip = el("span", "bx-chip bx-chip--sm solid " + (STATUS_SEV[v] || "muted"), v || "—");
+  /* Depth tooltip (served `empty_streak` + `empty_threshold` — both already in
+     the payload): the status_label branch below REPLACES the visible x/3 streak
+     span, so the streak + the promotion threshold stay hover-inspectable here.
+     Wording mirrors the winhelp legend (a 429/timeout preserves the streak). */
+  if ((v === "EMPTY" || v === "SKIPPED") && r.empty_streak != null) {
+    chip.title = "clean-empty streak: " + asText(r.empty_streak) + "/" + asText(emptyThreshold)
+      + " — settles as durable no-data at " + asText(emptyThreshold) + "/" + asText(emptyThreshold)
+      + "; a 429/timeout preserves the streak, only SUCCESS resets";
+  }
+  cell.appendChild(chip);
   /* Honesty label (empty-vs-failed, server-derived `status_label` — ONE common
      backend function feeds both payload paths): EMPTY/SKIPPED spell out
      "vendor confirmed no trades (N clean attempt(s)[ — settled])" and FAILED
@@ -262,8 +277,20 @@ function winStatus(r) {
 function winFetches(r) {
   const cell = el("td", "num");
   const n = Number(r.in_pull_fetches || 0);
-  if (n <= 0) { cell.appendChild(el("span", "bx-prov", "—")); return cell; }
-  if (n === 1) { cell.appendChild(el("span", "bx-prov", "1")); return cell; }
+  /* Tooltip parity with the ↻ badge below (the winhelp legend's wording): the
+     "—" and "1" states get their meanings on hover too, not only in the legend. */
+  if (n <= 0) {
+    const dash = el("span", "bx-prov", "—");
+    dash.title = "0 — a planned window, never fetched this pull";
+    cell.appendChild(dash);
+    return cell;
+  }
+  if (n === 1) {
+    const one = el("span", "bx-prov", "1");
+    one.title = "1 — first-try outcome: recorded on the first in-pull fetch";
+    cell.appendChild(one);
+    return cell;
+  }
   const kind = r.status === "FAILED"
     ? "transient 429/timeout re-attempts"
     : r.status === "EMPTY"
@@ -352,7 +379,15 @@ function renderWindows(rows) {
     tr.appendChild(el("td", null, asText(r.window_end || "")));
     tr.appendChild(winStatus(r));
     tr.appendChild(el("td", "num", num(r.bars)));
-    tr.appendChild(el("td", "num", num(r.attempts)));
+    /* Served-but-never-rendered ledger stamps (`first_seen_at` / `last_attempt_at`,
+       IST-formatted server-side) surface as an Attempts-cell tooltip; a null part
+       is OMITTED — never a fabricated stamp (Golden Rule #1). */
+    const attempts = el("td", "num", num(r.attempts));
+    const stamps = [];
+    if (r.first_seen_at) stamps.push("first seen " + asText(r.first_seen_at) + " IST");
+    if (r.last_attempt_at) stamps.push("last attempt " + asText(r.last_attempt_at) + " IST");
+    if (stamps.length) attempts.title = stamps.join(" · ");
+    tr.appendChild(attempts);
     tr.appendChild(winFetches(r));
     tr.appendChild(el("td", "err", asText(r.last_error || "")));
     tbody.appendChild(tr);
@@ -381,6 +416,26 @@ function countRecorded(counts, total) {
   for (const bucket of kpiBuckets(counts)) for (const v of Object.values(bucket)) n += v || 0;
   return n;
 }
+/* KPI tile depth tooltip: the per-bucket breakdown of the SAME served `counts`
+   map countStatus() folds (spot · options · futures), plus the
+   DEC-WINDOW-KPI-MARKET-SCOPE-001 scoping law (previously comment-only).
+   `st` = one status; "" = all statuses summed (the "windows recorded" tile).
+   Empty counts → "" (no tooltip — never a fabricated 0-breakdown). */
+function bucketBreakdownTitle(counts, st) {
+  const known = ["spot", "options", "futures"];
+  const keys = known.filter(k => (counts || {})[k])
+    .concat(Object.keys(counts || {}).filter(k => !known.includes(k)));
+  if (!keys.length) return "";
+  const parts = keys.map(k => {
+    const bucket = counts[k] || {};
+    let n = 0;
+    if (st) n = bucket[st] || 0;
+    else for (const v of Object.values(bucket)) n += v || 0;
+    return k + " " + num(n);
+  });
+  return parts.join(" · ")
+    + " — scoped to the selected market chip; All sums all buckets";
+}
 
 async function poll() {
   /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
@@ -401,9 +456,14 @@ async function poll() {
     const rows = body.windows || [];
     emptyThreshold = body.empty_threshold ?? 3;
     wincEl.textContent = num(countRecorded(body.counts, body.count ?? 0));
+    wincEl.title = bucketBreakdownTitle(body.counts, "");
     failcEl.textContent = num(countStatus(body.counts, "FAILED"));
+    failcEl.title = bucketBreakdownTitle(body.counts, "FAILED");
     const planEl = document.getElementById("planc");
-    if (planEl) planEl.textContent = num(countStatus(body.counts, "PLANNED"));
+    if (planEl) {
+      planEl.textContent = num(countStatus(body.counts, "PLANNED"));
+      planEl.title = bucketBreakdownTitle(body.counts, "PLANNED");
+    }
     /* Per-run vs lifetime EMPTY (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001):
        counts_since_pull_start ships ONLY when the server knows the current
        pull's journal start — absent, the tile shows the lifetime figure alone
@@ -416,6 +476,17 @@ async function poll() {
       emptyEl.textContent = since
         ? num(countStatus(since, "EMPTY")) + " this run · " + num(lifetimeEmpty) + " lifetime"
         : num(lifetimeEmpty);
+      /* Per-run anchor clause rides the SAME gate as the "N this run" split:
+         `pull_start_utc` ships only when the server knows the journal start —
+         an absent key adds NO clause (the never-fabricated-0 law). */
+      const emptyBits = [];
+      const emptyBreakdown = bucketBreakdownTitle(body.counts, "EMPTY");
+      if (emptyBreakdown) emptyBits.push(emptyBreakdown);
+      if (body.pull_start_utc) {
+        emptyBits.push("this run = windows recorded since pull start "
+          + asText(body.pull_start_utc) + " (UTC)");
+      }
+      emptyEl.title = emptyBits.join(" · ");
     }
     statusEl.textContent = num(body.matched ?? rows.length) + " matched · "
       + num(body.returned ?? rows.length) + " shown"

@@ -273,6 +273,14 @@
     background:var(--surface); display:none; position:relative; overflow:hidden; box-shadow:var(--elev-1); }
   #pullpanel.on { display:block; animation: fadeInUp .4s ease both; }
   #pullpanel .title { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  /* Page-local scope for the pull-header .sub spans ("units" + the
+     DEC-PULL-HEADER-SUBUNIT-001 #subunit note): the shared bx-theme.css rule is
+     `header .sub`-scoped, so these panel spans lost the page's former unscoped
+     .sub styling when the inline duplicate token block was removed (Batch A).
+     ALL FOUR properties mirror origin/main's unscoped `.sub` rule verbatim —
+     color + font-size + the padding-left/border-left divider. */
+  #pullpanel .sub { color:var(--muted); font-size:12px; padding-left:12px;
+    border-left:1px solid var(--border-strong); }
   /* The sweeping beam is the LIVE "running" indicator. Show it ONLY while a
      pull is actually in flight (panel has `.running`); the panel itself stays
      `.on` after the job settles so the ✓/✕ result + chunk grid remain visible,
@@ -557,7 +565,7 @@
 
   <div id="pullpanel">
     <div class="beam"></div>
-    <div class="title"><b id="pulltitle">Pulling…</b><span class="chip stall" id="stallchip"></span><span class="counter" id="counter">0</span><span class="sub">units</span><span class="sub" id="subunit"></span><span class="chip stale" id="feedage"></span></div>
+    <div class="title"><b id="pulltitle">Pulling…</b><span class="chip stall" id="stallchip"></span><span class="counter" id="counter">0</span><span class="sub">units</span><span class="sub" id="subunit" title="distinct in-progress contract labels observed since the unit counter last moved — a poll-sampled floor (600 ms sampling can miss fast transitions; approximate past 4096 labels)"></span><span class="chip stale" id="feedage"></span></div>
     <div class="tfgrid" id="tfgrid"></div>
     <!-- DEC-PROGRESS-WINDOW-UNITS-001: the card counts COARSE units (spot:
          symbol×interval chunks; options: all-or-nothing SERIES of ~dozens of
@@ -567,7 +575,7 @@
          surfaces finally speak one language. Counts are bucket-global
          (all recorded windows for spot/options), not per-pull — said here
          plainly. -->
-    <div id="windowsline" style="font-size:12px;color:var(--muted);margin-top:6px;"></div>
+    <div id="windowsline" style="font-size:12px;color:var(--muted);margin-top:6px;" title="bucket-global counts — ALL recorded fetch windows for spot/futures/options from the window ledger, not just this pull; resolved = SUCCESS+SKIPPED+EMPTY"></div>
     <!-- DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the LIVE per-phase progress block —
          spot / futures / options each read identically (done/total windows + a
          progress bar + the status breakdown), with the current phase highlighted.
@@ -782,7 +790,10 @@ function buildTabs(summary) {
     '<span class="key"><span class="chip index">INDEX</span></span>'
     + '<span class="key"><span class="chip stock">STOCK</span></span>'
     + '<span class="key"><span class="chip opt">OPT</span> option-pullable · F&amp;O</span>'
-    + '<span class="key"><span class="chip ref">REF</span> reference-only · no options</span>';
+    + '<span class="key"><span class="chip ref">REF</span> reference-only · no options</span>'
+    /* Static key for the per-row completeness-strip markers (mirrors the
+       spotSeg rules — previously explained only in a code comment). */
+    + '<span class="key">cov: ✓ full from 2020 · ⚠ partial / late start · ✕ failed windows · — not pulled</span>';
   tabsEl.appendChild(legend);
   /* Search-first UX: focus the box on load so the operator types a symbol
      immediately instead of scrolling 240 rows. Guard on document.body so a
@@ -1003,6 +1014,41 @@ function covStrip(i) {
     + "</div>";
 }
 
+/* Truncate an arbitrary-length payload string for a title attribute (~500 chars
+   with an ellipsis) — a tooltip must stay readable, never a megabyte balloon. */
+function capTitle(s) {
+  s = String(s == null ? "" : s);
+  return s.length > 500 ? s.slice(0, 500) + "…" : s;
+}
+
+/* Per-segment depth tooltips on the cov strip — the RAW stored completeness
+   fields behind the color/flag encoding (status · from_2020 · first/last date;
+   the open-subst N/M tally incl. the n=0 branch whose display collapses to "—";
+   the options status + year span). Titles are set via the element `title`
+   PROPERTY after the strip is in the DOM (covStrip is a string builder — value-
+   carrying string-built attributes are banned), from the SAME COV map the strip
+   itself renders. Missing dims get NO tooltip — never a fabricated field. */
+function applyCovTitles(rowEl, i) {
+  const c = COV[i.symbol];
+  if (!c) return;
+  const segs = rowEl.querySelectorAll(".cov .seg");
+  if (segs.length < 3) return;   // strip shape: [0]=1m spot · [1]=open subst · [2]=opt
+  const s = (c.spot || {})["1minute"];
+  if (s) {
+    segs[0].title = "1-minute coverage · status=" + (s.status ?? "—")
+      + " · from_2020=" + (s.from_2020 ?? "—")
+      + " · first " + (s.first_date ?? "—") + " → last " + (s.last_date ?? "—");
+    segs[1].title = "daily-open substitution: " + Number(s.open_substituted_days || 0)
+      + " of " + Number(s.session_days || 0)
+      + " stored sessions (first present minute ≠ 09:15 IST on a non-Muhurat session)";
+  }
+  const o = c.options;
+  if (o) {
+    segs[2].title = "options · status=" + (o.status ?? "—")
+      + " · years " + (o.first_year ?? "—") + "–" + (o.last_year ?? "—");
+  }
+}
+
 async function loadCompleteness() {
   if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: fetch the per-symbol completeness map + re-render the list ONLY when it
@@ -1041,6 +1087,7 @@ async function loadMappingIntegrity() {
       verdict.style.color = "var(--green)";
       detail.textContent = " · " + m.fully_covered + "/" + m.total_eligible +
         " eligible spots pulled their option history" + pendingNote;
+      detail.removeAttribute("title");   // no red list — never a stale tooltip
     } else {
       const reds = (m.under_pulled || [])
         .filter(u => u.reason === "none" && !u.whitelisted).map(u => u.symbol);
@@ -1048,6 +1095,10 @@ async function loadMappingIntegrity() {
       verdict.style.color = "var(--red-text)";
       detail.textContent = (reds.length ? (" · " + reds.slice(0, 12).join(", ") +
         (reds.length > 12 ? " …" : "")) : "") + pendingNote;
+      /* The visible list is sliced to 12 — the FULL under-pulled symbol list
+         stays hover-recoverable (title = DOM property, capped ~500 chars). */
+      if (reds.length) detail.title = capTitle(reds.join(", "));
+      else detail.removeAttribute("title");
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
@@ -1141,6 +1192,11 @@ async function loadParseSkips() {
       verdict.style.color = "var(--red-text)";
       const samples = (m.samples || []).slice(0, 3).join(" | ");
       detail.textContent = denom + (samples ? (" · e.g. " + samples) : "");
+      /* The visible sample is sliced to 3 — the COMPLETE stored sample set
+         stays hover-recoverable (title = DOM property, capped ~500 chars). */
+      const allSamples = (m.samples || []).join(" | ");
+      if (allSamples) detail.title = capTitle(allSamples);
+      else detail.removeAttribute("title");
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
@@ -1188,7 +1244,10 @@ function refreshCov() {
   document.querySelectorAll('#instruments .inst').forEach(row => {
     const i = bySym[row.dataset.symbol];
     const cov = row.querySelector(".cov");
-    if (i && cov) cov.outerHTML = covStrip(i);
+    if (i && cov) {
+      cov.outerHTML = covStrip(i);
+      applyCovTitles(row, i);   // outerHTML swap replaced the nodes — re-apply the seg titles
+    }
   });
 }
 
@@ -1238,6 +1297,18 @@ function renderInstruments() {
       + `<span class="cc">${esc(i.exchange)}</span>`;
     const cb = d.querySelector(".msel");
     cb.onclick = (ev) => { ev.stopPropagation(); toggleMulti(i, cb.checked); };
+    /* Raw stored economics on hover (title = DOM property): surfaces the fields
+       econLine deliberately omits from the visible line (lot ≤ 1, tick ≤ 0,
+       null freeze) with their field names — all already in the /instruments row.
+       (The vendor pull_symbol is deliberately NOT tooltipped: in this payload
+       pull_symbol === symbol — universe_query.py builds both from symbol_name —
+       so it would merely repeat the visible symbol.) */
+    const econTitle = "stored: lot_size " + (i.lot_size ?? "—")
+      + " · tick_size " + (i.tick_size ?? "—")
+      + " · freeze_quantity " + (i.freeze_quantity ?? "—");
+    const econEl = d.querySelector(".econ");
+    if (econEl) econEl.title = econTitle; else d.title = econTitle;
+    applyCovTitles(d, i);   // per-segment raw completeness fields on the cov strip
     d.onclick = () => selectInstrument(i);
     /* Keyboard accessibility (DEC-UNIVERSE-UI-POLISH-001): the rows carry a
        :focus-visible style but were not focusable — make each row Tab-reachable
@@ -1298,6 +1369,12 @@ async function selectInstrument(i) {
       p.className = "pill" + (ix === 0 ? " near" : "");
       p.style.animationDelay = (ix * 0.05) + "s";
       p.textContent = expiryDate;
+      /* Depth tooltip (title = DOM property): the served-but-discarded registry
+         fetched_at (REGISTRY_EXPIRY_COLUMNS[4], IST-formatted server-side) +
+         an explanation of the previously-unexplained yellow .near highlight
+         (registry_store._SELECT_EXPIRIES orders by expiry_date ascending). */
+      p.title = (ix === 0 ? "earliest listed expiry (registry order: expiry_date ascending) · " : "")
+        + "registry: fetched " + (row[4] ?? "—");
       p.onclick = () => selectExpiry(i.symbol, expiryDate, p);
       ex.appendChild(p);
     });
@@ -1341,8 +1418,11 @@ async function renderContracts(symbol, expiryDate) {
       if (strike == null) return;  // FUT leg — no strike, skip the option ladder
       const s = strike;
       byStrike[s] = byStrike[s] || {};
-      if (side === "CE") byStrike[s].ce = true;
-      else if (side === "PE") byStrike[s].pe = true;
+      /* Keep the FULL registry row per side (was a boolean) so optionCell can
+         surface the previously-discarded contract_symbol / candle_status /
+         fetched_at (REGISTRY_CONTRACT_COLUMNS [3]/[6]/[7]) as a tooltip. */
+      if (side === "CE") byStrike[s].ce = row;
+      else if (side === "PE") byStrike[s].pe = row;
     });
     const strikes = Object.keys(byStrike).sort((a, b) => parseFloat(a) - parseFloat(b));
     if (!strikes.length) { c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>No CE/PE strikes for this expiry yet</div>'; return; }
@@ -1366,13 +1446,25 @@ async function renderContracts(symbol, expiryDate) {
    removed with the "Pull historical" button — the ONE full pipeline pulls every
    contract's history automatically (futures then options) over the selection / the
    whole universe, so the operator never clicks a single cell to fill it. */
-function optionCell(side, present, ix) {
+function optionCell(side, row, ix) {
+  /* `row` is the side's FULL registry row (REGISTRY_CONTRACT_COLUMNS) or
+     undefined when that side has no contract at this strike. The lit-cell
+     tooltip now carries the registry truth the ladder previously discarded —
+     contract_symbol [3] · candle_status [6] · fetched_at [7] (the old
+     "series in the lake" wording overclaimed: a registry row is metadata,
+     candle_status is the lake answer). Titles = DOM property, textContent-safe. */
+  const present = !!row;
   const cell = document.createElement("div");
   cell.className = "cell " + side + (present ? " live" : "");
   cell.style.animationDelay = (ix * 0.02) + "s";
   cell.textContent = present ? side.toUpperCase() : "—";
   if (present) {
-    cell.title = side.toUpperCase() + " series in the lake";
+    cell.title = String(row[3] ?? "—") + " · candle_status=" + (row[6] ?? "—")
+      + " · fetched " + (row[7] ?? "—");
+  } else {
+    const absent = "no " + side.toUpperCase() + " contract in the registry at this strike";
+    cell.title = absent;
+    cell.setAttribute("aria-label", absent);
   }
   return cell;
 }
@@ -1465,11 +1557,18 @@ function updateSelectionLead() {
     const more = syms.length > LEAD_MAX_NAMED ? ` +${syms.length - LEAD_MAX_NAMED} more` : "";
     lead.textContent = `Selected: ${named}${more} (${n}) — one combined selection across the `
       + `Index + Stocks lists. Hit ▶ Pull · full pipeline above (✗ clear unticks both lists).`;
+    /* Past the 12-name cap the "+N more" tail is hover-recoverable: the full
+       ticked-symbol list rides the title (DOM property, capped ~500 chars —
+       client-held selMulti keys, no server call). */
+    if (syms.length > LEAD_MAX_NAMED) lead.title = capTitle(syms.join(", "));
+    else lead.removeAttribute("title");
   } else if (selInst) {
     lead.textContent = `Selected ${selInst} — tick more rows to scope the pull, `
       + `or hit ▶ Pull · full pipeline above`;
+    lead.removeAttribute("title");
   } else {
     lead.textContent = DEFAULT_PULL_LEAD;
+    lead.removeAttribute("title");
   }
 }
 function updateMultiBtn() {
@@ -2062,9 +2161,15 @@ async function pollProgress(label) {
     /* open_ended (DEC-PULL-PROGRESS-HONESTY-001): the phase's total is NOT final
        (the F&O denominator grows as contracts are planned), so show the honest
        units count instead of a fabricated-complete "N / N". */
-    document.getElementById('counter').textContent = s.open_ended
+    const counterEl = document.getElementById('counter');
+    counterEl.textContent = s.open_ended
       ? (s.completed || 0).toLocaleString('en-IN') + ' / ?'
       : (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
+    /* The open-ended '?' legend mirrors the "of total" bstat tooltip (static). */
+    counterEl.title = s.open_ended
+      ? 'total not final — the F&O denominator grows as contracts are planned'
+        + ' (open_ended=true), so ? avoids a fake final count'
+      : '';
     renderLiveStats(s);
     renderPhases(s.phases, s.phase);   // DEC-UNIVERSE-PER-PHASE-PROGRESS-001: live per-phase rows
     if (s.state === 'running') {
@@ -2080,9 +2185,16 @@ async function pollProgress(label) {
       const subNote = subUnitNote(s, trackSubUnit(s));
       const suEl = document.getElementById('subunit');
       if (suEl) suEl.textContent = subNote ? '· ' + subNote : '';
-      document.getElementById('pulltitle').textContent = s.open_ended
+      const ptEl = document.getElementById('pulltitle');
+      ptEl.textContent = s.open_ended
         ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '')
         : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s);
+      /* Full-precision hover for the display-rounded header: the raw served
+         percent (Math.round'ed above) + raw eta_seconds (folded to ~Xh Ym) +
+         the current unit label. Title = DOM property; cleared in finishLive. */
+      ptEl.title = 'percent=' + (s.percent ?? '—')
+        + ' · eta_seconds=' + (s.eta_seconds ?? '—')
+        + ' · current=' + (s.current || '—');
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
       return;
     }
@@ -2106,6 +2218,10 @@ async function pollProgress(label) {
 
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  // Clear the live-watch raw-values tooltip — a settled header carries no
+  // stale percent/eta claim (the terminal header is its own honest verdict).
+  const ptEl = document.getElementById('pulltitle');
+  if (ptEl) ptEl.removeAttribute('title');
   watchActive = false;   // the visibility re-poll gate closes with the watch (DEC-PULL-UI-STALENESS-001)
   pollGen += 1;          // invalidate any in-flight poll straggler (a settled page never repaints stale)
   stopFeedAgeTicker();   // a settled page never reads STALE (DEC-PULL-UI-STALENESS-001)
@@ -2369,6 +2485,16 @@ function renderLiveStats(s) {
     const shown = (v === null) ? '?' : (v || 0).toLocaleString('en-IN');
     d.innerHTML = `<span class="bv">${shown}</span>`
       + `<span class="bk">${esc(k)}</span>`;
+    /* Marker legends on hover (static strings, title = DOM property): the amber
+       no-data-gaps semantics + the open-ended '?' — both previously documented
+       only in code comments. */
+    if (k === 'no-data gaps') {
+      d.title = 'vendor-confirmed empty windows (benign boundary) — counted separately,'
+        + ' never failures (DEC-DHAN-NO-DATA-GAP-COUNT-001)';
+    } else if (k === 'of total' && s.open_ended) {
+      d.title = 'total not final — the F&O denominator grows as contracts are planned'
+        + ' (open_ended=true), so ? avoids a fake final count';
+    }
     row.appendChild(d);
   });
 }
