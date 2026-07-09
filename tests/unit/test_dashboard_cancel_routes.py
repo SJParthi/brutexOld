@@ -257,6 +257,35 @@ def test_detached_sweep_cancel_root_helper_branches(tmp_path: Path) -> None:
     )
 
 
+def test_detached_root_resolve_oserror_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pathological ``Path.resolve`` OSError on the RECORDED root → the default root.
+
+    Combined-PR fix round 2 (the #1614/#1524 killable-mutant-suppression purge): this
+    branch previously rode a ``# pragma: no cover`` — now directly tested. The fake
+    raises ONLY for the recorded candidate path (an ELOOP-style failure); the earlier
+    ``<lake>/sweeps`` resolve outside the try must still succeed.
+    """
+    lake = tmp_path / "lake"
+    default = lake / "sweeps"
+    hostile = default / "launch-oserror"
+    real_resolve = Path.resolve
+
+    def _resolve(self: Path, strict: bool = False) -> Path:
+        if self == hostile:
+            raise OSError("simulated ELOOP symlink cycle")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    assert (
+        app_module._detached_sweep_cancel_root(
+            {"results_root": str(hostile)}, lake, default=default
+        )
+        == default
+    )
+
+
 def test_sweep_cancel_nothing_running(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Nothing running (no in-process sweep, no live detached state) → cancelling False."""
     monkeypatch.setattr("brutex.dashboard.launch_button.read_launch_state", lambda _lake: None)

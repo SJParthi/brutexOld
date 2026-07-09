@@ -155,6 +155,7 @@ class TestMissingSessionsRoute:
         assert resp.json() == {
             "datasets": 0,
             "total_missing": 0,
+            "total_missing_before_first_stored": 0,
             "interval": "1minute",
             "range_start": None,
             "range_end": None,

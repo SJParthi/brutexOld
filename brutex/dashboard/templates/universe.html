@@ -1673,7 +1673,7 @@ function setBulkDisabled(on) {
   stopBtn.onclick = async () => {
     stopBtn.disabled = true;
     const lbl = document.getElementById('pullStopLabel');
-    if (lbl) lbl.textContent = 'Stopping — finishing current window…';
+    if (lbl) lbl.textContent = 'Stopping — finishing current window + draining queued writes…';
     try {
       const r = await fetch('/api/v1/pull/cancel', { method: 'POST' });
       const j = await r.json();
@@ -2174,8 +2174,10 @@ async function pollProgress(label) {
       if (suEl) suEl.textContent = subNote ? '· ' + subNote : '';
       // Cooperative cancel visibility (DEC-JOB-COOPERATIVE-CANCEL-001): while
       // the run's cancel token is set the header says so honestly — the pull
-      // finishes its current window's durable write, then settles.
-      const cancelPrefix = s.cancelling ? 'CANCELLING — finishing current window… · ' : '';
+      // finishes its current window, drains the queued tail writes + ledger
+      // persist (the post-pull heal/Greeks tail is WITHHELD on cancel — the
+      // combined-PR fix round 2), then settles.
+      const cancelPrefix = s.cancelling ? 'CANCELLING — finishing current window + draining queued writes… · ' : '';
       document.getElementById('pulltitle').textContent = cancelPrefix + (s.open_ended
         ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '')
         : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s));

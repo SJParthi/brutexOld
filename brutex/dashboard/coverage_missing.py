@@ -17,7 +17,13 @@ set, and special weekend sessions), and returns per (symbol, interval):
 
 * ``present_count`` — expected sessions that ARE stored,
 * ``expected_count`` — expected NSE/BSE trading sessions over the audited range,
-* ``missing_dates`` — the sorted ISO ``YYYY-MM-DD`` list the operator re-pulls.
+* ``missing_dates`` — the sorted ISO ``YYYY-MM-DD`` list the operator re-pulls,
+* ``missing_before_first_stored`` — how many of ``missing_count`` fall strictly BEFORE
+  the earliest stored session (combined-PR fix round 2): under an explicit range
+  override reaching before the stored span (the 2020-floor audit), a LATE-LISTED
+  symbol's un-pullable pre-listing dates would otherwise be conflated with genuine
+  interior vendor holes in the "sessions to re-pull" headline — the split keeps both
+  honest without clamping away a genuinely-missing early history.
 
 **Honest envelope (Golden Rule #1 / #10):** the ``session_dates`` the caller supplies come
 from ONE ``COUNT(DISTINCT ist_date)``/``array_agg`` columnar aggregate — that read is
@@ -100,6 +106,7 @@ class MissingSessions:
     expected_count: int | None
     present_count: int | None
     missing_count: int | None
+    missing_before_first_stored: int | None
     missing_dates: tuple[str, ...]
     missing_truncated: bool
     abstained: bool
@@ -117,6 +124,7 @@ class MissingSessions:
             "expected_count": self.expected_count,
             "present_count": self.present_count,
             "missing_count": self.missing_count,
+            "missing_before_first_stored": self.missing_before_first_stored,
             "missing_dates": list(self.missing_dates),
             "missing_truncated": self.missing_truncated,
             "abstained": self.abstained,
@@ -178,7 +186,11 @@ def compute_missing_sessions(
         parseable bound wins over the stored one; a given UNPARSEABLE bound ABSTAINS
         (:data:`ABSTAIN_BAD_RANGE_OVERRIDE`) — an operator's typo'd override never
         silently falls back to the stored span and fakes an interior-only audit
-        (Golden Rule #1).
+        (Golden Rule #1). CAVEAT (combined-PR fix round 2): a ``range_start``
+        earlier than the first stored session counts dates the lake never held —
+        for a late-listed symbol those are un-pullable pre-listing dates, not
+        vendor holes; the verdict's ``missing_before_first_stored`` splits them
+        out of ``missing_count`` so the two classes are never conflated.
     expected_cache
         Optional mutable memo keyed ``(start, end, calendar_exchange)`` →
         the expected-session tuple. The payload builder passes ONE dict per payload
@@ -236,6 +248,18 @@ def compute_missing_sessions(
     missing_count = len(missing)
     truncated = missing_count > MAX_MISSING_DATES
     shown = missing[:MAX_MISSING_DATES] if truncated else missing
+    # Pre-stored-span split (combined-PR fix round 2 — Golden Rule #10): an explicit
+    # ``range_start`` earlier than the FIRST stored session counts dates the lake has
+    # never held — for a LATE-LISTED symbol those are un-pullable pre-listing dates, NOT
+    # vendor holes, yet they inflate ``missing_count`` under the route's own advertised
+    # 2020-floor audit. The split names how many of ``missing_count`` fall strictly
+    # BEFORE the earliest stored session, so the operator can tell "never listed /
+    # never pulled" head gaps from interior re-pullable holes. Deliberately NOT a
+    # clamp — an index genuinely missing its early history must stay auditable. With
+    # ZERO stored sessions there is no first-stored anchor, so the split is an honest
+    # 0 (every gap counts as ordinary missing — conservative, disclosed).
+    first_stored = min(stored) if stored else None
+    missing_before = 0 if first_stored is None else sum(1 for d in missing if d < first_stored)
     return MissingSessions(
         exchange=exchange,
         segment=segment,
@@ -246,6 +270,7 @@ def compute_missing_sessions(
         expected_count=len(expected),
         present_count=len(expected) - missing_count,
         missing_count=missing_count,
+        missing_before_first_stored=missing_before,
         missing_dates=tuple(d.isoformat() for d in shown),
         missing_truncated=truncated,
         abstained=False,
@@ -310,6 +335,7 @@ def _abstain(
         expected_count=None,
         present_count=None,
         missing_count=None,
+        missing_before_first_stored=None,
         missing_dates=(),
         missing_truncated=False,
         abstained=True,
@@ -348,7 +374,10 @@ def build_missing_sessions_payload(
     The payload is well-shaped even for an empty ``rows`` (a lake with no spot datasets, or
     no filesystem-backed store) — the route NEVER 500s. ``datasets`` counts the audited
     datasets; ``total_missing`` sums the non-abstained missing counts (a quick "how many
-    sessions to re-pull" headline). ONE per-payload ``expected_cache`` dict memoises the
+    sessions to re-pull" headline) and ``total_missing_before_first_stored`` sums the
+    pre-stored-span split (combined-PR fix round 2 — under an explicit range override a
+    late-listed symbol's un-pullable pre-listing dates land in the split, not silently
+    in the re-pull headline's interior-hole reading). ONE per-payload ``expected_cache`` dict memoises the
     expected-session calendar walk per distinct ``(start, end, exchange)`` range, so the
     common unfiltered many-datasets-one-range case pays the O(span-days) walk once — not
     once per dataset.
@@ -384,9 +413,11 @@ def build_missing_sessions_payload(
         )
     entries.sort(key=lambda e: (e.symbol, e.exchange, e.interval))
     total_missing = sum(e.missing_count or 0 for e in entries)
+    total_missing_before = sum(e.missing_before_first_stored or 0 for e in entries)
     return {
         "datasets": len(entries),
         "total_missing": total_missing,
+        "total_missing_before_first_stored": total_missing_before,
         "interval": DRILL_INTERVAL,
         "range_start": range_start,
         "range_end": range_end,

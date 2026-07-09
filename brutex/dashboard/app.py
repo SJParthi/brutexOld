@@ -4605,12 +4605,16 @@ def build_app(
         cancel seam in its spine, so it starts ``cancellable=False`` and this
         route returns an honest ``{"cancelling": false}`` for it — never a
         fabricated true the run could not observe. HONEST latency (Golden Rule
-        #10): cooperative — the in-flight
-        window's fetch + durable write + ledger record always complete first
-        (≤ one fetch + the 90 s write deadline), then the job settles via the
-        NORMAL path as an honest amber partial ("(cancelled)" stop) — never a
-        red ✕, never a fabricated green; the durable ledger makes the next pull
-        resume exactly the unsettled remainder.
+        #10): cooperative — the in-flight window's fetch completes, the async
+        pipeline's already-queued tail writes DRAIN (each bounded by the 90 s
+        write deadline), and the ledger persists first; the F&O post-pull tail
+        (the O(pulled-scope) L2 heal + the FULL Greeks-enrichment pass) is
+        WITHHELD on cancel (combined-PR fix round 2 — the note reads "withheld
+        (cancelled) — re-attempted next pull"; the next pull heals + re-enriches,
+        nothing is lost). Then the job settles via the NORMAL path as an honest
+        amber partial ("(cancelled)" stop) — never a red ✕, never a fabricated
+        green; the durable ledger makes the next pull resume exactly the
+        unsettled remainder.
         """
         cancelling = _pull_job.request_cancel(expected_kind=JOB_KIND_PULL)
         return JSONResponse({"cancelling": bool(cancelling)})
@@ -4632,7 +4636,17 @@ def build_app(
         durable write chain first; a heavy k=5 tuple legitimately runs many
         minutes, and a wedged worker ignores it (the stall watchdog remains
         that class's terminal). A cancelled sweep's checkpoint is a CLEAN
-        resumable boundary — run again to resume.
+        resumable boundary — run again to resume. HONEST race windows
+        (DISCLOSED, combined-PR fix round 2 — Golden Rule #10): (a) a Stop
+        POSTed in the ``_pull_job.start()`` → ``cmd_sweep_all`` LAUNCH window
+        is deleted by the launch-time stale-sidecar guard (indistinguishable
+        from a prior run's leftover — the guard exists so a leftover can never
+        kill a fresh/resumed run), so that acked cancel is LOST; (b) the
+        running-check → sidecar-write sequence here can ack a JUST-SETTLED
+        sweep with ``{"cancelling": true}`` (the orphan sidecar is then
+        harmlessly cleared by the next launch). Remedy for both: press Stop
+        again once the run is visibly underway — the sidecar is probed at
+        EVERY tuple boundary, so a re-press always lands.
         """
         from brutex.dashboard.launch_button import read_launch_state, state_liveness
         from brutex.engine.sweep_cancel import request_cancel as request_sweep_cancel
@@ -4889,7 +4903,13 @@ def build_app(
         ``?exchange=``/``?interval=`` filters (case-insensitive exact) narrow the drill;
         ``?range_start=``/``?range_end=`` (ISO ``YYYY-MM-DD``) override the default
         ``[first_date, last_date]`` interior-gap range (e.g. to audit against the 2020 pull
-        floor). READ-ONLY — no pull logic.
+        floor). CAVEAT on that floor audit (combined-PR fix round 2): a ``range_start``
+        earlier than a symbol's FIRST stored session counts dates the lake never held —
+        for a late-listed symbol those are un-pullable pre-listing dates, NOT vendor
+        holes; each row's ``missing_before_first_stored`` (+ the payload's
+        ``total_missing_before_first_stored``) splits them out of the "sessions to
+        re-pull" counts so the two classes are never conflated. READ-ONLY — no pull
+        logic.
 
         **Honest envelope (Golden Rule #10):** the distinct stored dates come from a
         SEPARATE ``session_dates``-enriched execution of the same scan SHAPE
@@ -7785,7 +7805,11 @@ def _detached_sweep_cancel_root(state: Mapping[str, Any], lake: Path, *, default
     sweeps = (lake / "sweeps").resolve(strict=False)
     try:
         resolved = candidate.resolve(strict=False)
-    except OSError:  # pragma: no cover — pathological path resolution only
+    except OSError:
+        # Pathological path resolution (e.g. an ELOOP symlink cycle) — the
+        # recorded root is unusable, fall back to the default (pragma LIFTED,
+        # combined-PR fix round 2 — directly unit-tested, the #1614/#1524
+        # killable-mutant-suppression purge precedent).
         return default
     if resolved == sweeps or sweeps in resolved.parents:
         return candidate

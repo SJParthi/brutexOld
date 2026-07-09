@@ -241,12 +241,66 @@ class TestComputeMissingSessions:
             "expected_count",
             "present_count",
             "missing_count",
+            "missing_before_first_stored",
             "missing_dates",
             "missing_truncated",
             "abstained",
             "abstain_reason",
         }
         assert isinstance(d["missing_dates"], list)
+
+    def test_pre_stored_span_split_under_floor_override(self) -> None:
+        """Combined-PR fix round 2: an override before the first stored session SPLITS.
+
+        A late-listed symbol audited against the 2020-style floor: the dates before
+        its first stored session are counted in ``missing_before_first_stored`` so
+        they are never conflated with interior re-pullable vendor holes. The audit
+        deliberately does NOT clamp — a genuinely-missing early history stays visible.
+        """
+        # Stored {03-Jan, 05-Jan 2024}; range override 2024-01-01 → 2024-01-05.
+        # Expected sessions: 01/02/03/04/05 (Mon–Fri, all trading days) — 01 + 02
+        # precede the first stored session (pre-history), 04 is an interior hole.
+        stored = frozenset({date(2024, 1, 3), date(2024, 1, 5)})
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "LATELIST",
+            DRILL_INTERVAL,
+            "2024-01-03",  # stored span begins here
+            "2024-01-05",
+            stored,
+            range_start="2024-01-01",
+            range_end="2024-01-05",
+        )
+        assert not result.abstained
+        # Missing = 01-Jan + 02-Jan (pre-first-stored) + 04-Jan (interior hole).
+        assert result.missing_dates == ("2024-01-01", "2024-01-02", "2024-01-04")
+        assert result.missing_count == 3
+        assert result.missing_before_first_stored == 2  # 01 + 02 precede 03-Jan
+
+    def test_default_interior_audit_split_is_zero(self) -> None:
+        # No override: the range starts AT the first stored session, so no missing
+        # date can precede it — the split reads 0 (never None on a served audit).
+        stored = frozenset({date(2024, 1, 2), date(2024, 1, 4), date(2024, 1, 5)})
+        result = compute_missing_sessions(
+            "NSE", "INDEX", "NIFTY", DRILL_INTERVAL, "2024-01-02", "2024-01-05", stored
+        )
+        assert result.missing_count == 1
+        assert result.missing_before_first_stored == 0
+
+    def test_empty_stored_set_split_is_conservative_zero(self) -> None:
+        # ZERO stored sessions ⇒ no first-stored anchor ⇒ the split is an honest 0
+        # (every gap counts as ordinary missing; nothing is silently reclassified).
+        result = compute_missing_sessions(
+            "NSE", "INDEX", "NIFTY", DRILL_INTERVAL, "2024-01-02", "2024-01-05", frozenset()
+        )
+        assert result.missing_count == 4
+        assert result.missing_before_first_stored == 0
+
+    def test_abstained_split_is_none(self) -> None:
+        result = compute_missing_sessions("NSE", "INDEX", "NIFTY", DRILL_INTERVAL, None, None, None)
+        assert result.abstained
+        assert result.missing_before_first_stored is None
 
 
 def _row(
@@ -305,9 +359,30 @@ class TestBuildMissingSessionsPayload:
         payload = build_missing_sessions_payload(rows)
         assert payload["datasets"] == 2
         assert payload["total_missing"] == 4
+        # No override → nothing precedes the (absent) first-stored anchor.
+        assert payload["total_missing_before_first_stored"] == 0
         # sorted by (symbol, exchange, interval) → BANKNIFTY first
         assert payload["rows"][0]["symbol"] == "BANKNIFTY"
         assert payload["rows"][0]["abstained"] is True
+
+    def test_total_missing_before_first_stored_sums_split(self) -> None:
+        """Combined-PR fix round 2: the payload headline carries the pre-stored split."""
+        rows = [
+            # Stored {03, 05} — under the 01→05 override: missing 01+02 (pre) + 04 (interior).
+            _row(
+                "NIFTY",
+                "1minute",
+                "2024-01-03",
+                "2024-01-05",
+                frozenset({date(2024, 1, 3), date(2024, 1, 5)}),
+            ),
+        ]
+        payload = build_missing_sessions_payload(
+            rows, range_start="2024-01-01", range_end="2024-01-05"
+        )
+        assert payload["total_missing"] == 3
+        assert payload["total_missing_before_first_stored"] == 2
+        assert payload["rows"][0]["missing_before_first_stored"] == 2
 
     def test_missing_session_dates_key_abstains(self) -> None:
         row = {
