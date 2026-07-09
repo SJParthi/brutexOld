@@ -109,6 +109,12 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "writes (aggs join + twin entry-ts sets) — engine artifacts, not "
         "lake bars (DEC-SWEEP-RESULTS-DEPTH-001)"
     ),
+    "brutex/engine/resilience_streaks.py": (
+        "reads its OWN stamp-validated <stem>.resilience.parquet sidecar (+ the "
+        "run_id-keyed trades sidecar for the adoption backfill) — run_id-keyed "
+        "engine artifacts under sweep_runs/, not lake bars; dedup identity does "
+        "not apply (DEC-SWEEP-RESULTS-DEPTH-001, losing-streak resilience)"
+    ),
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
         "bar/options lake — dedup identity does not apply"

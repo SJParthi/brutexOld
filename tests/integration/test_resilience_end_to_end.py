@@ -265,6 +265,37 @@ def test_resilience_failure_next_run_backfills_clean(
     assert load_resilience_stamp(paths) is not None  # type: ignore[arg-type]
 
 
+def test_backfill_resilience_failure_degrades_not_drops(
+    swept: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backfill-path resilience failure degrades the annotation, keeps the tuple.
+
+    The trio is current but the resilience sidecar is gone (the backfill arm); a
+    generic fold failure there counts ``resilience_errored``, NOT
+    ``resilience_backfilled`` / ``tuples_errored``, and the tuple STILL pools.
+    """
+    _run_pass(swept)  # writes the trio + resilience
+    paths = _paths(swept)
+    paths.resilience.unlink()  # type: ignore[attr-defined]
+    paths.resilience_stamp.unlink()  # type: ignore[attr-defined]
+
+    import brutex.engine.results_depth_pass as mod
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("backfill fold exploded")
+
+    monkeypatch.setattr(mod, "fold_resilience", _boom)
+    with capture_logs() as logs:
+        report = _run_pass(swept)
+
+    assert report.resilience_errored == 1
+    assert report.resilience_backfilled == 0  # the failed backfill did NOT count
+    assert report.tuples_errored == 0
+    assert report.tuples_processed == 0  # trio current — no fresh build
+    assert report.pool > 0  # the tuple still pooled with resilience=None
+    assert any(e["event"] == "results_depth.resilience_failed" for e in logs)
+
+
 def test_memory_error_from_resilience_step_re_raises(
     swept: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
