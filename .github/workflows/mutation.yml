@@ -282,6 +282,42 @@ jobs:
           #    + 3 untested, driven to zero by 7 targeted tests + documented
           #    in-module pragmas (its dedicated file runs in ~2 s, same
           #    focused-runner subset argument as the rest of the loop).
+          #    data/lake_stats_manifest.py (the /db paging stats manifest —
+          #    a silent mutant here wrong-pages or wrong-totals the viewer)
+          #    joined per DEC-LAKE-STATS-MANIFEST-001 review round 8: the
+          #    round-8 refuter caught MIGRATION #1614 claiming the module
+          #    "rides the weekly Mutation workflow" while NO --paths-to-mutate
+          #    named it (an unwired gate presented as a deferred one, Golden
+          #    Rule #10). Wired + EXECUTED in-session (mutmut 2.5.1,
+          #    py3.12): the pre-hardening enumeration measured 473 mutants
+          #    with 84 pending (83 survived + 1 suspicious-timing FIFO-hang
+          #    classification); the TestMutationHardening pins (literal /
+          #    exact-message / boundary / log-event-name kills incl. an
+          #    os.open O_NONBLOCK flag spy) drove the round-8 enumeration to
+          #    456 mutants / ZERO survived / ZERO suspicious. ENDGAME round 2
+          #    (DEC-LAKE-STATS-MANIFEST-001, MIGRATION #1614) then PURGED the
+          #    round-8 fd-sentinel / bounded-read / dead-"unknown" line
+          #    pragmas — the refuter proved they suppressed killable,
+          #    NON-equivalent mutants, so calling that residue
+          #    "provably-equivalent" here was an overstatement — by
+          #    restructuring the lines into fully killable shapes (union
+          #    return type, owned-flag fd handoff + os.close spy — NOT an
+          #    fd: int|None sentinel, whose annotation-only `int & None`
+          #    mutant is runtime-unevaluated [PEP 526] and provably
+          #    survives, as the first re-enumeration itself demonstrated —
+          #    cap-read + 1-byte over-cap probe + inside-the-JSON at-cap
+          #    boundary test); re-enumeration measured 462 enumerated
+          #    (196 machine-verified killed in-session, 0 survivors, before
+          #    the session budget stopped the run — THIS weekly gate
+          #    enforces the full zero-survivor law on every scheduled run;
+          #    every restructured-line mutant was also hand-applied and
+          #    KILLED)
+          #    with the ONLY remaining pragmas the discarded-message
+          #    `field=` names (genuinely equivalent).
+          #    The dedicated file runs in seconds (same focused-runner
+          #    subset argument as the rest of the loop) and
+          #    TestMutationWorkflowWiring fails the unit suite if this pair
+          #    is ever dropped.
           #
           # Pass 2: per-module focused runners (DEC-MUTATION-RUNTIME-001).
           # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597) with a
@@ -366,7 +402,9 @@ jobs:
           #     sits < 1.5x a legit pass) into explicit loud refusals at the
           #     start of the pass; a mid-pass swing INSIDE the (1.2, 20) s
           #     regime remains the accepted, disclosed residual.
-          # The 9 proven pairs keep their exact historical runner + no
+          # The 10 proven pairs (incl. data/lake_stats_manifest.py, merged in
+          # from DEC-LAKE-STATS-MANIFEST-001 — see its rationale block above)
+          # keep their exact historical runner + no
           # --test-time-base (minimal diff — their verified interplay is
           # unchanged). HONEST mechanism note (fixer round 2 — the earlier "no
           # spin constructs there" justification was FALSE): audit.py DOES carry
@@ -385,7 +423,7 @@ jobs:
           # rehearsal/scheduled run ever wedges on one of the 9 pairs again, give
           # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
           # measured CI baseline. rate_common runs LAST so a survivor there never
-          # masks the 9 proven modules.
+          # masks the 10 proven modules.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
@@ -395,6 +433,7 @@ jobs:
             "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py:" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
+            "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             mod="${pair%%:*}"
