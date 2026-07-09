@@ -99,6 +99,68 @@ function bxEventLineText(rec) {
   return String(rec.ts_utc) + "  " + String(rec.kind) + "  " + JSON.stringify(rec.payload);
 }
 
+/** The honest null-VIX copy (ONE constant — the [W3-R4] house awaiting style). */
+var BX_VIX_BAND_NOT_STAMPED = "VIX band not stamped for this run";
+
+/**
+ * The story-card VIX band sentence ([W3-R4] DEC-ONECLICK-TOP100-OBJECT-
+ * ROOT-001 wave-3 fold; pure — textContent-rendered on the operator rank-1
+ * card AND the /strategy story card).
+ *
+ * The REAL writer emits ``vix_band`` as an OBJECT whose ``lo``/``hi`` are
+ * null for a null-VIX run (engine ``_vix_band_payload``) — the old
+ * undefined-only gate rendered "works when VIX between null–null". A
+ * null/missing bound now reads the honest not-stamped copy; a PARTIAL band
+ * (one real bound) states the bound it has and names the missing one —
+ * never a fabricated range, never "null" as prose.
+ *
+ * @param {*} band - the row's vix_band value (object | null | undefined).
+ * @returns {string} the sentence.
+ */
+function bxVixBandText(band) {
+  if (!band || typeof band !== "object") {
+    return BX_VIX_BAND_NOT_STAMPED;
+  }
+  var loNum = typeof band.lo === "number" && isFinite(band.lo);
+  var hiNum = typeof band.hi === "number" && isFinite(band.hi);
+  if (loNum && hiNum) {
+    return "works when VIX between " + String(band.lo) + "–" + String(band.hi);
+  }
+  if (loNum) {
+    return "works when VIX ≥ " + String(band.lo) + " (upper bound not stamped)";
+  }
+  if (hiNum) {
+    return "works when VIX ≤ " + String(band.hi) + " (lower bound not stamped)";
+  }
+  return BX_VIX_BAND_NOT_STAMPED;
+}
+
+/**
+ * The compact /screener band-column cell for the SAME verdicts (pure; the
+ * cell previously rendered "null–null" for a null-lo/hi writer band).
+ *
+ * @param {*} band - the row's vix_band value (object | null | undefined).
+ * @returns {string} the cell text ("12.5–18.2" · "≥ 12.5 (upper not
+ *   stamped)" · "≤ 18.2 (lower not stamped)" · "not stamped").
+ */
+function bxVixBandCellText(band) {
+  if (!band || typeof band !== "object") {
+    return "not stamped";
+  }
+  var loNum = typeof band.lo === "number" && isFinite(band.lo);
+  var hiNum = typeof band.hi === "number" && isFinite(band.hi);
+  if (loNum && hiNum) {
+    return String(band.lo) + "–" + String(band.hi);
+  }
+  if (loNum) {
+    return "≥ " + String(band.lo) + " (upper not stamped)";
+  }
+  if (hiNum) {
+    return "≤ " + String(band.hi) + " (lower not stamped)";
+  }
+  return "not stamped";
+}
+
 /**
  * Funnel write-precedence law (C-M2, pure): the live source may always
  * write; the manifest fill applies ONLY while NO sweep is running.
@@ -203,11 +265,25 @@ function bxFunnelProvenance(source, runId) {
     return String(value);
   }
 
+  /* [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+     the one-click Top-100 order is the artifact's R30 preset (default
+     min_dd_first — smallest max-drawdown first), which deliberately DIFFERS
+     from /results (Rank-by metric, descending). Label only — neither sort
+     is changed; a missing preset falls back honestly to the default name. */
+  function sortBasisText(preset) {
+    var name =
+      typeof preset === "string" && preset ? preset : "min_dd_first (default)";
+    return (
+      "sort basis: artifact preset " +
+      name +
+      " — differs from /results (Rank-by metric, descending)"
+    );
+  }
+
+  /* [W3-R4]: delegate to the ONE pure builder above — a null-lo/hi writer
+     band reads the honest not-stamped copy, never "between null–null". */
   function vixBandText(band) {
-    if (!band || typeof band !== "object" || band.lo === undefined || band.hi === undefined) {
-      return "no VIX band";
-    }
-    return "works when VIX between " + String(band.lo) + "–" + String(band.hi);
+    return bxVixBandText(band);
   }
 
   /* One-shot fetch failure law (F-M4): rejection AND non-ok AND malformed
@@ -534,6 +610,7 @@ function bxFunnelProvenance(source, runId) {
           }
         }
         if (payload.status === "ok" || payload.status === "partial") {
+          setOc("top100_sort_basis", sortBasisText(payload.preset));
           fillRankOneCard(payload.rows || []);
           renderCombosRows(payload);
           if (payload.rows && payload.rows.length && payload.row_count !== undefined) {
@@ -613,6 +690,14 @@ function bxFunnelProvenance(source, runId) {
     }
     if (series.invalid_rows) {
       noteBits.push(String(series.invalid_rows) + " invalid row(s) skipped");
+    }
+    /* [W2-4] Ruling-18 null costs: counted at Rs 0 — the curve is honestly
+       labeled gross of those unverified costs, never an empty chart. */
+    if (series.null_cost_rows) {
+      noteBits.push(
+        String(series.null_cost_rows) +
+          " row(s) carry null costs (by design until P5) — curve is gross of those costs"
+      );
     }
     noteBits.push("net " + paisaText(series.final_paisa));
     host.appendChild(window.BXUI.el("div", "oc-sub", noteBits.join(" · ")));
@@ -1011,11 +1096,14 @@ function bxFunnelProvenance(source, runId) {
   window.BXOneclick = {
     TIMELINE_RING_CAP: BX_TIMELINE_RING_CAP,
     TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
+    VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     ringPush: bxRingPush,
     ringFilter: bxRingFilter,
     eventLineText: bxEventLineText,
     funnelWriteAllowed: bxFunnelWriteAllowed,
     funnelProvenance: bxFunnelProvenance,
+    vixBandText: bxVixBandText,
+    vixBandCellText: bxVixBandCellText,
     oneshotFetch: bxOneshotFetch,
     renderChainMap: renderChainMap,
     selectRun: function (runId) {
@@ -1042,10 +1130,13 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     BX_TIMELINE_RING_CAP: BX_TIMELINE_RING_CAP,
     BX_TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
+    BX_VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     bxRingPush: bxRingPush,
     bxRingFilter: bxRingFilter,
     bxEventLineText: bxEventLineText,
     bxFunnelWriteAllowed: bxFunnelWriteAllowed,
-    bxFunnelProvenance: bxFunnelProvenance
+    bxFunnelProvenance: bxFunnelProvenance,
+    bxVixBandText: bxVixBandText,
+    bxVixBandCellText: bxVixBandCellText
   };
 }
