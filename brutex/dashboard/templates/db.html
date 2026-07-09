@@ -1441,7 +1441,14 @@ function candleGridHtml(body, err, notice) {
   const stepNote = body.strike_step_confidence === "observed"
     ? '<div class="stepnote">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
     : "";
-  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote;
+  /* STATIC display-law footnote (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the /db
+     derived %-change baseline is the nearest STORED prior bar — including a Diwali
+     Muhurat session's close, a real NSE session the lake legitimately carries —
+     while the engine's day anchors deliberately use the prior REGULAR session
+     (#1616). Template-only honesty text, zero payload/backend change; a per-row
+     Muhurat marker is the named follow-up DEC-DB-MUHURAT-PREVCLOSE-MARK-001. */
+  const prevAnchorNote = '<div class="stepnote">%CHNG anchors on the nearest stored prior bar (including a Diwali Muhurat session\'s close).</div>';
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote + prevAnchorNote;
 }
 
 /* Publish the candle page window into the ONE delegated Prev/Next pager
