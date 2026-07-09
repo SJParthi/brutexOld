@@ -19,6 +19,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -362,6 +363,47 @@ class TestRunPreconditions:
         check = _check(checks, "no_active_launch")
         assert check.ok is True
         assert "recoverable" in check.detail
+
+
+class TestDiskUsageSeam:
+    """DEC-LAUNCH-DISK-GATE-HERMETIC-001: the production disk probe is
+    ``shutil.disk_usage`` resolved at CALL time through the ``disk_usage=None``
+    module seam — test-injectable, byte-identical gate in production."""
+
+    def test_default_arg_is_the_none_seam(self) -> None:
+        """The def-time-bound ``shutil.disk_usage`` default is gone — pin it."""
+        kwdefaults = lb.run_preconditions.__kwdefaults__
+        assert kwdefaults is not None
+        assert kwdefaults["disk_usage"] is None
+        assert kwdefaults["min_free_bytes"] == lb.DEFAULT_MIN_DISK_FREE_BYTES
+
+    def test_default_disk_usage_delegates_to_shutil_at_call_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The production default IS ``shutil.disk_usage`` (spy-proven)."""
+        calls: list[str] = []
+
+        def _spy(path: str) -> Any:
+            calls.append(path)
+            return SimpleNamespace(total=4, used=2, free=2)
+
+        # lb resolves `shutil.disk_usage` at CALL time — patching the shutil
+        # module attribute (the SAME module object lb imported) proves it.
+        monkeypatch.setattr(shutil, "disk_usage", _spy)
+        assert lb._default_disk_usage("/probe/here").free == 2
+        assert calls == ["/probe/here"]
+
+    def test_none_arm_resolves_the_module_seam(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``run_preconditions`` with NO injection rides the monkeypatchable seam."""
+        lake = _make_lake(tmp_path)
+        monkeypatch.setattr(lb, "_default_disk_usage", _fake_usage(10**15))
+        checks = lb.run_preconditions(lake)
+        assert _check(checks, "disk_free").ok is True
+        monkeypatch.setattr(lb, "_default_disk_usage", _fake_usage(1))
+        checks = lb.run_preconditions(lake)
+        assert _check(checks, "disk_free").ok is False
 
 
 # ── pid probing + liveness + pidfile ─────────────────────────────────
