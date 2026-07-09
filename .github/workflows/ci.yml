@@ -2120,6 +2120,15 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_artifacts test file not present yet — gate inactive)"
           fi
+          # DEC-CACHE-SERVE-LAST-KNOWN-001 (MIGRATION.md #1645): the COMMON
+          # keyed cache (`MoversSnapshotCache`) gains the serve-last-known
+          # probe-outage mode + the mru_prefix bookkeeping — the module ships
+          # at 100% line+branch under its two dedicated unit suites.
+          if compgen -G "tests/unit/test_movers_cache.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.movers_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_cache.py tests/unit/test_movers_cache_serve_last_known.py
+          else
+            echo "(brutex.dashboard.movers_cache test file not present yet — gate inactive)"
+          fi
           # DEC-OPERATOR-PAGE-REAL-001 (MIGRATION.md #1561): the pure oneclick
           # payload builders — run pill / chain map / funnel reconcile / the
           # R44 5-state verify truth table (no I/O, no FastAPI). 100%
