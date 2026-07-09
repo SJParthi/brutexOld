@@ -695,8 +695,15 @@ def test_g6_concurrent_second_sweep_refused_and_winner_chain_verifies(
         tripwire_config=TripwireConfig(),
         diffcheck_k=0,
     ) as core:
+        # A second sweep-lock acquisition while `core` holds it MUST be refused
+        # at __enter__ (SweepAlreadyRunningError). pytest.raises is the tooth —
+        # a wrongly-granted lock enters the body, leaves the flag True, and the
+        # assert below fails loudly. The flag is a non-raising body so the
+        # post-`with` assertions stay genuinely reachable.
+        second_sweep_entered = False
         with pytest.raises(SweepAlreadyRunningError) as excinfo, sweep_run_lock(out):
-            raise AssertionError("the second sweep must never proceed")
+            second_sweep_entered = True
+        assert not second_sweep_entered, "the second sweep must never proceed"
         assert excinfo.value.holder_pid == os.getpid()
         run_id = core.run_id
         core.set_exit_code(0)

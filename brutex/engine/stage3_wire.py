@@ -74,6 +74,7 @@ from brutex.engine.cascade_wire import (
 )
 from brutex.engine.combo_mask import popcount
 from brutex.engine.results_store import ResultRow, ResultsStore
+from brutex.engine.snapshot_hash import data_snapshot_hash
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.stage3_refine import (
     Evaluator,
@@ -166,72 +167,6 @@ def ensure_stage3_runtime() -> tuple[str, str]:
             "install with: pip install -e '.[optimize]' "
             f"(import failed: {exc})"
         ) from exc
-
-
-def data_snapshot_hash(
-    *,
-    exchange: str,
-    segment: str,
-    start: str,
-    end: str,
-    slices: Mapping[tuple[str, str], Sequence[CandleBar]],
-) -> str:
-    """Return a real BLAKE3 content fingerprint of a loaded data window.
-
-    The SHARED snapshot-identity derivation (CLAUDE.md §11 COMMON): the
-    ``brutex sweep-all`` launcher hashes its full-window slices through this
-    helper, and :func:`run_stage3_pass` hashes the lockbox-excluded TRAIN
-    slices through the SAME derivation (ADR-0007 Amendment A1) — so a refined
-    row's ``data_snapshot_hash`` honestly encodes the data it was evaluated on.
-
-    FULL-CONTENT since DEC-SNAPSHOT-HASH-FULL-001 (preimage version
-    ``bxsnap2``): every bar folds ALL SEVEN :class:`~brutex.data.models.CandleBar`
-    fields (timestamp / open / high / low / close / volume / open_interest)
-    into a STREAMED BLAKE3 (O(1) extra memory), so **any single-bar difference
-    in any slice produces a different hash**. The v1 derivation (bar count +
-    first/last timestamp+close per slice — a SAMPLED fingerprint) let an
-    interior-bar re-pull edit alias the identity, so Bloom/LMDB dedup + the
-    tuple cache served STALE results as fresh (Golden Rules #4/#7); it is
-    retained ONLY as the private recount diagnostic
-    :func:`_data_snapshot_hash_v1`, never exported to any identity path. The
-    ``bxsnap2|`` domain tag makes a v1/v2 preimage collision structurally
-    impossible (including the degenerate all-empty-slices grid) and keeps the
-    format provenance auditable.
-
-    Honest complexity envelope (Golden Rule #10): NOT O(1) — O(total loaded
-    bars), paid ONCE per launch / Stage-3 pass / recount over bars already
-    resident in RAM; strictly smaller than the pre-existing unconditional
-    per-launch ``catalog_reconcile`` full-byte rescan. Zero cost in any
-    per-combo hot path (Rule 5 untouched). ``Decimal.__str__`` renders prices
-    exactly (2dp-snapped at the lake-write boundary, DEC-SPOT-PRICE-2DP-001);
-    a ``None`` open_interest renders ``"None"`` deterministically.
-
-    Parameters
-    ----------
-    exchange, segment, start, end
-        The data scope labels (the lake partition + the requested ISO window).
-    slices
-        Every loaded ``(symbol, interval) -> bars`` slice (empty slices
-        participate as explicit zero-count entries).
-
-    Returns
-    -------
-    str
-        The 64-char lowercase BLAKE3 hex digest.
-    """
-    hasher = blake3.blake3()
-    hasher.update(f"bxsnap2|{exchange}|{segment}|{start}|{end}".encode())
-    for (symbol, interval), bars in sorted(slices.items()):
-        hasher.update(f"\n{symbol}|{interval}|{len(bars)}".encode())
-        for bar in bars:
-            hasher.update(
-                f"\n{bar.timestamp.isoformat()}|{bar.open}|{bar.high}|{bar.low}|"
-                f"{bar.close}|{bar.volume}|{bar.open_interest}".encode()
-            )
-    # str(...) keeps this typed `str` even where the blake3 wheel (and its
-    # stubs) is absent and the import degrades to Any — e.g. the isolated
-    # pre-commit mypy env (hook-portability, the #575 combo.py precedent).
-    return str(hasher.hexdigest())
 
 
 def _data_snapshot_hash_v1(

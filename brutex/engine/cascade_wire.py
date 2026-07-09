@@ -1668,7 +1668,7 @@ def manifest_snapshot_hash(
     str
         The 64-hex snapshot digest.
     """
-    from brutex.engine.stage3_wire import data_snapshot_hash
+    from brutex.engine.snapshot_hash import data_snapshot_hash
 
     pairs = sorted({(spec.instrument, spec.tf_label) for spec in manifest.specs})
     slices = {(instrument, tf): list(bars_for(instrument, tf)) for instrument, tf in pairs}

@@ -617,7 +617,7 @@ class HaltAlerterLike(Protocol):
 
     def sweep_halted(self, *, run_id: str, reason: str) -> bool:
         """Fire the CRITICAL sweep-halted alert (best-effort)."""
-        ...
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 @contextlib.contextmanager
