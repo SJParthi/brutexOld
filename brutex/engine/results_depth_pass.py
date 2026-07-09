@@ -80,6 +80,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Final, cast
 
 import structlog
@@ -128,9 +129,9 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
     from brutex.engine.results_store import ResultRow
     from brutex.engine.session_lens import SessionLens
-    from brutex.engine.trade_capture import ComboCapture
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
     from brutex.engine.top100_artifact import MarginRoiProvider, ReasonProvider
+    from brutex.engine.trade_capture import ComboCapture
 
 _LOG = structlog.get_logger("brutex.engine.results_depth_pass")
 
@@ -754,9 +755,14 @@ def run_results_depth_pass(
                 # sidecar is absent/stale — re-fold it from disk, NO re-sim.
                 # Nested resilience fence: a fold/write defect degrades the
                 # annotation (resilience=None) but the tuple STILL pools/ranks.
+                # ``partial`` binds the loop vars EAGERLY (no late-binding
+                # closure — the B023 trap) into a zero-arg ``Callable[[], int]``.
                 folded = _run_resilience_step(
-                    lambda: _backfill_resilience(
-                        paths, store_hash=store_hash, start_equity_paisa=grid.start_equity_paisa
+                    partial(
+                        _backfill_resilience,
+                        paths,
+                        store_hash=store_hash,
+                        start_equity_paisa=grid.start_equity_paisa,
                     ),
                     store_path=store_path,
                     tallies=tallies,
@@ -792,9 +798,12 @@ def run_results_depth_pass(
                     store=str(store_path),
                     rows=len(rows),
                 )
+                # ``partial`` binds the loop vars EAGERLY into a zero-arg
+                # ``Callable[[], int]`` (no B023 late-binding closure).
                 resilience_ok = (
                     _run_resilience_step(
-                        lambda: _write_fresh_resilience(
+                        partial(
+                            _write_fresh_resilience,
                             paths,
                             rows,
                             captures,

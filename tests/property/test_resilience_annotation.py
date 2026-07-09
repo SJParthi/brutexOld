@@ -10,6 +10,7 @@ column is a ranking/preset input.
 # pyright: reportPrivateUsage=none
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Final
@@ -118,7 +119,7 @@ def test_ranking_order_is_identical_with_and_without_resilience() -> None:
     assert _order(bare) == _order(annotated)
 
 
-def _entries(candidates: list[object]) -> list[dict[str, object]]:
+def _entries(candidates: list[object]) -> list[Mapping[str, object]]:
     """Build the top100 and return its ordered entry dicts (the full wire bytes)."""
     twins = group_twins(
         [
@@ -143,7 +144,7 @@ def _entries(candidates: list[object]) -> list[dict[str, object]]:
     return list(artifact.entries)
 
 
-def _strip_resilience(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+def _strip_resilience(entries: list[Mapping[str, object]]) -> list[dict[str, object]]:
     """Drop the ONE ``resilience`` key from every entry (leave all else verbatim)."""
     return [{k: v for k, v in e.items() if k != RESILIENCE_ANNOTATION_KEY} for e in entries]
 
