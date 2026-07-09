@@ -79,10 +79,20 @@ class TestActiveBranchConsistency:
         )
 
     def test_active_branch_is_a_claude_branch(self) -> None:
-        """The shared name follows the repo's `claude/<slug>` convention."""
+        """The shared name follows a recognized branch convention.
+
+        ``claude/<slug>`` is the per-session feature convention this pin
+        originally encoded (DEC-LAKE-STATS-MANIFEST-001, pre-train).
+        ``integration/<train>`` is the coordinator-driven integration-train
+        convention added 2026-07-09 (`integration/t1-sweep-core` PR #1357,
+        `integration/t2-sweep-hardening` PR #1370) — a train's CLAUDE.md
+        honestly names the train branch as active, so the pin accepts both
+        prefixes; arbitrary/junk branch forms still fail loudly. The §1 ≡ §3
+        single-source consistency stays enforced by the sibling test above.
+        """
         text = _CLAUDE_MD.read_text(encoding="utf-8")
         s1 = _single_branch(_S1_PATTERN, text, "§1 '**Active branch:**'")
-        assert s1.startswith("claude/"), f"unexpected active-branch form: {s1!r}"
+        assert s1.startswith(("claude/", "integration/")), f"unexpected active-branch form: {s1!r}"
 
 
 def _normalized_region(text: str, start_marker: str, end_marker: str) -> str:

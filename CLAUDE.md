@@ -69,7 +69,10 @@ non-darwin is a logged no-op. In-train re-derivations: `run_one_tuple` carries B
 T1's G1 `_attempt()` retry body. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
 REFERENCE_ONLY, no scope/vocab/rate change; touched engine modules 100% line+branch
 (seq-vs-parallel byte-identity goldens + suffix-independence gates pass unchanged);
-ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline.)
+ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline.
+Review-round history is deliberately not narrated in this header — each member's
+per-round record lives ONLY in the §1 Active-branch blurb + its own
+MIGRATION.md entry.)
 Earlier: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
 ONE coordinator-confirmed fold of five member PRs in binding order: **#1330
 DEC-SWEEP-UNKILLABLE-CORE-001** (MIGRATION.md #1594 / ADR-0019 — the UNKILLABLE sweep run
