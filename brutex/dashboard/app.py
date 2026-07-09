@@ -5236,7 +5236,13 @@ def build_app(
         budget crosses 24 h at ~43.2M files — to the 30-min floor,
         re-opening the large-lake first-scan false-stall the hint exists
         to prevent; the most-authoritative signal is never discarded, only
-        bounded). The ``files_scanned`` arm is a non-negative int
+        bounded). Round-4 refuter: the ``duration_ms`` arm converts under
+        a local ``OverflowError`` guard — a JSON int beyond float range
+        (``10**309``) made ``math.isfinite`` RAISE, failing the whole hint
+        callable (repeating WARN each check cycle) and collapsing the
+        bound to the floor; a positive-huge int now SATURATES to a huge
+        finite float and rides the same holder-clamp path as its ``1e308``
+        float twin. The ``files_scanned`` arm is a non-negative int
         (structurally finite) whose product with the per-file budget is
         guarded against an absurd-magnitude ``OverflowError`` → ``None``;
         its result rides the same holder clamp. Runs ON the census daemon
@@ -5251,13 +5257,26 @@ def build_app(
         if sweep is None:
             return None
         duration_ms = sweep.get("duration_ms")
-        if (
-            isinstance(duration_ms, (int, float))
-            and not isinstance(duration_ms, bool)
-            and math.isfinite(duration_ms)
-            and duration_ms > 0
-        ):
-            return float(duration_ms) / 1000.0
+        if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+            d: float | None
+            try:
+                d = float(duration_ms)
+            except OverflowError:
+                # Round-4 refuter: a JSON *int* beyond float range (10**309)
+                # made `math.isfinite(duration_ms)` raise pre-fix — the whole
+                # hint callable failed (a repeating holder
+                # `first_scan_bound_hint_failed` WARN each check cycle) and
+                # the bound collapsed to the bare floor: the round-3
+                # never-a-floor-collapse doctrine violated again, through the
+                # INT shape. A positive-huge int is mathematically FINITE —
+                # SATURATE it to a huge finite float so it rides the SAME
+                # finite-positive → holder-clamp path as its 1e308 float twin
+                # (→ the 24 h ceiling, never the floor); a negative-huge int
+                # is unusable like any non-positive value (falls through to
+                # the files arm).
+                d = 1e308 if duration_ms > 0 else None
+            if d is not None and math.isfinite(d) and d > 0:
+                return d / 1000.0
         files = sweep.get("files_scanned")
         if isinstance(files, bool) or not isinstance(files, int) or files < 0:
             return None

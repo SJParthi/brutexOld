@@ -490,6 +490,78 @@ class TestCensusEstimateSeam:
         assert payload["scan_progress"]["files_total_estimate"] == 10**400
         assert payload["scan_stalled"] is False
 
+    @pytest.mark.parametrize("huge_ms", [10**309, 10**400])
+    def test_huge_int_sentinel_duration_saturates_never_fails_the_hint(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, huge_ms: int
+    ) -> None:
+        """Round-4 refuter: a JSON *int* ``duration_ms`` beyond float range
+        made ``math.isfinite(duration_ms)`` raise ``OverflowError`` — the
+        whole hint callable failed (a repeating
+        ``lake_census.first_scan_bound_hint_failed`` WARN each check cycle)
+        and the bound collapsed to the bare floor: the round-3
+        never-a-floor-collapse doctrine violated through the INT shape. The
+        local conversion guard now SATURATES a positive-huge int to a huge
+        finite float, riding the same finite-positive → holder-clamp path as
+        its 1e308 float twin (the clamp teeth live in the holder suite)."""
+        import json as _json
+
+        import brutex.dashboard.lake_census_holder as holder_module
+
+        class _Rec:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+
+            def warning(self, event: str, **kw: object) -> None:
+                self.events.append(event)
+
+        rec = _Rec()
+        monkeypatch.setattr(holder_module, "_LOG", rec)
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": huge_ms}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert payload["scan_stalled"] is False
+        # Pre-fix teeth: math.isfinite(10**309) RAISED — the hint callable
+        # failed with exactly this WARN; the guarded conversion never does.
+        assert "lake_census.first_scan_bound_hint_failed" not in rec.events
+
+    def test_negative_huge_int_duration_falls_to_the_files_arm(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The negative-huge INT twin is unusable (like any non-positive
+        value) — it falls through to the ``files_scanned`` arm without ever
+        failing the hint callable."""
+        import json as _json
+
+        import brutex.dashboard.lake_census_holder as holder_module
+
+        class _Rec:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+
+            def warning(self, event: str, **kw: object) -> None:
+                self.events.append(event)
+
+        rec = _Rec()
+        monkeypatch.setattr(holder_module, "_LOG", rec)
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": -(10**400)}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert "lake_census.first_scan_bound_hint_failed" not in rec.events
+
     def test_sentinel_duration_ms_arm_serves_normally(self, store: InstrumentStore) -> None:
         """A sentinel carrying a recorded duration exercises the duration-first
         bound-hint arm — the route serves the verdict identically."""
