@@ -74,6 +74,42 @@ def price_violation_expr() -> pl.Expr:
     return combined
 
 
+def price_row_insane(
+    open_: float | None, high: float | None, low: float | None, close: float | None
+) -> bool:
+    """Scalar per-row twin of :func:`price_violation_expr` (positivity + ordering).
+
+    The ONE COMMON SCALAR price-sanity predicate (CLAUDE.md §11 COMMON) — the
+    row-at-a-time twin of the vectorized :func:`price_violation_expr`, so the
+    two are the SAME boolean by construction (pinned row-wise by a property
+    test). ``True`` for an INSANE row: ANY price ``None`` / non-positive
+    (``<= 0``), or the OHLC ordering broken (``high < low``, or
+    ``open`` / ``close`` outside ``[low, high]``).
+
+    Needed by the dashboard's scalar screening path
+    (:mod:`brutex.data.bar_screen`), where the columnar
+    :func:`price_violation_expr` is unavailable (a DuckDB page of Python
+    tuples). ``None`` is tested FIRST so a null price short-circuits before any
+    ``<=`` / ``<`` comparison (a ``None <= 0`` would raise) — mirroring the
+    ``is_null`` arm of the expression.
+
+    Parameters
+    ----------
+    open_, high, low, close
+        The four OHLC prices of one bar (rupees; ``None`` for a null cell).
+
+    Returns
+    -------
+    bool
+        ``True`` iff the row violates price positivity or OHLC ordering.
+    """
+    if open_ is None or high is None or low is None or close is None:
+        return True
+    if open_ <= 0 or high <= 0 or low <= 0 or close <= 0:
+        return True
+    return high < low or open_ > high or open_ < low or close > high or close < low
+
+
 def count_price_violations(df: pl.DataFrame) -> int:
     """Count the price-insane rows of *df* (0 for an empty frame).
 
@@ -144,6 +180,7 @@ def validate_frame_price_sanity(
 __all__ = [
     "PRICE_SANITY_COLUMNS",
     "count_price_violations",
+    "price_row_insane",
     "price_violation_expr",
     "validate_frame_price_sanity",
 ]

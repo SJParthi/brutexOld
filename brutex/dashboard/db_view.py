@@ -70,6 +70,7 @@ from brutex.calendars.nse import MUHURAT_SESSIONS
 from brutex.dashboard.movers_cache import MoversSnapshotCache, revision_generation
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
+from brutex.data.bar_screen import screen_rows
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
@@ -2247,6 +2248,20 @@ def query_candles(
         [*where_params, safe_limit, safe_offset],
         source=skip_source,
     )
+    # Split-brain screen (DEC-DASHBOARD-READ-SCREEN-001): route the page through
+    # the ONE COMMON engine-parity screen so a bad-tick spike / an insane bar the
+    # engine + /movers drop is never SERVED raw here — /db == /movers == engine.
+    # Seeded with the single in-session bar before the page's earliest row so the
+    # cross-row bad-tick screen is correct at the page's left edge (the residual
+    # double-edge case is documented). Clean pages return the same object (no-op).
+    raw_rows = screen_rows(
+        raw_rows,
+        out_columns,
+        source=skip_source,
+        seed_bar=_bad_tick_seed_bar(
+            conn, base, raw_rows=raw_rows, out_columns=out_columns, skip_source=skip_source
+        ),
+    )
     # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix,
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
     # coercion (shared helper).
@@ -2620,6 +2635,50 @@ def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> 
     if ts_idx < 0:
         return set()
     return {_bar_ist_date(row[ts_idx]) for row in raw_rows if isinstance(row[ts_idx], datetime)}
+
+
+def _bad_tick_seed_bar(
+    conn: Any,
+    base: Path,
+    *,
+    raw_rows: list[tuple[Any, ...]],
+    out_columns: list[str],
+    skip_source: str,
+) -> tuple[Any, float, float, float, float] | None:
+    """Single in-session bar IMMEDIATELY before the page's earliest row, or ``None``.
+
+    The bounded prior-bar seed for the ``/db`` cross-row bad-tick screen
+    (DEC-DASHBOARD-READ-SCREEN-001), mirroring the predecessor read of
+    :func:`_intraday_prev_close_by_page_date`: reads the one bar with the greatest
+    ``timestamp`` STRICTLY BEFORE the page's earliest row AND on the same UTC/session
+    date (``CAST(timestamp AS DATE)`` — an NSE session never crosses a UTC date), so
+    the page's leading row is judged by the screen against a real predecessor rather
+    than being exempt as a false "first bar of session". ``ORDER BY DESC LIMIT 1``
+    reads ~one row-group (O(1), not the whole partition). Returns ``None`` when the
+    page lacks OHLC/``timestamp`` columns, is empty, or has no same-session
+    predecessor (a page that starts at 09:15 — the honest documented residual).
+    """
+    if any(name not in out_columns for name in ("timestamp", "open", "high", "low", "close")):
+        return None
+    ts_idx = out_columns.index("timestamp")
+    page_ts = [row[ts_idx] for row in raw_rows if isinstance(row[ts_idx], datetime)]
+    if not page_ts:
+        return None
+    earliest = min(page_ts)
+    rows = _execute_parquet_resilient(
+        conn,
+        base,
+        'SELECT "open", "high", "low", "close", "timestamp" '
+        "FROM read_parquet(?, union_by_name=true) "
+        'WHERE "timestamp" < ? AND CAST("timestamp" AS DATE) = CAST(? AS DATE) '
+        'ORDER BY "timestamp" DESC LIMIT 1',
+        [earliest, earliest],
+        source=skip_source,
+    )
+    if not rows:
+        return None
+    open_, high, low, close, ts = rows[0]
+    return (ts, open_, high, low, close)
 
 
 def _intraday_prev_close_by_page_date(

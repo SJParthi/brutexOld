@@ -85,6 +85,7 @@ from brutex.dashboard.movers_snapshot import (
     value_meets_volume_floor,
     warn_prev_baseline_noncontiguous,
 )
+from brutex.data.bar_screen import screen_frame
 from brutex.data.fno_symbol import expiry_year_in_window
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -841,6 +842,13 @@ def _read_future_session(
         # (movers_snapshot.filter_to_ist_minute — DEC-HARDENING-LEFTOVERS-001,
         # CLAUDE.md §11 COMMON; byte-identical to the prior inline expression).
         day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="timestamp")
+    # Screen bad-tick + insane bars (DEC-DASHBOARD-READ-SCREEN-001): a scaled
+    # spike drops here exactly as the engine + spot reader drop it, so the LTP /
+    # turnover / OI reduce below never reflects a corrupt bar. The frame is
+    # ascending-sorted + as-of-cut; clean frames pass through unchanged (no-op).
+    day_df = screen_frame(
+        day_df, ts_col="timestamp", source=f"{exchange}/{segment}/{symbol}/1minute"
+    )
     if day_df.is_empty():
         return None
     last = day_df.tail(1)

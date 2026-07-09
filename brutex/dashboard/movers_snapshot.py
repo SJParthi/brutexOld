@@ -53,6 +53,7 @@ import structlog
 from brutex.calendars.nse import previous_trading_session
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_stored_read import read_stored_day_frame
+from brutex.data.bar_screen import screen_frame
 from brutex.data.derive_lock import derive_in_progress
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -752,6 +753,12 @@ def _read_cut_1m_frame(
     day_df = df.filter(ist_date == day).sort("ts_utc")
     if cutoff_min is not None:
         day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
+    # Screen bad-tick + insane bars through the ONE COMMON engine-parity screen
+    # (DEC-DASHBOARD-READ-SCREEN-001): a scaled fat-finger spike the engine drops
+    # must not be SERVED here (it fabricated the Top-Value turnover + the %-move
+    # and poisoned the movers cache). Clean frames pass through unchanged (no-op).
+    # The frame is ascending-sorted + as-of-cut, so the causal screen is exact.
+    day_df = screen_frame(day_df, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
         return None
     return day_df
@@ -957,6 +964,14 @@ def _read_intraday_bars(
                 if cutoff_min is None
                 else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
             )
+            # Screen the STORED derived-TF partition too (DEC-DASHBOARD-READ-SCREEN-001):
+            # the prebuild's make_lake_read_1m applies price_sanity but NOT the
+            # bad-tick screen, so a scaled spike can derive into a stored 5m/etc
+            # bucket unscreened — screen the stored read so it agrees with the
+            # 1m-resample path (and /db). Clean partitions pass through unchanged.
+            res = screen_frame(
+                res, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/{interval}"
+            )
             return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
     return (
         _read_session_bars(
@@ -1026,7 +1041,16 @@ def _read_daily_bars(
     # The 1-day partition stores the lake instant in `timestamp`; the shared
     # `_row_to_bar` reads `ts_utc` — rename so the one converter serves both
     # the daily and the resampled-intraday readers (CLAUDE.md §11 COMMON).
-    return [_row_to_bar(row) for row in sel.rename({"timestamp": "ts_utc"}).iter_rows(named=True)]
+    # Screen the stored 1day bar(s) (DEC-DASHBOARD-READ-SCREEN-001): each daily
+    # bar is its own session (first-of-session exempt), so only the insane
+    # (positivity/ordering) arm can fire here — a corrupt derived 1day bar is
+    # dropped, never served raw. Clean partitions pass through unchanged.
+    screened = screen_frame(
+        sel.rename({"timestamp": "ts_utc"}),
+        ts_col="ts_utc",
+        source=f"{exchange}/{segment}/{symbol}/1day",
+    )
+    return [_row_to_bar(row) for row in screened.iter_rows(named=True)]
 
 
 #: Max calendar days to walk back searching for the prior trading day's last
