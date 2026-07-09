@@ -14,10 +14,11 @@ polling concern). It also:
 * adds the missing raw-text skip-render memo to ``completeness.html`` (the ONLY
   4 s-poller page that rebuilt its ~750-row options table every tick — the
   payload-diff gate is additionally pinned in
-  ``test_dashboard_js_perf_frontend.py``); and
-* replaces ``reports.html``'s fixed 1.2 s ``setInterval(pollSweep, …)`` with a
-  self-scheduling chain carrying a 3 s → 30 s capped failure backoff plus the
-  hidden-tab guard.
+  ``test_dashboard_js_perf_frontend.py``).
+
+(The reports.html sweep-poll hardening this pack originally shipped was dropped
+once DEC-OPERATOR-PAGE-REAL-001 moved the Run-Sweep surface off ``/reports``;
+its dedicated pin was removed with it.)
 
 HONEST envelope (Golden Rule #10): these are SOURCE-STRING pins — the repo has
 no JS runtime in CI — not a browser-executed behavioural test. Visible-tab
@@ -170,29 +171,4 @@ def test_movers_gated_retry_pauses_while_hidden() -> None:
     )
     assert "if (!document.hidden && wasGated) { clearTimeout(gateTimer); load(); }" in js, (
         "movers.html: the gated catch-up listener is missing"
-    )
-
-
-# ── reports.html: hidden guard + 3 s→30 s failure backoff (MAJOR-12) ─────────
-
-
-def test_reports_sweep_poll_guards_and_backs_off() -> None:
-    """pollSweep is a self-scheduling chain: hidden-guarded + capped backoff."""
-    js = _tpl("reports.html")
-    # No fixed interval survives — it is now a self-scheduling setTimeout chain.
-    assert "setInterval(pollSweep" not in js, "the fixed 1.2 s sweep interval must be gone"
-    assert "if (document.hidden) { scheduleSweepPoll(SWEEP_POLL_MS); return; }" in js, (
-        "reports.html: pollSweep's hidden-tab guard is missing"
-    )
-    # 3 s → 30 s capped backoff that never gives up.
-    assert "function sweepBackoffMs(n)" in js
-    assert "const SWEEP_BACKOFF_MAX_MS = 30000;" in js
-    assert "scheduleSweepPoll(sweepBackoffMs(sweepFailures));" in js
-    # Success clears the failure counter; the completion branch stops the chain.
-    assert "sweepFailures = 0;" in js
-    assert "clearTimeout(sweepPoll); sweepPoll = null;" in js
-    # Immediate catch-up on tab return while a watch is active.
-    assert (
-        "if (!document.hidden && sweepPoll !== null) { clearTimeout(sweepPoll); pollSweep(); }"
-        in js
     )

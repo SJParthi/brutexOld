@@ -258,60 +258,9 @@
       </p>
     </div>
 
-    <div class="card" style="margin-top:18px;">
-      <h1>🚀 Run Sweep (brute-force backtest)</h1>
-      <p class="lede">
-        The ONE-CLICK web version of the <code>brutex sweep-all</code> terminal
-        command — no typing required. BruteX tries <b>every</b> strategy combo
-        from the 52-condition vocabulary across your downloaded index data,
-        simulates each one's trades, scores them, and saves the ranked winners.
-        Then press <b>🪜 Run cascade</b> below to keep only the ones that survive
-        the nine anti-luck filters. Leave the boxes blank for the sensible
-        defaults (<code>NIFTY,BANKNIFTY</code> · <code>1minute,5minute,15minute</code>
-        · 2020-01-01 → today). SENSEX is BSE-listed, so run it separately with
-        <code>SENSEX</code> + exchange <code>BSE</code>.
-      </p>
-      <div class="row" style="margin-top:14px;gap:10px;flex-wrap:wrap;align-items:flex-end;">
-        <label style="display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:4px;">
-          SYMBOLS
-          <input id="swSymbols" type="text" placeholder="NIFTY,BANKNIFTY"
-                 style="min-width:180px;">
-        </label>
-        <label style="display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:4px;">
-          TIMEFRAMES
-          <input id="swIntervals" type="text" placeholder="1minute,5minute,15minute"
-                 style="min-width:200px;">
-        </label>
-        <label style="display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:4px;">
-          FROM
-          <input id="swStart" type="date" value="2020-01-01">
-        </label>
-        <label style="display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:4px;">
-          TO
-          <input id="swEnd" type="date">
-        </label>
-        <button class="go" id="run-sweep">🚀 Run Sweep</button>
-      </div>
-      <div id="sweep-msg"></div>
-      <div id="sweep-bar" style="display:none;margin-top:10px;height:8px;border-radius:4px;background:#1b2030;overflow:hidden;">
-        <div id="sweep-bar-fill" style="height:100%;width:0%;background:var(--green);transition:width .4s;"></div>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top:18px;">
-      <h1>🪜 Stage-4 cascade (9 filters)</h1>
-      <p class="lede">
-        Re-run the nine-filter statistical cascade (DSR · CPCV · SPA · PBO ·
-        Romano-Wolf · WFO · Lockbox · Monte-Carlo) on the most recent sweep's
-        top-K winners. <code>sweep-all</code> already runs this automatically;
-        this button re-runs it on demand and regenerates the byte-identical
-        <code>cascade-report.json</code>.
-      </p>
-      <div class="row" style="margin-top:14px;">
-        <button class="go" id="run-cascade">🪜 Run cascade</button>
-      </div>
-      <div id="cascade-msg"></div>
-    </div>
+    <!-- The "🚀 Run Sweep" + "🪜 Stage-4 cascade" cards MOVED to the Operator
+         page (/) — DEC-OPERATOR-PAGE-REAL-001 / R25: /reports returns to the
+         pre-open report ONLY. The POST endpoints are byte-unchanged. -->
   </div>
 
 <script>
@@ -478,130 +427,9 @@ document.getElementById("download").onclick = () => {
 };
 loadSymbols();
 
-/* Stage-4 cascade trigger (DEC-CASCADE-WIRE-001): POST the manual re-run and
-   show the pool / candidate / survivor tally (or a clear "run a sweep first"
-   message). The cascade itself is the engine's job — this just kicks it. */
-const cascadeBtn = document.getElementById("run-cascade");
-const cascadeMsg = document.getElementById("cascade-msg");
-cascadeBtn.onclick = async () => {
-  cascadeBtn.disabled = true;
-  cascadeMsg.textContent = "Running the nine-filter cascade…";
-  try {
-    const r = await fetch("/api/v1/cascade/run", { method: "POST" });
-    const j = await r.json();
-    if (j.ok) {
-      cascadeMsg.textContent =
-        "Cascade done — sweep " + j.sweep_id.slice(0, 16) + " · pools=" + j.pools +
-        " · candidates=" + j.candidates + " · survivors=" + j.survivors;
-    } else {
-      cascadeMsg.textContent = "Cascade error: " + (j.error || ("HTTP " + r.status));
-    }
-  } catch (e) {
-    cascadeMsg.textContent = "Cascade request failed: " + e;
-  } finally {
-    cascadeBtn.disabled = false;
-  }
-};
 
-/* 🚀 Run Sweep trigger (DEC-SWEEP-RUN-BUTTON-001): POST the form fields (blank ⇒
-   server defaults), then poll the existing /api/v1/sweep-progress feed for the
-   live per-tuple tick. The sweep engine is the engine's job — this just kicks it
-   and renders the honest progress (tuples · combos/sec · survivors). */
-const sweepBtn = document.getElementById("run-sweep");
-const sweepMsg = document.getElementById("sweep-msg");
-const sweepBar = document.getElementById("sweep-bar");
-const sweepFill = document.getElementById("sweep-bar-fill");
-let sweepPoll = null;          // pending self-scheduled tick (was a fixed setInterval)
-let sweepFailures = 0;         // consecutive poll failures → capped backoff
-const SWEEP_POLL_MS = 1200;
-const SWEEP_BACKOFF_MAX_MS = 30000;
-
-/* 3 s → 30 s capped exponential backoff (DEC-DASHBOARD-POLL-HYGIENE-001): a
-   multi-day sweep polled every 1.2 s must not hammer a wedged endpoint; it never
-   gives up (mirrors the bx-rate-monitor backoff shape). */
-function sweepBackoffMs(n) {
-  return Math.min(SWEEP_BACKOFF_MAX_MS, 3000 * Math.pow(2, Math.max(0, n - 1)));
-}
-function scheduleSweepPoll(ms) {
-  clearTimeout(sweepPoll);
-  sweepPoll = setTimeout(pollSweep, ms);
-}
-
-function renderSweep(p) {
-  const pct = Math.max(0, Math.min(100, p.percent || 0));
-  sweepBar.style.display = "block";
-  sweepFill.style.width = pct.toFixed(1) + "%";
-  const rate = p.combos_per_sec ? Math.round(p.combos_per_sec).toLocaleString() : "0";
-  sweepMsg.textContent =
-    p.state + " · " + pct.toFixed(1) + "% · enumerated=" + (p.enumerated || 0) +
-    " · evaluated=" + (p.evaluated || 0) + " · survivors=" + (p.survivors || 0) +
-    " · " + rate + " combos/sec";
-}
-
-async function pollSweep() {
-  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires ZERO
-     fetches; a hidden tick re-arms at normal cadence WITHOUT fetching, and the
-     visibilitychange listener below re-polls immediately on return. */
-  if (document.hidden) { scheduleSweepPoll(SWEEP_POLL_MS); return; }
-  try {
-    const r = await fetch("/api/v1/sweep-progress");
-    const p = await r.json();
-    renderSweep(p);
-    sweepFailures = 0;
-    if (!p.running && p.state !== "idle") {
-      clearTimeout(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
-      sweepMsg.textContent = "✅ Sweep " + p.state + " — " + (p.survivors || 0) +
-        " survivor(s). Now press 🪜 Run cascade to filter them.";
-      return;
-    }
-    scheduleSweepPoll(SWEEP_POLL_MS);
-  } catch (e) {
-    /* Never give up, but back off 3 s → 30 s so a wedged endpoint is not hammered. */
-    sweepFailures += 1;
-    sweepMsg.textContent = "Could not read sweep progress: " + e;
-    scheduleSweepPoll(sweepBackoffMs(sweepFailures));
-  }
-}
-
-sweepBtn.onclick = async () => {
-  sweepBtn.disabled = true;
-  sweepMsg.textContent = "Starting the brute-force sweep…";
-  const q = new URLSearchParams();
-  const sym = document.getElementById("swSymbols").value.trim();
-  const itv = document.getElementById("swIntervals").value.trim();
-  const st = document.getElementById("swStart").value.trim();
-  const en = document.getElementById("swEnd").value.trim();
-  if (sym) q.set("symbols", sym);
-  if (itv) q.set("intervals", itv);
-  if (st) q.set("start", st);
-  if (en) q.set("end", en);
-  try {
-    const r = await fetch("/api/v1/sweep/run?" + q.toString(), { method: "POST" });
-    const j = await r.json();
-    if (r.status === 400) {
-      sweepMsg.textContent = "Sweep error: " + (j.detail || ("HTTP " + r.status));
-      sweepBtn.disabled = false; return;
-    }
-    if (!j.started) {
-      sweepMsg.textContent = "A pull or sweep is already running — wait for it to finish.";
-      sweepBtn.disabled = false; return;
-    }
-    sweepMsg.textContent = "Sweep started — " + j.symbols + " · " + j.intervals +
-      " · " + j.start + " → " + j.end + ". Watching progress…";
-    if (sweepPoll) clearTimeout(sweepPoll);
-    sweepFailures = 0;
-    pollSweep();   // fires now; self-schedules the next tick (cadence or backoff)
-  } catch (e) {
-    sweepMsg.textContent = "Sweep request failed: " + e;
-    sweepBtn.disabled = false;
-  }
-};
-/* Immediate catch-up on tab return while a sweep is being watched
-   (DEC-DASHBOARD-POLL-HYGIENE-001): pollSweep re-arms sweepPoll while hidden, so a
-   non-null handle means a watch is active; clear the pending tick and poll NOW. */
-document.addEventListener("visibilitychange", function () {
-  if (!document.hidden && sweepPoll !== null) { clearTimeout(sweepPoll); pollSweep(); }
-});
+/* The Run-Sweep + cascade triggers MOVED to the Operator page (/) —
+   DEC-OPERATOR-PAGE-REAL-001 / R25 (pre-open report only on this page). */
 </script>
 </body>
 </html>
