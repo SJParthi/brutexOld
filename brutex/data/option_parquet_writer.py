@@ -32,14 +32,24 @@ follow-up.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
+
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import parquet_read_skip_errors
+from brutex.data.lake_stats_manifest import (
+    KIND_OPTIONS,
+    partition_stats_tracked,
+    record_partition_stats,
+    stats_manifest_enabled,
+)
 from brutex.data.models import OptionBar
 from brutex.data.partition import partition_for_timestamp
 from brutex.data.partition_lock import BoundedLockRegistry, partition_write_lock
@@ -48,6 +58,8 @@ from brutex.money import round_money
 
 if TYPE_CHECKING:
     import polars as pl
+
+_LOG = structlog.get_logger("brutex.data.option_parquet_writer")
 
 #: Subdirectory under the lake root holding the expired-options table.
 _OPTIONS_SUBDIR: str = "options"
@@ -212,7 +224,13 @@ class OptionParquetWriter:
     def _merge_partition(
         self, dest: Path, coordinate: OptionSeriesCoordinate, new_bars: list[OptionBar]
     ) -> int:
-        """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new rows.
+        """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new DISTINCT keys.
+
+        The return is the count of genuinely NEW ``(side, timestamp)`` keys —
+        post-``unique`` distinct minus the EXISTING file's distinct count,
+        never a physical-row delta (review round 3: the physical baseline
+        under-counted on a physically-duplicated partition and silently
+        dropped new bars). ``added == 0`` (pure re-pull) writes nothing.
 
         The existence-check → read → union → atomic-rename below is a
         read-modify-write, so it runs under this partition's shared lock
@@ -255,11 +273,22 @@ class OptionParquetWriter:
                     existing = pl.read_parquet(dest)
                 except parquet_read_skip_errors() as exc:
                     raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
-                # int() coercion keeps the return concretely int even in the CI
+                # ``before`` counts DISTINCT ``(side, timestamp)`` keys — NEVER
+                # the physical height: on a pre-uniqueness-era poisoned
+                # partition (physical duplicate keys) the physical count
+                # exceeds the distinct count, so the old
+                # ``combined.height - physical_before`` went non-positive even
+                # when genuinely NEW keys arrived and the merge silently
+                # SKIPPED the write — dropping the new bars for that pull
+                # (review round 3; a clean partition has physical == distinct,
+                # byte-identical). When new keys DO arrive on a poisoned file,
+                # the rewrite keep-first-collapses the physical dups exactly as
+                # ``heal_partition`` would (same ``unique`` key + keep rule).
+                # int() coercion keeps the value concretely int even in the CI
                 # type-check env where polars is NOT installed (`[dev]`-only env, without the `[data]` extra)
-                # — there `.height` is Any (ignore_missing_imports) and an un-coerced
-                # return would trip mypy --strict's no-any-return.
-                before = int(existing.height)
+                # — there the polars return is Any (ignore_missing_imports) and an
+                # un-coerced value would trip mypy --strict's no-any-return.
+                before = int(existing.n_unique(subset=["side", "timestamp"]))
                 combined = (
                     pl.concat([existing, new_df])
                     .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
@@ -274,6 +303,12 @@ class OptionParquetWriter:
             if added > 0:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 _atomic_write_parquet(dest, combined)
+                # Stats-manifest upsert (DEC-LAKE-STATS-MANIFEST-001): bytes
+                # were RENDERED, so the shard — when one exists (lazy
+                # accretion) — is re-stamped under the still-held lock stack.
+                # The ``added == 0`` pure re-pull writes nothing and therefore
+                # touches no shard (the existing row stays stat-valid).
+                _record_option_stats(self._lake_root, dest=dest, frame=combined)
             return added
 
     def heal_partition(self, dest: Path, *, quarantine_to: Path | None = None) -> OptionHealResult:
@@ -347,6 +382,11 @@ class OptionParquetWriter:
             quarantine_to.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_via(quarantine_to, lambda tmp: tmp.write_bytes(existing_bytes))
             _atomic_write_parquet(dest, deduped)
+            # Stats-manifest re-stamp (DEC-LAKE-STATS-MANIFEST-001): the heal
+            # rewrite rendered new bytes — upsert the row (post-dedup distinct
+            # count + fresh stat token) under the SAME held locks. The
+            # unchanged branch above returns earlier and touches nothing.
+            _record_option_stats(self._lake_root, dest=dest, frame=deduped)
             return OptionHealResult(
                 path=dest,
                 changed=True,
@@ -419,6 +459,68 @@ def _render_df(coordinate: OptionSeriesCoordinate, bars: Sequence[OptionBar]) ->
         pl.col("strike").cast(pl.Float64),
         pl.col("spot").cast(pl.Float64),
         pl.col("iv").cast(pl.Float64),
+    )
+
+
+def _record_option_stats(lake_root: Path, *, dest: Path, frame: pl.DataFrame) -> None:
+    """Best-effort stats-manifest upsert after an options-tree partition render.
+
+    DEC-LAKE-STATS-MANIFEST-001 write hook (the options twin of
+    ``ParquetWriter._record_stats_hook``): called by
+    :meth:`OptionParquetWriter._merge_partition` (inside its ``added > 0``
+    branch) and by the :meth:`OptionParquetWriter.heal_partition` rewrite —
+    always INSIDE the still-held partition lock stack, so the ``os.stat``
+    token is the durable file's. ``rows`` is *frame*'s height — already the
+    post-``unique`` DISTINCT ``(side, timestamp)`` count — with bounds from
+    the rendered frame and ``raw_hash=None`` (the options writer computes
+    none; forensics-only field). The dataset key is the on-disk series dir
+    name VERBATIM (``{"series": dest.parent.name}``). LAZY ACCRETION, probed
+    FIRST (:func:`~brutex.data.lake_stats_manifest.partition_stats_tracked`,
+    review round 2): an unviewed series' write costs exactly ONE cheap O(1)
+    probe — a shard-path key digest + one failed ``os.stat`` — and never runs
+    the O(frame) bounds fold or the ``os.stat(dest)``. When the shard exists,
+    delegates to the best-effort
+    :func:`~brutex.data.lake_stats_manifest.record_partition_stats` — a shard
+    failure can never raise into the pull (a
+    :class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/`` creation on a
+    genuinely full disk deliberately propagates). Kill switch off ⇒ pure
+    no-op (not even the probe). A frame whose timestamp bounds are not
+    datetimes (defensive — an empty/null column) or a vanished-file stat is
+    logged and skipped.
+    """
+    if not stats_manifest_enabled():
+        return
+    key = {"series": dest.parent.name}
+    if not partition_stats_tracked(lake_root, KIND_OPTIONS, key):
+        # Lazy accretion, probe-FIRST (review round 2): an unviewed series
+        # pays only this probe — the O(frame) min/max fold and the
+        # os.stat(dest) below never run; seeding stays read-side only.
+        return
+    min_ts = frame["timestamp"].min()
+    max_ts = frame["timestamp"].max()
+    if not isinstance(min_ts, datetime) or not isinstance(max_ts, datetime):
+        _LOG.warning("lake.stats_manifest.bounds_underivable", partition=str(dest))
+        return
+    try:
+        stat = os.stat(dest)
+    except OSError as exc:
+        _LOG.warning(
+            "lake.stats_manifest.stat_failed",
+            partition=str(dest),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return
+    record_partition_stats(
+        lake_root,
+        kind=KIND_OPTIONS,
+        key=key,
+        dest=dest,
+        rows=int(frame.height),
+        min_ts=min_ts,
+        max_ts=max_ts,
+        raw_hash=None,
+        stat=stat,
     )
 
 

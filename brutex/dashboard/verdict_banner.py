@@ -8,9 +8,10 @@ the ``"verdict"`` object in the ``/api/v1/universe/pull-all`` JSON
 ``/universe`` page never SHOWED it. This module is the pure half of the banner:
 it maps the *already-computed* verdict onto a small, deterministic
 :class:`VerdictBanner` presentation — a CSS modifier class + a human colour name
-(red = ``auth_expired``, amber = ``transient_residual``, grey = ``known_gap_only``,
-green = ``clean``) + a ``show_retry_button`` flag — that the coverage-excluded
-HTML/JS renders verbatim.
+(red = ``credentials_missing`` / ``auth_expired`` / ``mass_empty_halt``, amber =
+``quota_exhausted`` / ``transient_residual``, grey = ``quarantined_symbols`` /
+``known_gap_only``, green = ``clean``) + a ``show_retry_button`` flag — that the
+coverage-excluded HTML/JS renders verbatim.
 
 **COMMON (CLAUDE.md §11):** no verdict field is re-derived here — ``headline`` /
 ``action`` / ``pending_windows`` are passed through verbatim and the retry button
@@ -45,6 +46,15 @@ _KIND_STYLE: Final[dict[str, tuple[str, str]]] = {
     # ``auth_expired``: only the operator can fix it.
     "credentials_missing": ("verdict--red", "red"),
     "auth_expired": ("verdict--red", "red"),
+    # ``mass_empty_halt`` is the mass-empty circuit-breaker HALT (a suspected
+    # vendor soft-throttle / mis-addressing episode stopped the pull before
+    # cementing more windows; DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). Red: the
+    # operator must triage before re-pulling — a blind retry is what the
+    # breaker exists to prevent. (Was MISSING here while ``classify_pull``
+    # could emit it — a real halted pull 500'd the pull-verdict route; the
+    # kind-set drift pin in tests/unit/test_verdict_banner.py now keeps this
+    # map exactly equal to ``PullVerdictKind``.)
+    "mass_empty_halt": ("verdict--red", "red"),
     "quota_exhausted": ("verdict--amber", "amber"),
     "transient_residual": ("verdict--amber", "amber"),
     "quarantined_symbols": ("verdict--grey", "grey"),
