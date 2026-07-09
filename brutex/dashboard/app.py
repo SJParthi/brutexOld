@@ -1546,13 +1546,24 @@ def build_app(
     # COMMON generation-stamped LRU `MoversSnapshotCache` (CLAUDE.md §11 — it is a
     # generic keyed cache; no movers coupling, just the shared implementation).
     _candle_count_cache = MoversSnapshotCache()
-    # The /coverage/windows counts cache (DEC-COVERAGE-WINDOWS-O1-001): the
-    # `GROUP BY market, status` bucketed counts over the window ledger are invariant
-    # across which tab/filter is clicked, so they are memoised behind the SAME
-    # generation signal — a repeat click within one generation is O(1), a pull bumps
-    # the generation → recompute. Dedicated instance so the (counts, total) tuples
-    # never share a key namespace with the candle int-totals above.
-    _window_counts_cache = MoversSnapshotCache()
+    # The /coverage/windows counts + page-row cache (DEC-COVERAGE-WINDOWS-O1-001 +
+    # DEC-WINDOWS-MIDPULL-FLOOR-001): the `GROUP BY market, status` bucketed counts
+    # AND the projected row page over the window ledger are invariant within one
+    # ledger stamp, so both families are memoised behind the composite-stamp-token
+    # generation db_view derives (`revision_generation` — NOT `_summary_cache.
+    # generation`, which mark_dirty bumps per window tick) — a repeat poll within
+    # one stamp is O(1), any ledger flush moves the stamp → recompute. Dedicated
+    # instance so the window families never share a key namespace with the candle
+    # int-totals above. Opted into the PULL-TIME adaptive floor exactly like the
+    # discovery memos below (`pull_active_probe` + `adaptive_floor=True` — the
+    # ported #920 pattern): mid-pull the ledger deltas accrue ~1 file/2 s and each
+    # fresh stamp's fold is O(total rows + delta footers), so an unfloored cache
+    # recomputed counts+page back-to-back on every 4 s poll as the delta count
+    # grew (the multi-hour-pull 4 s+ poll class); while `_pull_live()` reads True
+    # a stamp-mismatched entry younger than min(max(2 s, its own compute
+    # duration), 600 s) is served STALE (logged `movers_cache.stale_served`,
+    # never silent), and the moment the pull ends the probe reads False → fresh.
+    _window_counts_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
     # The FOUR discovery-walk memos below additionally opt into the PULL-TIME
     # adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the ported #920
     # pattern): during a pull the write generation bumps on EVERY window tick,
