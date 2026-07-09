@@ -665,3 +665,273 @@ class TestClosedGuardsAndIdempotentClose:
                 start=datetime(2024, 1, 1),  # naive
                 end=datetime(2024, 1, 2, tzinfo=UTC),
             )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# R2N-02 / R2N-04 + NEW-1(a): corrupt / torn partition reads at get_bars.
+# DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1633.
+# ────────────────────────────────────────────────────────────────────────
+
+_pl = pytest.importorskip("polars")
+pytest.importorskip("pyarrow")
+
+from datetime import UTC as _UTC  # noqa: E402
+from decimal import Decimal as _Decimal  # noqa: E402
+
+from brutex.data.catalog import (  # noqa: E402
+    _read_partition_frame,
+    _validate_partition_schema,
+)
+from brutex.data.models import CandleBar as _CandleBar  # noqa: E402
+from brutex.data.partition import build_partition_path as _build_partition_path  # noqa: E402
+
+_EXCH, _SEG, _SYM, _INT = "NSE", "FNO", "NSE-NIFTY", "1minute"
+_WIN_START = datetime(2024, 1, 1, tzinfo=_UTC)
+_WIN_END = datetime(2024, 1, 31, 23, 59, tzinfo=_UTC)
+
+
+def _cbar(day: int, *, minute: int = 15, open_price: float = 22000.0) -> _CandleBar:
+    return _CandleBar(
+        timestamp=datetime(2024, 1, day, 9, minute, 0, tzinfo=_UTC),
+        open=_Decimal(str(open_price)),
+        high=_Decimal(str(open_price + 10)),
+        low=_Decimal(str(open_price - 10)),
+        close=_Decimal(str(open_price + 5)),
+        volume=100,
+        open_interest=500,
+    )
+
+
+def _write_and_register(lake: Path, catalog_path: Path, bars: list[_CandleBar]) -> Path:
+    """Write *bars* through the REAL writer, reconcile the catalog, return the partition path."""
+    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    from brutex.data.parquet_writer import ParquetWriter
+
+    writer = ParquetWriter(lake_root=lake)
+    writer.write(exchange=_EXCH, segment=_SEG, symbol=_SYM, interval=_INT, bars=bars)
+    with Catalog.open(catalog_path) as cat:
+        reconcile_catalog_from_lake(
+            lake_root=lake,
+            catalog=cat,
+            exchange=_EXCH,
+            segment=_SEG,
+            symbol=_SYM,
+            interval=_INT,
+        )
+    return _build_partition_path(
+        lake_root=lake, exchange=_EXCH, segment=_SEG, symbol=_SYM, interval=_INT, year=2024, month=1
+    )
+
+
+def _get_bars(catalog_path: Path, lake: Path, **kw: object) -> object:
+    with Catalog.open(catalog_path) as cat:
+        return cat.get_bars(
+            lake_root=lake,
+            exchange=_EXCH,
+            segment=_SEG,
+            symbol=_SYM,
+            interval=_INT,
+            start=_WIN_START,
+            end=_WIN_END,
+            **kw,  # type: ignore[arg-type]
+        )
+
+
+class TestGetBarsReadIntegrity:
+    def test_corrupt_partition_raises_unreadable_naming_file(self, tmp_path: Path) -> None:
+        """C1/C2: a garbage parquet raises CatalogError 'UNREADABLE' naming the month file."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2)])
+        part.write_bytes(b"CORRUPT\x00\x01" * 40)
+        with pytest.raises(CatalogError, match="UNREADABLE") as excinfo:
+            _get_bars(catalog_path, lake, retry_sleep=lambda _s: None)
+        assert str(part) in str(excinfo.value)
+
+    def test_foreign_schema_missing_ohlc_raises(self, tmp_path: Path) -> None:
+        """C3: a timestamp-only foreign parquet is rejected naming the missing columns."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2)])
+        _pl.DataFrame({"timestamp": [datetime(2024, 1, 2, 9, 15, tzinfo=_UTC)]}).write_parquet(part)
+        with pytest.raises(CatalogError, match="missing required bar column") as excinfo:
+            _get_bars(catalog_path, lake)
+        assert "open" in str(excinfo.value)
+
+    def test_utf8_close_dtype_raises(self, tmp_path: Path) -> None:
+        """C4: a full-schema parquet with close stored as Utf8 is a dtype refusal."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2)])
+        good = _pl.read_parquet(part)
+        poisoned = good.with_columns(_pl.col("close").cast(_pl.Utf8))
+        poisoned.write_parquet(part)
+        with pytest.raises(CatalogError, match="wrong column dtype") as excinfo:
+            _get_bars(catalog_path, lake)
+        assert "close" in str(excinfo.value)
+
+    def test_non_temporal_timestamp_dtype_raises(self, tmp_path: Path) -> None:
+        """A timestamp stored as Int64 (raw epoch) is a dtype refusal naming timestamp."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2)])
+        good = _pl.read_parquet(part)
+        poisoned = good.with_columns(_pl.col("timestamp").cast(_pl.Int64))
+        poisoned.write_parquet(part)
+        with pytest.raises(CatalogError, match="wrong column dtype") as excinfo:
+            _get_bars(catalog_path, lake)
+        assert "timestamp" in str(excinfo.value)
+
+    def test_non_integer_volume_dtype_raises(self, tmp_path: Path) -> None:
+        """A volume stored as Utf8 is a dtype refusal naming volume."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2)])
+        good = _pl.read_parquet(part)
+        poisoned = good.with_columns(_pl.col("volume").cast(_pl.Utf8))
+        poisoned.write_parquet(part)
+        with pytest.raises(CatalogError, match="wrong column dtype") as excinfo:
+            _get_bars(catalog_path, lake)
+        assert "volume" in str(excinfo.value)
+
+    def test_torn_read_retry_once_heals(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R2N-04: a torn read (raises once) is retried ONCE and the real frame returned."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        _write_and_register(lake, catalog_path, [_cbar(2), _cbar(3)])
+
+        real_read = _pl.read_parquet
+        calls = {"n": 0}
+
+        def _tear_once(path: object, *a: object, **k: object) -> object:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _pl.exceptions.ComputeError("simulated torn read")
+            return real_read(path, *a, **k)
+
+        monkeypatch.setattr(_pl, "read_parquet", _tear_once)
+        sleeps: list[float] = []
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            table = _get_bars(catalog_path, lake, retry_sleep=sleeps.append)
+        assert table.num_rows == 2  # the real frame, healed after one retry
+        assert calls["n"] == 2
+        assert len(sleeps) == 1  # slept exactly once
+        assert sum(1 for e in logs if e.get("event") == "catalog.read.parquet_retry") == 1
+
+    def test_torn_read_both_attempts_fail_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R2N-04: a persistent tear (both attempts raise) fails LOUD as UNREADABLE."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        _write_and_register(lake, catalog_path, [_cbar(2)])
+
+        def _always_tear(_path: object, *a: object, **k: object) -> object:
+            raise _pl.exceptions.ComputeError("persistent tear")
+
+        monkeypatch.setattr(_pl, "read_parquet", _always_tear)
+        sleeps: list[float] = []
+        with pytest.raises(CatalogError, match="UNREADABLE"):
+            _get_bars(catalog_path, lake, retry_sleep=sleeps.append)
+        assert len(sleeps) == 1  # retried exactly once before failing
+
+    def test_clean_read_no_retry_no_warn_no_sleep(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A clean partition reads first try — zero retries, zero WARNs, zero sleeps."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        _write_and_register(lake, catalog_path, [_cbar(2), _cbar(3)])
+
+        def _must_not_sleep(_s: float) -> None:  # pragma: no cover - asserts by never running
+            raise AssertionError("clean read must never sleep/retry")
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            table = _get_bars(catalog_path, lake, retry_sleep=_must_not_sleep)
+        assert table.num_rows == 2
+        assert not any(e.get("event") == "catalog.read.parquet_retry" for e in logs)
+
+    def test_clean_lake_byte_parity_output_unchanged(self, tmp_path: Path) -> None:
+        """Clean-data neutrality: the guard never mutates a clean read's rows."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2), _cbar(3)])
+        table = _get_bars(catalog_path, lake)
+        # The guarded read equals a direct read+filter (no mutation, no dropped rows).
+        direct = (
+            _pl.read_parquet(part)
+            .filter((_pl.col("timestamp") >= _WIN_START) & (_pl.col("timestamp") <= _WIN_END))
+            .sort("timestamp")
+        )
+        assert table.num_rows == direct.height == 2
+        assert table.column("close").to_pylist() == direct["close"].to_list()
+
+    def test_get_bars_is_full_or_raises_never_a_subset(self, tmp_path: Path) -> None:
+        """No-subset property: get_bars returns ALL in-window rows OR raises — never partial."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2), _cbar(3), _cbar(4)])
+        # Clean → all 3 rows.
+        assert _get_bars(catalog_path, lake).num_rows == 3
+        # Corrupt → raises (never a truncated 0/1/2-row subset).
+        part.write_bytes(b"GARBAGE" * 40)
+        with pytest.raises(CatalogError):
+            _get_bars(catalog_path, lake, retry_sleep=lambda _s: None)
+
+    def test_validate_partition_schema_accepts_canonical_frame(self, tmp_path: Path) -> None:
+        """A canonical frame passes the schema gate silently (the happy branch)."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2)])
+        # Direct helper call: no raise on the canonical writer output.
+        _validate_partition_schema(_pl.read_parquet(part), part)
+
+    def test_read_partition_frame_default_sleep_on_clean_frame(self, tmp_path: Path) -> None:
+        """_read_partition_frame with no injected sleep still reads a clean frame fine."""
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        part = _write_and_register(lake, catalog_path, [_cbar(2)])
+        frame = _read_partition_frame(part)  # retry_sleep=None → time.sleep, never reached
+        assert frame.height == 1
+
+    def test_concurrent_writer_no_raw_polars_error_escapes(self, tmp_path: Path) -> None:
+        """R2N-04 concurrency: reads under a live atomic-replace writer never leak a PolarsError."""
+        import threading
+
+        from brutex.data.parquet_writer import ParquetWriter
+
+        lake, catalog_path = tmp_path / "lake", tmp_path / "catalog.duckdb"
+        _write_and_register(lake, catalog_path, [_cbar(2), _cbar(3)])
+        writer = ParquetWriter(lake_root=lake)
+        stop = threading.Event()
+
+        def _write_loop() -> None:
+            i = 0
+            while not stop.is_set() and i < 40:
+                writer.write(
+                    exchange=_EXCH,
+                    segment=_SEG,
+                    symbol=_SYM,
+                    interval=_INT,
+                    bars=[_cbar(2), _cbar(3, open_price=22000.0 + i)],
+                )
+                i += 1
+
+        t = threading.Thread(target=_write_loop)
+        t.start()
+        try:
+            with Catalog.open(catalog_path) as cat:
+                for _ in range(40):
+                    # Any transient tear is absorbed by the retry; a genuine
+                    # PolarsError must NEVER escape get_bars (only a typed
+                    # CatalogError could, and an atomic-replace lake yields none).
+                    table = cat.get_bars(
+                        lake_root=lake,
+                        exchange=_EXCH,
+                        segment=_SEG,
+                        symbol=_SYM,
+                        interval=_INT,
+                        start=_WIN_START,
+                        end=_WIN_END,
+                        retry_sleep=lambda _s: None,
+                    )
+                    assert table.num_rows >= 1
+        except _pl.exceptions.PolarsError as exc:  # pragma: no cover - the bug this pins
+            raise AssertionError(f"raw PolarsError escaped get_bars: {exc!r}") from exc
+        finally:
+            stop.set()
+            t.join()

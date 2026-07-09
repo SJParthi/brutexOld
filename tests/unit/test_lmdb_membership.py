@@ -26,6 +26,7 @@ import pytest
 from brutex.data.lmdb_membership import (
     DEFAULT_MAP_SIZE_MB,
     SWEEP_CACHE_MAP_MB_ENV,
+    LmdbCorruptEnvError,
     LmdbMapFullError,
     LmdbMembership,
     LmdbMembershipError,
@@ -293,3 +294,46 @@ class TestMapFullGraceful:
                 m.add(oversized)
             with pytest.raises(lmdb.BadValsizeError):
                 m.add_many([oversized])
+
+
+# ── R2-D2 (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1631) ──────────
+
+
+def _corrupt_data_mdb(env_dir: Path) -> None:
+    """XOR the first min(4096, len) bytes of a real ``data.mdb`` with 0xFF."""
+    data_mdb = env_dir / "data.mdb"
+    raw = bytearray(data_mdb.read_bytes())
+    n = min(4096, len(raw))
+    for i in range(n):
+        raw[i] ^= 0xFF
+    data_mdb.write_bytes(bytes(raw))
+
+
+def test_corrupt_env_raises_typed_not_raw_lmdb_error(tmp_path: Path) -> None:
+    """A corrupt ``data.mdb`` raises the typed ``LmdbCorruptEnvError`` at open.
+
+    Fix-reversion (R2-D2): pre-fix ``lmdb.open`` raises a raw ``lmdb.Error``
+    (e.g. ``lmdb.InvalidError``) out of :meth:`LmdbMembership.open`; post-fix the
+    fault is mapped to :class:`LmdbCorruptEnvError` (a ``LmdbMembershipError``), so
+    the SweepCache consumer can quarantine + rebuild.
+    """
+    env_dir = tmp_path / "members.lmdb"
+    with LmdbMembership.open(env_dir, map_size_mb=1) as m:
+        m.add(_K1)
+    _corrupt_data_mdb(env_dir)
+    with pytest.raises(LmdbCorruptEnvError) as excinfo:
+        LmdbMembership.open(env_dir, map_size_mb=1)
+    assert str(env_dir) in str(excinfo.value)
+    # It IS a LmdbMembershipError (the domain hierarchy), never a raw lmdb.Error.
+    assert isinstance(excinfo.value, LmdbMembershipError)
+    assert not isinstance(excinfo.value, lmdb.Error)
+
+
+def test_clean_env_opens_for_non_sweepcache_consumer(tmp_path: Path) -> None:
+    """A clean env opens + reads normally — the corruption guard never false-trips."""
+    env_dir = tmp_path / "members.lmdb"
+    with LmdbMembership.open(env_dir, map_size_mb=1) as m:
+        m.add(_K1)
+    # Re-open the SAME clean env (a non-SweepCache consumer, e.g. option-dedup).
+    with LmdbMembership.open(env_dir, map_size_mb=1) as m2:
+        assert _K1 in m2

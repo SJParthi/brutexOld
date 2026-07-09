@@ -35,9 +35,11 @@ import threading
 from pathlib import Path
 from typing import Any, cast
 
+import lmdb
 import pytest
 from brutex.data.lmdb_membership import (
     SWEEP_CACHE_MAP_MB_ENV,
+    LmdbCorruptEnvError,
     LmdbMapFullError,
     LmdbMembership,
 )
@@ -902,3 +904,114 @@ class TestRecordDigestExactFirst:
         from brutex.engine.sweep_run import SweepComboError
 
         assert not issubclass(LmdbMapFullError, SweepComboError)
+
+
+# ── R2-D2 corrupt-LMDB quarantine + rebuild ───────────────────────────────────
+# DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1631.
+
+
+def _corrupt_exact_data_mdb(cache_path: Path) -> None:
+    """XOR the first min(4096, len) bytes of the exact store's ``data.mdb``."""
+    data_mdb = cache_path / "exact" / "data.mdb"
+    raw = bytearray(data_mdb.read_bytes())
+    n = min(4096, len(raw))
+    for i in range(n):
+        raw[i] ^= 0xFF
+    data_mdb.write_bytes(bytes(raw))
+
+
+class TestCorruptEnvQuarantineRebuild:
+    def test_corrupt_env_quarantined_and_rebuilt(self, tmp_path: Path) -> None:
+        """A corrupt exact ``data.mdb`` is quarantined + rebuilt empty (recompute-safe).
+
+        Fix-reversion (R2-D2): pre-fix run-2 ``SweepCache.open`` raises a raw
+        ``lmdb.InvalidError``; post-fix it succeeds with an EMPTY rebuilt dedup set
+        (the recorded combo re-runs — results byte-identical, Golden Rule #7), the
+        original bytes preserved in an ``exact.corrupt-<ns>`` sibling, and one
+        ``sweep_cache.corrupt_quarantined`` WARN.
+        """
+        cache_path = tmp_path / "cache"
+        d = _digest(7, "NIFTY", "5m", "bull", {"sl": 100})
+        with SweepCache.open(cache_path, bloom_capacity=1000) as cache:
+            cache.record_digest(d)
+            assert cache.seen_digest(d) is True
+        _corrupt_exact_data_mdb(cache_path)
+
+        with (
+            capture_logs() as logs,
+            SweepCache.open(cache_path, bloom_capacity=1000) as cache2,
+        ):
+            # Rebuilt EMPTY — the previously-recorded digest is gone.
+            assert len(cache2._exact) == 0
+            assert cache2.seen_digest(d) is False
+            # And re-recording works on the fresh store.
+            assert cache2.record_digest(d) is True
+        # The original corrupt env bytes are preserved aside (never deleted).
+        siblings = list(cache_path.glob("exact.corrupt-*"))
+        assert len(siblings) == 1
+        assert (siblings[0] / "data.mdb").exists()
+        warns = [e for e in logs if e.get("event") == "sweep_cache.corrupt_quarantined"]
+        assert len(warns) == 1
+        assert warns[0]["quarantined_to"].startswith(str(cache_path / "exact.corrupt-"))
+
+    def test_mid_rebuild_lmdb_fault_quarantined(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raw ``lmdb.Error`` DURING the bloom rebuild is also quarantined + rebuilt."""
+        cache_path = tmp_path / "cache"
+        with SweepCache.open(cache_path, bloom_capacity=1000) as cache:
+            cache.record_digest(_digest(1, "NIFTY", "5m", "bull"))
+
+        real_rebuild = SweepCache._rebuild_bloom_from_exact
+        calls = {"n": 0}
+
+        def _rebuild_raises_once(bloom: object, exact: object, *, bloom_capacity: int) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise lmdb.Error("simulated mid-cursor read fault")
+            real_rebuild(bloom, exact, bloom_capacity=bloom_capacity)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(SweepCache, "_rebuild_bloom_from_exact", _rebuild_raises_once)
+        with (
+            capture_logs() as logs,
+            SweepCache.open(cache_path, bloom_capacity=1000) as cache2,
+        ):
+            assert len(cache2._exact) == 0
+        assert calls["n"] == 2  # first raised, second (post-quarantine) succeeded
+        assert any(e.get("event") == "sweep_cache.corrupt_quarantined" for e in logs)
+        assert len(list(cache_path.glob("exact.corrupt-*"))) == 1
+
+    def test_second_failure_propagates_typed_no_second_quarantine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A SECOND corruption (even the rebuilt env) propagates typed, ONE quarantine dir."""
+        cache_path = tmp_path / "cache"
+        cache_path.mkdir(parents=True, exist_ok=True)
+        # Pre-create the exact/ dir so the quarantine rename has a real target.
+        (cache_path / "exact").mkdir()
+
+        def _always_corrupt(*_args: object, **_kwargs: object) -> object:
+            raise LmdbCorruptEnvError("simulated persistent corruption")
+
+        monkeypatch.setattr(SweepCache, "_open_exact_and_bloom", _always_corrupt)
+        with pytest.raises(LmdbCorruptEnvError, match="persistent corruption"):
+            SweepCache.open(cache_path, bloom_capacity=1000)
+        # Exactly ONE quarantine happened (the retry is not itself wrapped).
+        assert len(list(cache_path.glob("exact.corrupt-*"))) == 1
+
+    def test_crash_window_preexisting_sibling_clean_fresh_open(self, tmp_path: Path) -> None:
+        """A pre-existing ``exact.corrupt-<ns>`` sibling + no ``exact/`` → clean fresh open."""
+        cache_path = tmp_path / "cache"
+        cache_path.mkdir(parents=True, exist_ok=True)
+        # Simulate a crash AFTER a prior quarantine but BEFORE the rebuild landed.
+        stale = cache_path / "exact.corrupt-123456789"
+        stale.mkdir()
+        with (
+            capture_logs() as logs,
+            SweepCache.open(cache_path, bloom_capacity=1000) as cache,
+        ):
+            assert len(cache._exact) == 0  # fresh empty store
+        # No NEW quarantine fired (nothing corrupt to detect); the stale sibling stays.
+        assert not any(e.get("event") == "sweep_cache.corrupt_quarantined" for e in logs)
+        assert stale.exists()
+        assert (cache_path / "exact").exists()

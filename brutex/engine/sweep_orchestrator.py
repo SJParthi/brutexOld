@@ -71,7 +71,7 @@ import blake3
 import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import ResultsStore, ResultsStoreSchemaError
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_run import (
@@ -104,6 +104,21 @@ _ACTION_GRID_COMPLETE: Final[str] = "GRID_SWEEP_COMPLETE"
 #: Audit action for a tuple that raised mid-evaluation and was SKIPPED
 #: ("Resilient: skip + continue") — names the exact offending combo + error.
 _ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
+
+#: Remediation string for a per-tuple CORRUPT / old-schema finalist store
+#: (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632). A store that raises
+#: :class:`~brutex.engine.results_store.ResultsStoreSchemaError` at LOAD is
+#: CONTAINED to a ``TUPLE_FAILED`` skip (exit 6), never a whole-grid abort — but
+#: it stays in place (un-quarantined, un-sentineled), so every resume re-counts it
+#: failed until the operator heals it. Deliberately NOT auto-quarantined: a fresh
+#: empty store flushed over a still-populated grid-wide MASK dedup would silently
+#: drop the tuple's finalists (the #650 / sweep_heal C5 empty-flush wedge).
+TUPLE_STORE_CORRUPT_REMEDIATION: Final[str] = (
+    "finalist store unreadable: run 'brutex sweep-verify --out-root <root>' then "
+    "'brutex sweep-heal' (quarantines the store AND wipes checkpoint/ and dedup-cache/ "
+    "so the tuple genuinely recomputes) — or move the store aside and wipe both "
+    "skip-tier dirs manually"
+)
 
 #: Default ceiling on the number of tuples a grid may enumerate (the honest
 #: opt-in guard — a grid this large is a conscious choice, raise it explicitly).
@@ -908,8 +923,14 @@ def run_sweep_grid(
     store is left un-sentineled so it redoes next run), counted in
     ``tuples_failed``, and recorded as a ``TUPLE_FAILED`` audit line naming the
     exact offending combo; the grid finishes the remaining tuples and a non-zero
-    ``tuples_failed`` makes the run's verdict NON-ZERO. Every OTHER exception
-    still propagates uncaught (global abort) — only ``SweepComboError`` is caught.
+    ``tuples_failed`` makes the run's verdict NON-ZERO. A
+    :class:`~brutex.engine.results_store.ResultsStoreSchemaError` — a CORRUPT /
+    old-schema finalist store raised at its LOAD boundary on resume — is CONTAINED
+    identically (DB-02, DEC-SWEEP-STORE-CORRUPT-CONTAIN-001) so one damaged store
+    can never abort the whole grid; it also fires a ``sweep_grid.tuple_store_corrupt``
+    WARN carrying the store path + heal remediation. Every OTHER exception still
+    propagates uncaught (global abort) — only ``SweepComboError`` + the G14
+    ``ResultsStoreSchemaError`` are caught (NOT its parent ``ResultsStoreError``).
 
     Honest envelope (Golden Rule #10): the loop is O(T) tuples, each O(N) masks;
     no part is O(1) total. This function's own memory is O(1) in ``T`` (scalar
@@ -1009,8 +1030,15 @@ def run_sweep_grid(
         # not a transient single combo), count it, audit the fingerprint, and
         # finish the remaining tuples; the failed tuple is left un-sentineled
         # (run_persisted_sweep raised before its flush/mark/sentinel writes) so
-        # it redoes deterministically next run. Only SweepComboError is caught —
-        # every other exception still propagates (global abort).
+        # it redoes deterministically next run. SweepComboError (a combo bug /
+        # corrupt bar window) AND ResultsStoreSchemaError (a CORRUPT / old-schema
+        # finalist store surfaced at its LOAD boundary) are the two per-tuple
+        # containment classes — DELIBERATELY widened (DB-02,
+        # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632): one damaged
+        # store must never abort the WHOLE grid on resume. Only the G14 schema
+        # class is caught, NOT its parent ResultsStoreError (a run-identity
+        # CONFLICT / missing-polars env fault keeps the documented global abort).
+        # Every OTHER exception still propagates (global abort).
         try:
             summary = run_one_tuple(
                 grid,
@@ -1022,7 +1050,7 @@ def run_sweep_grid(
                 skip_empty=skip_empty,
                 kernel_cache=kernel_cache,
             )
-        except SweepComboError as exc:
+        except (SweepComboError, ResultsStoreSchemaError) as exc:
             tuples_failed += 1
             label = (
                 f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"
@@ -1036,6 +1064,17 @@ def run_sweep_grid(
                 payload={"tuple": label, "error": error},
             )
             _LOG.warning("sweep_grid.tuple_failed", subject=subject, tuple=label, error=error)
+            if isinstance(exc, ResultsStoreSchemaError):
+                # The error string already NAMES the store path (the G14 load
+                # contract) — carry it + the heal remediation on the dedicated
+                # corrupt-store WARN so the completeness hole is loud + fixable.
+                _LOG.warning(
+                    "sweep_grid.tuple_store_corrupt",
+                    subject=subject,
+                    tuple=label,
+                    error=error,
+                    remediation=TUPLE_STORE_CORRUPT_REMEDIATION,
+                )
             continue
         if summary is None:
             tuples_skipped_no_bars += 1

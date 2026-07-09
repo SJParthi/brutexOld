@@ -29,9 +29,10 @@ from pathlib import Path
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import ResultsStore, ResultsStoreError, ResultsStoreSchemaError
 from brutex.engine.sweep_orchestrator import (
     DEFAULT_MAX_TUPLES,
+    TUPLE_STORE_CORRUPT_REMEDIATION,
     SweepGridConfig,
     SweepGridSummary,
     SweepTuple,
@@ -49,6 +50,7 @@ from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.ranking import OverfitGateConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
+from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -848,3 +850,102 @@ class TestRunSweepGridResilientHardening:
 
 def test_default_max_tuples_is_exposed() -> None:
     assert DEFAULT_MAX_TUPLES == 100_000
+
+
+class TestRunSweepGridCorruptStoreContained:
+    """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632).
+
+    A CORRUPT / old-schema finalist store raised at its LOAD boundary on resume is
+    CONTAINED to a per-tuple ``TUPLE_FAILED`` (never a whole-grid abort), fires the
+    dedicated ``sweep_grid.tuple_store_corrupt`` WARN with the heal remediation, and
+    leaves the corrupt file in place (un-sentineled → visible on every resume). Only
+    the G14 ``ResultsStoreSchemaError`` is caught — its parent ``ResultsStoreError``
+    keeps the documented global abort.
+    """
+
+    def test_corrupt_store_contained_tuple_failed(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        bars = _trending_bars()
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])  # 2 tuples
+        results_root = tmp_path / "results"
+
+        # Simulate a corrupt finalist store on resume: a real garbage parquet at
+        # the BANKNIFTY tuple's store path (VECTOR: overwrite *.parquet with
+        # b"CORRUPT\x00\x01"*40). load_or_create_store loads it (path exists) →
+        # ResultsStore.load raises the typed ResultsStoreSchemaError.
+        victim = next(t for t in iter_sweep_tuples(grid) if t.instrument == "BANKNIFTY")
+        victim_path = tuple_store_path(results_root, victim, grid)
+        victim_path.parent.mkdir(parents=True, exist_ok=True)
+        victim_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+
+        audit_path = tmp_path / "grid.jsonl"
+        with capture_logs() as logs, AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(results_root, grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        # The clean tuple ran; the corrupt one was contained, not a whole-grid abort.
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 1
+        # The corrupt file is left in place (un-quarantined, un-sentineled).
+        assert victim_path.read_bytes() == b"CORRUPT\x00\x01" * 40
+        failed = next(e for e in read_entries(audit_path) if e.action == "TUPLE_FAILED")
+        assert "BANKNIFTY" in failed.payload["tuple"]
+        assert "ResultsStoreSchemaError" in failed.payload["error"]
+        # The dedicated corrupt-store WARN carries the store path + heal remediation.
+        corrupt = [e for e in logs if e.get("event") == "sweep_grid.tuple_store_corrupt"]
+        assert len(corrupt) == 1
+        assert str(victim_path) in corrupt[0]["error"]
+        assert corrupt[0]["remediation"] == TUPLE_STORE_CORRUPT_REMEDIATION
+        assert verify_chain(audit_path) > 0
+
+    def test_store_schema_error_from_store_for_is_contained(self, tmp_path: Path) -> None:
+        """A ResultsStoreSchemaError raised from the store factory is contained + WARNed."""
+        pytest.importorskip("polars")
+        bars = _trending_bars()
+        grid = _grid()  # single NIFTY tuple
+        base_store_for = make_store_for(tmp_path / "results", grid)
+
+        def _corrupt_store_for(tuple_: SweepTuple) -> ResultsStore:
+            raise ResultsStoreSchemaError(
+                f"unreadable results store at {tmp_path}/store.parquet: boom"
+            )
+
+        del base_store_for  # the real factory is intentionally unused here
+        with capture_logs() as logs, AuditWriter.open(tmp_path / "grid.jsonl") as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=_corrupt_store_for,
+                dedup=_dedup(),
+                audit=audit,
+            )
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 0
+        assert any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)
+
+    def test_parent_results_store_error_still_aborts_grid(self, tmp_path: Path) -> None:
+        """The NARROWNESS tooth: a parent ResultsStoreError (not schema) still aborts."""
+        pytest.importorskip("polars")
+        bars = _trending_bars()
+        grid = _grid()
+
+        def _conflict_store_for(tuple_: SweepTuple) -> ResultsStore:
+            # A run-identity CONFLICT / env fault is ResultsStoreError, NOT the G14
+            # ResultsStoreSchemaError — it must keep the documented global abort.
+            raise ResultsStoreError("run-identity conflict: same id, different metrics")
+
+        with (
+            AuditWriter.open(tmp_path / "grid.jsonl") as audit,
+            pytest.raises(ResultsStoreError, match="run-identity conflict"),
+        ):
+            run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=_conflict_store_for,
+                dedup=_dedup(),
+                audit=audit,
+            )

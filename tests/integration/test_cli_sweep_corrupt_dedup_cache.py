@@ -1,0 +1,136 @@
+"""R2-D2 CLI byte-parity tooth: a corrupt dedup-cache LMDB self-heals; results stay identical.
+
+DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1631. The Bloom→LMDB combo
+dedup cache is a losslessly-rebuildable ACCELERATOR (Golden Rule #7): a corrupt
+``data.mdb`` is quarantined aside + rebuilt EMPTY, so the affected combos merely
+recompute — the persisted finalist stores are byte-identical to a
+never-corrupted run.
+
+VECTOR (reproducer_catalog): run-1 clean ``cmd_sweep_all`` builds the dedup
+cache; XOR the first 4096 bytes of ``sweeps/dedup-cache/exact/data.mdb``; re-run
+``cmd_sweep_all`` on the SAME results root → it recovers + exits ``EXIT_OK`` with
+the finalist parquet bytes matching a separate never-corrupted run.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("polars")
+pytest.importorskip("duckdb")
+pytest.importorskip("pyarrow")
+
+from brutex.cli import EXIT_OK, cmd_sweep_all
+from brutex.data.catalog import Catalog
+from brutex.data.models import CandleBar
+from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.sink import ParquetBarSink
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+_EXCH, _SEG, _SYM, _INT = "NSE", "INDEX", "NIFTY", "1minute"
+
+
+def _trending_bars(n_days: int = 6, per_day: int = 60) -> list[CandleBar]:
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 0.6 if m % 3 else price - 0.3
+            ts = (
+                datetime(2024, 1, 2, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            hi = max(price, close) + 0.5
+            lo = min(price, close) - 0.5
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(price, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=1000,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+def _build_lake(root: Path) -> tuple[Path, Path]:
+    lake_root, catalog_path = root / "lake", root / "catalog.duckdb"
+    writer = ParquetWriter(lake_root=lake_root)
+    with Catalog.open(catalog_path) as cat:
+        ParquetBarSink(writer=writer, catalog=cat).append(
+            exchange=_EXCH, segment=_SEG, symbol=_SYM, interval=_INT, bars=_trending_bars()
+        )
+    return lake_root, catalog_path
+
+
+def _sweep_kwargs(lake_root: Path, catalog_path: Path, results_root: Path) -> dict[str, object]:
+    return {
+        "lake_root": lake_root,
+        "catalog_path": catalog_path,
+        "results_root": results_root,
+        "exchange": _EXCH,
+        "segment": _SEG,
+        "symbols": _SYM,
+        "intervals": _INT,
+        "start": "2024-01-02",
+        "end": "2024-01-10",
+        "directions": "BUY",
+        "k": "1",
+        "conditions": "0,1,2,3,4",
+        "sl": "80,none",
+        "tp": "50",
+        "top": 5,
+        "mode": "A",
+        "max_tuples": None,
+        "max_combos": None,
+        "data_snapshot_hash": None,
+        "options_sim": False,
+    }
+
+
+def _finalist_hashes(results_root: Path) -> dict[str, str]:
+    """{tuple-store rel-path → sha256} for every finalist parquet under *results_root*."""
+    out: dict[str, str] = {}
+    for p in sorted(results_root.rglob("*.parquet")):
+        if "dedup-cache" in p.parts:
+            continue
+        out[str(p.relative_to(results_root))] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
+def test_corrupt_dedup_cache_recovers_and_results_byte_identical(tmp_path: Path) -> None:
+    # A separate, never-corrupted reference run.
+    ref_root = tmp_path / "ref"
+    ref_lake, ref_catalog = _build_lake(ref_root)
+    assert cmd_sweep_all(**_sweep_kwargs(ref_lake, ref_catalog, ref_root / "sweeps")) == EXIT_OK  # type: ignore[arg-type]
+    ref_hashes = _finalist_hashes(ref_root / "sweeps")
+    assert ref_hashes  # the reference run persisted at least one finalist store
+
+    # The test run: build the same lake, run-1 clean, then corrupt the dedup cache.
+    test_root = tmp_path / "test"
+    test_lake, test_catalog = _build_lake(test_root)
+    results_root = test_root / "sweeps"
+    assert cmd_sweep_all(**_sweep_kwargs(test_lake, test_catalog, results_root)) == EXIT_OK  # type: ignore[arg-type]
+
+    data_mdb = results_root / "dedup-cache" / "exact" / "data.mdb"
+    assert data_mdb.exists()
+    raw = bytearray(data_mdb.read_bytes())
+    for i in range(min(4096, len(raw))):
+        raw[i] ^= 0xFF
+    data_mdb.write_bytes(bytes(raw))
+
+    # Run-2 on the SAME results root: the corrupt cache self-heals (quarantine +
+    # rebuild empty), the sweep completes, and the finalist parquet bytes match
+    # the never-corrupted reference run exactly (idempotent recompute).
+    assert cmd_sweep_all(**_sweep_kwargs(test_lake, test_catalog, results_root)) == EXIT_OK  # type: ignore[arg-type]
+    assert _finalist_hashes(results_root) == ref_hashes
+    # The corrupt env was quarantined aside (bytes preserved, never deleted).
+    assert list((results_root / "dedup-cache").glob("exact.corrupt-*"))

@@ -161,6 +161,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
 import structlog
 
 from brutex.engine.combo_mask import count_combos
+from brutex.engine.results_store import ResultsStoreSchemaError
 from brutex.engine.sweep_mem_budget import MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -888,7 +889,14 @@ def _run_tuple_in_worker(
             audit=collector,
             skip_empty=True,
         )
-    except SweepComboError as exc:
+    except (SweepComboError, ResultsStoreSchemaError) as exc:
+        # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632): a
+        # CORRUPT / old-schema finalist store raised at its LOAD boundary is
+        # CONTAINED as a failed outcome (surfaced through the supervisor's
+        # SUPERVISOR_TUPLE_FAILED / sweep_parallel.tuple_failed lane, whose error
+        # string names the store path) instead of crashing the worker → the whole
+        # grid. Only the G14 ResultsStoreSchemaError is caught here, NOT its parent
+        # ResultsStoreError (a run-identity conflict keeps the global abort).
         return TupleWorkResult(
             index=index,
             summary=None,

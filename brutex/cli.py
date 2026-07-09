@@ -6386,40 +6386,50 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     _require_lake_dir(resolved_lake, command="sweep-all")
 
     # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is a real
-    # content fingerprint and each tuple reuses the cached bars (no re-read).
-    slices: dict[tuple[str, str], list[Any]] = {}
-    with Catalog.open(catalog) as cat:
-        # Rebuild the catalog from the on-disk Parquet truth for the swept
-        # coordinates BEFORE reading, so a lake whose partitions were never
-        # registered (every production ingest sink historically passed
-        # catalog=None — DEC-CATALOG-RECONCILE-WIRE-001) is still sweep-able
-        # with no re-pull. O(P) one-time over the requested partitions, not in
-        # the per-combo hot loop (Golden Rule #10).
-        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    # content fingerprint and each tuple reuses the cached bars (no re-read). An
+    # UNREADABLE partition (corrupt/torn bytes surviving one retry, or a foreign
+    # schema) is a LOUD refusal, never a silent drop — a skipped partition would
+    # hole the data_snapshot_hash inputs and silently change run identity
+    # (Golden Rule #4; DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1633).
+    from brutex.data.errors import CatalogError
 
-        for symbol in symbol_list:
-            for interval in interval_list:
-                reconcile_catalog_from_lake(
-                    lake_root=resolved_lake,
-                    catalog=cat,
-                    exchange=exchange,
-                    segment=segment,
-                    symbol=symbol,
-                    interval=interval,
-                )
-        for symbol in symbol_list:
-            for interval in interval_list:
-                feed = ReplayFeed(
-                    catalog=cat,
-                    lake_root=resolved_lake,
-                    exchange=exchange,
-                    segment=segment,
-                    symbols=[symbol],
-                    interval=interval,
-                    start=_parse_dt(start),
-                    end=_parse_dt(end),
-                )
-                slices[(symbol, interval)] = [event.bar for event in feed]
+    slices: dict[tuple[str, str], list[Any]] = {}
+    try:
+        with Catalog.open(catalog) as cat:
+            # Rebuild the catalog from the on-disk Parquet truth for the swept
+            # coordinates BEFORE reading, so a lake whose partitions were never
+            # registered (every production ingest sink historically passed
+            # catalog=None — DEC-CATALOG-RECONCILE-WIRE-001) is still sweep-able
+            # with no re-pull. O(P) one-time over the requested partitions, not in
+            # the per-combo hot loop (Golden Rule #10).
+            from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+
+            for symbol in symbol_list:
+                for interval in interval_list:
+                    reconcile_catalog_from_lake(
+                        lake_root=resolved_lake,
+                        catalog=cat,
+                        exchange=exchange,
+                        segment=segment,
+                        symbol=symbol,
+                        interval=interval,
+                    )
+            for symbol in symbol_list:
+                for interval in interval_list:
+                    feed = ReplayFeed(
+                        catalog=cat,
+                        lake_root=resolved_lake,
+                        exchange=exchange,
+                        segment=segment,
+                        symbols=[symbol],
+                        interval=interval,
+                        start=_parse_dt(start),
+                        end=_parse_dt(end),
+                    )
+                    slices[(symbol, interval)] = [event.bar for event in feed]
+    except CatalogError as exc:
+        print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
 
     loaded = {key: len(bars) for key, bars in slices.items() if bars}
     if not loaded:
@@ -6639,15 +6649,28 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # CLI still exits non-zero). KeyboardInterrupt/SystemExit are
     # BaseException, so an operator Ctrl-C never alerts; the clean path fires
     # only alerter.sweep_complete below (never both).
+    # Open the Bloom→LMDB dedup cache FIRST so a corrupt ``data.mdb`` is handled
+    # cleanly: SweepCache.open quarantines + rebuilds a FIRST corruption
+    # transparently (the store is a rebuildable accelerator, Golden Rule #7); only
+    # a SECOND failure raises LmdbCorruptEnvError, which is a clean user-facing
+    # refusal here (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1631) —
+    # not a raw traceback deep inside the sweep span.
+    from brutex.data.lmdb_membership import LmdbCorruptEnvError
+
+    try:
+        cache = SweepCache.open(
+            cache_path,
+            bloom_capacity=cache_knobs.bloom_capacity,
+            map_size_mb=cache_knobs.map_size_mb,
+        )
+    except LmdbCorruptEnvError as exc:
+        print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     with sweep_abort_alert(_emit_pull_halt_alert):
         with (
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
-            SweepCache.open(
-                cache_path,
-                bloom_capacity=cache_knobs.bloom_capacity,
-                map_size_mb=cache_knobs.map_size_mb,
-            ) as cache,
+            cache,
         ):
             # Audit the scope override on the hash-chained launch log (Golden Rule
             # #8): a research launch that let out-of-scope symbols through is a

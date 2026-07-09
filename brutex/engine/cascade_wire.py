@@ -101,6 +101,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import structlog
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
@@ -1556,7 +1557,7 @@ def build_stage2_cascade_specs(
     list[CascadeTupleSpec]
         One spec per non-empty grid tuple, in ``iter_sweep_tuples`` order.
     """
-    from brutex.engine.results_store import ResultsStore
+    from brutex.engine.results_store import ResultsStore, ResultsStoreSchemaError
     from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
     from brutex.engine.sweep_run import _direction_label
 
@@ -1565,6 +1566,19 @@ def build_stage2_cascade_specs(
         store_path = tuple_store_path(results_root, sweep_tuple, grid)
         if not store_path.exists():
             continue
+        try:
+            rows = ResultsStore.load(store_path).rows()
+        except ResultsStoreSchemaError as exc:
+            # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632): a
+            # corrupt / old-schema finalist store surfaces as a typed cascade
+            # abort naming the file, NEVER a raw error and NEVER a silent skip
+            # (dropping a tuple's finalists would change Stage-2 selection
+            # invisibly — a false green; fabricating empty winners is equally
+            # forbidden, Golden Rule #1).
+            raise CascadeWireError(
+                f"stage-2 finalist store UNREADABLE at {store_path}: {exc} — run "
+                f"'brutex sweep-verify' / 'brutex sweep-heal', then re-run the cascade"
+            ) from exc
         proximity_bps = (
             None
             if sweep_tuple.proximity is None
@@ -1584,7 +1598,7 @@ def build_stage2_cascade_specs(
             prior_n=grid.prior_n,
             proximity_bps=proximity_bps,
             start_equity_paisa=grid.start_equity_paisa,
-            rows=ResultsStore.load(store_path).rows(),
+            rows=rows,
             top_k=top_k,
             fib_anchor=sweep_tuple.fib_anchor,
         )
@@ -1607,18 +1621,45 @@ def report_path(results_root: Path) -> Path:
 
 
 def write_manifest(results_root: Path, manifest: CascadeManifest) -> Path:
-    """Write *manifest* JSON under *results_root* and return its path."""
+    """Write *manifest* JSON under *results_root* atomically and return its path.
+
+    Routed through :func:`~brutex.data.atomic_io.atomic_write_simple`
+    (tmp→``fsync``→``os.replace``) so a crash / ENOSPC mid-write leaves either
+    the OLD complete or the NEW complete file — never a torn one, and never a
+    destroyed prior copy (``load_manifest`` still serves the last complete
+    cascade). A disk-full maps to :class:`CascadeWireError` — a loud cascade-tail
+    abort, deliberately NOT the lake-wide ``LakeWriteHalt`` escalation
+    (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1634).
+    """
     path = manifest_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(manifest_to_json(manifest))
+    payload = manifest_to_json(manifest)
+    try:
+        atomic_write_simple(path, lambda tmp: tmp.write_bytes(payload))
+    except OSError as exc:
+        raise CascadeWireError(
+            f"failed to write cascade manifest at {path}: {exc} — the prior copy "
+            f"(if any) is INTACT (atomic replace); free disk space and re-run the cascade"
+        ) from exc
     return path
 
 
 def write_report(results_root: Path, report: CascadeWireReport) -> Path:
-    """Write the serialised *report* JSON under *results_root* and return its path."""
+    """Write the serialised *report* JSON under *results_root* atomically and return its path.
+
+    Same atomic-write + typed ENOSPC contract as :func:`write_manifest`
+    (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1634).
+    """
     path = report_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(serialize_wire_report(report))
+    payload = serialize_wire_report(report)
+    try:
+        atomic_write_simple(path, lambda tmp: tmp.write_bytes(payload))
+    except OSError as exc:
+        raise CascadeWireError(
+            f"failed to write cascade report at {path}: {exc} — the prior copy "
+            f"(if any) is INTACT (atomic replace); free disk space and re-run the cascade"
+        ) from exc
     return path
 
 

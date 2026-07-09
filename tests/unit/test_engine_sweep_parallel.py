@@ -2292,3 +2292,44 @@ class TestBrokenProcessPoolQuarantine:
                 driver.run()
         actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
         assert "SUPERVISOR_ABORT" in actions
+
+
+class TestWorkerCorruptStoreContained:
+    """DB-02 parallel twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632).
+
+    A CORRUPT / old-schema finalist store raised at its LOAD boundary inside a
+    worker is CONTAINED as a failed marker (surfaced through the supervisor's
+    ``TUPLE_FAILED`` lane, whose error string names the store path) instead of
+    crashing the worker → the whole grid. Only the G14 ``ResultsStoreSchemaError``
+    is caught, NOT its parent ``ResultsStoreError``.
+    """
+
+    def test_corrupt_store_returns_failed_marker(self, tmp_path: Path) -> None:
+        grid = _grid()
+        out = tmp_path / "out"
+        mod._worker_init(mod._WorkerContext(grid=grid, root=out))
+        tuple_ = next(iter_sweep_tuples(grid))
+        # Corrupt the tuple's finalist store so its LOAD raises ResultsStoreSchemaError.
+        store_path = tuple_store_path(out, tuple_, grid)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        assert result.summary is None
+        assert result.failed_error is not None
+        assert "ResultsStoreSchemaError" in result.failed_error
+
+    def test_corrupt_store_contained_in_real_spawn_pool(self, tmp_path: Path) -> None:
+        grid = _grid()  # 4 tuples via BUY/SELL × k={1,2}
+        out = tmp_path / "out"
+        victim = next(iter_sweep_tuples(grid))
+        store_path = tuple_store_path(out, victim, grid)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+        _run_parallel(tmp_path, grid, workers=2)
+        entries = read_sup_entries(tmp_path / "sup.jsonl")
+        actions = [e.action for e in entries]
+        # The grid FINISHED (not a whole-grid abort) with the corrupt tuple contained.
+        assert "SUPERVISOR_COMPLETE" in actions
+        failed = [e for e in entries if e.action == "TUPLE_FAILED"]
+        assert len(failed) == 1
+        assert "ResultsStoreSchemaError" in failed[0].payload["error"]

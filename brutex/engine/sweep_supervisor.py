@@ -93,10 +93,12 @@ from typing import TYPE_CHECKING, Any, Final
 import blake3
 import structlog
 
+from brutex.engine.results_store import ResultsStoreSchemaError
 from brutex.engine.sweep_cache import SweepCache, combo_digest
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_orchestrator import (
+    TUPLE_STORE_CORRUPT_REMEDIATION,
     SweepGridConfig,
     SweepTuple,
     count_sweep_tuples,
@@ -757,17 +759,24 @@ def run_supervised_grid(
                     skip_empty=skip_empty,
                     kernel_cache=kernel_cache,
                 )
-            except SweepComboError as exc:
+            except (SweepComboError, ResultsStoreSchemaError) as exc:
+                # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1632):
+                # a CORRUPT / old-schema finalist store raised at its LOAD boundary
+                # on resume is CONTAINED to this tuple exactly like a SweepComboError,
+                # never a whole-grid abort. Only the G14 ResultsStoreSchemaError is
+                # caught, NOT its parent ResultsStoreError (a run-identity conflict /
+                # missing-polars fault keeps the documented global abort).
                 tuples_failed += 1
                 had_failure = True
                 _advance(current=label, survived=False, skipped=False)
+                error = f"{type(exc).__name__}: {exc}"
                 guards.audit.append(
                     action=_ACTION_TUPLE_FAILED,
                     subject=subject,
                     payload={
                         "index": index,
                         "tuple": label,
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": error,
                     },
                 )
                 _LOG.warning(
@@ -775,8 +784,17 @@ def run_supervised_grid(
                     subject=subject,
                     index=index,
                     tuple=label,
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=error,
                 )
+                if isinstance(exc, ResultsStoreSchemaError):
+                    _LOG.warning(
+                        "sweep_grid.tuple_store_corrupt",
+                        subject=subject,
+                        index=index,
+                        tuple=label,
+                        error=error,
+                        remediation=TUPLE_STORE_CORRUPT_REMEDIATION,
+                    )
                 continue
             if summary is None:
                 tuples_skipped_no_bars += 1
