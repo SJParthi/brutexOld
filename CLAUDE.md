@@ -1948,8 +1948,16 @@ hostile-review pass._
   trims: the strike-centered CE|PE chain + spot-marker band does NOT fit the ranking table — the separate-feature
   follow-up `DEC-MOVERS-OPTION-CHAIN-VIEW-001`; no futures `oi_chg` wire field fabricated (the futures triplet
   ships OI + OI Chg %); no futures tier-expiry DATE chip (the row's first cell already carries the dated contract
-  name); `unread_symbols` not emitted; Buildup header sort = a stable no-op (derived cell). Tests: node-executed
-  goldens over the REAL bx-movers-chips.js + bx-format.js; substring-presence pins
+  name); `unread_symbols` not emitted; Buildup header sort = a stable no-op (derived cell). ROUND-1 refuter fold
+  (executed Chromium repros — the `[hidden]` cascade trap): the page's own author-origin `.seg`/`.chiprow`
+  display rules beat the UA `[hidden]{display:none}` (author origin wins regardless of specificity), leaving
+  `.hidden = true` INERT — the seg tabs rendered clickable on the SPOT boot tab and a gated refresh kept the
+  stale chips painted; fixed by ONE higher-specificity guard rule `#chips[hidden], #expiryTabs[hidden],
+  #trackTabs[hidden] { display:none; }` (the expired_options `#pullribbon[hidden]` precedent; no other
+  hidden-toggled element in the page carries an author display rule — audited), pinned by the adopted
+  `tests/browser/test_refuter_r1_chips_probes.py` (P1/P2 failed pre-fix; P3 all-legs-missing-OI honesty,
+  P4 cap-50 "+K more" tail, P5 rapid-tier-click single-flight executed green pre-fix, kept as pins). Tests:
+  node-executed goldens over the REAL bx-movers-chips.js + bx-format.js; substring-presence pins
   (`test_dashboard_movers_header_chips.py`); Chromium browser truth (`tests/browser/test_movers_header_chips.py`
   — the computed 0.78/0.96 chips off a REAL Parquet lake, the amber-badge click naming the seeded null-OI leg
   end-to-end, the Next tab issuing exactly ONE `expiry=Next` request + repaint, the PCR-chip panel toggle;

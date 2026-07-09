@@ -87,6 +87,14 @@
   /* Header chips row + ⓘ explainer + expiry tabs + buildup pills
      (DEC-MOVERS-HEADER-CHIPS-001) — kept in the page's OWN style block. */
   .chiprow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  /* The .chiprow/.seg display rules here are AUTHOR-origin, so they beat the
+     UA stylesheet's non-important `[hidden]{display:none}` regardless of
+     specificity — leaving `el.hidden = true` INERT on these containers
+     (round-1 refuter: the seg tabs rendered clickable on the Spot tab; the
+     stale chips row stayed painted on a gated refresh). Re-assert hidden with
+     a HIGHER-specificity author rule per element (id+attr 1-1-0 beats class
+     0-1-0) — the #pullribbon[hidden] precedent in expired_options.html. */
+  #chips[hidden], #expiryTabs[hidden], #trackTabs[hidden] { display:none; }
   .chip { display:inline-flex; align-items:center; gap:7px; padding:6px 12px; border-radius:999px;
     font-size:12.5px; color:var(--muted); background:var(--surface-2); border:1px solid var(--border-strong); }
   .chip .lbl { font-size:10px; text-transform:uppercase; letter-spacing:.4px; }
