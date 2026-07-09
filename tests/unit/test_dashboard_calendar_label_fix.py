@@ -28,6 +28,21 @@ def test_outside_close_ignores_the_pickers_own_input() -> None:
     assert "!single && e.target === toInput" in _JS, "the to-input guard is missing"
 
 
+def test_doc_listeners_are_delegated_once() -> None:
+    """The rebuild-leak fix's delegated design is pinned: instances REGISTER in
+    the shared doc-target registry, and the document click/keydown listeners are
+    attached exactly ONCE — never one per buildCalendar/buildSelect instance
+    (the old per-instance pattern accumulated listeners + retained detached
+    trees across rebuilds)."""
+    assert "registerDocTarget" in _JS, "the shared doc-target registry is missing"
+    assert _JS.count('document.addEventListener("click"') == 1, (
+        "expected exactly ONE delegated document click listener"
+    )
+    assert _JS.count('document.addEventListener("keydown"') == 1, (
+        "expected exactly ONE delegated document keydown listener"
+    )
+
+
 def test_movers_reports_headings_have_the_accent_bar() -> None:
     """Movers + Reports section headings carry the gradient accent bar + a title."""
     pytest.importorskip("fastapi", reason="render needs the [ui] extra")

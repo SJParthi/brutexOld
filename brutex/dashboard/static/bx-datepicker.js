@@ -71,11 +71,31 @@
     }
   }
   function registerDocTarget(entry) {
+    /* Stamp the entry on its root so a detached-then-REATTACHED wrap can be
+       re-registered by reattachDocTargets() — pruning drops the entry while
+       the wrap is detached, and the dataset.dpDone/dataset.cs enhance-dedup
+       (correctly) blocks a second buildCalendar/buildSelect on reattach, so
+       without the stamp the live node would lose its outside-click/Escape
+       close forever. */
+    entry.root._bxDocTarget = entry;
     docTargets.push(entry);
     if (docWired) return;
     docWired = true;
     document.addEventListener("click", onDocClick);
     document.addEventListener("keydown", onDocKeydown);
+  }
+  /* Re-push the stamped entry of every already-enhanced LIVE wrap that is
+     missing from docTargets (a node pruned while detached, now reattached).
+     Runs on every auto() pass — the same cadence as pruning — so doc-target
+     registration is decoupled from the enhance-dedup. Document-wide by design
+     (a reattach can land outside the MutationObserver scope that triggered
+     the pass); O(enhanced wraps) per pass, duplicate-guarded. */
+  function reattachDocTargets() {
+    var wraps = document.querySelectorAll(".dp-wrap, .cs-wrap");
+    for (var i = 0; i < wraps.length; i++) {
+      var entry = wraps[i]._bxDocTarget;
+      if (entry && wraps[i].isConnected && docTargets.indexOf(entry) === -1) docTargets.push(entry);
+    }
   }
 
   /* Core: mount the picker into `mount` (the mount's own contents are NOT touched
@@ -230,6 +250,7 @@
 
   function auto(root) {
     pruneDocTargets();  /* release replaced instances' registry entries (and their detached trees) on every re-wire pass */
+    reattachDocTargets();  /* re-register enhanced wraps that were pruned while detached and have since REATTACHED */
     var scope = root && root.querySelectorAll ? root : document;
     Array.prototype.forEach.call(scope.querySelectorAll('[data-bxdp="range"]'), function (el) { try { wireRange(el); } catch (e) { } });
     Array.prototype.forEach.call(scope.querySelectorAll('input[type="date"]'), function (i) { try { wireLooseInput(i); } catch (e) { } });
