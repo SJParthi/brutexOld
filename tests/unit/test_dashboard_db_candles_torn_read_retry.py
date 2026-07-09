@@ -22,10 +22,15 @@ These tests pin the fix:
 * the no-error path pays ZERO sleeps and is behaviour-identical;
 * a retried success is cached normally by the injected count cache (never a
   poisoned entry);
-* the returned ``total`` is clamped to the honest observed lower bound
-  ``offset + len(rows)`` — the CACHED-total vs live-page skew is inherent to
-  the DEC-DB-CANDLE-COUNT-CACHE-001 generation-keyed design (documented, not
-  eliminated), but the pager never reports a total the served page disproves.
+* when the page returned ROWS, the returned ``total`` is raised to at least
+  ``offset + len(rows)`` — an OBSERVED lower bound (the CACHED-total vs
+  live-page skew is inherent to the DEC-DB-CANDLE-COUNT-CACHE-001
+  generation-keyed design; documented, not eliminated) — while an EMPTY page
+  never adjusts the total (it proves nothing; the review-fold regressions pin
+  that an offset past the end can no longer fabricate ``total == offset``);
+* the #1228 manifest PRUNED page rides the same guard: a one-shot
+  ``duckdb.Error`` inside its first attempt recovers manifest-served after
+  exactly one 0.1 s sleep.
 
 Target: 100% line + branch coverage of the new ``db_view`` block alongside the
 sibling suites in the per-module gate.
@@ -129,6 +134,7 @@ def _candles(
     count_cache: MoversSnapshotCache | None = None,
     generation: int = 0,
     retry_sleep: Callable[[float], None] | None = None,
+    use_stats_manifest: bool = False,
 ) -> dict[str, Any]:
     """Call ``query_candles`` over the fixed NSE/CASH/1minute partition with typed kwargs."""
     return query_candles(
@@ -143,6 +149,7 @@ def _candles(
         count_cache=count_cache,
         generation=generation,
         retry_sleep=retry_sleep,
+        use_stats_manifest=use_stats_manifest,
     )
 
 
@@ -276,6 +283,8 @@ class TestRetryCandleReadOnce:
     ) -> None:
         # DuckDB exposes no version-stable transient subclass (repo precedent), so
         # the retry keys on the BROAD duckdb.Error — ANY subclass gets the one retry.
+        # Honest shape note: sampled_from over a FIXED subclass list makes this a
+        # parametrization-style exhaustive sweep, not a generative property.
         flaky = _FlakyDelegate(lambda: "answer", [exc_cls("torn")])
         sleeps: list[float] = []
         out = _retry_candle_read_once(flaky, source="t", retry_sleep=sleeps.append)
@@ -413,6 +422,76 @@ class TestQueryCandlesTornReadRetry:
         assert len(second["rows"]) == 3
         assert second["total"] == 3, "the served page disproves the stale cached 2"
 
+    def test_empty_page_past_end_never_fabricates_total(self, conn: Any, tmp_path: Path) -> None:
+        # Review fold (BLOCKER): the clamp's lower bound `offset + len(rows)` is
+        # valid ONLY for a page that returned rows (k > 0). The unconditional
+        # clamp turned an offset past the end (route-reachable — the `offset`
+        # query param is unbounded) into a FABRICATED total == offset
+        # (3-row lake, offset=999999 → total=999999). An empty page proves
+        # nothing and must leave the real count untouched.
+        _write(tmp_path, n_days=3)
+        page = _candles(conn, tmp_path, offset=999_999)
+        assert page["rows"] == []
+        assert page["total"] == 3, "an empty page must never adjust the total"
+
+    def test_shrink_empty_page_keeps_cached_total_unclamped(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        # The shrink direction: the cached total (3) outlives a lake that shrank
+        # to 1 row within the same generation. A valid-but-now-past-the-end
+        # offset serves an EMPTY page — which proves nothing, so the total stays
+        # the cached 3 (the unguarded clamp fabricated max(3, 10 + 0) == 10).
+        _write(tmp_path, n_days=3)
+        cache = MoversSnapshotCache()
+        first = _candles(conn, tmp_path, count_cache=cache, generation=7)
+        assert first["total"] == 3
+        year_dir = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute" / "2024"
+        unlinked = list(year_dir.glob("*.parquet"))
+        assert unlinked, "the fixture partition must exist to shrink"
+        for parquet in unlinked:
+            parquet.unlink()
+        _write(tmp_path, n_days=1)
+        page = _candles(conn, tmp_path, count_cache=cache, generation=7, offset=10)
+        assert page["rows"] == []
+        assert page["total"] == 3, "an empty page must not rewrite the cached total"
+
+
+# ── query_candles × #1228 stats manifest — the pruned page rides the guard ───
+
+
+class TestQueryCandlesManifestPrunedPageRetry:
+    """The #1228 manifest PRUNED-page path goes through _retry_candle_read_once too."""
+
+    def test_pruned_page_torn_read_retries_once_and_recovers_manifest_served(
+        self, conn: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review fold (MAJOR): the pruned-page retry window was headlined but
+        # untested. Seed a REAL stats shard (first opted-in read falls back on
+        # the absent shard + write-behind seeds it — the #1228 read-side seed),
+        # then inject a one-shot duckdb.Error into the pruned page's FIRST
+        # attempt: the retry must recover with the manifest-served page
+        # (stats_ctx non-None → page_source == "manifest", correct rows AND
+        # total) after exactly ONE 0.1 s sleep.
+        _write(tmp_path, n_days=3)
+        seeded = _candles(conn, tmp_path, use_stats_manifest=True)
+        assert seeded["total"] == 3  # legacy-answered; the shard is now seeded
+        flaky = _FlakyDelegate(
+            db_view._stats_pruned_page, [duckdb.InvalidInputException("torn footer")]
+        )
+        monkeypatch.setattr(db_view, "_stats_pruned_page", flaky)
+        sleeps: list[float] = []
+        with capture_logs() as logs:
+            page = _candles(conn, tmp_path, use_stats_manifest=True, retry_sleep=sleeps.append)
+        assert flaky.calls == 2  # first attempt torn, second (real) attempt served
+        assert len(page["rows"]) == 3
+        assert page["total"] == 3
+        assert sleeps == [_DUCKDB_RETRY_DELAY_S]  # exactly ONE 0.1 s pause
+        (retry,) = _events(logs, "db.candle_read_retry")
+        assert retry["source"] == "candle:NSE/CASH/NSE-NIFTY/1minute"
+        assert retry["error_type"] == "InvalidInputException"
+        (read,) = _events(logs, "db.stats_manifest.read")
+        assert read["page_source"] == "manifest", "the retry recovered the PRUNED branch"
+
 
 # ── query_option_candles — the expired-options twin ──────────────────────────
 
@@ -490,3 +569,12 @@ class TestQueryOptionCandlesTornReadRetry:
         second = _opt(conn, tmp_path, count_cache=cache, generation=5)
         assert len(second["rows"]) == 3
         assert second["total"] == 3, "the served page disproves the stale cached 2"
+
+    def test_empty_page_past_end_never_fabricates_total(self, conn: Any, tmp_path: Path) -> None:
+        # The expired-options twin of the spot empty-page regression: an offset
+        # past the end serves an empty page and the REAL count — never the
+        # fabricated total == offset the unconditional clamp produced.
+        _write_options(tmp_path, n_bars=3)
+        page = _opt(conn, tmp_path, offset=999_999)
+        assert page["rows"] == []
+        assert page["total"] == 3, "an empty page must never adjust the total"

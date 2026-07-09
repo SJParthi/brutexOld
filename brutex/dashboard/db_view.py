@@ -1471,13 +1471,21 @@ def _retry_candle_read_once[T](
     previously 500'd the page. *operation* is re-run ONCE after
     :data:`_DUCKDB_RETRY_DELAY_S` (via *retry_sleep*, injectable for tests;
     ``None`` = the ALIASED module default ``from time import sleep`` — the bare
-    name ``time`` here is ``datetime.time``): every wrapped operation rebuilds
-    its glob / file list from the partition directory per attempt, so the
-    retry reads the freshly-replaced files. The retry covers the WHOLE
-    execute+fetch — including :func:`_execute_candle_page_resilient`'s
-    ``fetchall`` (outside its own corrupt-skip ``try``) and the corrupt-file
-    degrade path's unguarded re-run — the exact windows the corrupt-skip
-    ladder never guarded.
+    name ``time`` here is ``datetime.time``). What the second attempt re-reads
+    has TWO shapes (review fold — the original "every operation re-globs"
+    claim was true only of the first): the LEGACY count/page operations
+    rebuild their glob / file list from the partition directory per attempt,
+    so the retry reads the freshly-replaced files; the #1228 manifest PRUNED
+    page (:func:`_stats_pruned_page`) re-plans from the request's captured
+    ``_StatsReadContext`` snapshot — a FIXED rel-path list, not a fresh glob —
+    which stays correct because an ``os.replace``'d file's CONTENT is re-read
+    on the retry and any stat-token movement is caught by
+    :func:`_stats_tokens_intact` (⇒ whole-request legacy degrade), so the
+    retry never serves a torn or stale manifest page. The retry covers the
+    WHOLE execute+fetch — including :func:`_execute_candle_page_resilient`'s
+    ``fetchall`` (outside its own corrupt-skip ``try``), the pruned page's
+    ``fetchall``, and the corrupt-file degrade path's unguarded re-run — the
+    exact windows the corrupt-skip ladder never guarded.
 
     Honest envelope (Golden Rule #10): retry-once NARROWS the race, it does
     not eliminate it — a SECOND replace landing inside the retry window still
@@ -2933,9 +2941,10 @@ def query_candles(
         the retry window still raises; and a CACHED total served beside a
         LIVE page read can lag a concurrent writer within one generation
         (inherent to the DEC-DB-CANDLE-COUNT-CACHE-001 generation-keyed
-        design) — the returned ``total`` is therefore clamped to the honest
-        observed lower bound ``offset + len(rows)``, never a total the served
-        page itself disproves.
+        design) — when the page returned rows, the returned ``total`` is
+        therefore raised to at least ``offset + len(rows)`` (an OBSERVED
+        lower bound); an EMPTY page never adjusts the total (it proves
+        nothing — ``offset + 0`` is a bound only for k > 0 rows).
 
     Returns
     -------
@@ -3185,8 +3194,13 @@ def query_candles(
     # generation-keyed CACHED total can lag a LIVE page read within one
     # generation (a concurrent writer between the COUNT and the page — the
     # skew is inherent to the DEC-DB-CANDLE-COUNT-CACHE-001 design, documented
-    # not eliminated). Never report a total the served page itself disproves.
-    total = max(total, safe_offset + len(raw_rows))
+    # not eliminated). When the page returned rows, the total is raised to at
+    # least ``offset + len(rows)`` — an OBSERVED lower bound. An EMPTY page
+    # proves nothing (``offset + 0`` is only a bound for k > 0 rows) and must
+    # never adjust the total: an unconditional clamp fabricated
+    # ``total == offset`` for any offset past the end (review fold).
+    if raw_rows:
+        total = max(total, safe_offset + len(raw_rows))
     if stats_ctx is not None:
         _LOG.info(
             _STATS_READ_EVENT,
@@ -4263,8 +4277,10 @@ def query_option_candles(
         retried ONCE after :data:`_DUCKDB_RETRY_DELAY_S` over a
         freshly-rebuilt glob/file list (see :func:`_retry_candle_read_once`);
         ``None`` (the default) sleeps for real. Same honest envelope: the
-        race is narrowed, not eliminated, and the returned ``total`` is
-        clamped to the observed lower bound ``offset + len(rows)``.
+        race is narrowed, not eliminated, and when the page returned rows the
+        returned ``total`` is raised to at least ``offset + len(rows)`` (an
+        observed lower bound; an EMPTY page never adjusts the total — it
+        proves nothing).
 
     Returns
     -------
@@ -4455,10 +4471,13 @@ def query_option_candles(
                     compute=_legacy_count_total,
                 )
     # Honest observed lower bound — the expired-options twin of the
-    # query_candles clamp (DEC-DB-CANDLES-TORN-READ-RETRY-001): the cached
-    # total can lag a live page within one generation; never report a total
-    # the served page itself disproves.
-    total = max(total, safe_offset + len(raw_rows))
+    # query_candles clamp (DEC-DB-CANDLES-TORN-READ-RETRY-001): when the page
+    # returned rows the total is raised to at least ``offset + len(rows)``
+    # (an OBSERVED lower bound); an EMPTY page proves nothing and never
+    # adjusts the total (the unconditional clamp fabricated
+    # ``total == offset`` past the end — review fold).
+    if raw_rows:
+        total = max(total, safe_offset + len(raw_rows))
     if stats_ctx is not None:
         _LOG.info(
             _STATS_READ_EVENT,
