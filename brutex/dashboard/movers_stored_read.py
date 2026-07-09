@@ -29,9 +29,21 @@ day slice it is about to serve against a fresh re-derive of the in-hand raw
 1-minute base (:func:`stored_day_frame_is_stale`, delegating to the ONE
 existing comparator :func:`brutex.data.tf_autoderive.compare_derived_freshness`)
 and falls back to the on-the-fly 1-minute resample on ANY drift — a stale
-prebuilt partition (a CLI-only fetch after a prebuild, a quarantined /
-crashed / partial prebuild, a mid-session live-edge bucket) can no longer
-serve a wrong LTP silently.
+prebuilt partition can no longer serve a wrong LTP silently. The AUDITED
+reachable stale-serve set is exactly three states: (1) a CLI-pulled lake
+growing an ALREADY-materialised day's 1-minute SAME-DAY (``brutex fetch``
+runs no prebuild — #1145); (2) a prebuild-QUARANTINED symbol whose stored
+TFs froze at an older generation (#1221; a crashed/partial prebuild reduces
+to this flavor); (3) a mid-session partial day (the prebuild's live-edge
+bucket predates later minutes). Three neighbouring states were audited
+ALREADY SAFE without this guard and are PINNED rather than re-guarded: an
+in-process dashboard pull bypasses the stored read entirely
+(``prefer_resample`` — spy-pinned to never pay the compare); a CLI fetch
+landing a NEW day self-heals via the pre-existing absent-day 1-minute
+fallback (pinned — fresh bytes, zero stale events); the F&O tabs have no
+stored-TF channel at all (the locked 1-minute-native snapshot below); and
+the ENGINE never reads through this path (the sweep has its own #1492-G1
+preflight freshness gate).
 
 The stored partitions hold FULL buckets, so under the unified raw-1m as-of
 semantic (DEC-HARDENING-LEFTOVERS-001 —

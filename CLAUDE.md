@@ -24,12 +24,23 @@ slice is now VERIFIED against a fresh re-derive of the raw 1-minute base
 before it is served (the CUT stored frame — the exact served bytes — judged
 via the NEW pure `movers_stored_read.stored_day_frame_is_stale`, which
 delegates to the ONE existing comparator `tf_autoderive.compare_derived_freshness`
-— the doctor + #1492-G1 sweep-gate core, ZERO diff to `tf_autoderive.py`;
+— the doctor + #1492-G1 sweep-gate core; the base guard left
+`tf_autoderive.py` at ZERO diff, then the same-PR fold-in B EXTENDED it
+(BND-5b: NEW `compare_daily_freshness` + a `(symbol, "1day")` verdict via
+kw-only `daily_before`, so the sweep-preflight gate now REFUSES on a
+post-crash stale stored `1day` — non-1day verdicts byte-identical, pinned;
+abstains kept for no-partition / no-1m-base / FNO segment, the OI-carrying
+FNO daily law a named follow-up DEC-FNO-DAILY-FRESHNESS-001;
+timestamp-INCLUSIVE compare — the deliberate divergence from movers'
+value-plane compare, cross-documented in both docstrings);
 day-scoped purely by caller frame slicing per DEC-RESAMPLE-ANCHOR-002;
 `tf_minutes==1` short-circuits — the stored 1minute IS the base), and a
-provably-STALE slice (a CLI-fetch-after-prebuild lake #1145, a quarantined
-#1221 / crashed / partial prebuild, a mid-session live-edge bucket — states
-`prefer_resample` + `derive_in_progress` are structurally blind to; repro:
+provably-STALE slice (the AUDITED reachable set — fold-in A: a CLI-pulled
+lake growing an already-materialised day SAME-DAY #1145, a
+prebuild-quarantined symbol #1221, a mid-session partial day — states
+`prefer_resample` + `derive_in_progress` are structurally blind to; the
+in-process pull / CLI new-day / F&O / engine cases audited already-safe and
+PINNED, not re-guarded — incl. the NEW CLI-new-day self-heal pin; repro:
 3minute 21365 vs 1minute 21374; 1day 21700 vs 21750.55) falls back to the
 existing proven-TF-invariant 1-minute derive fed from the SAME in-hand frame
 (the #1538 value read HOISTED — the fallback double-read collapses 2→1;
@@ -39,16 +50,29 @@ warner pattern, separate per-build budget; ZERO new payload keys). The 1day
 branch serves the CANONICAL `resample_1m_to_daily` re-derive on drift
 (value-plane compare, timestamp-exempt stamping convention; `date.max`
 saturates to abstain); a missing 1-minute base ABSTAINS to today's stored
-bytes (the G1 no-verdict doctrine — never a guess, never a dropped symbol).
+bytes (the G1 no-verdict doctrine — never a guess, never a dropped symbol);
+and the same-PR fold-in C (r2j_seam2) makes the `/movers` DEFAULT DATE
+1-minute-aware — `movers_warm.latest_movers_date` = the MAX fold of the
+verbatim `1day` arm + a NEW bounded 1-minute arm (filename max-month scan,
+zero Parquet opens, then ONE bounded DuckDB MAX(IST date); per-arm-guarded,
+`None` only when both abstain), fixing the executed repro of the default
+view pinning to the PREVIOUS day for hours mid-fetch — with COHERENCE: a
+day holding 1-minute but NO stored `1day` bar yet serves the SAME canonical
+re-derive SILENTLY (counted `resampled_reads`; the daily tab converges with
+the 1minute tab instead of blanking; a zero-1day-partition lake still shows
+an empty daily tab — discovery unchanged, disclosed; F&O 1-minute
+deliberately NOT scanned — bounded-I/O envelope).
 HONEST: on the intraday stored-hit path the guard's compare costs ≈ the
 fallback resample it guards against — the stored-first CPU saving largely
 evaporates (retained for the abstain envelope + provenance + the 1minute
 short-circuit); NO speedup claimed; fresh-lake payloads BYTE-IDENTICAL
 (spy-pinned, zero events); five stale-serve test pins consciously
-flipped/re-seeded (ledgered F1-F5). READ-ONLY dashboard — ENGINE UNCHANGED —
+flipped/re-seeded (ledgered F1-F5). READ-ONLY dashboard + the CLI sweep
+preflight refusal — ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
-`movers_snapshot.py` + `movers_stored_read.py` 100% line+branch;
-ruff/ruff-format/`mypy --strict`/pyright clean.)
+`movers_snapshot.py` + `movers_stored_read.py` + `tf_autoderive.py` +
+`sweep_preflight.py` + `movers_warm.py` ALL 100% line+branch;
+ruff/ruff-format/`mypy --strict`/pyright clean on the touched modules.)
 Earlier: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
 the P4 merge-integration rebind of the one-click display adapter onto the
 SHIPPED #1275 results-depth artifacts: the ONE discovery seam
@@ -1652,18 +1676,32 @@ hostile-review pass._
 - **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1622** — the
   `/movers` stored-read FRESHNESS GUARD: every prebuilt stored TF / `1day` day slice is verified against a fresh
   re-derive of the raw 1-minute base before it is served (the NEW pure `stored_day_frame_is_stale` delegating to the
-  ONE existing `compare_derived_freshness` — `tf_autoderive.py` ZERO diff, the #1492-G1 sweep gate non-regressed by an
-  empty diff; the 1day branch value-plane-compares against the canonical `resample_1m_to_daily`), and a provably-STALE
-  slice — the reproduced CLI-fetch-after-prebuild / quarantined / crashed / partial / live-edge prebuild states that
-  `prefer_resample` + `derive_in_progress` are blind to (repro: 3minute 21365 vs 1minute 21374; 1day 21700 vs
-  21750.55) — falls back to the proven-TF-invariant 1-minute derive fed from the SAME hoisted #1538 base frame
+  ONE existing `compare_derived_freshness`; the 1day branch value-plane-compares against the canonical
+  `resample_1m_to_daily`), and a provably-STALE slice — the AUDITED reachable set (fold-in A, reachable-set honesty):
+  a CLI-pulled lake growing an already-materialised day SAME-DAY, a prebuild-quarantined symbol, a mid-session
+  partial day — states `prefer_resample` + `derive_in_progress` are blind to (repro: 3minute 21365 vs 1minute 21374;
+  1day 21700 vs 21750.55), while the in-process pull / CLI new-day / F&O / engine cases are audited already-safe and
+  PINNED (the bypass spy, the NEW CLI-new-day self-heal pin, the locked 1-minute-native F&O snapshot, the #1492-G1
+  sweep gate) — falls back to the proven-TF-invariant 1-minute derive fed from the SAME hoisted #1538 base frame
   (fallback double-read collapses 2→1; I/O never MORE than today), counted under the existing `resampled_reads` + ONE
   capped `movers.stored_stale_fallback` WARN — ZERO new payload keys; a missing 1-minute base ABSTAINS to the stored
   bytes (never a guess, never a dropped symbol); fresh-lake payloads BYTE-IDENTICAL (spy-pinned, zero events); five
-  stale-serve test pins consciously flipped/re-seeded (F1-F5, ledgered). HONEST: the guard's compare ≈ the fallback
-  resample it prevents on the stored-hit path — no speedup claimed. READ-ONLY dashboard — ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `movers_snapshot.py` + `movers_stored_read.py` 100%
-  line+branch; ruff/ruff-format/`mypy --strict` (403 files)/pyright clean.)
+  stale-serve test pins consciously flipped/re-seeded (F1-F5, ledgered). SAME-PR FOLD-IN B (BND-5b): `tf_autoderive`
+  gains the pure `compare_daily_freshness` + a `(symbol, "1day")` verdict (kw-only `daily_before`), so the #1492-G1
+  sweep-preflight gate now REFUSES a post-crash stale stored `1day` loudly (`EXIT_USER_ERROR` naming the pair; zero
+  gate-code change — fail-closed on any non-"fresh" string); non-1day verdicts byte-identical pinned; abstains kept
+  (no partition / no 1m base / FNO — named follow-up DEC-FNO-DAILY-FRESHNESS-001); timestamp-INCLUSIVE by design
+  (the lake-plane divergence from movers' value-plane compare, cross-documented). SAME-PR FOLD-IN C (r2j_seam2):
+  `latest_movers_date` is 1-minute-aware — the MAX fold of the verbatim `1day` arm + a NEW bounded 1m arm (filename
+  max-month scan, zero Parquet opens, ONE bounded DuckDB MAX; per-arm-guarded abstains) — fixing the default view
+  pinning to the PREVIOUS day for hours mid-fetch; coherence: a day with 1m but NO stored `1day` bar serves the
+  canonical re-derive SILENTLY (counted; the daily tab converges with 1minute instead of blanking; zero-1day-partition
+  discovery limit unchanged + disclosed; F&O 1m deliberately not scanned). HONEST: the guard's compare ≈ the fallback
+  resample it prevents on the stored-hit path — no speedup claimed. READ-ONLY dashboard + the CLI sweep-preflight
+  refusal — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `movers_snapshot.py` + `movers_stored_read.py` +
+  `tf_autoderive.py` + `sweep_preflight.py` + `movers_warm.py` ALL 100%
+  line+branch; ruff/ruff-format/`mypy --strict`/pyright clean on the touched modules.)
   Earlier: `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
   P4 merge-integration rebind, built ON TOP of PR #1280's `claude/operator-page-real-rebuild` head (the eventual PR
   targets main only after #1280 merges): the one-click discovery seam repoints `<results_root>/runs/` → the Ruling-4
@@ -3920,7 +3958,12 @@ hostile-review pass._
   (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1622 — the `/movers`
   stored-read freshness guard: a stale prebuilt TF / `1day` day slice is
   detected against the raw 1-minute base and falls back to the 1-minute
-  derive, warned + counted; READ-ONLY dashboard; ENGINE UNCHANGED —
+  derive, warned + counted — reachability audited to exactly the CLI
+  same-day-growth / quarantined-symbol / mid-session-partial states, the
+  safe neighbours pinned; + fold-in B: the sweep-preflight freshness gate
+  now covers the derived `1day`; + fold-in C: the `/movers` default date is
+  1-minute-aware with missing-1day-bar coherence; READ-ONLY dashboard + the
+  CLI sweep-preflight refusal; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
   Earlier: `claude/oneclick-sweep-runs-rebind`
   (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 — the P4

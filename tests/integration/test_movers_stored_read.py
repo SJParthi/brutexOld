@@ -569,6 +569,40 @@ class TestStoredFreshnessGuard:
         }
         assert ltps == {Decimal("20125")}
 
+    def test_cli_new_day_self_heals_via_absent_day_fallback(self, tmp_path: Path) -> None:
+        """A1 — the audited SAFE case pinned (reachable-set honesty, fold-in
+        A): a CLI ``brutex fetch`` landing a whole NEW day's 1-minute bars
+        (the stored TF partitions end at the prebuild's last day) is NOT a
+        stale-serve state — the stored read finds no rows for the new day and
+        the pre-existing absent-day fallback serves the fresh 1-minute
+        resample, with ZERO ``movers.stored_stale_fallback`` events (a
+        self-heal, never the warned stale path)."""
+        from structlog.testing import capture_logs
+
+        new_day = date(2024, 6, 14)  # the next NSE session after _DAY (a Friday)
+        _seed_spot(tmp_path, "NIFTY", 20000)
+        _materialize_spot(tmp_path, "NIFTY")  # prebuild covers only up to _DAY
+        # The CLI fetch lands the NEW day's session; no prebuild follows (#1145).
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=_session(new_day, 21000),
+        )
+        with capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="5minute", date=new_day.isoformat(), time=None
+            )
+            base = compute_spot_candidates(
+                lake_root=tmp_path, interval="1minute", date=new_day.isoformat(), time=None
+            )
+        assert len(cands.snapshots) == 1
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 1)  # the honest fallback
+        # Fresh new-day bytes — the 5minute LTP equals the 1minute LTP (one truth).
+        assert cands.snapshots[0].ltp == base.snapshots[0].ltp == Decimal("21090")
+        assert [e for e in logs if e["event"] == "movers.stored_stale_fallback"] == []
+
     def test_value_drift_same_shape_is_caught(self, tmp_path: Path) -> None:
         """N2 — a stored partition with the CORRECT bucket timestamps + height
         but ONE drifted close still falls back (full-equality teeth beyond the

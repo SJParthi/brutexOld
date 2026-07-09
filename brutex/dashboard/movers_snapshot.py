@@ -937,10 +937,12 @@ def _read_intraday_bars(
     :func:`~brutex.dashboard.movers_stored_read.stored_day_frame_is_stale`
     (delegating to the ONE existing comparator
     ``tf_autoderive.compare_derived_freshness`` — CLAUDE.md §11 COMMON). A
-    STALE verdict (a CLI-fetch-after-prebuild lake, a quarantined / crashed /
-    partial prebuild, a mid-session live-edge bucket — states the
-    ``prefer_resample`` probe and the derive-lock probe are structurally blind
-    to) takes the existing proven-TF-invariant 1-minute resample fallback fed
+    STALE verdict (the AUDITED reachable set: a CLI-pulled lake growing an
+    already-materialised day SAME-DAY, a prebuild-quarantined symbol, a
+    mid-session partial day — states the ``prefer_resample`` probe and the
+    derive-lock probe are structurally blind to; an in-process pull and a CLI
+    NEW-day fetch are already safe — the bypass and the absent-day fallback,
+    both pinned) takes the existing proven-TF-invariant 1-minute resample fallback fed
     from the SAME in-hand frame + one capped WARN. A missing base (``None``)
     is an HONEST ABSTAIN — the verdict is unknowable without the 1-minute base
     (the ``tf_autoderive`` no-base abstain doctrine mirrored); refusing would
