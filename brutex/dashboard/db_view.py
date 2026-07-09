@@ -3330,7 +3330,10 @@ def _fno_derived_rows(
         pid = row[pid_idx] if pid_idx >= 0 else None
         # DuckDB fetchall() returns a native Python int for INTEGER-family columns
         # (NULL → None) — the driver contract this isinstance narrowing relies on.
-        packed = pid if isinstance(pid, int) else None
+        # bool is EXCLUDED explicitly (bool subclasses int, so a stray True would
+        # otherwise decode as packed id 1 → a fabricated "ok"); DuckDB never yields
+        # bool for an INTEGER column, but Golden Rule #1 forbids relying on that.
+        packed = pid if isinstance(pid, int) and not isinstance(pid, bool) else None
         return greeks_status_label(packed, is_option=option_type is not None)
 
     # A future / undecodable contract (or an option with no decoded strike) has no

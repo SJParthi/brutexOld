@@ -1035,6 +1035,28 @@ class TestGreeksStatusColumn:
         )
         assert rows[0][5] == "not enriched"
 
+    def test_bool_pid_cell_degrades_to_not_enriched(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # Finder fold (Golden Rule #1): bool subclasses int, so a stray ``True``
+        # cell passed a bare ``isinstance(pid, int)`` narrowing and decoded as
+        # packed id 1 → a fabricated "ok". Production-unreachable (DuckDB never
+        # yields bool for an INTEGER column) but the narrowing must not rely on
+        # that — a bool stamp reads the honest "not enriched", never "ok".
+        # FAILS BEFORE THE FIX: rows[0][5] read "ok".
+        _seed_option_lake(tmp_path)
+        rows, _conf, _join = _fno_derived_rows(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            interval="1minute",
+            raw_rows=[(_T1, Decimal("150"), True)],
+            out_columns=["timestamp", "close", "greeks_provenance_id"],
+        )
+        assert rows[0][5] == "not enriched"
+        assert rows[0][5] != "ok"
+
     def test_int_pid_cell_decodes_through_the_derived_rows(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
