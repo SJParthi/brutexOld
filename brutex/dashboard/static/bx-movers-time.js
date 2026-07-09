@@ -24,16 +24,17 @@
  * HH:MM(bucketFinal), the minute actually SENT as ?time=. The backend as-of
  * cut is inclusive-≤ on the RAW 1-minute frame BEFORE resampling
  * (movers_snapshot.filter_to_ist_minute), so a bucket-START cutoff serves a
- * FORMING partial bucket while the bucket-FINAL cutoff serves the COMPLETED
+ * PARTIAL (mid-bucket) cut while the bucket-FINAL cutoff serves the COMPLETED
  * bar — byte-equal to the stored /db row — WHEN the lake holds the bucket in
  * full (the #1145 stored-vs-resample equality; every non-last value is
  * _stored_serves_cutoff-aligned, the always-"15:29" last value rides the
  * resample path on non-divisor TFs with byte-equal values). HONEST LIMIT: a
- * pick whose bucket-final lies BEYOND the day's last traded minute (a
- * live/partial day) serves the latest FORMING data instead — undetectable
- * client-side today because the backend echoes latest_time only on Latest
- * (no-time) requests, so the forming disclosure below cannot cover explicit
- * picks (named follow-up DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001).
+ * pick whose bucket-final lies BEYOND the day's last stored minute (a day
+ * incomplete in the DB — pull still in progress / truncated day) serves
+ * exactly the data stored so far instead — undetectable client-side today
+ * because the backend echoes latest_time only on Latest (no-time) requests,
+ * so the stored-data disclosure below cannot cover explicit picks (named
+ * follow-up DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001).
  * Containing-bucket disclosure: the snap may extend the effective as-of by
  * up to m−1 minutes past the raw instant — the page's as-of span label
  * ("15:27–15:29") makes that visible.
@@ -103,8 +104,8 @@ function bxBucketStart(instantMin, minutes) {
 /* The bucket-FINAL minute (the SENT ?time= cutoff) of the m-minute bucket
  * containing the instant — min(bucketStart + m − 1, 929). Sending this serves
  * the COMPLETED bucket (inclusive-≤ raw-1m cut) when the lake holds it in
- * full; past the day's last traded minute it serves the latest forming data
- * (the header's HONEST LIMIT). */
+ * full; past the day's last stored minute it serves exactly the data stored
+ * so far (the header's HONEST LIMIT). */
 function bxBucketFinal(instantMin, minutes) {
   return Math.min(bxBucketStart(instantMin, minutes) + minutes - 1, BX_SESSION_LAST_MIN);
 }
@@ -149,25 +150,32 @@ function bxTimeOptionPairs(minutes) {
   });
 }
 
-/* Forming-bar verdict for the Latest as-of (DEC-MOVERS-TIME-SNAP-UX-001
- * item 4): given the payload's latest_time echo ("HH:MM") and the selected
- * timeframe's minutes, report whether that instant falls MID-bucket (the bar
- * on screen is a forming partial) and where the completed bar closes.
- * null (honest abstain — no forming claim) when the timeframe is
- * daily/unknown OR latestHHMM is absent/malformed. The instant is clamped
- * into the session first, so an out-of-session echo can never claim forming.
- * A finalized day (latest 15:29) is final==929 on EVERY timeframe → never
- * forming (the session-truncated last bucket closes at 15:29). */
-function bxFormingInfo(latestHHMM, minutes) {
+/* Stored-data verdict for the Latest as-of (DEC-MOVERS-TIME-SNAP-UX-001
+ * item 4, reworded to the operator's FINAL stored-data-only spec — the
+ * "forming bar" concept is CUT as a feature; the only residual partial
+ * display is a day whose stored data ends mid-session): given the payload's
+ * latest_time echo ("HH:MM") and the selected timeframe's minutes, report
+ * whether the DAY is incomplete in the DB (latest stored minute is
+ * mid-session — pull may still be running / truncated day), whether that
+ * minute additionally falls MID-bucket (the last bar on screen aggregates
+ * stored data only through it), and where the completed bar would close.
+ * null (honest abstain — no claim) when the timeframe is daily/unknown OR
+ * latestHHMM is absent/malformed. The instant is clamped into the session
+ * first, so an out-of-session echo (e.g. a Muhurat evening session) can
+ * never claim an incomplete day. A finalized day (latest 15:29) reads
+ * dayIncomplete==false AND midBucket==false on EVERY timeframe (final==929
+ * everywhere — the session-truncated last bucket closes at 15:29). */
+function bxStoredCutInfo(latestHHMM, minutes) {
   if (!bxIsIntradayMinutes(minutes)) return null;
   var raw = bxCutoffMinute(latestHHMM);
   if (raw === null) return null;
   var t = bxClampInstant(raw);
   var fin = bxBucketFinal(t, minutes);
   return {
-    forming: t !== fin,
+    dayIncomplete: t !== BX_SESSION_LAST_MIN,
+    midBucket: t !== fin,
     barLabel: bxMinuteToHHMM(bxBucketStart(t, minutes)),
-    upTo: latestHHMM,
+    dataThrough: latestHHMM,
     closesAt: bxMinuteToHHMM(fin),
   };
 }
@@ -185,7 +193,7 @@ var BXMoversTime = {
   bucketFinal: bxBucketFinal,
   snapTime: bxSnapTime,
   timeOptionPairs: bxTimeOptionPairs,
-  formingInfo: bxFormingInfo,
+  storedCutInfo: bxStoredCutInfo,
 };
 
 /* Browsers get the global; a non-browser harness (the node golden) gets the

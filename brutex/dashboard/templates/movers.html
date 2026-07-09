@@ -323,10 +323,10 @@ const SAMPLE = {
    label) and value = bucket-FINAL HH:MM (min(start+m−1, 15:29), the SENT
    ?time= cutoff) — the backend's inclusive-≤ raw-1m cut then serves the
    COMPLETED /db-equal bar when the lake holds the bucket in full; a pick
-   whose bucket-final lies beyond the day's last traded minute serves the
-   latest FORMING data instead (undetectable here — latest_time is echoed
-   only on Latest requests; named follow-up
-   DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001). NO first-slot pin and NO
+   whose bucket-final lies beyond the day's last stored minute serves
+   exactly the data stored so far instead (undetectable here — latest_time
+   is echoed only on Latest requests; named follow-up
+   DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001). NO first-slot pin and NO
    Latest fallback on a non-slot pick (the two pre-fix reset bugs). Grid
    strings come from BXMoversTime.timeOptionPairs — numeric-generated "HH:MM"
    + one static literal, so the innerHTML stays XSS-safe
@@ -674,18 +674,26 @@ async function load() {
        multi-minute pick shows its BUCKET SPAN ("15:27–15:29" — the /db label
        to the sent bucket-final cutoff, making the containing-bucket snap
        visible); 1minute keeps the plain minute; a daily TF reads "(daily)".
-       A Latest cut whose last minute falls MID-bucket is labelled a FORMING
-       bar (item 4 — derived 100% client-side from the existing latest_time
-       echo via BXMoversTime.formingInfo; a malformed/absent echo abstains to
-       the plain label, never a wrong forming claim). HONEST LIMIT: the
-       forming disclosure covers the LATEST cut only — an EXPLICIT pick whose
-       bucket-final lies beyond the day's last traded minute (a live/partial
-       day) also serves forming data under its completed-span label, but is
-       UNDETECTABLE client-side today because the backend echoes latest_time
-       only when no time was sent (app.py `time is None` gate, pinned by
+       A Latest cut over a day whose stored data ends MID-SESSION (the day
+       is incomplete in the DB — pull may still be running / truncated day)
+       carries a STORED-DATA note (item 4, reworded to the operator's FINAL
+       stored-data-only spec — the "forming bar" concept is CUT; the rule is
+       "show exactly what's stored" and the label speaks only about the
+       stored data): "data through HH:MM — day incomplete in DB", plus
+       "; completed <tf> bar would close HH:MM" only when the latest stored
+       minute additionally falls MID-bucket (derived 100% client-side from
+       the existing latest_time echo via BXMoversTime.storedCutInfo; a
+       malformed/absent echo abstains to the plain label, never a wrong
+       claim; a finalized day — latest 15:29 — never shows it on any TF).
+       HONEST LIMIT: the stored-data disclosure covers the LATEST cut only —
+       an EXPLICIT pick whose bucket-final lies beyond the day's last stored
+       minute also serves exactly the data stored so far under its
+       completed-span label, but is UNDETECTABLE client-side today because
+       the backend echoes latest_time only when no time was sent (app.py
+       `time is None` gate, pinned by
        test_explicit_time_leaves_latest_time_none); echoing it on explicit
        picks + extending this note is the named follow-up
-       DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001. textContent only. */
+       DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001. textContent only. */
     const asofM = TF_MIN[j.interval] || 375;
     const isDaily = asofM >= 375;
     const pickedMin = j.time ? BXMoversTime.cutoffMinute(j.time) : null;
@@ -694,12 +702,12 @@ async function load() {
                        : j.time)
                    : isDaily ? "(daily)"
                    : (j.latest_time ? `latest (${j.latest_time})` : "latest");
-    const formingInfo = (!j.time && !isDaily && j.latest_time)
-      ? BXMoversTime.formingInfo(j.latest_time, asofM) : null;
-    const formingNote = (formingInfo && formingInfo.forming)
-      ? ` · forming ${j.interval||""} bar — includes trades up to ${j.latest_time} only; completed bar closes at ${formingInfo.closesAt}`
+    const cutInfo = (!j.time && !isDaily && j.latest_time)
+      ? BXMoversTime.storedCutInfo(j.latest_time, asofM) : null;
+    const storedNote = (cutInfo && cutInfo.dayIncomplete)
+      ? ` · data through ${j.latest_time} — day incomplete in DB${cutInfo.midBucket ? `; completed ${j.interval||""} bar would close ${cutInfo.closesAt}` : ""}`
       : "";
-    $("asof").textContent = `as-of ${(j.date||"")} ${asofTime} · ${j.interval||""}${formingNote}`;
+    $("asof").textContent = `as-of ${(j.date||"")} ${asofTime} · ${j.interval||""}${storedNote}`;
     /* Defensive adopt of an EXPLICIT echoed as-of — reflected via .value /
        .textContent (never innerHTML of server data), injecting an off-grid
        minute as a selectable option (XSS-safe). A no-op BY CONSTRUCTION since

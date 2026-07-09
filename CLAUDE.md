@@ -30,27 +30,33 @@ bucket-FINAL HH:MM` (`min(start+m−1, 15:29)`, the SENT `?time=` cutoff) — so
 an explicit pick serves the completed /db-equal bar WHEN the lake holds the
 bucket in full (`_stored_serves_cutoff`-aligned for every non-last slot; the
 always-`15:29` last slot rides the resample path byte-equal on non-divisor
-TFs), closing the operator's 24360.00-vs-24355.1 forming-cut confusion at
+TFs), closing the operator's 24360.00-vs-24355.1 partial-cut confusion at
 the root. NEW
 persistent `state.instant` (minute-of-day; written ONLY by an explicit pick,
 never by a TF switch / 1day round-trip / adopt) + pure `bxSnapTime` /
 `bxBucketStart` / `bxBucketFinal` / `bxTimeOptionPairs` / `bxCutoffMinute` /
-`bxFormingInfo` on the COMMON `bx-movers-time.js` (`bxResolveTime` superseded
-+ deleted); "Latest" applies only when no explicit pick exists; a mid-bucket
-Latest is labelled `forming <tf> bar — includes trades up to HH:MM only;
-completed bar closes at HH:MM` (client-derived from the existing
-`latest_time` echo — zero payload change); /db gains a static
+`bxStoredCutInfo` on the COMMON `bx-movers-time.js` (`bxResolveTime`
+superseded + deleted); "Latest" applies only when no explicit pick exists; a
+Latest over a day whose stored data ends mid-session (day incomplete in the
+DB — pull still in progress / truncated day) is labelled `data through HH:MM
+— day incomplete in DB`, plus `; completed <tf> bar would close HH:MM` only
+when the latest stored minute additionally falls mid-bucket (the operator's
+FINAL stored-data-only spec — the "forming bar" concept is CUT as a feature,
+the label speaks only about the STORED DATA; client-derived from the
+existing `latest_time` echo — zero payload change; a finalized day never
+shows it on any TF); /db gains a static
 bucket-START-label stepnote. PLUS the `/movers` route ships `Cache-Control:
 no-store` (the /db precedent — the browser-cache staleness that served the
 operator the pre-#1243 09:15 page). HONEST: the containing-bucket snap can
 extend the effective as-of by up to m−1 minutes (disclosed in the span
 label); explicit coarse-TF picks now show the COMPLETED bar where they showed
-a forming cut — a SANCTIONED operator-specified correction; a pick whose
-bucket-final lies BEYOND the day's last traded minute (a live/partial day)
-serves the latest FORMING data under its completed-span label, undetectable
-client-side (`latest_time` is echoed only on Latest requests — the pinned
-DEC-MOVERS-ASOF-LATEST-DEFAULT-001 scoping; envelope-pinned; named follow-up
-DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001); node goldens pin
+a mid-bucket partial cut — a SANCTIONED operator-specified correction; a pick
+whose bucket-final lies BEYOND the day's last stored minute (a day incomplete
+in the DB) serves exactly the data stored so far under its completed-span
+label, undetectable client-side (`latest_time` is echoed only on Latest
+requests — the pinned DEC-MOVERS-ASOF-LATEST-DEFAULT-001 scoping;
+envelope-pinned; named follow-up
+DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001); node goldens pin
 LOGIC, substring tests pin PRESENCE — no headless-browser claim. FRONTEND
 display/UX + one response header — every payload key byte-identical;
 READ-ONLY dashboard; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
@@ -1732,19 +1738,20 @@ hostile-review pass._
   /db row label) / `value = bucket-FINAL HH:MM` (`min(start+m−1, 15:29)`, the SENT `?time=` cutoff) — an explicit
   pick serves the COMPLETED /db-equal bar WHEN the lake holds the bucket in full (every non-last slot
   `_stored_serves_cutoff`-aligned; the always-`15:29` last slot resample-path byte-equal on non-divisor TFs),
-  closing the 24360.00-vs-24355.1 forming-cut confusion; NEW persistent `state.instant` written ONLY by an explicit pick (survives TF walks +
+  closing the 24360.00-vs-24355.1 partial-cut confusion; NEW persistent `state.instant` written ONLY by an explicit pick (survives TF walks +
   1day round-trips; round-trip 1→3→5→1min exact — a 24,282-case ordered-TF-pair (src ≠ dst) property); `bxResolveTime`
-  superseded + DELETED; mid-bucket Latest labelled "forming <tf> bar — … completed bar closes at HH:MM"
-  (client-derived from the existing `latest_time` echo); explicit multi-minute picks show the bucket SPAN
+  superseded + DELETED; a Latest over a day incomplete in the DB labelled "data through HH:MM — day incomplete
+  in DB[; completed <tf> bar would close HH:MM]" (the operator's FINAL stored-data-only spec — the "forming bar"
+  concept is CUT; client-derived from the existing `latest_time` echo; a finalized day never shows it); explicit multi-minute picks show the bucket SPAN
   ("15:27–15:29"); /db gains a static bucket-START-label stepnote; the `/movers` route ships `Cache-Control:
   no-store` (the /db DEC-DB-VIEWER-NOSTORE-001 precedent — the browser-cache staleness that served the operator
   the pre-#1243 page). HONEST: the snap can extend the effective as-of by up to m−1 minutes (disclosed in the
   span label); coarse-TF explicit picks now show the COMPLETED bar — a SANCTIONED operator-specified correction;
-  a pick whose bucket-final lies BEYOND the day's last traded minute (a live/partial day) serves the latest
-  FORMING data under its completed-span label — undetectable client-side because `latest_time` is echoed only on
-  Latest requests (the pinned DEC-MOVERS-ASOF-LATEST-DEFAULT-001 scoping); envelope-pinned
-  (`test_pick_beyond_end_of_data_serves_the_forming_latest_envelope`), the explicit-pick echo + forming note is
-  the named follow-up DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001;
+  a pick whose bucket-final lies BEYOND the day's last stored minute (a day incomplete in the DB) serves
+  exactly the data stored so far under its completed-span label — undetectable client-side because `latest_time`
+  is echoed only on Latest requests (the pinned DEC-MOVERS-ASOF-LATEST-DEFAULT-001 scoping); envelope-pinned
+  (`test_pick_beyond_end_of_data_serves_the_stored_latest_envelope`), the explicit-pick echo + stored-data note
+  is the named follow-up DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001;
   node goldens pin LOGIC, substring tests pin PRESENCE — no headless-browser claim; `_MOVERS_TEMPLATE_CACHE`
   still needs a restart per redeploy (envelope note). FRONTEND display/UX + one response header — every payload
   key byte-identical, Latest requests byte-identical; READ-ONLY dashboard; ENGINE UNCHANGED —
@@ -4155,8 +4162,9 @@ hostile-review pass._
   as-of TIME persists across TF switches + snaps to the completed containing
   bucket (label = bucket-START, sent value = bucket-FINAL — the /db-equal
   completed bar when the lake holds the bucket in full; a pick beyond the
-  day's last traded minute serves the latest forming data — named follow-up
-  DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001); `bxResolveTime` deleted; forming-bar Latest label; /db
+  day's last stored minute serves exactly the data stored so far — named
+  follow-up DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001); `bxResolveTime`
+  deleted; the day-incomplete-in-DB stored-data Latest label; /db
   bucket-label stepnote; `/movers` `Cache-Control: no-store`; READ-ONLY
   dashboard display/UX; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/dazzling-pasteur-jf8s3w`

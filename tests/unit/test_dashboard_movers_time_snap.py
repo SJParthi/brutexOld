@@ -27,11 +27,15 @@ Each dropdown option: label = HH:MM(bucketStart) (the /db row label), value =
 HH:MM(bucketFinal) (the SENT ``?time=`` cutoff) — so an explicit pick serves
 the COMPLETED /db-equal bar WHENEVER the lake holds the bucket in full (the
 backend cut is inclusive-<= on the raw 1-minute frame BEFORE resampling),
-killing the operator's 24360.00-vs-24355.1 forming-cut confusion at the root.
+killing the operator's 24360.00-vs-24355.1 partial-cut confusion at the root.
 HONEST LIMIT (envelope-pinned below): a pick whose bucket-final lies BEYOND
-the day's last traded minute (a live/partial day) serves the latest FORMING
-data instead, undetectable client-side — ``latest_time`` is echoed only on
-Latest requests (named follow-up DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001).
+the day's last stored minute (a day incomplete in the DB — pull still in
+progress / truncated day) serves exactly the data stored so far instead,
+undetectable client-side — ``latest_time`` is echoed only on Latest requests
+(named follow-up DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001). Per the
+operator's FINAL stored-data-only spec the "forming bar" concept is CUT as a
+feature: the Latest label's residual disclosure speaks ONLY about the stored
+data ("data through HH:MM — day incomplete in DB"), never a "forming" bar.
 
 House idiom: node-executed goldens run the REAL shipped ``bx-movers-time.js``
 (and the REAL ``fillTimes()`` / handler lines extracted verbatim from
@@ -488,39 +492,75 @@ console.log(JSON.stringify({{ cases, bad: bad.slice(0, 5) }}));
 
 
 @node_required
-class TestFormingInfo:
-    def test_operator_example_3min_at_1527_is_forming(self) -> None:
-        info = _run_js("t.formingInfo('15:27', 3)")
-        assert info == {"forming": True, "barLabel": "15:27", "upTo": "15:27", "closesAt": "15:29"}
+class TestStoredCutInfo:
+    """The stored-data verdict (the operator's FINAL spec: labels speak only
+    about the STORED DATA — the "forming bar" concept is CUT). The note fires
+    iff the day is incomplete in the DB (latest stored minute mid-session);
+    the completed-bar tail applies only when that minute is also MID-bucket.
+    """
 
-    def test_first_bucket_forming_e10(self) -> None:
-        info = _run_js("t.formingInfo('09:15', 5)")
-        assert info == {"forming": True, "barLabel": "09:15", "upTo": "09:15", "closesAt": "09:19"}
+    def test_operator_example_3min_at_1527_is_incomplete_mid_bucket(self) -> None:
+        info = _run_js("t.storedCutInfo('15:27', 3)")
+        assert info == {
+            "dayIncomplete": True,
+            "midBucket": True,
+            "barLabel": "15:27",
+            "dataThrough": "15:27",
+            "closesAt": "15:29",
+        }
 
-    def test_finalized_day_never_forming_e11(self) -> None:
-        # latest 15:29 → final == 929 on EVERY TF (session-truncated last bucket).
+    def test_first_bucket_mid_bucket_e10(self) -> None:
+        info = _run_js("t.storedCutInfo('09:15', 5)")
+        assert info == {
+            "dayIncomplete": True,
+            "midBucket": True,
+            "barLabel": "09:15",
+            "dataThrough": "09:15",
+            "closesAt": "09:19",
+        }
+
+    def test_finalized_day_never_flagged_e11(self) -> None:
+        # latest 15:29 → final == 929 on EVERY TF (session-truncated last
+        # bucket, incl. ragged non-divisors via min(start+m-1, 929)) — a
+        # FINALIZED day NEVER shows the stored-data note on any timeframe.
         for m in sorted(_TF_GOLDEN):
-            info = _run_js(f"t.formingInfo('15:29', {m})")
+            info = _run_js(f"t.storedCutInfo('15:29', {m})")
             assert isinstance(info, dict)
-            assert info["forming"] is False, m
+            assert info["dayIncomplete"] is False, m
+            assert info["midBucket"] is False, m
             assert info["closesAt"] == "15:29", m
 
-    def test_bucket_final_minute_not_forming(self) -> None:
-        info = _run_js("t.formingInfo('09:17', 3)")  # 09:17 IS the 09:15-bucket final
+    def test_bucket_final_minute_mid_day_is_incomplete_not_mid_bucket(self) -> None:
+        # 09:17 IS the 09:15-bucket final: the on-screen 3minute bar is
+        # complete, but the DAY is not — the note fires WITHOUT the
+        # completed-bar tail (stored-data semantics).
+        info = _run_js("t.storedCutInfo('09:17', 3)")
         assert isinstance(info, dict)
-        assert info["forming"] is False
+        assert info["dayIncomplete"] is True
+        assert info["midBucket"] is False
+
+    def test_one_minute_tf_mid_day_is_incomplete_not_mid_bucket(self) -> None:
+        # TF=1minute: every stored bar is complete, yet a mid-day latest
+        # still discloses the incomplete day (pull may be running).
+        info = _run_js("t.storedCutInfo('13:42', 1)")
+        assert isinstance(info, dict)
+        assert info["dayIncomplete"] is True
+        assert info["midBucket"] is False
+        assert info["dataThrough"] == "13:42"
 
     def test_absent_malformed_daily_abstain_e9(self) -> None:
-        assert _run_js("t.formingInfo(null, 3)") is None
-        assert _run_js("t.formingInfo('', 3)") is None
-        assert _run_js("t.formingInfo('junk', 3)") is None
-        assert _run_js("t.formingInfo('12:00', 375)") is None  # daily
-        assert _run_js("t.formingInfo('12:00', undefined)") is None  # unknown TF
+        assert _run_js("t.storedCutInfo(null, 3)") is None
+        assert _run_js("t.storedCutInfo('', 3)") is None
+        assert _run_js("t.storedCutInfo('junk', 3)") is None
+        assert _run_js("t.storedCutInfo('12:00', 375)") is None  # daily
+        assert _run_js("t.storedCutInfo('12:00', undefined)") is None  # unknown TF
 
-    def test_out_of_session_echo_never_claims_forming(self) -> None:
-        info = _run_js("t.formingInfo('16:00', 3)")  # clamped to 15:29 → final
+    def test_out_of_session_echo_never_claims_incomplete(self) -> None:
+        # e.g. a Muhurat evening session's echo clamps to 15:29 → finalized.
+        info = _run_js("t.storedCutInfo('16:00', 3)")  # clamped to 15:29 → final
         assert isinstance(info, dict)
-        assert info["forming"] is False
+        assert info["dayIncomplete"] is False
+        assert info["midBucket"] is False
 
 
 # ── the KEY-SEMANTICS teeth: explicit pick == the /db bar, value-for-value ──
@@ -542,27 +582,28 @@ def _bar_at(day: date, hhmm: str, close: str, volume: int) -> CandleBar:
 
 
 class TestExplicitPickEqualsDbBar:
-    """The mapping — not luck — closes the operator's forming-cut gap.
+    """The mapping — not luck — closes the operator's partial-cut gap.
 
     A 3-minute last bucket whose 1m closes DIVERGE: ``?time=15:29`` (the new
     sent bucket-final) must equal the /db 3minute bar labeled 15:27 (the
     resampler oracle), while ``?time=15:27`` (the OLD wire — a bucket-START
-    cutoff) serves the DIFFERENT forming value. The operator's confirmed
-    confusion: movers 3min@15:27 = 24360.00 (forming cut) vs /db bar 15:27 =
-    24355.1 (full bucket) — both correct, different semantics; the dropdown
-    now always sends the completed-bucket semantics.
+    cutoff) serves the DIFFERENT mid-bucket partial value. The operator's
+    confirmed confusion: movers 3min@15:27 = 24360.00 (mid-bucket cut) vs
+    /db bar 15:27 = 24355.1 (full bucket) — both correct, different
+    semantics; the dropdown now always sends the completed-bucket semantics.
 
     HONEST LIMIT (the round-3 hostile-review fold): the /db-equality holds
     WHENEVER the lake holds the picked bucket in full. A pick whose
-    bucket-final lies BEYOND the day's last traded minute (the live current
-    day, or a mid-pull partial day) serves the latest FORMING data instead —
-    and the client structurally cannot detect it today, because the backend
-    resolves ``latest_time`` only when no explicit ``time`` was sent
-    (app.py's ``time is None`` gate, integration-pinned by
-    ``test_explicit_time_leaves_latest_time_none``). Echoing ``latest_time``
-    on explicit picks + extending the forming note there is the NAMED
-    follow-up DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001 (a payload-VALUE
-    change deliberately kept out of this byte-identical-payload change).
+    bucket-final lies BEYOND the day's last stored minute (a day incomplete
+    in the DB — pull still in progress / truncated day) serves exactly the
+    data stored so far instead — and the client structurally cannot detect
+    it today, because the backend resolves ``latest_time`` only when no
+    explicit ``time`` was sent (app.py's ``time is None`` gate,
+    integration-pinned by ``test_explicit_time_leaves_latest_time_none``).
+    Echoing ``latest_time`` on explicit picks + extending the stored-data
+    note there is the NAMED follow-up
+    DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001 (a payload-VALUE change
+    deliberately kept out of this byte-identical-payload change).
     """
 
     _DAY = date(2024, 1, 2)
@@ -619,31 +660,32 @@ class TestExplicitPickEqualsDbBar:
         # The new wire (?time=15:29, the sent bucket-final) == the /db bar.
         assert self._ltp(tmp_path, "15:29") == db_bar_close
 
-    def test_bucket_start_cutoff_serves_the_forming_value(self, tmp_path: Path) -> None:
+    def test_bucket_start_cutoff_serves_the_partial_value(self, tmp_path: Path) -> None:
         self._write_lake(tmp_path)
         # The OLD wire (?time=15:27 — a bucket-START cutoff) cuts MID-bucket:
-        # the forming partial's close is the 15:27 1m close — a DIFFERENT number.
-        forming = self._ltp(tmp_path, "15:27")
+        # the partial cut's close is the 15:27 1m close — a DIFFERENT number.
+        partial = self._ltp(tmp_path, "15:27")
         completed = self._ltp(tmp_path, "15:29")
-        assert forming == Decimal("24360.00")
-        assert forming != completed
+        assert partial == Decimal("24360.00")
+        assert partial != completed
 
-    def test_pick_beyond_end_of_data_serves_the_forming_latest_envelope(
+    def test_pick_beyond_end_of_data_serves_the_stored_latest_envelope(
         self, tmp_path: Path
     ) -> None:
         """HONEST-LIMIT envelope pin (the round-3 hostile-review fold).
 
-        A live/partial day: the 1m lake ends at 13:00 IST. An explicit
-        ``?time=15:29`` (the 15:27-labeled slot's sent bucket-final) does NOT
-        serve any completed 15:27 bucket — none exists — it serves the latest
-        FORMING data: the 13:00-bucket cut (3minute bucket 13:00–13:02 holding
-        one minute), byte-equal to the Latest (no-time) whole-day cut. The
-        client cannot detect this today (``latest_time`` is echoed only on
-        Latest requests — ``test_explicit_time_leaves_latest_time_none``);
-        making it detectable is the NAMED follow-up
-        DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001. If this test ever FAILS,
-        the envelope moved — reconcile the ledger #1632 HONEST section, the
-        movers.html as-of note, and the bx-movers-time.js header together.
+        A day incomplete in the DB: the 1m lake ends at 13:00 IST. An
+        explicit ``?time=15:29`` (the 15:27-labeled slot's sent bucket-final)
+        does NOT serve any completed 15:27 bucket — none exists — it serves
+        exactly the data stored so far: the 13:00-bucket cut (3minute bucket
+        13:00–13:02 holding one minute), byte-equal to the Latest (no-time)
+        whole-day cut. The client cannot detect this today (``latest_time``
+        is echoed only on Latest requests —
+        ``test_explicit_time_leaves_latest_time_none``); making it detectable
+        is the NAMED follow-up DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001. If
+        this test ever FAILS, the envelope moved — reconcile the ledger #1632
+        HONEST section, the movers.html as-of note, and the bx-movers-time.js
+        header together.
         """
         bars = [
             _bar_at(self._DAY, "12:57", "101.00", 1),
@@ -655,10 +697,10 @@ class TestExplicitPickEqualsDbBar:
             exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=bars
         )
         # The picked 15:27–15:29 bucket does not exist in the lake; the served
-        # value is the forming 13:00-bucket cut (the 13:00 1m close) …
+        # value is the 13:00-bucket cut (the 13:00 1m close — the stored end) …
         assert self._ltp(tmp_path, "15:29") == Decimal("103.00")
         # … byte-equal to the Latest whole-day cut (the pick degenerated to
-        # "latest forming data", exactly what the disclosed envelope states).
+        # "the data stored so far", exactly what the disclosed envelope states).
         latest = compute_spot_candidates(
             lake_root=tmp_path,
             interval="3minute",
@@ -703,25 +745,33 @@ class TestTemplateWiringPins:
         assert "state.time" not in handler
         assert "state.instant" not in handler
 
-    def test_explicit_span_label_and_forming_note(self) -> None:
+    def test_explicit_span_label_and_stored_data_note(self) -> None:
         text = _MOVERS.read_text(encoding="utf-8")
         # The explicit-pick bucket SPAN label (start–final, textContent-only).
         assert "BXMoversTime.bucketStart(pickedMin, asofM)" in text
-        # The item-4 forming disclosure literal (client-derived from latest_time).
-        assert "completed bar closes at" in text
-        assert "BXMoversTime.formingInfo(j.latest_time, asofM)" in text
+        # The item-4 stored-data disclosure literals (client-derived from
+        # latest_time; the operator's FINAL spec wording — about the STORED
+        # DATA, never a "forming" bar).
+        assert "day incomplete in DB" in text
+        assert "bar would close" in text
+        assert "BXMoversTime.storedCutInfo(j.latest_time, asofM)" in text
+        # The retired "forming bar" copy must never come back (the label's
+        # code path speaks only about the stored data).
+        assert "forming ${" not in text
+        assert "includes trades up to" not in text
 
     def test_honest_limit_disclosure_names_the_followup(self) -> None:
-        # The round-3 fold: the explicit-pick-beyond-end-of-data FORMING limit
-        # (an explicit pick's /db-equality holds only when the lake holds the
-        # bucket in full) must stay DISCLOSED at both frontend sources, each
-        # naming the follow-up that would make it client-detectable. Presence
-        # pins only (honest envelope) — the behavior itself is pinned by
-        # test_pick_beyond_end_of_data_serves_the_forming_latest_envelope.
+        # The round-3 fold: the explicit-pick-beyond-end-of-data stored-data
+        # limit (an explicit pick's /db-equality holds only when the lake
+        # holds the bucket in full) must stay DISCLOSED at both frontend
+        # sources, each naming the follow-up that would make it
+        # client-detectable. Presence pins only (honest envelope) — the
+        # behavior itself is pinned by
+        # test_pick_beyond_end_of_data_serves_the_stored_latest_envelope.
         for path in (_MOVERS, _STATIC_JS):
             text = path.read_text(encoding="utf-8")
-            assert "DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001" in text, path.name
-        assert "last traded minute" in _MOVERS.read_text(encoding="utf-8")
+            assert "DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001" in text, path.name
+        assert "last stored minute" in _MOVERS.read_text(encoding="utf-8")
 
     def test_adopt_block_stays_defensive_and_instant_free(self) -> None:
         text = _MOVERS.read_text(encoding="utf-8")
