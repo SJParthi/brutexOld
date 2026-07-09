@@ -721,6 +721,77 @@ def test_cmd_fetch_live_inspect_reports_failures(
     assert controller.snapshot()["ceiling_per_min"] == 500
 
 
+def test_cmd_fetch_live_pull_halts_when_crossing_market_hours(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-1: a LIVE ``brutex fetch`` that CROSSES
+    08:45 IST mid-run halts GRACEFULLY — committed work kept, ledger resumable, EXIT_OK.
+
+    The start gate ALLOWED this pull (launched off-hours), so only the mid-run belt
+    can stop it. The spine raises :class:`MarketHoursHalt` on the window that crosses;
+    ``cmd_fetch`` must (a) thread a non-``None`` ``market_closed`` predicate into the
+    ingest spine, (b) catch the halt, drain+persist the ledger (resumable), and (c)
+    exit ``EXIT_OK`` with the halt notice — never a crash the legacy auto-resume would
+    hammer-retry. The ingest engine is faked to RAISE the halt (simulating the spine's
+    per-window belt firing); the real persisting sink + ledger prove the drain/persist.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.data.errors import MarketHoursHalt
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_build_live_groww_spot",
+        lambda lake, catalog=None: (
+            object(),
+            ParquetBarSink(writer=ParquetWriter(lake_root=lake), catalog=catalog),
+        ),
+    )
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    seen: dict[str, Any] = {}
+
+    def fake_ingest(adapter_arg: Any, sink_arg: Any, **kwargs: Any) -> Any:
+        """Record the wiring, then simulate the per-window belt crossing 08:45."""
+        seen.update(kwargs)
+        raise MarketHoursHalt()
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=2,
+        auto_retry=False,
+    )
+    # Graceful deferral — EXIT_OK, never a crash the auto-resume would hammer-retry.
+    assert rc == cli.EXIT_OK
+    captured = capsys.readouterr()
+    assert (
+        "[brutex] fetch halted — crossed into NSE market-hours window "
+        "(08:45-15:35 IST); committed work kept, resumes next out-of-hours run"
+    ) in captured.out
+    # (a) a REAL live pull threads a bound (non-None) market-hours predicate.
+    assert seen["market_closed"] is not None
+    assert callable(seen["market_closed"])
+    # (b) the ledger was drained + persisted (resumable), not wiped — the durable
+    # window-ledger sidecar exists for the next out-of-hours run to resume from.
+    assert (tmp_path / "window_ledger" / "ledger.parquet").exists()
+
+
 def test_cmd_fetch_live_wires_timeout_ladder_into_ingest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1215,8 +1286,14 @@ def test_cmd_fetch_until_clean_dead_token_needs_operator(
     until_clean_mod = importlib.import_module("brutex.adapters.ingest_common")
     budgets: list[int] = []
 
-    def fake_run_until_clean(round_runner: Any, *, max_rounds: int) -> Any:
-        """Drive ONE real round, then report the loop halted on a dead token."""
+    def fake_run_until_clean(
+        round_runner: Any, *, max_rounds: int, market_closed: Any = None
+    ) -> Any:
+        """Drive ONE real round, then report the loop halted on a dead token.
+
+        Accepts the DEC-GROWW-MARKET-HOURS-GUARD-001 between-rounds ``market_closed``
+        belt kwarg the CLI now threads (default ``None`` — this fake never crosses).
+        """
         budgets.append(max_rounds)
         round_runner()
         return until_clean_mod.UntilCleanOutcome(

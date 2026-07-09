@@ -245,8 +245,9 @@ class TestMarketHoursHalt:
         sink = _RecordingSink()
         halts: list[BaseException] = []
         monkeypatch.setattr(historical_pull, "emit_pull_halt_alert", halts.append)
-        # A REAL (dry_run=False) pull binds guard_active_default — force it active.
-        monkeypatch.setattr(historical_pull, "guard_active_default", lambda: True)
+        # A REAL (dry_run=False) pull resolves the belt ONCE at pull start
+        # (DEC-GROWW-MARKET-HOURS-GUARD-001 MINOR) — force the bound predicate active.
+        monkeypatch.setattr(historical_pull, "resolve_market_closed", lambda: lambda: True)
         with capture_logs() as logs:
             report = pull_contract_candles(
                 registry.list_contracts(),
@@ -273,13 +274,13 @@ class TestMarketHoursHalt:
     def test_market_closed_open_completes_normally(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """market_closed inactive (guard binds but returns False) → normal pull."""
+        """market_closed inactive (belt binds but returns False) → normal pull."""
         from brutex.dashboard import historical_pull
 
         registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
         sdk = _FakeSDK()
         sink = _RecordingSink()
-        monkeypatch.setattr(historical_pull, "guard_active_default", lambda: False)
+        monkeypatch.setattr(historical_pull, "resolve_market_closed", lambda: lambda: False)
         report = pull_contract_candles(
             registry.list_contracts(),
             lake_root=tmp_path / "lake",

@@ -255,11 +255,12 @@ def test_spot_closure_kwargs_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert kwargs["auto_retry"] is True
     assert kwargs["until_clean"] is True
     assert kwargs["floor_store"] is store
-    # DEC-GROWW-MARKET-HOURS-GUARD-001: a REAL (dry_run=False) build binds the
-    # live-clock guard so a nightly pull halts if it runs into market hours.
-    from brutex.calendars.market_hours import guard_active_default
-
-    assert kwargs["market_closed"] is guard_active_default
+    # DEC-GROWW-MARKET-HOURS-GUARD-001: a REAL (dry_run=False) build binds ONE
+    # once-resolved clock-only predicate (env parsed once at build, fail-loud) and
+    # threads the SAME bound object into every phase — so a junk env set mid-pull can
+    # never crash the long nightly run with a per-window re-parse.
+    assert kwargs["market_closed"] is hp.market_closed
+    assert callable(kwargs["market_closed"])
     # The OMISSION set: no dashboard-only hooks ride the headless binding.
     assert set(kwargs) == {
         "lake_root",
@@ -289,7 +290,17 @@ def test_metadata_closure_kwargs_exact(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert kwargs["years"] == list(range(2020, 2027))
     assert kwargs["dry_run"] is False
     assert isinstance(kwargs["session_rate"], SessionRateController)
-    assert set(kwargs) == {"registry", "coverage_store", "years", "dry_run", "session_rate"}
+    # DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-2: the metadata phase gets the SAME
+    # once-resolved belt so a phase CROSSING 08:45 halts mid-phase (per-cell guard).
+    assert kwargs["market_closed"] is hp.market_closed
+    assert set(kwargs) == {
+        "registry",
+        "coverage_store",
+        "years",
+        "dry_run",
+        "session_rate",
+        "market_closed",
+    }
 
 
 def test_historical_closure_kwargs_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -343,11 +354,14 @@ def test_one_shared_session_rate_controller(
 def test_headless_binds_market_hours_guard_for_real_pull(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """DEC-GROWW-MARKET-HOURS-GUARD-001: a REAL build binds the live-clock guard."""
-    from brutex.calendars.market_hours import guard_active_default
+    """DEC-GROWW-MARKET-HOURS-GUARD-001: a REAL build binds the ONCE-resolved clock-only
+    belt (env parsed once at build, not per-window) — the MINOR fix vs the per-call
+    ``guard_active_default``. With the env unset (guard enabled) it is the clock-only
+    ``_market_clock_blocked`` predicate."""
+    from brutex.calendars.market_hours import _market_clock_blocked
 
     hp, _spies, _store = _wire(monkeypatch, tmp_path, dry_run=False)
-    assert hp.market_closed is guard_active_default
+    assert hp.market_closed is _market_clock_blocked
 
 
 def test_headless_dry_run_never_binds_market_hours_guard(

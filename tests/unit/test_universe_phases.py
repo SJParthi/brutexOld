@@ -218,6 +218,54 @@ class TestRunTwoPhase:
         assert report.expiry_failures == 0
         assert report.contract_jobs == 0
 
+    def test_phase1_market_hours_halt_reraised_not_swallowed(self) -> None:
+        """DEC-GROWW-MARKET-HOURS-GUARD-001: a Phase-1 fetcher's MarketHoursHalt is the
+        ONE captured-per-cell exception that HALTS the whole phase (re-raised), instead
+        of being recorded-and-resumed like an ordinary fetch failure."""
+        from brutex.data.errors import MarketHoursHalt
+
+        cells = [("NSE", "A", 2024)]
+
+        def fetch_expiries(cell: ExpiryCell) -> Sequence[date]:
+            raise MarketHoursHalt()
+
+        def fetch_contracts(job: ContractJob) -> int:  # pragma: no cover — never reached
+            return 1
+
+        with pytest.raises(MarketHoursHalt):
+            run_two_phase(
+                cells,
+                fetch_expiries=fetch_expiries,
+                fetch_contracts=fetch_contracts,
+                run_parallel=_sync_run_parallel,
+                on_expiry_cell=lambda *_: None,
+                on_contract=lambda *_: None,
+            )
+
+    def test_phase2_market_hours_halt_reraised_not_swallowed(self) -> None:
+        """DEC-GROWW-MARKET-HOURS-GUARD-001: a Phase-2 (contract) fetcher's
+        MarketHoursHalt likewise halts the whole phase (re-raised)."""
+        from brutex.data.errors import MarketHoursHalt
+
+        cells = [("NSE", "A", 2024)]
+        expiries = {("NSE", "A", 2024): [_D(2024, 1, 25)]}
+
+        def fetch_expiries(cell: ExpiryCell) -> Sequence[date]:
+            return expiries[cell]
+
+        def fetch_contracts(job: ContractJob) -> int:
+            raise MarketHoursHalt()
+
+        with pytest.raises(MarketHoursHalt):
+            run_two_phase(
+                cells,
+                fetch_expiries=fetch_expiries,
+                fetch_contracts=fetch_contracts,
+                run_parallel=_sync_run_parallel,
+                on_expiry_cell=lambda *_: None,
+                on_contract=lambda *_: None,
+            )
+
     def test_empty_universe(self) -> None:
         report = self._run([], {})
         assert report == TwoPhaseReport(0, 0, 0, 0, 0, 0)

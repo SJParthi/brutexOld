@@ -146,7 +146,7 @@ def build_headless_pipeline(
         at build — the pre-chain refusal), or junk ISO dates.
     """
     from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
-    from brutex.calendars.market_hours import guard_active_default
+    from brutex.calendars.market_hours import resolve_market_closed
     from brutex.dashboard.composite_pull import pull_historical_for_underlyings
     from brutex.dashboard.fno_cascade import build_fno_cascade
     from brutex.dashboard.metadata_pull import pull_expiries_contracts
@@ -202,10 +202,11 @@ def build_headless_pipeline(
 
     # Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the nightly 01:30 IST
     # headless pull is the MOTIVATING case — it must STOP gracefully at 08:45 if it runs
-    # long. Bound to the live-clock ``guard_active_default`` for a REAL pull; a dry-run
-    # threads ``None`` (no vendor calls to gate, and the pipeline gate below never fires
-    # on a synthetic run), so nightly dry-run tests are byte-identical.
-    _market_closed = None if dry_run else guard_active_default
+    # long. The env kill switch is parsed ONCE here at build (fail-loud on junk); the
+    # bound predicate then reads the live clock only (no per-window env re-parse → a junk
+    # env set mid-pull can never crash the long nightly run). A dry-run threads ``None``
+    # (no vendor calls to gate), so nightly dry-run tests are byte-identical.
+    _market_closed = None if dry_run else resolve_market_closed(env=env)
 
     # F&O expiry scope with the LIVE-edge normalization the dashboard applies
     # (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): a default-shaped bound is lifted to
@@ -246,6 +247,9 @@ def build_headless_pipeline(
                 years=years,
                 dry_run=dry_run,
                 session_rate=rate,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: a metadata phase CROSSING 08:45
+                # halts mid-phase (per-cell belt), like the spot/historical spines.
+                market_closed=_market_closed,
             )
 
     def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:

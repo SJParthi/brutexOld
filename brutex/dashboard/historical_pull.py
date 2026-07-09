@@ -117,7 +117,7 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.calendars.market_hours import guard_active_default
+from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
@@ -1271,7 +1271,10 @@ def _run_phase(
     # gating pattern), so a synthetic F&O pull never gates. When it flips ``True`` a
     # contract raises ``MarketHoursHalt`` (a global stop) — caught below, the committed
     # work kept + the not-yet-started later step buckets announced ``pull.step.halted``.
-    market_closed = None if dry_run else guard_active_default
+    # The env kill switch is parsed ONCE here (fail-loud on junk); the bound predicate
+    # then reads the live clock only, so a junk env set mid-pull can never crash a long
+    # F&O phase with a per-contract ValueError.
+    market_closed = None if dry_run else resolve_market_closed()
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
     # phase and threaded into the FUTURES partial-window observe margin ONLY (an
     # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d

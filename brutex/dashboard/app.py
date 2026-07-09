@@ -59,7 +59,7 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
-from brutex.calendars.market_hours import guard_active_default
+from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.paths import resolve_lake_root
@@ -2724,8 +2724,11 @@ def build_app(
                 on_ledger_sync=_ledger_sync,
                 floor_store=instrument_store,
                 # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
-                # into the NSE market-hours window (the shared-account belt).
-                market_closed=guard_active_default,
+                # into the NSE market-hours window (the shared-account belt). The env
+                # kill switch is parsed ONCE here (fail-loud); the bound predicate then
+                # reads the live clock only (no per-window env re-parse → a junk env
+                # set mid-pull can never crash a long pull).
+                market_closed=resolve_market_closed(),
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -3491,6 +3494,15 @@ def build_app(
             # pulls/processes. A dry-run threads store=None (base-identical).
             form_preference = PersistentSymbolFormPreference(None if dry_run else instrument_store)
 
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: resolve the env kill switch ONCE, here
+            # at pull start (fail-loud on junk), and reuse the SAME bound clock-only
+            # predicate across every phase of this pipeline run — the spot spine's
+            # per-window belt (_run_spot), the metadata phase's per-cell belt
+            # (_run_metadata → pull_expiries_contracts), and the sequencer's
+            # between-phase belt (run_full_pipeline). So a junk BRUTEX_MARKET_HOURS_GUARD
+            # set MID-pull can never crash a long run with a per-call ValueError.
+            _market_closed = resolve_market_closed()
+
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
 
@@ -3529,7 +3541,7 @@ def build_app(
                     floor_store=instrument_store,
                     # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull
                     # crosses into the NSE market-hours window (shared-account belt).
-                    market_closed=guard_active_default,
+                    market_closed=_market_closed,
                 )
 
             def _run_metadata() -> MetadataPullReport:
@@ -3548,6 +3560,10 @@ def build_app(
                         session_rate=_session_rate,
                         on_progress=partial(_metadata_progress_sync, _pull_job),
                         form_preference=form_preference,
+                        # DEC-GROWW-MARKET-HOURS-GUARD-001: a metadata phase CROSSING
+                        # 08:45 halts mid-phase (per-cell belt), exactly like the
+                        # spot/historical spines — dry-run threads None (never gated).
+                        market_closed=None if dry_run else _market_closed,
                     )
 
             def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
@@ -4024,8 +4040,10 @@ def build_app(
                         strict_gate=strict_gate,
                         # DEC-GROWW-MARKET-HOURS-GUARD-001: if this pipeline pull
                         # reaches the sequencer inside the NSE market-hours window,
-                        # skip the whole vendor chain (spot/metadata/historical).
-                        market_closed=guard_active_default,
+                        # skip the whole vendor chain (spot/metadata/historical), and
+                        # halt between phases if it crosses in. ONE bound predicate,
+                        # env parsed once at pull start (see _market_closed above).
+                        market_closed=_market_closed,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -4325,8 +4343,11 @@ def build_app(
                 until_clean=until_clean,
                 floor_store=instrument_store,
                 # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
-                # into the NSE market-hours window (the shared-account belt).
-                market_closed=guard_active_default,
+                # into the NSE market-hours window (the shared-account belt). The env
+                # kill switch is parsed ONCE here (fail-loud); the bound predicate then
+                # reads the live clock only (no per-window env re-parse → a junk env
+                # set mid-pull can never crash a long pull).
+                market_closed=resolve_market_closed(),
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report

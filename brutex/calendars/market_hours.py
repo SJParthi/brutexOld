@@ -174,6 +174,52 @@ def guard_active_default(
     return not pull_allowed_default(now=now)
 
 
+def _market_never_blocked() -> bool:
+    """A bound 'never blocked' predicate — the guard is disabled."""
+    return False
+
+
+def _market_clock_blocked() -> bool:
+    """A bound 'blocked?' predicate reading ONLY the live clock (no env re-parse)."""
+    return not pull_allowed_default()
+
+
+def resolve_market_closed(*, env: Mapping[str, str] | None = None) -> Callable[[], bool]:
+    """Resolve the env kill switch ONCE (fail-loud) → a clock-only ``blocked?`` predicate.
+
+    The MID-RUN wiring seam (DEC-GROWW-MARKET-HOURS-GUARD-001): every production pull
+    that threads a per-window / per-cell / between-rounds guard binds THIS at pull
+    START — the ``BRUTEX_MARKET_HOURS_GUARD`` env is parsed exactly ONCE, here (still
+    fail-LOUD on junk, at start, before any vendor call), and the returned callable
+    reads ONLY the live clock + NSE calendar per call (:func:`pull_allowed_default`).
+    So a junk env value set MID-pull can NEVER crash a long-running pull with a
+    per-call ``ValueError`` — the only parse happened at start (contrast
+    :func:`guard_active_default`, which re-reads the env on every call and is used
+    ONLY for the one-shot START gates).
+
+    Disabled → :func:`_market_never_blocked` (always ``False``); enabled →
+    :func:`_market_clock_blocked` (``True`` iff currently in-window on a trading day).
+
+    Parameters
+    ----------
+    env
+        Injectable environment mapping (tests); ``None`` reads ``os.environ`` ONCE.
+
+    Returns
+    -------
+    Callable[[], bool]
+        A clock-only ``blocked?`` predicate (env already resolved).
+
+    Raises
+    ------
+    ValueError
+        If the env value is junk — raised HERE, at pull start, never mid-pull.
+    """
+    if resolve_market_hours_guard_enabled(env):
+        return _market_clock_blocked
+    return _market_never_blocked
+
+
 @dataclass(frozen=True, slots=True)
 class MarketHoursGuard:
     """A tiny ``now``-injectable guard consulted at the mid-run per-window seams.

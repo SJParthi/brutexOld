@@ -97,6 +97,7 @@ from brutex.dashboard.pipeline_verdict import (
     PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
 )
 from brutex.dashboard.pull_controller import BulkSpotReport
+from brutex.data.errors import MarketHoursHalt
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.money import format_inr, round_money
@@ -1058,7 +1059,38 @@ def run_full_pipeline(
             quarantined_count=quarantined_count,
         )
 
-    metadata = run_metadata()
+    # Market-hours belt BEFORE the metadata vendor phase (DEC-GROWW-MARKET-HOURS-GUARD-001):
+    # spot finishing ~08:43 must NOT leak a `get_expiries`/`get_contracts` storm into the
+    # trading window. Re-check the guard here (the top check covers a pull dispatched into
+    # the window; this covers a spot phase that finished just before it opened). The
+    # metadata phase itself ALSO consults the guard per-cell so a metadata pull that
+    # CROSSES 08:45 halts mid-phase; this is the between-phases stop.
+    if market_closed is not None and market_closed():
+        _LOG.warning("pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="metadata")
+        return PipelinePullReport(
+            spot=spot,
+            metadata=None,
+            historical=None,
+            stopped_after=PHASE_MARKET_HOURS,
+            note=_market_hours_stop_note(),
+        )
+    try:
+        metadata = run_metadata()
+    except MarketHoursHalt:
+        # DEC-GROWW-MARKET-HOURS-GUARD-001: the metadata phase CROSSED 08:45 mid-flight
+        # — its per-cell guard raised MarketHoursHalt and run_two_phase re-raised it as a
+        # global stop. Committed expiries/contracts are already persisted (record-in-the-
+        # fetcher); the un-persisted cells re-pull next out-of-hours run. Stop cleanly.
+        _LOG.warning(
+            "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, crossed="metadata"
+        )
+        return PipelinePullReport(
+            spot=spot,
+            metadata=None,
+            historical=None,
+            stopped_after=PHASE_MARKET_HOURS,
+            note=_market_hours_stop_note(),
+        )
     if not metadata_phase_ok(metadata):
         quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
         return PipelinePullReport(
@@ -1081,6 +1113,23 @@ def run_full_pipeline(
         metadata_clean=metadata_phase_ok(metadata),
         strict=strict_gate,
     )
+    # Market-hours belt BEFORE the historical (F&O) vendor phase
+    # (DEC-GROWW-MARKET-HOURS-GUARD-001): a metadata phase that finished just before the
+    # window opens must not leak the F&O candle storm into it. The F&O spine ALSO
+    # consults the guard per-contract (a contract already started at 08:45 finishes its
+    # few small windows — an acceptable, bounded residue), so this is the between-phases
+    # stop; a phase that crosses mid-flight halts on its next contract.
+    if market_closed is not None and market_closed():
+        _LOG.warning(
+            "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="historical"
+        )
+        return PipelinePullReport(
+            spot=spot,
+            metadata=metadata,
+            historical=None,
+            stopped_after=PHASE_MARKET_HOURS,
+            note=_market_hours_stop_note(),
+        )
     historical = run_historical(prior)
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's

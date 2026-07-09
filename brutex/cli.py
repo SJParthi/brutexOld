@@ -4647,9 +4647,10 @@ def cmd_fetch(
         make_vendor_floor_learner,
     )
     from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
+    from brutex.calendars.market_hours import resolve_market_closed
     from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
-    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import NullBarSink, ParquetBarSink
     from brutex.data.window_ledger_store import (
@@ -4665,6 +4666,11 @@ def cmd_fetch(
 
     _pull_halt_errors = (
         LakeWriteHalt,
+        # DEC-GROWW-MARKET-HOURS-GUARD-001: a mid-run MarketHoursHalt (the pull crossed
+        # into the NSE market-hours window) fires the CRITICAL Telegram alert here + is
+        # re-raised, then caught below the pull section so cmd_fetch exits cleanly with
+        # the ledger left resumable (never a crash-retry for the legacy auto-resume).
+        MarketHoursHalt,
         DailyQuotaExceeded,
         QuotaInvariantError,
         MassEmptySettleHalt,
@@ -5099,6 +5105,15 @@ def cmd_fetch(
         from brutex.calendars.observed_sessions import load_observed_holidays
 
         observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
+        # Mid-run market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001): a `brutex fetch`
+        # launched at 01:30 IST (the start gate ALLOWED it) can run for hours and cross
+        # 08:45 — the most-exposed path (legacy auto-resume re-launches it). Thread a
+        # per-window `market_closed` predicate into the spine so a pass that crosses the
+        # window halts on the next window (`MarketHoursHalt`, caught below). Resolved ONCE
+        # here (the env is fail-loud at START, never per-window — the bound predicate reads
+        # only the clock), `None` for `--dry-run`/`--inspect` (a synthetic adapter / no
+        # persistence makes ZERO vendor calls, so those are exempt like the start gate).
+        market_closed = None if (dry_run or inspect) else resolve_market_closed()
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -5135,6 +5150,7 @@ def cmd_fetch(
                     # `--dry-run` / `--inspect` — byte-identical.
                     symbol_windows=floor_windows,
                     floor_learner=floor_learner,
+                    market_closed=market_closed,
                 )
             except _pull_halt_errors as exc:
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or
@@ -5157,6 +5173,12 @@ def cmd_fetch(
         # statement, so a pull-halt raise leaves it False and the heal never
         # runs after an already-alerted halt (alert-once holds).
         fetch_ok = False
+        # Mid-run market-hours halt latch (DEC-GROWW-MARKET-HOURS-GUARD-001): set when a
+        # pass crosses into the NSE trading window and the spine raises MarketHoursHalt
+        # — the pull halts GRACEFULLY (the finally still drains + persists the ledger,
+        # so PLANNED/FAILED windows stay resumable), the post-drain tail is skipped, and
+        # cmd_fetch exits cleanly (never a crash-retry for the legacy auto-resume).
+        market_halted = False
         # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
         # whole fetch (including every until-clean round + the drain/persist
         # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
@@ -5198,12 +5220,26 @@ def cmd_fetch(
                     rounds_budget = (
                         until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
                     )
-                    until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
+                    until_outcome = run_until_clean(
+                        _round_runner,
+                        max_rounds=rounds_budget,
+                        # DEC-GROWW-MARKET-HOURS-GUARD-001 between-rounds belt: do not
+                        # fire a NEW round once the market has opened (the per-window
+                        # raise handles a round that crosses mid-flight).
+                        market_closed=market_closed,
+                    )
                     result = fetch_passes[0]
                 else:
                     result = _one_fetch_pass(do_retry)
                 # Fetch pass(es) returned without raising — arm the L2 heal.
                 fetch_ok = True
+            except MarketHoursHalt:
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: a pass crossed into the NSE
+                # market-hours window — the spine raised MarketHoursHalt and the CRITICAL
+                # Telegram alert already fired in `_one_fetch_pass`. Latch so the tail
+                # exits cleanly; the ``finally`` below still drains + persists the ledger
+                # (committed work kept, un-settled windows resume next out-of-hours run).
+                market_halted = True
             finally:
                 # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
                 # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
@@ -5275,7 +5311,7 @@ def cmd_fetch(
             # per-pair counts are only reconciled AFTER this seam (the
             # reconcile_pairs_with_pipeline fold below), so any such gate would misread
             # 0 — running unconditionally is stamp-idempotent-safe.
-            if greeks_enrich_enabled and not _no_persist:
+            if greeks_enrich_enabled and not _no_persist and not market_halted:
                 _run_cli_greeks_enrich(
                     lake_root=resolved,
                     instruments=fetch_instruments,
@@ -5285,6 +5321,17 @@ def cmd_fetch(
                     # after the pull completed (review round-1 fix).
                     end=_next_day_saturating(end_dt.date()),
                 )
+    # Mid-run market-hours deferral (DEC-GROWW-MARKET-HOURS-GUARD-001): the pull crossed
+    # into the NSE trading window and halted; the ledger is already drained + persisted
+    # (resumable) and the CRITICAL alert fired. Exit CLEANLY (EXIT_OK) so the legacy
+    # auto-resume subprocess treats a deferral as a no-op, never a crash to hammer-retry;
+    # the pull resumes on the next out-of-hours run.
+    if market_halted:
+        print(
+            "[brutex] fetch halted — crossed into NSE market-hours window "
+            "(08:45-15:35 IST); committed work kept, resumes next out-of-hours run"
+        )
+        return EXIT_OK
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger

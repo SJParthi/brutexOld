@@ -14,6 +14,7 @@ from brutex.calendars.market_hours import (
     market_hours_blocked_now,
     pull_allowed_default,
     pull_allowed_now,
+    resolve_market_closed,
     resolve_market_hours_guard_enabled,
 )
 from brutex.calendars.nse import IST
@@ -194,3 +195,44 @@ def test_guard_from_env_default_clock_is_now_ist(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _at(10, 0))
     guard = MarketHoursGuard.from_env(env={})
     assert guard.blocked() is True
+
+
+# ── resolve_market_closed — the MID-RUN wiring seam (env parsed ONCE) ──────────
+
+
+def test_resolve_market_closed_enabled_returns_clock_only_predicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enabled: the bound predicate reads ONLY the live clock — no env re-parse."""
+    predicate = resolve_market_closed(env={})
+    # Inside the window on a trading day → blocked.
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _at(10, 0))
+    assert predicate() is True
+    # Same predicate, clock advanced past close → allowed. Crucially, a JUNK env
+    # set AFTER resolution can never affect this call (no env read here).
+    monkeypatch.setenv(MARKET_HOURS_GUARD_ENV, "garbage-set-mid-pull")
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _at(16, 0))
+    assert predicate() is False
+
+
+def test_resolve_market_closed_disabled_never_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disabled: the bound predicate is always False regardless of the clock."""
+    predicate = resolve_market_closed(env={MARKET_HOURS_GUARD_ENV: "off"})
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _at(10, 0))
+    assert predicate() is False
+
+
+def test_resolve_market_closed_junk_env_raises_at_resolution() -> None:
+    """Junk env fails LOUD at resolution (pull start), never mid-pull per call."""
+    with pytest.raises(ValueError, match=MARKET_HOURS_GUARD_ENV):
+        resolve_market_closed(env={MARKET_HOURS_GUARD_ENV: "maybe"})
+
+
+def test_resolve_market_closed_reads_os_environ_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``env=None`` resolves ``os.environ`` once; the predicate then reads the clock."""
+    monkeypatch.setenv(MARKET_HOURS_GUARD_ENV, "1")
+    predicate = resolve_market_closed()
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _at(10, 0))
+    assert predicate() is True

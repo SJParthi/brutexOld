@@ -36,24 +36,41 @@ CRITICAL Telegram `emit_pull_halt_alert`). START GATES: `BackgroundPullJob.start
 defers a `JOB_KIND_PULL` in-window UNLESS `market_hours_exempt=True` — the THREE
 vendor-free exemptions are the sweep (`job_kind != PULL`), the dashboard
 Greeks-backfill start and every dashboard dry-run pull start (both pass
-`market_hours_exempt`); `cmd_fetch` defers a LIVE pull with a clean EXIT_OK
-(dry-run/inspect EXEMPT). MID-RUN: a
+`market_hours_exempt`); `cmd_fetch` defers a LIVE pull at the START gate with a
+clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN (the CRITICAL requirement): a
 `market_closed` predicate threaded to the PER-WINDOW seam of both spines raises
 `MarketHoursHalt` (the durable window ledger leaves PLANNED/FAILED windows
 RESUMABLE — no new checkpoint); `run_until_clean` gains a `market_closed` hook →
 NEW `stop_market_hours` verdict; `pull_all_spot`/`pull_contract_candles` catch it
 mid-round + belt-break later steps + the minute phase (loud
-`pull.step.halted reason="market_hours"`); `run_full_pipeline` skips the whole
-vendor chain with `stopped_after="market_hours"`. Production entrypoints inject
-`guard_active_default` (dashboard routes + the nightly headless binding — the
-MOTIVATING 01:30 case covered); a dry-run / un-wired caller passes `None`
-(byte-identical). NOT edited: `_start_auto_resume_on_boot`/`cmd_dashboard` (auto-
-resume covered transitively by the start-gates; conflict-free with PR #1343).
-HONEST: DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up).
+`pull.step.halted reason="market_hours"`); the METADATA phase
+(`pull_expiries_contracts`) gets a per-cell belt (raises `MarketHoursHalt` before
+each `get_expiries`/`get_contracts`; `run_two_phase` re-raises it, not
+record-and-resume); `run_full_pipeline` re-checks the belt BEFORE metadata AND
+before historical + wraps `run_metadata` in `try/except MarketHoursHalt`, skipping
+the rest of the vendor chain with `stopped_after="market_hours"`; and the CLI
+`brutex fetch` path is MID-RUN-guarded too — `cmd_fetch` threads `market_closed`
+into the spot spine + the between-rounds `run_until_clean`, catches
+`MarketHoursHalt` (drains + persists the ledger → resumable), and exits EXIT_OK.
+The mid-run env kill switch is resolved ONCE at pull start via
+`resolve_market_closed()` (fail-LOUD on junk at START; the bound predicate reads
+ONLY the live clock per call — so a junk env written MID-pull can never crash a
+long run with a per-window re-parse); the one-shot START gates keep
+`guard_active_default`. Production entrypoints (dashboard routes + the nightly
+headless binding — the MOTIVATING 01:30 case covered) bind `resolve_market_closed()`;
+a dry-run / un-wired caller passes `None` (byte-identical). NOT edited:
+`_start_auto_resume_on_boot`/`cmd_dashboard` (auto-resume covered transitively by
+the start-gates; conflict-free with PR #1343). HONEST: the CLI + metadata paths
+are now mid-run-guarded (not merely start-gated); the Groww F&O guard is
+per-CONTRACT granularity — a contract already started at 08:45 finishes its few
+small remaining windows before the next contract's belt stops the pull (an
+accepted bounded overrun, never a whole extra symbol); a pull interrupted at 08:45
+DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only (no fetch/rate/pool/
-governor change); `market_hours.py` + `data/errors.py` 100% line+branch, touched
-modules covered by the whole-package `--cov=brutex` gate; ruff/ruff-format clean,
-`mypy --strict` clean, pyright at the pre-change baseline).
+governor change); `market_hours.py` + `data/errors.py` + `universe_phases.py` +
+`metadata_pull.py` + `pipeline_pull.py` + nightly binding 100% line+branch, the
+CLI/dashboard touched lines covered by the whole-package `--cov=brutex` gate;
+ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline).
 Earlier: 2026-07-09 (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 —
 the one-click `top100.json` READER-ADOPTS-WRITER fix for the 3/3
 refuter-confirmed BLOCKER: the SHIPPED engine writer
@@ -1784,17 +1801,29 @@ hostile-review pass._
   defers a `JOB_KIND_PULL` in-window UNLESS `market_hours_exempt=True` — the THREE vendor-free exemptions are the
   sweep (`job_kind != PULL`), the dashboard Greeks-backfill start + every dashboard dry-run pull start (both pass
   `market_hours_exempt`; the over-block fix — Greeks-backfill runs under `JOB_KIND_PULL`, so job_kind alone was not
-  enough); `cmd_fetch` defers a LIVE pull with a clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN: a `market_closed`
-  predicate threaded to the PER-WINDOW seam of both
+  enough); `cmd_fetch` defers a LIVE pull at the START gate with a clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN
+  (the CRITICAL requirement): a `market_closed` predicate threaded to the PER-WINDOW seam of both
   spines raises `MarketHoursHalt` (durable ledger leaves PLANNED/FAILED windows RESUMABLE); `run_until_clean` gains a
   `market_closed` hook → `stop_market_hours`; `pull_all_spot`/`pull_contract_candles` catch it mid-round + belt-break
-  later steps + the minute phase; `run_full_pipeline` skips the vendor chain with `stopped_after="market_hours"`.
-  Production wiring injects `guard_active_default` (dashboard routes + the nightly headless binding — the MOTIVATING
+  later steps + the minute phase; the METADATA phase (`pull_expiries_contracts`) gets a per-cell belt (raises
+  `MarketHoursHalt` before each `get_expiries`/`get_contracts`; `run_two_phase` re-raises it, not record-and-resume);
+  `run_full_pipeline` re-checks the belt BEFORE metadata AND before historical + wraps `run_metadata` in a
+  `try/except MarketHoursHalt`, skipping the rest of the vendor chain with `stopped_after="market_hours"`; and the
+  CLI `brutex fetch` path is MID-RUN-guarded too (`cmd_fetch` threads `market_closed` into the spot spine + the
+  between-rounds `run_until_clean`, catches `MarketHoursHalt`, drains + persists the ledger → resumable, exits
+  EXIT_OK). The mid-run env kill switch is resolved ONCE at pull start via `resolve_market_closed()` (fail-LOUD on
+  junk at START; the bound predicate reads ONLY the live clock per call, so a junk env written MID-pull can never
+  crash a long run with a per-window re-parse); the one-shot START gates keep `guard_active_default`. Production
+  wiring binds `resolve_market_closed()` (dashboard routes + the nightly headless binding — the MOTIVATING
   01:30 case covered); a dry-run / un-wired caller passes `None` (byte-identical). NOT edited:
   `_start_auto_resume_on_boot`/`cmd_dashboard` (auto-resume covered transitively; conflict-free with PR #1343).
-  HONEST: DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up); out-of-coverage default is
+  HONEST: the CLI + metadata paths are now mid-run-guarded (not merely start-gated); the Groww F&O guard is
+  per-CONTRACT granularity — a contract already started at 08:45 finishes its few small remaining windows before the
+  next contract's belt stops the pull (an accepted bounded overrun, never a whole extra symbol); a pull interrupted
+  at 08:45 DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up); out-of-coverage default is
   BLOCK-in-window (fail-safe). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only, no fetch/rate/pool/
-  governor change; `market_hours.py` + `data/errors.py` 100% line+branch; ruff/ruff-format clean, `mypy --strict`
+  governor change; `market_hours.py` + `data/errors.py` + `universe_phases.py` + `metadata_pull.py` +
+  `pipeline_pull.py` + nightly binding 100% line+branch; ruff/ruff-format clean, `mypy --strict`
   clean, pyright at the pre-change baseline).
   Earlier: `claude/oneclick-top100-object-root` (**DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631** —
   the one-click `top100.json` READER-ADOPTS-WRITER blocker fix: the display reader
