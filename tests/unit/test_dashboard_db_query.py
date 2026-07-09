@@ -16,7 +16,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import pytest
 from brutex.dashboard.db_view import (
     _IST_DATE_EXPR,
@@ -1123,6 +1122,8 @@ def test_readable_parquet_subset_logs_skip_and_keeps_good(
             store.connection,
             base,
             RuntimeError("whole-glob failed"),
+            sql='SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
+            extra_params=[],
             source="unit",
             skip_event="db.parquet_skip",
             unreadable_event="db.parquet_unreadable",
@@ -1132,6 +1133,7 @@ def test_readable_parquet_subset_logs_skip_and_keeps_good(
     skips = [e for e in logs if e["event"] == "db.parquet_skip"]
     assert len(skips) == 1
     assert skips[0]["path"].endswith(april.name)
+    assert skips[0]["reason"] == "unreadable"  # the stage-1 readability skip, not alien
     assert not [e for e in logs if e["event"] == "db.parquet_unreadable"]
 
 
@@ -1139,9 +1141,9 @@ def test_readable_parquet_subset_all_readable_reports_not_omitted(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
     # The transient-error branch: the whole-glob read raised but EVERY file probes
-    # readable → ``omitted=False`` (nothing dropped), so an adjacency-sensitive caller
-    # keeps its baseline. (A genuine SQL bug rides this branch and is re-raised by the
-    # caller's re-run — see test_execute_parquet_resilient_genuine_sql_error_propagates.)
+    # readable (stage-1 readability AND the stage-2 real-sql schema probe) →
+    # ``omitted=False`` (nothing dropped), so an adjacency-sensitive caller keeps its
+    # baseline (DEC-ALIEN-SCHEMA-READ-HEAL-001 — the probe now runs the real sql too).
     march, april = _write_two_month_candles(tmp_path)
     base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
     with capture_logs() as logs:
@@ -1149,6 +1151,8 @@ def test_readable_parquet_subset_all_readable_reports_not_omitted(
             store.connection,
             base,
             RuntimeError("transient"),
+            sql='SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
+            extra_params=[],
             source="unit",
             skip_event="db.parquet_skip",
             unreadable_event="db.parquet_unreadable",
@@ -1158,23 +1162,31 @@ def test_readable_parquet_subset_all_readable_reports_not_omitted(
     assert not [e for e in logs if e["event"].startswith("db.parquet")]
 
 
-def test_execute_parquet_resilient_genuine_sql_error_propagates(
+def test_execute_parquet_resilient_genuine_sql_error_degrades_loud(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
-    # A genuine SQL bug (a non-existent column) is NEVER swallowed by the resilient
-    # helper: the whole-glob read raises duckdb.Error, every file probes readable
-    # (omitted=False), and the degraded re-run over the SAME files RE-RAISES — so a real
-    # bug surfaces as a 500, not a silent empty result (the over-broad-catch MINOR).
+    # DEC-ALIEN-SCHEMA-READ-HEAL-001 SUPERSEDES the earlier re-raise carve-out: a
+    # query that fails on EVERY individual file (here a non-existent column — the same
+    # per-file shape a single alien-schema file produces) now degrades to an EMPTY
+    # result with ONE loud db.parquet_unreadable ERROR, never a raise/500. Sanctioned:
+    # the constant SQL strings are pinned by the per-module 100% gate (the bug net);
+    # the operator-facing alien-DATA sticky-500 outweighed the lab-only raise signal.
     _write_two_month_candles(tmp_path)
     base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
-    with pytest.raises(duckdb.Error):
-        _execute_parquet_resilient(
+    with capture_logs() as logs:
+        rows = _execute_parquet_resilient(
             store.connection,
             base,
             "SELECT definitely_not_a_column FROM read_parquet(?, union_by_name=true)",
             [],
             source="unit",
         )
+    assert rows == []
+    unreadable = [e for e in logs if e["event"] == "db.parquet_unreadable"]
+    assert len(unreadable) == 1
+    skips = [e for e in logs if e["event"] == "db.parquet_skip"]
+    assert len(skips) == 2  # both files fail the stage-2 schema probe
+    assert all(e["reason"] == "alien_schema" for e in skips)
 
 
 def test_aggregate_parquet_resilient_uses_coverage_namespace(

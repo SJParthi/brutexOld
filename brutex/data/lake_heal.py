@@ -85,6 +85,7 @@ from brutex.data.lake_invariants import (
     LegacyKeyDrift,
     OptionIntraFileDup,
     PriceSanityRows,
+    SchemaAlienFile,
     scan_lake_invariants,
 )
 from brutex.data.lake_manifest import invalidate_manifest
@@ -407,16 +408,25 @@ def _audit_append(
 #: The finding kinds the healer can ACT on. PriceSanityRows is deliberately
 #: absent (observe-only, DEC-STORED-DATA-VALIDATION-001) — the type system
 #: makes routing it into a healer impossible, not merely untested.
-type _HealableFinding = LegacyKeyDrift | ForeignMonthRows | IntraFileDup | OptionIntraFileDup
+#: SchemaAlienFile IS healable (DEC-ALIEN-SCHEMA-READ-HEAL-001): its heal is a
+#: whole-file quarantine MOVE — strictly file-quarantining, never
+#: value-editing (a machine "repair" of an alien schema would fabricate data).
+type _HealableFinding = (
+    LegacyKeyDrift | ForeignMonthRows | IntraFileDup | OptionIntraFileDup | SchemaAlienFile
+)
 
 
 def _order_findings(findings: Sequence[_HealableFinding]) -> tuple[_HealableFinding, ...]:
-    """Deterministic heal order: drift → foreign → dup → option-dup, by path.
+    """Deterministic heal order: drift → foreign → dup → option-dup → alien, by path.
 
     A drift merge changes which files exist, so it heals FIRST; the later
     per-partition healers find consumed paths gone and skip them (counted
     ``skipped``, re-found next scan if still relevant — idempotent
-    convergence, never a double-heal).
+    convergence, never a double-heal). The alien whole-file quarantine
+    (DEC-ALIEN-SCHEMA-READ-HEAL-001) runs LAST — it removes a file the other
+    healers never read (they read canonical-schema columns the alien file
+    lacks), and it still lands BEFORE the post-batch derived-data recall, so
+    a 1-minute alien file is gone before any re-derive reads the tree.
     """
 
     def key(finding: _HealableFinding) -> tuple[int, str]:
@@ -426,7 +436,9 @@ def _order_findings(findings: Sequence[_HealableFinding]) -> tuple[_HealableFind
             return (1, str(finding.path))
         if isinstance(finding, IntraFileDup):
             return (2, str(finding.path))
-        return (3, str(finding.path))
+        if isinstance(finding, OptionIntraFileDup):
+            return (3, str(finding.path))
+        return (4, str(finding.path))
 
     return tuple(sorted(findings, key=key))
 
@@ -924,6 +936,65 @@ def _heal_option_dup(finding: OptionIntraFileDup, state: _BatchState) -> bool:
     return True  # no catalog (the options tree is not catalogued), no recall
 
 
+def _heal_schema_alien(finding: SchemaAlienFile, state: _BatchState) -> bool:
+    """Quarantine-MOVE one schema-alien file whole; ``True`` iff it moved.
+
+    DEC-ALIEN-SCHEMA-READ-HEAL-001 — the heal for the finding the scanner now
+    emits where it previously only WARN-skipped: a file whose SCHEMA is alien
+    to its tree (missing canonical column / non-temporal timestamp /
+    non-numeric OHLC). The file's rows are UNREADABLE under the canonical
+    schema, so the heal is the whole-file quarantine move through the ONE
+    :func:`_quarantine_move` chokepoint (copy → fsync-rename → unlink; the
+    dataset + stats manifests invalidated; audited
+    ``LAKE_HEAL_QUARANTINE_FILE``) — strictly file-quarantining, NEVER
+    value-editing (rewriting an alien schema would fabricate data, Golden
+    Rule #1; the bytes stay recoverable under ``.quarantine/``). A bars-tree
+    alien additionally drops its catalog partition row (Golden Rule #4) and,
+    on the ``1minute`` interval, marks its month for the derived-data recall
+    (the derived TFs may embed whatever a permissive earlier reader made of
+    it). The :class:`~brutex.data.lake_heal.HealAction` row carries honest
+    ZERO row counts — an alien file's row count is unknowable without
+    trusting the alien schema.
+    """
+    path = finding.path
+    if not path.exists():
+        return False  # consumed by an earlier heal / already moved — skip, re-found next scan
+    dest = _quarantine_move(state, path)
+    coords = finding.coords
+    if coords is not None:
+        if state.catalog is not None:
+            state.catalog.delete_partition(
+                exchange=coords.exchange,
+                segment=coords.segment,
+                symbol=coords.symbol,
+                interval=coords.interval,
+                year=coords.year,
+                month=coords.month,
+            )
+        if coords.interval == "1minute":
+            state.touch(
+                coords.exchange, coords.segment, coords.symbol, {(coords.year, coords.month)}
+            )
+        partition = coords.relpath()
+    else:
+        partition = f"{OPTIONS_DIR_NAME}/{finding.series}/{path.name}"
+    _LOG.warning("lake_heal.alien_file_quarantined", partition=partition, reason=finding.reason)
+    state.actions.append(
+        HealAction(
+            action=AUDIT_HEAL_QUARANTINE_FILE,
+            partition=partition,
+            kept=0,
+            dropped=0,
+            moved=0,
+            conflicts=0,
+            raw_hash_before=None,
+            raw_hash_after=None,
+            quarantine_path=str(dest),
+        )
+    )
+    return True
+
+
 def _heal_one(finding: _HealableFinding, state: _BatchState) -> bool:
     """Dispatch one finding to its heal algorithm; ``True`` iff it healed.
 
@@ -940,7 +1011,9 @@ def _heal_one(finding: _HealableFinding, state: _BatchState) -> bool:
         return _heal_foreign(finding, state)
     if isinstance(finding, IntraFileDup):
         return _heal_dup(finding, state)
-    return _heal_option_dup(finding, state)
+    if isinstance(finding, OptionIntraFileDup):
+        return _heal_option_dup(finding, state)
+    return _heal_schema_alien(finding, state)
 
 
 def _prune_empty_dirs(root: Path) -> None:
@@ -1225,8 +1298,9 @@ def heal_findings(
     """Heal one batch of scanner *findings* — the ONE heal chokepoint.
 
     Order: LegacyKeyDrift first (dir merges change which files exist), then
-    ForeignMonthRows (reassignment), then IntraFileDup, then OptionIntraFileDup
-    — sorted by path within each class. A
+    ForeignMonthRows (reassignment), then IntraFileDup, then OptionIntraFileDup,
+    then SchemaAlienFile (whole-file quarantine —
+    DEC-ALIEN-SCHEMA-READ-HEAL-001) — sorted by path within each class. A
     :class:`~brutex.data.lake_invariants.PriceSanityRows` finding is FILTERED
     OUT up-front (observe-only — never healed, never counted in ``findings``;
     one ``lake_heal.price_findings_observe_only`` WARNING names the count —

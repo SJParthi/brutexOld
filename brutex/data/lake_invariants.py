@@ -34,9 +34,17 @@ the per-file read is wider but the pass/file counts are unchanged) — the
 column read scales with the file's ROW COUNT, so this is NOT O(1). L2 bounds
 it by coordinates × months; L3 pays the full O(files) once per lake content
 token. A file with foreign rows costs one extra targeted read of its
-canonical sibling to split ``overlap_rows``. A bar file MISSING a price
-column now skips (unreadable-columns WARN) instead of being dup-scanned —
-such a file violates the canonical 7-column schema and is itself a defect.
+canonical sibling to split ``overlap_rows``. A bar file MISSING a scan
+column — or carrying a non-temporal ``timestamp`` / non-numeric OHLC dtype —
+violates the canonical 7-column schema and is itself a defect: it skips the
+dup/foreign/price classification AND emits a real :class:`SchemaAlienFile`
+finding (DEC-ALIEN-SCHEMA-READ-HEAL-001 — previously a bare
+``scan_skip`` WARN with NO finding, so the healer never quarantined the
+schema-poisoned file the dashboard read side was skipping per poll; the
+missing-column classification pays one anomaly-only
+``pl.read_parquet_schema`` footer probe, never a happy-path cost). The
+healer quarantine-MOVES the whole alien file (strictly file-quarantining —
+never value-editing; the bytes stay recoverable under ``.quarantine/``).
 
 This module must NOT import ``catalog_reconcile`` (which imports THIS module
 for its free L1 piggyback) or ``lake_heal`` (which imports this module) —
@@ -213,13 +221,44 @@ class PriceSanityRows:
     bad_rows: int
 
 
+@dataclass(frozen=True, slots=True)
+class SchemaAlienFile:
+    """A readable month file whose SCHEMA is alien to its tree's canonical shape.
+
+    DEC-ALIEN-SCHEMA-READ-HEAL-001 — the scanner previously WARN-skipped a
+    bar file missing a scan column with NO finding, so the healer never
+    quarantined the schema-poisoned file while the dashboard read side
+    (``db_view._readable_parquet_subset``) skipped the SAME file on every
+    poll (pre-fix: 500'd on it). Emitted for (a) a ``bars/`` file missing
+    one of :data:`BAR_SCAN_COLUMNS`, (b) a ``bars/`` file whose ``timestamp``
+    dtype is not Datetime or whose OHLC dtype is non-numeric (both
+    deterministic content properties — never a transient I/O error, which
+    stays a plain ``scan_skip``), and (c) an ``options/`` file missing one of
+    :data:`UNIQUE_KEY_OPTIONS`. Exactly one of ``coords`` (bars tree) /
+    ``series`` (options tree) is set. HEALABLE: the healer quarantine-MOVES
+    the whole file (strictly file-quarantining, never value-editing — the
+    bytes stay recoverable under ``.quarantine/``; a machine "repair" of an
+    alien schema would fabricate data, Golden Rule #1).
+    """
+
+    path: Path
+    reason: str
+    coords: PartitionCoords | None = None
+    series: str | None = None
+
+
 #: Union of every finding kind one scan can emit. Importable by name
 #: (``from brutex.data.lake_invariants import LakeFinding``) but intentionally
 #: NOT listed in ``__all__``: it is a PEP 695 ``type`` statement, which some
 #: static analysers (CodeQL) do not yet model as an ``__all__`` binding, and
 #: type aliases are idiomatically not part of the ``import *`` surface anyway.
 type LakeFinding = (
-    IntraFileDup | ForeignMonthRows | LegacyKeyDrift | OptionIntraFileDup | PriceSanityRows
+    IntraFileDup
+    | ForeignMonthRows
+    | LegacyKeyDrift
+    | OptionIntraFileDup
+    | PriceSanityRows
+    | SchemaAlienFile
 )
 
 
@@ -433,9 +472,21 @@ def log_lake_finding(finding: LakeFinding) -> None:
     exchange, segment, files`` — drifted/canonical via ``repr()``, the #907
     convention), ``lake.invariant.option_intra_file_dup`` (``partition,
     physical_rows, unique_keys``), ``lake.invariant.price_sanity_rows``
-    (``partition, bad_rows`` — DEC-STORED-DATA-VALIDATION-001).
+    (``partition, bad_rows`` — DEC-STORED-DATA-VALIDATION-001),
+    ``lake.invariant.schema_alien_file`` (``partition, reason`` —
+    DEC-ALIEN-SCHEMA-READ-HEAL-001).
     """
-    if isinstance(finding, PriceSanityRows):
+    if isinstance(finding, SchemaAlienFile):
+        _LOG.warning(
+            "lake.invariant.schema_alien_file",
+            partition=(
+                finding.coords.relpath()
+                if finding.coords is not None
+                else f"{OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"
+            ),
+            reason=finding.reason,
+        )
+    elif isinstance(finding, PriceSanityRows):
         _LOG.warning(
             "lake.invariant.price_sanity_rows",
             partition=finding.coords.relpath(),
@@ -476,6 +527,48 @@ def log_lake_finding(finding: LakeFinding) -> None:
 def _read_key_columns(path: Path, columns: Sequence[str]) -> pl.DataFrame:
     """The ONE per-file read seam (spy tests count calls through this)."""
     return pl.read_parquet(path, columns=list(columns))
+
+
+def _missing_columns_reason(path: Path, columns: Sequence[str]) -> str | None:
+    """Classify a failed column read: missing-column reason, or ``None`` = not that class.
+
+    Anomaly-only cost (DEC-ALIEN-SCHEMA-READ-HEAL-001): called ONLY after
+    :func:`_read_key_columns` already raised, it pays one
+    ``pl.read_parquet_schema`` footer probe to decide DETERMINISTICALLY —
+    message-string-free — whether the failure is the alien missing-column
+    class (→ a :class:`SchemaAlienFile` finding) or a genuinely unreadable
+    file (→ the caller keeps its plain ``scan_skip``). A file whose very
+    FOOTER is unreadable returns ``None`` (corrupt, not alien).
+    """
+    try:
+        schema = pl.read_parquet_schema(path)
+    except parquet_read_skip_errors():
+        return None
+    missing = [c for c in columns if c not in schema]
+    if missing:
+        return f"missing column(s): {', '.join(missing)}"
+    return None
+
+
+def _bar_dtype_alien_reason(schema: Mapping[str, pl.DataType]) -> str | None:
+    """The dtype-alien reason for one already-read bar frame's schema, or ``None`` = sane.
+
+    DEC-ALIEN-SCHEMA-READ-HEAL-001: a bar file whose ``timestamp`` is not a
+    Datetime — or whose OHLC column is non-numeric (``is_numeric()`` covers
+    int/float/Decimal on the pinned polars) — cannot be dup/foreign/price
+    classified (a Utf8 OHLC column previously DETONATED
+    ``count_price_violations`` with an uncaught ``ComputeError``, killing the
+    WHOLE scan — the latent crash this gate closes). Deterministic content
+    property → the caller emits a :class:`SchemaAlienFile` finding.
+    """
+    ts_dtype = schema["timestamp"]
+    if not isinstance(ts_dtype, pl.Datetime):
+        return f"timestamp dtype {ts_dtype} is not Datetime"
+    for column in PRICE_SANITY_COLUMNS:
+        dtype = schema[column]
+        if not dtype.is_numeric():
+            return f"column {column} dtype {dtype} is not numeric"
+    return None
 
 
 def _pause(per_file_pause: Callable[[], None] | None) -> None:
@@ -668,11 +761,33 @@ def scan_lake_invariants(
             try:
                 frame = _read_key_columns(path, BAR_SCAN_COLUMNS)
             except parquet_read_skip_errors() as exc:
-                _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
+                # DEC-ALIEN-SCHEMA-READ-HEAL-001: a readable file MISSING a
+                # scan column is the deterministic alien-schema class — a real
+                # finding (the healer quarantines it), never a bare WARN the
+                # dashboard read side skips forever. Any other failure stays
+                # the plain transient-tolerant scan_skip.
+                alien_reason = _missing_columns_reason(path, BAR_SCAN_COLUMNS)
+                if alien_reason is not None:
+                    alien = SchemaAlienFile(path=path, reason=alien_reason, coords=coords)
+                    log_lake_finding(alien)
+                    findings.append(alien)
+                else:
+                    _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
                 files_skipped += 1
                 _pause(per_file_pause)
                 continue
             _pause(per_file_pause)
+            dtype_reason = _bar_dtype_alien_reason(frame.schema)
+            if dtype_reason is not None:
+                # Non-temporal timestamp / non-numeric OHLC: the dup/foreign/
+                # price classification is meaningless (and a Utf8 OHLC column
+                # previously crashed the whole scan inside
+                # count_price_violations) — emit the alien finding and skip.
+                alien = SchemaAlienFile(path=path, reason=dtype_reason, coords=coords)
+                log_lake_finding(alien)
+                findings.append(alien)
+                files_skipped += 1
+                continue
             files_scanned += 1
             scanned_in_series += 1
             files_by_segment[coords.segment] = files_by_segment.get(coords.segment, 0) + 1
@@ -728,7 +843,18 @@ def scan_lake_invariants(
                     try:
                         frame = _read_key_columns(path, UNIQUE_KEY_OPTIONS)
                     except parquet_read_skip_errors() as exc:
-                        _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
+                        # The options-tree twin of the bars-loop alien
+                        # classification (missing-column only — the options
+                        # census is dup-only by honest scope).
+                        alien_reason = _missing_columns_reason(path, UNIQUE_KEY_OPTIONS)
+                        if alien_reason is not None:
+                            alien = SchemaAlienFile(
+                                path=path, reason=alien_reason, series=series_dir.name
+                            )
+                            log_lake_finding(alien)
+                            findings.append(alien)
+                        else:
+                            _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
                         option_files_skipped += 1
                         _pause(per_file_pause)
                         continue
@@ -778,6 +904,12 @@ class SegmentCensus:
     constructors stay valid; the ``OPTIONS`` row keeps a structural ``0``
     (the options tree is dup-census only — honest scope, mirroring the
     foreign/overlap follow-up note in :func:`build_lake_census`).
+
+    ``alien_files`` (DEC-ALIEN-SCHEMA-READ-HEAL-001, defaulted trailing)
+    counts :class:`SchemaAlienFile` findings per segment. An alien file is
+    SKIPPED before classification, so it is NOT in ``files`` (the scanned
+    count) and does not reduce ``clean`` — it is reported as its own honest
+    column (the ``OPTIONS`` row counts its series-level aliens).
     """
 
     segment: str
@@ -788,6 +920,7 @@ class SegmentCensus:
     overlap_files: int
     drift_dirs: int
     price_files: int = 0
+    alien_files: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,6 +938,14 @@ def _engine_relevant(finding: LakeFinding) -> bool:
     """True when *finding* touches an :data:`ENGINE_INDEX_COORDS` series."""
     if isinstance(finding, OptionIntraFileDup):
         return False
+    if isinstance(finding, SchemaAlienFile):
+        if finding.coords is None:
+            return False  # options-tree alien — never an engine bars series
+        return (
+            finding.coords.exchange,
+            finding.coords.segment,
+            finding.coords.symbol,
+        ) in ENGINE_INDEX_COORDS
     if isinstance(finding, LegacyKeyDrift):
         return (finding.exchange, finding.segment, finding.canonical_symbol) in (
             ENGINE_INDEX_COORDS
@@ -826,6 +967,15 @@ def _engine_offender(finding: LakeFinding) -> str:
         return f"foreign {finding.coords.relpath()}"
     if isinstance(finding, PriceSanityRows):
         return f"price {finding.coords.relpath()}"
+    if isinstance(finding, SchemaAlienFile):
+        # An engine-relevant alien always carries bars coords (the options
+        # arm is filtered out by _engine_relevant), but stay total anyway.
+        location = (
+            finding.coords.relpath()
+            if finding.coords is not None
+            else f"{OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"
+        )
+        return f"alien {location}"
     return f"option-dup {OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"
 
 
@@ -837,18 +987,25 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
     drifted dir's own files are also scanned + counted in ``files``). The
     ``OPTIONS`` row covers dups only — foreign/overlap classification for the
     options tree is a named follow-up (honest scope, DEC-LAKE-HEAL-001).
+    :class:`SchemaAlienFile` findings count into the per-segment
+    ``alien_files`` column (DEC-ALIEN-SCHEMA-READ-HEAL-001) — an alien file was
+    skipped BEFORE classification, so it is outside ``files``/``clean``.
     """
     seg_files = dict(report.files_by_segment)
     dup_paths: dict[str, set[str]] = {}
     foreign_paths: dict[str, set[str]] = {}
     overlap_paths: dict[str, set[str]] = {}
     price_paths: dict[str, set[str]] = {}
+    alien_paths: dict[str, set[str]] = {}
     drift_dirs: dict[str, int] = {}
     engine_findings: list[LakeFinding] = []
     for finding in report.findings:
         if _engine_relevant(finding):
             engine_findings.append(finding)
-        if isinstance(finding, OptionIntraFileDup):
+        if isinstance(finding, SchemaAlienFile):
+            segment_key = finding.coords.segment if finding.coords is not None else OPTIONS_SEGMENT
+            alien_paths.setdefault(segment_key, set()).add(str(finding.path))
+        elif isinstance(finding, OptionIntraFileDup):
             dup_paths.setdefault(OPTIONS_SEGMENT, set()).add(str(finding.path))
         elif isinstance(finding, LegacyKeyDrift):
             drift_dirs[finding.segment] = drift_dirs.get(finding.segment, 0) + 1
@@ -876,6 +1033,7 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
                 overlap_files=len(overlap_paths.get(seg, set())),
                 drift_dirs=drift_dirs.get(seg, 0),
                 price_files=len(prices),
+                alien_files=len(alien_paths.get(seg, set())),
             )
         )
     option_dups = dup_paths.get(OPTIONS_SEGMENT, set())
@@ -888,6 +1046,7 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
             foreign_files=0,
             overlap_files=0,
             drift_dirs=0,
+            alien_files=len(alien_paths.get(OPTIONS_SEGMENT, set())),
         )
     )
     if engine_findings:
@@ -956,6 +1115,7 @@ def census_to_dict(
                 "overlap_files": row.overlap_files,
                 "drift_dirs": row.drift_dirs,
                 "price_files": row.price_files,
+                "alien_files": row.alien_files,
             }
             for row in census.segments
         ],
@@ -981,6 +1141,7 @@ __all__ = [
     "OptionIntraFileDup",
     "PartitionCoords",
     "PriceSanityRows",
+    "SchemaAlienFile",
     "SegmentCensus",
     "build_lake_census",
     "census_to_dict",

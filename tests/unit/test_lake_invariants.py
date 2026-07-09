@@ -410,15 +410,21 @@ class TestScanFindings:
         assert report.findings == ()
         assert report.files_scanned == 1
 
-    def test_missing_price_columns_file_is_skipped(self, tmp_path: Path) -> None:
-        """A bar file WITHOUT the OHLC columns is honestly SKIPPED (not dup-scanned).
+    def test_missing_price_columns_file_emits_alien_finding(self, tmp_path: Path) -> None:
+        """A bar file WITHOUT the OHLC columns is SKIPPED and now carries a FINDING.
 
-        DEC-STORED-DATA-VALIDATION-001 behavior change, documented in the
-        module docstring: the scan now reads BAR_SCAN_COLUMNS (timestamp +
-        OHLC) in ONE pass; a file violating the canonical 7-column schema
-        cannot satisfy the read and is counted ``files_skipped`` with the
-        ``lake.invariant.scan_skip`` WARNING — never silently ignored.
+        DEC-ALIEN-SCHEMA-READ-HEAL-001 behavior change (supersedes the
+        DEC-STORED-DATA-VALIDATION-001 bare-WARN pin this test previously
+        carried): a file violating the canonical 7-column schema cannot
+        satisfy the BAR_SCAN_COLUMNS read — it is still counted
+        ``files_skipped``, but the skip now emits a real
+        :class:`SchemaAlienFile` finding (the healer quarantines it) with the
+        ``lake.invariant.schema_alien_file`` WARNING instead of the
+        finding-less ``scan_skip`` that left the schema-poisoned file in
+        place forever while the dashboard read side skipped it per poll.
         """
+        from brutex.data.lake_invariants import SchemaAlienFile
+
         dest = _dest(tmp_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame({"timestamp": _series([_ts(1)])}).write_parquet(dest)
@@ -426,7 +432,13 @@ class TestScanFindings:
             report = scan_lake_invariants(tmp_path)
         assert report.files_scanned == 0
         assert report.files_skipped == 1
-        assert len(_events(logs, "lake.invariant.scan_skip")) == 1
+        aliens = [f for f in report.findings if isinstance(f, SchemaAlienFile)]
+        assert len(aliens) == 1
+        assert aliens[0].path == dest
+        assert aliens[0].coords is not None
+        assert "missing column(s)" in aliens[0].reason
+        assert len(_events(logs, "lake.invariant.schema_alien_file")) == 1
+        assert not _events(logs, "lake.invariant.scan_skip")
 
     def test_utc_month_rule_no_false_flag_1day(self, tmp_path: Path) -> None:
         # A derived 1day bar is stamped midnight IST = 18:30 UTC of the PREVIOUS
@@ -831,6 +843,7 @@ class TestCensusToDict:
             "overlap_files",
             "drift_dirs",
             "price_files",
+            "alien_files",
         }
 
     def test_stats_and_sweep_folded(self, tmp_path: Path) -> None:

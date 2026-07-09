@@ -192,6 +192,7 @@ class TestLakeUniquenessRoute:
             "overlap_files": 0,
             "drift_dirs": 0,
             "price_files": 0,
+            "alien_files": 0,
         }
         assert payload["healed_total"] == 0
         assert payload["last_sweep_utc"] is None
