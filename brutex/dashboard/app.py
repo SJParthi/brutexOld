@@ -1316,6 +1316,24 @@ def build_app(
             "state model do not need FastAPI."
         ) from exc
 
+    # Hoist the response classes used as ROUTE RETURN ANNOTATIONS into module
+    # globals (DEC-OPENAPI-ANNOTATIONS-RESOLVE-001) — the SAME hoist
+    # :func:`_make_ws_handler` applies to ``WebSocket``. Under
+    # ``from __future__ import annotations`` every closure's ``-> JSONResponse``
+    # (+ ``Response`` / ``HTMLResponse``) annotation is a STRING that
+    # FastAPI/pydantic resolve against ``endpoint.__globals__`` — this module's
+    # dict, where a function-local import is invisible. FastAPI's lenient
+    # ``try_eval_type`` kept the unresolvable ForwardRefs at registration time,
+    # so ``app.openapi()`` raised ``PydanticUserError`` → ``/openapi.json``
+    # 500'd and ``/docs`` + ``/redoc`` were dead. The hoist runs strictly
+    # BEFORE any route registration below; ``PlainTextResponse`` is used only
+    # as a runtime value (never an annotation), so it is deliberately NOT
+    # hoisted. Docs-surface only — zero route behavior change, and the
+    # module still imports without fastapi (the guard above is untouched).
+    globals()["HTMLResponse"] = HTMLResponse
+    globals()["JSONResponse"] = JSONResponse
+    globals()["Response"] = Response
+
     from brutex.observability.metrics import get_registry, render_prometheus
 
     # The retired-vendor 24h-JWT token keepalive was retired here (PR-J4c): the
