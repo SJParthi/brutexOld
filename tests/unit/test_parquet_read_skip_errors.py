@@ -6,6 +6,12 @@ don't crash the whole pass" (polars ``PolarsError`` + ``OSError``). The dashboar
 ``/movers`` + ``/db`` twin
 :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors` DELEGATES to it and
 WIDENS it with ``duckdb.Error`` (CLAUDE.md §11 COMMON — no copy-pasted set).
+
+The round-18 datetime-out-of-range set pins
+(:func:`~brutex.data.errors.datetime_out_of_range_errors` /
+:func:`~brutex.data.errors.datetime_out_of_range_escape_errors`) live in
+``tests/unit/test_data_errors_pickle.py`` — the module's stem-matched
+discovery-gate suite (ONE source of truth, moved there not copied).
 """
 
 from __future__ import annotations

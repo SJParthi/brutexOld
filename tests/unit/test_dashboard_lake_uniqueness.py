@@ -238,6 +238,50 @@ class TestLakeUniquenessRoute:
         assert payload["findings_total"] == 1
         assert "dup bars/NSE/INDEX/NIFTY/1minute/2025/10.parquet" in payload["engine_detail"]
 
+    def test_options_foreign_overlap_real_numbers(self, store: InstrumentStore) -> None:
+        """The chip payload carries REAL OPTIONS foreign/overlap counts
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 — no shape change, real values)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        series = store.path.parent / "options" / "NSE-NIFTY-2025-09"
+        series.mkdir(parents=True, exist_ok=True)
+        sep_ts = datetime(2025, 9, 1, 4, 0, tzinfo=UTC)
+        oct_ts = datetime(2025, 10, 1, 4, 0, tzinfo=UTC)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE"]),
+                    "timestamp": pa.array([sep_ts], type=pa.timestamp("us", tz="UTC")),
+                }
+            ),
+            series / "2025-09.parquet",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", "CE"]),
+                    "timestamp": pa.array([oct_ts, sep_ts], type=pa.timestamp("us", tz="UTC")),
+                }
+            ),
+            series / "2025-10.parquet",
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["engine_clean"] is True  # options never touch the engine verdict
+        assert payload["findings_total"] == 1
+        options_row = next(row for row in payload["segments"] if row["segment"] == "OPTIONS")
+        assert options_row == {
+            "segment": "OPTIONS",
+            "files": 2,
+            "clean": 1,
+            "dup_files": 0,
+            "foreign_files": 1,
+            "overlap_files": 1,
+            "drift_dirs": 0,
+            "price_files": 0,
+        }
+
     def test_present_false_when_lake_root_unresolved(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
