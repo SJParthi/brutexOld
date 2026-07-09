@@ -70,6 +70,44 @@ the `!=`→`==` mutant proven dead on both guards. READ-ONLY dashboard — ENGIN
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
 preopen_report.py + calendars/nse.py 100% line+branch; ruff/ruff-format clean,
 `mypy --strict` clean, pyright 0 errors at the pre-change baseline).
+Earlier: 2026-07-09 (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1650 —
+the `/movers` page gains an `All | Indices | Stocks` underlying-class filter on
+all THREE tabs (Spot / Futures / Options), mirroring DEC-MOVERS-MIN-VOLUME-001
+(#1034) EXACTLY: ONE COMMON `brutex/dashboard/movers_underlying_class.py`
+(`normalize_underlying_class` blank/unknown → `all`; `candidate_passes_class`
+predicate; `filter_by_underlying_class`; EMIT-ON-non-default note/echo helpers)
+applied at RANK time in `build_*_payload` over the SAME cached candidate set —
+never a re-scan. Classification is viewer-reads-storage-only: SPOT from the lake
+segment (`INDEX`→index / `CASH`→stock, the stored `is_index` reflection);
+FUTURES/OPTIONS from a `{underlying → kind}` map REUSING the six-step pull
+order's `primary_fno_underlying` + `is_index` classification (#1527, never
+re-minted). Unresolvable → `unknown`: in `All`, EXCLUDED from Indices AND
+Stocks, and COUNTED (`excluded_unclassified` echo + note suffix). Each candidate
+gains a DEFAULTED additive `underlying_kind` field (never row-emitted), so the
+default `All` payload is BYTE-IDENTICAL (pinned all three tabs). DELIBERATE
+DEVIATION (ledgered honestly): the class is a RANK-time filter over the SHARED
+cached set, so — unlike the #917 expiry tier — it is NOT in `candidate_key`
+(threading it would triple-cache an identical set); cache-independence is proven
+by a route test (Indices vs Stocks over one coordinate → different rows,
+`movers_cache.size()==1`). ADVERSARIAL-REVIEW FIX ROUND folded (same branch,
+pre-merge, MIGRATION.md #1650): the F&O class lookup now NORMALISES the parsed
+token into the map's `primary_fno_underlying` key space (a hyphenated/aliased
+underlying — `BAJAJ-AUTO` — previously misclassified `unknown` and dropped from
+BOTH classes; `parse_future_symbol` made right-anchored + hyphen-preserving,
+mirroring `parse_fno_symbol` — sanctioned display/spot-probe corrections); the
+kind map AND the stamped F&O candidate cache keys fold the `master_revision`
+CONTENT token via ONE `_underlying_kinds_cached` helper (a keyless
+load-instruments now refreshes classification with NO generation bump; the
+post-pull warmer threads the kinds + shares the composite key — warmed rows were
+previously all-`unknown`); full frozen default-payload equality pinned on all
+three tabs; the head's CI pyright red (a mis-annotated `-> TestClient` test
+helper) fixed — the per-round record lives ONLY in the §1 Active-branch blurb +
+MIGRATION.md #1650; this header carries the one-line summary, never the
+round-by-round story. DISPLAY-zone read-only — ENGINE UNCHANGED
+(NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change;
+`movers_underlying_class.py` + `movers_snapshot.py` + `movers_futures.py` +
+`movers_options.py` ALL 100% line+branch; ruff/ruff-format clean, `mypy
+--strict`/pyright clean incl. `app.py`.)
 Earlier: 2026-07-09 (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 —
 the one-click `top100.json` READER-ADOPTS-WRITER fix for the 3/3
 refuter-confirmed BLOCKER: the SHIPPED engine writer
@@ -1854,6 +1892,29 @@ hostile-review pass._
   (204/52) BOTH 100.00% line+branch on their static gates; ruff/ruff-format clean; `mypy --strict` clean (403 files);
   pyright 0 errors at the pre-change baseline, +2 test-file `reportPrivateUsage` warnings — the house private-import
   test pattern — plus 2 more for the round-1 `_hole_shape`/`_hole_detail` private-helper imports.)
+  Earlier: `claude/movers-underlying-class` (**DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1650** —
+  the `/movers` page gains an `All | Indices | Stocks` underlying-class filter on all THREE tabs
+  (Spot / Futures / Options), mirroring DEC-MOVERS-MIN-VOLUME-001 (#1034) EXACTLY: ONE COMMON
+  `brutex/dashboard/movers_underlying_class.py` (`normalize_underlying_class` blank/unknown → `all`;
+  `candidate_passes_class`; `filter_by_underlying_class`; EMIT-ON-non-default note/echo helpers) applied at
+  RANK time in `build_*_payload` over the SAME cached candidate set — never a re-scan. Classification is
+  viewer-reads-storage-only: SPOT from the lake segment (`INDEX`→index / `CASH`→stock, the stored `is_index`
+  reflection); FUTURES/OPTIONS from a `{underlying → kind}` map REUSING the six-step pull order's
+  `primary_fno_underlying` + `is_index` classification (#1527, never re-minted). Unresolvable → `unknown`: in
+  `All`, EXCLUDED from Indices AND Stocks, and COUNTED. Each candidate gains a DEFAULTED additive
+  `underlying_kind` field (never row-emitted), so the default `All` payload is BYTE-IDENTICAL (pinned all
+  three tabs). DELIBERATE DEVIATION (ledgered): the class is a RANK-time filter over the SHARED cached set,
+  so — unlike the #917 expiry tier — it is NOT in `candidate_key`; cache-independence is proven by a route
+  test (Indices vs Stocks over one coordinate → different rows, `movers_cache.size()==1`).
+  ADVERSARIAL-REVIEW FIX ROUND folded (same branch, pre-merge — #1650, renumber history #1631→#1632→#1633→#1650 as PRs #1352/#1354 landed holding the prior claims and the slot wave reserved #1633–#1649): the F&O class lookup normalises the
+  hyphen-preserving parsed token into the map's `primary_fno_underlying` key space (`BAJAJ-AUTO` previously
+  misclassified `unknown`; `parse_future_symbol` right-anchored, mirroring `parse_fno_symbol`); the kind map
+  + the stamped F&O candidate keys fold the `master_revision` CONTENT token via ONE
+  `_underlying_kinds_cached` helper (a keyless load-instruments refreshes with NO generation bump; the
+  warmer threads the kinds + shares the key — warmed rows were all-`unknown`); full default-payload
+  equality pinned; the head's CI pyright red (mis-annotated test helper) fixed. DISPLAY-zone
+  read-only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX); touched modules 100% line+branch; ruff/ruff-format
+  clean, `mypy --strict`/pyright clean incl. `app.py`).
   Earlier: `claude/oneclick-top100-object-root` (**DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631** —
   the one-click `top100.json` READER-ADOPTS-WRITER blocker fix: the display reader
   (`oneclick_artifacts.load_top100`) now parses the SHIPPED engine writer's OBJECT root
@@ -4308,6 +4369,19 @@ hostile-review pass._
   `extra_nonsession_bar` reworded honestly suspicious), /db gains the static
   %CHNG anchor footnote; READ-ONLY dashboard; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/movers-underlying-class`
+  (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1650 — renumber history
+  #1631→#1632→#1633→#1650 (PRs #1352/#1354 took the first two; the slot wave
+  reserved #1633–#1649); the `/movers` page gains
+  an `All | Indices | Stocks` underlying-class filter on all THREE tabs, a
+  rank-time filter over the SHARED cached candidate set (the #1034 min_volume
+  template); SPOT class from the lake segment, FUTURES/OPTIONS from the six-step
+  pull order's `primary_fno_underlying` + `is_index` map (#1527, reused); default
+  `All` byte-identical; ADVERSARIAL-REVIEW FIX ROUND folded — normalize-at-lookup
+  for hyphenated/aliased F&O underlyings, right-anchored `parse_future_symbol`,
+  `master_revision`-keyed kind-map + F&O candidate memos (warmer included), the
+  CI pyright fix; DISPLAY zone only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/oneclick-top100-object-root`
   (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 — the one-click
   `top100.json` reader-adopts-writer blocker fix: object root + the ONE

@@ -53,6 +53,14 @@ import structlog
 from brutex.calendars.nse import has_muhurat_session, previous_trading_session
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_stored_read import read_stored_day_frame
+from brutex.dashboard.movers_underlying_class import (
+    KIND_UNKNOWN,
+    class_echo,
+    class_note_suffix,
+    filter_by_underlying_class,
+    normalize_underlying_class,
+    spot_kind_from_segment,
+)
 from brutex.data.derive_lock import derive_in_progress
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -251,6 +259,13 @@ class MoverSnapshot:
         DEC-SWEEP-DATA-EDGE-GUARDS-001 #1616) — the recorded two-law design of
         DEC-PREVSESSION-MUHURAT-COHERENCE-001. Emitted ON TRUE ONLY, so every
         non-Muhurat row stays byte-identical.
+    underlying_kind
+        The resolved index-vs-stock class of this instrument
+        (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
+        for SPOT it is derived from the lake segment (the stored reflection of the
+        master's ``is_index``). Additive + defaulted (``unknown``); consumed ONLY
+        by the rank-time ``All | Indices | Stocks`` filter, never emitted in a row,
+        so the default payload is byte-identical.
     """
 
     instrument: ScreenInstrument
@@ -264,6 +279,7 @@ class MoverSnapshot:
     prev_close_session: str | None = None
     prev_close_contiguous: bool | None = None
     prev_close_muhurat: bool = False
+    underlying_kind: str = KIND_UNKNOWN
 
     @property
     def ltp_inr(self) -> str:
@@ -520,6 +536,7 @@ def build_snapshot_payload(
     stored_reads: int = 0,
     resampled_reads: int = 0,
     latest_time: str | None = None,
+    underlying_class: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -553,33 +570,47 @@ def build_snapshot_payload(
     is unchanged); ``echo == cut`` in value by construction.
     """
     floor = normalize_min_volume(min_volume)
+    # DEC-MOVERS-UNDERLYING-CLASS-001: RANK-time `All | Indices | Stocks` filter over
+    # the SAME cached candidate set — never a re-scan (the DEC-MOVERS-MIN-VOLUME-001
+    # template). `all` (the default) returns the set unchanged with zero excluded, so
+    # the payload below is byte-identical; a class filter drops non-matching + counts
+    # the unclassified (KIND_UNKNOWN) exclusions for the honest note.
+    wanted_class = normalize_underlying_class(underlying_class)
+    ranked_snapshots, excluded_unclassified = filter_by_underlying_class(snapshots, wanted_class)
     ranked: dict[str, list[dict[str, Any]]] = {
         category: [
             _row(s)
             for s in (
-                _by_volume(snapshots, top_n, min_volume=floor)
+                _by_volume(ranked_snapshots, top_n, min_volume=floor)
                 if category == "volume"
-                else rank_fn(snapshots, top_n)
+                else rank_fn(ranked_snapshots, top_n)
             )
         ]
         for category, rank_fn in _SPOT_CATEGORIES.items()
     }
-    instrument_count = len(snapshots) + skipped
-    if instrument_count == 0:
+    class_note = class_note_suffix(wanted_class, excluded_unclassified)
+    instrument_count = len(ranked_snapshots) + skipped
+    # The "empty lake" message keys on the UNFILTERED population so a class filter
+    # that legitimately empties the ranked set never mis-reads as "no spot pulled"
+    # (for `all` the two counts are equal — byte-identical default).
+    lake_population = len(snapshots) + skipped
+    if lake_population == 0:
         note = (
             "No spot data in the lake yet — pull spot first on the Coverage page, "
-            "then refresh. (Reference-only lake view, CLAUDE.md §3.)"
+            "then refresh. (Reference-only lake view, CLAUDE.md §3.)" + class_note
         )
     elif not any(ranked.values()):
         note = (
             f"{instrument_count} instrument(s) in the lake, but none had a bar at "
             f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
+            + class_note
         )
     else:
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the previous day's close, volume is the fresh session."
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
+            + class_note
         )
     return {
         "interval": interval,
@@ -593,6 +624,7 @@ def build_snapshot_payload(
         "resampled_reads": resampled_reads,
         "latest_time": latest_time,
         "note": note,
+        **class_echo(wanted_class, excluded_unclassified),
         **ranked,
     }
 
@@ -1648,11 +1680,17 @@ def compute_spot_candidates(
         session_iso, contiguous, muhurat = prev_baseline_provenance(
             baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
+        # DEC-MOVERS-UNDERLYING-CLASS-001: resolve the index-vs-stock class from the
+        # lake segment (the stored reflection of the master's `is_index` — CLAUDE.md
+        # §6), attached once here so the rank-time `All | Indices | Stocks` filter
+        # (build_snapshot_payload) never re-reads the master. Additive/defaulted, so
+        # the default (`all`) payload stays byte-identical.
         snap = replace(
             snap,
             prev_close_session=session_iso,
             prev_close_contiguous=contiguous,
             prev_close_muhurat=muhurat,
+            underlying_kind=spot_kind_from_segment(dataset["segment"]),
         )
         if session_iso is not None and contiguous is False:
             warn_prev_baseline_noncontiguous(

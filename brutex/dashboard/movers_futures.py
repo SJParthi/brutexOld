@@ -64,6 +64,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
@@ -85,6 +86,14 @@ from brutex.dashboard.movers_snapshot import (
     value_crore_str,
     value_meets_volume_floor,
     warn_prev_baseline_noncontiguous,
+)
+from brutex.dashboard.movers_underlying_class import (
+    KIND_UNKNOWN,
+    class_echo,
+    class_note_suffix,
+    filter_by_underlying_class,
+    fno_kind_from_underlying,
+    normalize_underlying_class,
 )
 from brutex.data.fno_symbol import expiry_year_in_window
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -189,8 +198,11 @@ def format_contract_date(value: date_cls) -> str:
 _EXPIRY_TOKEN_LEN: Final[int] = 7
 
 #: The minimum hyphen-split arity of a FUT contract groww_symbol
-#: (``EXCH-UNDERLYING-DDMmmYY-FUT`` → 4 parts; a stock name never hyphenates,
-#: vendor symbols use hyphen only as the field separator).
+#: (``EXCH-UNDERLYING-DDMmmYY-FUT`` → 4 parts). NOTE (review round 1): an
+#: underlying CAN itself contain hyphens (``BAJAJ-AUTO`` — the vendor keeps the
+#: spot spelling's interior hyphen), so the parse is right-ANCHORED and joins the
+#: interior tokens back (mirroring :func:`~brutex.data.fno_symbol.parse_fno_symbol`);
+#: the prior "a stock name never hyphenates" claim here was FALSE.
 _MIN_FUT_PARTS: Final[int] = 4
 
 #: The three serial-month futures expiry TIERS → the 0-based rank of the live
@@ -217,6 +229,16 @@ def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
     so its last hyphen part is not ``FUT``) and for any junk / unparseable expiry
     token — the caller then skips it, never raising (Golden Rule #1).
 
+    Right-ANCHORED, mirroring the canonical
+    :func:`~brutex.data.fno_symbol.parse_fno_symbol` (CLAUDE.md §11 COMMON): the
+    underlying is every token between the exchange (token ``0``) and the expiry,
+    joined through any interior hyphens, so a hyphenated underlying is preserved
+    intact — ``"NSE-BAJAJ-AUTO-30Sep25-FUT"`` → ``("BAJAJ-AUTO", …)``. Review
+    round 1 fix: the prior ``parts[1]`` read TRUNCATED it to ``"BAJAJ"``,
+    mis-keying the grouping / display name / underlying-spot probe AND the
+    underlying-class lookup (a sanctioned correction, ledgered in
+    ``MIGRATION.md`` #1650).
+
     Parameters
     ----------
     symbol
@@ -232,7 +254,9 @@ def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
     # Need at least EXCH, UNDERLYING, expiry, FUT — and the last part must be FUT.
     if len(parts) < _MIN_FUT_PARTS or parts[-1] != "FUT":
         return None
-    underlying = parts[1]
+    # Right-anchored: expiry/FUT from the END, the underlying is EVERYTHING between
+    # (interior hyphens re-joined — the parse_fno_symbol idiom, review round 1).
+    underlying = "-".join(parts[1:-2])
     expiry = _parse_expiry_token(parts[-2])
     if not underlying or expiry is None:
         return None
@@ -419,6 +443,12 @@ class FuturesMover:
         Judged INDEPENDENTLY per baseline like the contiguity pair; emitted
         ON TRUE ONLY. The engine's day anchors deliberately skip the Muhurat
         session instead (#1616) — the recorded two-law design.
+    underlying_kind
+        The resolved index-vs-stock class of this future's underlying
+        (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
+        looked up in the stored-master kind map. Additive + defaulted (``unknown``);
+        consumed ONLY by the rank-time ``All | Indices | Stocks`` filter, never
+        emitted in a row, so the default payload is byte-identical.
     """
 
     underlying: str
@@ -440,6 +470,7 @@ class FuturesMover:
     oi_baseline_contiguous: bool | None = None
     prev_close_muhurat: bool = False
     oi_baseline_muhurat: bool = False
+    underlying_kind: str = KIND_UNKNOWN
 
     @property
     def name(self) -> str:
@@ -688,6 +719,7 @@ def build_futures_payload(
     expiry_tier: str = _DEFAULT_TIER,
     min_volume: int | None = None,
     latest_time: str | None = None,
+    underlying_class: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
 
@@ -713,6 +745,12 @@ def build_futures_payload(
         The OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001) applied at RANK
         time to the ``volume`` ranking only; ``None`` / ``0`` ⇒ the byte-identical
         no-floor default.
+    underlying_class
+        The ``All | Indices | Stocks`` filter (DEC-MOVERS-UNDERLYING-CLASS-001)
+        applied at RANK time over the SAME candidate set; ``None`` / blank / unknown
+        ⇒ ``all`` (byte-identical — no filtering, no added payload key). A non-``all``
+        class drops non-matching + unclassified rows and echoes the active class +
+        the ``excluded_unclassified`` count.
     latest_time
         The ADDITIVE display-only echo of the resolved latest intraday minute
         (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — shown as
@@ -731,33 +769,42 @@ def build_futures_payload(
         ``instrument_count`` / ``skipped_count`` / ``note``.
     """
     floor = normalize_min_volume(min_volume)
+    # DEC-MOVERS-UNDERLYING-CLASS-001: RANK-time `All | Indices | Stocks` filter over
+    # the SAME cached candidate set — never a re-scan (the DEC-MOVERS-MIN-VOLUME-001
+    # template). `all` (the default) is byte-identical.
+    wanted_class = normalize_underlying_class(underlying_class)
+    ranked_movers, excluded_unclassified = filter_by_underlying_class(movers, wanted_class)
     ranked: dict[str, list[dict[str, Any]]] = {
         category: [
             _futures_row(m)
             for m in (
-                rank_volume(movers, top_n, min_volume=floor)
+                rank_volume(ranked_movers, top_n, min_volume=floor)
                 if category == "volume"
-                else rank_fn(movers, top_n)
+                else rank_fn(ranked_movers, top_n)
             )
         ]
         for category, rank_fn in _FUTURES_CATEGORIES.items()
     }
-    instrument_count = len(movers) + skipped
-    if instrument_count == 0:
+    class_note = class_note_suffix(wanted_class, excluded_unclassified)
+    instrument_count = len(ranked_movers) + skipped
+    lake_population = len(movers) + skipped
+    if lake_population == 0:
         note = (
             "No futures in the lake yet — pull the F&O futures first on the Coverage "
-            "page, then refresh. (Reference-only lake view, CLAUDE.md §3.)"
+            "page, then refresh. (Reference-only lake view, CLAUDE.md §3.)" + class_note
         )
     elif not any(ranked.values()):
         note = (
             f"{instrument_count} future(s) in the lake, but none had a bar at "
             f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
+            + class_note
         )
     else:
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the future's previous close, premium is vs the spot."
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
+            + class_note
         )
     return {
         "interval": interval,
@@ -770,6 +817,7 @@ def build_futures_payload(
         "skipped_count": skipped,
         "latest_time": latest_time,
         "note": note,
+        **class_echo(wanted_class, excluded_unclassified),
         **ranked,
     }
 
@@ -1104,6 +1152,7 @@ def compute_futures_candidates(
     names: Mapping[str, str] | None = None,
     datasets: list[dict[str, str]] | None = None,
     expiry_tier: str = _DEFAULT_TIER,
+    underlying_kinds: dict[str, str] | None = None,
 ) -> FuturesCandidates:
     """Scan the lake → the :class:`FuturesCandidates` for one snapshot coordinate.
 
@@ -1130,6 +1179,14 @@ def compute_futures_candidates(
         unknown value falls back to ``near``). It is part of the candidate cache
         key, so Near / Next / Far each cache + rank independently (never a stale
         Near row served for a Far request).
+    underlying_kinds
+        The stored-master ``{underlying → kind}`` map
+        (:func:`~brutex.dashboard.movers_underlying_class.build_underlying_kind_map`,
+        DEC-MOVERS-UNDERLYING-CLASS-001) used to stamp each future's
+        ``underlying_kind`` for the RANK-time ``All | Indices | Stocks`` filter.
+        ``None`` (a direct/test caller) leaves every kind ``unknown`` — inert for
+        the default ``all`` class. NOT part of the cache key (the class filters the
+        shared set at rank time, so one cached set serves all three classes).
 
     Returns
     -------
@@ -1157,6 +1214,10 @@ def compute_futures_candidates(
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
     expected_session_for = make_expected_session_resolver(day)
+    # The spot→F&O index alias map for the class lookup, resolved ONCE per compute
+    # call (an env parse + dict copy) and threaded into every per-candidate
+    # `fno_kind_from_underlying` — the lookup stays O(1)/candidate (review round 1).
+    class_aliases = resolve_fno_index_aliases()
     for underlying, contracts in by_underlying.items():
         chosen = select_expiry_tier(
             [(sym, exp) for sym, _exch, exp in contracts], on_date=day, tier=tier
@@ -1232,6 +1293,16 @@ def compute_futures_candidates(
             oi_baseline_contiguous=oi_contig,
             prev_close_muhurat=close_muhurat,
             oi_baseline_muhurat=oi_muhurat,
+            # DEC-MOVERS-UNDERLYING-CLASS-001: resolve the index-vs-stock class from
+            # the stored-master kind map. The map is keyed by primary_fno_underlying
+            # FORMS (BAJAJAUTO) while the PARSED token is hyphen-preserving
+            # (BAJAJ-AUTO), so the lookup normalises the token into the map's key
+            # space via the SAME resolver + the hoisted alias map (review round 1).
+            # Attached once so the rank-time filter never re-reads the master;
+            # absent map / unrecognised underlying → KIND_UNKNOWN (Golden Rule #1).
+            underlying_kind=fno_kind_from_underlying(
+                underlying, underlying_kinds, aliases=class_aliases
+            ),
         )
         if close_iso is not None and close_contig is False:
             warn_prev_baseline_noncontiguous(
