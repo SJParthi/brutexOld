@@ -7,6 +7,10 @@ retired in Stage e), the PLANNED upsert (`plan_windows`), the throttled live
 flush, and the begin/end dry-run rule.
 """
 
+# Whitebox tests reach module-private decode helpers (`_read_ledger_file_rows` /
+# `_intern_cells` / `_INTERNED_COLUMNS`) — sanctioned per pyproject.toml.
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import errno
@@ -2870,3 +2874,239 @@ class TestRetrySplitBackwardCompat:
         newer = _row(last_attempt="2026-06-08T13:00:00+00:00", empty_retries=2, transient_retries=1)
         assert merge_ledger_rows([older], [newer]) == [newer]
         assert merge_ledger_rows([newer], [older]) == [newer]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-LEDGER-LOAD-SPACE-V1-001 — interned decode (the per-load string memo)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _window_key(security_id: str, start: date, end: date) -> WindowKey:
+    """A window key with an explicit span (the intern tests need >1 window/contract)."""
+    return WindowKey(
+        market="dhan", security_id=security_id, interval="1minute", start=start, end=end
+    )
+
+
+class TestInternedDecode:
+    """Equal low-cardinality string cells share ONE object after a load.
+
+    Pre-fix, ``to_pylist()`` yielded a DISTINCT ``str`` per cell (measured
+    794 B/row logical / 1,305 B/row RSS on an 87,573-row real-writer fixture —
+    the Breaker-B finding-1 audit); the per-load memo collapses ``==``-equal
+    cells of the seven :data:`_INTERNED_COLUMNS` onto one object. VALUES stay
+    byte-identical (the row fixed point below) — only identity changes.
+    """
+
+    def _saved_ledger(self, tmp_path: Path) -> WindowLedger:
+        ledger = WindowLedger()
+        # Two windows of ONE contract (shared security_id) + a second contract,
+        # all on the shared interval/market; two FAILED rows share an error string.
+        ledger.record(
+            _window_key("NIFTY", date(2021, 1, 1), date(2021, 4, 1)),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+        )
+        ledger.record(
+            _window_key("NIFTY", date(2021, 4, 1), date(2021, 8, 1)),
+            raw_bars=0,
+            error_type="GrowwTimeoutError",
+            bars_appended=0,
+            now=_NOW,
+        )
+        ledger.record(
+            _window_key("SENSEX", date(2021, 1, 1), date(2021, 4, 1)),
+            raw_bars=0,
+            error_type="GrowwTimeoutError",
+            bars_appended=0,
+            now=_NOW,
+        )
+        save_window_ledger(ledger, tmp_path)
+        return ledger
+
+    def test_loaded_records_share_low_cardinality_strings(self, tmp_path: Path) -> None:
+        ledger = self._saved_ledger(tmp_path)
+        restored = load_window_ledger(tmp_path)
+        # Row fixed point FIRST: values are byte-identical to the pre-memo load.
+        assert restored.to_rows() == ledger.to_rows()
+        records = restored.records()
+        nifty = [r for r in records if r.security_id == "NIFTY"]
+        failed = [r for r in records if r.last_error is not None]
+        a, b = records[0], records[1]
+        # ONE shared object per equal value — market / interval across all rows,
+        # security_id across a contract's windows, last_error across failures.
+        assert a.market is b.market
+        assert a.interval is b.interval
+        assert nifty[0].security_id is nifty[1].security_id
+        assert len(failed) == 2
+        assert failed[0].last_error is failed[1].last_error
+        assert failed[0].status is failed[1].status
+        # Equal window dates share too (the two contracts' first windows align).
+        sensex = next(r for r in records if r.security_id == "SENSEX")
+        assert nifty[0].window_start is sensex.window_start
+
+    def test_memo_spans_base_and_delta_files(self, tmp_path: Path) -> None:
+        self._saved_ledger(tmp_path)
+        # Dirty ONE new window on a freshly loaded ledger and flush it as a DELTA.
+        live = load_window_ledger(tmp_path)
+        live.record(
+            _window_key("BANKNIFTY", date(2021, 1, 1), date(2021, 4, 1)),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=3,
+            now=_NOW,
+        )
+        assert append_ledger_delta(live, tmp_path) == 1
+        restored = load_window_ledger(tmp_path)
+        records = restored.records()
+        from_delta = next(r for r in records if r.security_id == "BANKNIFTY")
+        from_base = next(r for r in records if r.security_id == "NIFTY")
+        # The delta row's cells re-use the BASE file's string objects — the memo
+        # is threaded across every folded file, not per-file.
+        assert from_delta.interval is from_base.interval
+        assert from_delta.market is from_base.market
+
+    def test_direct_read_interns_within_one_file(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import _read_ledger_file_rows
+
+        self._saved_ledger(tmp_path)
+        rows = _read_ledger_file_rows(ledger_path(tmp_path))  # memo=None → fresh memo
+        # interval is row index 2; market index 0 — shared within the file.
+        assert rows[0][2] is rows[1][2]
+        assert rows[0][0] is rows[1][0]
+
+    def test_timestamp_columns_are_deliberately_not_interned(self) -> None:
+        # µs-ISO timestamps are essentially unique — a memo would double-hold
+        # them; the exclusion is per-COLUMN policy, pinned here.
+        from brutex.data.window_ledger_store import _CORE_COLUMNS, _INTERNED_COLUMNS
+
+        assert "first_seen_at" not in _INTERNED_COLUMNS
+        assert "last_attempt_at" not in _INTERNED_COLUMNS
+        # Every interned column IS a core column (the optional int columns
+        # never carry strings — nothing to intern there).
+        assert frozenset(_CORE_COLUMNS) >= _INTERNED_COLUMNS
+
+    def test_intern_cells_passthrough_for_non_strings(self) -> None:
+        from brutex.data.window_ledger_store import _intern_cells
+
+        memo: dict[str, str] = {}
+        first = "1minute"
+        second = "".join(["1minu", "te"])  # equal value, runtime-built distinct object
+        assert second == first and second is not first
+        out = _intern_cells([first, None, second], memo)
+        assert out[0] is first
+        assert out[1] is None  # None (a nullable cell) passes through untouched
+        assert out[2] is first  # the memo collapsed the equal value
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-LEDGER-LOAD-SPACE-V1-001 — the shared pull-ledger scope
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSharedPullLedgerScope:
+    """One whole-ledger materialisation per pipeline run (2 loads → 1)."""
+
+    def _seed(self, lake: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(ledger, lake)
+
+    def _counting(self, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+        """Spy on the begin-time full load (`load_or_migrate_window_ledger`)."""
+        import brutex.data.window_ledger_store as wls
+
+        real = wls.load_or_migrate_window_ledger
+        calls: list[Path] = []
+
+        def _spy(lake_root: Path, **kwargs: Any) -> WindowLedger:
+            calls.append(lake_root)
+            return real(lake_root, **kwargs)
+
+        monkeypatch.setattr(wls, "load_or_migrate_window_ledger", _spy)
+        return calls
+
+    def test_outside_scope_each_begin_loads_fresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path)
+        calls = self._counting(monkeypatch)
+        a = begin_pull_ledger(tmp_path, dry_run=False)
+        b = begin_pull_ledger(tmp_path, dry_run=False)
+        # Byte-identical pre-scope behaviour: two loads, two distinct instances.
+        assert a is not None and b is not None
+        assert a is not b
+        assert len(calls) == 2
+
+    def test_scope_reuses_one_instance_one_load(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger_store import shared_pull_ledger_scope
+
+        self._seed(tmp_path)
+        calls = self._counting(monkeypatch)
+        with shared_pull_ledger_scope():
+            a = begin_pull_ledger(tmp_path, dry_run=False)
+            b = begin_pull_ledger(tmp_path, dry_run=False)
+        # The fails-before pin: pre-fix this was 2 full loads + 2 instances.
+        assert a is b
+        assert len(calls) == 1
+        assert a is not None and a.count == 1
+
+    def test_dry_run_in_scope_stays_none_and_uncached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger_store import shared_pull_ledger_scope
+
+        self._seed(tmp_path)
+        calls = self._counting(monkeypatch)
+        with shared_pull_ledger_scope():
+            assert begin_pull_ledger(tmp_path, dry_run=True) is None
+            assert calls == []  # a dry-run never loads, never caches
+            live = begin_pull_ledger(tmp_path, dry_run=False)
+            assert live is not None
+            assert begin_pull_ledger(tmp_path, dry_run=True) is None  # still None mid-scope
+        assert len(calls) == 1
+
+    def test_scope_is_per_lake(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import shared_pull_ledger_scope
+
+        lake_a = tmp_path / "a"
+        lake_b = tmp_path / "b"
+        lake_a.mkdir()
+        lake_b.mkdir()
+        self._seed(lake_a)
+        self._seed(lake_b)
+        with shared_pull_ledger_scope():
+            a = begin_pull_ledger(lake_a, dry_run=False)
+            b = begin_pull_ledger(lake_b, dry_run=False)
+            assert a is not b  # distinct lakes never share an instance
+            assert begin_pull_ledger(lake_a, dry_run=False) is a
+
+    def test_scope_exit_resets(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import shared_pull_ledger_scope
+
+        self._seed(tmp_path)
+        with shared_pull_ledger_scope():
+            a = begin_pull_ledger(tmp_path, dry_run=False)
+        b = begin_pull_ledger(tmp_path, dry_run=False)
+        assert a is not b  # the scope died with the `with` — no cross-pull reuse
+
+    def test_scope_resets_on_exception(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import shared_pull_ledger_scope
+
+        self._seed(tmp_path)
+        holder: list[WindowLedger | None] = []
+
+        def _begin_then_boom() -> None:
+            with shared_pull_ledger_scope():
+                holder.append(begin_pull_ledger(tmp_path, dry_run=False))
+                raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            _begin_then_boom()
+        assert holder[0] is not None
+        after = begin_pull_ledger(tmp_path, dry_run=False)
+        assert after is not holder[0]  # the finally reset ran

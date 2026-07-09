@@ -99,6 +99,7 @@ from brutex.dashboard.pipeline_verdict import (
 from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.parquet_writer import fold_max_close_delta
+from brutex.data.window_ledger_store import shared_pull_ledger_scope
 from brutex.money import format_inr, round_money
 from brutex.notifications.sweep_alerts import emit_vendor_conflict_alert
 
@@ -962,6 +963,15 @@ def run_full_pipeline(
     it triggers is the real multi-hour vendor fill + the O(symbols × bars)
     prebuild (no throughput claim, Golden Rule #10).
 
+    **One ledger load per run (DEC-LEDGER-LOAD-SPACE-V1-001):** the fetch
+    phases run inside ONE
+    :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`, so the
+    spot phase's full window-ledger materialisation is REUSED by the
+    historical phase (previously each phase loaded the whole O(rows) ledger —
+    two full loads + two co-resident copies per pipeline run). Per-phase saves
+    are unchanged; the scope closes before the prebuild/movers post-steps so
+    the ledger is released, not held through the derive.
+
     Parameters
     ----------
     run_spot
@@ -1011,43 +1021,56 @@ def run_full_pipeline(
     PipelinePullReport
         The combined, auditable outcome of every phase that ran.
     """
-    spot = run_spot()
-    if not spot_phase_ok(spot):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=None,
-            historical=None,
-            stopped_after=PHASE_SPOT,
-            note=_spot_stop_note(spot),
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
-        )
+    # ONE whole-ledger materialisation for the fetch phases
+    # (DEC-LEDGER-LOAD-SPACE-V1-001): the spot phase and the historical phase
+    # each `begin_pull_ledger` the SAME lake — inside this scope the second
+    # (and any later) live begin reuses the first load's instance instead of
+    # re-materialising every recorded window row (measured 1,305 B/row RSS +
+    # ~13.6 µs/row per full load; two distinct materialisations co-resided
+    # across the phase boundary pre-scope). Per-phase SAVES are unchanged
+    # (durability byte-identical); the scope closes BEFORE the post-steps
+    # (prebuild/movers), releasing the ledger instead of holding it through
+    # the O(symbols × bars) derive. Safe by construction: the phases run
+    # sequentially on this one thread under the pull single-flight lock (the
+    # scope is a ContextVar — confined to this thread/context).
+    with shared_pull_ledger_scope():
+        spot = run_spot()
+        if not spot_phase_ok(spot):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_SPOT,
+                note=_spot_stop_note(spot),
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
 
-    metadata = run_metadata()
-    if not metadata_phase_ok(metadata):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=metadata,
-            historical=None,
-            stopped_after=PHASE_METADATA,
-            note=_metadata_stop_note(metadata),
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
-        )
+        metadata = run_metadata()
+        if not metadata_phase_ok(metadata):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=PHASE_METADATA,
+                note=_metadata_stop_note(metadata),
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
 
-    # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
-    # cleanliness threaded INTO the historical phase (the Greeks seam at the
-    # historical tail cannot otherwise see a spot-side quarantine under the
-    # strict barrier). Computed AFTER both gates passed — the gate arms are
-    # True by construction here; the quarantine check is the strict extra.
-    prior = PriorStepsVerdict(
-        spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
-        metadata_clean=metadata_phase_ok(metadata),
-        strict=strict_gate,
-    )
-    historical = run_historical(prior)
+        # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
+        # cleanliness threaded INTO the historical phase (the Greeks seam at the
+        # historical tail cannot otherwise see a spot-side quarantine under the
+        # strict barrier). Computed AFTER both gates passed — the gate arms are
+        # True by construction here; the quarantine check is the strict extra.
+        prior = PriorStepsVerdict(
+            spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
+            metadata_clean=metadata_phase_ok(metadata),
+            strict=strict_gate,
+        )
+        historical = run_historical(prior)
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of
