@@ -1262,14 +1262,17 @@ def build_app(
     oneclick_trades_reader
         Optional typed :class:`~brutex.dashboard.oneclick_artifacts.TradesReader`
         for the ``/api/v1/oneclick/trades`` route (DEC-OPERATOR-PAGE-REAL-001).
-        ``None`` (the default) resolves per request: the fail-loud
+        ``None`` (the default) resolves per request
+        (DEC-ONECLICK-SWEEP-RUNS-REBIND-001): the fail-loud
         ``BRUTEX_ONECLICK_FIXTURE_ROOT`` fixture tree activates a memoised
-        :class:`~brutex.dashboard.oneclick_artifacts.FixtureTradesReader`,
-        otherwise the HONEST
-        :class:`~brutex.dashboard.oneclick_artifacts.AwaitingTradesReader`
-        serves ``status="awaiting"`` — production can NEVER serve a real lake
-        path as trade data until the ResultsStore paged API lands at
-        merge-integration.
+        :class:`~brutex.dashboard.oneclick_artifacts.FixtureTradesReader`;
+        otherwise the PRODUCTION
+        :class:`~brutex.dashboard.oneclick_artifacts.TradeStoreReader` pages
+        the SHIPPED #1275 results-depth sidecars under the Ruling-4
+        ``sweep_runs/`` sibling root (a run without those sidecars degrades
+        to the honest ``status="awaiting"``), and the no-lake configuration
+        keeps the honest
+        :class:`~brutex.dashboard.oneclick_artifacts.AwaitingTradesReader`.
     session_rate
         Optional :class:`~brutex.dashboard.pull_controller.SessionRateController`
         — the ONE per-session rate holder every pull shares
@@ -2082,9 +2085,14 @@ def build_app(
         derived counts are cached behind ``_universe_cache``, keyed by the
         master's ``instruments``-table content token — a re-poll between two loads
         is a dict handoff, a new load rebuilds.
+
+        DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the cache's revision probe (a sync
+        DuckDB ``COUNT`` + ``MAX``) — and the three base reads on a miss — run on a
+        threadpool worker, NEVER the uvicorn event loop, so a stalled lake volume
+        cannot freeze the whole dashboard.
         """
         store = _require_store()
-        return JSONResponse(_universe_cache.summary(store))
+        return JSONResponse(await run_in_threadpool(_universe_cache.summary, store))
 
     @app.get("/api/v1/universe/instruments")
     async def api_universe_instruments(
@@ -2108,7 +2116,11 @@ def build_app(
         """
         store = _require_store()
         try:
-            rows = _universe_cache.instruments(store, kind=kind)
+            # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the cache's revision probe +
+            # per-kind base reads run on a threadpool worker, never the event loop
+            # (the classifier's ValueError for a bad kind still propagates out of
+            # run_in_threadpool → 400, before any caching).
+            rows = await run_in_threadpool(lambda: _universe_cache.instruments(store, kind=kind))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
@@ -2152,19 +2164,33 @@ def build_app(
         from brutex.universe_constituents import held_members
 
         store = _require_store()
-        eligible = store.fno_eligible_underlyings()
-        candidates = store.list_index_equity_instruments()
-        reference_only_ids = store.reference_only_security_ids()
-        # The bare engine symbols of EVERY single stock we hold — F&O-eligible AND
-        # admitted REFERENCE_ONLY NTM constituents (DEC-INDEX-CONSTITUENTS-FULL-001).
-        # Passing reference_only_ids classifies the non-F&O constituents as "stock"
-        # too, so the tick covers the index's FULL membership (not just the ~212 F&O
-        # names); the frontend "F&O only" toggle then narrows to the option-pullable
-        # rows. Reuse the COMMON classifier (CLAUDE.md §11) — no re-derived split.
-        stock_rows = list_underlyings(
-            candidates, kind="stock", fno_eligible=eligible, reference_only_ids=reference_only_ids
-        )
-        held_symbols = [row["symbol"] for row in stock_rows]
+
+        def _held_universe() -> tuple[list[Instrument], list[str]]:
+            """Read + classify the held single-stock universe off the event loop.
+
+            DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the three DuckDB store reads +
+            the COMMON classifier run on a threadpool worker (built + used on the
+            SAME thread so the store's RLock stays on one thread —
+            DEC-DASHBOARD-FASTREAD-001), never the uvicorn event loop.
+            """
+            eligible = store.fno_eligible_underlyings()
+            candidates = store.list_index_equity_instruments()
+            reference_only_ids = store.reference_only_security_ids()
+            # The bare engine symbols of EVERY single stock we hold — F&O-eligible AND
+            # admitted REFERENCE_ONLY NTM constituents (DEC-INDEX-CONSTITUENTS-FULL-001).
+            # Passing reference_only_ids classifies the non-F&O constituents as "stock"
+            # too, so the tick covers the index's FULL membership (not just the ~212 F&O
+            # names); the frontend "F&O only" toggle then narrows to the option-pullable
+            # rows. Reuse the COMMON classifier (CLAUDE.md §11) — no re-derived split.
+            stock_rows = list_underlyings(
+                candidates,
+                kind="stock",
+                fno_eligible=eligible,
+                reference_only_ids=reference_only_ids,
+            )
+            return candidates, [row["symbol"] for row in stock_rows]
+
+        candidates, held_symbols = await run_in_threadpool(_held_universe)
 
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
@@ -5463,10 +5489,6 @@ def build_app(
                     )
                 )
             lake_root = store_path.parent
-            # The current write-generation — a pull/materialize bumps it, so every
-            # cached candidate set computed at an older generation is dirty (the
-            # page never serves pre-pull data). Reused from the coverage cache.
-            generation = _summary_cache.generation
 
             def _resolve() -> dict[str, Any]:
                 """Cache-or-compute the candidate set, then rank to top_n + exchange.
@@ -5476,6 +5498,13 @@ def build_app(
                 ONLY on a miss / post-pull; a hit is an O(1) handoff + a cheap
                 in-memory rank (DEC-MOVERS-O1-LATENCY-001).
                 """
+                # The current write-generation — a pull/materialize bumps it, so every
+                # cached candidate set computed at an older generation is dirty (the
+                # page never serves pre-pull data). Reused from the coverage cache.
+                # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: read HERE on the threadpool
+                # worker — the probe stats the ledger + digests the sweeps tree (an
+                # O(dirs) read), which must never run on the uvicorn event loop.
+                generation = _summary_cache.generation
                 # Normalise the date so the candidate cache key is canonical. With NO
                 # explicit date, default to the LATEST available spot day
                 # (DEC-PULL-MOVERS-WARM-001), NOT today: a historical pull fills the lake
@@ -5799,10 +5828,12 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
         lake = lake_root.parent
-        gen = _summary_cache.generation
 
         def _resolve() -> dict[str, Any]:
             """Tag pullability off the event loop; discovery is generation-memoised."""
+            # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
+            # sweeps-tree digest) runs HERE on the threadpool worker, never the loop.
+            gen = _summary_cache.generation
             triples = _db_datasets_cache.get_or_compute(
                 preopen_datasets_key(report_basis),
                 generation=gen,
@@ -6383,7 +6414,10 @@ def build_app(
         except oneclick_artifacts.OneclickConfigError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if fixture_root is not None:
-            return fixture_root, fixture_root
+            # The pseudo sweeps root INSIDE the fixture tree — the Ruling-4
+            # parent-sibling derivation then lands runs at
+            # <fixture_root>/sweep_runs/ (self-contained, never escapes).
+            return oneclick_artifacts.fixture_results_root(fixture_root), fixture_root
         if instrument_store is None:
             return None, None
         store_path = getattr(instrument_store, "path", None)
@@ -6391,29 +6425,45 @@ def build_app(
             return None, None
         return default_results_root(store_path.parent), None
 
-    # FixtureTradesReader instances memoised per fixture root so their
-    # parse-once-per-revision memo survives across requests (owned by this app
+    # Fixture/production reader instances memoised per root so their
+    # parse-once-per-revision memos survive across requests (owned by this app
     # instance — no module-global mutable state, CLAUDE.md §4).
     _oneclick_fixture_readers: dict[str, oneclick_artifacts.FixtureTradesReader] = {}
+    _oneclick_store_readers: dict[str, oneclick_artifacts.TradeStoreReader] = {}
 
-    def _oneclick_reader(fixture_root: Path | None) -> oneclick_artifacts.TradesReader:
-        """The typed trades seam: injected reader > fixture reader > honest awaiting."""
+    def _oneclick_reader(
+        results_root: Path | None, fixture_root: Path | None
+    ) -> oneclick_artifacts.TradesReader:
+        """The typed trades seam (DEC-ONECLICK-SWEEP-RUNS-REBIND-001 order).
+
+        injected reader > fixture reader (env override) > the PRODUCTION
+        ``TradeStoreReader`` over the #1275 results-depth sidecars (per-run
+        honest awaiting when absent) > ``AwaitingTradesReader`` when no lake
+        root is wired at all.
+        """
         if oneclick_trades_reader is not None:
             return oneclick_trades_reader
-        if fixture_root is None:
+        if fixture_root is not None:
+            fkey = str(fixture_root)
+            freader = _oneclick_fixture_readers.get(fkey)
+            if freader is None:
+                freader = oneclick_artifacts.FixtureTradesReader(fixture_root)
+                _oneclick_fixture_readers[fkey] = freader
+            return freader
+        if results_root is None:
             return oneclick_artifacts.AwaitingTradesReader()
-        key = str(fixture_root)
-        reader = _oneclick_fixture_readers.get(key)
-        if reader is None:
-            reader = oneclick_artifacts.FixtureTradesReader(fixture_root)
-            _oneclick_fixture_readers[key] = reader
-        return reader
+        skey = str(results_root)
+        sreader = _oneclick_store_readers.get(skey)
+        if sreader is None:
+            sreader = oneclick_artifacts.TradeStoreReader(results_root)
+            _oneclick_store_readers[skey] = sreader
+        return sreader
 
     @app.get("/api/v1/oneclick/runs")
     async def api_oneclick_runs() -> JSONResponse:
         """GET /api/v1/oneclick/runs — discovered sweep runs, newest first.
 
-        Lists ``<results_root>/runs/<run_id>/`` directories with per-artifact
+        Lists the Ruling-4 ``sweep_runs/<run_id>/`` directories with per-artifact
         presence flags + the manifest's ``suspect`` verdict (``null`` until
         readable — never fabricated). Memoised per ``runs/`` dir stat token;
         an empty/absent tree is the loud ``status:"awaiting"`` payload.
@@ -6635,22 +6685,22 @@ def build_app(
     ) -> JSONResponse:
         """GET /api/v1/oneclick/trades — one paged trade list via the typed seam.
 
-        PRODUCTION DEFAULT is the honest ``AwaitingTradesReader`` (trades land
-        at merge-integration via the ResultsStore paged API); the file-reading
+        PRODUCTION DEFAULT is the ``TradeStoreReader`` over the SHIPPED #1275
+        results-depth sidecars (DEC-ONECLICK-SWEEP-RUNS-REBIND-001) — a run
+        without those sidecars degrades to the honest awaiting page (the
+        ``AwaitingTradesReader`` semantics, preserved); the file-reading
         ``FixtureTradesReader`` activates ONLY under the fail-loud
         ``BRUTEX_ONECLICK_FIXTURE_ROOT``. ``source`` is a VISIBLE badge
         client-side (C-M5); ``total`` stays ``null`` when unknown — never a
-        fabricated 0; VIX nulls pass through (R31 honest NULL).
+        fabricated 0; VIX + lots/costs nulls pass through (R31 honest NULL /
+        Ruling 18 NULL-by-design).
         """
         rid = _oneclick_require_run_id(run_id)
 
         def _resolve() -> dict[str, Any]:
             """Build the trades payload off the event loop via the TradesReader seam."""
-            try:
-                fixture_root = oneclick_artifacts.resolve_fixture_root()
-            except oneclick_artifacts.OneclickConfigError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            reader = _oneclick_reader(fixture_root)
+            root, fixture_root = _oneclick_roots()
+            reader = _oneclick_reader(root, fixture_root)
             page = reader.page(rid, rank, offset=offset, limit=limit)
             return oneclick_view.build_trades_payload(
                 rid,
@@ -6716,7 +6766,7 @@ def build_app(
                         )
                     except oneclick_artifacts.ChainNotVerifiedError:
                         chain = None
-            trades_probe = _oneclick_reader(fixture_root).page(rid, 1, offset=0, limit=1)
+            trades_probe = _oneclick_reader(root, fixture_root).page(rid, 1, offset=0, limit=1)
             return oneclick_view.build_verify_payload(
                 rid,
                 manifest,
@@ -6929,11 +6979,12 @@ def build_app(
         # generation — a tab switch within one generation is an O(1) cached handoff, a
         # pull bumps the generation → rediscover. The build still runs on the threadpool
         # worker (the store read + dir-walks stay off the event loop) on a cache miss.
-        gen = _summary_cache.generation
+        # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
+        # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
         return JSONResponse(
             await run_in_threadpool(
                 lambda: _db_datasets_cache.get_or_compute(
-                    DB_DATASETS_KEY, generation=gen, compute=_datasets
+                    DB_DATASETS_KEY, generation=_summary_cache.generation, compute=_datasets
                 )
             )
         )
@@ -6953,11 +7004,12 @@ def build_app(
         if not isinstance(lake_root, Path):
             return None
         lake = lake_root.parent
-        gen = _summary_cache.generation
+        # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
+        # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
         index: FnoCascadeIndex = await run_in_threadpool(
             lambda: _fno_cascade_cache.get_or_compute(
                 FNO_CASCADE_KEY,
-                generation=gen,
+                generation=_summary_cache.generation,
                 compute=lambda: build_fno_cascade(list_fno_candle_datasets(lake)),
             )
         )
@@ -7078,15 +7130,16 @@ def build_app(
         if not isinstance(lake_root, Path):
             return None
         lake = lake_root.parent
-        gen = _summary_cache.generation
 
         def _build() -> SpotCascadeIndex:
             """Build the spot symbol→interval cascade from the non-F&O lake datasets."""
             return build_spot_cascade(filter_spot_datasets(list_candle_datasets(lake)))
 
+        # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
+        # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
         index: SpotCascadeIndex = await run_in_threadpool(
             lambda: _spot_cascade_cache.get_or_compute(
-                SPOT_CASCADE_KEY, generation=gen, compute=_build
+                SPOT_CASCADE_KEY, generation=_summary_cache.generation, compute=_build
             )
         )
         return index

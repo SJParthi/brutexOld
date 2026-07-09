@@ -92,9 +92,11 @@ spot is signal-only → NO brokerage (CLAUDE.md §7), so net == gross.
 
 ### #10 — one-click artifact contract corpus (DEC-OPERATOR-PAGE-REAL-001)
 
-Files live under `tests/fixtures/oneclick/runs/**` (NOT this directory — the
-corpus is a whole `runs/` directory TREE the dashboard adapter reads
-path-shaped, registered HERE per the fixture law). CONTRACT-shaped fixtures
+Files live under `tests/fixtures/oneclick/sweep_runs/**` (NOT this directory
+— the corpus is a whole `sweep_runs/` directory TREE the dashboard adapter
+reads path-shaped, registered HERE per the fixture law; migrated from the
+original `runs/` tree under gap-register Ruling 4 /
+DEC-ONECLICK-SWEEP-RUNS-REBIND-001, bytes unchanged). CONTRACT-shaped fixtures
 for the P4 display build (sweep-parallel-integration-contracts): the P2 run
 manifest (`manifest.json`, funnel hand-derived so R44 check #7 reconciles to
 the digit), the P3 top-100 leaderboard (`top100.json`, 100 rows over a 3-TF ×
