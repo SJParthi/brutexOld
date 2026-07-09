@@ -197,9 +197,9 @@
       return Array.isArray(v) ? v.join(' × ') : '—';
     }
     if (col.type === 'vix') {
-      return v && typeof v === 'object' && v.lo !== undefined
-        ? String(v.lo) + '–' + String(v.hi)
-        : 'null'; // R31 honest NULL — never a silent zero
+      /* [W3-R4]: the ONE shared compact band cell — a null-lo/hi writer band
+         reads "not stamped" (R31 honest NULL), never "null–null". */
+      return window.BXOneclick.vixBandCellText(v);
     }
     if (v === null || v === undefined) { return '—'; }
     if (col.money) { return money(v); }

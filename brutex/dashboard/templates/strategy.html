@@ -236,10 +236,12 @@
     return null;
   }
 
+  /* TZ-SAFE parse ([W3-R1] second layer): the ONE shared BXChart.parseTsIst —
+     a naive API string is IST wall-clock pinned to +05:30, an offset-carrying
+     trade timestamp passes through — so arrow placement is TZ-invariant in
+     every browser, never a browser-local Date.parse of a naive string. */
   function parseTs(raw) {
-    if (typeof raw === 'number') { return raw; }
-    var t = Date.parse(String(raw).replace(' ', 'T'));
-    return isNaN(t) ? null : t;
+    return window.BXChart.parseTsIst(raw);
   }
 
   /* ── candle chart ── */
@@ -304,7 +306,9 @@
         'no trade timestamps yet — chart loads once trades exist (awaiting real run artifact)';
       return;
     }
-    var day = new Date(anchor).toISOString().slice(0, 10);
+    // The session-day anchor is the IST calendar date of the entry instant
+    // (pure epoch arithmetic — TZ-invariant, never a browser-local Date).
+    var day = window.BXChart.istDateOfEpoch(anchor);
     var parts = String(state.symbol).split('-');
     var exchange = parts.length > 1 ? parts[0] : 'NSE';
     var url = '/api/v1/db/candles' +
@@ -319,24 +323,18 @@
       state.symbol + ' · ' + state.interval + ' · session ' + day +
       (state.tradeIdx !== null ? ' · centered on trade #' + String(state.tradeIdx + 1) : '');
     window.BXOneclick.oneshotFetch(url, byId('stChartError'), function (payload) {
-      var cols = payload.columns || [];
-      var idx = {};
-      for (var c = 0; c < cols.length; c++) { idx[cols[c]] = c; }
-      var rows = [];
-      var raw = payload.rows || [];
-      for (var r = 0; r < raw.length; r++) {
-        var ts = parseTs(raw[r][idx.ts]);
-        if (ts === null) { continue; }
-        rows.push({
-          ts: ts,
-          open: Number(raw[r][idx.open]),
-          high: Number(raw[r][idx.high]),
-          low: Number(raw[r][idx.low]),
-          close: Number(raw[r][idx.close])
-        });
+      /* [W3-R1]: the ONE route-shape-driven mapper (BXChart) — the route's
+         column is "timestamp" (db_view.CANDLE_COLUMNS); the old inline
+         idx.ts read undefined on every REAL payload so no candle ever
+         plotted (the fixture blindspot). A missing required column shows
+         an honest note, never a silently empty chart. */
+      var mapped = window.BXChart.candleRowsFromDbPayload(payload);
+      if (mapped.missing !== null) {
+        byId('stChartCoords').textContent =
+          'candle payload is missing the "' + mapped.missing + '" column — cannot chart';
+        return;
       }
-      rows.sort(function (a, b) { return a.ts - b.ts; });
-      state.candles = rows;
+      state.candles = mapped.rows;
       renderChart();
     });
   }
@@ -484,11 +482,9 @@
         byId('stWinRate').textContent = m.win_rate === undefined ? '—' : String(m.win_rate);
         byId('stPf').textContent = m.profit_factor === undefined ? '—' : String(m.profit_factor);
         byId('stTrades').textContent = m.trades === undefined ? '—' : String(m.trades);
-        var band = row.vix_band;
-        byId('stVixBand').textContent =
-          band && typeof band === 'object' && band.lo !== undefined
-            ? 'works when VIX between ' + String(band.lo) + '–' + String(band.hi)
-            : 'no VIX band recorded for this combo (honest NULL — R31)';
+        /* [W3-R4]: the ONE shared band builder — a null-lo/hi writer band
+           reads the honest not-stamped copy, never "between null–null". */
+        byId('stVixBand').textContent = window.BXOneclick.vixBandText(row.vix_band);
         state.interval = tfToInterval(row.tf);
         loadTrades();
       }

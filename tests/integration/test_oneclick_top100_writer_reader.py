@@ -283,6 +283,44 @@ class TestEngineWriterThroughRoutes:
         assert payload["row_count"] > 0
         assert all("sharpe" in row["metrics"] for row in payload["rows"])
 
+    def test_strategy_story_card_arm_is_the_bridged_string_on_the_wire(
+        self, tmp_path: Path
+    ) -> None:
+        """[W3-R3] second-surface verdict: /strategy's story card obtains its
+        row from THIS route's payload (``strategy.html`` ``loadRow`` fetches
+        ``/api/v1/oneclick/top100`` and sets ``stArm`` from ``row.arm``) — the
+        f1d271d4 reader-boundary bridge therefore covers /strategy too: every
+        wire row's ``arm`` is the display STRING, so ``String(row.arm)`` can
+        never render "[object Object]" on ANY consumer. Route-level proof
+        (the earlier arm test asserted the reader only) + the template pin
+        that no OTHER fetch feeds the arm."""
+        lake = tmp_path / "lake"
+        artifact = _engine_artifact()
+        # Writer truth: the persisted entries carry arm as a DICT.
+        path = _write_engine_artifact(lake, artifact)
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        assert all(isinstance(entry["arm"], dict) for entry in doc["entries"])
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok"
+        for row in payload["rows"]:
+            assert isinstance(row["arm"], str)  # bridged for EVERY consumer
+            assert row["arm"] == "SL ₹0.80 · TP ₹0.50"
+            assert row["arm_raw"] == {"sl_paisa": 80, "tp_paisa": 50}
+        # /strategy consumes exactly this payload: stArm is fed from row.arm
+        # of the top100 fetch — no second, unbridged arm source exists.
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "templates"
+            / "strategy.html"
+        ).read_text(encoding="utf-8")
+        assert "byId('stArm').textContent = String(row.arm);" in template
+        assert "/api/v1/oneclick/top100?run_id=" in template
+        assert template.count("arm") >= 1
+        assert client.get("/strategy").status_code == 200
+
     def test_route_names_a_future_schema_version_corruptly_never_500(self, tmp_path: Path) -> None:
         """A NEWER writer's artifact degrades to a NAMED corrupt through the
         route — never a 500, never fabricated rows."""

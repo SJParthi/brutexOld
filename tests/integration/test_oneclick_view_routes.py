@@ -466,10 +466,40 @@ class TestStrategyPage:
         assert "per-trade close equity — minute-path equity lands with P3" in html
 
     def test_vix_band_on_the_story_card(self) -> None:
-        """R31 display duty."""
+        """R31 display duty — via the ONE shared builder ([W3-R4]): a
+        null-lo/hi writer band reads the honest not-stamped copy, never
+        "works when VIX between null–null"."""
         html = _template("strategy.html")
         assert 'id="stVixBand"' in html
-        assert "works when VIX between" in html
+        assert "window.BXOneclick.vixBandText(row.vix_band)" in html
+        js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert "works when VIX between" in js
+        assert "VIX band not stamped for this run" in js
+        # The old inline undefined-only gate is gone from the template.
+        assert "works when VIX between" not in html
+
+    def test_candle_mapper_reads_the_route_timestamp_column(self) -> None:
+        """[W3-R1]: the chart mapper is the ONE shared route-shape mapper —
+        the dead ``idx.ts`` read (the /api/v1/db/candles column is named
+        "timestamp") can never return; parsing + the session-day anchor are
+        TZ-safe (never a browser-local Date roundtrip)."""
+        html = _template("strategy.html")
+        assert "window.BXChart.candleRowsFromDbPayload(payload)" in html
+        assert "window.BXChart.parseTsIst(raw)" in html
+        assert "window.BXChart.istDateOfEpoch(anchor)" in html
+        # The dead indexing EXPRESSION is gone (the prose comment naming the
+        # bug deliberately remains — pin the code token, not the story).
+        assert "[idx.ts]" not in html
+        assert "toISOString().slice(0, 10)" not in html
+        js = (_STATIC / "bx-chart.js").read_text(encoding="utf-8")
+        assert '"timestamp", "open", "high", "low", "close"' in js
+        assert "+05:30" in js  # naive strings pinned to IST, never browser-local
+
+    def test_screener_band_cell_uses_the_shared_builder(self) -> None:
+        """[W3-R4] screener band column: a null-lo/hi band cell reads
+        "not stamped", never "null–null"."""
+        html = _template("screener.html")
+        assert "window.BXOneclick.vixBandCellText(v)" in html
 
     def test_beginner_pro_toggle_is_the_shared_mechanism(self) -> None:
         """C-MINOR-5: ONE mechanism — bxApplyMode over .jargon/.plain-eng."""

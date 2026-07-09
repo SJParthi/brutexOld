@@ -242,6 +242,109 @@ function bxNearestBarIdx(ts, rows) {
   return dLo <= dHi ? lo : hi; // tie -> earlier index
 }
 
+/**
+ * TZ-SAFE timestamp parse for the BruteX display APIs ([W3-R1] second layer,
+ * DEC-ONECLICK-TOP100-OBJECT-ROOT-001 wave-3 fold).
+ *
+ * The two payload families this page mixes carry DIFFERENT forms:
+ *   - /api/v1/db/candles bar timestamps are IST WALL-CLOCK NAIVE strings
+ *     ("YYYY-MM-DD HH:MM:SS", or "YYYY-MM-DD" for a 1day bar —
+ *     db_view._format_candle_timestamp, the CLAUDE.md §6 display-IST law);
+ *   - /api/v1/oneclick/trades entry_ts/exit_ts are ISO-8601 UTC strings WITH
+ *     an explicit offset (trade_store._us_to_iso → "…+00:00").
+ * Naive Date.parse treats an offset-less string as BROWSER-LOCAL time, so in
+ * a non-IST browser the candle epochs shifted by (local − IST) while the
+ * trade epochs did not — misplaced/dropped arrows. This parser pins a naive
+ * string to the fixed +05:30 IST offset (NSE has no DST) and passes
+ * offset/Z-carrying strings through untouched, so every epoch is
+ * TZ-INVARIANT (node-golden-proven under TZ=America/New_York).
+ *
+ * @param {*} raw - a number (epoch ms, passed through), or a timestamp string.
+ * @returns {number|null} epoch milliseconds, or null (unparseable — the
+ *   caller skips the row / shows the honest note, never a NaN coordinate).
+ */
+function bxParseTsIst(raw) {
+  if (typeof raw === "number") {
+    return isFinite(raw) ? raw : null;
+  }
+  if (typeof raw !== "string" || raw === "") {
+    return null;
+  }
+  var s = raw.replace(" ", "T");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    s += "T00:00:00"; // a date-only 1day bar reads midnight IST
+  }
+  if (!/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(s)) {
+    s += "+05:30"; // naive = IST wall-clock (never browser-local)
+  }
+  var t = Date.parse(s);
+  return isNaN(t) ? null : t;
+}
+
+/**
+ * The IST calendar date ("YYYY-MM-DD") of an epoch-ms instant (pure epoch
+ * arithmetic — never a browser-local Date roundtrip, so the session-day
+ * anchor for the candle fetch is TZ-invariant).
+ *
+ * @param {number} ms - epoch milliseconds.
+ * @returns {string|null} the IST date, or null for a non-finite input.
+ */
+function bxIstDateOfEpoch(ms) {
+  if (typeof ms !== "number" || !isFinite(ms)) {
+    return null;
+  }
+  return new Date(ms + 330 * 60000).toISOString().slice(0, 10);
+}
+
+/** The /api/v1/db/candles columns the chart needs (db_view.CANDLE_COLUMNS). */
+var BX_DB_CANDLE_REQUIRED_COLUMNS = ["timestamp", "open", "high", "low", "close"];
+
+/**
+ * Map ONE REAL /api/v1/db/candles payload ({columns, rows}) to the chart's
+ * candle rows ([{ts, open, high, low, close}], ascending ts) — the route-
+ * shape-driven mapper ([W3-R1] DEC-ONECLICK-TOP100-OBJECT-ROOT-001 wave-3
+ * fold: the page previously indexed ``idx.ts`` while the route's column is
+ * named "timestamp", so NO candle ever plotted on a real payload — the
+ * fixture-blindspot class again; this mapper is node-golden-tested against
+ * the REAL route payload shape).
+ *
+ * @param {object} payload - the /api/v1/db/candles response body.
+ * @returns {object} {rows: [...], missing: string|null} — ``missing`` names
+ *   the first absent required column (the caller shows an honest note; an
+ *   empty payload maps to {rows: [], missing: null}).
+ */
+function bxCandleRowsFromDbPayload(payload) {
+  var cols = (payload && payload.columns) || [];
+  var idx = {};
+  for (var c = 0; c < cols.length; c++) {
+    idx[cols[c]] = c;
+  }
+  for (var q = 0; q < BX_DB_CANDLE_REQUIRED_COLUMNS.length; q++) {
+    if (idx[BX_DB_CANDLE_REQUIRED_COLUMNS[q]] === undefined) {
+      return { rows: [], missing: BX_DB_CANDLE_REQUIRED_COLUMNS[q] };
+    }
+  }
+  var out = [];
+  var raw = (payload && payload.rows) || [];
+  for (var r = 0; r < raw.length; r++) {
+    var ts = bxParseTsIst(raw[r][idx.timestamp]);
+    if (ts === null) {
+      continue; // unparseable row skipped — never a NaN coordinate
+    }
+    out.push({
+      ts: ts,
+      open: Number(raw[r][idx.open]),
+      high: Number(raw[r][idx.high]),
+      low: Number(raw[r][idx.low]),
+      close: Number(raw[r][idx.close])
+    });
+  }
+  out.sort(function (a, b) {
+    return a.ts - b.ts;
+  });
+  return { rows: out, missing: null };
+}
+
 /** The loud out-of-window note (ONE constant so UI + tests cannot drift). */
 var BX_ARROW_DROPPED_NOTE = "trade outside chart window — widen range";
 
@@ -405,6 +508,10 @@ function bxEquityPathNode(series, w, h, pad) {
 var BXChart = {
   SVG_NS: BX_SVG_NS,
   ARROW_DROPPED_NOTE: BX_ARROW_DROPPED_NOTE,
+  DB_CANDLE_REQUIRED_COLUMNS: BX_DB_CANDLE_REQUIRED_COLUMNS,
+  parseTsIst: bxParseTsIst,
+  istDateOfEpoch: bxIstDateOfEpoch,
+  candleRowsFromDbPayload: bxCandleRowsFromDbPayload,
   scaleLinear: bxScaleLinear,
   candleGeom: bxCandleGeom,
   equitySeries: bxEquitySeries,

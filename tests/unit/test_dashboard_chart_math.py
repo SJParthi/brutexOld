@@ -20,8 +20,10 @@ guard so the skip can never go silent on the runners.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess  # nosec B404 — fixed-argv node invocation, test-only
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -278,3 +280,167 @@ class TestPathD:
     def test_empty_points_is_the_empty_string(self) -> None:
         out = _node_call("C.pathD(ARGS[0])", json.dumps([]))
         assert out == ""
+
+
+def _node_call_tz(tz: str, expr: str, *argv: str) -> Any:
+    """``_node_call`` with node's ambient timezone FORCED to *tz*.
+
+    The [W3-R1] second-layer TZ goldens run the REAL shipped parser under a
+    non-IST zone (node honors the ``TZ`` env var), proving candle/arrow
+    placement never rides browser-local ``Date`` parsing of a naive string.
+    """
+    script = (
+        f"const C = require({json.dumps(str(_CHART_JS))});"
+        "const ARGS = process.argv.slice(1).map((a) => JSON.parse(a));"
+        f"console.log(JSON.stringify({expr}));"
+    )
+    proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+        ["node", "-e", script, *argv],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "TZ": tz},
+    )
+    return json.loads(proc.stdout)
+
+
+#: 2024-01-02 10:15:00 IST — epoch ms oracle computed in Python (tz-explicit).
+_IST = timezone(timedelta(hours=5, minutes=30))
+_NAIVE_IST_STR = "2024-01-02 10:15:00"
+_NAIVE_IST_EPOCH_MS = int(datetime(2024, 1, 2, 10, 15, tzinfo=_IST).timestamp() * 1000)
+
+
+class TestParseTsIst:
+    """bxParseTsIst — the [W3-R1] TZ-safe parse (naive = IST, never local)."""
+
+    def test_naive_api_string_is_pinned_to_ist(self) -> None:
+        out = _node_call("C.parseTsIst(ARGS[0])", json.dumps(_NAIVE_IST_STR))
+        assert out == _NAIVE_IST_EPOCH_MS
+
+    def test_date_only_1day_bar_reads_midnight_ist(self) -> None:
+        out = _node_call("C.parseTsIst(ARGS[0])", json.dumps("2024-01-02"))
+        assert out == int(datetime(2024, 1, 2, tzinfo=_IST).timestamp() * 1000)
+
+    def test_offset_carrying_trade_string_passes_through(self) -> None:
+        """trade_store._us_to_iso emits "+00:00" — never double-shifted."""
+        out = _node_call("C.parseTsIst(ARGS[0])", json.dumps("2024-01-02T04:45:00+00:00"))
+        assert out == int(datetime(2024, 1, 2, 4, 45, tzinfo=UTC).timestamp() * 1000)
+
+    def test_zulu_string_passes_through(self) -> None:
+        out = _node_call("C.parseTsIst(ARGS[0])", json.dumps("2024-01-02T04:45:00Z"))
+        assert out == int(datetime(2024, 1, 2, 4, 45, tzinfo=UTC).timestamp() * 1000)
+
+    def test_number_passes_through_and_junk_is_null(self) -> None:
+        assert _node_call("C.parseTsIst(1234)") == 1234
+        assert _node_call("C.parseTsIst('not a time')") is None
+        assert _node_call("C.parseTsIst('')") is None
+        assert _node_call("C.parseTsIst(null)") is None
+        assert _node_call("C.parseTsIst(NaN)") is None
+
+    @pytest.mark.parametrize("tz", ["America/New_York", "Asia/Kolkata", "UTC"])
+    def test_naive_parse_is_tz_invariant(self, tz: str) -> None:
+        """The SAME epoch in every ambient zone — the pre-fix Date.parse of a
+        naive string shifted by (local − IST) in a non-IST browser."""
+        out = _node_call_tz(tz, "C.parseTsIst(ARGS[0])", json.dumps(_NAIVE_IST_STR))
+        assert out == _NAIVE_IST_EPOCH_MS
+
+
+class TestIstDateOfEpoch:
+    """bxIstDateOfEpoch — the TZ-invariant session-day anchor."""
+
+    def test_ist_date_differs_from_utc_date_after_1830_utc(self) -> None:
+        ms = int(datetime(2024, 1, 2, 19, 30, tzinfo=UTC).timestamp() * 1000)
+        assert _node_call("C.istDateOfEpoch(ARGS[0])", json.dumps(ms)) == "2024-01-03"
+
+    def test_session_morning_instant_reads_the_session_date(self) -> None:
+        assert (
+            _node_call("C.istDateOfEpoch(ARGS[0])", json.dumps(_NAIVE_IST_EPOCH_MS)) == "2024-01-02"
+        )
+
+    def test_non_finite_is_null(self) -> None:
+        assert _node_call("C.istDateOfEpoch(NaN)") is None
+        assert _node_call("C.istDateOfEpoch('x')") is None
+
+    @pytest.mark.parametrize("tz", ["America/New_York", "Asia/Kolkata"])
+    def test_anchor_date_is_tz_invariant(self, tz: str) -> None:
+        out = _node_call_tz(tz, "C.istDateOfEpoch(ARGS[0])", json.dumps(_NAIVE_IST_EPOCH_MS))
+        assert out == "2024-01-02"
+
+
+#: A REAL /api/v1/db/candles payload SHAPE (db_view.CANDLE_COLUMNS + the two
+#: derived columns a spot page appends) — the [W3-R1] fixture-blindspot killer:
+#: the column is named "timestamp"; the pre-fix mapper indexed ``idx.ts``.
+_DB_CANDLES_SHAPED_PAYLOAD = {
+    "columns": [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "open_interest",
+        "change_pct",
+        "open_gap_pct",
+    ],
+    "rows": [
+        ["2024-01-02 10:16:00", 101.0, 102.0, 100.5, 101.5, 10, None, None, None],
+        ["2024-01-02 10:15:00", 100.0, 101.0, 99.5, 100.5, 12, None, None, None],
+        ["junk-not-a-time", 1.0, 2.0, 0.5, 1.5, 1, None, None, None],
+    ],
+}
+
+
+class TestCandleRowsFromDbPayload:
+    """bxCandleRowsFromDbPayload — the route-shape mapper ([W3-R1])."""
+
+    def test_real_payload_shape_maps_and_sorts_ascending(self) -> None:
+        out = _node_call(
+            "C.candleRowsFromDbPayload(ARGS[0])", json.dumps(_DB_CANDLES_SHAPED_PAYLOAD)
+        )
+        assert out["missing"] is None
+        assert [r["open"] for r in out["rows"]] == [100.0, 101.0]  # sorted by ts
+        assert out["rows"][0]["ts"] == _NAIVE_IST_EPOCH_MS
+        assert out["rows"][0] == {
+            "ts": _NAIVE_IST_EPOCH_MS,
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.5,
+            "close": 100.5,
+        }
+        # The unparseable-timestamp row is SKIPPED, never a NaN coordinate.
+        assert len(out["rows"]) == 2
+
+    def test_missing_timestamp_column_is_named_never_a_silent_empty(self) -> None:
+        payload = {"columns": ["ts", "open", "high", "low", "close"], "rows": [[1, 2, 3, 4, 5]]}
+        out = _node_call("C.candleRowsFromDbPayload(ARGS[0])", json.dumps(payload))
+        assert out == {"rows": [], "missing": "timestamp"}
+
+    def test_empty_payload_maps_to_no_rows(self) -> None:
+        out = _node_call("C.candleRowsFromDbPayload(ARGS[0])", json.dumps({}))
+        # No columns at all: the FIRST required column is named.
+        assert out == {"rows": [], "missing": "timestamp"}
+
+    @pytest.mark.parametrize("tz", ["America/New_York", "Asia/Kolkata"])
+    def test_arrow_placement_is_tz_invariant_end_to_end(self, tz: str) -> None:
+        """The [W3-R1] second-layer golden: candles from NAIVE IST strings +
+        a trade from OFFSET-carrying UTC strings land the SAME arrow indices
+        in a New York browser as in an IST one (pre-fix the candle epochs
+        shifted browser-local while the trade epochs did not — misplaced or
+        dropped arrows)."""
+        expr = (
+            "(() => {"
+            "  const rows = C.candleRowsFromDbPayload(ARGS[0]).rows;"
+            "  const entry = C.parseTsIst(ARGS[1]);"
+            "  const exit = C.parseTsIst(ARGS[2]);"
+            "  return C.tradeArrow(entry, exit, rows);"
+            "})()"
+        )
+        out = _node_call_tz(
+            tz,
+            expr,
+            json.dumps(_DB_CANDLES_SHAPED_PAYLOAD),
+            # 10:15 / 10:16 IST expressed as the trade store's UTC "+00:00" form.
+            json.dumps("2024-01-02T04:45:00+00:00"),
+            json.dumps("2024-01-02T04:46:00+00:00"),
+        )
+        assert out == {"entry_idx": 0, "exit_idx": 1, "dropped": False, "note": ""}
