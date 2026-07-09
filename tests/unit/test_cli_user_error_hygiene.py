@@ -31,6 +31,9 @@ import pytest
 from brutex import cli
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
+pytestmark = pytest.mark.usefixtures("_inert_sweep_logging_guard")  # see tests/conftest.py
+
+
 # ── Area 1: _parse_dt ───────────────────────────────────────────────────
 
 

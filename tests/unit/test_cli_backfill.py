@@ -22,6 +22,9 @@ from unittest import mock
 import pytest
 from brutex import __version__, cli
 
+pytestmark = pytest.mark.usefixtures("_inert_sweep_logging_guard")  # see tests/conftest.py
+
+
 # ── version ─────────────────────────────────────────────────────────────
 
 
