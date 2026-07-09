@@ -362,6 +362,12 @@ async function pollCompleteness() {
 }
 
 async function poll() {
+  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001, the bx-liveproof / v29.html
+     pattern): a background tab fires ZERO fetches — the 4 s interval keeps ticking
+     (a hidden tick is free) and the visibilitychange listener below fires an
+     immediate catch-up poll() on return, so a returning operator is never stale
+     beyond one RTT (Golden Rule #1). */
+  if (document.hidden) return;
   /* Parallel fan-out: one slow endpoint no longer stalls the other three
      (the old serial awaits froze the whole tick behind the slowest call). */
   const settled = await Promise.allSettled(
@@ -378,6 +384,12 @@ async function poll() {
 
 poll();
 setInterval(poll, 4000);
+/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001): the hidden
+   guard in poll() suppresses background fetches, so re-poll NOW on becoming
+   visible instead of waiting out the interval. */
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden) poll();
+});
 /* Deferred bx-ui.js is guaranteed executed by DOMContentLoaded: pause every
    ambient animation while the tab is hidden (richer feel, lower cost). */
 document.addEventListener("DOMContentLoaded", function () {
