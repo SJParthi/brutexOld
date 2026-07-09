@@ -1409,9 +1409,7 @@ class TestCooperativeCancel:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert actions == ["SUPERVISOR_START", "SUPERVISOR_CANCELLED"]
 
-    def test_core_guarantee_resume_after_cancel_equals_uninterrupted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_core_guarantee_resume_after_cancel_equals_uninterrupted(self, tmp_path: Path) -> None:
         """THE CORE GUARANTEE: run(cancel@1) + run(resume) ≡ run(uninterrupted), by BYTES.
 
         The cancelled run stops at the tuple-1 boundary with tuple 0's durable

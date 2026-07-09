@@ -79,11 +79,6 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.dashboard.composite_pull import CompositePullReport
-from brutex.dashboard.metadata_pull import MetadataPullReport
-from brutex.dashboard.movers_warm import MoversWarmResult
-from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
-
 # The verdict dataclass lives in the LEAF brutex.dashboard.pipeline_verdict
 # (DEC-PULL-SIX-STEP-ORDER-001): its consumers (composite_pull/historical_pull)
 # sit BELOW this sequencer in the module import graph, so housing it here made
@@ -94,6 +89,10 @@ from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 # no-implicit-reexport demands; ruff PLC0414 flags exactly that idiom, hence
 # the per-line noqa (the repo's per-line-noqa-with-rationale house style).
 from brutex.adapters.ingest_common import CancelCheck
+from brutex.dashboard.composite_pull import CompositePullReport
+from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.movers_warm import MoversWarmResult
+from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_verdict import (
     PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
 )

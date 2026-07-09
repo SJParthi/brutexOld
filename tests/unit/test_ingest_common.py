@@ -27,17 +27,20 @@ import pytest
 from brutex.adapters.ingest_common import (
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
     DateWindow,
+    PullCancelled,
     clamp_window_end,
     drop_bars_after,
     fetch_until_nonempty,
     now_ist,
     plan_windows,
+    raise_if_cancelled,
     summarize_conflicts,
     tile_windows,
     window_days_for_interval,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict
+from brutex.models import BruteXError
 
 
 def _dt(year: int, month: int, day: int) -> datetime:
@@ -355,3 +358,23 @@ class TestMaybeAudit:
         assert entry.action == "INGEST_PAIR_DONE"
         assert entry.subject == "NIFTY:1minute"
         assert entry.payload == {"bars_appended": 3}
+
+
+class TestRaiseIfCancelled:
+    """The cooperative-cancel boundary helper (DEC-JOB-COOPERATIVE-CANCEL-001)."""
+
+    def test_none_probe_is_a_noop(self) -> None:
+        # Every legacy caller passes None — byte-identical, never raises.
+        assert raise_if_cancelled(None) is None
+
+    def test_false_probe_is_a_noop(self) -> None:
+        # A wired-but-not-firing probe does not raise (the window proceeds).
+        assert raise_if_cancelled(lambda: False) is None
+
+    def test_true_probe_raises_pull_cancelled(self) -> None:
+        with pytest.raises(PullCancelled):
+            raise_if_cancelled(lambda: True)
+
+    def test_pull_cancelled_is_a_brutex_error(self) -> None:
+        # Rides the ingest spines' _GLOBAL_STOP_ERRORS graceful-halt propagation.
+        assert issubclass(PullCancelled, BruteXError)

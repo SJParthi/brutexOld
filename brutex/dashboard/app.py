@@ -4576,9 +4576,7 @@ def build_app(
         red ✕, never a fabricated green; the durable ledger makes the next pull
         resume exactly the unsettled remainder.
         """
-        cancelling = (
-            _pull_job.running_job_kind == JOB_KIND_PULL and _pull_job.request_cancel()
-        )
+        cancelling = _pull_job.running_job_kind == JOB_KIND_PULL and _pull_job.request_cancel()
         return JSONResponse({"cancelling": bool(cancelling)})
 
     @app.post("/api/v1/sweep/cancel")

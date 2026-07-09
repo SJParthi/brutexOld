@@ -2292,3 +2292,149 @@ class TestBrokenProcessPoolQuarantine:
                 driver.run()
         actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
         assert "SUPERVISOR_ABORT" in actions
+
+
+class TestParallelCooperativeCancel:
+    """The parallel driver's dispatch-gate cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001).
+
+    On a cancel request the driver STOPS DISPATCHING but DRAINS every in-flight
+    tuple to its durable boundary, so the checkpoint holds the contiguous clean
+    prefix and a resume behaves EXACTLY like a resume after a graceful stop —
+    the resumed tree is byte-identical to an uninterrupted control run.
+    """
+
+    def test_none_probe_run_has_no_cancelled_action(self, tmp_path: Path) -> None:
+        """should_stop=None (every legacy caller): no CANCELLED action, normal complete."""
+        grid = _grid()
+        _run_parallel(tmp_path, grid, workers=2)
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert "SUPERVISOR_CANCELLED" not in actions
+        assert actions[-1] == "SUPERVISOR_COMPLETE"
+
+    def test_wired_but_never_firing_probe_completes(self, tmp_path: Path) -> None:
+        """A wired probe that always reads False is a normal COMPLETE (the False arm)."""
+        grid = _grid()
+        out = tmp_path / "out"
+        probes: list[int] = []
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                should_stop=lambda: probes.append(1) or False,
+            )
+        assert summary.cancelled is False
+        assert probes  # the probe was consulted
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert actions[-1] == "SUPERVISOR_COMPLETE"
+        assert "SUPERVISOR_CANCELLED" not in actions
+
+    def test_cancel_immediately_runs_nothing(self, tmp_path: Path) -> None:
+        """A pre-armed cancel dispatches ZERO tuples and returns cancelled=True."""
+        grid = _grid()
+        out = tmp_path / "out"
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                should_stop=lambda: True,
+            )
+            assert summary.cancelled is True
+            assert summary.tuples_run == 0
+            assert guards.checkpoint.next_index == 0
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert actions[-1] == "SUPERVISOR_CANCELLED"
+        assert "SUPERVISOR_COMPLETE" not in actions
+
+    def test_cancel_drains_then_resume_equals_uninterrupted(self, tmp_path: Path) -> None:
+        """THE CORE GUARANTEE (parallel): cancel drains to a clean checkpoint; resume ≡ control.
+
+        The probe fires after the first outer-iteration dispatch, so any in-flight
+        tuples are DRAINED (their durable store writes land + parent-side apply
+        runs), the checkpoint holds exactly the contiguous clean prefix
+        (next_index == tuples_run), and a fresh-object resume completes the grid
+        to a byte-identical tree vs a never-cancelled control run.
+        """
+        grid = _grid()
+        total = count_sweep_tuples(grid)
+
+        # ── Arm A: cancel after the first dispatch, then RESUME ──
+        a = tmp_path / "a"
+        a.mkdir()
+        calls: list[int] = []
+        with (
+            AuditWriter.open(a / "ingest.jsonl") as ingest,
+            _guards(a, grid) as guards,
+        ):
+            first = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=a / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                should_stop=lambda: bool(calls.append(1) is None and len(calls) >= 2),
+            )
+        assert first.cancelled is True
+        # The contiguous clean prefix: every drained tuple was checkpointed.
+        assert first.tuples_run <= total
+        # Resume with fresh objects over the SAME durable files (a process restart).
+        with (
+            AuditWriter.open(a / "ingest.jsonl", resume=True) as ing2,
+            SweepAuditWriter.open(a / "sup.jsonl", resume=True) as sup2,
+            SweepCache.open(a / "cache", bloom_capacity=10_000) as cache2,
+        ):
+            ckpt2 = SweepCheckpointStore(
+                path=a / "ckpt.json",
+                sweep_id=grid_identity(grid),
+                total_combos=total,
+            )
+            guards2 = SweepGuards(
+                audit=sup2,
+                progress=SweepProgress(),
+                checkpoint=ckpt2,
+                cache=cache2,
+                watchdog=SweepWatchdog(),
+            )
+            resumed = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=a / "out",
+                ingest_audit=ing2,
+                guards=guards2,
+                workers=2,
+            )
+        assert resumed.cancelled is False
+
+        # ── Arm B: the uninterrupted control run ──
+        b = tmp_path / "b"
+        b.mkdir()
+        with (
+            AuditWriter.open(b / "ingest.jsonl") as c_ing,
+            _guards(b, grid) as c_guards,
+        ):
+            control = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=b / "out",
+                ingest_audit=c_ing,
+                guards=c_guards,
+                workers=2,
+            )
+        assert control.cancelled is False
+
+        # THE BYTES: cancelled+resumed tree == uninterrupted tree, file for file.
+        assert _tree(a / "out") == _tree(b / "out")

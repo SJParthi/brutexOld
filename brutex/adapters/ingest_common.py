@@ -1833,7 +1833,7 @@ class PullCancelled(BruteXError):
 
 #: The zero-arg cooperative-cancel probe threaded down the pull spines
 #: (DEC-JOB-COOPERATIVE-CANCEL-001). ``True`` ⇒ stop at the next safe boundary.
-CancelCheck: TypeAlias = Callable[[], bool]
+CancelCheck: TypeAlias = Callable[[], bool]  # noqa: UP040
 
 
 def raise_if_cancelled(should_stop: CancelCheck | None) -> None:

@@ -4186,3 +4186,43 @@ def test_durable_preference_persists_the_candle_phase_winner(tmp_path: Path) -> 
     assert sdk.candle_symbols == ["NSE-M&M-25Jan24-2400-CE", "NSE-M%26M-25Jan24-2400-CE"]
     assert meta.rows == {form_winner_key("M&M"): "M%26M"}
     store.close()
+
+
+def test_pull_cooperative_cancel_at_window_boundary(registry: RegistryStore) -> None:
+    """DEC-JOB-COOPERATIVE-CANCEL-001: a should_stop that fires stops the phase gracefully.
+
+    The real F&O spine raises ``PullCancelled`` at the first ``(contract, interval)``
+    window boundary (``should_stop`` reads True BEFORE any vendor call); the phase
+    CATCHES it (no per-bucket quarantine, NO Telegram alert), logs
+    ``historical.pull.cancelled`` + ``pull.step.halted`` (reason=cancelled) for the
+    later buckets, drains + persists via the ``finally``, and returns an honest
+    report — every un-fetched window stays PLANNED/unsettled (re-pulled next time).
+    """
+    from brutex.adapters.groww.ingest import IngestReport  # noqa: F401  (kept explicit)
+
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    with capture_logs() as logs:
+        report = pull_contract_candles(
+            selected,
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            should_stop=lambda: True,  # cancel at the very first window boundary
+        )
+    assert isinstance(report, HistoricalPullReport)
+    # A cancel BEFORE any fetch: no candle symbols hit, nothing marked complete.
+    assert sdk.candle_symbols == []
+    assert report.contracts_completed == 0
+    events = {log["event"] for log in logs}
+    assert "historical.pull.cancelled" in events
+    # The later step(s) are announced halted with the cancelled reason.
+    halted = [log for log in logs if log["event"] == "pull.step.halted"]
+    assert halted
+    assert all(log.get("reason") == "cancelled" for log in halted)
