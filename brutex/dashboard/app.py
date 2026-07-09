@@ -1804,12 +1804,41 @@ def build_app(
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
     # `"mtime_ns:size"` stat token folded into the KEY at a FIXED generation=0
     # (the `_sweep_leaderboard_cache` `rev=` precedent) — a repeat poll of an
-    # unchanged artifact is an O(1) hit, a token move re-parses, and a `None`
-    # token (absent / stat outage) computes fresh and caches NOTHING (never a
-    # stale serve, never a poisoned key). HONEST envelope (Golden Rule #10):
-    # the FIRST read per revision pays the O(artifact) parse; the cached hit is
-    # O(1) vs run count / artifact size. REUSES the COMMON `MoversSnapshotCache`.
+    # unchanged artifact is an O(1) hit and a token move re-parses. A `None`
+    # token SPLITS (DEC-CACHE-SERVE-LAST-KNOWN-001, superseding the prior
+    # "computes fresh and caches NOTHING" doctrine): an ABSENT artifact
+    # (`ArtifactProbe.outage=False`) still computes the cheap awaiting payload
+    # fresh and caches nothing — never a stale serve of a DELETED artifact —
+    # while a probe OUTAGE (a stalled volume) serves the LAST-KNOWN payload
+    # for the route's stable key prefix via `serve_last_known`, labelled with
+    # the additive `revision_probe` degrade marker + one latched WARN per
+    # outage (the rate_bridge_cache posture; the pre-change doctrine re-ran
+    # the full O(artifact) parse on EVERY poll for the outage's duration).
+    # HONEST envelope (Golden Rule #10): the FIRST read per revision pays the
+    # O(artifact) parse; the cached hit is O(1) vs run count / artifact size.
+    # REUSES the COMMON `MoversSnapshotCache`.
     _oneclick_cache = MoversSnapshotCache()
+
+    def _probe_outage_payload(
+        payload: dict[str, Any], *, served_last_known: bool
+    ) -> dict[str, Any]:
+        """Shallow-copy *payload* + stamp the ADDITIVE `revision_probe` degrade marker.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the `store_error_payload` honest-degrade
+        precedent): a payload served while the revision probe is DOWN must say
+        so — either "serving last-known" (a previously-cached payload) or
+        "computed fresh (seeded as last-known)" (the outage's first poll for
+        this key family). The copy keeps the CACHED dict immutable — a marker
+        must never leak into the entry another (post-recovery) poll serves.
+        """
+        out = dict(payload)
+        out["revision_probe"] = (
+            "outage — serving last-known"
+            if served_last_known
+            else "outage — computed fresh (seeded as last-known)"
+        )
+        return out
+
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
@@ -6573,6 +6602,19 @@ def build_app(
             (DEC-LEDGER-DELTA-O-PAGE-001).
             """
             rev = sweep_results_revision(lake_root)
+            # The STABLE (revision-free) filter key. Casefold the filter
+            # axes: build_sweep_leaderboard's _matches filters them
+            # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
+            # leaderboard and must share ONE cache slot (rank_by stays raw — it
+            # is matched exactly against RANKABLE_COLUMNS, not casefolded; the
+            # RESOLVED preset token rides too — a preset-ranked payload must
+            # never share a slot with the default ordering, and blank/absent
+            # share ONE slot because both resolve to None).
+            lb_key = (
+                f"sweep_leaderboard|i={(instrument or '').casefold()}"
+                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
+                f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+            )
 
             def _fresh() -> dict[str, Any]:
                 return build_sweep_leaderboard(
@@ -6586,10 +6628,15 @@ def build_app(
                 ).to_dict()
 
             if rev is None:
-                # No signal → no freshness decision: compute fresh, cache
-                # NOTHING (never a stale serve, never a poisoned key — Golden
-                # Rule #1; the lake_revision "None = no signal" doctrine).
-                return _fresh()
+                # Probe OUTAGE (`sweep_results_revision` returns None ONLY on a
+                # non-missing-file OSError — an absent sweeps tree is the stable
+                # ABSENT_TOKEN composite): serve the LAST-KNOWN payload for this
+                # filter key, labelled + WARN-latched (DEC-CACHE-SERVE-LAST-
+                # KNOWN-001, C-r2-3 — the pre-change "compute fresh, cache
+                # NOTHING" doctrine re-paid the full O(stores × rows) scan on
+                # EVERY poll for the outage's duration).
+                payload, served = _sweep_leaderboard_cache.serve_last_known(lb_key, compute=_fresh)
+                return _probe_outage_payload(payload, served_last_known=served)
             # Level 1: ONE rank-independent SweepScan per revision — the
             # O(stores × rows) load + the audit era pass run once, then every
             # filter/rank/top_n click within this revision re-ranks it.
@@ -6598,23 +6645,12 @@ def build_app(
                 generation=0,
                 compute=lambda: load_sweep_scan(lake_root),
             )
-            # Level 2: the ranked payload per filter key. Casefold the filter
-            # axes: build_sweep_leaderboard's _matches filters them
-            # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
-            # leaderboard and must share ONE cache slot (rank_by stays raw — it
-            # is matched exactly against RANKABLE_COLUMNS, not casefolded; the
-            # RESOLVED preset token rides too — a preset-ranked payload must
-            # never share a slot with the default ordering, and blank/absent
-            # share ONE slot because both resolve to None). The revision rides
+            # Level 2: the ranked payload per filter key. The revision rides
             # in the KEY at a fixed generation=0 (the `_nav_latency_key`
-            # precedent); the LRU ages out old revisions.
-            key = (
-                f"sweep_leaderboard|rev={rev}|i={(instrument or '').casefold()}"
-                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
-                f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
-            )
+            # precedent); the LRU ages out old revisions; `mru_prefix` records
+            # the last-known pointer the probe-outage arm above serves.
             return _sweep_leaderboard_cache.get_or_compute(
-                key,
+                f"{lb_key}|rev={rev}",
                 generation=0,
                 compute=lambda: build_sweep_leaderboard(
                     lake_root,
@@ -6626,6 +6662,7 @@ def build_app(
                     scan=scan,
                     preset=resolved_preset,
                 ).to_dict(),
+                mru_prefix=lb_key,
             )
 
         try:
@@ -6736,7 +6773,8 @@ def build_app(
             if root is None:
                 return oneclick_view.build_runs_payload((), fixture_root_active=fixture_active)
             results_root: Path = root
-            rev = oneclick_artifacts.runs_revision(results_root)
+            probe = oneclick_artifacts.runs_probe(results_root)
+            prefix = f"oc_runs|fx={fixture_active}"
 
             def _fresh() -> dict[str, Any]:
                 return oneclick_view.build_runs_payload(
@@ -6744,10 +6782,20 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
 
-            if rev is None:
-                return _fresh()
+            if probe.token is None:
+                if not probe.outage:
+                    # ABSENT tree (no sweep_runs/ yet): the cheap fresh awaiting
+                    # payload, uncached — never a stale serve of a pruned tree.
+                    return _fresh()
+                # Probe OUTAGE: serve the last-known listing, labelled
+                # (DEC-CACHE-SERVE-LAST-KNOWN-001).
+                payload, served = _oneclick_cache.serve_last_known(prefix, compute=_fresh)
+                return _probe_outage_payload(payload, served_last_known=served)
             return _oneclick_cache.get_or_compute(
-                f"oc_runs|rev={rev}|fx={fixture_active}", generation=0, compute=_fresh
+                f"oc_runs|rev={probe.token}|fx={fixture_active}",
+                generation=0,
+                compute=_fresh,
+                mru_prefix=prefix,
             )
 
         return JSONResponse(await _run_lake(_resolve))
@@ -6779,9 +6827,10 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(
+            probe = oneclick_artifacts.artifact_probe(
                 run_dir / oneclick_artifacts.MANIFEST_FILENAME
             )
+            prefix = f"oc_manifest|{rid}|fx={fixture_active}"
             # Sibling-artifact PRESENCE rides the cache KEY as two cheap stat
             # probes (never a parse) so the pill's missing-file naming
             # refreshes when top100.json / events.jsonl land without a
@@ -6813,15 +6862,23 @@ def build_app(
                 payload["chain_links"] = oneclick_view.chain_links(manifest_result, kinds)
                 return payload
 
-            if rev is None:
-                return _fresh()
+            if probe.token is None:
+                if not probe.outage:
+                    # ABSENT manifest: the cheap fresh awaiting/probe payload,
+                    # uncached — never a stale serve of a deleted artifact.
+                    return _fresh()
+                # Probe OUTAGE: last-known manifest payload, labelled
+                # (DEC-CACHE-SERVE-LAST-KNOWN-001).
+                payload, served = _oneclick_cache.serve_last_known(prefix, compute=_fresh)
+                return _probe_outage_payload(payload, served_last_known=served)
             # The key folds the manifest revision AND the events revision (the
             # chain-map input) — a growing events.jsonl refreshes the links.
             return _oneclick_cache.get_or_compute(
-                f"oc_manifest|{rid}|rev={rev}|files={int(has_top100)}{int(has_events)}"
+                f"oc_manifest|{rid}|rev={probe.token}|files={int(has_top100)}{int(has_events)}"
                 f"|ev={events_rev}|fx={fixture_active}",
                 generation=0,
                 compute=_fresh,
+                mru_prefix=prefix,
             )
 
         return JSONResponse(await _run_lake(_resolve))
@@ -6853,7 +6910,8 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.TOP100_FILENAME)
+            probe = oneclick_artifacts.artifact_probe(run_dir / oneclick_artifacts.TOP100_FILENAME)
+            prefix = f"oc_top100|{rid}|fx={fixture_active}"
 
             def _fresh() -> dict[str, Any]:
                 return oneclick_view.build_top100_payload(
@@ -6862,12 +6920,19 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
 
-            if rev is None:
-                return _fresh()
+            if probe.token is None:
+                if not probe.outage:
+                    # ABSENT artifact: cheap fresh awaiting payload, uncached.
+                    return _fresh()
+                # Probe OUTAGE: last-known payload, labelled
+                # (DEC-CACHE-SERVE-LAST-KNOWN-001).
+                payload, served = _oneclick_cache.serve_last_known(prefix, compute=_fresh)
+                return _probe_outage_payload(payload, served_last_known=served)
             return _oneclick_cache.get_or_compute(
-                f"oc_top100|{rid}|rev={rev}|fx={fixture_active}",
+                f"oc_top100|{rid}|rev={probe.token}|fx={fixture_active}",
                 generation=0,
                 compute=_fresh,
+                mru_prefix=prefix,
             )
 
         return JSONResponse(await _run_lake(_resolve))
@@ -6912,7 +6977,12 @@ def build_app(
                     window_filtered=window_filtered,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.EVENTS_FILENAME)
+            probe = oneclick_artifacts.artifact_probe(run_dir / oneclick_artifacts.EVENTS_FILENAME)
+            # json-encoded key parts: kind/q are operator-typed strings that
+            # may contain the `|` separator — encoding keeps keys collision-free.
+            prefix = "oc_events|" + json.dumps(
+                [rid, offset, limit, kind, q, fixture_active], ensure_ascii=False
+            )
 
             def _fresh() -> dict[str, Any]:
                 page = oneclick_artifacts.tail_events(
@@ -6925,14 +6995,20 @@ def build_app(
                     window_filtered=window_filtered,
                 )
 
-            if rev is None:
-                return _fresh()
-            # json-encoded key parts: kind/q are operator-typed strings that
-            # may contain the `|` separator — encoding keeps keys collision-free.
+            if probe.token is None:
+                if not probe.outage:
+                    # ABSENT events log: cheap fresh awaiting payload, uncached.
+                    return _fresh()
+                # Probe OUTAGE: last-known page for THIS page window, labelled
+                # (DEC-CACHE-SERVE-LAST-KNOWN-001).
+                payload, served = _oneclick_cache.serve_last_known(prefix, compute=_fresh)
+                return _probe_outage_payload(payload, served_last_known=served)
             key = "oc_events|" + json.dumps(
-                [rid, offset, limit, kind, q, rev, fixture_active], ensure_ascii=False
+                [rid, offset, limit, kind, q, probe.token, fixture_active], ensure_ascii=False
             )
-            return _oneclick_cache.get_or_compute(key, generation=0, compute=_fresh)
+            return _oneclick_cache.get_or_compute(
+                key, generation=0, compute=_fresh, mru_prefix=prefix
+            )
 
         return JSONResponse(await _run_lake(_resolve))
 

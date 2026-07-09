@@ -95,6 +95,7 @@ __all__ = [
     "TOP100_ROW_REQUIRED_KEYS",
     "TOP100_SCHEMA_VERSION",
     "TRADES_DIRNAME",
+    "ArtifactProbe",
     "ArtifactStatus",
     "AwaitingTradesReader",
     "ChainNotVerifiedError",
@@ -107,6 +108,7 @@ __all__ = [
     "TradeStoreReader",
     "TradesReader",
     "TradesResult",
+    "artifact_probe",
     "artifact_revision",
     "canonical_record_bytes",
     "chain_hash",
@@ -119,6 +121,7 @@ __all__ = [
     "probe_run_dir",
     "raise_chain_not_verified",
     "resolve_fixture_root",
+    "runs_probe",
     "runs_revision",
     "runs_root",
     "sidecar_paths_from_ref",
@@ -491,6 +494,112 @@ def is_safe_run_id(run_id: str) -> bool:
     return bool(_RUN_ID_RE.fullmatch(run_id))
 
 
+class _ProbeOutageLatch:
+    """Once-per-outage WARN latch for the artifact stat probes.
+
+    DEC-CACHE-SERVE-LAST-KNOWN-001 — the per-path twin of
+    :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache`'s
+    ``_degraded`` latch: the FIRST non-missing-file ``OSError`` per path logs
+    ONE ``oneclick.artifact_probe_outage`` WARN (the pre-change probe
+    silently mapped EVERY ``OSError`` to ``None`` — a wedged volume was
+    invisible in the logs); repeats while the outage persists stay silent; a
+    later successful stat (or an honest absent verdict — the volume answered)
+    logs ``oneclick.artifact_probe_recovered`` and re-arms. Bounded to
+    ``capacity`` latched paths (LRU-evicted — a pathological path flood
+    re-WARNs, never grows without bound). Module-scoped with a
+    :meth:`reset` test seam — the ``groww.parse.epoch_timestamp``
+    once-per-pull guard precedent for a module-function latch.
+    """
+
+    def __init__(self, capacity: int = 64) -> None:
+        self._lock = threading.Lock()
+        self._capacity = capacity
+        self._down: dict[str, None] = {}
+
+    def flag(self, path: Path, exc: OSError) -> None:
+        """Record *path* as in-outage; WARN on the first flip only."""
+        key = str(path)
+        with self._lock:
+            if key in self._down:
+                return
+            self._down[key] = None
+            while len(self._down) > self._capacity:
+                # dicts iterate in insertion order — drop the oldest latch.
+                del self._down[next(iter(self._down))]
+        _LOG.warning(
+            "oneclick.artifact_probe_outage",
+            path=key,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+    def clear(self, path: Path) -> None:
+        """Re-arm *path*'s latch after a successful probe (one INFO per flip)."""
+        if not self._down:  # benign-race fast path — the common (no-outage) case.
+            return
+        key = str(path)
+        with self._lock:
+            if key not in self._down:
+                return
+            del self._down[key]
+        _LOG.info("oneclick.artifact_probe_recovered", path=key)
+
+    def reset(self) -> None:
+        """Test seam: forget every latched path."""
+        with self._lock:
+            self._down.clear()
+
+
+#: The module probe latch (see :class:`_ProbeOutageLatch` for the precedent
+#: note on module scoping; tests re-arm it via ``reset()``).
+_PROBE_OUTAGE_LATCH: Final[_ProbeOutageLatch] = _ProbeOutageLatch()
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactProbe:
+    """One stat-probe verdict: the content token + the outage distinction.
+
+    ``token is None`` alone is ambiguous — it covers a merely-ABSENT artifact
+    (normal: a run that has not landed the file yet) AND a genuine probe
+    OUTAGE (a stalled volume). The routes branch on :attr:`outage`
+    (DEC-CACHE-SERVE-LAST-KNOWN-001): absent stays the cheap fresh-compute
+    (awaiting payloads, never a stale serve of a DELETED artifact); outage
+    serves the last-known payload, labelled.
+    """
+
+    token: str | None
+    outage: bool = False
+
+
+def artifact_probe(path: Path) -> ArtifactProbe:
+    """Stat *path* into an :class:`ArtifactProbe` (token + outage verdict).
+
+    Parameters
+    ----------
+    path
+        The artifact file (or directory) to stat.
+
+    Returns
+    -------
+    ArtifactProbe
+        ``(token="mtime_ns:size", outage=False)`` on success;
+        ``(None, False)`` when the artifact is ABSENT
+        (``FileNotFoundError``/``NotADirectoryError`` — the volume answered);
+        ``(None, True)`` on any other :class:`OSError` — a genuine probe
+        outage, WARNed once per path per outage via the module latch.
+    """
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        _PROBE_OUTAGE_LATCH.clear(path)
+        return ArtifactProbe(None, False)
+    except OSError as exc:
+        _PROBE_OUTAGE_LATCH.flag(path, exc)
+        return ArtifactProbe(None, True)
+    _PROBE_OUTAGE_LATCH.clear(path)
+    return ArtifactProbe(f"{st.st_mtime_ns}:{st.st_size}", False)
+
+
 def artifact_revision(path: Path) -> str | None:
     """Return *path*'s ``"mtime_ns:size"`` stat token, or ``None`` when unavailable.
 
@@ -503,14 +612,13 @@ def artifact_revision(path: Path) -> str | None:
     -------
     str or None
         The content token used to key the parse-once-per-revision memos;
-        ``None`` (absent / stat error) means "no signal" — compute fresh,
-        cache nothing (the ``lake_revision`` doctrine).
+        ``None`` (absent / stat error) means "no signal". Callers that must
+        DISTINGUISH an absent artifact from a probe outage (the
+        serve-last-known routes — DEC-CACHE-SERVE-LAST-KNOWN-001) use
+        :func:`artifact_probe` instead; this thin view keeps every
+        presence-check call site byte-compatible.
     """
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return f"{st.st_mtime_ns}:{st.st_size}"
+    return artifact_probe(path).token
 
 
 def runs_revision(results_root: Path) -> str | None:
@@ -547,11 +655,33 @@ def runs_revision(results_root: Path) -> str | None:
         ``"<dir mtime_ns:size>:m<manifest-digest16>"`` for the Ruling-4
         ``<results_root parent>/sweep_runs`` tree; the bare directory token
         when the tree cannot be listed; ``None`` when it cannot be statted.
+        Callers that must distinguish absent-tree from a stat OUTAGE
+        (DEC-CACHE-SERVE-LAST-KNOWN-001) use :func:`runs_probe`.
+    """
+    return runs_probe(results_root).token
+
+
+def runs_probe(results_root: Path) -> ArtifactProbe:
+    """:func:`runs_revision` with the absent-vs-outage distinction preserved.
+
+    Parameters
+    ----------
+    results_root
+        The sweep results root.
+
+    Returns
+    -------
+    ArtifactProbe
+        The :func:`runs_revision` token with :attr:`ArtifactProbe.outage`
+        carried through from the root-directory stat (the digest legs inherit
+        the existing degrade — a scandir/manifest-stat fault degrades to the
+        bare/partial token, never an outage verdict: the tree itself
+        answered).
     """
     root = runs_root(results_root)
-    base = artifact_revision(root)
-    if base is None:
-        return None
+    base = artifact_probe(root)
+    if base.token is None:
+        return base
     try:
         entries = list(os.scandir(root))
     except OSError:
@@ -563,11 +693,11 @@ def runs_revision(results_root: Path) -> str | None:
                 names.append(entry.name)
         except OSError:
             continue
-    digest = sha256(base.encode("utf-8"))
+    digest = sha256(base.token.encode("utf-8"))
     for name in sorted(names):
         token = artifact_revision(root / name / MANIFEST_FILENAME)
         digest.update(f"{name}={token}\n".encode())
-    return f"{base}:m{digest.hexdigest()[:16]}"
+    return ArtifactProbe(f"{base.token}:m{digest.hexdigest()[:16]}", False)
 
 
 # ── Discovery ───────────────────────────────────────────────────────────
@@ -1580,9 +1710,15 @@ class TradeStoreReader:
                 "awaiting", (), None, "none", "invalid run_id/rank — nothing to read"
             )
         run_dir = runs_root(self._results_root) / run_id
-        top100 = self._top100_cached(run_dir)
+        top100, top100_last_known = self._top100_cached(run_dir)
+        outage_note = (
+            "top100 revision probe outage — serving last-known" if top100_last_known else ""
+        )
         if top100.status in ("awaiting", "corrupt"):
-            return TradesResult(top100.status, (), None, "none", top100.detail)
+            detail = top100.detail
+            if outage_note:
+                detail = f"{detail}; {outage_note}" if detail else outage_note
+            return TradesResult(top100.status, (), None, "none", detail)
         entry = next(
             (row for row in top100.rows if row.get("rank") == rank),
             None,
@@ -1636,35 +1772,51 @@ class TradeStoreReader:
             return TradesResult(
                 "corrupt", (), None, "results_store", f"results-depth read failed: {exc}"
             )
-        detail = ""
+        detail_parts: list[str] = []
         if limit != page.limit:
-            detail = f"limit clamped to {page.limit} (trade_store page law)"
+            detail_parts.append(f"limit clamped to {page.limit} (trade_store page law)")
+        if outage_note:
+            detail_parts.append(outage_note)
         return TradesResult(
             status="ok",
             rows=tuple(dict(row) for row in page.rows),
             total=page.total,
             source="results_store",
-            detail=detail,
+            detail="; ".join(detail_parts),
         )
 
-    def _top100_cached(self, run_dir: Path) -> Top100Result:
+    def _top100_cached(self, run_dir: Path) -> tuple[Top100Result, bool]:
         """Serve the single-entry ``(path, revision)`` top100 memo, parsing on a miss.
 
-        A ``None`` revision (absent/unstattable) computes fresh and caches
-        NOTHING (the ``lake_revision`` doctrine — no stale illusion).
+        Returns ``(result, served_last_known)``. A ``None`` revision splits
+        (DEC-CACHE-SERVE-LAST-KNOWN-001): a merely-ABSENT artifact computes
+        fresh and caches NOTHING (the cheap awaiting parse — never a stale
+        serve of a deleted artifact), while a probe OUTAGE (a stalled volume
+        — WARNed once per outage by the probe latch) serves the LAST-KNOWN
+        memo for this exact path when one exists (``served_last_known=True``
+        — the caller labels the page detail), falling back to the fresh
+        uncached parse when none does. The pre-change doctrine re-parsed the
+        whole artifact on EVERY trades-page request for the outage's
+        duration.
         """
         path = run_dir / TOP100_FILENAME
-        revision = artifact_revision(path)
-        if revision is None:
-            self.parse_count += 1
-            return load_top100(run_dir)
+        probe = artifact_probe(path)
         key = str(path)
+        if probe.token is None:
+            if probe.outage:
+                with self._lock:
+                    memo = self._top100_memo
+                if memo is not None and memo[0] == key:
+                    return memo[2], True
+            self.parse_count += 1
+            return load_top100(run_dir), False
+        revision = probe.token
         with self._lock:
             memo = self._top100_memo
         if memo is not None and memo[0] == key and memo[1] == revision:
-            return memo[2]
+            return memo[2], False
         self.parse_count += 1
         parsed = load_top100(run_dir)
         with self._lock:
             self._top100_memo = (key, revision, parsed)
-        return parsed
+        return parsed, False
