@@ -76,6 +76,7 @@ from brutex.engine.trade_store import (
     TradeStoreError,
     read_trade_page,
 )
+from brutex.money import format_inr
 
 _LOG = structlog.get_logger(__name__)
 
@@ -290,7 +291,9 @@ class Top100Result:
         list is ``ok`` (the artifact EXISTS; T-M2 status law).
     rows
         The validated entries (kept up to the first bad row on ``partial``),
-        metric keys already mapped via :data:`TOP100_METRIC_KEY_MAP`.
+        metric keys already mapped via :data:`TOP100_METRIC_KEY_MAP` and the
+        writer's ``arm`` dict already bridged to its display string
+        (:func:`_bridge_top100_arm`; the raw dict rides as ``arm_raw``).
     detail
         Defect note naming the bad row index / missing keys (empty when ok).
     revision
@@ -522,7 +525,13 @@ def runs_revision(results_root: Path) -> str | None:
     served the stale badge until the next run landed. Probe cost is honest
     O(run dirs) ``stat`` calls per poll (never a parse — the parses stay
     behind the memo this token keys); the primed cache HIT itself remains a
-    dict lookup. Remaining bound (Golden Rule #10): an in-place rewrite of
+    dict lookup. DELIBERATELY UNCAPPED (hostile-round F5 ruling): bounding
+    the digest to the listing's newest-50 cap would need one ``stat`` per
+    run DIR to rank by mtime first — N dir stats + 50 manifest stats is MORE
+    syscalls than today's N manifest stats, so the full walk IS the cheaper
+    honest option; the O(run dirs) scaling is disclosed here and in the
+    ``test_oneclick_o1.py`` B-2 bench docstring instead. Remaining bound
+    (Golden Rule #10): an in-place rewrite of
     ``top100.json``/``events.jsonl`` still does not move this token — the
     listing carries only their PRESENCE, which cannot change without the
     directory mtime moving, so nothing served from the listing goes stale.
@@ -741,6 +750,12 @@ def _top100_row_shape_defect(row: dict[str, Any]) -> str | None:
         return "carries a non-integer rank"
     if not isinstance(row["conditions"], list):
         return "conditions is not an array"
+    # Deliberately NO metric SUB-key mandate (hostile-round finder (a) pin):
+    # the writer legitimately emits null metric values (``deflated_sharpe``
+    # can be ``None``) and omits others entirely (``cpcv_pass_pct``) — a
+    # sub-key/type mandate here would false-flag REAL artifacts as partial.
+    # An absent/None metric sub-key renders the honest "—" client-side BY
+    # DESIGN; only the CONTAINER shapes are gated.
     if not isinstance(row["metrics"], dict):
         return "metrics is not an object"
     if not isinstance(row["regime"], dict):
@@ -774,6 +789,44 @@ def _map_top100_metrics(row: dict[str, Any]) -> dict[str, Any]:
     return mapped
 
 
+def _arm_leg_text(value: object) -> str:
+    """One SL/TP leg of the arm display string — ``format_inr`` paisa→₹ 2dp.
+
+    A non-integer leg (the writer's honest ``None``, or hand-edited junk)
+    renders the "—" segment — never a fabricated amount (Golden Rule #1).
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return format_inr(value)
+    return "—"
+
+
+def _bridge_top100_arm(row: dict[str, Any]) -> dict[str, Any]:
+    """Bridge the writer's arm DICT to an honest display string (hostile-round F1).
+
+    The SHIPPED engine writer emits ``arm`` as an OBJECT
+    (``brutex.engine.top100_artifact._entry_payload`` —
+    ``{"sl_paisa": int | None, "tp_paisa": int | None}``), but every display
+    site stringifies the field raw (``String(row.arm)`` in bx-oneclick.js /
+    strategy.html / screener.html), which renders ``"[object Object]"`` on a
+    REAL sweep card. This ONE reader boundary (the :data:`TOP100_METRIC_KEY_MAP`
+    pattern) replaces the dict with ``"SL <₹sl> · TP <₹tp>"`` — each leg via
+    the house :func:`brutex.money.format_inr` (paisa → rupees, exactly 2dp,
+    DEC-MONEY-2DP-001), a ``None``/junk leg reading "—" — and keeps the raw
+    dict ADDITIVELY under ``arm_raw`` (only when that key is absent). A
+    non-dict ``arm`` (a legacy display string) passes through untouched.
+    """
+    arm = row["arm"]
+    if not isinstance(arm, dict):
+        return row
+    bridged = dict(row)
+    bridged["arm"] = (
+        f"SL {_arm_leg_text(arm.get('sl_paisa'))} · TP {_arm_leg_text(arm.get('tp_paisa'))}"
+    )
+    if "arm_raw" not in bridged:
+        bridged["arm_raw"] = arm
+    return bridged
+
+
 def load_top100(run_dir: Path) -> Top100Result:
     """Load ``top100.json`` — the WRITER's object root, entries validated per row.
 
@@ -791,7 +844,11 @@ def load_top100(run_dir: Path) -> Top100Result:
     never assumed 100. A bad ROW → ``partial``, rows kept up to it, defect
     named (required keys + the :func:`_top100_row_shape_defect` inner
     shapes). Each kept row's metrics gain the :data:`TOP100_METRIC_KEY_MAP`
-    display aliases additively.
+    display aliases additively, and the writer's ``arm`` OBJECT is bridged to
+    its display string via :func:`_bridge_top100_arm` (the raw dict rides
+    along additively as ``arm_raw``) — the display sites ``String()`` the
+    field, so an unbridged dict rendered ``"[object Object]"`` on every real
+    sweep card (hostile-round F1).
 
     Parameters
     ----------
@@ -837,12 +894,19 @@ def load_top100(run_dir: Path) -> Top100Result:
             "corrupt", (), f"{TOP100_FILENAME} is not the writer's JSON object root", revision
         )
     version = obj.get("schema_version")
-    if version is not None and version != TOP100_SCHEMA_VERSION:
+    # Hostile-round finder (b): the version must be a GENUINE int — a JSON
+    # ``true`` (Python bool, ``True == 1``) or a float ``1.0`` pun must not
+    # slip past ``!=`` equality; both name themselves corrupt instead.
+    if version is not None and (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != TOP100_SCHEMA_VERSION
+    ):
         return Top100Result(
             "corrupt",
             (),
             f"{TOP100_FILENAME} schema_version {version!r} is not the supported "
-            f"{TOP100_SCHEMA_VERSION} — a newer writer? upgrade the display reader",
+            f"integer {TOP100_SCHEMA_VERSION} — a newer writer? upgrade the display reader",
             revision,
         )
     raw_preset = obj.get("preset")
@@ -884,7 +948,7 @@ def load_top100(run_dir: Path) -> Top100Result:
                 revision,
                 preset,
             )
-        rows.append(_map_top100_metrics(row))
+        rows.append(_bridge_top100_arm(_map_top100_metrics(row)))
     return Top100Result("ok", tuple(rows), "", revision, preset)
 
 

@@ -462,6 +462,17 @@ class TestLoadTop100:
         _write(tmp_path / oc.TOP100_FILENAME, json.dumps(doc))
         assert oc.load_top100(tmp_path).status == "ok"
 
+    @pytest.mark.parametrize("pun", [True, 1.0, "1"])
+    def test_schema_version_type_puns_are_named_corrupt(self, tmp_path: Path, pun: Any) -> None:
+        """Hostile-round finder (b): a JSON ``true`` (``True == 1``), float
+        ``1.0`` or string ``"1"`` must NOT pass the version equality — the
+        version is a GENUINE int or the artifact names itself corrupt."""
+        _write_top100(tmp_path, [_top100_row(1)], schema_version=pun)
+        result = oc.load_top100(tmp_path)
+        assert result.status == "corrupt"
+        assert result.rows == ()
+        assert f"schema_version {pun!r}" in result.detail
+
     def test_object_root_without_entries_array_is_corrupt(self, tmp_path: Path) -> None:
         _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"schema_version": 1, "rows": []}))
         result = oc.load_top100(tmp_path)
@@ -586,6 +597,51 @@ class TestTop100MetricKeyMap:
         _write_top100(tmp_path, [_top100_row(1)])
         metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
         assert metrics == {"sharpe": 1.2345678901}
+
+
+class TestTop100ArmBridge:
+    """The reader-boundary arm dict → display string bridge (hostile-round F1).
+
+    The SHIPPED writer emits ``arm`` as ``{"sl_paisa", "tp_paisa"}`` while
+    every display site ``String()``s the field — an unbridged dict rendered
+    ``"[object Object]"`` on every real sweep card.
+    """
+
+    def test_writer_arm_dict_bridges_to_the_house_money_string(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1, arm={"sl_paisa": 8_000, "tp_paisa": 5_000})])
+        row = oc.load_top100(tmp_path).rows[0]
+        assert row["arm"] == "SL ₹80.00 · TP ₹50.00"  # format_inr — paisa→₹ 2dp
+        assert row["arm_raw"] == {"sl_paisa": 8_000, "tp_paisa": 5_000}  # additive
+
+    def test_grouped_amounts_ride_the_house_formatter(self, tmp_path: Path) -> None:
+        """format_inr grouping — the display never re-invents money format."""
+        _write_top100(tmp_path, [_top100_row(1, arm={"sl_paisa": 123_456, "tp_paisa": 5})])
+        assert oc.load_top100(tmp_path).rows[0]["arm"] == "SL ₹1,234.56 · TP ₹0.05"
+
+    def test_none_legs_read_the_honest_dash_never_a_fabrication(self, tmp_path: Path) -> None:
+        """The writer's honest ``None`` legs (a store row without a tuple arm)."""
+        _write_top100(tmp_path, [_top100_row(1, arm={"sl_paisa": None, "tp_paisa": None})])
+        assert oc.load_top100(tmp_path).rows[0]["arm"] == "SL — · TP —"
+
+    def test_junk_and_missing_legs_read_the_dash_segment(self, tmp_path: Path) -> None:
+        """A hand-edited non-int leg (bool/str) or an absent key reads "—"."""
+        _write_top100(tmp_path, [_top100_row(1, arm={"sl_paisa": True})])
+        assert oc.load_top100(tmp_path).rows[0]["arm"] == "SL — · TP —"
+
+    def test_string_arm_passes_through_untouched(self, tmp_path: Path) -> None:
+        """A non-dict arm (legacy display string) is NOT bridged, no arm_raw."""
+        _write_top100(tmp_path, [_top100_row(1)])  # arm is the string default
+        loaded = oc.load_top100(tmp_path).rows[0]
+        assert loaded["arm"] == "SL1.0_TP2.0"
+        assert "arm_raw" not in loaded
+
+    def test_preexisting_arm_raw_is_never_overwritten(self, tmp_path: Path) -> None:
+        """Additive law: an artifact already carrying arm_raw keeps its value."""
+        row = _top100_row(1, arm={"sl_paisa": 100, "tp_paisa": 200}, arm_raw="keep-me")
+        _write_top100(tmp_path, [row])
+        loaded = oc.load_top100(tmp_path).rows[0]
+        assert loaded["arm"] == "SL ₹1.00 · TP ₹2.00"
+        assert loaded["arm_raw"] == "keep-me"
 
 
 # ── preflight fixture loader ────────────────────────────────────────────

@@ -25,10 +25,22 @@ names (``sharpe_ratio`` / ``max_drawdown_paisa`` / ``deflated_sharpe`` /
 emits none — the display renders the honest "—"). The pre-#1621 bare-array
 form was a hand-written fixture-only dialect the real writer never produced —
 the audit lesson this generator now encodes: fixtures match the WRITER's
-shape, not the reader's wishes. The entries deliberately OMIT the #1275
-additive keys (``run_id``/``equity_ref``) so the pre-#1275-artifact trades
-degrade stays pinned; the edge-class rows (tie / zero-trades / negative-PF /
-huge-DD / null-vix / hostile strings) remain display-robustness twins, not
+shape, not the reader's wishes. The hostile-round F1/F2 fold finished the
+per-key alignment to ``top100_artifact._entry_payload``: ``arm`` is the
+writer's DICT ``{sl_paisa, tp_paisa}`` (the reader bridges it to the display
+string — a string-armed fixture had MASKED the "[object Object]" render bug),
+``mask_hex`` is the writer's 32-hex NO-``0x`` form, ``regime`` carries the
+writer's key set (``by_year``/``by_trend``/``one_regime_wonder``/
+``regime_wonder_axis``/``entry_hour_hist``/``event_days``), ``vix_band``
+carries the writer's full key set (``lo``/``hi``/``stamped``/``missing``/
+``win``/``loss``), and the always-emitted ``instrument``/``family_members``/
+``reasons``/``margin_roi`` keys are present (``reasons``/``margin_roi`` are
+the writer's honest ``null`` — providers unwired, matching ``source``). The
+ONLY writer keys the entries still OMIT — deliberately, documented here —
+are the #1275 additive ``run_id``/``equity_ref``, so the pre-#1275-artifact
+trades degrade stays pinned; the edge-class rows (tie / zero-trades /
+negative-PF / huge-DD / null-vix [a JSON ``null`` band the writer never
+emits] / null-arm / hostile strings) remain display-robustness twins, not
 writer byte-dumps.
 
 Every number is deterministic pure arithmetic (no RNG, no clock) so a
@@ -75,6 +87,7 @@ HOSTILE_RUN_ID = "r-hostile01"
 SHORT_ROW_COUNT = 17
 TRADE_ROW_COUNT = 412
 TIE_RANKS = (41, 42)  # identical sharpe — the F-m2 rank-ascending tie-break golden pair
+NULL_ARM_RANK = 96  # writer-truth None legs — the reader renders "SL — · TP —"
 ZERO_TRADES_RANK = 97
 NEGATIVE_PF_RANK = 98  # display-robustness edge: impossible in reality, must not crash a renderer
 HUGE_DD_RANK = 99
@@ -159,13 +172,21 @@ def build_top100_rows() -> list[dict[str, Any]]:
         idx = rank - 1
         bit = idx % 60
         sharpe = round(3.2 - idx * 0.0173, 10)
+        band_lo = 11.0 + (rank % 5) * 0.75
+        band_hi = 17.5 + (rank % 7) * 0.5
         row: dict[str, Any] = {
             "rank": rank,
-            "mask_hex": f"0x{(1 << bit) | 0x5:032x}",
+            # The writer's mask form: 32-hex, NO 0x prefix (_MASK_HEX_WIDTH).
+            "mask_hex": f"{(1 << bit) | 0x5:032x}",
             "conditions": [f"COND_BIT_{bit:02d}", "PDH_CROSS_UP"],
+            "instrument": "NSE-NIFTY",
             "tf": TFS[idx % len(TFS)],
             "direction": DIRECTIONS[idx % len(DIRECTIONS)],
-            "arm": f"SL{1 + rank % 3}.0_TP{2 + rank % 4}.0",
+            # The writer's arm DICT (_entry_payload) — the reader bridges it.
+            "arm": {
+                "sl_paisa": (1 + rank % 3) * 2_575,
+                "tp_paisa": (2 + rank % 4) * 3_125,
+            },
             "metrics": {
                 # ENGINE metric names (the writer's _metrics_payload keys) —
                 # the reader's TOP100_METRIC_KEY_MAP adds the display aliases.
@@ -178,12 +199,39 @@ def build_top100_rows() -> list[dict[str, Any]]:
                 "total_trades": 180 + (rank * 7) % 260,
                 "deflated_sharpe": round(0.93 - idx * 0.0041, 10),
             },
+            # The writer's regime key set (_regime_payload).
             "regime": {
-                "trending_pnl_paisa": 6_000_000 - rank * 25_021,
-                "sideways_pnl_paisa": 3_000_000 - rank * 12_510,
+                "by_year": {
+                    "2024": 6_000_000 - rank * 25_021,
+                    "2025": 3_000_000 - rank * 12_510,
+                },
+                "by_trend": {
+                    "trending": 6_000_000 - rank * 25_021,
+                    "sideways": 3_000_000 - rank * 12_510,
+                },
+                "one_regime_wonder": False,
+                "regime_wonder_axis": None,
+                "entry_hour_hist": {"9": 100 + rank, "10": 80 + (rank * 3) % 90},
+                "event_days": {"counts": {}, "pnl": {}},
             },
-            "vix_band": {"lo": 11.0 + (rank % 5) * 0.75, "hi": 17.5 + (rank % 7) * 0.5},
+            # The writer's vix_band key set (_vix_band_payload, stamped arm).
+            "vix_band": {
+                "lo": band_lo,
+                "hi": band_hi,
+                "stamped": 180 + (rank * 7) % 260,
+                "missing": 0,
+                "win": {"min": band_lo, "avg": round((band_lo + band_hi) / 2, 10), "max": band_hi},
+                "loss": {
+                    "min": round(band_lo - 0.5, 10),
+                    "avg": round((band_lo + band_hi) / 2 - 0.5, 10),
+                    "max": round(band_hi - 0.5, 10),
+                },
+            },
             "family_id": f"fam-{1 + idx // 4:04d}",
+            "family_members": [f"fam-{1 + idx // 4:04d}"],
+            # Providers unwired in the fixture run (matches source flags).
+            "reasons": None,
+            "margin_roi": None,
         }
         rows.append(row)
     # Metric TIE pair (F-m2 golden): rank 42 shares rank 41's sharpe exactly.
@@ -199,6 +247,9 @@ def build_top100_rows() -> list[dict[str, Any]]:
         max_drawdown_paisa=0,
         total_trades=0,
     )
+    # Null-arm edge: the writer's honest None legs (a store row without a
+    # tuple arm) — the reader bridges to "SL — · TP —", never a fabrication.
+    rows[NULL_ARM_RANK - 1]["arm"] = {"sl_paisa": None, "tp_paisa": None}
     # Negative-PF display edge (impossible in reality — renderer must not crash).
     rows[NEGATIVE_PF_RANK - 1]["metrics"]["profit_factor"] = -0.5
     # Huge-drawdown edge.

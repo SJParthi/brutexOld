@@ -39,7 +39,7 @@ _EXPECTED_SHA256: dict[str, str] = {
         "344184a57b869707f2497d8a4a78687c051da7a9c8dca6191c18a0f010cb4a7a"
     ),
     "sweep_runs/r-20260707-fixt01/top100.json": (
-        "b8620bf39f436f25a60f5eece45c830f84a2bedb9959321d7b86822ae8def645"
+        "a48ea333dd5b668100a4b0ed63fda0e0e56c045f208b50208bce8aeb6d842791"
     ),
     "sweep_runs/r-20260707-fixt01/trades/rank-0001.json": (
         "3b2c4ce7d42ff046c27e6a262128f1fd2273f51ef78932ac6d9f4c1edf977386"
@@ -48,7 +48,7 @@ _EXPECTED_SHA256: dict[str, str] = {
         "98d5bf94846e2a31a9251c5bef552346de8c9b8a9e485a79dd88338d29b134f5"
     ),
     "sweep_runs/r-corrupt01/top100.json": (
-        "fbbc1df32e40eb632bb62fc745f61780a4f233f8ac9f1843883dccb8a2108dfc"
+        "60b258070fe9172e5784287c7ec6be6b3a87af82a616325058790dbdafe07f0d"
     ),
     "sweep_runs/r-empty01/top100.json": (
         "0fbd1222ef9b776468c540ed50d90c2fe346d052469a12b4cc806e8ae11af6ba"
@@ -60,10 +60,10 @@ _EXPECTED_SHA256: dict[str, str] = {
         "cdcabe6fdd16bf59275c8c2bc3b9470e0f07830f17714bd381d06c456b4a7422"
     ),
     "sweep_runs/r-hostile01/top100.json": (
-        "f00d6ea94bca64143779a7370c034a5867fca65c8ea8c90acfa147a8be55a687"
+        "7df84ef8bbd1e785f85200899fc2046428e7e5fed6b849e7f53836b624fd0645"
     ),
     "sweep_runs/r-short01/top100.json": (
-        "3dd682629203f3a37cc5281c728615cb5e89b196fbe5363ce1b5ab2cc482cfb6"
+        "ceb4a881c523fdfd5b1634c446dd295072e24a0f91d7a2442c20bccf1d698bab"
     ),
 }
 
@@ -75,7 +75,11 @@ class TestCorpusPinned:
         # DEC-ONECLICK-SWEEP-RUNS-REBIND-001; every ``top100.json`` then
         # migrated to the WRITER's object root + engine metric names under
         # DEC-ONECLICK-TOP100-OBJECT-ROOT-001 — those five SHAs moved with
-        # that deliberate regeneration). The old sibling ``.gitignore``
+        # that deliberate regeneration; the hostile-round F1/F2 fold then
+        # regenerated the four row-carrying twins onto the writer's per-entry
+        # dialect — dict arm / no-0x mask / writer regime + vix_band key sets
+        # / provider keys — the empty twin's bytes were already exact).
+        # The old sibling ``.gitignore``
         # re-include is GONE: the root .gitignore ignores ``runs/`` dirs,
         # not ``sweep_runs/``.
         actual = {
@@ -111,10 +115,31 @@ class TestMainRunRoundTrips:
         assert committed["run_id"] == gen.RUN_ID
         assert committed["preset"] == "min_dd_first"
         assert isinstance(committed["entries"], list)
-        raw_metrics = committed["entries"][0]["metrics"]
+        first = committed["entries"][0]
+        raw_metrics = first["metrics"]
         assert "sharpe_ratio" in raw_metrics  # engine names on disk
         assert "sharpe" not in raw_metrics  # the alias is READER-added only
         assert "cpcv_pass_pct" not in raw_metrics  # the writer emits none
+        # Hostile-round F1/F2: the writer's per-entry dialect on disk — the
+        # arm DICT (a string arm masked the "[object Object]" render bug),
+        # the 32-hex no-0x mask, the writer's regime/vix_band key sets, and
+        # the always-emitted provider keys (honest null — unwired).
+        assert set(first["arm"]) == {"sl_paisa", "tp_paisa"}
+        assert len(first["mask_hex"]) == 32 and not first["mask_hex"].startswith("0x")
+        assert set(first["regime"]) == {
+            "by_year",
+            "by_trend",
+            "one_regime_wonder",
+            "regime_wonder_axis",
+            "entry_hour_hist",
+            "event_days",
+        }
+        assert set(first["vix_band"]) == {"lo", "hi", "stamped", "missing", "win", "loss"}
+        assert first["instrument"] == "NSE-NIFTY"
+        assert first["reasons"] is None and first["margin_roi"] is None
+        assert isinstance(first["family_members"], list)
+        # The DOCUMENTED remaining omissions: the #1275 additive keys only.
+        assert "run_id" not in first and "equity_ref" not in first
 
     def test_top100_loads_ok_with_100_rows_and_edge_classes(self) -> None:
         top100 = oc.load_top100(_RUNS / gen.RUN_ID)
@@ -128,6 +153,12 @@ class TestMainRunRoundTrips:
         assert by_rank[gen.NULL_VIX_RANK]["vix_band"] is None
         tie_a, tie_b = gen.TIE_RANKS
         assert by_rank[tie_a]["metrics"]["sharpe"] == by_rank[tie_b]["metrics"]["sharpe"]
+        # Hostile-round F1: the reader bridged the writer's arm dict to the
+        # display string (rank 1: sl 2×2575 / tp 3×3125 paisa) and kept the
+        # raw dict additively; the null-arm edge reads the honest "—" legs.
+        assert by_rank[1]["arm"] == "SL ₹51.50 · TP ₹93.75"
+        assert by_rank[1]["arm_raw"] == {"sl_paisa": 5_150, "tp_paisa": 9_375}
+        assert by_rank[gen.NULL_ARM_RANK]["arm"] == "SL — · TP —"
 
     def test_events_chain_verifies_end_to_end(self) -> None:
         """Self-consistency ONLY: generator and verifier share ONE chain_hash."""

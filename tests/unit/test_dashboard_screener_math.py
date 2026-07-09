@@ -27,7 +27,12 @@ from typing import Any
 
 import pytest
 
-from tests.golden.generate_oneclick_fixture import NULL_VIX_RANK, RUN_ID, TIE_RANKS
+from tests.golden.generate_oneclick_fixture import (
+    NULL_ARM_RANK,
+    NULL_VIX_RANK,
+    RUN_ID,
+    TIE_RANKS,
+)
 
 _STATIC = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static"
 _SCREENER_JS = _STATIC / "bx-screener.js"
@@ -273,3 +278,33 @@ class TestApplyFilters:
         """The F-m3 count-line suffix is pinned verbatim (UI cannot drift)."""
         out = _node_call("S.nullVixNote(ARGS[0])", json.dumps(n))
         assert out == expected
+
+
+class TestArmRenderString:
+    """Hostile-round F1 node golden: the arm column renders the BRIDGED string.
+
+    Every display sink ``String()``s the arm field (screener.html's str-cell
+    fallback / strategy.html stArm / bx-oneclick.js r1_arm); these goldens
+    run the writer-DICT fixture rows THROUGH the real reader and pin that
+    the JS-side ``String()`` yields the bridged money string, never
+    ``"[object Object]"`` — plus the teeth proving the raw writer dict
+    WOULD render exactly that without the bridge.
+    """
+
+    def test_reader_bridged_arm_renders_the_money_string(self) -> None:
+        rows = _fixture_rows()
+        out = _node_call(
+            'ARGS[0].map((r) => String(S.fieldValue(r, "arm")))',
+            json.dumps([rows[0], rows[NULL_ARM_RANK - 1]]),
+        )
+        assert out == ["SL ₹51.50 · TP ₹93.75", "SL — · TP —"]
+        assert "[object Object]" not in out
+
+    def test_raw_writer_arm_dict_would_render_object_object(self) -> None:
+        """The pre-bridge failure mode, pinned: the SHIPPED writer's arm dict
+        ``String()``s to "[object Object]" — what every real sweep card
+        showed until the reader bridge (the fixture's old STRING arm had
+        masked it)."""
+        raw = {"rank": 1, "arm": {"sl_paisa": 80, "tp_paisa": 50}}
+        out = _node_call('String(S.fieldValue(ARGS[0], "arm"))', json.dumps(raw))
+        assert out == "[object Object]"

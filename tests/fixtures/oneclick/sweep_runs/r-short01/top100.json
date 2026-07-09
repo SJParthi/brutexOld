@@ -2,14 +2,22 @@
  "baselines": {},
  "entries": [
   {
-   "arm": "SL2.0_TP3.0",
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
    "conditions": [
     "COND_BIT_00",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0001",
-   "mask_hex": "0x00000000000000000000000000000005",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000005",
    "metrics": {
     "deflated_sharpe": 0.93,
     "max_drawdown_paisa": -158117,
@@ -20,25 +28,62 @@
     "win_rate": 0.61
    },
    "rank": 1,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2987490,
-    "trending_pnl_paisa": 5974979
+    "by_trend": {
+     "sideways": 2987490,
+     "trending": 5974979
+    },
+    "by_year": {
+     "2024": 5974979,
+     "2025": 2987490
+    },
+    "entry_hour_hist": {
+     "10": 83,
+     "9": 101
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "5m",
    "vix_band": {
     "hi": 18.0,
-    "lo": 11.75
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.375,
+     "max": 17.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 187,
+    "win": {
+     "avg": 14.875,
+     "max": 18.0,
+     "min": 11.75
+    }
    }
   },
   {
-   "arm": "SL3.0_TP4.0",
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
    "conditions": [
     "COND_BIT_01",
     "PDH_CROSS_UP"
    ],
    "direction": "short",
    "family_id": "fam-0001",
-   "mask_hex": "0x00000000000000000000000000000007",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000007",
    "metrics": {
     "deflated_sharpe": 0.9259,
     "max_drawdown_paisa": -166234,
@@ -49,25 +94,62 @@
     "win_rate": 0.6077
    },
    "rank": 2,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2974980,
-    "trending_pnl_paisa": 5949958
+    "by_trend": {
+     "sideways": 2974980,
+     "trending": 5949958
+    },
+    "by_year": {
+     "2024": 5949958,
+     "2025": 2974980
+    },
+    "entry_hour_hist": {
+     "10": 86,
+     "9": 102
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "15m",
    "vix_band": {
     "hi": 18.5,
-    "lo": 12.5
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.0,
+     "max": 18.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 194,
+    "win": {
+     "avg": 15.5,
+     "max": 18.5,
+     "min": 12.5
+    }
    }
   },
   {
-   "arm": "SL1.0_TP5.0",
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
    "conditions": [
     "COND_BIT_02",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0001",
-   "mask_hex": "0x00000000000000000000000000000005",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000005",
    "metrics": {
     "deflated_sharpe": 0.9218,
     "max_drawdown_paisa": -174351,
@@ -78,25 +160,62 @@
     "win_rate": 0.6054
    },
    "rank": 3,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2962470,
-    "trending_pnl_paisa": 5924937
+    "by_trend": {
+     "sideways": 2962470,
+     "trending": 5924937
+    },
+    "by_year": {
+     "2024": 5924937,
+     "2025": 2962470
+    },
+    "entry_hour_hist": {
+     "10": 89,
+     "9": 103
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "1h",
    "vix_band": {
     "hi": 19.0,
-    "lo": 13.25
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.625,
+     "max": 18.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 201,
+    "win": {
+     "avg": 16.125,
+     "max": 19.0,
+     "min": 13.25
+    }
    }
   },
   {
-   "arm": "SL2.0_TP2.0",
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
    "conditions": [
     "COND_BIT_03",
     "PDH_CROSS_UP"
    ],
    "direction": "short",
    "family_id": "fam-0001",
-   "mask_hex": "0x0000000000000000000000000000000d",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "0000000000000000000000000000000d",
    "metrics": {
     "deflated_sharpe": 0.9177,
     "max_drawdown_paisa": -182468,
@@ -107,25 +226,62 @@
     "win_rate": 0.6031
    },
    "rank": 4,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2949960,
-    "trending_pnl_paisa": 5899916
+    "by_trend": {
+     "sideways": 2949960,
+     "trending": 5899916
+    },
+    "by_year": {
+     "2024": 5899916,
+     "2025": 2949960
+    },
+    "entry_hour_hist": {
+     "10": 92,
+     "9": 104
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "5m",
    "vix_band": {
     "hi": 19.5,
-    "lo": 14.0
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.25,
+     "max": 19.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 208,
+    "win": {
+     "avg": 16.75,
+     "max": 19.5,
+     "min": 14.0
+    }
    }
   },
   {
-   "arm": "SL3.0_TP3.0",
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
    "conditions": [
     "COND_BIT_04",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0002",
-   "mask_hex": "0x00000000000000000000000000000015",
+   "family_members": [
+    "fam-0002"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000015",
    "metrics": {
     "deflated_sharpe": 0.9136,
     "max_drawdown_paisa": -190585,
@@ -136,25 +292,62 @@
     "win_rate": 0.6008
    },
    "rank": 5,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2937450,
-    "trending_pnl_paisa": 5874895
+    "by_trend": {
+     "sideways": 2937450,
+     "trending": 5874895
+    },
+    "by_year": {
+     "2024": 5874895,
+     "2025": 2937450
+    },
+    "entry_hour_hist": {
+     "10": 95,
+     "9": 105
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "15m",
    "vix_band": {
     "hi": 20.0,
-    "lo": 11.0
+    "lo": 11.0,
+    "loss": {
+     "avg": 15.0,
+     "max": 19.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 215,
+    "win": {
+     "avg": 15.5,
+     "max": 20.0,
+     "min": 11.0
+    }
    }
   },
   {
-   "arm": "SL1.0_TP4.0",
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
    "conditions": [
     "COND_BIT_05",
     "PDH_CROSS_UP"
    ],
    "direction": "short",
    "family_id": "fam-0002",
-   "mask_hex": "0x00000000000000000000000000000025",
+   "family_members": [
+    "fam-0002"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000025",
    "metrics": {
     "deflated_sharpe": 0.9095,
     "max_drawdown_paisa": -198702,
@@ -165,25 +358,62 @@
     "win_rate": 0.5985
    },
    "rank": 6,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2924940,
-    "trending_pnl_paisa": 5849874
+    "by_trend": {
+     "sideways": 2924940,
+     "trending": 5849874
+    },
+    "by_year": {
+     "2024": 5849874,
+     "2025": 2924940
+    },
+    "entry_hour_hist": {
+     "10": 98,
+     "9": 106
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "1h",
    "vix_band": {
     "hi": 20.5,
-    "lo": 11.75
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.625,
+     "max": 20.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 222,
+    "win": {
+     "avg": 16.125,
+     "max": 20.5,
+     "min": 11.75
+    }
    }
   },
   {
-   "arm": "SL2.0_TP5.0",
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
    "conditions": [
     "COND_BIT_06",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0002",
-   "mask_hex": "0x00000000000000000000000000000045",
+   "family_members": [
+    "fam-0002"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000045",
    "metrics": {
     "deflated_sharpe": 0.9054,
     "max_drawdown_paisa": -206819,
@@ -194,25 +424,62 @@
     "win_rate": 0.5962
    },
    "rank": 7,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2912430,
-    "trending_pnl_paisa": 5824853
+    "by_trend": {
+     "sideways": 2912430,
+     "trending": 5824853
+    },
+    "by_year": {
+     "2024": 5824853,
+     "2025": 2912430
+    },
+    "entry_hour_hist": {
+     "10": 101,
+     "9": 107
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "5m",
    "vix_band": {
     "hi": 17.5,
-    "lo": 12.5
+    "lo": 12.5,
+    "loss": {
+     "avg": 14.5,
+     "max": 17.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 229,
+    "win": {
+     "avg": 15.0,
+     "max": 17.5,
+     "min": 12.5
+    }
    }
   },
   {
-   "arm": "SL3.0_TP2.0",
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
    "conditions": [
     "COND_BIT_07",
     "PDH_CROSS_UP"
    ],
    "direction": "short",
    "family_id": "fam-0002",
-   "mask_hex": "0x00000000000000000000000000000085",
+   "family_members": [
+    "fam-0002"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000085",
    "metrics": {
     "deflated_sharpe": 0.9013,
     "max_drawdown_paisa": -214936,
@@ -223,25 +490,62 @@
     "win_rate": 0.5939
    },
    "rank": 8,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2899920,
-    "trending_pnl_paisa": 5799832
+    "by_trend": {
+     "sideways": 2899920,
+     "trending": 5799832
+    },
+    "by_year": {
+     "2024": 5799832,
+     "2025": 2899920
+    },
+    "entry_hour_hist": {
+     "10": 104,
+     "9": 108
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "15m",
    "vix_band": {
     "hi": 18.0,
-    "lo": 13.25
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.125,
+     "max": 17.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 236,
+    "win": {
+     "avg": 15.625,
+     "max": 18.0,
+     "min": 13.25
+    }
    }
   },
   {
-   "arm": "SL1.0_TP3.0",
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
    "conditions": [
     "COND_BIT_08",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0003",
-   "mask_hex": "0x00000000000000000000000000000105",
+   "family_members": [
+    "fam-0003"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000105",
    "metrics": {
     "deflated_sharpe": 0.8972,
     "max_drawdown_paisa": -223053,
@@ -252,25 +556,62 @@
     "win_rate": 0.5916
    },
    "rank": 9,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2887410,
-    "trending_pnl_paisa": 5774811
+    "by_trend": {
+     "sideways": 2887410,
+     "trending": 5774811
+    },
+    "by_year": {
+     "2024": 5774811,
+     "2025": 2887410
+    },
+    "entry_hour_hist": {
+     "10": 107,
+     "9": 109
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "1h",
    "vix_band": {
     "hi": 18.5,
-    "lo": 14.0
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.75,
+     "max": 18.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 243,
+    "win": {
+     "avg": 16.25,
+     "max": 18.5,
+     "min": 14.0
+    }
    }
   },
   {
-   "arm": "SL2.0_TP4.0",
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
    "conditions": [
     "COND_BIT_09",
     "PDH_CROSS_UP"
    ],
    "direction": "short",
    "family_id": "fam-0003",
-   "mask_hex": "0x00000000000000000000000000000205",
+   "family_members": [
+    "fam-0003"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000205",
    "metrics": {
     "deflated_sharpe": 0.8931,
     "max_drawdown_paisa": -231170,
@@ -281,25 +622,62 @@
     "win_rate": 0.5893
    },
    "rank": 10,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2874900,
-    "trending_pnl_paisa": 5749790
+    "by_trend": {
+     "sideways": 2874900,
+     "trending": 5749790
+    },
+    "by_year": {
+     "2024": 5749790,
+     "2025": 2874900
+    },
+    "entry_hour_hist": {
+     "10": 110,
+     "9": 110
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "5m",
    "vix_band": {
     "hi": 19.0,
-    "lo": 11.0
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.5,
+     "max": 18.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 250,
+    "win": {
+     "avg": 15.0,
+     "max": 19.0,
+     "min": 11.0
+    }
    }
   },
   {
-   "arm": "SL3.0_TP5.0",
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
    "conditions": [
     "COND_BIT_10",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0003",
-   "mask_hex": "0x00000000000000000000000000000405",
+   "family_members": [
+    "fam-0003"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000405",
    "metrics": {
     "deflated_sharpe": 0.889,
     "max_drawdown_paisa": -239287,
@@ -310,25 +688,62 @@
     "win_rate": 0.587
    },
    "rank": 11,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2862390,
-    "trending_pnl_paisa": 5724769
+    "by_trend": {
+     "sideways": 2862390,
+     "trending": 5724769
+    },
+    "by_year": {
+     "2024": 5724769,
+     "2025": 2862390
+    },
+    "entry_hour_hist": {
+     "10": 113,
+     "9": 111
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "15m",
    "vix_band": {
     "hi": 19.5,
-    "lo": 11.75
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.125,
+     "max": 19.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 257,
+    "win": {
+     "avg": 15.625,
+     "max": 19.5,
+     "min": 11.75
+    }
    }
   },
   {
-   "arm": "SL1.0_TP2.0",
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 6250
+   },
    "conditions": [
     "COND_BIT_11",
     "PDH_CROSS_UP"
    ],
    "direction": "short",
    "family_id": "fam-0003",
-   "mask_hex": "0x00000000000000000000000000000805",
+   "family_members": [
+    "fam-0003"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000805",
    "metrics": {
     "deflated_sharpe": 0.8849,
     "max_drawdown_paisa": -247404,
@@ -339,25 +754,62 @@
     "win_rate": 0.5847
    },
    "rank": 12,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2849880,
-    "trending_pnl_paisa": 5699748
+    "by_trend": {
+     "sideways": 2849880,
+     "trending": 5699748
+    },
+    "by_year": {
+     "2024": 5699748,
+     "2025": 2849880
+    },
+    "entry_hour_hist": {
+     "10": 116,
+     "9": 112
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "1h",
    "vix_band": {
     "hi": 20.0,
-    "lo": 12.5
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.75,
+     "max": 19.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 264,
+    "win": {
+     "avg": 16.25,
+     "max": 20.0,
+     "min": 12.5
+    }
    }
   },
   {
-   "arm": "SL2.0_TP3.0",
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
    "conditions": [
     "COND_BIT_12",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0004",
-   "mask_hex": "0x00000000000000000000000000001005",
+   "family_members": [
+    "fam-0004"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000001005",
    "metrics": {
     "deflated_sharpe": 0.8808,
     "max_drawdown_paisa": -255521,
@@ -368,25 +820,62 @@
     "win_rate": 0.5824
    },
    "rank": 13,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2837370,
-    "trending_pnl_paisa": 5674727
+    "by_trend": {
+     "sideways": 2837370,
+     "trending": 5674727
+    },
+    "by_year": {
+     "2024": 5674727,
+     "2025": 2837370
+    },
+    "entry_hour_hist": {
+     "10": 119,
+     "9": 113
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "5m",
    "vix_band": {
     "hi": 20.5,
-    "lo": 13.25
+    "lo": 13.25,
+    "loss": {
+     "avg": 16.375,
+     "max": 20.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 271,
+    "win": {
+     "avg": 16.875,
+     "max": 20.5,
+     "min": 13.25
+    }
    }
   },
   {
-   "arm": "SL3.0_TP4.0",
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
    "conditions": [
     "COND_BIT_13",
     "PDH_CROSS_UP"
    ],
    "direction": "short",
    "family_id": "fam-0004",
-   "mask_hex": "0x00000000000000000000000000002005",
+   "family_members": [
+    "fam-0004"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000002005",
    "metrics": {
     "deflated_sharpe": 0.8767,
     "max_drawdown_paisa": -263638,
@@ -397,25 +886,62 @@
     "win_rate": 0.5801
    },
    "rank": 14,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2824860,
-    "trending_pnl_paisa": 5649706
+    "by_trend": {
+     "sideways": 2824860,
+     "trending": 5649706
+    },
+    "by_year": {
+     "2024": 5649706,
+     "2025": 2824860
+    },
+    "entry_hour_hist": {
+     "10": 122,
+     "9": 114
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "15m",
    "vix_band": {
     "hi": 17.5,
-    "lo": 14.0
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.25,
+     "max": 17.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 278,
+    "win": {
+     "avg": 15.75,
+     "max": 17.5,
+     "min": 14.0
+    }
    }
   },
   {
-   "arm": "SL1.0_TP5.0",
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
    "conditions": [
     "COND_BIT_14",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0004",
-   "mask_hex": "0x00000000000000000000000000004005",
+   "family_members": [
+    "fam-0004"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000004005",
    "metrics": {
     "deflated_sharpe": 0.8726,
     "max_drawdown_paisa": -271755,
@@ -426,25 +952,62 @@
     "win_rate": 0.5778
    },
    "rank": 15,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2812350,
-    "trending_pnl_paisa": 5624685
+    "by_trend": {
+     "sideways": 2812350,
+     "trending": 5624685
+    },
+    "by_year": {
+     "2024": 5624685,
+     "2025": 2812350
+    },
+    "entry_hour_hist": {
+     "10": 125,
+     "9": 115
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "1h",
    "vix_band": {
     "hi": 18.0,
-    "lo": 11.0
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.0,
+     "max": 17.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 285,
+    "win": {
+     "avg": 14.5,
+     "max": 18.0,
+     "min": 11.0
+    }
    }
   },
   {
-   "arm": "SL2.0_TP2.0",
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
    "conditions": [
     "COND_BIT_15",
     "PDH_CROSS_UP"
    ],
    "direction": "short",
    "family_id": "fam-0004",
-   "mask_hex": "0x00000000000000000000000000008005",
+   "family_members": [
+    "fam-0004"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000008005",
    "metrics": {
     "deflated_sharpe": 0.8685,
     "max_drawdown_paisa": -279872,
@@ -455,25 +1018,62 @@
     "win_rate": 0.5755
    },
    "rank": 16,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2799840,
-    "trending_pnl_paisa": 5599664
+    "by_trend": {
+     "sideways": 2799840,
+     "trending": 5599664
+    },
+    "by_year": {
+     "2024": 5599664,
+     "2025": 2799840
+    },
+    "entry_hour_hist": {
+     "10": 128,
+     "9": 116
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "5m",
    "vix_band": {
     "hi": 18.5,
-    "lo": 11.75
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.625,
+     "max": 18.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 292,
+    "win": {
+     "avg": 15.125,
+     "max": 18.5,
+     "min": 11.75
+    }
    }
   },
   {
-   "arm": "SL3.0_TP3.0",
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
    "conditions": [
     "COND_BIT_16",
     "PDH_CROSS_UP"
    ],
    "direction": "long",
    "family_id": "fam-0005",
-   "mask_hex": "0x00000000000000000000000000010005",
+   "family_members": [
+    "fam-0005"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000010005",
    "metrics": {
     "deflated_sharpe": 0.8644,
     "max_drawdown_paisa": -287989,
@@ -484,14 +1084,43 @@
     "win_rate": 0.5732
    },
    "rank": 17,
+   "reasons": null,
    "regime": {
-    "sideways_pnl_paisa": 2787330,
-    "trending_pnl_paisa": 5574643
+    "by_trend": {
+     "sideways": 2787330,
+     "trending": 5574643
+    },
+    "by_year": {
+     "2024": 5574643,
+     "2025": 2787330
+    },
+    "entry_hour_hist": {
+     "10": 131,
+     "9": 117
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
    },
    "tf": "15m",
    "vix_band": {
     "hi": 19.0,
-    "lo": 12.5
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.25,
+     "max": 18.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 299,
+    "win": {
+     "avg": 15.75,
+     "max": 19.0,
+     "min": 12.5
+    }
    }
   }
  ],

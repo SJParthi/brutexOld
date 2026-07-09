@@ -239,6 +239,14 @@ class TestPrimedCacheHitFlatVsRunCount:
         Measured 2026-07-07 (sandbox): 0.55 µs/hit @ 3 runs vs 0.54 µs/hit
         @ 50 runs → ratio 0.98×. The FIRST poll per ``runs/`` revision pays
         the real O(run dirs) ``discover_runs`` scan — stated, not gated here.
+        SCALING NOTE (hostile-round F5): EVERY poll additionally pays the
+        ``runs_revision`` key computation — O(run dirs) ``stat`` syscalls
+        (dir listing + one manifest stat per run dir, never a parse). That
+        probe is DELIBERATELY uncapped: ranking dirs by mtime to reuse the
+        listing's newest-50 cap would cost N dir stats + 50 manifest stats,
+        MORE than the N manifest stats it pays today (see the
+        ``runs_revision`` docstring ruling). Only the primed payload HIT
+        below is the O(1) dict lookup this bench pins.
         Ceiling: ``ratio_ceiling(5.0)`` — pure dict hit (the
         ``test_db_option_count_cache_o1.py`` precedent).
         """

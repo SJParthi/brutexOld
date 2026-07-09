@@ -90,6 +90,23 @@ def _write_engine_artifact(lake: Path, artifact: engine_top100.Top100Artifact) -
     return write_top100(lake / "sweep_runs", artifact)
 
 
+def _single_candidate_artifact(candidate: Any) -> engine_top100.Top100Artifact:
+    """A REAL one-entry artifact around *candidate* (the engine's own builder)."""
+    families = TwinFamilies(
+        family_by_run_id={run_id_of(1): run_id_of(1)},
+        members_by_family={run_id_of(1): (run_id_of(1),)},
+    )
+    return build_top100(
+        [candidate],
+        run_id=_GRID_RUN_ID,
+        preset="min_dd_first",
+        families=families,
+        counts=PoolCounts(stores=1, excluded_no_aggs=0, zero_trade_excluded=0, parity_excluded=0),
+        data_snapshot_hashes=["a" * 64],
+        baselines={},
+    )
+
+
 class TestEngineWriterThroughDisplayReader:
     """The adapter-level golden: real writer bytes → load_top100 → ok + mapped."""
 
@@ -133,6 +150,68 @@ class TestEngineWriterThroughDisplayReader:
             assert "cpcv_pass_pct" not in metrics  # honest absence → "—" client-side
             # The engine names ride along verbatim (additive mapping).
             assert metrics["sharpe_ratio"] == raw["sharpe_ratio"]
+
+    def test_arm_dict_bridges_to_the_display_string_never_object_object(
+        self, tmp_path: Path
+    ) -> None:
+        """Hostile-round F1: the writer emits ``arm`` as a DICT
+        (``{"sl_paisa": 80, "tp_paisa": 50}``) while every display site
+        ``String()``s the field (bx-oneclick.js r1_arm / strategy.html stArm /
+        screener.html str-cell) — unbridged, EVERY real sweep card rendered
+        ``"[object Object]"``. The reader bridge must hand the pages a STRING
+        (house paisa→₹ 2dp per leg) and keep the raw dict additively."""
+        artifact = _engine_artifact()
+        _write_engine_artifact(tmp_path / "lake", artifact)
+        result = oc.load_top100((tmp_path / "lake" / "sweep_runs") / _GRID_RUN_ID)
+        assert result.status == "ok"
+        for row, entry in zip(result.rows, artifact.entries, strict=True):
+            assert entry["arm"] == {"sl_paisa": 80, "tp_paisa": 50}  # writer truth: a dict
+            assert row["arm"] == "SL ₹0.80 · TP ₹0.50"  # the bridged display string
+            assert isinstance(row["arm"], str)  # String(row.arm) is now honest
+            assert row["arm_raw"] == entry["arm"]  # the raw dict rides additively
+
+    def test_none_arm_legs_bridge_to_the_honest_dash(self, tmp_path: Path) -> None:
+        """A candidate without a tuple arm (None legs) reads "SL — · TP —"."""
+        artifact = _single_candidate_artifact(
+            make_candidate(1, fingerprint="fp01" + "0" * 62, sl_paisa=None, tp_paisa=None)
+        )
+        _write_engine_artifact(tmp_path / "lake", artifact)
+        result = oc.load_top100((tmp_path / "lake" / "sweep_runs") / _GRID_RUN_ID)
+        assert result.status == "ok"
+        assert result.rows[0]["arm"] == "SL — · TP —"  # never a fabricated amount
+
+    def test_unstamped_vix_band_is_the_writer_object_with_null_fields(self, tmp_path: Path) -> None:
+        """Hostile-round F4: the REAL writer's UNSTAMPED vix_band is an OBJECT
+        whose value fields are null (``_vix_band_payload`` — never the JSON
+        ``null`` root the fixture's display-robustness twin uses); the reader
+        keeps it as-read through the shape gate (object-or-null law)."""
+        unstamped = {
+            "vix_band_lo": None,
+            "vix_band_hi": None,
+            "vix_win_min": None,
+            "vix_win_avg": None,
+            "vix_win_max": None,
+            "vix_loss_min": None,
+            "vix_loss_avg": None,
+            "vix_loss_max": None,
+            "vix_stamped_trades": 0,
+            "vix_missing_trades": 40,
+        }
+        artifact = _single_candidate_artifact(
+            make_candidate(1, fingerprint="fp01" + "0" * 62, agg_overrides=dict(unstamped))
+        )
+        _write_engine_artifact(tmp_path / "lake", artifact)
+        result = oc.load_top100((tmp_path / "lake" / "sweep_runs") / _GRID_RUN_ID)
+        assert result.status == "ok"
+        band = result.rows[0]["vix_band"]
+        assert band == {
+            "lo": None,
+            "hi": None,
+            "stamped": 0,
+            "missing": 40,
+            "win": None,
+            "loss": None,
+        }
 
     def test_engine_loader_round_trips_the_same_bytes(self, tmp_path: Path) -> None:
         """Reader-adopts-writer sanity: the ENGINE's validating loader accepts
