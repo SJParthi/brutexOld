@@ -408,7 +408,7 @@ class TestExclusionsAndParity:
         paths = sidecar_paths_for(store_path, out_root, run_id=grid_identity(grid))
         stamp = load_stamp(paths)
         assert stamp is not None
-        # DEC-DEPTH-STAMP-REFDATA-001 (#1638): carry the SAME reference_fingerprint
+        # DEC-DEPTH-STAMP-REFDATA-001 (#1646): carry the SAME reference_fingerprint
         # the pass wrote so the re-stamped trio stays CURRENT (both the store bytes
         # AND the reference fingerprint must match, else the tuple re-derives).
         write_tuple_sidecars(
@@ -663,7 +663,7 @@ class TestCompositesFor:
 
 
 class TestMissingStoreLoud:
-    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 1 M2): a missing
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1645, review round 1 M2): a missing
     finalist store is classified deterministically (no-bars ⇒ expected; bars
     present ⇒ deletion-suspect), counted + capped-INFO'd + — when the
     bars-present, not-quarantined count exceeds the run-scoped FAILED
@@ -827,7 +827,7 @@ class TestMissingStoreLoud:
 
 
 class TestMissingStoreQuarantineIdentity:
-    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 2 M1): a
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1645, review round 2 M1): a
     quarantined-prior missing store is attributed BY IDENTITY (the sidecar
     label set), NOT by a stale COUNT — so a stale entry for a tuple whose store
     now EXISTS can never launder an UNRELATED deletion into a silent green run.
@@ -962,7 +962,7 @@ class TestMissingStoreQuarantineIdentity:
 
 
 class TestBarsSha256:
-    """DEC-DEPTH-STAMP-REFDATA-001 (#1638): the full-content reference-bar digest."""
+    """DEC-DEPTH-STAMP-REFDATA-001 (#1646): the full-content reference-bar digest."""
 
     def test_identical_streams_match(self) -> None:
         from brutex.engine.results_depth_pass import _bars_sha256
@@ -1013,7 +1013,7 @@ class TestBarsSha256:
 
 
 class TestReferenceFingerprintRedo:
-    """DEC-DEPTH-STAMP-REFDATA-001 (#1638): a reference-data change forces a redo;
+    """DEC-DEPTH-STAMP-REFDATA-001 (#1646): a reference-data change forces a redo;
     unchanged refs + store still skip; an old field-less stamp re-derives once."""
 
     def test_reference_change_forces_redo(self, out_root: Path) -> None:
