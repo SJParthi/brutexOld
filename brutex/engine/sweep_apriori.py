@@ -57,8 +57,13 @@ Each intermediate frequent frontier's membership authority is a **sorted numpy
 ``uint64`` array** (8 bytes/mask, subset lookup via ``np.searchsorted``) — never
 a Python ``set`` (per-element object overhead). Because a single ``uint64`` limb
 holds the mask, the generator REQUIRES every chosen condition bit ``< 64``; with
-the flag ON a ``>= 64`` bit raises a clear ``ValueError`` (unset the flag for a
-u128 vocabulary). Today's vocabulary is 60 bits, so production is unaffected.
+the flag ON a ``>= 64`` bit raises
+:class:`brutex.engine.sweep_run.SweepAprioriUnsupportedError` — a
+:class:`~brutex.engine.sweep_run.SweepComboError` subclass, so the grid
+GRACEFULLY skips that tuple (TUPLE_FAILED) rather than crashing on a raw
+``ValueError`` if the flag is ever left ON over a future u128 vocabulary (unset
+the flag to use the byte-identical brute-force path, which has no bit-width
+limit). Today's vocabulary is 60 bits, so production is unaffected.
 
 ## The time-based breaker (honest, MODELED)
 
@@ -79,14 +84,39 @@ env-tunable (``BRUTEX_SWEEP_APRIORI_CELL_BUDGET_S`` /
 ``BRUTEX_SWEEP_APRIORI_WALK_RATE``); an invalid value falls back to the default
 LOUDLY, a non-positive / non-finite value is refused.
 
-## Honest complexity envelope (Golden Rule #10)
+What the breaker bounds — and does NOT (honest, Golden Rule #10): it projects the
+DOWNSTREAM SERIAL BACKTEST time of the emitted candidates
+(``len(candidates) × n_bars / walk_rate``) and trips on THAT. It does **not**
+directly bound the generator's OWN join CPU, nor the transient candidate-LIST
+memory below — it is a proxy that trips before a candidate set large enough to
+make the backtest infeasible is fully materialised (the incremental
+:data:`_BUDGET_CHECK_STRIDE` check). The generator's own join CPU is bounded in
+practice only by ``n = len(unique bits) <= 60``.
+
+## The parity-completion caveat (Golden Rule #10)
+
+ON-vs-OFF leaderboard parity is **bit-identical for cells that BOTH paths run to
+completion**; a cell that trips the (default-OFF, time-based, MODELED) breaker is
+a LOUD ``TUPLE_FAILED`` (operator-visible, counted, non-zero exit), never a
+silent divergence.
+
+## Honest complexity + memory envelope (Golden Rule #10)
 
 NOT free and NOT ``O(1)``: building the frontier costs one ``count_hits`` batch
 per level over that level's candidates, the join is
 ``O(Σ_j |bucket|² · subset-checks)``, and the final emit list is
-``O(|candidates|)``. Memory is driven by the FRONTIER size (bounded by the
-breaker), NOT by ``n_bars`` — the generator never holds the bar window (it calls
-the injected ``count_hits``), so its peak is flat versus bar count.
+``O(|candidates|)``.
+
+Memory: the persistent per-level frequent-frontier authority is the sorted
+``uint64`` numpy array at **8 bytes/mask**. But the DOMINANT peak TRANSIENT at
+level ``k`` is the Python ``list[tuple[int, ...]]`` of candidates the join
+materialises — each an interned-``int`` tuple costing on the order of **~160
+bytes/candidate** (small-tuple + element overhead, an order-of-magnitude figure,
+not a measured constant), so peak ``≈ O(160 B) · |candidates_k|``, bounded by
+``min(C(n, k), the breaker's implied candidate cap)``. This peak is driven by the
+FRONTIER / candidate-list size, NOT by ``n_bars`` — the generator never holds the
+bar window (it calls the injected ``count_hits``), so its peak is flat versus bar
+count.
 """
 
 from __future__ import annotations
@@ -183,9 +213,15 @@ def _resolve_positive_float_env(
     """Resolve a positive-float env knob — unset/blank → *default*, invalid → LOUD.
 
     Mirrors the numeric-env idiom of
-    ``brutex.engine.sweep_parallel._resolve_positive_float_env`` (kept local so
-    this pure module stays free of the heavy parallel-sweep import graph). Reads
-    *name* from *env* (default :data:`os.environ`): unset/blank → *default*; a
+    ``brutex.engine.sweep_parallel._resolve_positive_float_env``. This is a
+    DELIBERATE, reviewer-blessed deviation from Golden Rule #11 (COMMON — one
+    source of truth): it is kept a LOCAL ~12-line copy rather than extracted to a
+    shared leaf so this pure, light-import generator stays free of the heavy
+    parallel-sweep import graph (``sweep_parallel`` pulls in the whole
+    process-pool / supervisor surface). The duplication is a bounded numeric-env
+    idiom (jscpd passes), and the two copies have no shared invariant that could
+    drift dangerously. Reads *name* from *env* (default :data:`os.environ`):
+    unset/blank → *default*; a
     finite ``float`` strictly ``> 0`` → that value; an INVALID value (non-float,
     non-finite, or ``<= 0``) → *default*, logged at WARNING on *event* naming the
     raw value via ``repr``. O(1).
@@ -373,6 +409,25 @@ def _raise_budget(
     )
 
 
+def _raise_unsupported_bit(bit: int) -> None:
+    """Raise the ``>= 64``-bit u128-vocab refusal as a ``SweepComboError`` subclass.
+
+    Imports :class:`brutex.engine.sweep_run.SweepAprioriUnsupportedError` LAZILY at
+    the raise site (the sibling of :func:`_raise_budget`) so this pure module makes
+    NO top-level reference to the heavy ``sweep_run`` orchestrator — no import
+    cycle, light module top. Subclassing ``SweepComboError`` means the flag ON over
+    a future ``>= 64``-bit vocabulary GRACEFULLY skips the tuple (TUPLE_FAILED)
+    rather than crashing the whole grid with a raw ``ValueError``.
+    """
+    from brutex.engine.sweep_run import SweepAprioriUnsupportedError
+
+    raise SweepAprioriUnsupportedError(
+        f"generate_apriori_candidates: Apriori frontier requires <64-bit masks "
+        f"(vocab bit {bit} >= {_U64_BITS}); unset {SWEEP_APRIORI_ENV} for u128 "
+        f"vocabularies."
+    )
+
+
 def generate_apriori_candidates(
     bar_bits: Sequence[int],
     *,
@@ -443,10 +498,15 @@ def generate_apriori_candidates(
     Raises
     ------
     ValueError
-        A condition bit is negative or ``>= 64`` (the u128-vocab guard), ``k``
-        is outside ``[0, len(set(condition_bits))]``, ``root_mod`` is malformed,
-        ``n_bars`` is negative, or an explicit *cell_budget_s* / *walk_rate* is
-        non-positive / non-finite.
+        A condition bit is negative, ``k`` is outside
+        ``[0, len(set(condition_bits))]``, ``root_mod`` is malformed, ``n_bars``
+        is negative, or an explicit *cell_budget_s* / *walk_rate* is non-positive
+        / non-finite (all caller-contract violations).
+    brutex.engine.sweep_run.SweepAprioriUnsupportedError
+        A condition bit is ``>= 64`` (the u128-vocab guard) — a
+        :class:`~brutex.engine.sweep_run.SweepComboError` subclass, so the flag
+        ON over a future ``>= 64``-bit vocabulary GRACEFULLY skips the tuple
+        (TUPLE_FAILED) rather than crashing the grid. Remedy: unset the flag.
     brutex.engine.sweep_run.SweepAprioriBudgetError
         The projected serial backtest of the emitted candidates exceeds
         *cell_budget_s* (a :class:`~brutex.engine.sweep_run.SweepComboError`
@@ -454,12 +514,16 @@ def generate_apriori_candidates(
     """
     unique_bits = sorted(set(condition_bits))
     for bit in unique_bits:
-        if bit < 0 or bit >= _U64_BITS:
+        if bit < 0:
             raise ValueError(
-                f"generate_apriori_candidates: condition bit {bit} out of range "
-                f"[0, {_U64_BITS}). Apriori frontier requires <64-bit masks; unset "
-                f"{SWEEP_APRIORI_ENV} for u128 vocabularies."
+                f"generate_apriori_candidates: condition bit {bit} is negative "
+                f"(out of range [0, {_U64_BITS}))"
             )
+        if bit >= _U64_BITS:
+            # A ``>= 64``-bit vocabulary (u128) — a GRACEFUL per-tuple refusal
+            # (SweepComboError subclass → TUPLE_FAILED), never a raw ValueError
+            # that would crash the whole grid with the flag left ON.
+            _raise_unsupported_bit(bit)
     n = len(unique_bits)
     if not 0 <= k <= n:
         raise ValueError(

@@ -18,7 +18,12 @@ DEC-SWEEP-APRIORI-TUPLE-001. Hypothesis-driven invariants over arbitrary
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
+
+from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import count_supermasks, iter_masks_k_of_bits
+from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_apriori import generate_apriori_candidates
 from brutex.vocabulary.conflicts import has_conflict
 from hypothesis import HealthCheck, given, settings
@@ -27,6 +32,38 @@ from hypothesis import strategies as st
 # A modest bit palette that includes conflict pairs (0,1)/(2,3)/(4,5) so
 # conflict-pruning is exercised, plus conflict-free bits.
 _BIT_PALETTE = [0, 1, 2, 3, 4, 5, 6, 7]
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+_SESSION_OPEN_IST = datetime(2026, 1, 5, 9, 16, tzinfo=_IST)
+_BARS_PER_DAY = 15
+# Integer-rupee prices INCLUDING the extreme edges, so the "extreme suffix" arm
+# is genuinely exercised (mirrors tests/property/test_sweep_suffix_independence.py).
+_price = st.one_of(
+    st.just(1),
+    st.just(1_000_000),
+    st.integers(min_value=1, max_value=1_000_000),
+)
+
+
+def _bar_at(day: int, minute: int, open_i: int, close_i: int) -> CandleBar:
+    ts = (_SESSION_OPEN_IST + timedelta(days=day, minutes=minute)).astimezone(UTC)
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(open_i),
+        high=Decimal(max(open_i, close_i)),
+        low=Decimal(min(open_i, close_i)),
+        close=Decimal(close_i),
+        volume=100,
+        open_interest=None,
+    )
+
+
+def _series_from_pairs(pairs: list[tuple[int, int]]) -> list[CandleBar]:
+    return [
+        _bar_at(i // _BARS_PER_DAY, i % _BARS_PER_DAY, open_i, close_i)
+        for i, (open_i, close_i) in enumerate(pairs)
+    ]
+
 
 _bit_sets = st.lists(st.sampled_from(_BIT_PALETTE), min_size=1, max_size=8, unique=True).map(sorted)
 _bar_bits = st.lists(st.integers(min_value=0, max_value=(1 << 8) - 1), min_size=1, max_size=120)
@@ -117,28 +154,53 @@ def test_shards_partition_the_whole(
 
 @settings(suppress_health_check=[HealthCheck.too_slow], deadline=None, max_examples=80)
 @given(
-    prefix=st.lists(st.integers(min_value=0, max_value=(1 << 8) - 1), min_size=1, max_size=80),
-    suffix=st.lists(st.integers(min_value=0, max_value=(1 << 8) - 1), max_size=40),
+    prefix_pairs=st.lists(st.tuples(_price, _price), min_size=1, max_size=45),
+    suffix_pairs=st.lists(st.tuples(_price, _price), max_size=30),
     bits=_bit_sets,
     data=st.data(),
 )
 def test_suffix_independence(
-    prefix: list[int], suffix: list[int], bits: list[int], data: st.DataObject
+    prefix_pairs: list[tuple[int, int]],
+    suffix_pairs: list[tuple[int, int]],
+    bits: list[int],
+    data: st.DataObject,
 ) -> None:
-    # The candidate SET over bars[0:N] must not depend on bars[N:] — bar_bits are
-    # causal. (The generator counts hits over the exact bars it is given, so a
-    # different n_bars would change the breaker projection; we compare over the
-    # SAME prefix window, appending an arbitrary suffix that must be ignored when
-    # only the prefix is counted.)
+    """The COMPOSED ``build_bar_bits`` → generator pipeline over ``bars[0:N]`` is
+    causal: its candidates never depend on ``bars[N:]``.
+
+    Mirrors ``tests/property/test_sweep_suffix_independence.py``. The vacuous form
+    (computing ``_apriori(prefix + suffix, …)`` and discarding it) is REPLACED by
+    a genuine composed comparison: build the truth matrix over the FULL series and
+    over the PREFIX series, assert (1) ``build_bar_bits`` is suffix-independent on
+    the prefix window (the Stage-1A causal property) and (2) the generator over
+    ``bar_bits_full[:N]`` is BIT-IDENTICAL to the generator over the
+    prefix-built ``bar_bits`` — whether the suffix is ABSENT, MUTATED, or EXTREME
+    (the ``_price`` strategy weights the ₹1 / ₹1,000,000 edges). This FAILS if any
+    stage of the pipeline ever smuggled out-of-window data into an earlier result.
+    """
+    prefix = _series_from_pairs(prefix_pairs)
+    n = len(prefix)
     k = data.draw(st.integers(min_value=0, max_value=len(bits)))
-    min_hits = data.draw(st.integers(min_value=0, max_value=len(prefix) + 1))
-    base = _apriori(prefix, bits, k, min_hits)
-    # Counting over the SAME prefix while a suffix physically exists downstream is
-    # modelled by passing only the prefix (the caller slices to bars[0:N]); the
-    # emitted candidates must be identical regardless of the (unused) suffix.
-    assert base == _apriori(prefix, bits, k, min_hits)
-    if suffix:
-        # A prefix+suffix window is a DIFFERENT (larger) input; its prefix-only
-        # counterpart must still reproduce ``base`` — no global state leaks.
-        _ = _apriori(prefix + suffix, bits, k, min_hits)
-        assert base == _apriori(prefix, bits, k, min_hits)
+    min_hits = data.draw(st.integers(min_value=0, max_value=n + 1))
+
+    bits_prefix = build_bar_bits(prefix)
+    base = generate_apriori_candidates(
+        bits_prefix, condition_bits=bits, k=k, min_hits=min_hits, n_bars=n
+    )
+
+    # Suffix ABSENT: the prefix built alone must reproduce ``base`` (determinism).
+    assert base == generate_apriori_candidates(
+        bits_prefix, condition_bits=bits, k=k, min_hits=min_hits, n_bars=n
+    )
+
+    if suffix_pairs:
+        # A FULL series = prefix + an arbitrary (extreme-capable) suffix. Stage-1A
+        # must agree with the prefix build on the prefix window …
+        full = _series_from_pairs(prefix_pairs + suffix_pairs)
+        bits_full = build_bar_bits(full)
+        assert bits_full[:n] == bits_prefix  # Stage-1A causal (suffix-independent)
+        # … and the generator over the prefix window of the FULL build is
+        # bit-identical to ``base`` — the composed causal property, non-vacuous.
+        assert base == generate_apriori_candidates(
+            bits_full[:n], condition_bits=bits, k=k, min_hits=min_hits, n_bars=n
+        )

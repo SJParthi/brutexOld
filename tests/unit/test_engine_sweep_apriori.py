@@ -36,7 +36,11 @@ from brutex.engine.sweep_apriori import (
     resolve_cell_budget_s,
     resolve_walk_rate,
 )
-from brutex.engine.sweep_run import SweepAprioriBudgetError, SweepComboError
+from brutex.engine.sweep_run import (
+    SweepAprioriBudgetError,
+    SweepAprioriUnsupportedError,
+    SweepComboError,
+)
 from brutex.vocabulary.conflicts import CONFLICT_PAIRS, has_conflict
 
 # A bit set that INCLUDES three real conflict pairs — (0, 1), (2, 3), (4, 5) —
@@ -325,17 +329,112 @@ def test_breaker_trips_before_materialising_giant_list(monkeypatch: pytest.Monke
         )
 
 
+# ────────────────────────── mutation hardening ──────────────────────────
+# Deterministic boundary pins that KILL the mutmut survivors on the hit-filter
+# `>=` boundaries, the breaker's strict `>`, and the incremental-check stride
+# `% == 0` — each fails under exactly the single-line mutant it targets.
+
+
+class TestMutationHardening:
+    """Kill the surviving mutants on the frequency / breaker / stride boundaries.
+
+    mutmut cannot run in this container (parso can't parse the repo's PEP-695
+    generics), so each pin was verified by MANUALLY applying its target mutant to
+    ``sweep_apriori.py`` and confirming the test fails, then reverting.
+    """
+
+    def test_f1_singleton_frequent_at_exactly_min_hits(self) -> None:
+        # Pins the F_1 singleton filter ``count >= min_hits`` (NOT ``count >``):
+        # bits 6 and 7 fire on EXACTLY min_hits bars, so both are frequent and the
+        # k=2 candidate (6, 7) MUST be emitted. Under a ``count > min_hits`` mutant
+        # F_1 is empty and (6, 7) vanishes → this asserts the boundary keeps it.
+        min_hits = 3
+        pair = (1 << 6) | (1 << 7)
+        bar_bits = [pair] * min_hits  # both bits fire on exactly min_hits bars
+        out = generate_apriori_candidates(
+            bar_bits, condition_bits=[6, 7], k=2, min_hits=min_hits, n_bars=len(bar_bits)
+        )
+        assert out == [pair]
+
+    def test_intermediate_frontier_frequent_at_exactly_min_hits(self) -> None:
+        # Pins the INTERMEDIATE-frontier filter ``count >= min_hits`` (NOT
+        # ``count >``) at the F_2 build feeding a k=3 join. Singletons 6,7,8 fire
+        # strictly ABOVE min_hits (so F_1 is unaffected by either boundary), while
+        # the pairs (6,7)/(6,8)/(7,8) each fire on EXACTLY min_hits bars → all three
+        # frequent → the triple (6,7,8) MUST be emitted. Under ``count > min_hits``
+        # at the F_2 filter the pairs drop out of F_2, the triple fails subset-prune
+        # and vanishes.
+        min_hits = 3
+        triple = (1 << 6) | (1 << 7) | (1 << 8)
+        bar_bits = (
+            [triple] * min_hits  # 6,7,8 together on exactly min_hits bars
+            + [1 << 6] * 4  # + bit 6 alone → count(6) = 3 + 4 = 7 > min_hits
+            + [1 << 7] * 4  # count(7) = 7 > min_hits
+            + [1 << 8] * 4  # count(8) = 7 > min_hits
+        )
+        out = generate_apriori_candidates(
+            bar_bits, condition_bits=[6, 7, 8], k=3, min_hits=min_hits, n_bars=len(bar_bits)
+        )
+        assert out == [triple]
+
+    def test_breaker_exactly_at_budget_does_not_trip(self) -> None:
+        # Pins the breaker's ``projected > budget_s`` (NOT ``>=``): count·n_bars/rate
+        # == budget_s EXACTLY (2·10/1.0 == 20.0), so the cell is ALLOWED — only a
+        # STRICTLY-over projection trips. Under a ``>=`` mutant this exactly-at-budget
+        # cell would raise SweepAprioriBudgetError.
+        out = generate_apriori_candidates(
+            [(1 << 6) | (1 << 7)] * 10,
+            condition_bits=[6, 7],
+            k=1,
+            min_hits=0,
+            n_bars=10,
+            cell_budget_s=20.0,
+            walk_rate=1.0,
+        )
+        assert out == [1 << 6, 1 << 7]  # returned normally, no raise
+
+    def test_budget_check_stride_cadence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Pins the incremental in-join breaker cadence ``len(candidates) % STRIDE
+        # == 0`` (NOT ``!= 0``). With STRIDE patched to 4 and a level-2 join
+        # producing exactly C(5, 2) = 10 candidates, on_count must fire at running
+        # counts [4, 8] (the multiples of 4). Under a ``% STRIDE != 0`` mutant it
+        # would fire at every NON-multiple ([1, 2, 3, 5, 6, 7, 9, 10]) instead.
+        monkeypatch.setattr(sweep_apriori, "_BUDGET_CHECK_STRIDE", 4)
+        bits = [6, 7, 8, 9, 10]  # 5 conflict-free bits → C(5, 2) = 10 pairs
+        frontier_tuples = [(b,) for b in bits]
+        frontier_masks = np.array(sorted(1 << b for b in bits), dtype=np.uint64)
+        recorded: list[int] = []
+        # Whitebox: drive the private join directly to observe the breaker-check
+        # cadence (DEC-P0-017 per-site friend-access convention).
+        out = sweep_apriori._join_and_prune(  # pyright: ignore[reportPrivateUsage]
+            frontier_tuples, frontier_masks, drop_conflicts=False, on_count=recorded.append
+        )
+        assert len(out) == 10
+        assert recorded == [4, 8]
+
+
 # ────────────────────────── validation guards ──────────────────────────
 
 
 def test_guard_rejects_bit_at_or_above_64() -> None:
-    with pytest.raises(ValueError, match="u128"):
+    # A >= 64-bit (u128) vocab is refused GRACEFULLY: SweepAprioriUnsupportedError
+    # is a SweepComboError subclass, so the grid driver skips the tuple
+    # (TUPLE_FAILED) rather than crashing the whole grid with a raw ValueError.
+    with pytest.raises(SweepAprioriUnsupportedError, match="u128") as ei:
         generate_apriori_candidates([1], condition_bits=[0, 64], k=1, min_hits=0)
+    assert isinstance(ei.value, SweepComboError)
+    assert "vocab bit 64 >= 64" in str(ei.value)
+    assert SWEEP_APRIORI_ENV in str(ei.value)
+    # It is NOT a ValueError — the whole point of the guard-symmetry fix.
+    assert not isinstance(ei.value, ValueError)
 
 
 def test_guard_rejects_negative_bit() -> None:
-    with pytest.raises(ValueError, match="out of range"):
+    # A negative bit is a caller-contract violation (never from a real vocab) →
+    # a plain ValueError, deliberately NOT the graceful u128 refusal.
+    with pytest.raises(ValueError, match="negative") as ei:
         generate_apriori_candidates([1], condition_bits=[-1, 3], k=1, min_hits=0)
+    assert not isinstance(ei.value, SweepComboError)
 
 
 def test_rejects_k_out_of_range() -> None:
@@ -530,3 +629,66 @@ def test_run_persisted_sweep_on_path_matches_off(tmp_path, monkeypatch: pytest.M
     assert on.store_content_hash == off.store_content_hash  # type: ignore[attr-defined]
     assert on_bytes == off_bytes
     assert on.enumerated < off.enumerated  # type: ignore[attr-defined]  # pruning fired
+
+
+# ─────────────── driver-level breaker propagation (FIX 5) ───────────────
+# Belt-and-suspenders: drive the REAL sequential grid driver with the flag ON and
+# a tiny budget so a tuple TRIPS the breaker, proving the
+# SweepAprioriBudgetError → SweepComboError → TUPLE_FAILED propagation works
+# end-to-end through the driver (not just the unit isinstance check).
+
+
+def test_driver_reports_breaker_trip_as_tuple_failed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    pytest.importorskip("polars")  # store construction needs the [data] extra
+    from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.sweep_orchestrator import (
+        SweepGridConfig,
+        Timeframe,
+        make_store_for,
+        run_sweep_grid,
+    )
+    from brutex.engine.sweep_run import ComboDedup
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.strategies.types import Side
+
+    bars = _mini_bars()
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY],
+        k_values=[2],
+        condition_bits=_BITS,
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        mode="A",
+        data_snapshot_hash="snap",
+        indicator_version="iv",
+        code_commit_sha="cc",
+        min_hits=0,
+    )
+    # Flag ON + a microscopic budget / unit walk-rate → any non-empty candidate
+    # set trips the breaker inside generate_apriori_candidates.
+    monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+    monkeypatch.setenv(CELL_BUDGET_ENV, "1e-9")
+    monkeypatch.setenv(WALK_RATE_ENV, "1.0")
+
+    dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+    with AuditWriter.open(tmp_path / "grid.jsonl") as audit:
+        summary = run_sweep_grid(
+            grid,
+            bars_for=lambda _i, _t: bars,
+            store_for=make_store_for(tmp_path / "results", grid),
+            dedup=dedup,
+            audit=audit,
+        )
+
+    # The tripped tuple is counted as failed (non-zero verdict), NOT persisted —
+    # the graceful TUPLE_FAILED skip, driven end-to-end through the real driver.
+    assert summary.tuples_failed == 1
+    assert summary.persisted == 0
+    # And the driver recorded a TUPLE_FAILED audit line for it.
+    audit_text = (tmp_path / "grid.jsonl").read_text(encoding="utf-8")
+    assert "TUPLE_FAILED" in audit_text

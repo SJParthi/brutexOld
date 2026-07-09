@@ -233,6 +233,22 @@ class SweepAprioriBudgetError(SweepComboError):
     """
 
 
+class SweepAprioriUnsupportedError(SweepComboError):
+    """The Apriori frontier cannot represent a ``>= 64``-bit vocabulary — GRACEFUL refusal.
+
+    Raised by :func:`brutex.engine.sweep_apriori.generate_apriori_candidates`
+    (only when ``BRUTEX_SWEEP_APRIORI`` is enabled) when a chosen condition bit is
+    ``>= 64``: the sorted-``uint64`` frequent frontier holds each mask in a single
+    64-bit limb, so a u128 vocabulary is out of range. Subclassing
+    :class:`SweepComboError` rides the existing tuple-skip contract UNCHANGED — the
+    grid drivers count it in ``tuples_failed``, emit ``TUPLE_FAILED``, leave the
+    tuple un-sentineled for a deterministic redo, and exit non-zero — a LOUD
+    per-tuple refusal instead of a raw ``ValueError`` that would crash the WHOLE
+    grid. The remedy is to unset ``BRUTEX_SWEEP_APRIORI``: the byte-identical
+    brute-force enumeration path supports the full u128 vocabulary.
+    """
+
+
 class SweepMemoryBudgetError(SweepComboError):
     """The tuple's rank-region memory exceeds the operator budget — a GRACEFUL refusal.
 
@@ -1723,6 +1739,7 @@ def run_persisted_sweep(
 __all__ = [
     "ComboDedup",
     "SweepAprioriBudgetError",
+    "SweepAprioriUnsupportedError",
     "SweepComboError",
     "SweepMemoryBudgetError",
     "SweepRunConfig",
