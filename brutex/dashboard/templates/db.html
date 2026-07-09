@@ -1188,7 +1188,7 @@ async function onFnoExpiryChange(exp) {
 /* A contract carries its available intervals; materialise ONE fno dataset
    descriptor per interval so the shared candle query path can address it, then
    select the first interval and run the page. */
-function onFnoContractChange(symbol) {
+function onFnoContractChange(symbol, prefInterval) {
   cstate.fno.con = symbol;
   const con = cstate.fno.cons.find(c => c.symbol === symbol) || null;
   if (!con) { cstate.datasets = []; cstate.key = null; renderCandleView(null, null, { kind: "prompt", text: "pick a contract" }); return; }
@@ -1198,8 +1198,12 @@ function onFnoContractChange(symbol) {
     strike: con.strike, instrument_type: con.instrument_type, option_type: con.option_type }));
   cstate.offset = 0;
   /* Default to 1-minute (the fetched granularity an operator most wants for an F&O
-     contract); fall back to the first available interval otherwise. */
-  const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
+     contract); fall back to the first available interval otherwise. `prefInterval`
+     (optional — the deep link, DEC-MOVERS-DRILL-DOWN-001) wins ONLY when that
+     interval is actually STORED for the contract; the change listener passes no
+     second arg, so the manual path is byte-identical. */
+  const pref = (prefInterval && cstate.datasets.find(x => x.interval === prefInterval))
+    || cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
   cstate.key = pref ? dsKey(pref) : null;
   if (cstate.key) runCandleQuery(false); else renderCandleView(null, null, { kind: "prompt", text: "pick a contract" });
 }
@@ -1229,14 +1233,19 @@ async function loadSpotCascade() {
 /* A symbol carries its available STORED intervals; materialise ONE spot dataset
    descriptor per interval so the shared candle query path can address it, then
    default to 1-minute and run the page. */
-function onSpotSymbolChange(key) {
+function onSpotSymbolChange(key, prefInterval) {
   cstate.spot.sym = key;
   const s = cstate.spot.syms.find(x => _spotKey(x) === key) || null;
   if (!s) { cstate.datasets = []; cstate.key = null; renderCandleView(null, null, { kind: "prompt", text: "pick a symbol" }); return; }
   cstate.datasets = (s.intervals || []).map(iv => ({
     kind: "spot", exchange: s.exchange, segment: s.segment, symbol: s.symbol, interval: iv }));
   cstate.offset = 0;
-  const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
+  /* `prefInterval` (optional — the deep link, DEC-MOVERS-DRILL-DOWN-001) wins ONLY
+     when that interval is actually STORED; an unstored one silently falls back to
+     the existing 1-minute preference (only stored intervals are offerable —
+     DEC-DB-SPOT-CASCADE-001). The change listener passes no second arg. */
+  const pref = (prefInterval && cstate.datasets.find(x => x.interval === prefInterval))
+    || cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
   cstate.key = pref ? dsKey(pref) : null;
   if (cstate.key) runCandleQuery(false); else renderCandleView(null, null, { kind: "prompt", text: "pick a symbol" });
 }
@@ -1612,12 +1621,80 @@ dataEl.addEventListener("click", (ev) => {
   showCopyToast();
 });
 
+/* ── Boot-time deep link (DEC-MOVERS-DRILL-DOWN-001) ──────────────────────
+   /db?candles=spot|fno&symbol=…&exchange=…&segment=…&interval=…&date=…
+   drives the EXISTING cascades (the /movers row drill-down builds these
+   URLs; no new backend route). Server-truth-gated at every level: a
+   symbol / underlying / expiry / contract the cascade payloads do not list
+   degrades to the pre-existing honest "pick a …" prompt — never a wrong or
+   fabricated selection (Golden Rule #1). Param values feed ONLY JS
+   comparisons + encodeURIComponent-built API URLs; the only ones that reach
+   markup are cstate.start/cstate.end, regex-gated to \d{4}-\d{2}-\d{2}
+   FIRST and rendered through the existing esc() value-attribute path.
+   Runs once at boot; Refresh + manual navigation are untouched. */
+const _FNO_MONTHS = { Jan:"01", Feb:"02", Mar:"03", Apr:"04", May:"05", Jun:"06",
+                      Jul:"07", Aug:"08", Sep:"09", Oct:"10", Nov:"11", Dec:"12" };
+/* Longest-prefix match against the SERVER's own underlyings list (never a
+   re-derived grammar) — the client twin of the right-anchored fno_symbol
+   parse (the #1530 precedent), so a hyphenated underlying
+   (NSE-BAJAJ-AUTO-30Sep25-FUT) or an &-underlying (M&M) is correct by
+   construction. */
+function _fnoUnderlyingFor(symbol) {
+  const exch = symbol.split("-")[0];
+  let best = "";
+  for (const u of cstate.fno.unds) {
+    if (u.length > best.length && symbol.startsWith(exch + "-" + u + "-")) best = u;
+  }
+  return best;
+}
+/* Right-anchored DDMmmYY expiry token → ISO, returned ONLY when the server's
+   own expiry list carries it — a mis-parse can never SELECT a wrong expiry,
+   it can only fail to match and degrade to the honest "pick an expiry"
+   prompt (the never-select-a-wrong-expiry law). */
+function _fnoExpiryFor(symbol) {
+  const t = symbol.split("-");
+  const last = t[t.length - 1];
+  const token = last === "FUT" ? t[t.length - 2]
+              : (last === "CE" || last === "PE") ? t[t.length - 3]
+              : "";
+  const m = /^(\d{1,2})([A-Z][a-z]{2})(\d{2})$/.exec(token || "");
+  if (!m || !_FNO_MONTHS[m[2]]) return "";
+  const iso = "20" + m[3] + "-" + _FNO_MONTHS[m[2]] + "-" + ("0" + m[1]).slice(-2);
+  return cstate.fno.exps.includes(iso) ? iso : "";
+}
+async function applyDeepLink() {
+  const q = new URLSearchParams(location.search);
+  const kind = q.get("candles");
+  if (kind !== "spot" && kind !== "fno") return;          /* no/unknown param → today's behavior */
+  const date = q.get("date") || "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) { cstate.start = date; cstate.end = date; }
+  const interval = q.get("interval") || "";
+  const symbol = q.get("symbol") || "";
+  await selectCandles(kind);                              /* loads the cascade level 1 */
+  if (!symbol) return;                                    /* bare tab open → honest prompt */
+  if (kind === "spot") {
+    const key = [q.get("exchange") || "", q.get("segment") || "", symbol].join("|");
+    if (cstate.spot.syms.some(s => _spotKey(s) === key)) onSpotSymbolChange(key, interval);
+    return;                                               /* no match → honest "pick a symbol" prompt */
+  }
+  const und = _fnoUnderlyingFor(symbol);                  /* server-vocabulary longest-prefix match */
+  if (!und) return;
+  await onFnoUnderlyingChange(und);
+  const exp = _fnoExpiryFor(symbol);                      /* DDMmmYY → ISO, gated ∈ cstate.fno.exps */
+  if (!exp) return;
+  await onFnoExpiryChange(exp);
+  if (cstate.fno.cons.some(c => c.symbol === symbol)) onFnoContractChange(symbol, interval);
+}
+
 /* Boot after DOMContentLoaded so the deferred shared helpers (bx-ui.js) are
    guaranteed loaded — every boot fetch then rides the 12 s timeout. A missing
    helper file degrades gracefully (bxFetch falls back to plain fetch). */
 function boot() {
   if (window.BXUI) BXUI.initVisibilityPause();
   loadTables();
+  /* Deep-link driver AFTER loadTables() (fire-and-forget async — it awaits
+     its own cascade fetches; the sidebar renders independently). */
+  applyDeepLink();
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
 else boot();
