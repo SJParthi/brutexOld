@@ -85,7 +85,7 @@ from brutex.dashboard.movers_snapshot import (
     value_meets_volume_floor,
     warn_prev_baseline_noncontiguous,
 )
-from brutex.data.fno_symbol import expiry_year_in_window
+from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
@@ -133,8 +133,10 @@ _SPOT_SEGMENTS: Final[tuple[str, ...]] = SPOT_PROBE_SEGMENTS
 #: ``-PE`` suffix, so this anchor keeps options out of the futures universe.
 _FUT_SUFFIX: Final[str] = "-FUT"
 
-#: Three-letter month abbreviation → month number, for the ``DDMmmYY`` expiry
-#: token (``30Sep25`` → 2025-09-30). The single parse table (CLAUDE.md §11).
+#: Three-letter month abbreviation → month number. Exists ONLY to build the
+#: inverse :data:`_MONTH_ABBR` display table below — expiry PARSING delegates
+#: wholesale to the canonical :func:`~brutex.data.fno_symbol.parse_fno_symbol`
+#: (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001; CLAUDE.md §11 COMMON — one grammar).
 _MONTHS: Final[dict[str, int]] = {
     "Jan": 1,
     "Feb": 2,
@@ -149,9 +151,6 @@ _MONTHS: Final[dict[str, int]] = {
     "Nov": 11,
     "Dec": 12,
 }
-
-#: The two-digit year in the expiry token is in the 2000s (``25`` → 2025).
-_CENTURY: Final[int] = 2000
 
 #: Month number → three-letter abbreviation, the inverse of :data:`_MONTHS`. Used
 #: by :func:`format_contract_date` so the human ``dd-Mon-YYYY`` contract label is
@@ -184,14 +183,6 @@ def format_contract_date(value: date_cls) -> str:
     return f"{value.day:02d}-{_MONTH_ABBR[value.month]}-{value.year:04d}"
 
 
-#: The expiry token's fixed character length (``DDMmmYY`` = 2 + 3 + 2).
-_EXPIRY_TOKEN_LEN: Final[int] = 7
-
-#: The minimum hyphen-split arity of a FUT contract groww_symbol
-#: (``EXCH-UNDERLYING-DDMmmYY-FUT`` → 4 parts; a stock name never hyphenates,
-#: vendor symbols use hyphen only as the field separator).
-_MIN_FUT_PARTS: Final[int] = 4
-
 #: The three serial-month futures expiry TIERS → the 0-based rank of the live
 #: contract (sorted earliest-expiry-first) the tier selects: ``near`` = the
 #: front month (next to expire), ``next`` = the second serial month, ``far`` =
@@ -210,11 +201,22 @@ _DEFAULT_TIER: Final[str] = "near"
 def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
     """Parse a FUT contract groww_symbol into ``(underlying, expiry_date)`` or ``None``.
 
-    The contract groww_symbol is ``EXCH-UNDERLYING-DDMmmYY-FUT`` (hyphen-joined),
-    e.g. ``"NSE-NIFTY-30Sep25-FUT"`` → ``("NIFTY", date(2025, 9, 30))``. Returns
-    ``None`` for any non-future symbol (an option symbol ends ``-CE`` / ``-PE``,
-    so its last hyphen part is not ``FUT``) and for any junk / unparseable expiry
-    token — the caller then skips it, never raising (Golden Rule #1).
+    A thin FUT-only view over the canonical RIGHT-anchored grammar
+    :func:`~brutex.data.fno_symbol.parse_fno_symbol` — the ONE F&O symbol parser
+    (CLAUDE.md §11 COMMON; DEC-MOVERS-FUTURES-HYPHEN-PARSE-001). The contract
+    groww_symbol is ``EXCH-UNDERLYING-DDMmmYY-FUT`` (hyphen-joined) where the
+    UNDERLYING may itself carry hyphens: ``"NSE-NIFTY-30Sep25-FUT"`` →
+    ``("NIFTY", date(2025, 9, 30))`` and ``"NSE-BAJAJ-AUTO-30Sep25-FUT"`` →
+    ``("BAJAJ-AUTO", date(2025, 9, 30))`` — the underlying is every token
+    between the exchange and the expiry, joined through interior hyphens
+    (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001; the previous LEFT-anchored local
+    parse truncated ``BAJAJ-AUTO`` to ``BAJAJ``, silently dropping the spot +
+    premium columns for every hyphenated underlying). Returns ``None`` for any
+    non-future symbol (an option decodes with ``instrument_type`` ``CE``/``PE``)
+    and for any junk / unparseable expiry token, including one whose resolved
+    year falls outside the SHARED sanity window
+    (DEC-FNO-EXPIRY-YEAR-PIVOT-001) — the caller then skips it, never raising
+    (Golden Rule #1).
 
     Parameters
     ----------
@@ -227,46 +229,10 @@ def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
         ``(underlying_symbol, expiry_date)`` when *symbol* is a well-formed
         future, else ``None``.
     """
-    parts = symbol.split("-")
-    # Need at least EXCH, UNDERLYING, expiry, FUT — and the last part must be FUT.
-    if len(parts) < _MIN_FUT_PARTS or parts[-1] != "FUT":
+    parts = parse_fno_symbol(symbol)
+    if parts is None or parts.instrument_type != FUTURE_TYPE:
         return None
-    underlying = parts[1]
-    expiry = _parse_expiry_token(parts[-2])
-    if not underlying or expiry is None:
-        return None
-    return underlying, expiry
-
-
-def _parse_expiry_token(token: str) -> date_cls | None:
-    """Parse a ``DDMmmYY`` expiry token (``30Sep25``) into a date, or ``None``.
-
-    The token is exactly 7 chars: a 2-digit day, a 3-letter month abbreviation
-    (title-case, in :data:`_MONTHS`), and a 2-digit year (``20YY``). Any other
-    shape, an unknown month, or an out-of-range day yields ``None`` so the
-    caller skips the malformed contract rather than raising. The resolved year
-    must also pass the SHARED :func:`~brutex.data.fno_symbol.expiry_year_in_window`
-    sanity window (DEC-FNO-EXPIRY-YEAR-PIVOT-001) — ``30Jun75`` is junk, NOT a
-    2075 expiry — so this shape-stricter twin can never diverge from the
-    canonical :func:`~brutex.data.fno_symbol.parse_expiry_token` on which
-    resolved years are accepted (CLAUDE.md §11 COMMON).
-    """
-    if len(token) != _EXPIRY_TOKEN_LEN:
-        return None
-    day_str, month_abbr, year_str = token[:2], token[2:5], token[5:]
-    if not (day_str.isdigit() and year_str.isdigit()):
-        return None
-    month = _MONTHS.get(month_abbr)
-    if month is None:
-        return None
-    year = _CENTURY + int(year_str)
-    if not expiry_year_in_window(year):
-        return None
-    try:
-        return date_cls(year, month, int(day_str))
-    except ValueError:
-        # Day out of range for the month (e.g. 31Feb) — malformed, skip honestly.
-        return None
+    return parts.underlying, parts.expiry
 
 
 def normalize_futures_tier(expiry: str | None) -> str:

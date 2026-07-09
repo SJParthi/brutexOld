@@ -59,9 +59,61 @@ class TestParseFutureSymbol:
     def test_stock_future(self) -> None:
         assert parse_future_symbol("NSE-RELIANCE-25Jun26-FUT") == ("RELIANCE", date(2026, 6, 25))
 
+    # ── DEC-MOVERS-FUTURES-HYPHEN-PARSE-001: right-anchored via the canonical
+    # grammar — a hyphenated underlying is preserved INTACT. ──
+
+    def test_hyphenated_underlying_preserved(self) -> None:
+        # Fails-before regression: the deleted LEFT-anchored local parse took
+        # parts[1] → "BAJAJ", so the spot probe hit the nonexistent
+        # bars/NSE/CASH/BAJAJ/ and premium was silently dropped for every
+        # hyphenated F&O underlying (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001).
+        assert parse_future_symbol("NSE-BAJAJ-AUTO-30Sep25-FUT") == (
+            "BAJAJ-AUTO",
+            date(2025, 9, 30),
+        )
+
+    def test_multi_hyphen_underlying_preserved(self) -> None:
+        # The grammar joins EVERY token between the exchange and the expiry —
+        # a 3-token exotic name survives intact (right-anchored, not arity-bound).
+        assert parse_future_symbol("NSE-A-B-C-30Sep25-FUT") == ("A-B-C", date(2025, 9, 30))
+
+    def test_ampersand_underlying_was_and_remains_correct(self) -> None:
+        # '&' names (M&M, M&MFIN) carry NO hyphen in the symbol grammar, so they
+        # parsed correctly under the old left-anchored split too — this pins that
+        # the delegation does not regress them (was-and-remains-correct).
+        assert parse_future_symbol("NSE-M&M-30Sep25-FUT") == ("M&M", date(2025, 9, 30))
+        assert parse_future_symbol("NSE-M&MFIN-25Jun26-FUT") == ("M&MFIN", date(2026, 6, 25))
+
+    def test_delegation_parity_with_canonical_grammar(self) -> None:
+        # parse_future_symbol IS the canonical parse_fno_symbol restricted to
+        # FUT — pinned over well-formed, hyphenated, junk and option corpora so
+        # the two grammars can never diverge again (CLAUDE.md §11 COMMON).
+        from brutex.data.fno_symbol import parse_fno_symbol
+
+        corpus = [
+            "NSE-NIFTY-30Sep25-FUT",
+            "NSE-BAJAJ-AUTO-30Sep25-FUT",
+            "NSE-M&M-30Sep25-FUT",
+            "BSE-SENSEX-25Sep25-FUT",
+            "NSE-NIFTY-30Sep25-24000-CE",
+            "NSE-NIFTY-30Xxx25-FUT",
+            "NIFTY-FUT",
+            "NSE--30Sep25-FUT",
+            "NSE-NIFTY-30Jun75-FUT",
+        ]
+        for symbol in corpus:
+            canonical = parse_fno_symbol(symbol)
+            expected = (
+                (canonical.underlying, canonical.expiry)
+                if canonical is not None and canonical.instrument_type == "FUT"
+                else None
+            )
+            assert parse_future_symbol(symbol) == expected, symbol
+
     def test_option_symbol_is_none(self) -> None:
-        # An option ends -CE / -PE (last part is not FUT) → not a future.
+        # An option ends -CE / -PE (decodes with instrument_type CE/PE) → not a future.
         assert parse_future_symbol("NSE-NIFTY-30Sep25-24000-CE") is None
+        assert parse_future_symbol("NSE-NIFTY-30Sep25-24000-PE") is None
 
     def test_junk_too_few_parts_is_none(self) -> None:
         assert parse_future_symbol("NIFTY-FUT") is None
@@ -69,9 +121,17 @@ class TestParseFutureSymbol:
     def test_bad_month_is_none(self) -> None:
         assert parse_future_symbol("NSE-NIFTY-30Xxx25-FUT") is None
 
-    def test_bad_expiry_length_is_none(self) -> None:
-        # Expiry token is not 7 chars (DDMmmYY).
-        assert parse_future_symbol("NSE-NIFTY-3Sep25-FUT") is None
+    def test_lenient_expiry_shapes_match_canonical(self) -> None:
+        # SANCTIONED delta (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, disclosed in the
+        # ledger): the deleted local twin was shape-stricter (exactly 7 chars,
+        # title-case month) and REJECTED tokens the canonical strptime("%d%b%y")
+        # grammar accepts — so a junk/foreign lake dir like NSE-NIFTY-30SEP25-FUT
+        # was visible in /db + options but invisible on the Futures tab. The one
+        # grammar now judges both identically. Every well-formed vendor symbol
+        # (DDMmmYY title-case) is byte-identical either way.
+        assert parse_future_symbol("NSE-NIFTY-3Sep25-FUT") == ("NIFTY", date(2025, 9, 3))
+        assert parse_future_symbol("NSE-NIFTY-30SEP25-FUT") == ("NIFTY", date(2025, 9, 30))
+        assert parse_future_symbol("NSE-NIFTY-30sep25-FUT") == ("NIFTY", date(2025, 9, 30))
 
     def test_non_numeric_day_is_none(self) -> None:
         assert parse_future_symbol("NSE-NIFTY-XXSep25-FUT") is None
@@ -754,6 +814,146 @@ class TestComputeFuturesCandidatesExchangeFilter:
         )
         # The BSE future is filtered out by the per-exchange discovery ``continue``.
         assert {m.underlying for m in nse.movers} == {"NIFTY"}
+
+
+# ── DEC-MOVERS-FUTURES-HYPHEN-PARSE-001: end-to-end over a real lake ──
+#
+# The fails-before flip on the REAL compute path: with the left-anchored local
+# parse, ``NSE-BAJAJ-AUTO-30Sep25-FUT`` bucketed under ``"BAJAJ"``, so
+# ``_underlying_spot_ltp`` probed the nonexistent ``bars/NSE/CASH/BAJAJ/`` and
+# the row shipped ``spot=None`` / ``premium=None`` despite the spot partition
+# existing under the correct ``BAJAJ-AUTO`` key.
+
+
+def _spot_min_bar(*, close: str) -> CandleBar:
+    """A flat 1-minute SPOT bar at 09:15 IST (03:45 UTC) on 2024-06-13."""
+    c = Decimal(close)
+    return CandleBar(
+        timestamp=datetime(2024, 6, 13, 3, 45, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=100,
+        open_interest=None,
+    )
+
+
+def _write_hyphen_lake(tmp_path: Path) -> None:
+    """A real lake: one hyphenated + one plain future, each with its spot partition."""
+    from brutex.data.parquet_writer import ParquetWriter
+
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="FNO",
+        symbol="NSE-BAJAJ-AUTO-27Jun24-FUT",
+        interval="1minute",
+        bars=[_fut_min_bar(close="8130", volume=70, oi=700)],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="BAJAJ-AUTO",
+        interval="1minute",
+        bars=[_spot_min_bar(close="8010")],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="FNO",
+        symbol="NSE-NIFTY-27Jun24-FUT",
+        interval="1minute",
+        bars=[_fut_min_bar(close="22010", volume=100, oi=1000)],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_spot_min_bar(close="22000")],
+    )
+
+
+class TestHyphenatedUnderlyingEndToEnd:
+    def test_spot_and_premium_present_for_hyphenated_underlying(self, tmp_path: Path) -> None:
+        """The fails-before flip: BAJAJ-AUTO keeps its full name + spot + premium."""
+        _write_hyphen_lake(tmp_path)
+        got = compute_futures_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+        )
+        by_underlying = {m.underlying: m for m in got.movers}
+        # The underlying is the FULL hyphenated name, never the "BAJAJ" truncation.
+        assert set(by_underlying) == {"BAJAJ-AUTO", "NIFTY"}
+        bajaj = by_underlying["BAJAJ-AUTO"]
+        # Spot resolved from the REAL bars/NSE/CASH/BAJAJ-AUTO partition
+        # (pre-fix: spot=None / premium=None — the silent drop).
+        assert bajaj.spot == Decimal("8010.00")
+        assert bajaj.premium == Decimal("120.00")
+        assert bajaj.symbol == "NSE-BAJAJ-AUTO-27Jun24-FUT"
+        assert got.skipped == 0
+
+    def test_non_hyphenated_row_byte_parity(self, tmp_path: Path) -> None:
+        """A plain underlying's row is byte-identical to the pre-delegation output."""
+        _write_hyphen_lake(tmp_path)
+        got = compute_futures_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+        )
+        nifty = next(m for m in got.movers if m.underlying == "NIFTY")
+        # The exact pre-fix NIFTY values (the left-anchored parse already handled
+        # plain names) — zero behavior change for non-hyphenated underlyings.
+        assert nifty.symbol == "NSE-NIFTY-27Jun24-FUT"
+        assert nifty.expiry == date(2024, 6, 27)
+        assert nifty.ltp == Decimal("22010.00")
+        assert nifty.spot == Decimal("22000.00")
+        assert nifty.premium == Decimal("10.00")
+        assert nifty.oi == 1000
+        assert nifty.volume == 100
+
+    def test_warm_grid_cache_serves_correct_hyphenated_rows(self, tmp_path: Path) -> None:
+        """The warmed cache entry carries the CORRECT rows (never re-cached truncations).
+
+        Mirrors the ``futures_warm_grid`` → ``candidate_key`` →
+        ``compute_futures_candidates`` wiring the app's post-pull warmer uses
+        (DEC-MOVERS-WARM-GRID-001): the grid coordinate is warmed once, then the
+        route-shaped second read is an O(1) cache HIT (compute NOT re-run) serving
+        the full hyphenated underlying + spot + premium — pre-fix the warmer
+        persisted the truncated spot-less rows as cache hits.
+        """
+        from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
+        from brutex.dashboard.movers_warm import futures_warm_grid
+
+        _write_hyphen_lake(tmp_path)
+        grid = futures_warm_grid()
+        coord = next(c for c in grid if c["exchange"] == "NSE" and c["expiry_tier"] == "near")
+        cache = MoversSnapshotCache(capacity=16)
+        key = candidate_key(
+            asset="futures",
+            exchange=coord["exchange"],
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            expiry_tier=coord["expiry_tier"],
+        )
+        computes: list[int] = []
+
+        def _compute() -> object:
+            computes.append(1)
+            return compute_futures_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                exchange=coord["exchange"],
+                expiry_tier=coord["expiry_tier"] or "near",
+            )
+
+        warmed = cache.get_or_compute(key, generation=1, compute=_compute)
+        served = cache.get_or_compute(key, generation=1, compute=_compute)
+        assert len(computes) == 1  # the second read is a cache HIT, no re-scan.
+        assert served is warmed
+        bajaj = next(m for m in served.movers if m.underlying == "BAJAJ-AUTO")  # type: ignore[attr-defined]
+        assert bajaj.spot == Decimal("8010.00")
+        assert bajaj.premium == Decimal("120.00")
 
 
 # ── DEC-MOVERS-MIN-VOLUME-001: the opt-in Top-Volume floor (futures) ──

@@ -133,11 +133,21 @@ class TestHeaderRoundNarrationRetired:
     rounds 3-8 — a within-file freshness drift baked into the header's shape.
     The header now carries a stale-proof POINTER to the two authoritative
     per-round records instead; these pins keep the narration from returning.
+
+    Anchoring note (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 rebase reconcile):
+    the pin originally sliced ``_Last updated: .. Earlier:`` — valid only
+    while the stats-manifest blurb held the ``_Last updated:`` slot. Header
+    succession demotes that blurb VERBATIM to an ``Earlier:`` item (house
+    convention), so the pin now anchors on the stats-manifest blurb itself
+    wherever it lives in the compressed header chain — the teeth are about
+    the BLURB's shape, not the slot (the module docstring's own DYNAMIC
+    stay-green-across-future-branches intent).
     """
 
     def test_header_points_at_the_authoritative_records(self) -> None:
         text = _CLAUDE_MD.read_text(encoding="utf-8")
-        header = _normalized_region(text, "_Last updated:", "Earlier:")
+        start = text.index("(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #")
+        header = " ".join(text[start : text.index("Earlier:", start)].split())
         assert "review round 1 (which" not in header, (
             "the CLAUDE.md _Last updated: header resurrected per-round narration — "
             "it froze at round 2 once (endgame round 2); keep the pointer, not the story"

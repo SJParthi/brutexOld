@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
+_Last updated: 2026-07-09 (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md
+#1631 — the `/movers` Futures contract-symbol parse is RIGHT-anchored via the
+ONE canonical grammar: `movers_futures.parse_future_symbol` now DELEGATES to
+`data/fno_symbol.parse_fno_symbol` (FUT-restricted; the local left-anchored
+twin — `_parse_expiry_token` + its constants — DELETED), so a hyphenated
+underlying (`NSE-BAJAJ-AUTO-30Sep25-FUT`) parses to `BAJAJ-AUTO` instead of
+the `parts[1]` truncation `BAJAJ` that made `_underlying_spot_ltp` probe the
+nonexistent `bars/NSE/CASH/BAJAJ/` — spot + premium were SILENTLY dropped for
+every hyphenated F&O underlying (executed real-lake repro: spot 8010.00
+present under the correct key, served row `spot=None`) and the wrong rows were
+persisted as warm-grid cache hits. HONEST disclosed delta (sanctioned, junk
+tokens only): the deleted twin was shape-stricter than the canonical
+`strptime("%d%b%y")`, so a junk lake dir like `NSE-NIFTY-30SEP25-FUT` flips
+reject→accept — exactly what options//db/Greeks already accepted; every
+well-formed vendor `DDMmmYY` symbol byte-identical, non-hyphenated rows
+byte-parity-pinned end-to-end, `&`-names (M&M — no hyphen in the grammar) were
+and remain correct. `movers_options` already delegated; `futures_warm_grid`
+needed zero change. READ-ONLY dashboard display fix — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+`movers_futures.py` 100% line+branch.)
+Earlier: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
 dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
@@ -1687,7 +1707,17 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
+- **Active branch:** `claude/movers-futures-hyphen-parse` (**DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md
+  #1631** — the `/movers` Futures contract-symbol parse is RIGHT-anchored via the ONE canonical grammar:
+  `parse_future_symbol` DELEGATES to `data/fno_symbol.parse_fno_symbol` (FUT-restricted; the left-anchored local twin
+  DELETED), so a hyphenated underlying (`NSE-BAJAJ-AUTO-30Sep25-FUT`) parses to `BAJAJ-AUTO` — not the `parts[1]`
+  truncation `BAJAJ` whose nonexistent-spot-key probe silently dropped spot + premium for every hyphenated F&O
+  underlying and let the warm grid cache the wrong rows (executed real-lake repro). Disclosed sanctioned delta:
+  junk lake-dir expiry tokens the shape-stricter twin rejected (`30SEP25` etc.) now accept exactly as
+  options//db/Greeks already did; well-formed vendor symbols + non-hyphenated rows byte-identical (pinned);
+  `&`-names were and remain correct (pinned). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  `movers_futures.py` 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
   O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
@@ -4087,9 +4117,15 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
+- **Active feature branch:** `claude/movers-futures-hyphen-parse`
+  (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md #1631 — the `/movers`
+  Futures contract-symbol parse right-anchored by DELEGATING to the canonical
+  `data/fno_symbol.parse_fno_symbol`; hyphenated underlyings keep their full
+  name so spot + premium resolve; READ-ONLY dashboard fix; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
-  PER-FILE lake STATS manifest; matches §1's Active branch line)
+  PER-FILE lake STATS manifest; matches §1's Earlier chain entry)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
