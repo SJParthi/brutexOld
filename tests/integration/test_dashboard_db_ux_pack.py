@@ -226,7 +226,9 @@ def test_db_fno_expiry_chip_wired() -> None:
     assert "expiry_counts" in html, "the cascade must consume the counts payload"
     assert "function fnoExpiryCountsText" in html
     assert "function fnoExpiryChipHtml" in html
-    assert 'id="cexpchip"' in html and 'class="expchip"' in html
+    # Batch A (DEC-DASHBOARD-VISUAL-OVERHAUL-001): the chip rides the SHARED
+    # .bx-chip warn skin — the page-local .expchip class was retired.
+    assert 'id="cexpchip"' in html and 'class="bx-chip warn bx-chip--sm"' in html
     assert '"listed " + ' in html
     assert '" · with data " + m' in html
     assert '"with data " + m' in html  # the honest null-listed rendering

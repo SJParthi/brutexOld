@@ -57,7 +57,9 @@
     background:var(--surface); color:var(--text); border:1px solid var(--border-strong);
     border-radius:9px; padding:8px 12px; font-size:13px; cursor:pointer; transition:.16s;
   }
-  select:hover, button:hover { border-color:var(--blue); }
+  select:hover, button:hover { border-color:var(--accent); }
+  /* The cascade's disabled-until-parent selects read visibly inert. */
+  select:disabled { opacity:.5; cursor:not-allowed; }
 
   /* Fluid sidebar (A-DB-6): scales with the viewport instead of a fixed 280px
      sliver on ultrawides; gutters ride the shared --gutter token (A-DB-5). */
@@ -71,20 +73,20 @@
     letter-spacing:1px; color:var(--muted); }
   .tbl { display:flex; align-items:center; gap:10px; padding:11px 12px; border-radius:10px;
     cursor:pointer; border:1px solid transparent; transition:.16s; }
-  .tbl:hover { background:var(--surface-2); box-shadow:0 0 22px rgba(91,141,239,.18);
-    transform:translateY(-1px); }
-  .tbl.sel { background:var(--surface-3); border-color:var(--blue); }
+  /* Batch A (DEC-DASHBOARD-VISUAL-OVERHAUL-001): the sidebar section switcher
+     adopts the segmented-tab selection language — ELEVATION + CONTRAST, never a
+     per-item hue (the blue border + blue hover glow are retired); rows, ids and
+     the delegated click handlers are unchanged. */
+  .tbl:hover { background:var(--surface-2); transform:translateY(-1px); }
+  .tbl.sel { background:var(--surface-3); border-color:var(--border-strong);
+    box-shadow:var(--elev-1); }
+  .tbl.sel .nm { color:var(--text-bright); }
   .tbl .nm { font-weight:700; font-family:"SF Mono",Menlo,Consolas,monospace; font-size:13px; }
-  .tbl .badge { margin-left:auto; font-size:11px; font-weight:700; padding:2px 9px;
-    border-radius:20px; color:var(--green); background:rgba(38,217,176,.13);
-    font-family:"SF Mono",Menlo,Consolas,monospace; }
-  .tbl .badge.zero { color:var(--muted); background:rgba(120,123,134,.13); }
-  /* Lake/registry badge tints as classes (A-DB-8) — replaces the five
-     copy-pasted inline style="" strings on the sidebar rows. */
-  .tbl .badge.b-purple { color:var(--purple); background:rgba(157,123,255,.13); }
-  .tbl .badge.b-blue   { color:var(--blue);   background:rgba(91,141,239,.13); }
-  .tbl .badge.b-green  { color:var(--green);  background:rgba(74,222,128,.13); }
-  .tbl .badge.b-yellow { color:var(--yellow); background:rgba(255,183,77,.13); }
+  /* Sidebar count/tag badges ride the SHARED .bx-chip system (Batch A) — the
+     hand-rolled base + the five decorative b-* tints are retired: counts are
+     value-gated (.ok when >0, .muted at 0 — a green "0" is forbidden) and the
+     category tags read neutral .muted. Only the layout seat stays page-local. */
+  .tbl .badge { margin-left:auto; font-family:var(--font-num); }
 
   /* ── Right: rows grid ── */
   #data { background:var(--surface); border:1px solid var(--border); border-radius:14px;
@@ -100,6 +102,11 @@
   #dbgrid.is-loading { opacity:.5; transition:opacity .12s ease; pointer-events:none; }
   table { width:100%; border-collapse:collapse;
     font-family:"SF Mono",Menlo,Consolas,monospace; font-size:12px; }
+  /* Batch A: the data grid rides the SHARED .bx-table skin (uppercase thead +
+     .bx-table--dense row padding + the right-aligned tabular-nums `.num` cells)
+     from bx-design.css; the page keeps its 12px mono density (the .bx-table
+     base is 13px). */
+  table.bx-table { font-size:12px; }
   th, td { text-align:left; padding:7px 12px; border-bottom:1px solid var(--border);
     white-space:nowrap; }
   thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
@@ -110,13 +117,17 @@
   tbody tr:hover { background:var(--surface-2); }
   td { cursor:copy; }
   td.nullcell { color:var(--muted); font-style:italic; cursor:default; }
-  /* Moneyness tint (DEC-FNO-MONEYNESS-001): ITM green · OTM red · UNKNOWN/NA muted. */
-  td.mny-itm { color:var(--green); } td.mny-otm { color:var(--red); }
-  td.mny-na { color:var(--muted); }
-  /* Strike-step honesty note (DEC-MONEYNESS-REGISTRY-STEP-001): a small muted line
+  /* Moneyness (DEC-FNO-MONEYNESS-001) now renders as the SHARED
+     .bx-chip.mny-{itm,otm,atm,na} pill (bx-design.css) — ONE moneyness visual
+     across /db + /movers + /screener; the page-local colour-only td tints are
+     retired. The cell values ("ITM -1" / "OTM +10" / "ATM" / "?" / "—") are
+     byte-unchanged, so click-to-copy still copies the exact label. */
+  /* Strike-step honesty note (DEC-MONEYNESS-REGISTRY-STEP-001): a small line
      under the F&O candle grid when the ATM±N grid came from the sparse lake ladder
-     only (no vendor registry chain) — the step may be overestimated. */
-  .stepnote { color:var(--muted); font-size:11px; padding:6px 2px 0; }
+     only (no vendor registry chain) — the step may be overestimated. Rides the
+     dedicated HONESTY channel token (--honest, muted gold — disclosed truth,
+     distinct from warn/bad); the note TEXT is byte-unchanged. */
+  .stepnote { color:var(--honest); font-size:11px; padding:6px 2px 0; }
   /* Click-to-copy cell flash — a brief green pulse on the copied cell. */
   @keyframes cellCopied { 0% { background:var(--green-dim); } 100% { background:transparent; } }
   td.copied { animation: cellCopied .6s ease both; color:var(--green-bright); }
@@ -125,8 +136,8 @@
   th .tchip { display:inline-block; min-width:15px; text-align:center; margin-right:7px;
     font-size:10px; font-weight:800; border-radius:5px; padding:1px 4px;
     font-family:"SF Mono",Menlo,Consolas,monospace; vertical-align:middle; }
-  th .tchip.t-num { color:var(--green); background:rgba(38,217,176,.14); }
-  th .tchip.t-time { color:var(--blue); background:rgba(91,141,239,.16); }
+  th .tchip.t-num { color:var(--green); background:var(--ok-bg); }
+  th .tchip.t-time { color:var(--blue); background:var(--info-bg); }
   th .tchip.t-txt { color:var(--purple); background:rgba(157,123,255,.15); }
 
   /* Empty-state art — a floating glyph instead of a bare sentence. */
@@ -167,12 +178,19 @@
     color:var(--text-bright); font-weight:700; }
   .qbar button.apply:hover { border-color:var(--green-bright); }
   /* The honest applied-range chip (DEC-DB-UX-PACK-001 Feature 2) + the per-expiry
-     "listed N · with data M" chip (Feature 6). (The COLUMNS checkbox strip and its
-     .colbox styles were REMOVED — Feature 1: every column is always visible.) */
-  .rangechip, .expchip { font-size:11px; font-weight:700; padding:3px 10px;
-    border-radius:20px; font-family:"SF Mono",Menlo,Consolas,monospace;
-    color:var(--blue); background:rgba(91,141,239,.13); white-space:nowrap; }
-  .expchip { color:var(--yellow); background:rgba(255,183,77,.13); }
+     "listed N · with data M" chip (Feature 6) now ride the SHARED .bx-chip
+     system (info / warn) — the page-local .rangechip/.expchip skins are retired;
+     the chip TEXTS + ids (#crange/#cexpchip) are byte-unchanged. (The COLUMNS
+     checkbox strip and its .colbox styles were REMOVED — Feature 1: every
+     column is always visible.) */
+  /* Cascade + query control GROUPS (Batch A): each label+control pair reads as
+     ONE bordered group so the underlying → expiry → contract dependency chain
+     is visually legible. Styling only — ids/selects/handlers are unchanged. */
+  .qgroup { display:inline-flex; align-items:center; gap:8px;
+    padding:2px 2px 2px 10px; background:var(--surface);
+    border:1px solid var(--border); border-radius:var(--r-md); }
+  .qgroup .lab { min-width:0; }
+  .qgroup select, .qgroup input { border-color:var(--border); }
   .frow { display:flex; align-items:center; gap:6px; }
   .frow .rm { color:var(--red); padding:6px 10px; }
   /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-002, extends #497) ── */
@@ -345,13 +363,16 @@ function fmtCell(col, cell) {
   return cell;
 }
 
-/* Moneyness colour class for a candle cell (DEC-FNO-MONEYNESS-001) — purely a display
-   tint; the cell reads "ITM -1" / "OTM +10" / "ATM" / "?" so tint by the leading bucket
-   ("" for every non-moneyness column or an ATM/"?"/"—" cell). */
+/* Moneyness class for a candle cell (DEC-FNO-MONEYNESS-001) — purely a display
+   treatment mapped onto the SHARED .bx-chip.mny-* pills (bx-design.css); the cell
+   reads "ITM -1" / "OTM +10" / "ATM" / "?" so classify by the leading bucket
+   ("" for every non-moneyness column). The NA honesty cells ("?" no spot /
+   "—" future-or-undecodable) stay muted, never fabricated. */
 function moneynessClass(col, cell) {
   if (col !== "moneyness" || typeof cell !== "string") return "";
   if (cell.startsWith("ITM")) return " mny-itm";
   if (cell.startsWith("OTM")) return " mny-otm";
+  if (cell === "ATM") return " mny-atm";
   if (cell === "?" || cell === "—") return " mny-na";
   return "";
 }
@@ -516,10 +537,12 @@ async function loadTables() {
       dbpath.textContent = n + " table" + (n === 1 ? "" : "s") + " · click a table to browse";
     }
     const tableRows = tables.map(t => {
-      const zero = (t.row_count || 0) === 0 ? " zero" : "";
+      /* Value-gated chip tone (shared .bx-chip): ok only when rows exist —
+         a green "0" is forbidden; zero counts read muted. */
+      const tone = (t.row_count || 0) === 0 ? " muted zero" : " ok";
       return '<div class="tbl" data-table="' + esc(t.table) + '">'
         + '<span class="nm">' + esc(t.table) + '</span>'
-        + '<span class="badge' + zero + '" data-count="' + (t.row_count || 0) + '">0</span>'
+        + '<span class="badge bx-chip bx-chip--sm' + tone + '" data-count="' + (t.row_count || 0) + '">0</span>'
         + '</div>';
     }).join("");
     /* The candle/OHLCV lake lives in Parquet, not a DuckDB table — surface
@@ -531,7 +554,7 @@ async function loadTables() {
        the lake `kind` it browses. */
     const candleRow = '<div class="tbl" data-candles="spot">'
       + '<span class="nm">📈 candles</span>'
-      + '<span class="badge b-purple">spot</span>'
+      + '<span class="badge bx-chip bx-chip--sm muted">spot</span>'
       + '</div>';
     /* DEC-FNO-CANDLE-LAKE-001: the F&O (futures + options) candle lake is its OWN
        first-class, clickable row — the SAME bars/<exch>/FNO/<contract>/<interval>/
@@ -540,7 +563,7 @@ async function loadTables() {
        and browses through the IDENTICAL segment=FNO candle query path. */
     const fnoRow = '<div class="tbl" data-candles="fno">'
       + '<span class="nm">📊 F&amp;O candles</span>'
-      + '<span class="badge b-blue">FNO</span>'
+      + '<span class="badge bx-chip bx-chip--sm muted">FNO</span>'
       + '</div>';
     /* DEC-DASHBOARD-UX-POLISH-001: the expired-options lake is HIDDEN from the
        browsable Candle-lake list per operator request — it is a documented
@@ -555,7 +578,7 @@ async function loadTables() {
        lifecycle.) */
     const ledgerRow = '<div class="tbl" data-ledger="window_ledger">'
       + '<span class="nm">🪟 window ledger</span>'
-      + '<span class="badge b-green">windows</span>'
+      + '<span class="badge bx-chip bx-chip--sm muted">windows</span>'
       + '</div>';
     /* The F&O expiries+contracts REGISTRY lives in a SEPARATE `registry.duckdb`
        cache (DEC-DERIV-METADATA-HISTORICAL-SPLIT-001 PR-1), a sibling of the lean
@@ -565,11 +588,11 @@ async function loadTables() {
        PR populates it — the badge starts blank and fills from the route's counts. */
     const expiriesRow = '<div class="tbl" data-registry="expiries">'
       + '<span class="nm">📅 expiries</span>'
-      + '<span class="badge b-blue">registry</span>'
+      + '<span class="badge bx-chip bx-chip--sm muted">registry</span>'
       + '</div>';
     const contractsRow = '<div class="tbl" data-registry="contracts">'
       + '<span class="nm">🔗 contracts</span>'
-      + '<span class="badge b-yellow">registry</span>'
+      + '<span class="badge bx-chip bx-chip--sm muted">registry</span>'
       + '</div>';
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
       + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow + fnoRow
@@ -843,20 +866,34 @@ function gridTableOpen(cols) {
   /* The <table> open tag carries its rendered column list (JSON, esc()'d) so a
      grid-only update can prove "same columns" against the LIVE DOM before doing
      the narrower tbody-only patch — the DOM is the source of truth, so an error
-     or empty repaint can never leave a stale match behind. */
-  return '<table data-cols="' + esc(JSON.stringify(cols)) + '">';
+     or empty repaint can never leave a stale match behind. The grid rides the
+     SHARED .bx-table skin + the --dense row padding (Batch A). */
+  return '<table class="bx-table bx-table--dense" data-cols="' + esc(JSON.stringify(cols)) + '">';
+}
+/* Per-column numeric flag (" num" / "") — the shared `.bx-table .num`
+   right-aligned tabular-nums treatment, keyed off the SAME colType() heuristic
+   the header chips use, computed once per column (not per cell). */
+function gridNumClasses(cols) {
+  return cols.map(c => (colType(c).cls === "t-num" ? " num" : ""));
 }
 function gridTheadHtml(cols) {
-  return '<thead><tr>' + cols.map(c => {
+  const numCls = gridNumClasses(cols);
+  return '<thead><tr>' + cols.map((c, i) => {
     const t = colType(c);
-    return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
+    return '<th' + (numCls[i] ? ' class="num"' : '') + '><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
   }).join("") + '</tr></thead>';
 }
 function gridRowsHtml(cols, rows) {
+  const numCls = gridNumClasses(cols);
   return rows.map(row =>
-    '<tr>' + row.map((cell, i) =>
-      cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>'
-    ).join("") + '</tr>'
+    '<tr>' + row.map((cell, i) => {
+      if (cell == null) return '<td class="nullcell">null</td>';
+      const mny = moneynessClass(cols[i], cell);
+      /* Moneyness renders as the SHARED .bx-chip.mny-* pill inside the cell —
+         same esc()'d value, so td.textContent (click-to-copy) is unchanged. */
+      if (mny) return '<td><span class="bx-chip bx-chip--sm' + mny + '">' + esc(fmtCell(cols[i], cell)) + '</span></td>';
+      return '<td class="' + numCls[i].trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>';
+    }).join("") + '</tr>'
   ).join("");
 }
 function gridRangeText(from, to, total) {
@@ -994,10 +1031,10 @@ function tableControlsHtml(name) {
     + '<div class="qrow"><span class="lab">Filters</span>'
     + '<div id="filters" style="display:flex;flex-direction:column;gap:6px">' + filterRows + '</div>'
     + '<button id="addf">+ filter</button></div>'
-    + '<div class="qrow"><span class="lab">Sort</span>'
+    + '<div class="qrow"><span class="qgroup"><span class="lab">Sort</span>'
     + '<select id="sortcol"><option value="">— none —</option>'
     + cols.map(c => '<option value="' + esc(c) + '">' + esc(c) + '</option>').join("") + '</select>'
-    + '<select id="sortdir"><option value="asc">asc</option><option value="desc">desc</option></select>'
+    + '<select id="sortdir"><option value="asc">asc</option><option value="desc">desc</option></select></span>'
     + '<button class="apply" id="applyq">Apply query</button></div>'
     + '</div>';
 }
@@ -1290,13 +1327,13 @@ function candleControlsHtml() {
     ? fnoCascadeHtml()
     : cstate.kind === "spot"
     ? spotCascadeHtml()
-    : '<span class="lab">Dataset</span><select id="cds">' + dsOpts + '</select>';
+    : '<span class="qgroup"><span class="lab">Dataset</span><select id="cds">' + dsOpts + '</select></span>';
   return '<div class="qbar">'
     + '<div class="qrow">' + picker
-    + '<span class="lab">From</span><input type="date" id="cstart" min="2020-01-01" value="' + esc(cstate.start) + '">'
-    + '<span class="lab">To</span><input type="date" id="cend" min="2020-01-01" value="' + esc(cstate.end) + '"></div>'
-    + '<div class="qrow"><span class="lab">Sort</span>'
-    + '<select id="cdir"><option value="asc">timestamp asc</option><option value="desc">timestamp desc</option></select></div>'
+    + '<span class="qgroup"><span class="lab">From</span><input type="date" id="cstart" min="2020-01-01" value="' + esc(cstate.start) + '"></span>'
+    + '<span class="qgroup"><span class="lab">To</span><input type="date" id="cend" min="2020-01-01" value="' + esc(cstate.end) + '"></span></div>'
+    + '<div class="qrow"><span class="qgroup"><span class="lab">Sort</span>'
+    + '<select id="cdir"><option value="asc">timestamp asc</option><option value="desc">timestamp desc</option></select></span></div>'
     + '</div>';
 }
 
@@ -1322,7 +1359,7 @@ function fnoExpiryCountsText(expiry, prefix) {
 function fnoExpiryChipHtml() {
   const txt = cstate.fno.exp ? fnoExpiryCountsText(cstate.fno.exp, "") : "";
   if (!txt) return "";
-  return '<span class="expchip" id="cexpchip"'
+  return '<span class="bx-chip warn bx-chip--sm" id="cexpchip"'
     + ' title="contracts the vendor lists for this expiry vs contracts with pulled candle data">'
     + esc(txt) + '</span>';
 }
@@ -1340,17 +1377,17 @@ function fnoCascadeHtml() {
     + f.exps.map(e => opt(e, f.exp, fnoExpiryCountsText(e, e))).join("");
   const conOpts = '<option value="">— contract —</option>'
     + f.cons.map(c => opt(c.symbol, f.con, c.label)).join("");
-  let h = '<span class="lab">Underlying</span><select id="cund">' + undOpts + '</select>'
-    + '<span class="lab">Expiry</span><select id="cexp"' + (f.und ? "" : " disabled") + '>' + expOpts + '</select>'
+  let h = '<span class="qgroup"><span class="lab">Underlying</span><select id="cund">' + undOpts + '</select></span>'
+    + '<span class="qgroup"><span class="lab">Expiry</span><select id="cexp"' + (f.und ? "" : " disabled") + '>' + expOpts + '</select></span>'
     + fnoExpiryChipHtml()
-    + '<span class="lab">Contract</span><select id="ccon"' + (f.exp ? "" : " disabled") + '>' + conOpts + '</select>';
+    + '<span class="qgroup"><span class="lab">Contract</span><select id="ccon"' + (f.exp ? "" : " disabled") + '>' + conOpts + '</select></span>';
   const d = curDataset();
   const intervals = cstate.datasets.map(x => x.interval);
   if (intervals.length > 1) {
-    h += '<span class="lab">Interval</span><select id="cintv">'
+    h += '<span class="qgroup"><span class="lab">Interval</span><select id="cintv">'
       + intervals.map(iv => '<option value="' + esc(iv) + '"'
         + (d && iv === d.interval ? " selected" : "") + '>' + esc(iv) + '</option>').join("")
-      + '</select>';
+      + '</select></span>';
   }
   return h;
 }
@@ -1364,14 +1401,14 @@ function spotCascadeHtml() {
   const symOpts = '<option value="">— symbol —</option>'
     + sp.syms.map(s => '<option value="' + esc(_spotKey(s)) + '"'
       + (_spotKey(s) === sp.sym ? " selected" : "") + '>' + esc(s.label) + '</option>').join("");
-  let h = '<span class="lab">Symbol</span><select id="csym">' + symOpts + '</select>';
+  let h = '<span class="qgroup"><span class="lab">Symbol</span><select id="csym">' + symOpts + '</select></span>';
   const d = curDataset();
   const intervals = cstate.datasets.map(x => x.interval);
   if (intervals.length > 1) {
-    h += '<span class="lab">Interval</span><select id="cintv">'
+    h += '<span class="qgroup"><span class="lab">Interval</span><select id="cintv">'
       + intervals.map(iv => '<option value="' + esc(iv) + '"'
         + (d && iv === d.interval ? " selected" : "") + '>' + esc(iv) + '</option>').join("")
-      + '</select>';
+      + '</select></span>';
   }
   return h;
 }
@@ -1417,9 +1454,10 @@ function candleHeadHtml(body) {
   if (d && d.kind === "option") { title = esc(d.label || (d.series + " · " + d.interval)); icon = "🅾"; }
   else if (d && d.kind === "fno") { title = esc(fnoLabel(d)); icon = "📊"; }
   else if (d) { title = esc(d.symbol + " · " + d.interval); }
-  /* #crange is filled via setRangeChip (textContent) right after each render. */
+  /* #crange is filled via setRangeChip (textContent) right after each render;
+     it rides the SHARED .bx-chip info skin (the retired page-local .rangechip). */
   return '<div class="datahead"><span class="dt">' + icon + ' ' + title + '</span><span class="sub">' + esc(sub) + '</span>'
-    + '<span class="rangechip" id="crange" style="display:none"></span></div>';
+    + '<span class="bx-chip info bx-chip--sm" id="crange" style="display:none"></span></div>';
 }
 
 /* The grid + pager body (or the error message). HONESTY MARKER
