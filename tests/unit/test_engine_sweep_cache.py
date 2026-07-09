@@ -907,7 +907,7 @@ class TestRecordDigestExactFirst:
 
 
 # ── R2-D2 corrupt-LMDB quarantine + rebuild ───────────────────────────────────
-# DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1632.
+# DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1640.
 
 
 def _corrupt_exact_data_mdb(cache_path: Path) -> None:

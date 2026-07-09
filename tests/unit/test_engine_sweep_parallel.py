@@ -2295,7 +2295,7 @@ class TestBrokenProcessPoolQuarantine:
 
 
 class TestWorkerCorruptStoreContained:
-    """DB-02 parallel twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1633).
+    """DB-02 parallel twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1641).
 
     A CORRUPT / old-schema finalist store raised at its LOAD boundary inside a
     worker is CONTAINED as a failed marker (surfaced through the supervisor's

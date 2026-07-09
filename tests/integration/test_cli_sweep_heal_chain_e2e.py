@@ -1,6 +1,6 @@
 """R2-review-round-2 SHOULD-FIX 1: the printed remediation chain actually works, end to end.
 
-DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1633. When a finalist store
+DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1641. When a finalist store
 is corrupt, ``cmd_sweep_all`` refuses the cascade and prints the ONE runnable
 remediation string (``TUPLE_STORE_CORRUPT_REMEDIATION``): verify →
 ``--recount`` → ``--emit-heal-plan`` → ``sweep-heal <plan> --execute`` →

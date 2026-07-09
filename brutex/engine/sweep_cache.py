@@ -507,7 +507,7 @@ class SweepCache:
         LmdbCorruptEnvError
             If the L2 exact store's ``data.mdb`` is corrupt AND a SECOND
             open fails after the quarantine-and-rebuild-once recovery
-            (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1632). A
+            (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1640). A
             FIRST corruption is recovered transparently (quarantined aside,
             rebuilt empty) — the store is a rebuildable dedup accelerator, so
             an emptied set only ever causes a wasted recompute, never a wrong

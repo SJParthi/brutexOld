@@ -1573,7 +1573,7 @@ def build_stage2_cascade_specs(
         try:
             rows = ResultsStore.load(store_path).rows()
         except ResultsStoreSchemaError as exc:
-            # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1633): a
+            # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1641): a
             # corrupt / old-schema finalist store surfaces as a typed cascade
             # abort naming the file, NEVER a raw error and NEVER a silent skip
             # (dropping a tuple's finalists would change Stage-2 selection
@@ -1635,7 +1635,7 @@ def write_manifest(results_root: Path, manifest: CascadeManifest) -> Path:
     destroyed prior copy (``load_manifest`` still serves the last complete
     cascade). A disk-full maps to :class:`CascadeWireError` — a loud cascade-tail
     abort, deliberately NOT the lake-wide ``LakeWriteHalt`` escalation
-    (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1635).
+    (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1643).
     """
     path = manifest_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1654,7 +1654,7 @@ def write_report(results_root: Path, report: CascadeWireReport) -> Path:
     """Write the serialised *report* JSON under *results_root* atomically and return its path.
 
     Same atomic-write + typed ENOSPC contract as :func:`write_manifest`
-    (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1635).
+    (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1643).
     """
     path = report_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
