@@ -6589,7 +6589,7 @@
  ],
  "preset": "min_dd_first",
  "run_id": "r-20260707-fixt01",
- "schema_version": 1,
+ "schema_version": 2,
  "source": {
   "data_snapshot_hashes": [
    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
