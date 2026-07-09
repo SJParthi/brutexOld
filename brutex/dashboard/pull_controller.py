@@ -1609,6 +1609,7 @@ def pull_all_spot(
     on_ledger_sync: OnLedgerSync | None = None,
     floor_store: VendorFloorMetaStore | None = None,
     step_monitor: StepOrderMonitor | None = None,
+    ledger: WindowLedger | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
 
@@ -1715,6 +1716,17 @@ def pull_all_spot(
         builds a fresh observe-only monitor — ordering violations are logged +
         counted, never raised; tests inject ``raise_on_violation=True`` as the
         hard ordering oracle.
+    ledger
+        Optional ALREADY-LOADED :class:`~brutex.data.window_ledger.WindowLedger`
+        to reuse for a LIVE pull (DEC-LEDGER-LOAD-SPACE-V1-001 — the shared
+        pipeline-instance seam: skips this phase's own
+        :func:`~brutex.data.window_ledger_store.begin_pull_ledger` full-ledger
+        load; the end-of-phase SAVE still runs unchanged). ``None`` (every
+        existing caller) loads exactly as before — and the load itself then
+        honours an active
+        :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`, the
+        production full-pipeline sharing path. IGNORED under ``dry_run`` (a
+        dry-run never records/persists — it keeps its ``None`` ledger).
 
     Returns
     -------
@@ -1810,7 +1822,11 @@ def pull_all_spot(
         # 1-minute alike — DEC-SPOT-INTERVAL-DECOUPLE-001); the planned keys equal
         # the fetched keys (no bounding, no phantom rows). Persisted to
         # <lake>/window_ledger/ — the single source /coverage/windows surfaces.
-        ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
+        # An injected `ledger=` (DEC-LEDGER-LOAD-SPACE-V1-001) skips the load and
+        # reuses the caller's instance — LIVE pulls only: a dry-run always
+        # resolves through begin_pull_ledger, which returns None (never records).
+        if ledger is None or dry_run:
+            ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
         # LOUD reload failure (DEC-WINDOW-LEDGER-RESCUE-001): the persisted ledger
         # existed but could not be read — the store already WARNed
         # (window_ledger.load_failed); surface it on the PULL report too so the
