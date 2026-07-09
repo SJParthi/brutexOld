@@ -3690,6 +3690,14 @@ def build_app(
                                 exchange=exch,
                                 datasets=warm_datasets,
                             ),
+                            # force_fresh (DEC-LATENCY-HONESTY-BATCH-001 review
+                            # fold): now that the production movers cache is
+                            # FLOORED, the still-`running` job's own pull-active
+                            # floor could serve a stale pre-pull entry back into
+                            # this warm re-seed — the exact class the discovery
+                            # warm already guards (warm_discovery_memos), so the
+                            # movers warm mirrors its documented pattern.
+                            force_fresh=True,
                         )
                         return len(cands.snapshots)
 
@@ -3744,6 +3752,10 @@ def build_app(
                                 expiry_tier=tier,
                                 datasets=warm_datasets,
                             ),
+                            # force_fresh — the warm re-seed must never be served
+                            # its own pull-active floor's stale pre-pull entry
+                            # (DEC-LATENCY-HONESTY-BATCH-001; see the spot job).
+                            force_fresh=True,
                         )
                         return len(cands.movers)
 
@@ -3821,6 +3833,10 @@ def build_app(
                                 calendar_expiries=calendar_expiries,
                                 registry_chain_for=registry_chain_for,
                             ),
+                            # force_fresh — the warm re-seed must never be served
+                            # its own pull-active floor's stale pre-pull entry
+                            # (DEC-LATENCY-HONESTY-BATCH-001; see the spot job).
+                            force_fresh=True,
                         )
                         return len(cands.movers)
 

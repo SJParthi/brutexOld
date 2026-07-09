@@ -203,3 +203,57 @@ class TestMoversPullFloorWiring:
         summary_cache.mark_dirty()
         assert client.get("/api/v1/movers", params=_PARAMS).status_code == 200
         assert calls["n"] == 2
+
+
+class TestMoversWarmForceFreshWiring:
+    """The three movers-warm sites bypass the floor (review fold, same DEC).
+
+    Now that the production ``_movers_cache`` is floored, the still-``running``
+    job's own pull-active floor could serve a stale pre-pull entry back into
+    the end-of-pull movers warm re-seed — so the spot/futures/options
+    ``_make_*_job`` builders must pass ``force_fresh=True``, mirroring the
+    discovery warm's documented pattern (``warm_discovery_memos``).
+
+    HONEST envelope (Golden Rule #10): driving the real pipeline movers phase
+    end-to-end needs a full non-dry-run pull — disproportionate for this pin —
+    so the SEMANTIC (``force_fresh`` bypasses the stale floor, never the
+    clean-hit fast path) is unit-pinned in
+    ``test_movers_cache.py::test_force_fresh_bypasses_floor`` and this test
+    holds the WIRING: every ``_movers_cache.get_or_compute`` call inside the
+    three warm job builders carries a literal ``force_fresh=True`` (AST-pinned,
+    the house wiring-pin pattern — a dropped kwarg fails by name).
+    """
+
+    def test_all_three_warm_job_builders_pass_force_fresh_true(self) -> None:
+        import ast
+        import inspect
+
+        import brutex.dashboard.app as app_mod
+
+        tree = ast.parse(inspect.getsource(app_mod))
+        warm_jobs = {"_spot_job": [], "_fut_job": [], "_opt_job": []}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in warm_jobs:
+                for call in ast.walk(node):
+                    if (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "get_or_compute"
+                        and isinstance(call.func.value, ast.Name)
+                        and call.func.value.id == "_movers_cache"
+                    ):
+                        kw = {k.arg: k.value for k in call.keywords}
+                        assert "force_fresh" in kw, (
+                            f"{node.name}: warm get_or_compute lost force_fresh"
+                        )
+                        val = kw["force_fresh"]
+                        assert isinstance(val, ast.Constant) and val.value is True, (
+                            f"{node.name}: force_fresh must be the literal True"
+                        )
+                        warm_jobs[node.name].append(call)
+        # Every builder exists and carries exactly ONE movers-cache warm call.
+        assert {name: len(calls) for name, calls in warm_jobs.items()} == {
+            "_spot_job": 1,
+            "_fut_job": 1,
+            "_opt_job": 1,
+        }

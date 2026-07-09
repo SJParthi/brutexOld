@@ -76,8 +76,9 @@ hidden — Golden Rule #10).
   snapshot is evicted) — but each entry retains its WHOLE payload, so total
   resident bytes are ``capacity × payload-size``: large payloads (e.g. sweep
   scans keyed per revision) can retain gigabytes at the default capacity
-  (measured 256 × ~4 MiB payloads → ~+1 GiB RSS). A byte-watermark /
-  size-aware eviction is a NAMED follow-up, not claimed.
+  (≈256 × 4 MiB ≈ 1 GiB — the latency audit's probe figure, arithmetically
+  derived, not re-measured on this branch). A byte-watermark / size-aware
+  eviction is a NAMED follow-up, not claimed.
 * An opted-in instance may serve a **bounded-stale** entry while a pull runs
   (age < the adaptive floor, capped at ``adaptive_floor_cap_s``); the staleness
   window closes the moment the pull ends (probe ``False`` → recompute) and the
