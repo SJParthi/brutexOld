@@ -613,6 +613,31 @@ class TestRunTupleInWorker:
         # Even on failure the collected pre-failure audit lines are returned.
         assert result.audit_records[0].action == "SWEEP_START"
 
+    def test_corrupt_store_quarantined_in_worker(self, tmp_path: Path) -> None:
+        """G1 (round 2): a corrupt store is quarantined + retried IN-WORKER.
+
+        A pre-corrupt tuple store raises ResultsStoreSchemaError (a
+        ResultsStoreError) from the worker's
+        persist. The worker-side quarantine moves the trio + retries once
+        (byte-identical regeneration), so the worker returns a SUCCESS summary +
+        the quarantine event as data — never a non-SweepComboError propagating
+        out to abort the whole grid.
+        """
+        grid = _grid()
+        root = tmp_path / "out"
+        mod._worker_init(mod._WorkerContext(grid=grid, root=root))
+        tuple_ = next(iter_sweep_tuples(grid))
+        store = tuple_store_path(root, tuple_, grid)
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b"garbage - not parquet")
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        assert result.summary is not None  # retry regenerated the store cleanly
+        assert result.failed_error is None
+        assert len(result.quarantine_events) == 1
+        dest_rel, reason = result.quarantine_events[0]
+        assert dest_rel.startswith(".quarantine/runtime/")
+        assert "ResultsStoreSchemaError" in reason
+
 
 class TestOutcomeAndResultMapping:
     def test_outcome_heap_orders_by_index(self) -> None:
