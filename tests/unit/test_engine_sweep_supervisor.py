@@ -492,8 +492,18 @@ class TestRunSupervisedGrid:
                 skip_empty=False,
             )
 
-    def test_cache_hit_skips_the_tuple(self, tmp_path: Path) -> None:
-        """A pre-cached tuple is skipped (cache branch); a fresh sibling runs the no-bars path."""
+    def test_cache_hit_skips_the_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-cached tuple is skipped (cache branch); a fresh sibling runs the no-bars path.
+
+        Pins the cache TIER mechanics under the legacy (guard-OFF) arm: the
+        fabricated cache mark has NO on-disk artifacts, which the default-ON
+        resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces
+        back through run_one_tuple — guard-ON behaviour is pinned in
+        ``test_engine_sweep_supervisor_store_guard.py``.
+        """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
         with (
             _open_guards(tmp_path, grid) as guards,
@@ -515,8 +525,15 @@ class TestRunSupervisedGrid:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert "TUPLE_SKIPPED_CACHE" in actions
 
-    def test_resume_skips_completed_tuples(self, tmp_path: Path) -> None:
-        """A loaded checkpoint resume-skips index 0; index 1 runs the no-bars path."""
+    def test_resume_skips_completed_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A loaded checkpoint resume-skips index 0; index 1 runs the no-bars path.
+
+        Legacy (guard-OFF) arm — the fabricated checkpoint has no on-disk
+        artifacts (see ``test_cache_hit_skips_the_tuple``'s rationale).
+        """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
         with (
             _open_guards(tmp_path, grid) as guards,
@@ -536,7 +553,9 @@ class TestRunSupervisedGrid:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert "TUPLE_SKIPPED_RESUME" in actions
 
-    def test_resume_batches_prefix_into_one_audit_line(self, tmp_path: Path) -> None:
+    def test_resume_batches_prefix_into_one_audit_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A resume over N>1 completed tuples emits ONE summarising audit line.
 
         O(1) resume emission (DEC-SWEEP-SCALE-OPERABILITY-001): on a 4-tuple grid
@@ -544,8 +563,12 @@ class TestRunSupervisedGrid:
         ``TUPLE_SKIPPED_RESUME`` line (the prior per-tuple emission wrote 3)
         carrying ``resumed_count`` + the resume boundary, fires ONE progress
         publish for the whole prefix, and the hash chain — with the summary as
-        an ordinary entry — still verifies end-to-end.
+        an ordinary entry — still verifies end-to-end. Legacy (guard-OFF) arm —
+        the fabricated checkpoint prefix has no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale); the guard-ON intact
+        batched emission is pinned in the store-guard suite.
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         # Synthetic instrument names by test intent (resume prefix needs 4
         # distinct tuples) — opt out of the Layer-1 engine-scope invariant
         # (DEC-ENGINE-SCOPE-GUARD-001).
@@ -597,13 +620,20 @@ class TestRunSupervisedGrid:
         assert snaps[0].evaluated == 3
         assert snaps[0].skipped == 3
 
-    def test_fully_resumed_rerun_emits_single_summary_line(self, tmp_path: Path) -> None:
+    def test_fully_resumed_rerun_emits_single_summary_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """An idempotent re-run over an N-tuple complete grid is O(1) in audit lines.
 
         The resume_count == total edge: the second run's ENTIRE grid is the
         resumed prefix — one summary line, zero per-tuple emission, and the
-        shared audit file still verifies across both runs.
+        shared audit file still verifies across both runs. Legacy (guard-OFF)
+        arm — an all-no-bars grid checkpoints ZERO artifacts, which the
+        default-ON guard deliberately re-probes each resume (the disclosed
+        no-bars shift, DEC-SWEEP-RESUME-STORE-GUARD-001; guard-ON arm pinned
+        in the store-guard suite).
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         # Synthetic instrument names by test intent (full-resume edge needs 3
         # distinct tuples) — opt out of the Layer-1 engine-scope invariant
         # (DEC-ENGINE-SCOPE-GUARD-001).
@@ -929,8 +959,11 @@ class TestRunSupervisedGrid:
         the no-bars paths: a later cache-HIT or no-bars tuple must NOT advance the
         checkpoint past the earlier failed tuple (else that failed tuple would be
         resume-skipped — the BLOCKER). 3 tuples: index 0 FAILS, index 1 is a
-        pre-cached cache-hit, index 2 has no bars.
+        pre-cached cache-hit, index 2 has no bars. Legacy (guard-OFF) arm — the
+        fabricated cache mark has no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale).
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         pytest.importorskip("polars")
         from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
 
@@ -1028,8 +1061,12 @@ class TestRunSupervisedGrid:
 
         A mixed 5-tuple grid touching EVERY disposition: index 0 resume-skipped
         (pre-checkpointed), index 1 cache-skipped (pre-cached), index 2 RUNS,
-        index 3 NO BARS, index 4 FAILS.
+        index 3 NO BARS, index 4 FAILS. Legacy (guard-OFF) arm — the fabricated
+        checkpoint/cache marks have no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale); the guard-ON
+        reconciliation invariant is pinned in the store-guard suite.
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         pytest.importorskip("polars")
         from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
 

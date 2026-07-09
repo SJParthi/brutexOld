@@ -794,7 +794,15 @@ class TestParallelSkipPaths:
         # 0..total-1 is recorded, so next_index == total.
         assert guards.checkpoint.next_index == count_sweep_tuples(grid)
 
-    def test_cache_skip_short_circuits_a_completed_tuple(self, tmp_path: Path) -> None:
+    def test_cache_skip_short_circuits_a_completed_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Legacy (guard-OFF) arm: run 2 deliberately probes a DIFFERENT (empty)
+        # results root, which the default-ON resume store guard
+        # (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces back through the
+        # workers — the cache TIER mechanics are what this test pins; guard-ON
+        # behaviour is pinned in test_engine_sweep_parallel_store_guard.py.
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()
         # First run populates the cache + results.
         _run_parallel(tmp_path / "first", grid, workers=3)
@@ -824,7 +832,13 @@ class TestParallelSkipPaths:
         assert summary.skipped_cache == count_sweep_tuples(grid)
         assert summary.tuples_run == 0
 
-    def test_resume_skips_already_checkpointed_tuples(self, tmp_path: Path) -> None:
+    def test_resume_skips_already_checkpointed_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Legacy (guard-OFF) arm: the pre-seeded checkpoint has NO on-disk
+        # artifacts under the probed root (see the cache twin above's
+        # rationale — DEC-SWEEP-RESUME-STORE-GUARD-001).
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()
         total = count_sweep_tuples(grid)
         out = tmp_path / "out"
