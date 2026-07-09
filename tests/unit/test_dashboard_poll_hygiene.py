@@ -1,5 +1,5 @@
 """Hidden-tab poll-hygiene pins for the dashboard poll loops
-(DEC-DASHBOARD-POLL-HYGIENE-001, MIGRATION.md #1618).
+(DEC-DASHBOARD-POLL-HYGIENE-001, MIGRATION.md #1623).
 
 Nine dashboard poll surfaces used plain ``setInterval`` loops with NO
 ``document.hidden`` guard, so a BACKGROUNDED tab kept hammering its endpoints
@@ -146,9 +146,23 @@ def test_universe_visibilitychange_fires_the_catch_up_pollers() -> None:
         "loadLakeUniqueness();",
     ):
         assert call in js, f"universe.html: catch-up call {call!r} is missing"
-    # The catch-up rides the EXISTING single visibilitychange listener (no new one).
-    assert js.count("addEventListener('visibilitychange'") == 1, (
-        "universe.html must keep its ONE visibilitychange listener"
+    # The catch-up rides the EXISTING pull-progress visibilitychange listener —
+    # this change adds NO new listener. universe.html carries exactly TWO
+    # listeners total: the pull-progress one (which folds these catch-ups,
+    # marked by the DEC-DASHBOARD-POLL-HYGIENE-001 comment) + the independent
+    # greeks-backfill gb-poller listener that landed on main via
+    # DEC-GREEKS-BULK-REENRICH-001 (#1558 round 9).
+    assert js.count("addEventListener('visibilitychange'") == 2, (
+        "universe.html must carry exactly the pull-progress + gb-poller "
+        "visibilitychange listeners — the poll-hygiene catch-ups add no new one"
+    )
+    # And the folded integrity catch-ups live INSIDE the pull-progress listener
+    # (before the gb-poller listener), not in a listener of their own.
+    first_listener = js.index("addEventListener('visibilitychange'")
+    second_listener = js.index("addEventListener('visibilitychange'", first_listener + 1)
+    catch_up = js.index("loadLakeUniqueness();", first_listener)
+    assert first_listener < catch_up < second_listener, (
+        "the integrity catch-ups must ride the FIRST (pull-progress) listener"
     )
 
 
