@@ -970,6 +970,91 @@ class TestBuildWindowPayloadDuckDB:
         assert "WHEN 'EMPTY' THEN 1" in sql
         assert sql.endswith("ELSE 9 END")
 
+    # ── counts-only mode (DEC-WINDOWS-COUNTS-ONLY-001, ``limit=0``) ──────────
+
+    def test_counts_only_meta_equals_the_default_call(self, tmp_path: Path) -> None:
+        """``limit=0`` ships the IDENTICAL counts/meta with ``windows=[]``.
+
+        The byte-parity pin for the counts-only consumers: every meta field the
+        default call carries is unchanged — only the row list is empty (and
+        ``returned``/``capped`` reflect that honestly: matching rows exist,
+        none shipped).
+        """
+        _save_mixed_ledger(tmp_path)
+        conn = duckdb.connect()
+        default = build_window_payload(tmp_path, conn=conn)
+        counts_only = build_window_payload(tmp_path, conn=conn, limit=0)
+        assert counts_only == {
+            **default,
+            "windows": [],
+            "returned": 0,
+            "capped": True,  # matched (5) > limit (0) — rows exist, none shipped
+        }
+        assert counts_only["counts"] == default["counts"]
+        assert counts_only["count"] == 6
+        assert counts_only["matched"] == 5
+
+    def test_counts_only_skips_the_row_page_query(self, tmp_path: Path) -> None:
+        """``limit=0`` never issues the row-page ``LIMIT ? OFFSET ?`` query.
+
+        The point of the mode: the counts GROUP BY is stamp-cached and computed
+        independently, so counts-only costs ZERO row-page work — spied on the
+        real connection's SQL text (never a ``LIMIT 0`` plan either).
+        """
+        _save_mixed_ledger(tmp_path)
+        real = duckdb.connect()
+        executed: list[str] = []
+
+        class _SpyConn:
+            def execute(self, sql: str, params: list[object] | None = None) -> object:
+                executed.append(sql)
+                return real.execute(sql, params) if params is not None else real.execute(sql)
+
+        payload = build_window_payload(tmp_path, conn=_SpyConn(), limit=0)
+        assert payload["windows"] == []
+        assert payload["counts"]["spot"]["FAILED"] == 1  # counts still complete
+        assert not any("LIMIT ? OFFSET ?" in sql for sql in executed), (
+            "counts-only must skip the row-page query entirely"
+        )
+        # A rowful call on the same spy DOES issue the page query (spy sanity).
+        build_window_payload(tmp_path, conn=_SpyConn(), limit=1)
+        assert any("LIMIT ? OFFSET ?" in sql for sql in executed)
+
+    def test_counts_only_market_and_status_filters_shape_matched(self, tmp_path: Path) -> None:
+        """counts-only ``matched`` still honours the market/status filters (from counts)."""
+        _save_mixed_ledger(tmp_path)
+        conn = duckdb.connect()
+        assert build_window_payload(tmp_path, conn=conn, limit=0, market="options") == {
+            **build_window_payload(tmp_path, conn=conn, market="options"),
+            "windows": [],
+            "returned": 0,
+            "capped": True,
+        }
+        failed = build_window_payload(tmp_path, conn=conn, limit=0, status="FAILED")
+        assert failed["matched"] == 1
+        assert failed["windows"] == []
+
+    def test_counts_only_on_the_legacy_paths(self, tmp_path: Path) -> None:
+        """``limit=0`` on the ``conn=None`` pyarrow path and the empty-lake default."""
+        _save_mixed_ledger(tmp_path)
+        legacy = build_window_payload(tmp_path, conn=None, limit=0)
+        assert legacy["source"] == "ledger"
+        assert legacy["windows"] == []
+        assert legacy["matched"] == 5
+        assert legacy["counts"] == build_window_payload(tmp_path, conn=None)["counts"]
+        # An empty lake stays the honest all-zero payload (capped False — no rows hidden).
+        empty = build_window_payload(tmp_path / "nowhere", limit=0)
+        assert empty["windows"] == []
+        assert empty["matched"] == 0
+        assert empty["capped"] is False
+
+    def test_negative_limit_still_clamps_up_to_one(self, tmp_path: Path) -> None:
+        """Only EXACTLY 0 means counts-only — a negative direct-caller limit keeps
+        the historical clamp-to-1 (the route already refuses negatives via ge=0)."""
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), limit=-3)
+        assert payload["returned"] == 1  # clamped UP to 1, not counts-only
+
     def test_direct_duckdb_builder_with_symbol_map(self, tmp_path: Path) -> None:
         # Exercise _build_window_payload_duckdb directly (the option symbol_for_id decode
         # path is shared with the legacy projection via _window_row).

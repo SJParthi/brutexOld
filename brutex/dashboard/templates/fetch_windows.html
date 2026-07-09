@@ -56,6 +56,17 @@
   .sym { font-weight:700; color:var(--text-bright); }
   .err { color:var(--red); font-family:var(--font-num); font-size:11.5px; }
 
+  /* Row pager (DEC-WINDOWS-COUNTS-ONLY-001 — the db.html .pager idiom). */
+  .pager { display:flex; align-items:center; gap:14px; padding:10px 24px;
+    border-top:1px solid var(--border); font-size:12px; color:var(--muted); }
+  .pager button { background:var(--surface-2); color:var(--text);
+    border:1px solid var(--border-strong); border-radius:8px; padding:6px 12px; cursor:pointer; }
+  .pager button:hover:not(:disabled) { border-color:var(--blue); }
+  .pager button:disabled { opacity:.4; cursor:not-allowed; }
+  .pager .prange { font-variant-numeric:tabular-nums; }
+  .pager select { background:var(--surface-2); color:var(--text);
+    border:1px solid var(--border-strong); border-radius:8px; padding:4px 8px; }
+
   /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-001) ── */
   a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
@@ -178,6 +189,23 @@
         <div class="bx-skel bx-skel-row"></div>
       </div>
     </div>
+  </div>
+
+  <!-- Row pager (DEC-WINDOWS-COUNTS-ONLY-001): the page requests a SANE page
+       (&limit=&offset= — the route already pages severity-first, so page 1
+       always carries FAILED/EMPTY) instead of the 20k-row server default. The
+       pager is STATIC DOM patched via textContent/disabled only. -->
+  <div class="pager" id="winpager">
+    <button id="winprev" disabled>‹ Prev</button>
+    <span class="prange" id="winrange">—</span>
+    <button id="winnext" disabled>Next ›</button>
+    <label>page size
+      <select id="winpagesize">
+        <option value="200" selected>200</option>
+        <option value="500">500</option>
+        <option value="1000">1000</option>
+      </select>
+    </label>
   </div>
 
 <script>
@@ -307,6 +335,40 @@ function winFetches(r) {
    server; counts are always complete. */
 let marketFilter = "";
 let statusFilter = "";
+/* Client-side page window (DEC-WINDOWS-COUNTS-ONLY-001): this page genuinely
+   renders rows, so it requests a SANE page (&limit=&offset=) instead of the
+   20k-row server default (~294 B/row ⇒ ~5.9 MB per 4 s poll mid-pull). The
+   route already supports offset; severity-first ordering means page 1 always
+   carries the actionable FAILED/EMPTY rows. Pager DOM is static — patched via
+   textContent/disabled only (CodeQL XSS discipline). */
+let winOffset = 0;
+const winPrev = document.getElementById("winprev");
+const winNext = document.getElementById("winnext");
+const winRange = document.getElementById("winrange");
+const winPageSize = document.getElementById("winpagesize");
+function winLimit() { return Number(winPageSize.value) || 200; }
+function updatePager(matched, returned) {
+  const from = matched === 0 ? 0 : winOffset + 1;
+  const to = winOffset + returned;
+  winRange.textContent = num(from) + "–" + num(to) + " / " + num(matched);
+  winPrev.disabled = !(winOffset > 0);
+  winNext.disabled = !(to < matched);
+}
+winPrev.addEventListener("click", () => {
+  winOffset = Math.max(0, winOffset - winLimit());
+  lastPayloadKey = null;
+  poll();
+});
+winNext.addEventListener("click", () => {
+  winOffset += winLimit();
+  lastPayloadKey = null;
+  poll();
+});
+winPageSize.addEventListener("change", () => {
+  winOffset = 0;
+  lastPayloadKey = null;
+  poll();
+});
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): the raw response
    text LAST RENDERED, folded with the filter state that rendered it (belt-and-
    braces — a filter flip already changes the querystring, so the server text
@@ -326,6 +388,7 @@ function wireChips(boxId, key, setter) {
         x.classList.toggle("on", on);
         x.setAttribute("aria-selected", on ? "true" : "false");
       });
+      winOffset = 0; // a fresh filter selection starts at page 1
       lastPayloadKey = null; // manual filter flip: force the next render, never a stale skip
       poll();
     });
@@ -333,6 +396,35 @@ function wireChips(boxId, key, setter) {
 }
 wireChips("mktfilter", "mkt", v => { marketFilter = v; });
 wireChips("stfilter", "st", v => { statusFilter = v; });
+
+/* One row-element builder shared by the full rebuild AND the in-place tbody
+   patch below (the db.html gridRowsHtml split, DEC-DASHBOARD-JS-PERF-001
+   idiom, adapted to this page's createElement/textContent rendering) — every
+   payload value stays inert text exactly as before. */
+function windowsRowEl(r) {
+  const tr = el("tr");
+  const sym = el("td");
+  sym.appendChild(el("span", "sym", asText(r.symbol)));
+  tr.appendChild(sym);
+  tr.appendChild(el("td", null, asText(r.market)));
+  tr.appendChild(el("td", null, asText(r.interval)));
+  tr.appendChild(el("td", null, asText(r.window_start || "")));
+  tr.appendChild(el("td", null, asText(r.window_end || "")));
+  tr.appendChild(winStatus(r));
+  tr.appendChild(el("td", "num", num(r.bars)));
+  /* Served-but-never-rendered ledger stamps (`first_seen_at` / `last_attempt_at`,
+     IST-formatted server-side) surface as an Attempts-cell tooltip; a null part
+     is OMITTED — never a fabricated stamp (Golden Rule #1). */
+  const attempts = el("td", "num", num(r.attempts));
+  const stamps = [];
+  if (r.first_seen_at) stamps.push("first seen " + asText(r.first_seen_at) + " IST");
+  if (r.last_attempt_at) stamps.push("last attempt " + asText(r.last_attempt_at) + " IST");
+  if (stamps.length) attempts.title = stamps.join(" · ");
+  tr.appendChild(attempts);
+  tr.appendChild(winFetches(r));
+  tr.appendChild(el("td", "err", asText(r.last_error || "")));
+  return tr;
+}
 
 function renderWindows(rows) {
   if (!rows.length) {
@@ -345,6 +437,17 @@ function renderWindows(rows) {
     const state = el("div", "bx-state empty");
     state.appendChild(el("div", "hint", message));
     panel.replaceChildren(state);
+    return;
+  }
+  /* In-place tbody patch (DEC-WINDOWS-COUNTS-ONLY-001 — the db.html
+     patchGridRows idiom): the column set here is FIXED, so when the table
+     shell already stands, swap ONLY the tbody rows — the SAME row builder
+     the full rebuild uses, against a NARROWER target — instead of tearing
+     down the whole table shell + sticky header per changed payload. Empty
+     states and the first paint take the full-rebuild path below. */
+  const existing = panel.querySelector("table > tbody");
+  if (existing) {
+    existing.replaceChildren(...rows.map(windowsRowEl));
     return;
   }
   const table = el("table", "bx-table bx-table--dense bx-table--zebra");
@@ -368,30 +471,7 @@ function renderWindows(rows) {
   const thead = el("thead");
   thead.appendChild(headRow);
   const tbody = el("tbody");
-  rows.forEach(r => {
-    const tr = el("tr");
-    const sym = el("td");
-    sym.appendChild(el("span", "sym", asText(r.symbol)));
-    tr.appendChild(sym);
-    tr.appendChild(el("td", null, asText(r.market)));
-    tr.appendChild(el("td", null, asText(r.interval)));
-    tr.appendChild(el("td", null, asText(r.window_start || "")));
-    tr.appendChild(el("td", null, asText(r.window_end || "")));
-    tr.appendChild(winStatus(r));
-    tr.appendChild(el("td", "num", num(r.bars)));
-    /* Served-but-never-rendered ledger stamps (`first_seen_at` / `last_attempt_at`,
-       IST-formatted server-side) surface as an Attempts-cell tooltip; a null part
-       is OMITTED — never a fabricated stamp (Golden Rule #1). */
-    const attempts = el("td", "num", num(r.attempts));
-    const stamps = [];
-    if (r.first_seen_at) stamps.push("first seen " + asText(r.first_seen_at) + " IST");
-    if (r.last_attempt_at) stamps.push("last attempt " + asText(r.last_attempt_at) + " IST");
-    if (stamps.length) attempts.title = stamps.join(" · ");
-    tr.appendChild(attempts);
-    tr.appendChild(winFetches(r));
-    tr.appendChild(el("td", "err", asText(r.last_error || "")));
-    tbody.appendChild(tr);
-  });
+  rows.forEach(r => tbody.appendChild(windowsRowEl(r)));
   table.appendChild(thead);
   table.appendChild(tbody);
   panel.replaceChildren(table);
@@ -446,14 +526,26 @@ async function poll() {
     const qs = new URLSearchParams();
     if (marketFilter) qs.set("market", marketFilter);
     if (statusFilter) qs.set("status", statusFilter);
-    const r = await fetch("/api/v1/coverage/windows" + (qs.size ? "?" + qs.toString() : ""));
+    /* Sane page instead of the 20k-row server default (DEC-WINDOWS-COUNTS-ONLY-001). */
+    qs.set("limit", String(winLimit()));
+    qs.set("offset", String(winOffset));
+    const r = await fetch("/api/v1/coverage/windows?" + qs.toString());
     if (!r.ok) { lastPayloadKey = null; liveTxt.textContent = "error " + r.status; return; }
     const txt = await r.text();
-    const payloadKey = marketFilter + "|" + statusFilter + "|" + txt;
+    const payloadKey = marketFilter + "|" + statusFilter + "|" + winLimit() + "|" + winOffset + "|" + txt;
     if (payloadKey === lastPayloadKey) { liveTxt.textContent = lastLiveLine; return; }
     lastPayloadKey = payloadKey;
     const body = JSON.parse(txt);
     const rows = body.windows || [];
+    /* Page snap-back: a shrinking matched set can strand the offset past the
+       last row (empty page while rows exist) — snap to page 1 once. Bounded:
+       the re-poll runs with winOffset 0, so it can never recurse. */
+    if (!rows.length && winOffset > 0 && (body.matched || 0) > 0) {
+      winOffset = 0;
+      lastPayloadKey = null;
+      poll();
+      return;
+    }
     emptyThreshold = body.empty_threshold ?? 3;
     wincEl.textContent = num(countRecorded(body.counts, body.count ?? 0));
     wincEl.title = bucketBreakdownTitle(body.counts, "");
@@ -490,7 +582,8 @@ async function poll() {
     }
     statusEl.textContent = num(body.matched ?? rows.length) + " matched · "
       + num(body.returned ?? rows.length) + " shown"
-      + (body.capped ? " · CAPPED (severity-first — FAILED/EMPTY always shown)" : "");
+      + (body.capped ? " · paged (severity-first — FAILED/EMPTY on page 1)" : "");
+    updatePager(body.matched ?? rows.length, body.returned ?? rows.length);
     renderWindows(rows);
     lastLiveLine = "live · " + rows.length + " rows";
     liveTxt.textContent = lastLiveLine;

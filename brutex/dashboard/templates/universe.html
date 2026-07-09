@@ -1771,7 +1771,10 @@ async function refreshWindowsLine() {
   if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   if (!pullStarted) return;
   try {
-    const r = await fetch('/api/v1/coverage/windows');
+    /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this line reads ONLY .counts —
+       ?limit=0 keeps the identical counts payload while dropping the
+       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
+    const r = await fetch('/api/v1/coverage/windows?limit=0');
     if (!r.ok) return;
     const counts = (await r.json()).counts || {};
     const grand = {noData: 0, resolved: 0, pending: 0, failed: 0, total: 0};
@@ -1803,6 +1806,10 @@ async function startAndPoll(path, label) {
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
   pullStarted = true;   // DEC-UNIVERSE-WINDOW-SEGMENTS-001: gate the all-segments line on a started pull
+                        // — armed for the WHOLE watch (incl. the pre-POST paint below) and cleared in
+                        // finishLive after one final refresh (DEC-LATENCY-HONESTY-BATCH-001), so a
+                        // refused/failed start (catch → finishLive) can never leave the 5 s poller
+                        // armed forever.
   pollFeedRetries = 0; lastProgressOkMs = null; lastProgressOkWallMs = null; hadProgressSuccess = false; lastPollLabel = null; resetSubUnit();   // a new watch starts clean
   watchActive = true;   // opens the visibility re-poll gate for the whole watch (cleared in finishLive)
   // Refuter-confirmed fix: start the staleness ticker BEFORE the start POST, so a
@@ -2229,6 +2236,15 @@ function finishLive() {
   const suEl = document.getElementById('subunit');
   if (suEl) suEl.textContent = '';
   updateStallChip(null);  // a settled run is never stalled-suspect — hide the chip (DEC-PULL-STALL-CHIP-001)
+  // DEC-LATENCY-HONESTY-BATCH-001: disarm the all-segments windows poller when the
+  // watch settles. pullStarted was set true at startAndPoll and NEVER cleared, so
+  // ONE pull click — even a REFUSED start (the catch path lands here too) — armed
+  // the 5 s full-payload /coverage/windows poll FOREVER. One final refresh paints
+  // the settled counts (it reads the still-armed flag synchronously at entry),
+  // then the flag drops and the interval's guard goes back to a no-op until the
+  // next startAndPoll arms it.
+  refreshWindowsLine();
+  pullStarted = false;
   setBulkDisabled(false);
   // Restore the ONE pull button to its selection-driven label/enabled state
   // (the pipeline button is re-enabled by setBulkDisabled(false); the manual
