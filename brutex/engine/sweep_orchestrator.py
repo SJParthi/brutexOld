@@ -65,7 +65,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import blake3
 import structlog
@@ -73,6 +73,9 @@ import structlog
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
 from brutex.engine.results_store import ResultsStore, ResultsStoreError
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
+from brutex.engine.sweep_identity import (
+    _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
+)
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_run import (
     SweepComboError,
@@ -661,6 +664,38 @@ def bloom_capacity_hint(grid: SweepGridConfig) -> int:
     return max(1, masks_per_tuple * other_axes)
 
 
+def _selection_identity_fragment(grid: SweepGridConfig) -> dict[str, int] | None:
+    """Return the non-default SELECTION-knob identity fragment, or ``None`` at defaults.
+
+    The store-address twin of :func:`_gate_config_fragment`
+    (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): ``top_k`` / ``min_hits`` /
+    ``max_combos`` change WHICH finalists a tuple persists, so a same-out-dir
+    re-run with a changed selection knob must re-key the store Parquet +
+    completion-sentinel address — otherwise the sentinel short-circuit serves a
+    prior config's finalists as this config's winners (C2 stale-serve). Each leg
+    is DEFAULT-ELIDED (emitted ONLY when the value differs from its canonical
+    production default), so an ungated default-selection sweep's address is
+    byte-identical to the pre-fix 16-key descriptor (Golden Rule #4 byte
+    stability — no on-disk store re-keys). The elision defaults are the SAME
+    constants :class:`SweepGridConfig`'s field defaults use (``top_k`` ``None`` =
+    unbounded, ``min_hits`` :data:`~brutex.ranking.MIN_TRADES`, ``max_combos``
+    :data:`~brutex.engine.sweep_driver.DEFAULT_MAX_COMBOS`) — single source of
+    truth for the defaults, so the two can never drift.
+    """
+    fragment: dict[str, int] = {}
+    if grid.top_k is not None:
+        # Canonical default None (= all ranked / unbounded) is canonicalised by
+        # ABSENCE — no bare JSON ``null`` leg, so no null-vs-absent ambiguity. A
+        # bounded top_k is a validated int >= 1 (never None).
+        fragment["top_k"] = grid.top_k
+    if grid.min_hits != MIN_TRADES:
+        # Any other value (incl. 0 = filter disabled) re-keys.
+        fragment["min_hits"] = grid.min_hits
+    if grid.max_combos != DEFAULT_MAX_COMBOS:
+        fragment["max_combos"] = grid.max_combos
+    return fragment or None
+
+
 def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     """Return the BLAKE3 hex digest of *tuple_*'s full canonical identity under *grid*.
 
@@ -669,6 +704,20 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     provenance context — so two distinct tuples cannot collide and the same tuple
     always maps to the same file (Golden Rule #4). ``None`` legs encode distinctly
     from any numeric value (JSON ``null`` vs a number).
+
+    The store address ALSO folds the ACTIVE gate config
+    (:func:`_gate_config_fragment` — overfit / Stage-3, emitted only when a gate
+    runs) AND the non-default SELECTION knobs
+    (:func:`_selection_identity_fragment` — ``top_k`` / ``min_hits`` /
+    ``max_combos``, emitted only when != their canonical defaults via
+    DEFAULT-ELISION), so a same-out-dir re-run with a changed
+    overfit(dsr_min)/top_k/min_hits/max_combos or Stage-3 config re-keys the
+    Parquet + completion-sentinel + trial-stats-sidecar address instead of
+    serving the prior config's finalists via the sentinel short-circuit
+    (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001). BYTE-STABLE at defaults: an
+    ungated default-selection grid emits NEITHER fragment, so the descriptor is
+    byte-identical to the pre-fold 16-key dict and no existing on-disk store
+    re-keys.
     """
     proximity_bps = (
         None
@@ -679,7 +728,7 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
             tuple_.proximity.fib_proximity_bps,
         ]
     )
-    descriptor = {
+    descriptor: dict[str, Any] = {
         "instrument": tuple_.instrument,
         "tf": tuple_.tf.label,
         "tf_minutes": tuple_.tf.minutes,
@@ -701,7 +750,21 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
         "indicator_version": grid.indicator_version,
         "code_commit_sha": grid.code_commit_sha,
     }
-    canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+    # DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001: fold the non-default SELECTION
+    # knobs + the ACTIVE gate config into the store address, each as a nested
+    # object mirroring the supervisor's #1330 ``gate_config`` style. Both are
+    # ABSENT at defaults, so the descriptor stays byte-identical to the pre-fold
+    # 16-key dict (no existing store re-keys).
+    selection = _selection_identity_fragment(grid)
+    if selection is not None:
+        descriptor["selection"] = selection
+    gate_config = _gate_config_fragment(grid)
+    if gate_config is not None:
+        descriptor["gate_config"] = gate_config
+    # allow_nan=False is byte-neutral for finite inputs (json emits identical
+    # bytes for finite numbers) and converts a hypothetical non-finite gate
+    # float from a silent invalid-JSON filename into a loud raise (F5).
+    canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"), allow_nan=False)
     # str(...) keeps this typed str where the blake3 stubs are absent (the
     # isolated pre-commit mypy env — the #575 hook-portability precedent).
     return str(blake3.blake3(canonical.encode("utf-8")).hexdigest())[:_PATH_DIGEST_LEN]

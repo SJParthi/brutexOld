@@ -502,6 +502,105 @@ class TestPaths:
         assert store.path == tuple_store_path(tmp_path, _tuple(), grid)
 
 
+# ────── _tuple_digest gate + selection identity (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) ──────
+
+
+class TestTupleDigestGateSelectionIdentity:
+    """The store address folds the ACTIVE gate + non-default selection knobs.
+
+    C1 (overfit) / C2 (top_k/min_hits/max_combos) / stage3 re-key the store
+    Parquet + completion-sentinel address, while a DEFAULT (ungated,
+    default-selection) sweep stays BYTE-STABLE — no existing on-disk store
+    re-keys. The pre-fix default digest is the empirically-captured constant.
+    """
+
+    # The pre-fix default digest captured on 0f411437 (16-char _PATH_DIGEST_LEN).
+    _PRE_FIX_DEFAULT_DIGEST = "5b020e892247deac"
+
+    def test_default_digest_byte_stable(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        assert _tuple_digest(_tuple(), _grid()) == self._PRE_FIX_DEFAULT_DIGEST
+
+    def test_default_store_path_filename_unchanged(self, tmp_path: Path) -> None:
+        name = tuple_store_path(tmp_path, _tuple(), _grid()).name
+        assert name == f"BUY_k1_{self._PRE_FIX_DEFAULT_DIGEST}.parquet"
+
+    def test_selection_defaults_elide_byte_stable(self) -> None:
+        from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+        from brutex.ranking import MIN_TRADES
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        # Explicitly setting a knob to its canonical default must NOT re-key.
+        assert _tuple_digest(_tuple(), _grid(top_k=None)) == d0
+        assert _tuple_digest(_tuple(), _grid(min_hits=MIN_TRADES)) == d0
+        assert _tuple_digest(_tuple(), _grid(max_combos=DEFAULT_MAX_COMBOS)) == d0
+
+    def test_overfit_rekeys_and_is_value_sensitive(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        d90 = _tuple_digest(_tuple(), _grid(overfit=OverfitGateConfig(dsr_min=0.90)))
+        d80 = _tuple_digest(_tuple(), _grid(overfit=OverfitGateConfig(dsr_min=0.80)))
+        assert d90 != d0
+        assert d90 != d80  # a distinct KNOB value re-keys again, not just presence
+
+    def test_stage3_rekeys_but_disabled_knobs_inert(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        assert _tuple_digest(_tuple(), _grid(stage3_enable=True)) != d0
+        # A disabled Stage-3 pass leaves its knobs INERT → no re-key.
+        assert _tuple_digest(_tuple(), _grid(stage3_top_k=999)) == d0
+
+    def test_non_default_selection_rekeys_pairwise_distinct(self) -> None:
+        from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        d_topk = _tuple_digest(_tuple(), _grid(top_k=50))
+        d_mh5 = _tuple_digest(_tuple(), _grid(min_hits=5))
+        d_mh0 = _tuple_digest(_tuple(), _grid(min_hits=0))  # filter disabled
+        d_mc = _tuple_digest(_tuple(), _grid(max_combos=DEFAULT_MAX_COMBOS - 1))
+        digests = {d0, d_topk, d_mh5, d_mh0, d_mc}
+        assert len(digests) == 5  # all pairwise-distinct incl. the default
+
+    def test_selection_identity_fragment_branches(self) -> None:
+        from brutex.engine.sweep_orchestrator import _selection_identity_fragment
+
+        assert _selection_identity_fragment(_grid()) is None
+        assert _selection_identity_fragment(_grid(top_k=50)) == {"top_k": 50}
+        assert _selection_identity_fragment(_grid(min_hits=5)) == {"min_hits": 5}
+        assert _selection_identity_fragment(_grid(max_combos=7)) == {"max_combos": 7}
+        assert _selection_identity_fragment(_grid(top_k=3, min_hits=5, max_combos=7)) == {
+            "top_k": 3,
+            "min_hits": 5,
+            "max_combos": 7,
+        }
+
+    def test_overfit_redo_targets_a_distinct_store_and_sentinel(self, tmp_path: Path) -> None:
+        """C1: a changed overfit config maps to a DIFFERENT store + sentinel path."""
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        t = _tuple()
+        light = _grid()
+        gated = _grid(overfit=OverfitGateConfig(dsr_min=0.90))
+        p_light = tuple_store_path(tmp_path, t, light)
+        p_gated = tuple_store_path(tmp_path, t, gated)
+        assert p_light != p_gated
+        assert completion_sentinel_path(p_light) != completion_sentinel_path(p_gated)
+
+    def test_selection_redo_targets_a_distinct_store(self, tmp_path: Path) -> None:
+        """C2: a changed top_k / min_hits each map to a fresh store path."""
+        t = _tuple()
+        base = _grid()
+        p_base = tuple_store_path(tmp_path, t, base)
+        p_topk = tuple_store_path(tmp_path, t, _grid(top_k=50))
+        p_mh = tuple_store_path(tmp_path, t, _grid(min_hits=5))
+        assert len({p_base, p_topk, p_mh}) == 3
+
+
 # ────── run_sweep_grid ──────
 
 
@@ -648,6 +747,55 @@ class TestRunSweepGridResilientSkip:
         complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
         assert complete.payload["tuples_failed"] == 1
         assert verify_chain(audit_path) > 0
+
+    def test_gate_conflict_at_persist_is_tuple_scoped_not_global_abort(
+        self, tmp_path: Path
+    ) -> None:
+        """C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a gate-config conflict at the
+        finalist ``store.append`` is a TUPLE-scoped skip+count, never a grid abort.
+
+        The store raises the typed :class:`ResultsStoreGateConflictError`;
+        ``run_persisted_sweep`` converts it to a ``SweepComboError`` that sails
+        PAST ``run_one_tuple``'s ``except ResultsStoreError`` (store_quarantine
+        None) global-abort re-raise and lands on the driver's tuple-skip ladder —
+        so the grid FINISHES, ``tuples_failed`` counts it, a TUPLE_FAILED audit
+        line names the config cause, and no healthy store is quarantined.
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.results_store import ResultsStoreGateConflictError
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        grid = _grid()  # single NIFTY tuple
+        results_root = tmp_path / "results"
+
+        class _GateConflictStore(ResultsStore):
+            def append(self, row: object) -> bool:  # type: ignore[override]
+                raise ResultsStoreGateConflictError(
+                    "the ONLY differing field(s) (deflated_sharpe) — a gate-config change "
+                    "(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001)."
+                )
+
+        def _store_for(t: SweepTuple) -> ResultsStore:
+            return _GateConflictStore(path=tuple_store_path(results_root, t, grid))
+
+        audit_path = tmp_path / "grid.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=_store_for,
+                dedup=_dedup(),
+                audit=audit,
+            )
+        # Tuple-scoped skip — the grid did NOT abort.
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 0
+        failed = next(e for e in read_entries(audit_path) if e.action == "TUPLE_FAILED")
+        assert "gate-config conflict" in failed.payload["error"]
+        # No sentinel written for the failed tuple (redo next run).
+        store_path = tuple_store_path(results_root, next(iter_sweep_tuples(grid)), grid)
+        assert not completion_sentinel_path(store_path).exists()
 
     def test_real_raise_leaves_failed_store_unsentineled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
