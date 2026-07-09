@@ -25,9 +25,12 @@ import pytest
 import structlog
 from brutex.observability.logging import (
     _FILE_HANDLER_TAG,
+    LOG_LEVEL_ENV,
     _level_to_int,
     configure_logging,
+    configure_process_logging_best_effort,
     reset_configuration,
+    resolve_env_log_level,
     resolve_log_file,
 )
 
@@ -136,6 +139,74 @@ class TestResetConfiguration:
         configure_logging(level="INFO", json_renderer=True)
         # If we got here without error, reset path is exercised.
         assert len(logging.getLogger().handlers) == 1
+
+    def test_reset_unfreezes_capture_logs_for_module_loggers(self) -> None:
+        """A module logger frozen under first-use caching is re-observable by
+        ``capture_logs`` after ``reset_configuration`` — the isolation contract
+        the sweep path-observability tests rely on (DEC-SWEEP-LOG-VOLUME-GUARD-001).
+
+        Sequence reproducing the exact leak: (1) ``configure_logging`` binds with
+        ``cache_logger_on_first_use=True`` and the module logger emits → its
+        ``bind`` freezes against that processors list; (2) ``reset_configuration``
+        installs a fresh list — WITHOUT the cache clear the frozen proxy is
+        orphaned; (3) a later ``capture_logs`` (which mutates the CURRENT list in
+        place) would then see ZERO events from that proxy. The cache clear makes
+        the proxy re-assemble against the current config, so the event is
+        captured.
+        """
+        from structlog.testing import capture_logs
+
+        # A distinct name so this proxy is unambiguously the one under test.
+        log = structlog.get_logger("brutex.test.frozen_module_logger")
+        configure_logging(level="INFO", json_renderer=False)
+        log.info("prime")  # freeze the proxy against the current processors list
+        reset_configuration()  # swaps the list AND clears the first-use cache
+        with capture_logs() as logs:
+            log.info("sweep_run.trade_sim_path", rust_active=True)
+        events = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert len(events) == 1  # 0 without the cache clear (the regression)
+        assert events[0]["rust_active"] is True
+
+
+class TestResolveEnvLogLevel:
+    """$BRUTEX_LOG_LEVEL resolution — DEC-SWEEP-LOG-VOLUME-GUARD-001.
+
+    The fail-loud env wrapper the module contract prescribes: unset/blank →
+    default, the four canonical names accepted case-insensitively, anything
+    else raises (never a silent fallback).
+    """
+
+    def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
+        assert resolve_env_log_level() == "INFO"
+
+    def test_blank_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, "   ")
+        assert resolve_env_log_level() == "INFO"
+
+    def test_custom_default_respected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
+        assert resolve_env_log_level(default="WARNING") == "WARNING"
+
+    @pytest.mark.parametrize("name", ["DEBUG", "INFO", "WARNING", "ERROR"])
+    def test_canonical_names_accepted(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, name)
+        assert resolve_env_log_level() == name
+
+    @pytest.mark.parametrize(("raw", "expected"), [("debug", "DEBUG"), ("  Error  ", "ERROR")])
+    def test_case_insensitive_and_stripped(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+    ) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, raw)
+        assert resolve_env_log_level() == expected
+
+    @pytest.mark.parametrize("junk", ["TRACE", "DEBG", "15", "CRITICAL"])
+    def test_junk_raises_naming_the_var(self, monkeypatch: pytest.MonkeyPatch, junk: str) -> None:
+        # CRITICAL is deliberately junk here: the env contract is the four
+        # obvious words only (an operator silencing ERROR would hide halts).
+        monkeypatch.setenv(LOG_LEVEL_ENV, junk)
+        with pytest.raises(ValueError, match="invalid BRUTEX_LOG_LEVEL"):
+            resolve_env_log_level()
 
 
 class TestResolveLogFile:
@@ -258,3 +329,57 @@ class TestFileSink:
         assert isinstance(fh, logging.handlers.RotatingFileHandler)
         assert fh.maxBytes == 1024
         assert fh.backupCount == 2
+
+
+class TestConfigureProcessLoggingBestEffort:
+    """The spawn-worker bound — DEC-SWEEP-LOG-VOLUME-GUARD-001 R4 fold.
+
+    Best-effort by contract: junk env falls back to the INFO default (the
+    parent entries already failed loud pre-pool), an existing configuration
+    is deferred to, and ANY configuration failure is swallowed — the caller
+    (a pool initializer) must never die over logging.
+    """
+
+    def test_default_binds_info_and_suppresses_debug(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
+        assert not structlog.is_configured()
+        configure_process_logging_best_effort()
+        assert structlog.is_configured()
+        log = structlog.get_logger("worker")
+        log.debug("trade_sim.entry", idx=1)
+        log.warning("sweep.quarantine", symbol="NIFTY")
+        err = capsys.readouterr().err
+        assert "trade_sim.entry" not in err
+        assert "sweep.quarantine" in err
+
+    def test_debug_env_binds_debug(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, "DEBUG")
+        configure_process_logging_best_effort()
+        structlog.get_logger("worker").debug("trade_sim.exit", pnl_paisa=1)
+        assert "trade_sim.exit" in capsys.readouterr().err
+
+    def test_junk_env_falls_back_to_info_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, "DEBG")
+        configure_process_logging_best_effort()  # must NOT raise
+        assert structlog.is_configured()
+        structlog.get_logger("worker").debug("should_not_appear")
+        assert "should_not_appear" not in capsys.readouterr().err
+
+    def test_defers_to_existing_configuration(self, capsys: pytest.CaptureFixture[str]) -> None:
+        configure_logging(level="DEBUG", json_renderer=False)
+        configure_process_logging_best_effort()  # would bind INFO if it did not defer
+        structlog.get_logger("worker").debug("still_debug_bound")
+        assert "still_debug_bound" in capsys.readouterr().err
+
+    def test_config_failure_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(**_kw: object) -> None:
+            raise RuntimeError("configure blew up")
+
+        monkeypatch.setattr("brutex.observability.logging.configure_logging", _boom)
+        configure_process_logging_best_effort()  # must NOT raise
