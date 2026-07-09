@@ -1570,12 +1570,83 @@ dataEl.addEventListener("click", (ev) => {
   showCopyToast();
 });
 
+/* ── Candle deep-link boot handler (DEC-MOVERS-DB-PROVENANCE-VERIFY-001) ──
+   /db?candles=spot|fno&exchange=…&segment=…&symbol=…&interval=…&date=…
+   pre-selects the candle viewer to the exact coordinate a /movers source line
+   names — the click-through of the movers provenance line. A bare /db (no
+   ?candles= param) boots byte-identically to before.
+
+   Validation: `date` + `interval` are FORMAT-gated below — an invalid value
+   DROPS that param (the field falls to its default; boot never blocks).
+   `exchange`/`segment`/`symbol` are DATA-only: they flow exclusively through
+   encodeURIComponent (buildCandleUrl) and esc() (candleControlsHtml /
+   spotCascadeHtml) — the pre-existing, verified sinks; this handler adds NO
+   new innerHTML path (CodeQL XSS gate). A wrong symbol yields the honest
+   empty grid / the cascade's own "pick a symbol" prompt — never fabricated
+   data (Golden Rule #1). */
+const DL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DL_INTERVAL_RE = /^\d+(minute|hour)$|^1day$/;
+async function deepLinkCandles(q) {
+  const kind = q.get("candles");
+  const date = DL_DATE_RE.test(q.get("date") || "") ? q.get("date") : "";
+  const wantIv = DL_INTERVAL_RE.test(q.get("interval") || "") ? q.get("interval") : "";
+  const exchange = q.get("exchange") || "";
+  const segment = q.get("segment") || "";
+  const symbol = q.get("symbol") || "";
+  mode = "candles";
+  selected = null;
+  cstate.kind = kind;
+  cstate.key = null;
+  cstate.offset = 0;
+  cstate.start = date;
+  cstate.end = date;
+  markCandles();
+  if (kind === "fno") {
+    /* F&O: materialise ONE descriptor directly (the movers link pins
+       interval=1minute — the partition the F&O movers tabs actually read).
+       Documented limitation: the 3-level cascade selects show their prompt
+       state — the GRID is correct. */
+    if (!symbol) { await selectCandles("fno"); return; }
+    cstate.datasets = [{ kind: "fno", exchange: exchange, segment: "FNO",
+      symbol: symbol, interval: wantIv || "1minute" }];
+    cstate.key = dsKey(cstate.datasets[0]);
+    runCandleQuery(false);
+    return;
+  }
+  /* SPOT: load the cascade, resolve the symbol, materialise its STORED
+     intervals exactly as onSpotSymbolChange does (inlined so the default-
+     1minute query never double-fires), then pick the requested interval iff
+     stored — an unstored TF deep-links to the 1-minute base, never an empty
+     grid. The cascade selects render fully synced FROM cstate
+     (spotCascadeHtml marks `selected`). */
+  await loadSpotCascade();
+  const key = [exchange, segment, symbol].join("|");
+  const s = cstate.spot.syms.find(x => _spotKey(x) === key) || null;
+  if (!s) return;  /* no such symbol — the cascade's own honest prompt stays */
+  cstate.spot.sym = key;
+  cstate.datasets = (s.intervals || []).map(iv => ({
+    kind: "spot", exchange: s.exchange, segment: s.segment, symbol: s.symbol, interval: iv }));
+  cstate.offset = 0;
+  const pick = cstate.datasets.find(x => x.interval === wantIv)
+    || cstate.datasets.find(x => x.interval === "1minute")
+    || cstate.datasets[0];
+  cstate.key = pick ? dsKey(pick) : null;
+  if (cstate.key) runCandleQuery(false);
+}
+
 /* Boot after DOMContentLoaded so the deferred shared helpers (bx-ui.js) are
    guaranteed loaded — every boot fetch then rides the 12 s timeout. A missing
    helper file degrades gracefully (bxFetch falls back to plain fetch). */
 function boot() {
   if (window.BXUI) BXUI.initVisibilityPause();
-  loadTables();
+  const tablesLoad = loadTables();
+  /* Deep-link (DEC-MOVERS-DB-PROVENANCE-VERIFY-001): only when ?candles= names
+     a known lake kind; runs after the sidebar load settles so markCandles()
+     highlights the row. A bare /db boots byte-identically. */
+  const q = new URLSearchParams(location.search);
+  if (q.get("candles") === "spot" || q.get("candles") === "fno") {
+    Promise.resolve(tablesLoad).catch(() => {}).then(() => deepLinkCandles(q));
+  }
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
 else boot();

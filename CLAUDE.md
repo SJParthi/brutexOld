@@ -1646,7 +1646,32 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
+- **Active branch:** `claude/movers-db-provenance-verify` (**DEC-MOVERS-DB-PROVENANCE-VERIFY-001,
+  MIGRATION.md #1631** — the `/movers` data source made VISIBLE, IDENTIFIED, CLICKABLE, and
+  LIVE-VERIFIED on the page; FRONTEND-ONLY (zero Python source change, every payload key
+  byte-identical): (1) a textContent-only Source line on all three tabs naming the logical lake
+  table, scope, interval, date, as-of words, and READ MODE — spot surfaces the EXISTING #1145
+  `stored_reads`/`resampled_reads` stored-first provenance verbatim, F&O states the
+  DEC-FNO-TF-DERIVE-OI-001 constant 1m-native read + Greeks overlay; (2) the line deep-links to
+  `/db` pre-filtered via a NEW additive `?candles=spot|fno&exchange&segment&symbol&interval&date`
+  boot handler in db.html (a bare `/db` boots byte-identically; invalid `date`/`interval` DROP the
+  param; an unstored TF falls to the `1minute` base; symbol/exchange/segment are DATA-only through
+  the pre-existing encodeURIComponent/esc() sinks — no new innerHTML path); (3) a post-paint verify
+  chip cross-checks the visible top-K(=5) rows' DISPLAYED LTP (all tabs) + %CHNG (spot) against the
+  EXISTING `/api/v1/db/candles` 1-minute base — K parallel desc day-page probes (the HONEST bound
+  is K requests, no batch API exists) under ONE AbortController + 10 s timeout + a `verifyGen`
+  single-flight + 150 ms debounce + `document.hidden` skip; `✓ matches /db` green / a LOUD red
+  naming the exact cell + BOTH values (+ the actionable stale-TF remediation suffix on a
+  non-1minute display TF) / an honest `verify unavailable` — NEVER a fake green (Golden Rule #1);
+  F&O verifies LTP ONLY (disclosed; the F&O %CHNG baseline law is unproven byte-equal — named
+  follow-up DEC-MOVERS-VERIFY-FNO-PCT-001); the comparison rides the ONE shared `bxFixed2` via the
+  NEW pure node-golden'd `static/bx-verify.js` with BOTH sides Number-coerced FIRST (the /db wire
+  delivers `change_pct` as a JSON STRING — `_json_safe` stringifies Decimal; feeding it raw to
+  bxFixed2 would guarantee a false mismatch, golden-pinned). Tests: node-executed goldens over the
+  REAL bx-verify.js + bx-format.js + substring-presence pins (the honest no-browser-harness
+  envelope). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; ruff/ruff-format/`mypy --strict` clean on the new tests).
+  Earlier: `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
   the sweep CLI log-volume guard: ONE `main()`-dispatch guard configures the COMMON
   `observability/logging.configure_logging` seam at INFO by default for
   `sweep`/`sweep-all`/`sweep-daemon`, with the fail-loud `BRUTEX_LOG_LEVEL` override
@@ -3911,7 +3936,16 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/sweep-log-level-guard`
+- **Active feature branch:** `claude/movers-db-provenance-verify`
+  (DEC-MOVERS-DB-PROVENANCE-VERIFY-001, MIGRATION.md #1631 — the `/movers`
+  data source made visible, identified, clickable, and live-verified: a
+  textContent-only Source line (spot surfaces the #1145 stored/resampled read
+  provenance), a `/db?candles=…` deep-link boot handler, and a post-paint
+  top-K verify chip against the existing `/api/v1/db/candles` 1-minute base
+  riding the ONE shared bxFixed2 (NEW pure node-golden'd `bx-verify.js`);
+  FRONTEND-ONLY, READ-ONLY dashboard; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
   `main()` sweep dispatch AND inside every spawn worker
