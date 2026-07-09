@@ -220,10 +220,12 @@ DEC-ONECLICK-TOP100-OBJECT-ROOT-001 #1631). Merged with the established
 resolution: this branch's blurbs stay newest in CLAUDE.md's three regions,
 main's #1631 entry demoted to the next `Earlier:` slot; `docs/MIGRATION.md`
 auto-merged (no numbering collision — ours #1625/#1626, main's #1631). The new
-ledger entries take **#1632/#1633** (next free above live main's #1631, noted
-in each entry).
+ledger entries took the interim **#1632/#1633** (next free above the then-live
+main max #1631) — RENUMBERED to **#1655/#1656** at fixer round 1 (below): live
+main advanced to #1654 max and PR #1354 took #1632, so the interim numbers
+collided on the merged tree.
 
-### Addition B — DEC-BADTICK-HILO-SCREEN-001 (MIGRATION.md #1632)
+### Addition B — DEC-BADTICK-HILO-SCREEN-001 (MIGRATION.md #1655; interim #1632)
 
 `BadTickScreen.screen_mask` gains OPTIONAL keyword-only `highs` / `lows`
 (each independently optional; omitted = close-only, byte-identical — the
@@ -255,7 +257,7 @@ lows-only supply · exact-4× boundary · mixed-reason one-WARN breakdown ·
 legit reopen gap must-NOT-trip · omitted-kwargs byte-identity · end-to-end
 replay drops with `skip_reasons` on the wire WARN.
 
-### Addition C — DEC-READ-BOUNDARY-FINITE-001 (MIGRATION.md #1633)
+### Addition C — DEC-READ-BOUNDARY-FINITE-001 (MIGRATION.md #1656; interim #1633)
 
 NEW `brutex/data/bad_tick.py::non_finite_keep_mask` + NEW event constant
 `NON_FINITE_SKIP_EVENT = "feed.non_finite_bar_skipped"` (a DISTINCT event
@@ -267,7 +269,7 @@ the bad-tick WARN). Wired in `arrow_table_to_bars` as the FIRST screen:
   BEFORE the positivity raise; one WARN per affected session (fields: source,
   session, skipped, first_field in pinned open→high→low→close order,
   first_value as a repr STRING — inf/nan are not JSON numbers);
-- SANCTIONED CHANGE (documented in code + #1633): `-inf` moves from
+- SANCTIONED CHANGE (documented in code + #1656): `-inf` moves from
   raise-class (positivity ValueError, the pre-change whole-table crash) to
   skip-class; the positivity raise stays reserved for FINITE non-positive
   prices, byte-unchanged;
@@ -290,7 +292,7 @@ the bad-tick WARN). Wired in `arrow_table_to_bars` as the FIRST screen:
 1. **Head escape band disclosure** — already landed in rounds 2/3 (module
    docstring names `[max_ratio * min(other head closes), max_ratio * median)`
    + the ledger #1625 carries it); verified present at this HEAD, no change
-   needed beyond the #1632 restatement.
+   needed beyond the #1655 restatement.
 2. **Majority-collapse WARN doc precision** — already landed in round 2 (the
    event's doc + `_flush` comment state it cannot fire on the minimal 2-of-3 /
    2v2 shapes and over-fires on a healthy-median short session; strict gate +
@@ -370,4 +372,127 @@ the bad-tick WARN). Wired in `arrow_table_to_bars` as the FIRST screen:
   this branch (zero diff) and untouched by every commit here; an
   environment-baseline finding, 0 new from this change.
 - `validate_ledger_numbering.py` → 1249 headers OK;
+  `validate_citation_accuracy.py` → every citation accurate.
+
+## Fixer round 1 (2026-07-09) — additions-cycle review findings
+
+Ten confirmed findings from the additions-cycle review (1 BLOCKER + 3 MAJOR +
+5 MINOR + 1 NIT, several duplicated across lenses), all resolved on top of a
+fresh origin/main merge (95955a71 → 0729fee1 range; merge commit resolves the
+CLAUDE.md three-region conflict the established way — this branch's blurbs
+newest, main's #1594/#1650 demoted into the Earlier chains; MIGRATION.md
+auto-merged).
+
+### BLOCKER/MAJOR — ledger #1632/#1633 collided with live main
+
+- Live main advanced to #1654 max and PR #1354 took #1632
+  (DEC-DASHBOARD-VISUAL-OVERHAUL-001); `validate_ledger_numbering.py` exited 1
+  on the merged tree ("entry number 1632 is claimed 2x") — a guaranteed CI
+  red at the required gate.
+- Fixed by the P-1 rule + the #1546–#1550/#1580 renumber precedent:
+  DEC-BADTICK-HILO-SCREEN-001 #1632 → **#1655**, DEC-READ-BOUNDARY-FINITE-001
+  #1633 → **#1656** (= live-main max #1654 + 1/+2; the validator allows
+  gaps), with in-entry renumber notes, the #1656 "Builds on"/next-free
+  cross-refs repointed, and every cross-reference swept: CLAUDE.md top blurb
+  + §1 + §3 (with renumber parentheticals), this file's five refs. No
+  brutex/ source or test file referenced the numbers (grep-verified — DEC
+  ids only). Validator green post-edit on the merged tree (1262 headers).
+
+### MAJOR — hi/lo arm's mis-ordered raise→skip narrowing undisclosed
+
+- A mis-ordered stored bar whose corrupt field is ALSO ratio-out-of-band
+  (e.g. a ×10 LOW above its own high) was pre-additions ALWAYS kept by the
+  close-only screen and hit the DEC-STORED-DATA-VALIDATION-001 ordering
+  ValueError (loud whole-table refusal); the hi/lo arm now skips it silently
+  — a real loud→quiet contract change with no SANCTIONED CHANGE record (the
+  `-inf` twin in #1656 got one), a stale `replay.py` docstring ("an ordering
+  violation raises a LOUD ValueError"), and no test pin.
+- Fixed as DISCLOSURE + pins (the behavior stands on the merits — the bar is
+  corrupt either way and both outcomes refuse to serve it): a SANCTIONED
+  CHANGE record in #1655; the `replay.py::arrow_table_to_bars` docstring
+  scoped ("FINITE non-positive price"; the ordering raise's scope with the
+  screens ON stated); module-docstring disclosure in `bad_tick.py`; three
+  new integration pins — `test_misordered_out_of_band_low_skipped_not_raised`
+  + `test_misordered_in_band_bar_still_raises_ordering_error` +
+  `test_kill_switch_off_restores_misordered_ordering_raise`.
+
+### MAJOR/MINOR (×4 lenses) — the never-emptied head-vote claim falsified
+
+- The invariant is CLOSE-vote-only: `_judge(median, i)` also tests the
+  median-close bar's OWN high/low, so the median bar can drop and a ≤3-bar
+  session whose every head bar carries an out-of-band high/low is fully
+  EMPTIED (kept=0; reproduced) — production `arrow_table_to_bars` always
+  supplies highs/lows. Stale at `_resolve_head`'s docstring, MIGRATION.md
+  #1625, and #1655's "carried verbatim" honest-limits framing.
+- Fixed: `_resolve_head` docstring scoped to the close vote (+ the
+  median-close-still-seeds-the-baseline note); #1625 corrected IN PLACE
+  (strikethrough + [CORRECTED 2026-07-09 …#1655] note, the #208 precedent);
+  #1655's honest limits gain the emptied-session shape (loud: skip WARN
+  `skip_reasons` + majority-dropped WARN kept=0) and drop the "carried
+  verbatim" wording; CLAUDE.md top + §1 blurbs updated; three new unit pins
+  — `test_hilo_median_close_bar_dropped_for_its_own_high` +
+  `test_hilo_all_head_bars_corrupt_highs_empty_the_session` (mask all-False,
+  skip_reasons={'high': 3}, majority kept=0) +
+  `test_close_only_vote_alone_never_empties_a_session` (the counter-pin
+  scoping the corrected claim). (The out-of-tree scratchpad notes' permutation
+  table carried the same stale row — superseded by this in-repo record.)
+
+### MINOR — kill-switch-OFF envelope claim imprecise ("NaN/+inf flow raw")
+
+- Measured per field on BOTH trees (branch OFF ≡ main, case-for-case): NaN
+  in ANY OHLC field raises an UNWRAPPED `decimal.InvalidOperation` from
+  CandleBar validation; `+inf` in open/low/close raises the wrapped
+  corrupt-bar ValueError; ONLY `+inf`-in-HIGH flows raw; `-inf` raises at
+  positivity. The old summary contradicted #1656's own GAP passage.
+- Fixed (docs only, behavior unchanged): the `bad_tick.py` non-finite
+  kill-switch paragraph + the #1656 kill-switch passage + the CLAUDE.md
+  top/§1 blurbs now carry the per-field truth.
+
+### MINOR — verifier-B PR-body materials not in the ledger
+
+- The golden census (1a), the vacuous re-key note (1b), and the
+  screen-then-hash ordering citation (2) lived only in this file; the
+  requirement wants them in the PR body / ledger entry.
+- Fixed: all three folded into #1655 as a "PR-BODY MATERIALS" passage (the
+  renumber forced a ledger edit anyway), so the ship step can source ONE
+  durable record. This file's copies stand as the working duplicates.
+
+### NIT — unscoped "P-06 + suffix-independence suites pass UNMODIFIED"
+
+- The additions-cycle CLAUDE.md blurbs + commit message re-minted the claim
+  without #1625's scoping clause. Fixed: the scoping ("they do not route
+  through `arrow_table_to_bars`, so they do not certify the new screens")
+  appended at the CLAUDE.md top + §1 blurbs and in #1655's gates sentence.
+
+### Incidental (environment-verified while gating)
+
+- The additions-cycle `test_screen_then_hash_kept_set_change_self_rekeys`
+  pin carried a pyright red in THIS environment (pyright 1.1.408:
+  `list[object]` invariance on the local `_hash`) — annotation fixed to
+  `list[CandleBar]`, the now-unneeded `# type: ignore[dict-item]` dropped;
+  0 errors post-fix, test green.
+
+### Fixer round-1 gate outputs (measured 2026-07-09, this worktree, venv312)
+
+- `pytest tests/unit/test_data_bad_tick.py
+  tests/integration/test_feed_replay_bad_tick_screen.py
+  tests/integration/test_feed_replay.py -q` → 131 passed (89 + 20 + 22);
+  coverage (branch): `brutex/data/bad_tick.py` 100.00% (124/46) +
+  `brutex/feed/replay.py` 100.00% (106/34).
+- `pytest tests/property/test_lookahead_properties.py
+  tests/property/test_sweep_suffix_independence.py
+  tests/property/test_market_structure_lookahead.py -q` → 18 passed
+  UNMODIFIED (scoped: they do not certify the screens).
+- `pytest tests/golden -q` → 388 passed;
+  `git diff origin/main HEAD -- tests/golden/fixtures/` EMPTY.
+- `pytest tests/unit/test_claude_md_branch_consistency.py -q` → 10 passed
+  (post-CLAUDE.md edits).
+- `ruff check brutex tests` clean; `ruff format --check` clean on every
+  touched file.
+- `mypy --strict brutex` → Success: no issues found in 407 source files
+  (post-merge tree).
+- pyright: touched files (`bad_tick.py` + `replay.py` + both test files)
+  0 errors post the incidental fix above.
+- `validate_ledger_numbering.py` → 1262 headers OK (on the MERGED tree —
+  the pre-fix red reproduced then closed);
   `validate_citation_accuracy.py` → every citation accurate.

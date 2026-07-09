@@ -358,6 +358,7 @@ def test_screen_then_hash_kept_set_change_self_rekeys(
     # SAME stored table hashes differently with the screen ON (poison
     # dropped) vs OFF (raw bytes), proving the hash input is the screened
     # list, never the raw table (hash-before-screen would make these equal).
+    from brutex.data.models import CandleBar
     from brutex.engine.stage3_wire import data_snapshot_hash
 
     rows = [
@@ -372,13 +373,70 @@ def test_screen_then_hash_kept_set_change_self_rekeys(
     bars_raw = arrow_table_to_bars(table)
     assert len(bars_screened) == 3 < len(bars_raw) == 4  # the kept-set changed
 
-    def _hash(bars: list[object]) -> str:
+    def _hash(bars: list[CandleBar]) -> str:
         return data_snapshot_hash(
             exchange="NSE",
             segment="INDEX",
             start="2024-01-02",
             end="2024-01-03",
-            slices={("NSE-NIFTY", "1minute"): bars},  # type: ignore[dict-item]
+            slices={("NSE-NIFTY", "1minute"): bars},
         )
 
     assert _hash(bars_screened) != _hash(bars_raw)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Fixer round 1 — the mis-ordered raise→skip SANCTIONED-change pins (#1655):
+# the hi/lo arm skips a mis-ordered bar whose corrupt field is ALSO
+# ratio-out-of-band BEFORE the CandleBar ordering ValueError can fire — a
+# disclosed loud→quiet narrowing, bounded (in-band mis-ordered bars still
+# raise; screen OFF restores the raise for every mis-ordered bar).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_misordered_out_of_band_low_skipped_not_raised() -> None:
+    # A ×10-scaled LOW sitting above its own high — the typical hi/lo-corrupt
+    # CAUSE of mis-ordering. Pre-additions this bar always reached the
+    # constructor and raised the DEC-STORED-DATA-VALIDATION-001 whole-table
+    # ordering ValueError; the hi/lo arm now SKIPS it (reason 'low') and the
+    # table is served minus the bar with one skip WARN.
+    rows = [
+        (_BASE, 100.0, 105.0, 95.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.5, 105.0, 96.0, 101.0),
+        (_BASE + timedelta(minutes=2), 101.0, 106.0, 97.0, 102.0),
+        (_BASE + timedelta(minutes=3), 100.0, 101.0, 990.0, 100.0),  # LOW ×10 > high
+    ]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows), source="probe/misordered")
+    assert [float(b.close) for b in bars] == [100.0, 101.0, 102.0]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skip_reasons"] == {"low": 1}
+    assert warns[0]["first_reason"] == "low"
+
+
+def test_misordered_in_band_bar_still_raises_ordering_error() -> None:
+    # The BOUNDED side of the narrowing: a mis-ordered bar whose fields all
+    # stay IN-band is NOT the hi/lo arm's class — the loud whole-table
+    # ordering refusal still fires.
+    rows = [
+        (_BASE, 100.0, 105.0, 95.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.0, 99.0, 98.0, 100.0),  # high < open, in-band
+    ]
+    with pytest.raises(ValueError, match="corrupt stored bar"):
+        arrow_table_to_bars(_table(rows), source="probe/misordered-inband")
+
+
+def test_kill_switch_off_restores_misordered_ordering_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # OFF = the exact pre-#1616 raw read path: EVERY mis-ordered bar raises
+    # the ordering ValueError again, including the out-of-band class the arm
+    # skips when ON.
+    monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "0")
+    rows = [
+        (_BASE, 100.0, 105.0, 95.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.0, 101.0, 990.0, 100.0),  # LOW ×10, mis-ordered
+    ]
+    with pytest.raises(ValueError, match="corrupt stored bar"):
+        arrow_table_to_bars(_table(rows), source="probe/misordered-off")

@@ -170,12 +170,32 @@ bounded-multiple law (boundary = bad):
   offending BAR's close even when the trigger was its high/low);
 * omitted ``highs``/``lows`` (the default) = the close-only screen,
   byte-identical to the pre-arm behavior;
-* honest limits carry over verbatim: a 1-bar session is kept unscreened, a
-  2-bar session is kept (its highs/lows included — no confirmed reference
-  exists, so a 2-bar session's x10 high is a DISCLOSED escape), and the head
-  escape band applies to the high/low judgment identically (a
-  threshold-adjacent ~4.00-4.04x high inside ``[4·min-neighbor, 4·median)``
-  rides it; the x10 class is always caught).
+* the 1-bar / 2-bar / escape-band honest limits carry over: a 1-bar session
+  is kept unscreened, a 2-bar session is kept (its highs/lows included — no
+  confirmed reference exists, so a 2-bar session's x10 high is a DISCLOSED
+  escape), and the head escape band applies to the high/low judgment
+  identically (a threshold-adjacent ~4.00-4.04x high inside
+  ``[4·min-neighbor, 4·median)`` rides it; the x10 class is always caught);
+* ONE head-seed invariant does NOT carry over: the ``DEC-BADTICK-HEAD-SEED-001``
+  "a session can never be emptied by its own head screen" guarantee is
+  CLOSE-vote-ONLY — the hi/lo arm additionally judges the median-close bar's
+  OWN high/low, so a ≤3-bar session whose EVERY head bar carries an
+  out-of-band high/low is fully EMPTIED (kept=0; loud, never silent: the
+  skip WARN's ``skip_reasons`` breakdown + the majority-dropped WARN with
+  ``kept=0`` both fire, and each dropped bar independently carries a field
+  ``>= max_ratio``x / ``<= 1/max_ratio``x the head close-median). A median
+  bar dropped for its high/low still seeds the post-head baseline with its
+  CLOSE (the baseline-stays-close-derived law);
+* SANCTIONED CHANGE (documented, never silent — the ``-inf`` raise→skip
+  precedent below): a MIS-ORDERED stored bar whose corrupt field is ALSO
+  ratio-out-of-band versus the session reference (e.g. a x10-scaled LOW
+  above its own high — the typical hi/lo-corrupt cause of mis-ordering) is
+  now SKIPPED by this arm BEFORE the ``CandleBar`` constructor runs, so the
+  ``DEC-STORED-DATA-VALIDATION-001`` ordering ``ValueError`` (the loud
+  whole-table refusal) no longer fires for that class — a disclosed
+  loud→quiet narrowing. Bounded: a mis-ordered bar whose fields all stay
+  IN-band still raises the ordering ValueError, and the kill switch OFF
+  restores the raise for EVERY mis-ordered bar (both arms test-pinned).
 
 Non-finite screen (``DEC-READ-BOUNDARY-FINITE-001``)
 ----------------------------------------------------
@@ -203,8 +223,14 @@ prices). KILL SWITCH: SHARED with the bad-tick screen
 the switch's contract is "OFF = the exact pre-#1616 raw read path for a
 forensic replay of raw stored bytes", and a separate finite-only switch would
 mint a mixed mode with no operator story. OFF therefore restores the
-pre-#1616 behavior for non-finite values too (``-inf`` raises at positivity;
-NaN/+inf flow raw — the pre-existing envelope, disclosed).
+pre-#1616 behavior for non-finite values too — measured per field: ``-inf``
+raises at positivity again; NaN in ANY OHLC field raises an UNWRAPPED
+``decimal.InvalidOperation`` out of ``CandleBar`` validation (a crash, NOT a
+raw flow — and not even the wrapped corrupt-bar ValueError naming the
+partition); ``+inf`` in open/low/close raises the wrapped corrupt-bar
+ordering ValueError; ONLY ``+inf``-in-HIGH genuinely flows raw. The OFF
+path is byte-identical to the pre-screen tree case-for-case (the
+pre-existing envelope, unchanged — disclosed precisely).
 
 Contract (deliberately narrow, to never destroy real data):
 
@@ -593,13 +619,23 @@ class BadTickScreen:
         def _resolve_head() -> None:
             """Vote the 3 buffered head bars against their median close.
 
-            The median bar itself always survives (``is_bad_tick(m, m)`` is
-            ``False`` for any positive ``m``), so a session can never be
-            emptied by its own head screen; the post-head baseline SEEDS from
+            On the CLOSE vote the median bar itself always survives
+            (``is_bad_tick(m, m)`` is ``False`` for any positive ``m``), so
+            the CLOSE vote alone can never empty a session — but that
+            guarantee is CLOSE-vote-ONLY: with the high/low arm supplied
+            (``DEC-BADTICK-HILO-SCREEN-001`` — production always supplies
+            it), ``_judge`` also tests the median bar's OWN high/low against
+            the median close, so the median bar can itself be dropped and a
+            ≤3-bar session whose every head bar carries an out-of-band
+            high/low is fully emptied (module docstring, honest limits;
+            test-pinned). The post-head baseline SEEDS from
             the head MEDIAN — the evidence-confirmed center — never blindly
             the LAST kept head bar (round-3 review): pre-round-3 a kept
             escape-band spike at head position 3 seated the baseline and
-            cascade-dropped every healthy successor (module docstring).
+            cascade-dropped every healthy successor (module docstring). The
+            median CLOSE seeds the baseline even when the median bar itself
+            was dropped for its high/low (the baseline is a close-derived
+            quantity, never a kept-bar identity).
             """
             nonlocal baseline
             median = sorted(closes[i] for i in head)[1]

@@ -19,7 +19,9 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-09 (DEC-BADTICK-HILO-SCREEN-001 +
-DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1632–#1633 —
+DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1655–#1656 — renumbered from
+the interim #1632–#1633 at the fixer round-1 merge reconcile (main's PR
+#1354 took #1632; live-main max #1654 + 1, the P-1 rule) —
 the data-edge-guard ADDITIONS cycle on the same branch:
 (1) DEC-BADTICK-HILO-SCREEN-001 — the bad-tick screen gains the HIGH/LOW arm:
 `BadTickScreen.screen_mask` grows OPTIONAL keyword-only `highs`/`lows`
@@ -37,11 +39,22 @@ reason never advances the baseline; reason precedence pinned close→high→low
 (a both-scaled fat-range bar counts once, as `high`); hi/lo skips FOLD into
 the one per-session skip WARN's `skipped` count, which gains the ADDITIVE
 `skip_reasons` per-reason map + `first_reason` fields (existing fields keep
-name + meaning); `replay.py` passes the table's highs/lows. Honest limits
-carried verbatim: 1-bar/2-bar sessions kept INCLUDING their highs/lows (no
-confirmed reference — a 2-bar session's x10 high is a disclosed escape,
-pinned); the head escape band `[4·min-neighbor, 4·median)` applies to the
-hi/lo judgment identically. The audit-3 permutation suite is pinned: HIGH-only
+name + meaning); `replay.py` passes the table's highs/lows. Honest limits:
+the #1625 1-bar/2-bar/escape-band limits carry over — 1-bar/2-bar sessions
+kept INCLUDING their highs/lows (no confirmed reference — a 2-bar session's
+x10 high is a disclosed escape, pinned); the head escape band
+`[4·min-neighbor, 4·median)` applies to the hi/lo judgment identically —
+but the #1625 "a session can never be emptied by its own head vote"
+invariant is CLOSE-vote-ONLY (fixer round 1): the arm judges the
+median-close bar's OWN high/low, so a ≤3-bar session whose every head bar
+carries an out-of-band high/low is fully EMPTIED (kept=0, skip WARN +
+majority-dropped WARN both fire; the dropped median's CLOSE still seeds the
+baseline; #1625 corrected in place, pinned). SANCTIONED CHANGE (fixer
+round 1): a MIS-ORDERED stored bar whose corrupt field is ratio-out-of-band
+is now SKIPPED by the arm BEFORE the DEC-STORED-DATA-VALIDATION-001
+ordering ValueError — a disclosed loud→quiet narrowing for that class
+(in-band mis-ordered bars still raise; screen OFF restores the raise for
+every mis-ordered bar — both pinned, #1655). The audit-3 permutation suite is pinned: HIGH-only
 x10 / LOW-only ÷10 / both-scaled fat-range, poison at position {0,1,last},
 head permutations, hi/lo-skip-never-advances-baseline, legit reopen gap
 must-not-trip, omitted-kwargs byte-identity.
@@ -60,7 +73,11 @@ positivity ValueError) to skip-class; the positivity raise stays reserved for
 FINITE non-positive prices, byte-unchanged. Kill switch DECISION: SHARED
 (`BRUTEX_BAD_TICK_SCREEN`, one gate for the whole read-boundary screen
 family) — OFF = the exact pre-#1616 raw read path for forensic replay
-(`-inf` then raises at positivity again, pinned); no second env knob.
+(`-inf` then raises at positivity again, pinned; the rest of the OFF
+envelope measured per field, fixer round 1: NaN raises an UNWRAPPED
+`decimal.InvalidOperation`, `+inf` in open/low/close the wrapped corrupt-bar
+ValueError, ONLY `+inf`-in-HIGH flows raw — byte-identical to main, #1656);
+no second env knob.
 PLUS the fix-forward completeness items: the first-day-Muhurat abstain WARN
 is now test-pinned as stream-START across ALL SIX real Muhurat dates
 (2020-2025) × both weekly anchors, and the resident-KERNEL bar_bits path
@@ -75,10 +92,12 @@ byte-identical (kill switch OFF = the pre-#1616 bytes; screen ON over clean
 data = unchanged — all goldens pass unmodified, the frozen 400-case
 vocab_golden_vectors.json byte-untouched); `bad_tick.py` + `replay.py` +
 `stage1a.py` ALL 100% line+branch (re-measured at this HEAD); P-06 +
-suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
+suffix-independence suites pass UNMODIFIED (scoped per #1625: they do not
+route through `arrow_table_to_bars`, so they do not certify the new
+screens); ruff/ruff-format clean, `mypy
 --strict` clean, pyright at the merged-main baseline. Any
 per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
-#1632–#1633 — this header carries outcome summaries, never the
+#1655–#1656 — this header carries outcome summaries, never the
 round-by-round story.)
 Earlier: 2026-07-09 (DEC-BADTICK-HEAD-SEED-001 +
 DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001, MIGRATION.md #1625 —
@@ -1973,7 +1992,9 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/data-edge-guard-fixes` (**DEC-BADTICK-HILO-SCREEN-001 +
-  DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1632–#1633** — the ADDITIONS cycle
+  DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1655–#1656** (renumbered from the
+  interim #1632–#1633 at the fixer round-1 merge reconcile — main's PR #1354
+  took #1632) — the ADDITIONS cycle
   on the same branch: (1) the bad-tick screen's HIGH/LOW arm — `screen_mask`
   gains OPTIONAL keyword-only `highs`/`lows` (omitted = close-only,
   byte-identical); a bar whose high OR low is out-of-band vs the session's
@@ -1986,14 +2007,25 @@ hostile-review pass._
   `skipped` + ADDITIVE `skip_reasons`/`first_reason` fields; `replay.py`
   passes the table's highs/lows; 1-bar/2-bar sessions stay kept incl. their
   highs/lows (disclosed) and the `[4·min-neighbor, 4·median)` head escape
-  band applies identically. (2) NEW `bad_tick.non_finite_keep_mask` —
+  band applies identically — but the #1625 never-emptied-by-its-own-head-vote
+  invariant is CLOSE-vote-ONLY (fixer round 1): the arm can drop the
+  median-close bar for its own out-of-band high/low, so a ≤3-bar session
+  whose every head bar carries one is fully EMPTIED (kept=0, both WARNs
+  fire; #1625 corrected in place, pinned); and SANCTIONED (fixer round 1): a
+  mis-ordered stored bar whose corrupt field is ratio-out-of-band is skipped
+  by the arm BEFORE the DEC-STORED-DATA-VALIDATION-001 ordering ValueError —
+  a disclosed loud→quiet narrowing (in-band mis-ordered bars still raise;
+  screen OFF restores the raise — both pinned). (2) NEW `bad_tick.non_finite_keep_mask` —
   inf/-inf/nan OHLC at `arrow_table_to_bars` is skipped-and-counted BEFORE
   the positivity raise (NaN compares false — it sailed past the raise AND
   blinded the ratio screen; non-finite rows are FILTERED out of the ratio
   screen's input, test-pinned), one NEW `feed.non_finite_bar_skipped` WARN
   per session; SANCTIONED CHANGE: `-inf` moves from raise-class to
   skip-class; kill switch SHARED (`BRUTEX_BAD_TICK_SCREEN` — OFF = the exact
-  pre-#1616 raw read path, `-inf` then raises again, pinned). Plus the
+  pre-#1616 raw read path, `-inf` then raises again, pinned; the OFF envelope
+  measured per field, fixer round 1: NaN raises an unwrapped
+  `decimal.InvalidOperation`, `+inf` in open/low/close the wrapped
+  corrupt-bar ValueError, only `+inf`-in-HIGH flows raw — #1656). Plus the
   fix-forward completeness items: first-day-Muhurat abstain WARN pinned as
   stream-START across ALL SIX Muhurat dates × both weekly anchors; the
   resident-KERNEL bar_bits path (`ResidentSweepKernel`/`ResidentKernelCache.get`
@@ -2002,7 +2034,9 @@ hostile-review pass._
   build. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
   no scope/vocab/rate-cap/lake-schema/stored-bar change; `bad_tick.py` +
   `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
-  suffix-independence + golden suites pass UNMODIFIED; the frozen 400-case
+  suffix-independence + golden suites pass UNMODIFIED (scoped per #1625: the
+  P-06/suffix suites do not route through `arrow_table_to_bars`, so they do
+  not certify the new screens); the frozen 400-case
   fixture byte-untouched; ruff/ruff-format/`mypy --strict` clean, pyright at
   the merged-main baseline.)
   Earlier (same branch): (**DEC-BADTICK-HEAD-SEED-001 +
@@ -5002,7 +5036,8 @@ hostile-review pass._
 
 - **Active feature branch:** `claude/data-edge-guard-fixes`
   (DEC-BADTICK-HILO-SCREEN-001 + DEC-READ-BOUNDARY-FINITE-001,
-  MIGRATION.md #1632–#1633 — the additions cycle: (1) the bad-tick screen's
+  MIGRATION.md #1655–#1656 (renumbered from the interim #1632–#1633; main's
+  PR #1354 took #1632) — the additions cycle: (1) the bad-tick screen's
   HIGH/LOW arm (optional keyword-only `highs`/`lows` on `screen_mask`; an
   out-of-band high/low skips the whole bar even with a sane close — the
   DATA-3b PDH-poison class; additive `skip_reasons`/`first_reason` WARN

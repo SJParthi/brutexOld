@@ -284,11 +284,19 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     of the constructor's ordering / ``volume >= 0`` invariants. A corrupt
     stored bar (e.g. a legacy pre-#912 partition holding an internally-ordered
     NEGATIVE bar the round-2 audit reproduced as a day_low of −1000) can never
-    silently enter the engine: a non-positive price OR an ordering violation
-    raises a LOUD :class:`ValueError` naming *source* (the partition
+    silently enter the engine: a FINITE non-positive price OR an ordering
+    violation raises a LOUD :class:`ValueError` naming *source* (the partition
     coordinates, when the caller knows them) plus the offending bar's
     timestamp — the graceful per-symbol error surface the ingest/prebuild
-    quarantines already handle. Positivity is checked HERE rather than in the
+    quarantines already handle. SCOPE of the ordering raise with the screens
+    ON (``DEC-BADTICK-HILO-SCREEN-001``, a documented SANCTIONED narrowing):
+    a mis-ordered bar whose corrupt field is ALSO ratio-out-of-band versus
+    the session's bad-tick reference is SKIPPED by the hi/lo arm BEFORE the
+    constructor runs (one ``feed.bad_tick_skipped`` WARN — never a raise),
+    and a non-finite field is skipped by the non-finite screen; the ordering
+    raise fires for mis-ordered bars whose fields stay IN-band, and for
+    EVERY mis-ordered bar when ``BRUTEX_BAD_TICK_SCREEN`` is off (both
+    test-pinned). Positivity is checked HERE rather than in the
     constructor because the bar container is legitimately used to hold a
     non-positive price for downstream corrupt-input classification (the Greeks
     ``BAD_INPUT`` path, the executor ``require_tradeable_price`` guard, the

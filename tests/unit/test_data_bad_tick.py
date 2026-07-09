@@ -1050,3 +1050,70 @@ def test_non_finite_length_mismatch_raises() -> None:
         non_finite_keep_mask([_D1], [1.0], [1.0], [1.0], [1.0, 2.0])
     with pytest.raises(ValueError, match="length mismatch"):
         non_finite_keep_mask([_D1, _D2], [1.0], [1.0], [1.0], [1.0])
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Fixer round 1 (DEC-BADTICK-HILO-SCREEN-001 disclosure pins): the #1625
+# "a session can never be emptied by its own head vote" invariant is
+# CLOSE-vote-ONLY — the hi/lo arm judges the median-close bar's OWN high/low,
+# so the median bar can itself drop and a ≤3-bar session whose every head bar
+# carries an out-of-band high/low is fully EMPTIED (loud: skip WARN with the
+# per-reason breakdown + the majority-dropped WARN with kept=0).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_hilo_median_close_bar_dropped_for_its_own_high() -> None:
+    # The median-CLOSE bar (position 2 of the head) carries a ×10 high: it is
+    # itself dropped — the close-only never-emptied invariant does NOT extend
+    # to the hi/lo arm — while its CLOSE still seeds the post-head baseline
+    # (baseline stays close-derived), so every healthy successor survives.
+    rows = [
+        _healthy(_D1, 100.0),
+        (_D1, 101.0, 1010.0, 96.0),  # the median-close bar; high ×10
+        _healthy(_D1, 102.0),
+        _healthy(_D1, 103.0),
+        _healthy(_D1, 104.0),
+    ]
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [True, False, True, True, True]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skip_reasons"] == {"high": 1}
+    # The dropped median's close (101.0) is the post-head baseline reference.
+    assert warns[0]["first_ref_close"] == 101.0
+
+
+def test_hilo_all_head_bars_corrupt_highs_empty_the_session() -> None:
+    # Every head bar of a 3-bar session carries a ×10 high over sane,
+    # mutually-consistent closes: the whole session is EMPTIED (kept=0) — the
+    # documented CLOSE-vote-only scope of the never-emptied invariant — and
+    # BOTH WARNs fire (the skip WARN with skip_reasons={'high': 3} + the
+    # majority-dropped WARN with kept=0). Each dropped bar independently
+    # carries a field ≥4x the head close-median, so no clean bar is lost.
+    rows = [
+        (_D1, 100.0, 1000.0, 99.0),
+        (_D1, 100.1, 1001.0, 99.0),
+        (_D1, 100.2, 1002.0, 99.0),
+    ]
+    with capture_logs() as logs:
+        mask = _hilo_mask(rows)
+    assert mask == [False, False, False]
+    skip_warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(skip_warns) == 1
+    assert skip_warns[0]["skipped"] == 3
+    assert skip_warns[0]["skip_reasons"] == {"high": 3}
+    majority = [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    assert len(majority) == 1
+    assert majority[0]["kept"] == 0
+    assert majority[0]["skipped"] == 3
+
+
+def test_close_only_vote_alone_never_empties_a_session() -> None:
+    # The counter-pin scoping the corrected claim: with highs/lows OMITTED
+    # (the close-only vote) the same session shape keeps its median bar —
+    # the CLOSE vote alone can never empty a session.
+    days = [_D1, _D1, _D1]
+    closes = [100.0, 100.1, 100.2]
+    with capture_logs():
+        mask = BadTickScreen().screen_mask(days, closes)
+    assert mask == [True, True, True]
