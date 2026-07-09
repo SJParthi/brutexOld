@@ -710,10 +710,15 @@ def run_results_depth_pass(
         + round 2 M1). A ``SweepComboError``-failed tuple genuinely never wrote
         a store (it raised before the store flush and was NOT cache-recorded),
         so its bars-present missing store is expected. This allowance is a
-        COUNT (not identities) DELIBERATELY: it is RUN-SCOPED + freshly computed
-        each run + can never OVER-claim (a failed tuple is ALWAYS missing), so
-        unlike the durable quarantine sidecar it cannot go stale and launder a
-        deletion. The no-bars class (round 1 M2) + the quarantined-prior class
+        COUNT (not identities) DELIBERATELY: it is RUN-SCOPED + freshly
+        computed each run, so unlike the durable quarantine sidecar it cannot
+        go stale across runs. HONEST SCOPE: it cannot over-claim for
+        COMPLETED-run tuples (a completed tuple's dedup-cache record prevents
+        a re-dispatch, so a tuple that failed THIS run wrote no store this
+        run); the disclosed residual is a crash inside the store-write →
+        cache-record window — the re-dispatched tuple can fail this run while
+        its PRIOR-run store exists, granting one count an unrelated deletion
+        could consume. The no-bars class (round 1 M2) + the quarantined-prior class
         (round 2 M1, ``quarantined_labels`` below) are attributed SEPARATELY and
         are NOT part of this count. A bars-present, not-quarantined missing
         count beyond this allowance is UNEXPLAINED (partial store deletion or a

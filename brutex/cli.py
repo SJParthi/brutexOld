@@ -6429,8 +6429,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 "silently-holed data (PDH/PDL/pivot/Fib anchors poisoned across the hole, "
                 "bits 6-29+48-51, and the run identity would hash the partial series as "
                 f"canonical, Golden Rule #4): {', '.join(shown)}{more}. Remedy: "
-                "quarantine/heal (brutex lake audit-unique) or re-pull the named months, "
-                "then re-run.",
+                "quarantine/heal (brutex lake audit-unique), re-pull the named months, "
+                "or restore read permissions (chmod/chown) if the file is "
+                "permission-blocked, then re-run.",
                 file=sys.stderr,
             )
             import structlog
@@ -6923,8 +6924,13 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 margin_entry_date=_parse_dt(start).date(),
                 # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2 +
                 # round 2 M1): the RUN-SCOPED FAILED allowance ONLY (a
-                # SweepComboError-failed tuple genuinely never wrote a store —
-                # run-scoped, freshly computed, can never over-claim). The
+                # SweepComboError-failed tuple wrote no store THIS run —
+                # run-scoped, freshly computed; it cannot over-claim for
+                # completed-run tuples, whose dedup-cache record prevents a
+                # re-dispatch; a crash inside the store-write → cache-record
+                # window is the disclosed residual — the re-dispatched tuple
+                # can fail while its prior-run store exists, granting one
+                # consumable count). The
                 # quarantined-prior class is NO LONGER summed here — it is
                 # attributed BY IDENTITY in the pass via quarantined_labels
                 # (below): a durable sidecar COUNT could go stale (its clear is

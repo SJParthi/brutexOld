@@ -160,6 +160,9 @@ def test_corrupt_month_refuses_launch(tmp_path: Path, capsys: pytest.CaptureFixt
     assert "REFUSED" in err
     assert "corrupt" in err
     assert "02.parquet" in err  # the Feb file is named
+    # The remedy names the permission fix too — `unreadable` includes the
+    # non-ENOENT OSError (permission/EIO) shape, not just corrupt decodes.
+    assert "restore read permissions" in err
     events = [e for e in logs if e["event"] == "sweep_launch.corrupt_partitions_refused"]
     assert len(events) == 1
     assert any("02.parquet" in f for f in events[0]["files"])
