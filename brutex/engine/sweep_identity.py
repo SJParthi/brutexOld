@@ -36,32 +36,39 @@ class _GateConfigInput(Protocol):
     FROZEN :class:`SweepGridConfig` (its attributes are read-only) satisfies the
     Protocol structurally — a writable attribute member would be invariant and
     reject the frozen dataclass.
+
+    Member bodies ``raise NotImplementedError`` (the
+    :mod:`brutex.orchestrator.supervisor` Protocol-stub form): a docstring-only
+    body implicitly returns ``None`` and trips pyright's ``reportReturnType``
+    on the non-``None`` members, while a trailing ``...`` after the docstring
+    is CodeQL ``py/ineffectual-statement``. The raise is coverage-excluded
+    (``exclude_lines``) and never executes — Protocol members are structural.
     """
 
     @property
     def overfit(self) -> OverfitGateConfig | None:
         """The overfit gate config, or ``None`` when the gate is off."""
-        ...
+        raise NotImplementedError
 
     @property
     def stage3_enable(self) -> bool:
         """Whether the Stage-3 refinement pass is enabled."""
-        ...
+        raise NotImplementedError
 
     @property
     def stage3_top_k(self) -> int:
         """Number of top finalists Stage-3 refines."""
-        ...
+        raise NotImplementedError
 
     @property
     def stage3_max_fevals(self) -> int:
         """Per-finalist function-evaluation budget for Stage-3."""
-        ...
+        raise NotImplementedError
 
     @property
     def stage3_max_restarts(self) -> int:
         """Per-finalist restart budget for Stage-3."""
-        ...
+        raise NotImplementedError
 
 
 def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
