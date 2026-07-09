@@ -206,6 +206,27 @@
       <label for="fTop">Top N</label>
       <input id="fTop" type="number" min="1" max="500" value="50" />
     </div>
+    <!-- Serving-side floors (DEC-RESULTS-TRUST-HONESTY-001 · B2a): operator
+         CONTROLS over a board already MIN_TRADES=30 pre-gated by construction.
+         Blank = inactive (the byte-identical legacy payload). A junk value is
+         a clean 400 from the route, surfaced by the error card. min CPCV is
+         honestly NOT offered — no per-row CPCV value is stored. -->
+    <div class="ctl">
+      <label for="fMinTrades">Min trades</label>
+      <input id="fMinTrades" type="number" min="0" step="1" placeholder="any" />
+    </div>
+    <div class="ctl">
+      <label for="fMinPf">Min PF</label>
+      <input id="fMinPf" type="number" min="0" step="any" placeholder="any" />
+    </div>
+    <div class="ctl">
+      <label for="fMinDsr" title="floors the TUPLE-scoped DSR column (see the legend)">Min DSR (tuple-N)</label>
+      <input id="fMinDsr" type="number" min="0" step="any" placeholder="any" />
+    </div>
+    <div class="ctl">
+      <label for="fMaxDd">Max |DD| %</label>
+      <input id="fMaxDd" type="number" min="0" step="any" placeholder="any" />
+    </div>
     <button class="refreshbtn" id="refreshBtn" title="Re-read the sweep leaderboard">&#x21bb; Refresh</button>
   </div>
 
@@ -251,6 +272,10 @@
     shown unlabeled; DSR @ search N is the Stage-4 cascade's own filter-#2 figure at
     its recorded trial population (hover the cell for N + source; a "pool"-sourced
     figure shares the under-count and pairs with the ~ provisional badge).
+    The Min trades / Min PF / Min DSR / Max |DD| floors are OPERATOR controls over a
+    board already min-trades-gated at rank time — Min DSR floors the tuple-N column.
+    A † on the rank marks a row failing a persisted hard door on serve-time re-check
+    (a legacy or non-gated store row) — marked, never dropped.
   </div>
 
   <div class="foot">
@@ -289,6 +314,10 @@ const fTf = document.getElementById("fTf");
 const fDirection = document.getElementById("fDirection");
 const fRankBy = document.getElementById("fRankBy");
 const fTop = document.getElementById("fTop");
+const fMinTrades = document.getElementById("fMinTrades");
+const fMinPf = document.getElementById("fMinPf");
+const fMinDsr = document.getElementById("fMinDsr");
+const fMaxDd = document.getElementById("fMaxDd");
 
 let ROWS = [];               // the current leaderboard rows (already ranked server-side)
 let sortKey = "rank";        // active client-side sort column
@@ -401,7 +430,13 @@ function cascadeBadge(r) {
 /* The sortable columns: key → (header label, cell renderer). The server already
    ranked by the chosen metric; client-side sort re-orders the fetched page only. */
 const COLS = [
-  ["rank", "#", (r) => '<span class="rank">' + num(r.rank) + "</span>"],
+  /* The hard_gates_recheck belt (B2a): a "marked" row keeps its rank but is
+     flagged † — MARK, never drop (legacy/non-gated stores stay visible). The
+     marker is a client literal chosen by an exact string compare. */
+  ["rank", "#", (r) => '<span class="rank">' + num(r.rank)
+    + (r.hard_gates_recheck === "marked"
+      ? ' <span title="fails a persisted hard door on re-check (min-trades / PF / max-DD) — a legacy or non-gated store row">†</span>'
+      : "") + "</span>"],
   ["instrument", "Instrument", (r) => '<span class="sym">' + esc(r.instrument) + "</span>"],
   ["tf", "TF", (r) => esc(r.tf)],
   ["direction", "Dir", (r) => esc(r.direction)],
@@ -723,6 +758,12 @@ async function load() {
   if (!isFinite(top) || top < 1) top = 50;
   if (top > 500) top = 500;
   params.set("top", String(top));
+  /* B2a serving-side floors: sent ONLY when non-blank (blank = the
+     byte-identical legacy request; the server validates the value). */
+  if (fMinTrades.value.trim()) params.set("min_trades", fMinTrades.value.trim());
+  if (fMinPf.value.trim()) params.set("min_pf", fMinPf.value.trim());
+  if (fMinDsr.value.trim()) params.set("min_dsr", fMinDsr.value.trim());
+  if (fMaxDd.value.trim()) params.set("max_abs_dd_pct", fMaxDd.value.trim());
   const url = "/api/v1/sweep/leaderboard?" + params.toString();
   try {
     const r = await (window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url));
@@ -779,7 +820,7 @@ async function load() {
 }
 
 [fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });
-fTop.onchange = load;
+[fTop, fMinTrades, fMinPf, fMinDsr, fMaxDd].forEach((el) => { el.onchange = load; });
 document.getElementById("refreshBtn").onclick = load;
 /* First load waits for DOMContentLoaded so the deferred bx-ui.js helpers are
    available (defer scripts run before DOMContentLoaded); everything above also

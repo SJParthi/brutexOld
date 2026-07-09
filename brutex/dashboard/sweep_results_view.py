@@ -69,6 +69,7 @@ zero store loads + zero audit reads; a repeat poll is an O(1) cache hit.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -87,6 +88,7 @@ from brutex.engine.cascade_wire import (
 from brutex.engine.period_stats import decode_judged_years, decode_period_stats, year_key
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
 from brutex.money import format_inr, paisa_to_rupees
+from brutex.ranking import persisted_hard_gates_recheck
 from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_preset
 from brutex.ranking.temporal import year_gate_diagnostic
 
@@ -106,6 +108,8 @@ __all__ = [
     "SweepScan",
     "build_sweep_leaderboard",
     "load_sweep_scan",
+    "parse_filter_float",
+    "parse_filter_int",
     "resolve_preset_param",
     "store_error_payload",
 ]
@@ -483,6 +487,86 @@ def resolve_preset_param(preset: str | None) -> str | None:
     if token in PRESETS:
         return token
     raise ValueError(f"unknown ranking preset {token!r}; valid presets: {', '.join(PRESET_NAMES)}")
+
+
+# ── Serving-side filter floors (DEC-RESULTS-TRUST-HONESTY-001 · B2a) ──
+# OPERATOR CONTROLS, not a missing gate: the persisted boards are already
+# MIN_TRADES=30 pre-gated by construction (passes_gates runs at rank time);
+# these floors let the operator TIGHTEN a served view. Absent params are
+# byte-identical to the legacy payload (pinned). ``min_cpcv`` is honestly NOT
+# offered — no per-row CPCV value is persisted anywhere the view can read
+# (the cascade's CPCV verdict is a stage token, not a rate), and fabricating
+# one would violate Golden Rule #1.
+
+
+def parse_filter_float(name: str, raw: str | None) -> float | None:
+    """Parse one optional non-negative FLOAT filter param; junk raises ``ValueError``.
+
+    ``None``/blank → ``None`` (filter inactive — the byte-identical legacy
+    arm). A non-numeric, non-finite, or negative token raises a
+    :class:`ValueError` naming the parameter — the route maps it to a clean
+    400 (the ``resolve_preset_param`` refusal law: an explicit operator value
+    must refuse loudly, never be silently dropped).
+    """
+    if raw is None:
+        return None
+    token = raw.strip()
+    if not token:
+        return None
+    try:
+        value = float(token)
+    except ValueError as exc:
+        raise ValueError(f"invalid {name} value {token!r}: expected a number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"invalid {name} value {token!r}: expected a finite value >= 0")
+    return value
+
+
+def parse_filter_int(name: str, raw: str | None) -> int | None:
+    """Parse one optional non-negative INT filter param; junk raises ``ValueError``.
+
+    The integer twin of :func:`parse_filter_float` (same blank/None/refusal
+    contract; a fractional token like ``"30.5"`` is junk for a trade COUNT).
+    """
+    if raw is None:
+        return None
+    token = raw.strip()
+    if not token:
+        return None
+    try:
+        value = int(token)
+    except ValueError as exc:
+        raise ValueError(f"invalid {name} value {token!r}: expected an integer") from exc
+    if value < 0:
+        raise ValueError(f"invalid {name} value {token!r}: expected an integer >= 0")
+    return value
+
+
+def _passes_serve_filters(
+    row: ResultRow,
+    *,
+    min_trades: int | None,
+    min_pf: float | None,
+    min_dsr: float | None,
+    max_abs_dd_pct: float | None,
+) -> bool:
+    """Whether *row* clears every ACTIVE serving-side floor (inactive = pass).
+
+    Fail-closed under an ACTIVE floor (Golden Rule #1): a row that cannot
+    DEMONSTRATE the floor is excluded from that filtered view — a ``None``
+    ``profit_factor`` under ``min_pf``, a ``None`` ``deflated_sharpe`` under
+    ``min_dsr`` (the TUPLE-scoped figure; the page labels it so), and a
+    non-finite ``max_drawdown_pct`` under ``max_abs_dd_pct`` (NaN fails the
+    ``<=`` by construction). Exclusion here is the operator's explicit
+    request, never a silent drop — the unfiltered view still shows every row.
+    """
+    if min_trades is not None and row.total_trades < min_trades:
+        return False
+    if min_pf is not None and (row.profit_factor is None or not row.profit_factor >= min_pf):
+        return False
+    if min_dsr is not None and (row.deflated_sharpe is None or not row.deflated_sharpe >= min_dsr):
+        return False
+    return not (max_abs_dd_pct is not None and not abs(row.max_drawdown_pct) <= max_abs_dd_pct)
 
 
 def _preset_rank_record(row: ResultRow) -> RankRecord:
@@ -892,6 +976,18 @@ def _project_row(
         "total_trades": row.total_trades,
         "winning_trades": row.winning_trades,
         "losing_trades": row.losing_trades,
+        # The serve-time hard-gate RE-CHECK belt (DEC-RESULTS-TRUST-HONESTY-001
+        # · B2a): "ok" | "marked" over the persisted doors via the ONE ranking
+        # predicate home — MARK, never drop (the snapshot_era pattern; protects
+        # legacy/non-gated stores). "marked" ⇒ the full rank-time gate would
+        # also reject; "ok" is necessary-not-sufficient (doors 4-5 need
+        # unpersisted inputs — see persisted_hard_gates_recheck).
+        "hard_gates_recheck": persisted_hard_gates_recheck(
+            total_trades=row.total_trades,
+            profit_factor=row.profit_factor,
+            max_drawdown_pct=row.max_drawdown_pct,
+            win_rate=row.win_rate,
+        ),
     }
     projected.update(_temporal_row_keys(row))
     projected.update(_cascade_row_keys(verdict))
@@ -919,6 +1015,10 @@ def build_sweep_leaderboard(
     top_n: int = DEFAULT_TOP_N,
     scan: SweepScan | None = None,
     preset: str | None = None,
+    min_trades: int | None = None,
+    min_pf: float | None = None,
+    min_dsr: float | None = None,
+    max_abs_dd_pct: float | None = None,
 ) -> SweepLeaderboard:
     """Build the ranked sweep leaderboard for the ``/results`` page.
 
@@ -959,6 +1059,16 @@ def build_sweep_leaderboard(
         ``run_id``-ASC deterministic ties, the exact ``ResultsStore.top_k``
         two-pass idiom); an unknown token raises ``ValueError`` naming the
         valid values (the route maps it to a clean 400).
+    min_trades, min_pf, min_dsr, max_abs_dd_pct
+        Optional serving-side floors (DEC-RESULTS-TRUST-HONESTY-001 · B2a) —
+        OPERATOR CONTROLS over an already-gated board, applied with the
+        axis filters before ranking (``total_rows`` counts the filtered
+        survivors). ``None`` (the default) = inactive = byte-identical legacy
+        output (pinned). ``min_dsr`` floors the TUPLE-scoped
+        ``deflated_sharpe`` (the page's label law); a row that cannot
+        demonstrate an active floor is excluded from that view — see
+        :func:`_passes_serve_filters`. ``min_cpcv`` is deliberately NOT
+        offered (no per-row CPCV value is persisted — never fabricated).
 
     Returns
     -------
@@ -978,7 +1088,16 @@ def build_sweep_leaderboard(
         scan = load_sweep_scan(lake_root)
 
     filtered = [
-        r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
+        r
+        for r in scan.rows
+        if _matches(r, instrument=instrument, tf=tf, direction=direction)
+        and _passes_serve_filters(
+            r,
+            min_trades=min_trades,
+            min_pf=min_pf,
+            min_dsr=min_dsr,
+            max_abs_dd_pct=max_abs_dd_pct,
+        )
     ]
     if resolved_preset is None:
         # Deterministic rank: by the chosen column descending, ties broken by run_id

@@ -37,3 +37,24 @@ def test_max_dd_pct_is_never_rescaled() -> None:
 def test_risk_columns_sort_numerically() -> None:
     html = _render_results_html()
     assert '"calmar_ratio", "max_drawdown_pct", "expectancy_paisa"' in html
+
+
+def test_results_ships_the_serve_filter_controls() -> None:
+    """B2a: the four serving-side floor inputs exist and are sent only when
+    non-blank (blank = the byte-identical legacy request)."""
+    html = _render_results_html()
+    for input_id in ("fMinTrades", "fMinPf", "fMinDsr", "fMaxDd"):
+        assert f'id="{input_id}"' in html
+    assert 'params.set("min_trades", fMinTrades.value.trim())' in html
+    assert 'params.set("min_pf", fMinPf.value.trim())' in html
+    assert 'params.set("min_dsr", fMinDsr.value.trim())' in html
+    assert 'params.set("max_abs_dd_pct", fMaxDd.value.trim())' in html
+    assert "Min DSR (tuple-N)" in html
+
+
+def test_hard_gates_recheck_marks_never_hides() -> None:
+    """The † marker renders on an exact string compare — MARK, never drop."""
+    html = _render_results_html()
+    assert 'r.hard_gates_recheck === "marked"' in html
+    assert "fails a persisted hard door on re-check" in html
+    assert "marked, never dropped" in html

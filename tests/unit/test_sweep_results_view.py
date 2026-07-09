@@ -25,6 +25,8 @@ from brutex.dashboard.sweep_results_view import (
     SweepLeaderboard,
     build_sweep_leaderboard,
     load_sweep_scan,
+    parse_filter_float,
+    parse_filter_int,
 )
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.money import format_inr
@@ -631,3 +633,85 @@ def test_prescanned_scan_is_ranked_without_a_rescan(tmp_path: Path) -> None:
     board = build_sweep_leaderboard(tmp_path, scan=scan)
     assert board == build_sweep_leaderboard(tmp_path)
     assert [r["sharpe_ratio"] for r in board.rows] == [2.5, 0.5]
+
+
+class TestServeFiltersAndRecheck:
+    """DEC-RESULTS-TRUST-HONESTY-001 · B2a — serving-side floors + the
+    hard-gate re-check belt (operator CONTROLS over an already-gated board)."""
+
+    def test_absent_filters_are_byte_identical_legacy(self, tmp_path: Path) -> None:
+        """No filter kwargs == explicit None kwargs — the pinned legacy arm."""
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[_row(seed=1)])
+        legacy = build_sweep_leaderboard(tmp_path).to_dict()
+        with_none = build_sweep_leaderboard(
+            tmp_path, min_trades=None, min_pf=None, min_dsr=None, max_abs_dd_pct=None
+        ).to_dict()
+        assert legacy == with_none
+
+    def test_min_trades_floor_filters_and_counts(self, tmp_path: Path) -> None:
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, total_trades=10), _row(seed=2, total_trades=60)],
+        )
+        board = build_sweep_leaderboard(tmp_path, min_trades=30)
+        assert [r["total_trades"] for r in board.rows] == [60]
+        assert board.total_rows == 1
+
+    def test_min_pf_and_max_abs_dd_floors(self, tmp_path: Path) -> None:
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[_row(seed=1)])
+        # profit_factor is 2.0 and max_drawdown_pct 0.05 on the fixture row.
+        assert build_sweep_leaderboard(tmp_path, min_pf=2.5).total_rows == 0
+        assert build_sweep_leaderboard(tmp_path, min_pf=2.0).total_rows == 1
+        assert build_sweep_leaderboard(tmp_path, max_abs_dd_pct=0.01).total_rows == 0
+        assert build_sweep_leaderboard(tmp_path, max_abs_dd_pct=0.05).total_rows == 1
+
+    def test_min_dsr_excludes_rows_that_cannot_demonstrate_it(self, tmp_path: Path) -> None:
+        """The fixture rows persist NO deflated_sharpe (None) — under an ACTIVE
+        min_dsr floor they are excluded (fail-closed on the operator's explicit
+        request; the unfiltered view still shows them)."""
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[_row(seed=1)])
+        assert build_sweep_leaderboard(tmp_path).total_rows == 1
+        assert build_sweep_leaderboard(tmp_path, min_dsr=0.0).total_rows == 0
+
+    def test_hard_gates_recheck_marks_never_drops(self, tmp_path: Path) -> None:
+        """A sub-MIN_TRADES legacy row is SERVED with hard_gates_recheck
+        "marked"; a door-passing row reads "ok" (the snapshot_era pattern)."""
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, total_trades=10), _row(seed=2, total_trades=60)],
+        )
+        board = build_sweep_leaderboard(tmp_path)
+        by_trades = {r["total_trades"]: r["hard_gates_recheck"] for r in board.rows}
+        assert by_trades == {10: "marked", 60: "ok"}
+        assert board.total_rows == 2  # marked, NEVER dropped
+
+
+class TestFilterParamParsers:
+    """parse_filter_int / parse_filter_float — blank inactive, junk refused."""
+
+    def test_none_and_blank_are_inactive(self) -> None:
+        assert parse_filter_int("min_trades", None) is None
+        assert parse_filter_int("min_trades", "  ") is None
+        assert parse_filter_float("min_pf", None) is None
+        assert parse_filter_float("min_pf", "") is None
+
+    def test_valid_tokens_parse(self) -> None:
+        assert parse_filter_int("min_trades", " 30 ") == 30
+        assert parse_filter_float("min_pf", "1.5") == 1.5
+        assert parse_filter_float("min_dsr", "0") == 0.0
+
+    @pytest.mark.parametrize("raw", ["abc", "30.5", "-1", "1e999"])
+    def test_int_junk_raises_naming_the_param(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="min_trades"):
+            parse_filter_int("min_trades", raw)
+
+    @pytest.mark.parametrize("raw", ["abc", "-0.1", "nan", "inf", "1e999"])
+    def test_float_junk_raises_naming_the_param(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="max_abs_dd_pct"):
+            parse_filter_float("max_abs_dd_pct", raw)

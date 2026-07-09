@@ -242,6 +242,8 @@ from brutex.dashboard.sweep_results_view import (
     SweepScan,
     build_sweep_leaderboard,
     load_sweep_scan,
+    parse_filter_float,
+    parse_filter_int,
     resolve_preset_param,
     store_error_payload,
 )
@@ -6213,6 +6215,10 @@ def build_app(
         top: int = Query(
             default=SWEEP_LEADERBOARD_DEFAULT_TOP_N, ge=1, le=SWEEP_LEADERBOARD_MAX_TOP_N
         ),
+        min_trades: str | None = Query(default=None),
+        min_pf: str | None = Query(default=None),
+        min_dsr: str | None = Query(default=None),
+        max_abs_dd_pct: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/sweep/leaderboard — the ranked brute-force sweep winners (DEC-DASHBOARD-RESULTS-PAGE-001).
 
@@ -6253,6 +6259,19 @@ def build_app(
             ``brutex.ranking`` (this route only validates + threads the token).
         top
             Leaderboard depth (1..500; default 50).
+        min_trades, min_pf, min_dsr, max_abs_dd_pct
+            OPTIONAL serving-side floors (DEC-RESULTS-TRUST-HONESTY-001 ·
+            B2a) — operator CONTROLS over a board that is ALREADY
+            MIN_TRADES=30 pre-gated by construction, not a missing gate.
+            Accepted as raw strings and parsed EAGERLY through the view's
+            fail-loud parsers (junk / non-finite / negative → a clean 400
+            naming the parameter — the ``preset`` refusal law; FastAPI's own
+            type coercion would 422, so the parse is explicit). Absent/blank
+            = inactive = the byte-identical legacy payload (pinned).
+            ``min_dsr`` floors the TUPLE-scoped ``deflated_sharpe`` (labeled
+            so on the page); ``min_cpcv`` is honestly NOT offered — no
+            per-row CPCV value is persisted anywhere this view can read, and
+            fabricating one is refused (Golden Rule #1).
 
         **Store-fault degrade (DEC-SWEEP-RESULTS-DEPTH-001, C3):** a typed
         :class:`~brutex.engine.results_store.ResultsStoreError` escaping the
@@ -6293,6 +6312,12 @@ def build_app(
         # values; None/blank resolves to None = the byte-identical legacy path.
         try:
             resolved_preset = resolve_preset_param(preset)
+            # B2a serving-side floors — parsed EAGERLY (before any threadpool
+            # hop / cache-key build) through the view's fail-loud parsers.
+            f_min_trades = parse_filter_int("min_trades", min_trades)
+            f_min_pf = parse_filter_float("min_pf", min_pf)
+            f_min_dsr = parse_filter_float("min_dsr", min_dsr)
+            f_max_abs_dd_pct = parse_filter_float("max_abs_dd_pct", max_abs_dd_pct)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -6309,6 +6334,10 @@ def build_app(
                 rank_by=rank_by,
                 top_n=top,
                 preset=resolved_preset,
+                min_trades=f_min_trades,
+                min_pf=f_min_pf,
+                min_dsr=f_min_dsr,
+                max_abs_dd_pct=f_max_abs_dd_pct,
             )
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
@@ -6332,6 +6361,10 @@ def build_app(
                     rank_by=rank_by,
                     top_n=top,
                     preset=resolved_preset,
+                    min_trades=f_min_trades,
+                    min_pf=f_min_pf,
+                    min_dsr=f_min_dsr,
+                    max_abs_dd_pct=f_max_abs_dd_pct,
                 ).to_dict()
 
             if rev is None:
@@ -6357,10 +6390,17 @@ def build_app(
             # share ONE slot because both resolve to None). The revision rides
             # in the KEY at a fixed generation=0 (the `_nav_latency_key`
             # precedent); the LRU ages out old revisions.
+            # The RESOLVED filter floors ride the key (parsed values, so
+            # "30" and " 30 " share one slot; absent floors read the stable
+            # empty token = the legacy slot).
             key = (
                 f"sweep_leaderboard|rev={rev}|i={(instrument or '').casefold()}"
                 f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
                 f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+                f"|mt={'' if f_min_trades is None else f_min_trades}"
+                f"|mp={'' if f_min_pf is None else f_min_pf!r}"
+                f"|md={'' if f_min_dsr is None else f_min_dsr!r}"
+                f"|xd={'' if f_max_abs_dd_pct is None else f_max_abs_dd_pct!r}"
             )
             return _sweep_leaderboard_cache.get_or_compute(
                 key,
@@ -6374,6 +6414,10 @@ def build_app(
                     top_n=top,
                     scan=scan,
                     preset=resolved_preset,
+                    min_trades=f_min_trades,
+                    min_pf=f_min_pf,
+                    min_dsr=f_min_dsr,
+                    max_abs_dd_pct=f_max_abs_dd_pct,
                 ).to_dict(),
             )
 
