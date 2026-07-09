@@ -314,3 +314,19 @@ def partition_for_timestamp(ts: datetime) -> tuple[int, int]:
         )
     utc = ts.astimezone(tz=UTC)
     return (utc.year, utc.month)
+
+
+def option_partition_stem(year: int, month: int) -> str:
+    """The canonical zero-padded stem of one expired-options month partition.
+
+    THE one source of the ``options/<series>/<YYYY>-<MM>.parquet`` stem format
+    (CLAUDE.md §11 COMMON — a hostile-review NIT found the f-string duplicated
+    at four load-bearing sites: ``OptionParquetWriter.write``'s destination,
+    ``lake_invariants._option_file_month``'s canonical-stem check,
+    ``lake_invariants._canonical_option_keys``'s sibling path and
+    ``lake_heal._heal_option_foreign``'s reassignment destination — a drift in
+    any one would desynchronise routing from addressing). Pure formatting; the
+    inverse parse (+ its canonical-form/bounds gates) lives in
+    ``lake_invariants._option_file_month``.
+    """
+    return f"{year:04d}-{month:02d}"

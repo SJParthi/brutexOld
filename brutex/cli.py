@@ -654,7 +654,7 @@ def build_parser() -> argparse.ArgumentParser:
     lake_audit.add_argument(
         "--no-options",
         action="store_true",
-        help="Skip the expired-options tree (options/<series>/ dup census)",
+        help="Skip the expired-options tree (options/<series>/ dup/foreign/overlap census)",
     )
 
     # ── reopen-skipped (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) — un-cement settles ──
@@ -2184,14 +2184,13 @@ def cmd_lake_audit_unique(
             f"{'foreign':>9}{'overlap':>9}{'drift-dirs':>12}"
         )
         for row in census.segments:
-            if row.segment == OPTIONS_SEGMENT:
-                # Foreign/overlap/drift are OUT of the options-tree census scope
-                # (a named DEC-LAKE-HEAL-001 follow-up) — shown as "-", never a fake 0.
-                foreign, overlap, drift = "-", "-", "-"
-            else:
-                foreign = str(row.foreign_files)
-                overlap = str(row.overlap_files)
-                drift = str(row.drift_dirs)
+            # Foreign/overlap are REAL for the options tree since
+            # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 (closed the DEC-LAKE-HEAL-001
+            # named follow-up); drift stays "-" — honestly N/A, no
+            # legacy-key-drift concept exists for series dirs.
+            foreign = str(row.foreign_files)
+            overlap = str(row.overlap_files)
+            drift = "-" if row.segment == OPTIONS_SEGMENT else str(row.drift_dirs)
             print(
                 f"{row.segment:<9}{row.files:>7}{row.clean:>7}{row.dup_files:>6}"
                 f"{foreign:>9}{overlap:>9}{drift:>12}"
