@@ -1514,10 +1514,12 @@ def test_fetch_windows_template_renders_status_label() -> None:
     """The /coverage/windows page renders the server's honesty label.
 
     String-presence pins: the row builder reads ``r.status_label``, renders it
-    through the page's ``esc()`` escaping convention, and — when the label is
-    present — REPLACES the legacy x/3 streak span (the label carries the same
-    clean-attempt count; never printed twice). The legacy streak widget survives
-    as the fallback for an older payload.
+    VERBATIM through the page's createElement + ``textContent`` discipline
+    (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A converted the former
+    ``esc()``+innerHTML build — no HTML interpolation remains), and — when the
+    label is present — REPLACES the legacy x/3 streak span (the label carries
+    the same clean-attempt count; never printed twice). The legacy streak
+    widget survives as the fallback for an older payload.
     """
     template = (
         Path(__file__).resolve().parents[2]
@@ -1527,7 +1529,7 @@ def test_fetch_windows_template_renders_status_label() -> None:
         / "fetch_windows.html"
     ).read_text(encoding="utf-8")
     assert "r.status_label" in template
-    assert "esc(label)" in template  # escaped, never raw interpolation
+    assert "textContent = label" in template  # textContent write, never HTML interpolation
     assert "label && label !== v" in template  # replace-not-double-print guard
     assert "r.empty_streak" in template  # the legacy fallback widget is kept
 
