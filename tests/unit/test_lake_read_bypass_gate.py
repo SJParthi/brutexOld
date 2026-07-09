@@ -51,6 +51,17 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/data/lake_day_glob.py": "wired: both day readers route through dedup_bars_frame",
     "brutex/data/spot_join.py": "wired: spot_close_by_ts_window dedups before the map build",
     "brutex/data/greeks_enrich.py": "wired: read_option_rows dedups the merged frame",
+    "brutex/data/greeks_backfill.py": (
+        "stamp-staleness probe — a bounded greeks_provenance_id COLUMN read per "
+        "month file (no OHLCV bar rows served); the RAW read DETECTS a stale "
+        "stamp on ANY physical row, but every TARGETING judgment runs over the "
+        "driver's row view (_driver_row_view: own-UTC-month bound + the COMMON "
+        "dedup_bars_frame keep-first — read_option_rows' exact per-file "
+        "discipline), because a stamp only a dropped dup/foreign row carries is "
+        "driver-unactionable and would loop false-green forever; such staleness "
+        "folds into stale_unfixable + one loud WARN naming lake_heal "
+        "(DEC-GREEKS-BULK-REENRICH-001 fix round 7)"
+    ),
     "brutex/data/spot_daily_resample.py": (
         "1m->1d derive read — its own frame-level dedup self-heal (DEC-PULL-FORENSIC-WAVE3-001)"
     ),
@@ -88,6 +99,16 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     # IMMEDIATELY, exactly as the superseded doctor.py entry did.
     "brutex/data/tf_autoderive.py": "wired: read_lake_bars_frame dedups",
     "brutex/engine/results_store.py": "results-tree Parquet (run_id-keyed), not the bar lake",
+    "brutex/engine/trade_store.py": (
+        "results-depth engine sidecars (trades/aggs/equity, run_id-keyed, "
+        "byte-locked writer/reader pair under sweep_runs/) — not lake bars; "
+        "dedup identity does not apply (DEC-SWEEP-RESULTS-DEPTH-001)"
+    ),
+    "brutex/engine/results_depth_pass.py": (
+        "reads back the SAME stamp-validated engine sidecars trade_store "
+        "writes (aggs join + twin entry-ts sets) — engine artifacts, not "
+        "lake bars (DEC-SWEEP-RESULTS-DEPTH-001)"
+    ),
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
         "bar/options lake — dedup identity does not apply"
