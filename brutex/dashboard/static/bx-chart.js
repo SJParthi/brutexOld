@@ -140,12 +140,27 @@ function bxEquitySeries(trades) {
   var cum = 0;
   var invalid = 0;
   var overflow = false;
+  var nullCosts = 0;
   for (var i = 0; i < trades.length; i++) {
     var pnl = trades[i].pnl_paisa;
     var costs = trades[i].costs_paisa;
+    /* Ruling-18 NULL-BY-DESIGN costs ([W2-4] DEC-ONECLICK-TOP100-OBJECT-
+       ROOT-001): every production trade row carries costs_paisa:null until
+       P5's futures translation — folding null into the non-integer bucket
+       EXCLUDED every real trade (empty equity, "0 trades"). A null cost is
+       a KNOWN-unverified cost, not a corrupt number: it contributes ₹0 and
+       is COUNTED (null_cost_rows) so the renderer labels the curve
+       "gross of null costs" — never silently, never fabricated. */
+    var nullCost = costs === null || costs === undefined;
+    if (nullCost) {
+      costs = 0;
+    }
     if (!Number.isSafeInteger(pnl) || !Number.isSafeInteger(costs)) {
       invalid += 1; // counted, never silently coerced (R27 no invented numbers)
       continue;
+    }
+    if (nullCost) {
+      nullCosts += 1;
     }
     var next = cum + (pnl - costs);
     if (!Number.isSafeInteger(next)) {
@@ -160,7 +175,8 @@ function bxEquitySeries(trades) {
     final_paisa: cum,
     empty: false,
     overflow: overflow,
-    invalid_rows: invalid
+    invalid_rows: invalid,
+    null_cost_rows: nullCosts
   };
 }
 

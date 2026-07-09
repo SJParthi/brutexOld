@@ -145,7 +145,7 @@ class TestEquitySeries:
             "empty": True,
             "overflow": False,
             "invalid_rows": 0,
-        }
+        }  # the empty fast path predates null_cost_rows — shape pinned as-is
 
     def test_fixture_trades_cumsum_matches_the_python_int_oracle(self) -> None:
         """The REAL 412-row fixture trades through the REAL JS vs pure-int Python."""
@@ -181,6 +181,37 @@ class TestEquitySeries:
         out = _node_call("C.equitySeries(ARGS[0])", json.dumps(rows))
         assert out["invalid_rows"] == 1
         assert [p["cum_paisa"] for p in out["points"]] == [100, 125]
+
+    def test_null_costs_count_at_zero_never_into_the_invalid_bucket(self) -> None:
+        """[W2-4] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: Ruling-18 NULL-BY-DESIGN
+        ``costs_paisa: null`` (every production trade row until P5) previously
+        fell into the non-integer bucket — 3 real rows produced an EMPTY
+        equity curve. Null costs now contribute ₹0 and are COUNTED in the
+        additive ``null_cost_rows`` so the renderer labels the curve gross."""
+        rows = [
+            {"pnl_paisa": 100, "costs_paisa": None},
+            {"pnl_paisa": 101, "costs_paisa": None},
+            {"pnl_paisa": 102, "costs_paisa": None},
+        ]
+        out = _node_call("C.equitySeries(ARGS[0])", json.dumps(rows))
+        assert out["invalid_rows"] == 0  # by-design null is NOT corrupt
+        assert out["null_cost_rows"] == 3
+        assert [p["cum_paisa"] for p in out["points"]] == [100, 201, 303]
+        assert out["final_paisa"] == 303
+
+    def test_absent_costs_key_counts_like_null(self) -> None:
+        rows = [{"pnl_paisa": 100}, {"pnl_paisa": 50, "costs_paisa": 10}]
+        out = _node_call("C.equitySeries(ARGS[0])", json.dumps(rows))
+        assert out["null_cost_rows"] == 1
+        assert [p["cum_paisa"] for p in out["points"]] == [100, 140]
+
+    def test_non_integer_costs_still_fall_into_the_invalid_bucket(self) -> None:
+        """The invalid bucket keeps its teeth for GENUINE non-integers."""
+        rows = [{"pnl_paisa": 100, "costs_paisa": 0.5}]
+        out = _node_call("C.equitySeries(ARGS[0])", json.dumps(rows))
+        assert out["invalid_rows"] == 1
+        assert out["null_cost_rows"] == 0
+        assert out["points"] == []
 
 
 class TestFunnelPct:

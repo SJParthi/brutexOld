@@ -40,11 +40,14 @@ the writer shape (object root + engine metric names; SHAs refreshed
 deliberately); NEW writer→reader golden drives the ACTUAL `build_top100` →
 `write_top100` → `load_top100` → routes chain. Fold [11]: visible sort-basis
 labels on /results AND the one-click surfaces (labels only, neither sort
-changed). Fold [11]-sibling: the /results `?preset=` tie-break now enriches
-the two non-persisted R30 axes from the persisted top100 artifacts
-(`_load_preset_tiebreak_axes` — engine values MIRRORED, never recomputed;
-no-artifact lakes byte-equivalent; payload honesty `preset_tiebreak_rows` +
-view-wide `preset_inert_axes`). Fold [12]: `runs_revision` folds per-run
+changed; the preset tie-break divergence itself is RULED design-sanctioned —
+inert axes wire-disclosed per #1617 Ruling 10, the /results UI sends no
+`?preset=`, negative-pinned). Folds [W2-4]/[W2-5]: Ruling-18
+`costs_paisa:null` no longer folds into the non-integer bucket (equity +
+R44 arithmetic count null costs at ₹0 with the honest "gross of those
+costs" caveat — 3 real rows previously read an EMPTY curve / "0 trades");
+the /screener count line's numerator is the RENDERED count, naming the
+render cap. Fold [12]: `runs_revision` folds per-run
 manifest stat tokens so an in-place `suspect` rewrite moves the cached
 runs-listing key (O(run dirs) stats per poll, stated). DISPLAY zone only —
 ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), engine writer byte-untouched;
@@ -1691,9 +1694,10 @@ hostile-review pass._
   `deflated_sharpe`→`dsr`, `total_trades`→`trades`; absent `cpcv_pass_pct` stays absent → honest "—",
   never a fabricated 0); fixtures REGENERATED from the writer shape; NEW writer→reader golden
   (engine `build_top100`→`write_top100` → display `load_top100` → routes). Folds: [11] visible
-  sort-basis labels on /results + the one-click surfaces (labels only); [11]-sibling — the /results
-  `?preset=` tie-break enriches composite/max_consecutive_losses from the persisted top100 artifacts
-  (mirrored engine values, never recomputed; no-artifact lakes byte-equivalent); [12] —
+  sort-basis labels on /results + the one-click surfaces (labels only — the preset tie-break
+  divergence is RULED design-sanctioned per #1617 Ruling 10, `?preset=` UI exposure negative-pinned);
+  [W2-4] — Ruling-18 null costs count at ₹0 with the honest gross-curve caveat instead of excluding
+  every real trade; [W2-5] — the /screener count line names the render cap; [12] —
   `runs_revision` folds per-run manifest stat tokens (an in-place `suspect` rewrite moves the cached
   runs-listing key). DISPLAY zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), engine writer
   byte-untouched; both oneclick modules 100% line+branch standalone.)
@@ -3967,8 +3971,9 @@ hostile-review pass._
   `top100.json` reader-adopts-writer blocker fix: object root + the ONE
   reader-boundary metric-key map + writer→reader golden + fixture corpus
   regenerated from the writer shape; folds [11] sort-basis labels,
-  [11]-sibling preset tie-break parity, [12] runs-listing manifest-token
-  cache key; DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  [W2-4] null-cost gross-equity honesty, [W2-5] screener render-cap count,
+  [12] runs-listing manifest-token cache key; DISPLAY zone only;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI

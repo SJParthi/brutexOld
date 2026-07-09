@@ -69,15 +69,13 @@ zero store loads + zero audit reads; a repeat poll is an O(1) cache hit.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, TypeAlias
+from typing import Any, Final
 
 import structlog
 
-from brutex.dashboard import oneclick_artifacts
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
 from brutex.money import format_inr, paisa_to_rupees
@@ -107,26 +105,6 @@ __all__ = [
 #: mirrors :func:`brutex.dashboard.sweep_runner.default_results_root`
 #: (``<lake>/sweeps``), the SAME tree the CLI ``sweep-all`` writes (CLAUDE.md §11).
 SWEEPS_DIRNAME: Final[str] = "sweeps"
-
-#: The :class:`~brutex.ranking.presets.RankRecord` axes NOT persisted on
-#: :class:`~brutex.engine.results_store.ResultRow`. Since
-#: DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (the [11]-sibling fold) they are
-#: ENRICHED per row from the persisted ``sweep_runs/*/top100.json`` artifact
-#: metrics (the ENGINE-written ``composite_score`` /
-#: ``max_consecutive_losses`` — MIRRORED values, never recomputed here), so a
-#: preset tie between two artifact-covered rows now breaks EXACTLY as the
-#: one-click Top-100 breaks it (previously ties fell straight to ``run_id``
-#: ASC and /results rank-1 could differ from one-click rank-1 under the SAME
-#: preset). A row absent from every artifact keeps the constant no-signal
-#: values (``None`` composite / ``0`` losses — ordering-inert, never
-#: fabricated); an axis with ZERO enriched rows in the filtered view is
-#: surfaced on the payload (``preset_inert_axes``) so a preset-ranked view
-#: never pretends it discriminated (Golden Rule #10).
-PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
-
-#: run_id → (composite_score, max_consecutive_losses) harvested from the
-#: persisted top100 artifacts (see :func:`_load_preset_tiebreak_axes`).
-TiebreakAxes: TypeAlias = Mapping[str, tuple[float | None, int | None]]  # noqa: UP040
 
 #: Default leaderboard depth when the caller does not specify one.
 DEFAULT_TOP_N: Final[int] = 50
@@ -258,22 +236,17 @@ class SweepLeaderboard:
     mixed_snapshot_eras: bool
     run_id_conflicts: int
     preset: str | None = None
-    preset_inert_axes: tuple[str, ...] = PRESET_INERT_AXES
-    preset_tiebreak_rows: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serialisable payload for the ``/api/v1/sweep/leaderboard`` route.
 
         With no preset applied the payload is BYTE-IDENTICAL to the pre-preset
         shape (no new keys — the absent/blank arm of gap-register ruling 10 is
-        pinned by test). A preset-ranked payload gains exactly THREE additive
-        keys: ``preset`` (the applied token), ``preset_inert_axes`` (the
+        pinned by test). A preset-ranked payload gains exactly TWO additive
+        keys: ``preset`` (the applied token) and ``preset_inert_axes`` (the
         honest names of the :class:`~brutex.ranking.presets.RankRecord` axes
-        that stayed constant-filled VIEW-WIDE — empty once the top100-artifact
-        harvest enriched them, see :func:`_preset_rank_record` /
-        :func:`_load_preset_tiebreak_axes`), and ``preset_tiebreak_rows`` (how
-        many filtered rows carried artifact-harvested tie-break values —
-        DEC-ONECLICK-TOP100-OBJECT-ROOT-001 [11]-sibling fold).
+        that are NOT persisted on :class:`~brutex.engine.results_store.ResultRow`
+        and were therefore constant-filled — see :func:`_preset_rank_record`).
         """
         payload: dict[str, Any] = {
             "available": self.available,
@@ -291,8 +264,7 @@ class SweepLeaderboard:
         }
         if self.preset is not None:
             payload["preset"] = self.preset
-            payload["preset_inert_axes"] = list(self.preset_inert_axes)
-            payload["preset_tiebreak_rows"] = self.preset_tiebreak_rows
+            payload["preset_inert_axes"] = list(PRESET_INERT_AXES)
         return payload
 
 
@@ -325,12 +297,6 @@ class SweepScan:
     snapshot_hashes
         The sorted distinct eras recorded for the coordinates the discovered
         rows cover (empty = honest "no signal").
-    tiebreak_axes
-        run_id → (``composite_score``, ``max_consecutive_losses``) harvested
-        from the persisted ``sweep_runs/*/top100.json`` artifacts — the R30
-        preset tie-break enrichment (see :func:`_load_preset_tiebreak_axes`);
-        empty when no artifact exists (rows then rank with the inert
-        constants, exactly the pre-fold behaviour).
     """
 
     rows: tuple[ResultRow, ...]
@@ -342,7 +308,6 @@ class SweepScan:
     timeframes: tuple[str, ...]
     directions: tuple[str, ...]
     snapshot_hashes: tuple[str, ...]
-    tiebreak_axes: TiebreakAxes = field(default_factory=dict)
 
 
 def load_sweep_scan(lake_root: Path) -> SweepScan:
@@ -392,69 +357,7 @@ def load_sweep_scan(lake_root: Path) -> SweepScan:
         timeframes=timeframes,
         directions=directions,
         snapshot_hashes=snapshot_hashes,
-        tiebreak_axes=_load_preset_tiebreak_axes(lake_root),
     )
-
-
-def _load_preset_tiebreak_axes(lake_root: Path) -> dict[str, tuple[float | None, int | None]]:
-    """Harvest run_id → (composite, max_consecutive_losses) from the top100 artifacts.
-
-    The [11]-sibling fold (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): the engine's
-    run-end pass PERSISTS the two non-``ResultRow`` R30 tie-break axes inside
-    every ``sweep_runs/<grid>/top100.json`` entry's ``metrics``
-    (``composite_score`` from the agg, ``max_consecutive_losses`` from the
-    captured trades). This reads them back through the SAME validating
-    display reader (:func:`brutex.dashboard.oneclick_artifacts.load_top100` —
-    no second parse dialect) so a preset-ranked /results view breaks ties
-    with the EXACT values the one-click Top-100 used — mirrored, never
-    recomputed (recomputing the population-z composite over a different row
-    population would fabricate different numbers).
-
-    Deterministic: run dirs iterate name-sorted and a duplicate run_id is
-    first-wins (the ``_load_rows_resilient`` precedent). Honest envelope
-    (Golden Rule #10): O(run dirs × ≤100 entries) once per cached scan
-    revision; a composite harvested from grid A is z-normalised over A's own
-    pool — it serves ONLY as a tie-break WITHIN equal primary keys, exactly
-    the role it plays in that grid's artifact; rows in NO artifact keep the
-    inert constants. An unreadable tree/dir/artifact contributes nothing —
-    never a raise on the /results path.
-    """
-    axes: dict[str, tuple[float | None, int | None]] = {}
-    root = oneclick_artifacts.runs_root(lake_root / SWEEPS_DIRNAME)
-    try:
-        entries = list(os.scandir(root))
-    except OSError:
-        return axes
-    names: list[str] = []
-    for entry in entries:
-        try:
-            if entry.is_dir():
-                names.append(entry.name)
-        except OSError:
-            continue
-    for name in sorted(names):
-        result = oneclick_artifacts.load_top100(root / name)
-        if result.status not in ("ok", "partial"):
-            continue
-        for row in result.rows:
-            rid = row.get("run_id")
-            if not isinstance(rid, str) or not rid or rid in axes:
-                continue
-            # load_top100 already validated metrics IS an object (its
-            # inner-shape gate) — no second isinstance needed here.
-            metrics = row["metrics"]
-            raw_comp = metrics.get("composite_score")
-            comp = (
-                float(raw_comp)
-                if isinstance(raw_comp, int | float) and not isinstance(raw_comp, bool)
-                else None
-            )
-            raw_mcl = metrics.get("max_consecutive_losses")
-            mcl = raw_mcl if isinstance(raw_mcl, int) and not isinstance(raw_mcl, bool) else None
-            if comp is None and mcl is None:
-                continue
-            axes[rid] = (comp, mcl)
-    return axes
 
 
 def _resolve_rank_by(rank_by: str | None) -> str:
@@ -483,9 +386,16 @@ def _clamp_top_n(top_n: int) -> int:
 # preset home, CLAUDE.md §11 COMMON); this surface only VALIDATES the query
 # token and PROJECTS a persisted ResultRow onto the preset's RankRecord.
 
-# (PRESET_INERT_AXES + TiebreakAxes are defined with the module constants
-# above — they are referenced as dataclass defaults, so they must exist
-# before SweepLeaderboard's class body executes.)
+#: The :class:`~brutex.ranking.presets.RankRecord` axes NOT persisted on
+#: :class:`~brutex.engine.results_store.ResultRow` — constant-filled by
+#: :func:`_preset_rank_record` so they are INERT for every row (ordering falls
+#: through to the next preset key, ultimately ``run_id`` ASC). Surfaced on the
+#: payload (``preset_inert_axes``) so a preset-ranked view never pretends those
+#: axes discriminated (Golden Rule #10): notably the ``composite`` preset
+#: currently orders by ``run_id`` alone — the recomputed composite lives in the
+#: (row ⋈ aggregate) top-100 artifact build, and joining the aggregate sidecars
+#: here is merge-integration work, NOT silently faked per-row values.
+PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
 
 
 def resolve_preset_param(preset: str | None) -> str | None:
@@ -511,29 +421,23 @@ def resolve_preset_param(preset: str | None) -> str | None:
     raise ValueError(f"unknown ranking preset {token!r}; valid presets: {', '.join(PRESET_NAMES)}")
 
 
-def _preset_rank_record(row: ResultRow, axes: TiebreakAxes) -> RankRecord:
+def _preset_rank_record(row: ResultRow) -> RankRecord:
     """Project one persisted :class:`ResultRow` onto the preset rank inputs.
 
     The persisted full-precision metrics map 1:1 (NEVER rounded — CLAUDE.md §4;
     raw floats, no coercion). The two :data:`PRESET_INERT_AXES` fields are NOT
-    persisted on ``ResultRow``: since the [11]-sibling fold
-    (DEC-ONECLICK-TOP100-OBJECT-ROOT-001) they are filled from *axes* — the
-    ENGINE-persisted top100-artifact values harvested by
-    :func:`_load_preset_tiebreak_axes` — so a tie between two artifact-covered
-    rows breaks exactly as the one-click Top-100 breaks it (the R30 law,
-    mirrored not re-derived). A row absent from every artifact keeps the
-    CONSTANT no-signal values (``None`` composite — the presets module's
-    honest "unscored" state — and ``0`` consecutive losses), which can never
-    reorder anything; its ties fall through to the store's ``run_id``-ASC law
+    persisted on ``ResultRow``: they are filled with the CONSTANT no-signal
+    values (``None`` composite — the presets module's honest "unscored" state —
+    and ``0`` consecutive losses), IDENTICAL for every row, so they can never
+    reorder anything; ties fall through to the store's ``run_id``-ASC law
     inside :func:`~brutex.ranking.presets.sort_by_preset`. Constants are not
     fabricated per-row data — they are never displayed, only ordering-inert.
     """
-    comp, mcl = axes.get(row.run_id, (None, None))
     return RankRecord(
         run_id=row.run_id,
         max_drawdown_pct=row.max_drawdown_pct,
-        composite_score=comp,
-        max_consecutive_losses=0 if mcl is None else mcl,
+        composite_score=None,
+        max_consecutive_losses=0,
         profit_factor=row.profit_factor,
         win_rate=row.win_rate,
         calmar_ratio=row.calmar_ratio,
@@ -895,8 +799,6 @@ def build_sweep_leaderboard(
     filtered = [
         r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
     ]
-    preset_tiebreak_rows = 0
-    preset_inert_axes: tuple[str, ...] = PRESET_INERT_AXES
     if resolved_preset is None:
         # Deterministic rank: by the chosen column descending, ties broken by run_id
         # ascending (the SAME total order ResultsStore.top_k uses — Golden Rule #4), so
@@ -907,27 +809,9 @@ def build_sweep_leaderboard(
         # THIN preset adapter (ruling 10): the ENTIRE ordering law — key,
         # direction, run_id-ASC tie pre-sort — lives in brutex.ranking.presets;
         # this call site only projects the persisted rows (raw full-precision
-        # values + the artifact-harvested tie-break axes, see
-        # _preset_rank_record) and never re-derives a ranking rule.
-        axes = scan.tiebreak_axes
+        # values, see _preset_rank_record) and never re-derives a ranking rule.
         ordered = list(
-            sort_by_preset(
-                filtered,
-                preset=PRESETS[resolved_preset],
-                record_of=lambda r: _preset_rank_record(r, axes),
-            )
-        )
-        # Payload honesty: count the rows that carried artifact-harvested
-        # tie-break values and name any axis that stayed inert VIEW-WIDE.
-        harvested = [axes[r.run_id] for r in filtered if r.run_id in axes]
-        preset_tiebreak_rows = len(harvested)
-        preset_inert_axes = tuple(
-            axis
-            for axis, enriched in (
-                ("composite_score", any(comp is not None for comp, _ in harvested)),
-                ("max_consecutive_losses", any(mcl is not None for _, mcl in harvested)),
-            )
-            if not enriched
+            sort_by_preset(filtered, preset=PRESETS[resolved_preset], record_of=_preset_rank_record)
         )
     rows = tuple(
         _project_row(r, rank, snapshot_era=_row_snapshot_era(r, scan.eras))
@@ -948,6 +832,4 @@ def build_sweep_leaderboard(
         mixed_snapshot_eras=len(scan.snapshot_hashes) > 1,
         run_id_conflicts=scan.run_id_conflicts,
         preset=resolved_preset,
-        preset_inert_axes=preset_inert_axes,
-        preset_tiebreak_rows=preset_tiebreak_rows,
     )

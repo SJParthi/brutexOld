@@ -274,9 +274,15 @@
     var wrap = byId('scShowAllWrap');
     wrap.hidden = state.showAll || sorted.length <= RENDER_CAP;
     // Count line: the DENOMINATOR is the payload's row_count — never an
-    // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3).
+    // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3);
+    // the NUMERATOR is the count actually RENDERED — when the render cap
+    // truncated the table it says so ([W2-5] DEC-ONECLICK-TOP100-OBJECT-
+    // ROOT-001: "500 of 500 shown" over a 200-row table was a lie).
     var total = state.rowCount === null ? '?' : String(state.rowCount);
-    var line = String(sorted.length) + ' of ' + total + ' shown';
+    var line = String(cap) + ' of ' + total + ' shown';
+    if (cap < sorted.length) {
+      line += ' (render cap ' + String(RENDER_CAP) + ' — use Show all)';
+    }
     if (applied.null_vix_excluded > 0) {
       line += ' ' + window.BXScreener.nullVixNote(applied.null_vix_excluded);
     }

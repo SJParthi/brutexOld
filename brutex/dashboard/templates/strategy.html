@@ -403,6 +403,11 @@
     var bits = ['per-trade close equity — minute-path equity lands with P3'];
     if (series.overflow) { bits.push('OVERFLOW: curve truncated at the safe-integer wall'); }
     if (series.invalid_rows) { bits.push(String(series.invalid_rows) + ' invalid row(s) skipped'); }
+    // [W2-4] Ruling-18 null costs: counted at ₹0 — the curve is honestly
+    // labeled gross of those unverified costs, never an empty chart.
+    if (series.null_cost_rows) {
+      bits.push(String(series.null_cost_rows) + ' row(s) carry null costs (by design until P5) — curve is gross of those costs');
+    }
     bits.push('net ' + money(series.final_paisa));
     host.appendChild(window.BXUI.el('div', 'note', bits.join(' · ')));
     // R44 #4: the plain-English claim decomposes to line-by-line arithmetic

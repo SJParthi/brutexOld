@@ -630,6 +630,14 @@ function bxFunnelProvenance(source, runId) {
     if (series.invalid_rows) {
       noteBits.push(String(series.invalid_rows) + " invalid row(s) skipped");
     }
+    /* [W2-4] Ruling-18 null costs: counted at Rs 0 — the curve is honestly
+       labeled gross of those unverified costs, never an empty chart. */
+    if (series.null_cost_rows) {
+      noteBits.push(
+        String(series.null_cost_rows) +
+          " row(s) carry null costs (by design until P5) — curve is gross of those costs"
+      );
+    }
     noteBits.push("net " + paisaText(series.final_paisa));
     host.appendChild(window.BXUI.el("div", "oc-sub", noteBits.join(" · ")));
   }

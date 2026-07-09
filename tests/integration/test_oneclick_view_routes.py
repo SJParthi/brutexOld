@@ -335,6 +335,24 @@ class TestScreenerPage:
         assert "row_count" in html
         assert "' of ' + total + ' shown'" in html
 
+    def test_count_line_numerator_is_the_rendered_count_naming_the_cap(self) -> None:
+        """[W2-5] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: '500 of 500 shown' over
+        a RENDER_CAP-truncated 200-row table was a lie — the numerator is now
+        the count actually rendered and a capped table SAYS so."""
+        html = _template("screener.html")
+        assert "String(cap) + ' of ' + total + ' shown'" in html
+        assert "String(sorted.length) + ' of '" not in html  # the lying numerator is gone
+        assert "render cap ' + String(RENDER_CAP)" in html
+        assert "use Show all" in html
+
+    def test_sort_basis_label_names_the_artifact_preset(self) -> None:
+        """[11] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the visible sort-basis
+        label (textContent-only) names the artifact preset and the /results
+        divergence — a LABEL, neither sort is changed."""
+        html = _template("screener.html")
+        assert 'id="scSortBasis"' in html
+        assert "differs from /results (Rank-by metric, descending)" in html
+
     def test_null_vix_band_exclusion_is_counted(self) -> None:
         html = _template("screener.html")
         assert "null_vix_excluded" in html
@@ -377,6 +395,17 @@ class TestStrategyPage:
         html = _template("strategy.html")
         assert 'id="ocTradesSource"' in html
         assert "source: none" in html
+
+    def test_null_cost_rows_get_the_gross_equity_caveat(self) -> None:
+        """[W2-4] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: Ruling-18 null-cost
+        rows render a LABELED gross curve on /strategy AND the operator page
+        (never an empty chart / a mislabeled non-integer error)."""
+        html = _template("strategy.html")
+        assert "series.null_cost_rows" in html
+        assert "curve is gross of those costs" in html
+        js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert "series.null_cost_rows" in js
+        assert "curve is gross of those costs" in js
 
     def test_out_of_window_trade_drops_the_arrow_loudly(self) -> None:
         """F-B1: the -1 sentinel is honored — never a snapped wrong candle."""
