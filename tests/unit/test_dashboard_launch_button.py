@@ -25,37 +25,6 @@ from brutex.dashboard import launch_button as lb
 from brutex.dashboard.app import DashboardState, build_app
 from fastapi.testclient import TestClient
 
-_REAL_RUN_PRECONDITIONS = lb.run_preconditions
-
-
-@pytest.fixture(autouse=True)
-def hermetic_disk_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the HOST disk probe — route tests must not depend on runner free disk.
-
-    CI evidence (run 29033731133, job 86174936677): the shared runner's free
-    disk fell below the 20 GiB ``DEFAULT_MIN_DISK_FREE_BYTES`` floor, so every
-    POST that reached the m3 re-check refused 412 (``disk_free``) — an
-    environment artifact, not a route defect. These route tests pin the
-    STATUS-CODE wiring, so the real ``run_preconditions`` runs UNCHANGED
-    (partitions · wheels · writable · active-launch all REAL) with ONLY the
-    ``disk_usage`` probe injected to a deterministic ample value. The disk
-    gate's own semantics (ample / below-floor / OSError) stay pinned by the
-    injected-probe unit tests in ``tests/unit/test_launch_button.py``.
-    """
-
-    def _pinned(
-        lake_root: Path | None,
-        *,
-        min_free_bytes: int = lb.DEFAULT_MIN_DISK_FREE_BYTES,
-    ) -> list[lb.PreconditionCheck]:
-        return _REAL_RUN_PRECONDITIONS(
-            lake_root,
-            min_free_bytes=min_free_bytes,
-            disk_usage=lambda _path: SimpleNamespace(total=2**63, used=0, free=2**63),
-        )
-
-    monkeypatch.setattr(lb, "run_preconditions", _pinned)
-
 
 @pytest.fixture(autouse=True)
 def hermetic_disk(monkeypatch: pytest.MonkeyPatch) -> None:
