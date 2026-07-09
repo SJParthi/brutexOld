@@ -283,9 +283,7 @@ class TestParallelWarnDiscipline:
         warns = [x for x in logs if x["event"] == "sweep_parallel.resume_store_guard_forced"]
         assert len(warns) == 1  # capped
         summaries = [
-            x
-            for x in logs
-            if x["event"] == "sweep_parallel.resume_store_guard_forced_suppressed"
+            x for x in logs if x["event"] == "sweep_parallel.resume_store_guard_forced_suppressed"
         ]
         assert len(summaries) == 1
         assert summaries[0]["suppressed"] == 1
