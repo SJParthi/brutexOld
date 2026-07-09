@@ -190,3 +190,98 @@ def test_generation_probe_off_loop_real_server(
     )
     assert status == 200
     assert b"underlyings" in body
+
+
+# ── DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 — the /api/v1/sweep-progress file read ──
+
+
+@pytest.fixture
+def sweep_progress_server(
+    store: InstrumentStore, tmp_path: Path
+) -> Generator[tuple[_RealServer, Path]]:
+    """A real server whose state carries a REAL sweep-progress file bridge."""
+    import json
+
+    state = DashboardState()
+    progress_file = tmp_path / "sweeps" / "progress" / "sweep-progress.json"
+    progress_file.parent.mkdir(parents=True)
+    progress_file.write_text(
+        json.dumps({"state": "running", "running": True, "enumerated": 999}),
+        encoding="utf-8",
+    )
+    state.sweep_progress_path = progress_file
+    srv = _RealServer(build_app(state, instrument_store=store), _free_port())
+    srv.start()
+    try:
+        yield srv, progress_file
+    finally:
+        srv.stop()
+
+
+def test_sweep_progress_stalled_read_keeps_loop_free_and_is_bounded(
+    sweep_progress_server: tuple[_RealServer, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled progress-file read must neither freeze the loop nor the route.
+
+    The measured M1 repro: ``/api/v1/sweep-progress`` ran ``path.exists()`` +
+    ``read_progress(path)`` ON the uvicorn event loop, so a 1.5 s stalled read
+    moved a concurrent ``/api/v1/state`` poll 9.1 ms → 1305.4 ms. Post-fix the
+    view runs on the threadpool AND the file arm rides the deadline-guarded
+    ``SweepProgressCache`` (0.5 s refresh bound, non-blocking single-flight),
+    so BOTH hold: (a) a concurrent ``/api/v1/state`` stays fast, and (b) the
+    sweep-progress response ITSELF is bounded — the wedged read is abandoned
+    to the guard's daemon and the route serves the honest fall-through (idle
+    on a cold wedge; last-known labelled ``unverified`` once warm). Once the
+    volume recovers, the late-returning daemon self-heals the memo and the
+    next poll serves the real file payload, provenance-stamped.
+    """
+    server, _progress_file = sweep_progress_server
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _stalled_read(path: Path) -> dict[str, object]:
+        entered.set()
+        release.wait(timeout=_STALL_S)
+        return {"state": "running", "running": True, "enumerated": 999}
+
+    monkeypatch.setattr("brutex.engine.sweep_supervisor.read_progress", _stalled_read)
+    try:
+        # (b) the route itself is BOUNDED while the read is wedged: the owner
+        # waits at most the 0.5 s refresh deadline, then serves the honest
+        # cold fall-through (idle — nothing memoised yet), never the stall.
+        start = time.perf_counter()
+        status, body = _get(server.port, "/api/v1/sweep-progress", timeout=_STALL_S + 2.0)
+        blocked_elapsed = time.perf_counter() - start
+        assert status == 200
+        assert entered.wait(timeout=1.0), "the stalled read was never entered"
+        assert blocked_elapsed < _POLL_BUDGET_S, (
+            f"/api/v1/sweep-progress took {blocked_elapsed * 1000:.0f}ms on a wedged "
+            "read — the deadline-guarded cache bound is broken (regression)."
+        )
+        assert b'"idle"' in body  # honest cold-wedge fall-through, never fabricated
+        # (a) a concurrent poll stays fast while the abandoned daemon is wedged.
+        start = time.perf_counter()
+        status, _ = _get(server.port, "/api/v1/state", timeout=_STALL_S + 2.0)
+        elapsed = time.perf_counter() - start
+        assert status == 200
+        assert elapsed < _POLL_BUDGET_S, (
+            f"/api/v1/state took {elapsed * 1000:.0f}ms while the sweep-progress read "
+            "stalled — the blocking read is running ON the uvicorn event loop "
+            "(regression)."
+        )
+    finally:
+        release.set()
+    # Recovery: the daemon's late return self-heals the memo; the next polls
+    # (past the 1 s TTL) serve the REAL file payload, provenance-stamped.
+    deadline = time.time() + 10.0
+    healed: dict[str, object] | None = None
+    while time.time() < deadline:
+        status, body = _get(server.port, "/api/v1/sweep-progress", timeout=5.0)
+        assert status == 200
+        parsed = __import__("json").loads(body)
+        if parsed.get("enumerated") == 999:
+            healed = parsed
+            break
+        time.sleep(0.2)
+    assert healed is not None, "the memo never self-healed after the volume recovered"
+    assert healed["progress_source"] in ("live", "cached")

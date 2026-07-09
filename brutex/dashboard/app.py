@@ -232,6 +232,7 @@ from brutex.dashboard.spot_cascade import (
     symbol_to_json,
 )
 from brutex.dashboard.summary_cache import LAKE_UNIQUENESS, OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 from brutex.dashboard.sweep_results_view import (
     DEFAULT_TOP_N as SWEEP_LEADERBOARD_DEFAULT_TOP_N,
 )
@@ -777,7 +778,11 @@ class DashboardState:
         with self._lock:
             self.sweep_progress = dict(snapshot)
 
-    def sweep_progress_view(self) -> dict[str, Any]:
+    def sweep_progress_view(
+        self,
+        *,
+        file_read: Callable[[Path], dict[str, Any] | None] | None = None,
+    ) -> dict[str, Any]:
         """Return the current live sweep-progress snapshot for the dashboard route.
 
         Resolution order (crash-tolerant — a dashboard poll NEVER raises):
@@ -791,14 +796,29 @@ class DashboardState:
         A missing / malformed progress file falls through to (2)/(3) — never an
         error (delegated to :func:`brutex.engine.sweep_supervisor.read_progress`,
         which returns the idle view on any read/parse failure).
+
+        *file_read* is the DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 seam: the
+        route injects :meth:`SweepProgressCache.read
+        <brutex.dashboard.sweep_progress_cache.SweepProgressCache.read>` so
+        the file arm becomes a TTL-memoised, DEADLINE-BOUNDED read (a wedged
+        lake volume serves the last-known payload labelled ``unverified``
+        instead of blocking) — it returns the file payload to serve, or
+        ``None`` to fall through to (2)/(3), exactly like the direct
+        ``exists()`` check. The default ``None`` keeps the direct,
+        byte-identical legacy read (the in-process test/consumer contract).
         """
         from brutex.engine.sweep_supervisor import idle_progress, read_progress
 
         with self._lock:
             path = self.sweep_progress_path
             in_process = self.sweep_progress
-        if path is not None and path.exists():
-            return read_progress(path)
+        if path is not None:
+            if file_read is not None:
+                payload = file_read(path)
+                if payload is not None:
+                    return payload
+            elif path.exists():
+                return read_progress(path)
         if in_process is not None:
             return dict(in_process)
         return idle_progress()
@@ -1131,6 +1151,7 @@ def build_app(
     movers_cache: MoversSnapshotCache | None = None,
     universe_cache: UniverseSnapshotCache | None = None,
     rate_bridge_cache: RateBridgeCache | None = None,
+    sweep_progress_cache: SweepProgressCache | None = None,
     prebuild_gate: PrebuildGate | None = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
     pull_phase_probe: Callable[[], str | None] | None = None,
@@ -1191,6 +1212,16 @@ def build_app(
         drive the slow-read / cache-hit / provenance behaviour
         deterministically; ``None`` (the default) builds a fresh production
         cache.
+    sweep_progress_cache
+        Optional :class:`~brutex.dashboard.sweep_progress_cache.SweepProgressCache`
+        backing the ``/api/v1/sweep-progress`` file-bridge read
+        (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001) — the sweep-progress twin of
+        *rate_bridge_cache*: a repeat poll within its 1 s TTL is a
+        zero-syscall O(1) memo hit, a post-TTL refresh is deadline-guarded on
+        a worker daemon, and a wedged lake volume serves the last-known
+        payload honestly labelled ``unverified``. Injected so tests drive the
+        slow-read / cache-hit / provenance behaviour deterministically;
+        ``None`` (the default) builds a fresh production cache.
     prebuild_gate
         Optional :class:`~brutex.dashboard.prebuild_gate.PrebuildGate` gating
         the ``/api/v1/movers`` screens while the one-click pull pipeline runs
@@ -1452,6 +1483,18 @@ def build_app(
     # the payload (`bridge_source` / `bridge_probe_age_s`), never a stale illusion.
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
+    # The /api/v1/sweep-progress file-bridge read memo
+    # (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001): the progress JSON lives under
+    # <lake>/sweeps/progress/ on the SAME external volume, so its per-poll
+    # synchronous exists()+read used to run ON the event loop — a measured
+    # 1.5 s stalled read froze a concurrent /api/v1/state poll 9.1 ms →
+    # 1305.4 ms. Same doctrine as the rate-bridge cache above: 1 s TTL memo,
+    # deadline-bounded refresh (0.5 s) on a daemon, non-blocking single-flight,
+    # honest additive `progress_source` / `progress_probe_age_s` provenance.
+    # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
+    _sweep_progress_cache = (
+        sweep_progress_cache if sweep_progress_cache is not None else SweepProgressCache()
+    )
 
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
@@ -1887,17 +1930,36 @@ def build_app(
 
     @app.get("/api/v1/sweep-progress")
     async def api_sweep_progress() -> JSONResponse:
-        """GET /api/v1/sweep-progress — O(1) live brute-force sweep progress (DEC-SWEEP-WIRE-GA-001).
+        """GET /api/v1/sweep-progress — live brute-force sweep progress (DEC-SWEEP-WIRE-GA-001).
 
         The dashboard panel for the guarantee-&-assurance layer: percent / ETA /
         tuples-per-sec / survivors / skipped, populated by the supervisor's
         :class:`~brutex.engine.sweep_progress.SweepProgress` (wired into
         :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`). Serves the
         freshest of the cross-process file bridge, the in-process push, or an idle
-        snapshot — a pure O(1) read that never touches the lake or the store lock
-        and never raises (see :meth:`DashboardState.sweep_progress_view`).
+        snapshot, and never raises (see :meth:`DashboardState.sweep_progress_view`).
+
+        HONEST envelope (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 — this route's
+        prior "pure O(1) read that never touches the lake" claim was FALSE): the
+        file-bridge arm READS ``<lake>/sweeps/progress/sweep-progress.json`` on
+        the lake volume — a stalled 1.5 s read used to run ON the uvicorn event
+        loop and moved a concurrent ``/api/v1/state`` poll 9.1 ms → 1305.4 ms.
+        Now the whole view runs on the threadpool (never the loop) and the file
+        arm rides the injected :class:`~brutex.dashboard.sweep_progress_cache.
+        SweepProgressCache` — a 1 s-TTL memo whose refresh is deadline-bounded
+        (0.5 s) with a non-blocking single-flight, so even the offloaded worker
+        is bounded on a wedged volume (last-known payload served, labelled with
+        the ADDITIVE ``progress_source`` / ``progress_probe_age_s`` keys — never
+        a stale-as-fresh illusion). The in-process-push + idle arms stay pure
+        in-memory, byte-identical, unstamped. Stays on the DEFAULT AnyIO pool
+        (not the lake limiter): like ``/api/v1/pull/rate`` it is a
+        deadline-guarded LIVENESS poll whose worker hold is capped per outage.
         """
-        return JSONResponse(state.sweep_progress_view())
+        return JSONResponse(
+            await run_in_threadpool(
+                lambda: state.sweep_progress_view(file_read=_sweep_progress_cache.read)
+            )
+        )
 
     @app.get("/api/v1/events")
     async def api_events() -> JSONResponse:
