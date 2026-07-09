@@ -434,6 +434,16 @@ jobs:
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
+          # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1645): the
+          # rank-budget worker-divisor wiring — a dedicated per-module pin at
+          # 100% line+branch over its two suites (the module also rides the
+          # whole-engine glob gate above; this line keeps the divisor seam's
+          # coverage visible on its own).
+          if compgen -G "tests/unit/test_engine_sweep_budget_workers.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_mem_budget --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_mem_budget.py tests/unit/test_engine_sweep_budget_workers.py
+          else
+            echo "(sweep_mem_budget worker-divisor test file not present yet — gate inactive)"
+          fi
           # DEC-AUDIT-VERIFY-UNIFY-001 (MIGRATION.md #560): the unified
           # audit-chain verifier (auto-detect SHA-256 ingest vs BLAKE3
           # supervisor) ships at 100% line+branch; the CLI shim it backs

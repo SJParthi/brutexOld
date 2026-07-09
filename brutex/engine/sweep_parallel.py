@@ -131,10 +131,17 @@ the flag, not a real production limitation.
   genuinely recomputes that tuple (the ONE reversible recovery lever).
   Fail-loud is chosen over blind pool-rebuild-and-continue on the merits: a broken
   pool from OOM means the machine is under memory pressure, and the per-tuple rank
-  budget DIVIDES across workers
-  (:func:`brutex.config.hardware_envelope.memory_budget_bytes` sizes
-  ``total × fraction / workers`` — the DEC-SWEEP-STREAMING-RANK-001 rank-region
-  interaction) — so rebuilding and re-running the next heavy tuple would just
+  budget DIVIDES across the pool's EVAL workers — wired for REAL by
+  DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001: :func:`_worker_init` exports the INTERNAL
+  ``BRUTEX_SWEEP_BUDGET_WORKERS=<pool_size>`` from :class:`_WorkerContext`, so each
+  worker's :func:`~brutex.engine.sweep_mem_budget.resolve_mem_budget_bytes` →
+  :func:`brutex.config.hardware_envelope.memory_budget_bytes` sizes
+  ``total × fraction / eval_workers`` (the DEC-SWEEP-STREAMING-RANK-001 rank-region
+  interaction; an explicit ``BRUTEX_SWEEP_MEM_BUDGET_BYTES`` override is a
+  PER-WORKER figure and stays UNDIVIDED — the #1352 contract. Before that wiring
+  the resolver never passed ``workers``, so N eval workers EACH admitted the full
+  ``total × 1/6`` — ~1.167× total RAM aggregate at the AUTO cap's 7 eval workers,
+  the C4/W7 root) — so rebuilding and re-running the next heavy tuple would just
   re-OOM. HONEST limit (named follow-up, NOT claimed): a deterministically-WEDGED
   non-OOM tuple (an infinite loop, not an allocation failure) still aborts via
   :class:`SweepStallError` with a frozen checkpoint, so an identical resume
@@ -161,7 +168,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
 import structlog
 
 from brutex.engine.combo_mask import count_combos
-from brutex.engine.sweep_mem_budget import MEM_BUDGET_ENV
+from brutex.engine.sweep_mem_budget import BUDGET_WORKERS_ENV, MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -601,7 +608,9 @@ class SweepWorkerPoolBrokenError(BruteXError):
     counter, never folded into ``skipped_cache``), then raises THIS — distinct from
     a generic abort — naming the offending tuple(s), the sidecar path, and the
     remediation: relieve the memory pressure (reduce ``BRUTEX_SWEEP_WORKERS`` — the
-    per-tuple rank budget divides across workers — / the grid's ``k``, or raise
+    per-tuple rank budget genuinely divides across the pool's eval workers since
+    DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001, so fewer workers = a larger per-worker
+    budget — / the grid's ``k``, or raise
     ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``), then DELETE the tuples' sidecar entries and
     resume — the tuples are then genuinely recomputed
     (DEC-SWEEP-STALL-OOM-GUARDS-001).
@@ -808,10 +817,19 @@ class _WorkerContext:
     worker rebuilds its ``store_for`` factory from ``(root, grid)`` via
     :func:`~brutex.engine.sweep_orchestrator.make_store_for`, so the un-picklable
     parent closure never crosses the process boundary.
+
+    ``budget_workers`` is the pool's live EVAL-worker count
+    (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001): :func:`_worker_init` exports it as
+    ``BRUTEX_SWEEP_BUDGET_WORKERS`` so each worker's
+    :func:`~brutex.engine.sweep_mem_budget.resolve_mem_budget_bytes` divides the
+    RAM-derived default rank budget by the pool size. Defaulted (``1``) so every
+    pre-existing constructor call — and the sequential path's semantics — is
+    byte-identical.
     """
 
     grid: SweepGridConfig
     root: Path
+    budget_workers: int = 1
 
 
 #: The per-worker-PROCESS context, set ONCE by :func:`_worker_init`. A module
@@ -841,6 +859,18 @@ def _worker_init(ctx: _WorkerContext) -> None:
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["RAYON_NUM_THREADS"] = "1"
     os.environ["POLARS_MAX_THREADS"] = "1"
+    # RANK-BUDGET DIVISOR (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001): export the
+    # pool's live EVAL-worker count so this worker's per-tuple
+    # resolve_mem_budget_bytes() divides the RAM-derived default by the pool
+    # size (total × 1/6 ÷ eval_workers) instead of EACH worker independently
+    # admitting the full total × 1/6 (~1.167× total RAM aggregate at the AUTO
+    # cap's 7 eval workers — the C4/W7 root). Unconditional: the live pool
+    # size is the truth (a stale parent/operator value never wins); an
+    # explicit BRUTEX_SWEEP_MEM_BUDGET_BYTES override stays per-worker
+    # UNDIVIDED regardless (the #1352 contract, enforced inside
+    # memory_budget_bytes). ADMISSION-only — results are byte-identical
+    # (bounded rank ≡ batch rank, pinned).
+    os.environ[BUDGET_WORKERS_ENV] = str(ctx.budget_workers)
     # LOG-VOLUME GUARD (DEC-SWEEP-LOG-VOLUME-GUARD-001, R4 fold): a SPAWN
     # worker starts from a CLEAN interpreter — the parent's structlog config
     # is NOT inherited — and the per-trade ``trade_sim.entry``/``exit`` DEBUG
@@ -1179,7 +1209,9 @@ class ParallelGridDriver:
         pool_size = self._workers - 1
         max_inflight = pool_size * _INFLIGHT_MULTIPLIER
         heap_cap = pool_size * _HEAP_CAP_MULTIPLIER
-        ctx = _WorkerContext(grid=self._grid, root=self._root)
+        # budget_workers = the EVAL-worker pool size (the writer-actor core is the
+        # parent and runs no tuples) — DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001.
+        ctx = _WorkerContext(grid=self._grid, root=self._root, budget_workers=pool_size)
         try:
             with ProcessPoolExecutor(
                 max_workers=pool_size,
