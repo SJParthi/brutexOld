@@ -1576,6 +1576,14 @@ this design.
     across the handoff. §7.4 pins a stubbed range-2-of-4 mismatch
     completing the tuple byte-identical to the spine with the
     mixed-provenance reconciliation assert passing.
+    **ENUMERATION-ORDER cross-reference (lever-discovery fold,
+    2026-07-09):** the rank space this shadow — and the whole
+    enumeration contract — is defined over is the POSITION-LEX
+    (itertools) order, NOT ascending-numeric/colex; the LEX-RANK
+    unranking MANDATE, the n=4/k=2 counterexample, and the
+    full-stream blake3 emission goldens live in the "Slice-1
+    substrate + ordering pins (lever-discovery fold, 2026-07-09)"
+    section, item 1.
   - *Metrics burn-in cost, QUANTIFIED (round-1 fix — the enum shadow was
     bounded but this strictly larger cost was silent):* arm (a) is a
     pure-Python walk + pure-Python metrics tail per mask — ~40–70 ms/mask
@@ -2154,6 +2162,13 @@ this design.
   production 1m/2m/3m/5m windows the retained O(n_bars) prefilter floor
   governs total cost — §0/§9; Slice 1's grid-level impact concentrates on
   high-TF tuples and on deleting the Python term everywhere.)
+  **Slice 1 additionally binds the "Slice-1 substrate + ordering pins
+  (lever-discovery fold, 2026-07-09)" section:** the LEX-RANK (NOT
+  colex/standard-CNS) unranking MANDATE + its emission-order goldens
+  (item 1), the condition-major transposed-bitplane internal substrate
+  (item 2), and the streaming residual pins (item 4); the prefix-AND
+  LEX-DFS pruning lever (item 3) is a SEPARATE post-proof commit, NOT
+  part of the Slice-1 bit-identity proof.
 - **Slice 2 — fold_block metrics core, default-OFF
   `BRUTEX_SWEEP_RUST_CORE`.** The fold kernel (consuming
   `simulate_one_core` + `drawdown_stats_checked` via `drawdown_stats_into`),
@@ -4829,3 +4844,108 @@ additions in their original wording, superseded by item 14. FL-10's log
 states its verification base as e8c708bd — true when written; this pass
 re-verified at 95955a71. No live (non-history) site quotes a withdrawn
 figure after this pass.
+
+## Slice-1 substrate + ordering pins (lever-discovery fold, 2026-07-09)
+
+Source: **lever-discovery session, refuter-gated report + live repo
+verification @ 95955a71**. Four pins folded into the locked design.
+None of them changes the locked FFI surface, the emission-order/counter
+contracts, or the §9/§9.1 binding perf law — items 1/2 bind the Slice-1
+implementation, item 3 is a post-proof optimization commit, item 4
+restates the streaming residual hazards as pins. Cross-referenced from
+the §6 Slice-1 bullet and §5's enumeration burn-in bullet.
+
+### 1. EMISSION-ORDER PIN (CRITICAL — prevents a real Slice-1 bug)
+
+The engine's `iter_masks_k_of_bits` emits **POSITION-LEX** order
+(`combo_mask.py:648-649` — "lexicographic on the sorted positions"; impl
+`:689-693` via `itertools.combinations`), **NOT ascending-numeric**.
+Ascending-numeric == COLEX == the STANDARD combinatorial-number-system
+order — so a naive/standard CNS unranking would enumerate in a DIFFERENT
+order than the engine stream and silently break emission-order identity
+PLUS the F1 positional-checkpoint pin (§3's enumeration-order/checkpoint
+identity pin). **MANDATE:** `enumerate_prefilter` uses the **LEX-RANK
+unranking variant** — rank within `combinations(sorted_bits, k)` lex
+order; unranking O(k) with an exact binomial table (`math.comb` /
+`count_combos`, `combo_mask.py:533-580`). Counterexample to memorialize:
+n=4, k=2 → itertools emits masks `[3, 5, 9, 6, 10, 12]` vs
+ascending-numeric `[3, 5, 6, 9, 10, 12]`. **GOLDEN mandated:** first +
+last 10k masks + blake3 of the FULL emission stream vs the Python
+oracle, plus a set+order survivor golden vs the flat path.
+
+Why order is load-bearing (**corrected grounds** — NOT fsum, which is
+order-independent per `trial_stats.py:41-42,:237`): survivor stream
+order → chunked-sim → ResultRow append order → store bytes →
+`store_content_hash`/sentinel byte-identity; the first-16-mask burn-in
+SELECTION + `_reattribute_chunk_failure` are stream-order-dependent; and
+`SurvivorColumns` retains kept order (`sweep_stream.py:89`). Across k:
+NO interleaving — k is a grid axis, one k per `SweepTuple`
+(`sweep_orchestrator.py:604-613`); k-major with per-k boundaries is the
+only defensible stream shape.
+
+### 2. SUBSTRATE CHOICE (absorbed now, ~zero cost)
+
+The kernel's INTERNAL layout is **CONDITION-MAJOR TRANSPOSED BITPLANES**
+(one per-condition bitmap over bars) — chosen at Slice-1 implementation
+time so the later prefix-AND DFS pruning lever (item 3) retrofits
+freely, with no substrate migration. The locked FFI surface, the
+emission order (item 1), and the counters are UNCHANGED by this internal
+choice — it is invisible outside the kernel.
+
+### 3. PREFIX-AND LEX-DFS PRUNING (post-proof optimization commit)
+
+NOT part of the initial bit-identity proof; a SEPARATE post-proof
+optimization commit that slides past acceptance if time requires — zero
+stranded work given item 2's substrate. Mechanism: a DFS extending each
+prefix only with strictly-greater bits, candidates ascending, is **by
+construction** the pre-order traversal whose depth-k leaves are
+itertools-lex — prefix-AND state carried on the stack cannot alter order
+(analytically argued, NOT machine-verified — item 1's golden is the
+proof obligation). **HARD CONSTRAINT: NO prefix memo tables**
+(refuter-measured 384–452 GB blowup) — stack-carried state only.
+Range-partitioned mid-DFS starts are compatible with THREE subtleties,
+each needing its OWN test:
+
+- **(a) BOUNDARY TRUNCATION** — a subtree straddling the range's `hi`
+  must stop at `hi` (compare the prefix's leaf-rank interval vs
+  `[lo, hi)` before descending);
+- **(b) ANCESTOR-PRUNE RECHECK AT SEEK** — re-apply conflict +
+  anti-monotone prune tests to ALL ancestors of the unranked start,
+  else the range emits/counts masks the unpartitioned DFS would have
+  pruned shallower;
+- **(c) PER-RANGE PRUNED-MASK ACCOUNTING** — per-range
+  `enumerated = hi − lo`; per-range `conflict_pruned` =
+  inclusion-exclusion over the CONFLICT_PAIRS (**26 pairs** —
+  repo-verified count; treat any "27" in older quotes as a journal
+  error) restricted to the rank interval; per-subtree `minhits_dropped`
+  = subtree_leaf_count − conflicted_leaf_count. **Item (c)'s closed-form
+  construction is UNVETTED DESIGN INPUT** (first-principles from the
+  discovery session, not refuter-vetted) — it must pass its OWN hostile
+  round before the pruning commit ships; the acceptance bar is counter
+  IDENTITY vs the sidecar (`trial_stats`) + the audit payload
+  (`sweep_run.py:1439/:1441/:1474/:1593-1600` counters).
+
+### 4. STREAMING RESIDUAL PINS (the four hazards that survive into the Rust core)
+
+From the OOM analysis: today's Python engine accumulates four
+O(C(n,k)) terms per worker (~3.5–5 GB × 8 workers ≈ 28–40 GB at k=6,
+CPython object overhead ~40 B/mask; `sweep_run.py:1434/:1453/
+:1468-1474/:1485`, `sweep_kernel.py:145-166` one-shot marshal) — ALL
+absent in this design **by construction, PROVIDED:**
+
+- **(a)** survivors NEVER return as Python `list[int]` — a ~50M-mask
+  list re-inflates ~1.9 GB/worker; compact columnar buffers only,
+  per-call-capped (already the design — PINNED here);
+- **(b)** Stage-1B counts are BLOCK-SCOPED — never batch all counts
+  after streaming enumeration, or hits retention re-enters;
+- **(c)** streaming/fused enumeration is DIGEST-PATH-ONLY
+  (`bypass_dedup = trial_stats_digest is not None`,
+  `sweep_run.py:1415`) — per-block `mark_many` on the legacy arm breaks
+  marks-after-flush (the MIGRATION #650 resume-skip class);
+- **(d)** downstream whole-tuple O(kept) accumulations
+  (`SurvivorColumns` + `sidecar_sharpes`) are NOT enumeration
+  structures — they stay bounded by the owned-bytes watermark
+  (`plan_rank_memory` ⇒ k=6 always takes the bounded columnar rank arm,
+  `sweep_mem_budget.py:84/:312`). This boundary is stated honestly: the
+  design deletes the ENUMERATION-scaled terms, not the kept-scaled
+  ones.

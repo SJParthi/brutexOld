@@ -48,6 +48,7 @@ Binding perf numbers live in EXACTLY two places: **DESIGN_FINAL §9/§9.1**
 - `reads/rust.md` §6 sibling-crate (`rust/sweep-core`) placement note —
   SUPERSEDED by the locked in-crate design (DESIGN §1.1: a NEW `sweep_core`
   module inside `rust/fno-math`).
+- Pack v4 (2026-07-09) ADDS DESIGN_FINAL's "Slice-1 substrate + ordering pins (lever-discovery fold, 2026-07-09)" section — the LEX-vs-colex emission-order pin + LEX-RANK unranking mandate, the condition-major bitplane substrate, the prefix-AND LEX-DFS pruning constraints (item (c) marked UNVETTED design input), and the four streaming residual pins; cross-referenced from §6 Slice 1 and §5's enumeration burn-in bullet.
 
 ## PR ↔ MIGRATION crosswalk (stub)
 
