@@ -447,6 +447,20 @@ class TestLoadTop100:
         assert result.status == "corrupt"
         assert "not the writer's JSON object root" in result.detail
 
+    def test_oversized_entries_capped_at_the_contract_100(self, tmp_path: Path) -> None:
+        """Hostile-round F2a (defense-in-depth): the writer's ≤100 contract
+        is enforced reader-side too — a 150-row out-of-band artifact parses
+        exactly TOP100_ROW_CAP rows and reads a NAMED partial counting the
+        dropped overflow, never an O(entries) parse or a silent overflow."""
+        _write_top100(tmp_path, [_top100_row(i + 1) for i in range(150)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        assert len(result.rows) == oc.TOP100_ROW_CAP == 100
+        assert [row["rank"] for row in result.rows] == list(range(1, 101))
+        assert "150 entries" in result.detail
+        assert "first 100 kept, 50 dropped" in result.detail
+        assert result.preset == "min_dd_first"
+
     def test_unknown_future_schema_version_is_named_corrupt(self, tmp_path: Path) -> None:
         """An unknown FUTURE schema_version degrades LOUDLY — never a crash."""
         _write_top100(tmp_path, [_top100_row(1)], schema_version=oc.TOP100_SCHEMA_VERSION + 1)
@@ -762,6 +776,36 @@ class TestTailEvents:
         assert len(page.records) == 2
         # next_offset stays at the partial line's start — re-read once complete.
         assert page.next_offset == page.total_bytes - len('{"ts_utc":"2026-07-07T0')
+
+    def test_single_line_larger_than_window_is_bounded_not_oom(self, tmp_path: Path) -> None:
+        """Hostile-round F3: a no-newline line larger than the 1 MiB window
+        is NEVER materialised whole (the prior unbounded readline() peaked
+        at the full line size BEFORE any cap check) — the page degrades
+        honestly: records before the giant line served, truncated flagged,
+        the over-window line NAMED, cursor left at its start."""
+        lines = _chained_lines(_event_bodies(1))
+        giant = '{"pad":"' + "x" * (oc._EVENTS_BYTES_CAP + 4096) + '"'  # no newline
+        _write(tmp_path / oc.EVENTS_FILENAME, lines[0] + "\n" + giant)
+        page = oc.tail_events(tmp_path, offset=0, limit=10)
+        assert page.status == "ok"
+        assert len(page.records) == 1  # the good record before the giant line
+        assert page.truncated_tail is True
+        assert f"exceeds the {oc._EVENTS_BYTES_CAP}-byte read window" in page.detail
+        assert page.next_offset == len(lines[0]) + 1  # at the giant line's start
+
+    def test_tail_anchor_window_without_record_boundary_is_named_corrupt(
+        self, tmp_path: Path
+    ) -> None:
+        """Hostile-round F3 (tail-anchor arm): a tail window living entirely
+        inside one giant line holds NO record boundary — a NAMED corrupt
+        (the bounded skip read), never an unbounded in-memory line."""
+        giant = '{"pad":"' + "x" * (oc._EVENTS_BYTES_CAP + 4096) + '"'  # no newline anywhere
+        _write(tmp_path / oc.EVENTS_FILENAME, giant)
+        page = oc.tail_events(tmp_path, offset=-1, limit=10)
+        assert page.status == "corrupt"
+        assert page.records == ()
+        assert page.truncated_tail is True
+        assert "no record boundary" in page.detail
 
     def test_blank_lines_are_skipped(self, tmp_path: Path) -> None:
         lines = _chained_lines(_event_bodies(2))

@@ -472,6 +472,14 @@ class TestStrategyPage:
         assert "per-trade close equity (minute-path unavailable for this run)" in html
         # The stale "lands with P3" deferral is DEAD — the route ships.
         assert "minute-path equity lands with P3" not in html
+        # Hostile-round fold: an ok-verdict sidecar with ZERO rows reads its
+        # OWN honest label (empty-for-this-run ≠ unavailable).
+        assert "per-trade close equity (minute-path series empty for this run)" in html
+        assert "state.equityOkEmpty" in html
+        # Audit re-break MINOR: the per-trade fallback note total carries the
+        # #12 gross/signal-only vocabulary — never a bare "net" claim.
+        assert "bits.push('gross signal ' + money(series.final_paisa));" in html
+        assert "bits.push('net ' + money(series.final_paisa));" not in html  # killed
 
     def test_vix_band_on_the_story_card(self) -> None:
         """R31 display duty — via the ONE shared builder ([W3-R4]): a

@@ -268,7 +268,10 @@
     trades: [],
     candles: [],
     equity: [], // stored minute-path points (item 4C — empty ⇒ per-trade fallback)
-    equityTotal: null
+    equityTotal: null,
+    // ok-verdict-but-zero-rows sidecar (hostile-round fold): distinguishes
+    // "series EMPTY for this run" from "sidecar unavailable" in the label.
+    equityOkEmpty: false
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -480,7 +483,12 @@
         return;
       }
     }
-    setEquityLabel('per-trade close equity (minute-path unavailable for this run)');
+    // An ok-verdict sidecar that served ZERO rows is its own honest state —
+    // the series is EMPTY for this run, not unavailable (hostile-round fold).
+    var fallbackLabel = state.equityOkEmpty
+      ? 'per-trade close equity (minute-path series empty for this run)'
+      : 'per-trade close equity (minute-path unavailable for this run)';
+    setEquityLabel(fallbackLabel);
     var series = window.BXChart.equitySeries(state.trades);
     if (series.empty) {
       host.appendChild(window.BXUI.el('div', 'note', 'no trades yet — awaiting real run artifact'));
@@ -490,7 +498,7 @@
     var path = window.BXChart.equityPathNode(series, 1000, 220, 8);
     if (path) { svg.appendChild(path); }
     host.appendChild(svg);
-    var bits = ['per-trade close equity (minute-path unavailable for this run)'];
+    var bits = [fallbackLabel];
     if (series.overflow) { bits.push('OVERFLOW: curve truncated at the safe-integer wall'); }
     if (series.invalid_rows) { bits.push(String(series.invalid_rows) + ' invalid row(s) skipped'); }
     // [W2-4] Ruling-18 null costs: counted at ₹0 — the curve is honestly
@@ -498,7 +506,9 @@
     if (series.null_cost_rows) {
       bits.push(String(series.null_cost_rows) + ' row(s) carry null costs (by design until P5) — curve is gross of those costs');
     }
-    bits.push('net ' + money(series.final_paisa));
+    // #12 vocabulary (audit re-break MINOR): the per-trade curve total is the
+    // GROSS signal figure — never "net" while costs are structurally absent.
+    bits.push('gross signal ' + money(series.final_paisa));
     host.appendChild(window.BXUI.el('div', 'note', bits.join(' · ')));
     renderArith();
   }
@@ -526,15 +536,18 @@
             (payload.status === 'ok' || payload.status === 'partial')) {
           state.equity = payload.rows || [];
           state.equityTotal = payload.total === undefined ? null : payload.total;
+          state.equityOkEmpty = state.equity.length === 0;
         } else {
           state.equity = [];
           state.equityTotal = null;
+          state.equityOkEmpty = false;
         }
         renderEquity();
       })
       .catch(function () {
         state.equity = [];
         state.equityTotal = null;
+        state.equityOkEmpty = false;
         renderEquity();
       });
   }

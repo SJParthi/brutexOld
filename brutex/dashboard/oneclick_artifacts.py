@@ -92,6 +92,7 @@ __all__ = [
     "SWEEP_RUNS_DIRNAME",
     "TOP100_FILENAME",
     "TOP100_METRIC_KEY_MAP",
+    "TOP100_ROW_CAP",
     "TOP100_ROW_REQUIRED_KEYS",
     "TOP100_SCHEMA_VERSION",
     "TRADES_DIRNAME",
@@ -177,6 +178,13 @@ MANIFEST_REQUIRED_KEYS: Final[tuple[str, ...]] = (
     "tripwires",
     "suspect",
 )
+
+#: Defense-in-depth row cap (hostile-round F2a): the P3 contract pins the
+#: artifact at ≤100 entries (the engine writer truncates at write time) — the
+#: reader independently refuses to PARSE past this bound, so an out-of-band
+#: oversized artifact costs O(100) row validation, never O(entries); the
+#: overflow degrades to a NAMED ``partial`` carrying the dropped count.
+TOP100_ROW_CAP: Final[int] = 100
 
 #: The contract's required per-row keys of ``top100.json`` (P3 → P4).
 TOP100_ROW_REQUIRED_KEYS: Final[tuple[str, ...]] = (
@@ -846,7 +854,10 @@ def load_top100(run_dir: Path) -> Top100Result:
     missing ``schema_version`` key is tolerated (validated only when
     present). A VALID EMPTY or SHORT entries list is ``status="ok"`` — the
     artifact EXISTS (T-M2 status law); the row count is ALWAYS ``len(rows)``,
-    never assumed 100. A bad ROW → ``partial``, rows kept up to it, defect
+    never assumed 100. An OVERSIZED entries list parses at most
+    :data:`TOP100_ROW_CAP` rows (defense-in-depth over the writer's ≤100
+    contract — hostile-round F2a) and reads a NAMED ``partial`` counting the
+    dropped overflow. A bad ROW → ``partial``, rows kept up to it, defect
     named (required keys + the :func:`_top100_row_shape_defect` inner
     shapes). Each kept row's metrics gain the :data:`TOP100_METRIC_KEY_MAP`
     display aliases additively, and the writer's ``arm`` OBJECT is bridged to
@@ -925,6 +936,19 @@ def load_top100(run_dir: Path) -> Top100Result:
             revision,
             preset,
         )
+    # Defense-in-depth (hostile-round F2a): the writer's ≤100 contract is
+    # enforced reader-side too — an out-of-band oversized artifact parses at
+    # most TOP100_ROW_CAP rows and degrades to a NAMED partial with the
+    # dropped count (a per-row defect within the kept rows still wins the
+    # detail slot — that artifact is doubly degenerate and names its defect).
+    cap_detail = ""
+    over_cap = len(entries_raw) - TOP100_ROW_CAP
+    if over_cap > 0:
+        cap_detail = (
+            f"{TOP100_FILENAME} carries {len(entries_raw)} entries — beyond the "
+            f"≤{TOP100_ROW_CAP} contract; first {TOP100_ROW_CAP} kept, {over_cap} dropped"
+        )
+        entries_raw = entries_raw[:TOP100_ROW_CAP]
     rows: list[dict[str, Any]] = []
     for idx, row in enumerate(entries_raw):
         if not isinstance(row, dict):
@@ -954,6 +978,8 @@ def load_top100(run_dir: Path) -> Top100Result:
                 preset,
             )
         rows.append(_bridge_top100_arm(_map_top100_metrics(row)))
+    if cap_detail:
+        return Top100Result("partial", tuple(rows), cap_detail, revision, preset)
     return Top100Result("ok", tuple(rows), "", revision, preset)
 
 
@@ -1019,8 +1045,14 @@ def tail_events(
     """Read ONE bounded page of the flight-recorder JSONL from a byte offset.
 
     O(page) law: ``seek(offset)`` then read forward at most *limit* complete
-    lines bounded by a 1 MiB byte cap — server work is bounded by the read
-    WINDOW, never the file size. ``kind``/``q`` filter the READ WINDOW only
+    lines bounded by a 1 MiB byte cap — server work AND peak memory are
+    bounded by the read WINDOW, never the file size: every ``readline`` is
+    byte-capped BEFORE line assembly (hostile-round F3 — the prior unbounded
+    reads materialised a whole no-newline line before any cap check), so a
+    single line larger than the window is never held in memory — mid-window
+    it degrades to the honest truncated page naming the over-window line; a
+    tail anchor whose window holds no record boundary reads a NAMED corrupt.
+    ``kind``/``q`` filter the READ WINDOW only
     (honest: not a whole-file search). ``offset=-1`` (any negative) anchors
     the window at the file TAIL (last ≤1 MiB, aligned to the next newline).
 
@@ -1072,20 +1104,47 @@ def tail_events(
         pos = start
         if offset < 0 and start > 0:
             # Tail anchor landed mid-line: discard up to the next newline so
-            # the window starts at a record boundary.
-            skipped = fh.readline()
+            # the window starts at a record boundary. BOUNDED read
+            # (hostile-round F3): the prior unbounded readline() materialised
+            # a whole no-newline line BEFORE any cap check — an 80 MB
+            # single-line file peaked far above the 1 MiB window. No newline
+            # within the bound ⇒ the window holds no record boundary at all —
+            # a NAMED corrupt, never unbounded memory.
+            skipped = fh.readline(_EVENTS_BYTES_CAP + 1)
             pos += len(skipped)
+            if not skipped.endswith(b"\n"):
+                return EventsPage(
+                    "corrupt",
+                    (),
+                    start,
+                    size,
+                    True,
+                    f"no record boundary within the {_EVENTS_BYTES_CAP}-byte tail "
+                    "window — a single line exceeds the read window",
+                )
         records: list[dict[str, Any]] = []
         truncated = False
         bad_lines = 0
         first_bad: int | None = None
         consumed = 0
         while len(records) < page_limit and consumed < _EVENTS_BYTES_CAP:
-            line = fh.readline()
+            # BOUNDED line assembly (hostile-round F3): each line is read
+            # with an EXPLICIT one-window byte bound (+1 byte to DETECT an
+            # overrun) — a legitimate ≤1 MiB line (even one straddling the
+            # window end) is served exactly as before, while a line larger
+            # than the WHOLE window degrades to the honest truncated page
+            # instead of an unbounded in-memory read.
+            line = fh.readline(_EVENTS_BYTES_CAP + 1)
             if not line:
                 break
             if not line.endswith(b"\n"):
                 truncated = True
+                if len(line) > _EVENTS_BYTES_CAP:
+                    note = (
+                        f"line at byte {pos} exceeds the {_EVENTS_BYTES_CAP}-byte "
+                        "read window — page truncated mid-line"
+                    )
+                    detail = f"{detail}; {note}" if detail else note
                 break
             line_start = pos
             pos += len(line)

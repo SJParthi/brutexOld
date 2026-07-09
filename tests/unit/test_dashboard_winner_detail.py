@@ -163,7 +163,19 @@ class TestAvgExtremeAndMinuteDd:
         assert _node_call('O.bxAvgExtremeText(null, undefined, "worst", FMT)') == "—"
 
     def test_minute_path_dd_with_pct(self) -> None:
-        assert _node_call("O.bxMinutePathDdText(1500, 1.5, FMT)") == "F1500 (1.5%)"
+        """The wire pct is a 0-1 RATIO (minute_path.py ``drop / peak`` →
+        top100_artifact.py verbatim) — the builder scales ×100. The prior
+        fixture literal ``1.5`` was PERCENT-scale, exactly the
+        value-plausible masking blindspot the hostile round named."""
+        assert _node_call("O.bxMinutePathDdText(1500, 0.015, FMT)") == "F1500 (1.5%)"
+
+    def test_minute_path_dd_ratio_scale_teeth(self) -> None:
+        """Hostile-round MAJOR-1 teeth: a 30% DD renders "30%" (the sibling
+        max_drawdown_pct scale on the same card) — never "0.3%"."""
+        assert _node_call("O.bxMinutePathDdText(1500, 0.3, FMT)") == "F1500 (30%)"
+
+    def test_minute_path_dd_precision_bounded_2dp(self) -> None:
+        assert _node_call("O.bxMinutePathDdText(1500, 0.123456, FMT)") == "F1500 (12.35%)"
 
     def test_minute_path_dd_without_pct(self) -> None:
         assert _node_call("O.bxMinutePathDdText(1500, null, FMT)") == "F1500"
@@ -224,6 +236,16 @@ class TestWinnerDetailWiring:
         assert "Gross signal P&amp;L" in html
         assert 'data-explain="gross_signal_pnl"' in html
         assert "net P&amp;L · buy-&amp;-hold baseline lands with P3" not in html  # killed
+        # Hostile-round fold: the killed-token pin EXTENDS to data-tooltip
+        # attributes — the EDGE hover claimed "net trade P&L … − full costs"
+        # while the card's own sub-label read gross/signal-only.
+        assert "net trade P&L" not in html  # killed tooltip claim
+        assert "full costs" not in html  # killed tooltip claim
+        assert "gross signal P&L from the stored run artifact" in html  # tooltip truth
+        # The baseline DATA ships on the #1617 artifact — only the RENDER is
+        # the named follow-up; the stale P3 phase-naming is dead on v29 too.
+        assert "buy-&amp;-hold baseline lands with P3" not in html
+        assert "(lands with P3 — O-n)" not in html
 
     def test_strategy_deep_stats_section_reads_the_builders(self) -> None:
         html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")

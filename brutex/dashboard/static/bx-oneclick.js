@@ -319,8 +319,15 @@ function bxAvgExtremeText(avg, extreme, extremeLabel, fmt) {
  * The minute-path max-drawdown cell (``max_dd_minute_path_paisa`` +
  * ``max_dd_minute_path_pct`` — the R22 minute-granular equity path).
  *
+ * SCALE LAW (hostile-round MAJOR-1): the wire's ``max_dd_minute_path_pct``
+ * is a 0-1 RATIO (``minute_path.py`` ``drop / peak``, served verbatim by
+ * ``top100_artifact.py``) — unlike the sibling ``max_drawdown_pct``, which
+ * the writer percent-scales (``compute.py`` ``* 100.0``). The builder
+ * scales ×100 HERE (bounded to 2dp) so an equal-magnitude event reads
+ * "30%" on BOTH cells of the same card — never a 100×-understated "0.3%".
+ *
  * @param {*} paisa - the minute-path DD paisa value.
- * @param {*} pct - the minute-path DD percent value (full precision).
+ * @param {*} pct - the minute-path DD as a 0-1 RATIO (writer scale).
  * @param {function(*): string} fmt - the house paisa→₹ formatter.
  * @returns {string} "−₹… (1.5%)" / "−₹…" / "—".
  */
@@ -330,7 +337,7 @@ function bxMinutePathDdText(paisa, pct, fmt) {
   }
   var out = fmt(paisa);
   if (typeof pct === "number" && isFinite(pct)) {
-    out += " (" + String(pct) + "%)";
+    out += " (" + String(Math.round(pct * 10000) / 100) + "%)";
   }
   return out;
 }

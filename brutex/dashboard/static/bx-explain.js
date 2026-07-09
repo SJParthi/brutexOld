@@ -51,7 +51,7 @@ var BX_EXPLAIN = {
   direction: "long bets the market goes up; short bets it goes down.",
   instrument: "The index this strategy trades — e.g. NSE-NIFTY (the winner's own market, not the run's whole selection).",
   arm: "The stop-loss / take-profit pair this strategy uses to exit its trades.",
-  net_pnl_paisa: "Every trade's profit and loss added up, after costs (shown in rupees).",
+  net_pnl_paisa: "Every trade's profit and loss added up (shown in rupees; signal-only — no costs are subtracted, they are modeled in the options-translation track).",
   gross_signal_pnl: "Signal-only profit — every trade's P&L added up with NO brokerage or taxes subtracted (Track 1 never trades; costs are modeled in the options-translation track).",
   expectancy_paisa: "The average rupees earned per trade — what one typical trade was worth.",
   recovery_factor: "Net profit divided by the worst drawdown — how strongly gains out-earned the deepest dip.",
