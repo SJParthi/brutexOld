@@ -1607,19 +1607,112 @@ def report_path(results_root: Path) -> Path:
 
 
 def write_manifest(results_root: Path, manifest: CascadeManifest) -> Path:
-    """Write *manifest* JSON under *results_root* and return its path."""
+    """Atomically write *manifest* JSON under *results_root* and return its path.
+
+    G7 (DEC-SWEEP-UNKILLABLE-CORE-001): tmp→fsync→``os.replace`` via the COMMON
+    :func:`~brutex.data.atomic_io.atomic_write_simple` — a crash mid-write can
+    never leave a torn manifest for the replay to consume (same bytes, atomic
+    rename only).
+    """
+    from brutex.data.atomic_io import atomic_write_simple
+
     path = manifest_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(manifest_to_json(manifest))
+    content = manifest_to_json(manifest)
+    atomic_write_simple(path, lambda tmp: tmp.write_bytes(content))
     return path
 
 
 def write_report(results_root: Path, report: CascadeWireReport) -> Path:
-    """Write the serialised *report* JSON under *results_root* and return its path."""
+    """Atomically write the serialised *report* JSON under *results_root*.
+
+    G7 (DEC-SWEEP-UNKILLABLE-CORE-001): same atomic law as
+    :func:`write_manifest` — byte-identical content, torn-write-proof rename.
+    """
+    from brutex.data.atomic_io import atomic_write_simple
+
     path = report_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(serialize_wire_report(report))
+    content = serialize_wire_report(report)
+    atomic_write_simple(path, lambda tmp: tmp.write_bytes(content))
     return path
+
+
+#: Stage labels bound into the two cascade artifact stamps (G7 / design §3).
+CASCADE_MANIFEST_STAGE: Final[str] = "cascade_manifest"
+CASCADE_REPORT_STAGE: Final[str] = "cascade_report"
+
+
+def manifest_snapshot_hash(
+    manifest: CascadeManifest, *, bars_for: Callable[[str, str], Sequence[CandleBar]]
+) -> str:
+    """Compute the data-snapshot hash over the manifest's OWN referenced slices.
+
+    The SAME shared derivation the sweep stamps its run identity with
+    (:func:`brutex.engine.stage3_wire.data_snapshot_hash`, CLAUDE.md §2 Rule 4),
+    computed over exactly the distinct ``(instrument, tf_label)`` pairs the
+    manifest's specs reference — so the stamp written at sweep time and the
+    hash recomputed at replay time compare equal IFF the underlying bars are
+    unchanged (G7). Honest envelope: O(referenced slices) bar loads via
+    *bars_for*, not O(1).
+
+    Parameters
+    ----------
+    manifest
+        The cascade manifest whose specs name the slices.
+    bars_for
+        ``(instrument, tf_label) -> bars`` loader.
+
+    Returns
+    -------
+    str
+        The 64-hex snapshot digest.
+    """
+    from brutex.engine.snapshot_hash import data_snapshot_hash
+
+    pairs = sorted({(spec.instrument, spec.tf_label) for spec in manifest.specs})
+    slices = {(instrument, tf): list(bars_for(instrument, tf)) for instrument, tf in pairs}
+    ctx = manifest.bars_context
+    return data_snapshot_hash(
+        exchange=ctx.exchange, segment=ctx.segment, start=ctx.start, end=ctx.end, slices=slices
+    )
+
+
+def stamp_cascade_artifacts(
+    results_root: Path,
+    manifest: CascadeManifest,
+    *,
+    bars_for: Callable[[str, str], Sequence[CandleBar]],
+) -> None:
+    """Stamp BOTH cascade artifacts (run-id + snapshot-hash bound) — G7 write side.
+
+    Each stamp carries the manifest's ``sweep_id`` as its ``run_id`` (D-1: the
+    sweep identity IS the run identity) plus the ``data_snapshot_hash`` extra
+    computed over the manifest's own referenced slices.
+
+    Raises
+    ------
+    brutex.observability.stage_stamp.StageStampError
+        If either artifact is missing or a stamp cannot be written — the
+        AUTOMATIC caller treats that as "artifact unstamped" (fail-soft WARN
+        at the call site, failure-matrix A14/F2; an unstamped artifact is
+        simply rebuilt, the safe direction).
+    """
+    from brutex.observability.stage_stamp import SNAPSHOT_EXTRA_KEY, write_stage_stamp
+
+    extra = {SNAPSHOT_EXTRA_KEY: manifest_snapshot_hash(manifest, bars_for=bars_for)}
+    write_stage_stamp(
+        manifest_path(results_root),
+        stage=CASCADE_MANIFEST_STAGE,
+        run_id=manifest.sweep_id,
+        extra=extra,
+    )
+    write_stage_stamp(
+        report_path(results_root),
+        stage=CASCADE_REPORT_STAGE,
+        run_id=manifest.sweep_id,
+        extra=extra,
+    )
 
 
 def load_manifest(results_root: Path) -> CascadeManifest:
@@ -1686,6 +1779,19 @@ def run_and_write_from_specs(
     )
     write_manifest(results_root, manifest)
     write_report(results_root, report)
+    # G7 write side (DEC-SWEEP-UNKILLABLE-CORE-001): stamp both artifacts after
+    # they are durably on disk (artifact first, stamp second — I-5). A stamp
+    # failure is fail-soft (A14/F2): the artifacts stand unstamped — the replay
+    # then proceeds on the documented legacy/unstamped path — never a lost run.
+    try:
+        stamp_cascade_artifacts(results_root, manifest, bars_for=bars_for)
+    except Exception as exc:  # fail-soft law (I-3) — stamping is observability
+        _LOG.warning(
+            "cascade_wire.stamp_failed",
+            results_root=str(results_root),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
     return report
 
 
@@ -1706,12 +1812,54 @@ def run_and_write_from_manifest(
     CascadeWireReport
         The aggregate cascade report (also written to disk).
 
+    G7 read side (DEC-SWEEP-UNKILLABLE-CORE-001): BEFORE consuming, the
+    manifest's stamp is validated (torn/foreign-run stamps REFUSE with the
+    exact verdict — rebuild this link via ``brutex sweep-all``, artifacts
+    1..N-1 untouched) and, when the stamp carries the ``data_snapshot_hash``
+    extra, the hash is recomputed over FRESHLY loaded bars — a changed lake
+    REFUSES naming both hashes instead of silently rewriting a
+    wrong-provenance "golden" report. A manifest with NO stamp (written before
+    this change, or by a direct :func:`write_manifest` call) proceeds with ONE
+    ``cascade_wire.replay_unstamped`` WARN — honest back-compat, never a
+    broken lake.
+
     Raises
     ------
     CascadeWireError
-        If no manifest exists under *results_root* or it is malformed.
+        If no manifest exists under *results_root*, it is malformed, its
+        stamp is torn/mismatched, or the lake bars drifted from the stamped
+        ``data_snapshot_hash``.
     """
+    from brutex.observability.stage_stamp import (
+        SNAPSHOT_EXTRA_KEY,
+        StampVerdict,
+        validate_stage_stamp,
+    )
+
     manifest = load_manifest(results_root)
+    verdict, stamp = validate_stage_stamp(
+        manifest_path(results_root),
+        expected_stage=CASCADE_MANIFEST_STAGE,
+        expected_run_id=manifest.sweep_id,
+    )
+    if verdict is StampVerdict.MISSING_STAMP:
+        _LOG.warning("cascade_wire.replay_unstamped", results_root=str(results_root))
+    elif verdict is not StampVerdict.OK:
+        raise CascadeWireError(
+            f"cascade manifest stamp verdict is {verdict.value!r} — refusing the replay "
+            f"(a torn/foreign manifest must be rebuilt, not consumed); re-run "
+            f"`brutex sweep-all` to rebuild this link (earlier artifacts are untouched)"
+        )
+    stamped_snapshot = stamp.extra.get(SNAPSHOT_EXTRA_KEY) if stamp is not None else None
+    if verdict is StampVerdict.OK and stamped_snapshot is not None:
+        fresh_snapshot = manifest_snapshot_hash(manifest, bars_for=bars_for)
+        if fresh_snapshot != stamped_snapshot:
+            raise CascadeWireError(
+                f"cascade replay REFUSED: the lake bars changed since this manifest was "
+                f"written — stamped data_snapshot_hash {stamped_snapshot} != freshly "
+                f"computed {fresh_snapshot}; re-run `brutex sweep-all` (the manifest's "
+                f"provenance no longer matches the lake)"
+            )
     report = run_cascade_over_specs(
         manifest.specs,
         bars_for=bars_for,
@@ -1722,6 +1870,18 @@ def run_and_write_from_manifest(
         leaderboard_trials=manifest.leaderboard_trials,
     )
     write_report(results_root, report)
+    if verdict is StampVerdict.OK:
+        # Re-stamp the just-rewritten report (byte-identical content given the
+        # verified-unchanged lake; the fresh stamp keeps I-5 sound). Fail-soft.
+        try:
+            stamp_cascade_artifacts(results_root, manifest, bars_for=bars_for)
+        except Exception as exc:  # fail-soft law (I-3)
+            _LOG.warning(
+                "cascade_wire.stamp_failed",
+                results_root=str(results_root),
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
     return report
 
 
@@ -1829,6 +1989,8 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
 
 __all__ = [
     "CASCADE_DIRNAME",
+    "CASCADE_MANIFEST_STAGE",
+    "CASCADE_REPORT_STAGE",
     "MANIFEST_FILENAME",
     "MANIFEST_VERSION",
     "REPORT_FILENAME",
@@ -1851,6 +2013,7 @@ __all__ = [
     "load_manifest",
     "manifest_from_json",
     "manifest_path",
+    "manifest_snapshot_hash",
     "manifest_to_json",
     "report_path",
     "run_and_write_from_manifest",
@@ -1858,6 +2021,7 @@ __all__ = [
     "run_cascade_over_specs",
     "serialize_wire_report",
     "spec_from_store_rows",
+    "stamp_cascade_artifacts",
     "wire_report_to_dict",
     "write_manifest",
     "write_report",

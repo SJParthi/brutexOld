@@ -225,6 +225,57 @@ class TestIdentity:
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
         assert key.hex() == "f9f118e0cfdc414f95e3a89a04f8d0b648e2a53960ba9c6608a6be3a55da9222"
 
+    def test_gate_config_change_rekeys_identity_and_cache_key(self) -> None:
+        """Ruling 3 (DEC-SWEEP-UNKILLABLE-CORE-001): the overfit + Stage-3 gate config
+        is part of BOTH the run identity AND the tuple cache key.
+
+        A gated institutional re-run over a light-research results tree must NOT
+        resume the same checkpoint (``grid_identity``) NOR cache-skip the ungated
+        tuples (``tuple_cache_key``) — otherwise it serves ungated rows as gated
+        winners. Only the gate knobs differ here.
+        """
+        from brutex.ranking import OverfitGateConfig
+
+        light = _grid()  # overfit=None, stage3 default-off — the light-research grid
+        gated_overfit = _grid(overfit=OverfitGateConfig(dsr_min=0.95))
+        gated_stage3 = _grid(stage3_enable=True)
+
+        # grid_identity (checkpoint resume) re-keys on either gate.
+        assert grid_identity(gated_overfit) != grid_identity(light)
+        assert grid_identity(gated_stage3) != grid_identity(light)
+        assert grid_identity(gated_overfit) != grid_identity(gated_stage3)
+
+        # tuple_cache_key (the cache-SKIP fast path — no preload safety net) too.
+        t_light = next(iter_sweep_tuples(light))
+        t_overfit = next(iter_sweep_tuples(gated_overfit))
+        t_stage3 = next(iter_sweep_tuples(gated_stage3))
+        assert tuple_cache_key(t_overfit, gated_overfit) != tuple_cache_key(t_light, light)
+        assert tuple_cache_key(t_stage3, gated_stage3) != tuple_cache_key(t_light, light)
+
+        # A distinct overfit KNOB value re-keys again (not just presence).
+        gated_overfit2 = _grid(overfit=OverfitGateConfig(dsr_min=0.90))
+        assert grid_identity(gated_overfit2) != grid_identity(gated_overfit)
+
+    def test_gate_config_default_is_identity_byte_stable(self) -> None:
+        """Ruling 3: an UNCHANGED (ungated, no-Stage-3) grid keeps identity byte-stable.
+
+        The gate-config axis contributes NOTHING at defaults, so a light grid
+        hashes exactly as it did before this axis existed (the frozen goldens
+        above are unmoved) — the "gate-config change never cache-skips, unchanged
+        config never re-keys" contract. A disabled Stage-3 pass leaves its knobs
+        INERT, so changing ``stage3_top_k`` on a ``stage3_enable=False`` grid must
+        NOT move the identity (no false full-recompute).
+        """
+        light = _grid()
+        assert grid_identity(_grid()) == grid_identity(light)
+        # Stage-3 knobs are inert while disabled → identity unmoved.
+        assert grid_identity(_grid(stage3_top_k=999)) == grid_identity(light)
+        assert grid_identity(_grid(stage3_max_fevals=17)) == grid_identity(light)
+        t_light = next(iter_sweep_tuples(light))
+        assert tuple_cache_key(
+            next(iter_sweep_tuples(_grid(stage3_top_k=999))), _grid(stage3_top_k=999)
+        ) == tuple_cache_key(t_light, light)
+
     @given(
         top_k_a=st.integers(min_value=1, max_value=5),
         top_k_b=st.integers(min_value=1, max_value=5),

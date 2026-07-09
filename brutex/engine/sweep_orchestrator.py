@@ -65,13 +65,13 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import blake3
 import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import ResultsStore, ResultsStoreError
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_run import (
@@ -781,6 +781,42 @@ def make_store_for(root: Path, grid: SweepGridConfig) -> Callable[[SweepTuple], 
     return lambda tuple_: load_or_create_store(tuple_store_path(root, tuple_, grid))
 
 
+class TupleDiffCheck(Protocol):
+    """The optional per-tuple R45 diff-check seam (DEC-SWEEP-UNKILLABLE-CORE-001).
+
+    Invoked strictly AFTER the tuple's store is flushed + sentineled, with the
+    tuple's certified ``bar_bits`` from the resident kernel — the hook is
+    read-only over the persisted result and MUST be fail-soft (the run core's
+    closure guarantees it; a mismatch marks the run SUSPECT, never alters a
+    byte — the never-adopt law, I-4).
+    """
+
+    def __call__(
+        self,
+        *,
+        bars: Sequence[CandleBar],
+        bar_bits: Sequence[int],
+        tuple_: SweepTuple,
+        grid: SweepGridConfig,
+    ) -> None:
+        """Spot-check one persisted tuple (results-inert by contract)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class StoreQuarantine(Protocol):
+    """The optional G1 corrupt-store quarantine seam (DEC-SWEEP-UNKILLABLE-CORE-001).
+
+    Invoked with the failing tuple + the raised
+    :class:`~brutex.engine.results_store.ResultsStoreError`; the implementation
+    moves the tuple's on-disk trio into forensic quarantine (never deletes) so
+    the ONE fresh retry regenerates it byte-identically (sentinel-redo law).
+    """
+
+    def __call__(self, tuple_: SweepTuple, exc: BaseException) -> None:
+        """Quarantine *tuple_*'s store trio after *exc*."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
 def run_one_tuple(
     grid: SweepGridConfig,
     tuple_: SweepTuple,
@@ -791,6 +827,8 @@ def run_one_tuple(
     audit: AuditSink,
     skip_empty: bool = True,
     kernel_cache: ResidentKernelCache | None = None,
+    diffcheck: TupleDiffCheck | None = None,
+    store_quarantine: StoreQuarantine | None = None,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
 
@@ -833,6 +871,20 @@ def run_one_tuple(
         from it and handed to :func:`~brutex.engine.sweep_run.run_persisted_sweep`
         (``kernel=``) — a byte-identical result, only the redundant rebuild is
         skipped (Golden Rule #4). ``None`` rebuilds per tuple (legacy path).
+    diffcheck
+        Optional :class:`TupleDiffCheck` (DEC-SWEEP-UNKILLABLE-CORE-001 R45),
+        invoked strictly AFTER the tuple persisted, with the resident kernel's
+        certified ``bar_bits``. Skipped (honestly, by design) when
+        ``kernel_cache`` is ``None`` — the production drivers always run with
+        a resident kernel. ``None`` (default) is byte-identical to before.
+    store_quarantine
+        Optional :class:`StoreQuarantine` (G1): a
+        :class:`~brutex.engine.results_store.ResultsStoreError` from the store
+        open / run quarantines the tuple's trio and retries ONCE fresh; a
+        second failure raises :class:`~brutex.engine.sweep_run.SweepComboError`
+        so the grid counts the tuple failed and CONTINUES (previously a
+        corrupt store aborted the whole grid). ``None`` (default) re-raises
+        the original error unchanged (byte-identical to before).
 
     Returns
     -------
@@ -844,6 +896,9 @@ def run_one_tuple(
     ------
     ValueError
         If ``skip_empty=False`` and the tuple has no bars.
+    SweepComboError
+        When ``store_quarantine`` is bound and the store fails AGAIN after the
+        single quarantine + retry (the grid drivers count it, never abort).
     """
     bars = bars_for(tuple_.instrument, tuple_.tf.label)
     if not bars:
@@ -865,17 +920,42 @@ def run_one_tuple(
         if kernel_cache is not None
         else None
     )
-    return run_persisted_sweep(
-        bars,
-        tuple_.to_run_config(grid),
-        store=store_for(tuple_),
-        dedup=dedup,
-        audit=audit,
-        kernel=kernel,
-        # Enables the per-tuple trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001):
-        # the digest is the same collision guard the store filename carries.
-        trial_stats_digest=_tuple_digest(tuple_, grid),
-    )
+
+    def _attempt() -> SweepRunSummary:
+        return run_persisted_sweep(
+            bars,
+            tuple_.to_run_config(grid),
+            store=store_for(tuple_),
+            dedup=dedup,
+            audit=audit,
+            kernel=kernel,
+            # Enables the per-tuple trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001):
+            # the digest is the same collision guard the store filename carries.
+            trial_stats_digest=_tuple_digest(tuple_, grid),
+        )
+
+    try:
+        summary = _attempt()
+    except ResultsStoreError as exc:
+        # G1 (DEC-SWEEP-UNKILLABLE-CORE-001): a corrupt on-disk store no longer
+        # aborts the WHOLE grid — quarantine the trio (forensics kept) + ONE
+        # fresh retry (byte-identical regeneration by the sentinel-redo law);
+        # a second store failure demotes to the tuple-skip contract.
+        if store_quarantine is None:
+            raise
+        store_quarantine(tuple_, exc)
+        try:
+            summary = _attempt()
+        except ResultsStoreError as retry_exc:
+            raise SweepComboError(
+                f"tuple store failed again after quarantine + one fresh retry "
+                f"({tuple_.instrument}/{tuple_.tf.label}): "
+                f"{type(retry_exc).__name__}: {retry_exc}"
+            ) from retry_exc
+    if diffcheck is not None and kernel is not None:
+        # R45 — strictly post-persist, read-only; the closure is fail-soft.
+        diffcheck(bars=bars, bar_bits=kernel.bar_bits, tuple_=tuple_, grid=grid)
+    return summary
 
 
 def run_sweep_grid(
@@ -888,6 +968,8 @@ def run_sweep_grid(
     skip_empty: bool = True,
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     reuse_bar_bits: bool = True,
+    diffcheck: TupleDiffCheck | None = None,
+    store_quarantine: StoreQuarantine | None = None,
 ) -> SweepGridSummary:
     """Run the full grid sweep: enumerate the outer product + persist every tuple.
 
@@ -947,6 +1029,10 @@ def run_sweep_grid(
         ``False`` to rebuild per tuple (the legacy path). Honest envelope (Golden
         Rule #10): the cache holds at most ``|proximities|`` bar windows resident →
         bounded ``O(|proximities| · N_bars)`` memory, never O(1) total.
+    diffcheck, store_quarantine
+        The optional DEC-SWEEP-UNKILLABLE-CORE-001 seams, threaded verbatim to
+        :func:`run_one_tuple` (see there); ``None`` defaults are byte-identical
+        to before.
 
     Returns
     -------
@@ -1021,6 +1107,8 @@ def run_sweep_grid(
                 audit=audit,
                 skip_empty=skip_empty,
                 kernel_cache=kernel_cache,
+                diffcheck=diffcheck,
+                store_quarantine=store_quarantine,
             )
         except SweepComboError as exc:
             tuples_failed += 1
@@ -1081,10 +1169,12 @@ def run_sweep_grid(
 
 __all__ = [
     "DEFAULT_MAX_TUPLES",
+    "StoreQuarantine",
     "SweepGridConfig",
     "SweepGridSummary",
     "SweepTuple",
     "Timeframe",
+    "TupleDiffCheck",
     "bloom_capacity_hint",
     "count_sweep_tuples",
     "iter_sweep_tuples",

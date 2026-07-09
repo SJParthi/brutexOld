@@ -83,6 +83,26 @@ def _isolate_groww_token_cache(
 
 
 @pytest.fixture(autouse=True)
+def _isolate_run_forensics_mirror(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redirect the Row-15 run-forensics mirror at a per-test tmp root for the suite.
+
+    DEC-SWEEP-UNKILLABLE-CORE-001 Row 15: the sweep run core mirrors its R40
+    forensics to ``~/.brutex/runs/<run_id>/`` on the INTERNAL disk by default.
+    Point every test's mirror at a fresh tmp root (via the public
+    ``BRUTEX_RUN_MIRROR_ROOT`` env override) so a run-core exercise NEVER writes
+    into the operator's real home — the same isolation discipline as the Groww
+    token cache above. A per-file fixture can still re-point or disable it (empty
+    value); ``monkeypatch`` auto-restores at teardown.
+    """
+    from brutex.engine.run_layout import MIRROR_ROOT_ENV
+
+    mirror = tmp_path_factory.mktemp("run-forensics-mirror")
+    monkeypatch.setenv(MIRROR_ROOT_ENV, str(mirror))
+
+
+@pytest.fixture(autouse=True)
 def _testclient_loopback_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point every ``TestClient`` at ``base_url="http://localhost"`` by default (R2-DS-F1).
 
