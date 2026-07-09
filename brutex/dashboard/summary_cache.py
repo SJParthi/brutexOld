@@ -306,7 +306,7 @@ class SummaryCache:
         #: starved the shared AnyIO limiter; LAKE_UNIQUENESS moved to the
         #: non-blocking ``LakeCensusHolder``. The SPOT/OPTIONS kinds KEEP this
         #: wait (their scans are seconds, not tens of minutes) — the same
-        #: hazard class at a smaller scale, a NAMED follow-up in #1648a's
+        #: hazard class at a smaller scale, a NAMED follow-up in #1648's
         #: honest-limits clause. The owner thread ident
         #: preserves the one legal fall-through: a RE-ENTRANT read from inside
         #: the in-flight recompute itself (same thread) must recompute rather
