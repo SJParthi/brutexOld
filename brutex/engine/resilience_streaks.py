@@ -27,6 +27,22 @@ the structurally collision-free dividend).
 * All ₹ are GROSS (costs ``None`` until P5, gap-register Ruling 18) and
   per-unit (no sizing, ``lots`` ``None`` until P5).
 
+## Spec-locked honest limits (documented at each fold site below)
+
+* ``longest_underwater_days`` is the peak → LAST-UNDERWATER-TRADE span, so when
+  ``still_underwater_at_end`` is ``True`` it is a strict LOWER BOUND on the true
+  peak → recovery duration (recovery, if it ever comes, lands one trade later —
+  outside the backtest). Never read it as a promise of recovery.
+* A scratch (``pnl == 0``) trade while below the peak INCREMENTS the underwater
+  trade/day counters (it does not deepen or recover the curve): those counters
+  measure how LONG you were underwater — a DURATION, not a count of losses.
+* The win-rate ``total`` denominator counts EVERY trade that year (scratches
+  included as non-wins), so ``wins / total`` is the literal win rate on a
+  CONSISTENT denominator — a scratch is neither a win here nor a loss in the
+  streak arm (they are treated distinctly, by design).
+* ``losing_streak_count`` counts losing RUNS, never losing TRADES — the name is
+  intentional; a display consumer must not read it as a trade count.
+
 ## O() envelope
 
 O(trades) single pass at run-END over ≤ top-k finalists (≤ ~10³ trades each —
@@ -485,13 +501,20 @@ def fold_resilience(
             month_losses[month_key] = month_losses.get(month_key, 0) + 1
             week_losses[week_key] = week_losses.get(week_key, 0) + 1
 
-        # 1.5 — win-rate stability across years.
+        # 1.5 — win-rate stability across years. HONEST LIMIT (iii): ``total``
+        # counts EVERY trade this year — a scratch (``pnl == 0``) is a non-win
+        # here (only ``pnl > 0`` wins), so ``wins / total`` is the literal win
+        # rate on a CONSISTENT denominator (the streak arm treats a scratch
+        # distinctly — neither win nor loss; that is deliberate, not a bug).
         year_key = f"{exit_date.year:04d}"
         year_total[year_key] = year_total.get(year_key, 0) + 1
         if pnl > 0:
             year_wins[year_key] = year_wins.get(year_key, 0) + 1
 
-        # 1.3 — underwater (inline cumulative curve, independent maxima).
+        # 1.3 — underwater (inline cumulative curve, independent maxima). The
+        # trade-episode and day-episode worst runs are tracked INDEPENDENTLY (a
+        # short-deep drawdown and a long-shallow one can be different episodes —
+        # both are the honest "worst you endured").
         equity += pnl
         if equity >= peak:
             peak = equity
@@ -499,6 +522,13 @@ def fold_resilience(
             cur_uw_trades = 0
             cur_uw_days = 0
         else:
+            # HONEST LIMIT (ii): a scratch (``pnl == 0``) adds nothing to the
+            # curve yet STILL increments these counters while below the peak —
+            # they measure the DURATION you spent underwater, never a count of
+            # losing trades. HONEST LIMIT (i): ``cur_uw_days`` is the span from
+            # the peak's exit date to THIS trade's exit date, so if the curve
+            # never recovers, ``longest_underwater_days`` (below) is a strict
+            # LOWER BOUND on the true peak → recovery duration.
             cur_uw_trades += 1
             cur_uw_days = (exit_date - peak_exit_date).days
             max_uw_trades = max(max_uw_trades, cur_uw_trades)
@@ -506,6 +536,8 @@ def fold_resilience(
 
     _flush_run(run, hist)
 
+    # HONEST LIMIT (iv): the count of losing RUNS (histogram frequencies),
+    # NEVER the count of losing trades — the field name is intentional.
     losing_streak_count = sum(hist.values())
     if losing_streak_count > 0:
         p50: int | None = _nearest_rank_from_hist(hist, _PCT_P50)
