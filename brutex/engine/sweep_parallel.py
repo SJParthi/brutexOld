@@ -187,6 +187,7 @@ from brutex.engine.sweep_supervisor import (
     SupervisedGridSummary,
     SweepGuards,
     grid_identity,
+    publish_progress_safe,
     tuple_cache_params,
     tuple_label,
 )
@@ -198,6 +199,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.sweep_progress import SweepProgressSnapshot
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
 
@@ -1028,6 +1030,7 @@ class ParallelGridDriver:
         "_monotonic",
         "_n_unique",
         "_next_apply",
+        "_on_progress",
         "_quarantined",
         "_root",
         "_stall_min_mask_bars_per_sec",
@@ -1045,6 +1048,7 @@ class ParallelGridDriver:
         ingest_audit: AuditWriterLike,
         guards: SweepGuards,
         workers: int,
+        on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
         stall_seconds: float | None = None,
         stall_min_mask_bars_per_sec: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
@@ -1070,6 +1074,17 @@ class ParallelGridDriver:
             The TOTAL worker budget; the pool holds ``workers - 1`` EVAL workers
             (one core is the writer-actor). MUST be ``>= 2`` (else the caller runs
             the sequential path).
+        on_progress
+            Optional hook fired with the fresh
+            :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` after
+            every ordered progress mutation (the SAME streaming seam as
+            :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`). ``None``
+            (the default) is byte-identical to the pre-hook behaviour. Invoked
+            ONLY from the ordered apply path (:meth:`_advance`) + the finish, so
+            the published ``completed`` count is monotonic/deterministic; it is
+            FENCED (:func:`~brutex.engine.sweep_supervisor.publish_progress_safe`)
+            so a failed progress write never aborts the sweep, and it writes ONLY
+            the progress file — never an audit line or a per-tuple store dir.
         stall_seconds
             The BASE stall floor — raise :class:`SweepStallError` if no result
             arrives for this long (or the heavier work-scaled bound) while work is
@@ -1106,6 +1121,7 @@ class ParallelGridDriver:
         self._ingest_audit = ingest_audit
         self._guards = guards
         self._workers = workers
+        self._on_progress = on_progress
         self._stall_seconds = resolve_stall_seconds() if stall_seconds is None else stall_seconds
         self._stall_min_mask_bars_per_sec = (
             resolve_stall_min_mask_bars_per_sec()
@@ -1147,7 +1163,12 @@ class ParallelGridDriver:
         sweep_id = grid_identity(self._grid)
         total = count_sweep_tuples(self._grid)
 
-        self._guards.checkpoint.load()
+        # Resilient resume (G12): a corrupt checkpoint is quarantined + logged
+        # LOUD and the sweep starts fresh (next_index == 0) instead of aborting
+        # with a CRITICAL alert. A clean/absent checkpoint is byte-identical to
+        # the prior ``load()`` (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001). The quarantine
+        # sidecar load below still gates FIRST in ``_gate_or_dispatch``.
+        self._guards.checkpoint.load_or_quarantine()
         resume_from = self._guards.checkpoint.next_index
 
         self._guards.progress.start(enumerated=total, detail=self._subject)
@@ -1240,6 +1261,8 @@ class ParallelGridDriver:
                 f"{quarantine_note}"
             )
         )
+        if self._on_progress is not None:
+            publish_progress_safe(self._on_progress, self._guards.progress.snapshot(), log=_LOG)
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_COMPLETE, subject=self._subject, payload=payload
         )
@@ -1796,8 +1819,16 @@ class ParallelGridDriver:
             )
 
     def _advance(self, *, current: str, survived: bool, skipped: bool) -> None:
-        """Tick progress once (the parent-only progress mutation)."""
+        """Tick progress once + stream the fresh snapshot (fenced, parent-only).
+
+        Called ONLY from the ordered apply path (:meth:`_apply_ready_prefix` →
+        :meth:`_apply`), so the published ``completed`` count is monotonic and
+        deterministic. The hook writes ONLY the progress file — never an audit
+        line — and is fenced so a failed write never aborts the sweep (G11).
+        """
         self._guards.progress.advance(current=current, survived=survived, skipped=skipped)
+        if self._on_progress is not None:
+            publish_progress_safe(self._on_progress, self._guards.progress.snapshot(), log=_LOG)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1905,6 +1936,7 @@ def run_parallel_grid(
     ingest_audit: AuditWriterLike,
     guards: SweepGuards,
     workers: int,
+    on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     stall_seconds: float | None = None,
     stall_min_mask_bars_per_sec: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -1925,6 +1957,9 @@ def run_parallel_grid(
     signature difference from ``run_supervised_grid``). ``stall_seconds`` /
     ``stall_min_mask_bars_per_sec`` default to ``None`` → resolved from the
     environment (the heavy-grid-aware stall bound, DEC-SWEEP-STALL-OOM-GUARDS-001).
+    ``on_progress`` is the optional fenced live-progress hook (default ``None`` is
+    byte-identical to the pre-hook behaviour; the SAME seam as
+    ``run_supervised_grid`` — DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001).
 
     Raises
     ------
@@ -1941,6 +1976,7 @@ def run_parallel_grid(
         ingest_audit=ingest_audit,
         guards=guards,
         workers=workers,
+        on_progress=on_progress,
         stall_seconds=stall_seconds,
         stall_min_mask_bars_per_sec=stall_min_mask_bars_per_sec,
         monotonic=monotonic,

@@ -847,7 +847,9 @@ class TestSweepKindAwareRateProbe:
         release = threading.Event()
         started_running = threading.Event()
 
-        def _blocking_sweep(request: object, *, lake_root: Path, results_root: Path) -> int:
+        def _blocking_sweep(
+            request: object, *, lake_root: Path, results_root: Path, on_summary: object = None
+        ) -> int:
             started_running.set()
             assert release.wait(timeout=20.0), "the test must release the sweep"
             return 0
@@ -943,7 +945,9 @@ class TestMeterLifecycleAppWiring:
 
         app_module = importlib.import_module("brutex.dashboard.app")
         monkeypatch.setattr(
-            app_module, "run_sweep_from_request", lambda request, *, lake_root, results_root: 0
+            app_module,
+            "run_sweep_from_request",
+            lambda request, *, lake_root, results_root, on_summary=None: 0,
         )
         injected = SessionRateController()
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
@@ -1038,7 +1042,9 @@ class TestMeterLifecycleAppWiring:
         release = threading.Event()
         started_running = threading.Event()
 
-        def _blocking_sweep(request: object, *, lake_root: Path, results_root: Path) -> int:
+        def _blocking_sweep(
+            request: object, *, lake_root: Path, results_root: Path, on_summary: object = None
+        ) -> int:
             started_running.set()
             assert release.wait(timeout=20.0), "the test must release the sweep"
             return 0

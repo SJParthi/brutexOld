@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from brutex.data.greeks_enrich import GreeksEnrichTarget
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
 
 from brutex import __version__
 from brutex.config.hardware_envelope import apply_polars_thread_bound
@@ -6250,6 +6251,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     sweep_cache_bloom_capacity: int | None = None,
     allow_out_of_scope: bool = False,
     acknowledge_sla_overrun: bool = False,
+    on_summary: Callable[[SupervisedGridSummary], None] | None = None,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -6639,7 +6641,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # CLI still exits non-zero). KeyboardInterrupt/SystemExit are
     # BaseException, so an operator Ctrl-C never alerts; the clean path fires
     # only alerter.sweep_complete below (never both).
-    with sweep_abort_alert(_emit_pull_halt_alert):
+    # keep_awake (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G9): hold the macOS host
+    # awake for the WHOLE sweep chain (launch → grid → stage-3 → options-sim →
+    # cascade → results-depth) — a sleeping Mac silently paused a multi-day sweep
+    # mid-flight, exactly as it did a long fetch (DEC-PULL-KEEPAWAKE-001). The
+    # fast pre-sweep validation above stays OUTSIDE the wrap. Best-effort:
+    # non-darwin / missing caffeinate is a logged no-op. Combined into the ONE
+    # ``with`` so keep_awake is the OUTER scope over the abort-alert chain with no
+    # re-indent (per-cycle when cmd_sweep_daemon re-invokes this — the host is
+    # free to sleep during the daemon's inter-cycle time.sleep).
+    from brutex.observability.power_keepawake import keep_awake
+
+    with keep_awake("brutex sweep-all"), sweep_abort_alert(_emit_pull_halt_alert):
         with (
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
@@ -6700,6 +6713,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     ingest_audit=ingest_audit,
                     guards=guards,
                     workers=workers,
+                    on_progress=_on_progress,
                 )
             else:
                 result = run_supervised_grid(
@@ -6894,6 +6908,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 "pass was SKIPPED (no trade sidecars / baselines / top-100 refresh this run)"
             )
 
+        # Surface the RICH grid summary to the optional consumer (G5b): the
+        # dashboard job captures it to render an honest finish-detail note
+        # (failed / quarantined-prior tuple counts) instead of a bare "done".
+        # The CLI/daemon int-return contract is UNCHANGED — this is additive.
+        if on_summary is not None:
+            on_summary(result)
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
         return sweep_all_exit_code(result.tuples_failed)
@@ -7011,6 +7031,11 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
                     f"[brutex] sweep-daemon --once: running one cycle now ({plan.resume.kind.value})"
                 )
 
+            # keep_awake is inherited TRANSITIVELY per cycle: cmd_sweep_all holds
+            # the host awake for its own chain (G9), so the daemon deliberately
+            # adds NO outer wrap — the host is free to sleep during the
+            # inter-cycle time.sleep above (a daemon-level wrap would pin it awake
+            # through every sleep).
             exit_code = cmd_sweep_all(**sweep_kwargs)
             audit.append(
                 action="DAEMON_CYCLE_DONE",

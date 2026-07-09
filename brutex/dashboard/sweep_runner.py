@@ -27,12 +27,16 @@ progress file reports the honest tuple/combo counts as they run.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
+
+if TYPE_CHECKING:
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
 
 #: Default LAKE-partition index symbols (bare trading symbols, NOT the
 #: ``EXCH-SYMBOL`` groww keys) — mirrors the CLI ``--symbols`` default in
@@ -392,11 +396,70 @@ def build_sweep_kwargs(
     }
 
 
+def sweep_finish_note(
+    *,
+    exit_code: int,
+    tuples_failed: int | None,
+    tuples_quarantined_prior: int | None,
+) -> str:
+    """The dashboard job's honest sweep-completion headline — pure.
+
+    Renders the finish-detail note surfaced through
+    :func:`brutex.dashboard.pull_jobs._finish_detail` (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001
+    / G5b), so a sweep that SKIPPED failed / prior-quarantined tuples never hides
+    behind a bare "done". The counts come from the run's
+    :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary`; ``None`` means
+    the summary was unavailable (the sweep raised / never returned a summary).
+
+    Truth table:
+
+    * summary unavailable (``tuples_failed is None``) + exit ``0`` → ``"done"``
+      (back-compat — a clean sweep with no captured summary).
+    * summary unavailable + non-zero exit → ``"sweep did not run (exit <code>)"``.
+    * summary present, ``0`` failed + ``0``/``None`` quarantined-prior →
+      ``"sweep complete"``.
+    * summary present with any failed / quarantined-prior tuples → a
+      ``"sweep complete — …"`` line naming the counts (the results ARE on disk —
+      a warn-flavoured completion is more honest than a failure).
+
+    Parameters
+    ----------
+    exit_code
+        The sweep's process exit code (only consulted when the summary is
+        unavailable — a present summary's failed count is authoritative).
+    tuples_failed
+        ``SupervisedGridSummary.tuples_failed``, or ``None`` if unavailable.
+    tuples_quarantined_prior
+        ``SupervisedGridSummary.tuples_quarantined_prior``, or ``None``.
+
+    Returns
+    -------
+    str
+        The completion headline.
+    """
+    if tuples_failed is None:
+        if exit_code == 0:
+            return "done"
+        return f"sweep did not run (exit {exit_code})"
+    parts: list[str] = []
+    if tuples_failed > 0:
+        parts.append(
+            f"{tuples_failed} tuple(s) FAILED and were skipped "
+            "(will redo next run; see sweep audit)"
+        )
+    if tuples_quarantined_prior is not None and tuples_quarantined_prior > 0:
+        parts.append(f"{tuples_quarantined_prior} tuple(s) quarantined from a prior run")
+    if parts:
+        return "sweep complete — " + "; ".join(parts)
+    return "sweep complete"
+
+
 def run_sweep_from_request(  # pragma: no cover — orchestration shim over the 100%-tested engine
     request: SweepRunRequest,
     *,
     lake_root: Path,
     results_root: Path,
+    on_summary: Callable[[SupervisedGridSummary], None] | None = None,
 ) -> int:
     """Run the full grid sweep for *request* via ``cmd_sweep_all`` (returns its exit code).
 
@@ -407,11 +470,18 @@ def run_sweep_from_request(  # pragma: no cover — orchestration shim over the 
     ``cmd_sweep_all`` itself — the orchestration is exercised end-to-end by the CLI
     integration tests; the dashboard route tests replace THIS function with an
     offline fake (no lake, no sweep) to keep the unit suite hermetic.
+
+    ``on_summary`` (default ``None``, byte-identical to the prior behaviour) is
+    forwarded to ``cmd_sweep_all`` so the dashboard job can capture the run's
+    :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary` and render an
+    honest finish note (:func:`sweep_finish_note`). The ``int`` exit-code return
+    contract is UNCHANGED — the callback is purely additive.
     """
     from brutex.cli import cmd_sweep_all
 
     return cmd_sweep_all(
-        **build_sweep_kwargs(request, lake_root=lake_root, results_root=results_root)
+        **build_sweep_kwargs(request, lake_root=lake_root, results_root=results_root),
+        on_summary=on_summary,
     )
 
 
@@ -432,5 +502,6 @@ __all__ = [
     "default_results_root",
     "resolve_sweep_request",
     "run_sweep_from_request",
+    "sweep_finish_note",
     "sweep_progress_file",
 ]

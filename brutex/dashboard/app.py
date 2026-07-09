@@ -45,9 +45,12 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
 
 import structlog
 
@@ -249,6 +252,7 @@ from brutex.dashboard.sweep_runner import (
     default_results_root,
     resolve_sweep_request,
     run_sweep_from_request,
+    sweep_finish_note,
     sweep_progress_file,
 )
 from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revision
@@ -6166,8 +6170,32 @@ def build_app(
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: run the grid sweep; the live tick streams to the progress file."""
-            return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
+            """Background body: run the grid sweep; the live tick streams to the progress file.
+
+            Captures the run's ``SupervisedGridSummary`` (G5b) and returns a
+            Mapping carrying an honest ``"note"`` (rendered by
+            :func:`~brutex.dashboard.sweep_runner.sweep_finish_note`), so
+            ``_finish_detail`` surfaces the failed / quarantined-prior tuple
+            counts instead of a bare "done". The int exit code (the nightly/cron
+            red contract) is unchanged upstream — only the RENDER is richer.
+            """
+            captured: list[SupervisedGridSummary] = []
+            exit_code = run_sweep_from_request(
+                request,
+                lake_root=lake,
+                results_root=results_root,
+                on_summary=captured.append,
+            )
+            summary = captured[0] if captured else None
+            return {
+                "note": sweep_finish_note(
+                    exit_code=exit_code,
+                    tuples_failed=(summary.tuples_failed if summary is not None else None),
+                    tuples_quarantined_prior=(
+                        summary.tuples_quarantined_prior if summary is not None else None
+                    ),
+                )
+            }
 
         # On a SUCCESSFUL sweep, bump the dashboard write-generation (the sweep
         # _work never reports per-bar progress, so the _on_progress mark_dirty
