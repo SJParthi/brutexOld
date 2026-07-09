@@ -487,11 +487,28 @@ def _wheels_check(
     )
 
 
+def _default_disk_usage(path: str) -> Any:
+    """The PRODUCTION disk probe — resolves ``shutil.disk_usage`` at CALL time.
+
+    DEC-LAUNCH-DISK-GATE-HERMETIC-001: ``run_preconditions`` previously bound
+    ``shutil.disk_usage`` as a DEF-TIME default argument, so tests could not
+    monkeypatch the probe and the ``/launch`` route suite read the REAL
+    runner disk — a CI runner with < 20 GiB free failed 7 POST tests with
+    412s (the disk gate itself was correct; the TESTS were not hermetic).
+    The default is now the ``spawner=None`` module-seam pattern:
+    ``disk_usage=None`` resolves THIS wrapper at call time, so tests pin
+    ``launch_button._default_disk_usage`` deterministically while production
+    behavior is identical — one ``shutil.disk_usage`` call per check, the
+    same floor, the same OSError arm.
+    """
+    return shutil.disk_usage(path)
+
+
 def run_preconditions(
     lake_root: Path | None,
     *,
     min_free_bytes: int = DEFAULT_MIN_DISK_FREE_BYTES,
-    disk_usage: Callable[[str], Any] = shutil.disk_usage,
+    disk_usage: Callable[[str], Any] | None = None,
 ) -> list[PreconditionCheck]:
     """Run the cheap launch preconditions (bounded — a few stats, zero scans).
 
@@ -499,7 +516,10 @@ def run_preconditions(
     free ≥ *min_free_bytes* · Rust wheels importable · sweeps root writable ·
     no launch already active. Deep lake-completeness checks are deliberately
     NOT duplicated here — the launched CLI itself refuses loudly on missing
-    slices (DEC-SWEEP-PREFLIGHT-001).
+    slices (DEC-SWEEP-PREFLIGHT-001). *disk_usage* ``None`` resolves the
+    module seam :func:`_default_disk_usage` (→ ``shutil.disk_usage``) at
+    call time (DEC-LAUNCH-DISK-GATE-HERMETIC-001 — test-injectable, never a
+    def-time binding).
     """
     checks: list[PreconditionCheck] = []
     if lake_root is None:
@@ -536,8 +556,9 @@ def run_preconditions(
         )
     )
 
+    disk_probe = disk_usage if disk_usage is not None else _default_disk_usage
     try:
-        free = int(disk_usage(str(lake_root)).free)
+        free = int(disk_probe(str(lake_root)).free)
         ok = free >= min_free_bytes
         detail = f"{free / 1024**3:.1f} GiB free (floor {min_free_bytes / 1024**3:.1f} GiB)"
     except OSError as exc:
