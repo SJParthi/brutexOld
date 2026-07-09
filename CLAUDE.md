@@ -18,7 +18,8 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1623 —
+_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1631 —
+renumbered from #1623 after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001;
 the /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named
 follow-up CLOSED: the minute-basis PREV. CLOSE anchored on the symbol's OWN
 1-day series with ZERO real-calendar check (its docstring called a real NSE
@@ -937,7 +938,7 @@ the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
 HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
 the missing session does; `preopen_report._previous_trading_day` was NOT
 refactored there (named follow-up DEC-PREOPEN-PREVDAY-COMMON-001 — since
-CLOSED by MIGRATION.md #1623). READ-ONLY dashboard — ENGINE
+CLOSED by MIGRATION.md #1631). READ-ONLY dashboard — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
 MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
@@ -1687,7 +1688,8 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1623** — the
+- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1631** — renumbered
+  from #1623 after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335) at the 2026-07-09 merge-reconcile; the
   /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named follow-up consolidation: the minute-basis
   PREV. CLOSE guard (`_minute_prev_close_contiguous`) anchored on `trading_dates[idx-1]` — the symbol's OWN 1-day
   series — with ZERO real-NSE-calendar check (its docstring claimed a session absent from BOTH series is "a genuine
@@ -2284,7 +2286,7 @@ hostile-review pass._
   " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
   makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
   session does; no bar is ever fabricated); `preopen_report._previous_trading_day` was deliberately NOT refactored
-  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since CLOSED by MIGRATION.md #1623 (the thin-delegator
+  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since CLOSED by MIGRATION.md #1631 (the thin-delegator
   consolidation). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
   line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
@@ -3998,7 +4000,8 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/preopen-prevday-common`
-  (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1623 — the /reports preopen
+  (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1631 — renumbered from #1623
+  after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001; the /reports preopen
   minute-basis calendar-contiguity fix (a real-session lake hole no longer
   fabricates a %CHNG — correct-or-absent) + the #1539-named follow-up CLOSED:
   `_previous_trading_day` delegates to the COMMON

@@ -1049,6 +1049,7 @@ function covStrip(i) {
 }
 
 async function loadCompleteness() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: fetch the per-symbol completeness map + re-render the list ONLY when it
      actually changed (a pull landed) — keeps the strip live without churning 750 rows. */
   try {
@@ -1063,6 +1064,7 @@ async function loadCompleteness() {
 }
 
 async function loadMappingIntegrity() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the green/red spot↔options mapping verdict (DEC-MAPPING-INTEGRITY-RECONCILE-001).
      VERIFIED when every options-eligible spot that was ATTEMPTED pulled >=1 expiry; RED lists
      only the ATTEMPTED-and-ZERO spots (e.g. M&M, the special-char options-fetch bug). A spot
@@ -1096,6 +1098,7 @@ async function loadMappingIntegrity() {
 }
 
 async function loadMasterIntegrity() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the green/red leg↔spot structural mapping verdict
      (DEC-INSTRUMENT-MASTER-INTEGRITY-001). VERIFIED when every FUT/CE/PE leg maps to exactly
      one IDX/EQ spot (by symbol AND token); RED counts orphan/ambiguous/disagreement/empty
@@ -1126,6 +1129,7 @@ async function loadMasterIntegrity() {
 }
 
 async function loadEconomicsIntegrity() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the green/red lot-economics verdict (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
      VERIFIED when lot_size is uniform per (underlying, expiry); RED counts within-expiry
      mismatches. Cross-expiry lot revisions (legit NSE quarterly) are shown informational,
@@ -1155,6 +1159,7 @@ async function loadEconomicsIntegrity() {
 }
 
 async function loadParseSkips() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the green/red master parse-skip verdict (DEC-PARSE-SKIP-REPORT-001).
      GREEN when the skipped-and-counted malformed in-scope rows
      (DEC-INSTRUMENT-SKIP-NO-GSYM-001) are within max(10, 0.1% of in-scope rows);
@@ -1186,6 +1191,7 @@ async function loadParseSkips() {
 }
 
 async function loadLakeUniqueness() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the lake duplicate-census verdict (DEC-LAKE-HEAL-001). CLEAN when the
      bounded scan found zero findings; otherwise the poisoned finding count, with the
      ENGINE-index (NIFTY/BANKNIFTY/SENSEX) verdict called out — the operator's headline
@@ -1708,6 +1714,7 @@ function windowBucketTallies(c) {
   return {noData, resolved, pending, failed, total: resolved + pending + failed};
 }
 async function refreshWindowsLine() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   if (!pullStarted) return;
   try {
     const r = await fetch('/api/v1/coverage/windows');
@@ -2010,6 +2017,14 @@ document.addEventListener('visibilitychange', () => {
   // recovery for a poll wedged mid-flight); the pollGen token makes a re-poll
   // during an in-flight fetch safe — the hung straggler drops on its gen check.
   if (!document.hidden && watchActive && lastPollLabel !== null) pollProgress(lastPollLabel);
+  // Integrity/windows catch-up (DEC-DASHBOARD-POLL-HYGIENE-001): the 5 s windows
+  // line + the six 15 s integrity loaders skip their fetch while hidden — on tab
+  // return, refresh them NOW so a returning operator never waits out an interval.
+  if (!document.hidden) {
+    refreshWindowsLine();
+    loadCompleteness(); loadMappingIntegrity(); loadMasterIntegrity();
+    loadEconomicsIntegrity(); loadParseSkips(); loadLakeUniqueness();
+  }
 });
 
 /* Per-expiry sub-unit progress (DEC-PULL-HEADER-SUBUNIT-001): one giant unit (a whole
