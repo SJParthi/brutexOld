@@ -143,9 +143,7 @@ def golden_rows(lake: Path) -> dict[str, list[PreOpenRow]]:
     conn = duckdb.connect()
     start, end = date(2024, 1, 1), date(2025, 12, 31)
     return {
-        "day": build_preopen_rows(
-            conn, lake, datasets=DATASETS, start=start, end=end, basis="day"
-        ),
+        "day": build_preopen_rows(conn, lake, datasets=DATASETS, start=start, end=end, basis="day"),
         "minute": build_preopen_rows(
             conn, lake, datasets=DATASETS, start=start, end=end, basis="minute"
         ),
