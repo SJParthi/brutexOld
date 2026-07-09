@@ -141,14 +141,14 @@ def build_golden_lake(lake: Path) -> None:
 def golden_rows(lake: Path) -> dict[str, list[PreOpenRow]]:
     """Build both bases' rows over the golden lake (the report's real spine)."""
     conn = duckdb.connect()
-    kwargs = {
-        "datasets": DATASETS,
-        "start": date(2024, 1, 1),
-        "end": date(2025, 12, 31),
-    }
+    start, end = date(2024, 1, 1), date(2025, 12, 31)
     return {
-        "day": build_preopen_rows(conn, lake, basis="day", **kwargs),
-        "minute": build_preopen_rows(conn, lake, basis="minute", **kwargs),
+        "day": build_preopen_rows(
+            conn, lake, datasets=DATASETS, start=start, end=end, basis="day"
+        ),
+        "minute": build_preopen_rows(
+            conn, lake, datasets=DATASETS, start=start, end=end, basis="minute"
+        ),
     }
 
 

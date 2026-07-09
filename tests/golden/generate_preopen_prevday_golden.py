@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.golden.test_preopen_prevday_golden import (  # noqa: E402
+from tests.golden.test_preopen_prevday_golden import (
     FIXTURES,
     GOLDEN_DAY_XLSX,
     GOLDEN_MINUTE_XLSX,
