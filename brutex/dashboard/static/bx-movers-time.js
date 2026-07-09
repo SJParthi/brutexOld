@@ -25,12 +25,18 @@
  * cut is inclusive-≤ on the RAW 1-minute frame BEFORE resampling
  * (movers_snapshot.filter_to_ist_minute), so a bucket-START cutoff serves a
  * FORMING partial bucket while the bucket-FINAL cutoff serves the COMPLETED
- * bar — byte-equal to the stored /db row (the #1145 stored-vs-resample
- * equality; every non-last value is _stored_serves_cutoff-aligned, the
- * always-"15:29" last value rides the resample path on non-divisor TFs with
- * byte-equal values). Containing-bucket disclosure: the snap may extend the
- * effective as-of by up to m−1 minutes past the raw instant — the page's
- * as-of span label ("15:27–15:29") makes that visible.
+ * bar — byte-equal to the stored /db row — WHEN the lake holds the bucket in
+ * full (the #1145 stored-vs-resample equality; every non-last value is
+ * _stored_serves_cutoff-aligned, the always-"15:29" last value rides the
+ * resample path on non-divisor TFs with byte-equal values). HONEST LIMIT: a
+ * pick whose bucket-final lies BEYOND the day's last traded minute (a
+ * live/partial day) serves the latest FORMING data instead — undetectable
+ * client-side today because the backend echoes latest_time only on Latest
+ * (no-time) requests, so the forming disclosure below cannot cover explicit
+ * picks (named follow-up DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001).
+ * Containing-bucket disclosure: the snap may extend the effective as-of by
+ * up to m−1 minutes past the raw instant — the page's as-of span label
+ * ("15:27–15:29") makes that visible.
  *
  * These are PURE, side-effect-free primitives the movers page's fillTimes()
  * uses; extracting them here lets a node-executed golden pin them without a
@@ -96,7 +102,9 @@ function bxBucketStart(instantMin, minutes) {
 
 /* The bucket-FINAL minute (the SENT ?time= cutoff) of the m-minute bucket
  * containing the instant — min(bucketStart + m − 1, 929). Sending this serves
- * the COMPLETED bucket (inclusive-≤ raw-1m cut), never a forming partial. */
+ * the COMPLETED bucket (inclusive-≤ raw-1m cut) when the lake holds it in
+ * full; past the day's last traded minute it serves the latest forming data
+ * (the header's HONEST LIMIT). */
 function bxBucketFinal(instantMin, minutes) {
   return Math.min(bxBucketStart(instantMin, minutes) + minutes - 1, BX_SESSION_LAST_MIN);
 }

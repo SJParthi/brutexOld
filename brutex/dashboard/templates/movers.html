@@ -322,7 +322,11 @@ const SAMPLE = {
    (bx-movers-time.js): each option's label = bucket-START HH:MM (the /db row
    label) and value = bucket-FINAL HH:MM (min(start+m−1, 15:29), the SENT
    ?time= cutoff) — the backend's inclusive-≤ raw-1m cut then serves the
-   COMPLETED /db-equal bar, never a forming partial. NO first-slot pin and NO
+   COMPLETED /db-equal bar when the lake holds the bucket in full; a pick
+   whose bucket-final lies beyond the day's last traded minute serves the
+   latest FORMING data instead (undetectable here — latest_time is echoed
+   only on Latest requests; named follow-up
+   DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001). NO first-slot pin and NO
    Latest fallback on a non-slot pick (the two pre-fix reset bugs). Grid
    strings come from BXMoversTime.timeOptionPairs — numeric-generated "HH:MM"
    + one static literal, so the innerHTML stays XSS-safe
@@ -662,7 +666,15 @@ async function load() {
        A Latest cut whose last minute falls MID-bucket is labelled a FORMING
        bar (item 4 — derived 100% client-side from the existing latest_time
        echo via BXMoversTime.formingInfo; a malformed/absent echo abstains to
-       the plain label, never a wrong forming claim). textContent only. */
+       the plain label, never a wrong forming claim). HONEST LIMIT: the
+       forming disclosure covers the LATEST cut only — an EXPLICIT pick whose
+       bucket-final lies beyond the day's last traded minute (a live/partial
+       day) also serves forming data under its completed-span label, but is
+       UNDETECTABLE client-side today because the backend echoes latest_time
+       only when no time was sent (app.py `time is None` gate, pinned by
+       test_explicit_time_leaves_latest_time_none); echoing it on explicit
+       picks + extending this note is the named follow-up
+       DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001. textContent only. */
     const asofM = TF_MIN[j.interval] || 375;
     const isDaily = asofM >= 375;
     const pickedMin = j.time ? BXMoversTime.cutoffMinute(j.time) : null;

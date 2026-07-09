@@ -24,10 +24,14 @@ bucket of the new timeframe under the ONE mapping law::
     bucketFinal(t, m) = min(bucketStart(t, m) + m - 1, 929)
 
 Each dropdown option: label = HH:MM(bucketStart) (the /db row label), value =
-HH:MM(bucketFinal) (the SENT ``?time=`` cutoff) — so an explicit pick always
-serves the COMPLETED /db-equal bar (the backend cut is inclusive-<= on the raw
-1-minute frame BEFORE resampling), killing the operator's 24360.00-vs-24355.1
-forming-cut confusion at the root.
+HH:MM(bucketFinal) (the SENT ``?time=`` cutoff) — so an explicit pick serves
+the COMPLETED /db-equal bar WHENEVER the lake holds the bucket in full (the
+backend cut is inclusive-<= on the raw 1-minute frame BEFORE resampling),
+killing the operator's 24360.00-vs-24355.1 forming-cut confusion at the root.
+HONEST LIMIT (envelope-pinned below): a pick whose bucket-final lies BEYOND
+the day's last traded minute (a live/partial day) serves the latest FORMING
+data instead, undetectable client-side — ``latest_time`` is echoed only on
+Latest requests (named follow-up DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001).
 
 House idiom: node-executed goldens run the REAL shipped ``bx-movers-time.js``
 (and the REAL ``fillTimes()`` / handler lines extracted verbatim from
@@ -547,6 +551,18 @@ class TestExplicitPickEqualsDbBar:
     confusion: movers 3min@15:27 = 24360.00 (forming cut) vs /db bar 15:27 =
     24355.1 (full bucket) — both correct, different semantics; the dropdown
     now always sends the completed-bucket semantics.
+
+    HONEST LIMIT (the round-3 hostile-review fold): the /db-equality holds
+    WHENEVER the lake holds the picked bucket in full. A pick whose
+    bucket-final lies BEYOND the day's last traded minute (the live current
+    day, or a mid-pull partial day) serves the latest FORMING data instead —
+    and the client structurally cannot detect it today, because the backend
+    resolves ``latest_time`` only when no explicit ``time`` was sent
+    (app.py's ``time is None`` gate, integration-pinned by
+    ``test_explicit_time_leaves_latest_time_none``). Echoing ``latest_time``
+    on explicit picks + extending the forming note there is the NAMED
+    follow-up DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001 (a payload-VALUE
+    change deliberately kept out of this byte-identical-payload change).
     """
 
     _DAY = date(2024, 1, 2)
@@ -612,6 +628,47 @@ class TestExplicitPickEqualsDbBar:
         assert forming == Decimal("24360.00")
         assert forming != completed
 
+    def test_pick_beyond_end_of_data_serves_the_forming_latest_envelope(
+        self, tmp_path: Path
+    ) -> None:
+        """HONEST-LIMIT envelope pin (the round-3 hostile-review fold).
+
+        A live/partial day: the 1m lake ends at 13:00 IST. An explicit
+        ``?time=15:29`` (the 15:27-labeled slot's sent bucket-final) does NOT
+        serve any completed 15:27 bucket — none exists — it serves the latest
+        FORMING data: the 13:00-bucket cut (3minute bucket 13:00–13:02 holding
+        one minute), byte-equal to the Latest (no-time) whole-day cut. The
+        client cannot detect this today (``latest_time`` is echoed only on
+        Latest requests — ``test_explicit_time_leaves_latest_time_none``);
+        making it detectable is the NAMED follow-up
+        DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001. If this test ever FAILS,
+        the envelope moved — reconcile the ledger #1631 HONEST section, the
+        movers.html as-of note, and the bx-movers-time.js header together.
+        """
+        bars = [
+            _bar_at(self._DAY, "12:57", "101.00", 1),
+            _bar_at(self._DAY, "12:58", "102.00", 1),
+            _bar_at(self._DAY, "12:59", "104.00", 1),
+            _bar_at(self._DAY, "13:00", "103.00", 1),
+        ]
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=bars
+        )
+        # The picked 15:27–15:29 bucket does not exist in the lake; the served
+        # value is the forming 13:00-bucket cut (the 13:00 1m close) …
+        assert self._ltp(tmp_path, "15:29") == Decimal("103.00")
+        # … byte-equal to the Latest whole-day cut (the pick degenerated to
+        # "latest forming data", exactly what the disclosed envelope states).
+        latest = compute_spot_candidates(
+            lake_root=tmp_path,
+            interval="3minute",
+            date=self._DAY.isoformat(),
+            time=None,
+            datasets=self._DATASET,
+        )
+        assert len(latest.snapshots) == 1
+        assert Decimal(str(latest.snapshots[0].ltp)) == Decimal("103.00")
+
 
 # ── substring presence pins (honest envelope: presence, not execution) ────
 
@@ -653,6 +710,18 @@ class TestTemplateWiringPins:
         # The item-4 forming disclosure literal (client-derived from latest_time).
         assert "completed bar closes at" in text
         assert "BXMoversTime.formingInfo(j.latest_time, asofM)" in text
+
+    def test_honest_limit_disclosure_names_the_followup(self) -> None:
+        # The round-3 fold: the explicit-pick-beyond-end-of-data FORMING limit
+        # (an explicit pick's /db-equality holds only when the lake holds the
+        # bucket in full) must stay DISCLOSED at both frontend sources, each
+        # naming the follow-up that would make it client-detectable. Presence
+        # pins only (honest envelope) — the behavior itself is pinned by
+        # test_pick_beyond_end_of_data_serves_the_forming_latest_envelope.
+        for path in (_MOVERS, _STATIC_JS):
+            text = path.read_text(encoding="utf-8")
+            assert "DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001" in text, path.name
+        assert "last traded minute" in _MOVERS.read_text(encoding="utf-8")
 
     def test_adopt_block_stays_defensive_and_instant_free(self) -> None:
         text = _MOVERS.read_text(encoding="utf-8")
