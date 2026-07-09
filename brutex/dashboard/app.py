@@ -1262,14 +1262,17 @@ def build_app(
     oneclick_trades_reader
         Optional typed :class:`~brutex.dashboard.oneclick_artifacts.TradesReader`
         for the ``/api/v1/oneclick/trades`` route (DEC-OPERATOR-PAGE-REAL-001).
-        ``None`` (the default) resolves per request: the fail-loud
+        ``None`` (the default) resolves per request
+        (DEC-ONECLICK-SWEEP-RUNS-REBIND-001): the fail-loud
         ``BRUTEX_ONECLICK_FIXTURE_ROOT`` fixture tree activates a memoised
-        :class:`~brutex.dashboard.oneclick_artifacts.FixtureTradesReader`,
-        otherwise the HONEST
-        :class:`~brutex.dashboard.oneclick_artifacts.AwaitingTradesReader`
-        serves ``status="awaiting"`` — production can NEVER serve a real lake
-        path as trade data until the ResultsStore paged API lands at
-        merge-integration.
+        :class:`~brutex.dashboard.oneclick_artifacts.FixtureTradesReader`;
+        otherwise the PRODUCTION
+        :class:`~brutex.dashboard.oneclick_artifacts.TradeStoreReader` pages
+        the SHIPPED #1275 results-depth sidecars under the Ruling-4
+        ``sweep_runs/`` sibling root (a run without those sidecars degrades
+        to the honest ``status="awaiting"``), and the no-lake configuration
+        keeps the honest
+        :class:`~brutex.dashboard.oneclick_artifacts.AwaitingTradesReader`.
     session_rate
         Optional :class:`~brutex.dashboard.pull_controller.SessionRateController`
         — the ONE per-session rate holder every pull shares
@@ -6388,7 +6391,10 @@ def build_app(
         except oneclick_artifacts.OneclickConfigError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if fixture_root is not None:
-            return fixture_root, fixture_root
+            # The pseudo sweeps root INSIDE the fixture tree — the Ruling-4
+            # parent-sibling derivation then lands runs at
+            # <fixture_root>/sweep_runs/ (self-contained, never escapes).
+            return oneclick_artifacts.fixture_results_root(fixture_root), fixture_root
         if instrument_store is None:
             return None, None
         store_path = getattr(instrument_store, "path", None)
@@ -6396,29 +6402,45 @@ def build_app(
             return None, None
         return default_results_root(store_path.parent), None
 
-    # FixtureTradesReader instances memoised per fixture root so their
-    # parse-once-per-revision memo survives across requests (owned by this app
+    # Fixture/production reader instances memoised per root so their
+    # parse-once-per-revision memos survive across requests (owned by this app
     # instance — no module-global mutable state, CLAUDE.md §4).
     _oneclick_fixture_readers: dict[str, oneclick_artifacts.FixtureTradesReader] = {}
+    _oneclick_store_readers: dict[str, oneclick_artifacts.TradeStoreReader] = {}
 
-    def _oneclick_reader(fixture_root: Path | None) -> oneclick_artifacts.TradesReader:
-        """The typed trades seam: injected reader > fixture reader > honest awaiting."""
+    def _oneclick_reader(
+        results_root: Path | None, fixture_root: Path | None
+    ) -> oneclick_artifacts.TradesReader:
+        """The typed trades seam (DEC-ONECLICK-SWEEP-RUNS-REBIND-001 order).
+
+        injected reader > fixture reader (env override) > the PRODUCTION
+        ``TradeStoreReader`` over the #1275 results-depth sidecars (per-run
+        honest awaiting when absent) > ``AwaitingTradesReader`` when no lake
+        root is wired at all.
+        """
         if oneclick_trades_reader is not None:
             return oneclick_trades_reader
-        if fixture_root is None:
+        if fixture_root is not None:
+            fkey = str(fixture_root)
+            freader = _oneclick_fixture_readers.get(fkey)
+            if freader is None:
+                freader = oneclick_artifacts.FixtureTradesReader(fixture_root)
+                _oneclick_fixture_readers[fkey] = freader
+            return freader
+        if results_root is None:
             return oneclick_artifacts.AwaitingTradesReader()
-        key = str(fixture_root)
-        reader = _oneclick_fixture_readers.get(key)
-        if reader is None:
-            reader = oneclick_artifacts.FixtureTradesReader(fixture_root)
-            _oneclick_fixture_readers[key] = reader
-        return reader
+        skey = str(results_root)
+        sreader = _oneclick_store_readers.get(skey)
+        if sreader is None:
+            sreader = oneclick_artifacts.TradeStoreReader(results_root)
+            _oneclick_store_readers[skey] = sreader
+        return sreader
 
     @app.get("/api/v1/oneclick/runs")
     async def api_oneclick_runs() -> JSONResponse:
         """GET /api/v1/oneclick/runs — discovered sweep runs, newest first.
 
-        Lists ``<results_root>/runs/<run_id>/`` directories with per-artifact
+        Lists the Ruling-4 ``sweep_runs/<run_id>/`` directories with per-artifact
         presence flags + the manifest's ``suspect`` verdict (``null`` until
         readable — never fabricated). Memoised per ``runs/`` dir stat token;
         an empty/absent tree is the loud ``status:"awaiting"`` payload.
@@ -6640,22 +6662,22 @@ def build_app(
     ) -> JSONResponse:
         """GET /api/v1/oneclick/trades — one paged trade list via the typed seam.
 
-        PRODUCTION DEFAULT is the honest ``AwaitingTradesReader`` (trades land
-        at merge-integration via the ResultsStore paged API); the file-reading
+        PRODUCTION DEFAULT is the ``TradeStoreReader`` over the SHIPPED #1275
+        results-depth sidecars (DEC-ONECLICK-SWEEP-RUNS-REBIND-001) — a run
+        without those sidecars degrades to the honest awaiting page (the
+        ``AwaitingTradesReader`` semantics, preserved); the file-reading
         ``FixtureTradesReader`` activates ONLY under the fail-loud
         ``BRUTEX_ONECLICK_FIXTURE_ROOT``. ``source`` is a VISIBLE badge
         client-side (C-M5); ``total`` stays ``null`` when unknown — never a
-        fabricated 0; VIX nulls pass through (R31 honest NULL).
+        fabricated 0; VIX + lots/costs nulls pass through (R31 honest NULL /
+        Ruling 18 NULL-by-design).
         """
         rid = _oneclick_require_run_id(run_id)
 
         def _resolve() -> dict[str, Any]:
             """Build the trades payload off the event loop via the TradesReader seam."""
-            try:
-                fixture_root = oneclick_artifacts.resolve_fixture_root()
-            except oneclick_artifacts.OneclickConfigError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            reader = _oneclick_reader(fixture_root)
+            root, fixture_root = _oneclick_roots()
+            reader = _oneclick_reader(root, fixture_root)
             page = reader.page(rid, rank, offset=offset, limit=limit)
             return oneclick_view.build_trades_payload(
                 rid,
@@ -6721,7 +6743,7 @@ def build_app(
                         )
                     except oneclick_artifacts.ChainNotVerifiedError:
                         chain = None
-            trades_probe = _oneclick_reader(fixture_root).page(rid, 1, offset=0, limit=1)
+            trades_probe = _oneclick_reader(root, fixture_root).page(rid, 1, offset=0, limit=1)
             return oneclick_view.build_verify_payload(
                 rid,
                 manifest,

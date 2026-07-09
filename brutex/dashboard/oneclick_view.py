@@ -593,7 +593,8 @@ def verify_checks(
         The chain verdict tuple from ``verify_events_chain`` — ``None`` when
         not verified for the current events revision (⇒ awaiting).
     trades_available
-        Whether ANY trades source currently serves rows (fixture pre-merge).
+        Whether ANY trades source currently serves rows (the #1275
+        results-depth sidecars in production, or the fixture override).
     reconcile
         An optional precomputed :func:`reconcile_funnel` verdict (so
         :func:`build_verify_payload` computes it ONCE — hostile-round NIT-3);
@@ -656,7 +657,7 @@ def verify_checks(
         eyeball_state = "ready"
         eyeball_detail = (
             "wired — operator eyeballs the chart vs Groww/TradingView (operator-judged, "
-            "never auto-passes server-side; trades fixture-backed until P3 merges)"
+            "never auto-passes server-side)"
         )
         claim_state = "ready"
         claim_detail = (
@@ -665,9 +666,9 @@ def verify_checks(
         )
     else:
         eyeball_state = "awaiting"
-        eyeball_detail = "awaiting trades — land at merge-integration (ResultsStore paged API)"
+        eyeball_detail = "awaiting trades — no results-depth sidecars for this run yet"
         claim_state = "awaiting"
-        claim_detail = "awaiting trades — land at merge-integration (ResultsStore paged API)"
+        claim_detail = "awaiting trades — no results-depth sidecars for this run yet"
     checks.append(
         {"id": 3, "name": "Trade → chart eyeball", "state": eyeball_state, "detail": eyeball_detail}
     )

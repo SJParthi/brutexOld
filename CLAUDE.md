@@ -18,7 +18,34 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 —
+_Last updated: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
+the P4 merge-integration rebind of the one-click display adapter onto the
+SHIPPED #1275 results-depth artifacts: the ONE discovery seam
+(`oneclick_artifacts.runs_root`) repoints `<results_root>/runs/` → the
+gap-register Ruling-4 `sweep_runs/` SIBLING root — derived from the SAME
+imported `trade_store.SWEEP_RUNS_DIRNAME` and mirror-PINNED byte-equal to the
+ONE engine seam `trade_store.sweep_run_dir`; deliberately NO legacy `runs/`
+fallback probe (a dual root could silently serve stale artifacts) — the
+committed fixture corpus migrated `runs/` → `sweep_runs/` byte-identically
+instead, with NEW `fixture_results_root` (`<fixture_root>/sweeps` pseudo-lake
+law) keeping the fixture override self-contained. The trades seam's PRODUCTION
+default becomes the NEW `TradeStoreReader` paging the REAL
+`trade_store.read_trade_page` sidecars (top100 additive `run_id` +
+`equity_ref.tuple` → `sidecar_paths_from_ref`, every segment safe-validated —
+a hostile traversal ref never touches disk; reader order injected > fixture
+env > TradeStoreReader > no-lake AwaitingTradesReader). HONEST: a pre-#1275
+top100 / absent stamp → loud awaiting; stamp/read damage → NAMED corrupt,
+never a 500 or a fabricated count; an unknown combo pages total=0; limit
+clamps INSIDE read_trade_page at PAGE_LIMIT_MAX=500, the clamp NAMED in
+detail; lots/costs_paisa pass through as honest None (Ruling 18) rendered
+"—"; additive trade_seq/path_1m_status/mae_granularity surfaced (mae/mfe
+carry a "(1m)"/"(tf)" suffix, textContent-only). The P2 manifest/events
+writers are still NOT shipped — the awaiting states + the ASSUMED chain
+algorithm stand. DISPLAY zone only — ENGINE UNCHANGED
+(NIFTY/BANKNIFTY/SENSEX), engine modules imported never edited; both oneclick
+modules 100% line+branch standalone; ruff/ruff-format/`mypy
+--strict`/pyright clean.)
+Earlier: 2026-07-07 (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 —
 the Operator page (/) is wired to the sweep-oneclick ARTIFACT CONTRACTS and
 the v29 PREVIEW mockup is KILLED by a MECHANICAL sweep (every hardcoded
 ₹/count/date/invented-strategy-name site re-fed via `data-oc=` hooks,
@@ -382,7 +409,7 @@ REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
 `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
 --strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
 UNMODIFIED.)
-Earlier: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1621 —
+Earlier: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1622 —
 India-VIX trade stamping wired end-to-end: `vix_at_entry`/`vix_at_exit` on
 every OBSERVABLE production trade + the persisted nullable
 `vix_mean`/`vix_min`/`vix_max` finalist trio (REFERENCE ONLY — never in the
@@ -1608,7 +1635,19 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/operator-page-real-rebuild` (**DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561** — the Operator
+- **Active branch:** `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
+  P4 merge-integration rebind, built ON TOP of PR #1280's `claude/operator-page-real-rebuild` head (the eventual PR
+  targets main only after #1280 merges): the one-click discovery seam repoints `<results_root>/runs/` → the Ruling-4
+  `sweep_runs/` SIBLING root (mirror-pinned to `trade_store.sweep_run_dir`; NO legacy `runs/` fallback — the fixture
+  corpus migrated instead, `fixture_results_root` keeping the fixture override self-contained), and the trades seam's
+  PRODUCTION default becomes the NEW `TradeStoreReader` over the SHIPPED #1275 results-depth sidecars
+  (`read_trade_page`; top100 additive `run_id` + `equity_ref.tuple` → `sidecar_paths_from_ref`, hostile refs never
+  touch disk; pre-#1275 top100 / absent stamp → loud awaiting, damage → NAMED corrupt, PAGE_LIMIT_MAX=500 clamp named,
+  Ruling-18 None lots/costs rendered "—", additive `trade_seq`/`path_1m_status`/`mae_granularity` surfaced with a
+  "(1m)"/"(tf)" suffix). P2 manifest/events writers still NOT shipped — awaiting states + the ASSUMED chain algorithm
+  stand. DISPLAY zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), engine imported never edited; both oneclick
+  modules 100% line+branch standalone; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/operator-page-real-rebuild` (**DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561** — the Operator
   page (/) is wired to the sweep-oneclick ARTIFACT CONTRACTS and the v29 PREVIEW mockup is KILLED by a MECHANICAL
   sweep (every hardcoded ₹/count/date/invented-strategy-name site re-fed via `data-oc=` hooks, em-dashed, or
   deleted — the fabricated CHARGES table deleted outright, Track 1 is signal-only; a generic
@@ -1872,7 +1911,7 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
   change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
   --strict`/pyright clean; the P-06 look-ahead + suffix-independence property suites pass UNMODIFIED.)
-  Earlier: `claude/peaceful-hamilton-kyeu07` (**DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1621** — the
+  Earlier: `claude/peaceful-hamilton-kyeu07` (**DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1622** — the
   dormant India-VIX trade stamping WOKEN end-to-end: the lake's `NSE/INDEX/INDIAVIX` series (1-minute ∪ derived 1-day,
   ONE window-bounded read per launch via NEW `brutex/engine/lake_slice.py::load_lake_slice` +
   `brutex/engine/reference_wire.py::build_vix_stamper`) stamps `vix_at_entry`/`vix_at_exit` on EVERY OBSERVABLE production trade, and
@@ -3606,7 +3645,7 @@ hostile-review pass._
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
    every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
-   #1621 — persisted finalist rows additionally carry the derived
+   #1622 — persisted finalist rows additionally carry the derived
    nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
    trade streams are the FIVE named DISCARDED/unobservable streams —
    the Stage-4 cascade candidate re-simulation (stamps would be dropped
@@ -3895,7 +3934,13 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/operator-page-real-rebuild`
+- **Active feature branch:** `claude/oneclick-sweep-runs-rebind`
+  (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 — the P4
+  merge-integration rebind: oneclick discovery repointed to the Ruling-4
+  `sweep_runs/` sibling root + the production `TradeStoreReader` over the
+  #1275 results-depth sidecars; DISPLAY zone only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/operator-page-real-rebuild`
   (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 — the Operator page (/)
   wired to the sweep-oneclick artifact contracts + NEW /screener + /strategy;
   DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
@@ -3919,7 +3964,7 @@ hostile-review pass._
   read boundary (`arrow_table_to_bars`); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
   Earlier: `claude/peaceful-hamilton-kyeu07`
-  (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1621 — India-VIX trade stamping wired
+  (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1622 — India-VIX trade stamping wired
   end-to-end: `vix_at_entry`/`vix_at_exit` on every OBSERVABLE trade + the
   persisted nullable `vix_mean`/`vix_min`/`vix_max` finalist trio, REFERENCE
   ONLY; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
