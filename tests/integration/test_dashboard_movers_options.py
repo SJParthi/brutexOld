@@ -1752,14 +1752,20 @@ class TestOptionsPcr:
         # Design test #28 (warm parity, round-1 hostile-review fold): prime the
         # INJECTED movers cache exactly as the app's `_make_opt_job` warm job
         # does — an `options_warm_grid()` coordinate keyed by `candidate_key` +
-        # `compute_options_candidates` at `latest_movers_date` and the live
-        # generation — then poll the route at that coordinate: a PURE cache hit
-        # (compute never re-invoked) whose payload carries the warmed PCR rows.
+        # the instrument-master content token (`|m=<count>:<latest>` — the
+        # DEC-MOVERS-UNDERLYING-CLASS-001 fix round folded `master_revision`
+        # into the F&O candidate keys, warm/route parity kept) +
+        # `compute_options_candidates` (threading the warm job's
+        # `underlying_kinds`) at `latest_movers_date` and the live generation —
+        # then poll the route at that coordinate: a PURE cache hit (compute
+        # never re-invoked) whose payload carries the warmed PCR rows.
         from brutex.dashboard import app as app_module
         from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
         from brutex.dashboard.movers_snapshot import DEFAULT_INTERVAL
+        from brutex.dashboard.movers_underlying_class import build_underlying_kind_map
         from brutex.dashboard.movers_warm import latest_movers_date, options_warm_grid
         from brutex.dashboard.summary_cache import SummaryCache
+        from brutex.dashboard.universe_cache import master_revision
 
         _seed_pcr_lake(tmp_path)
         # A spot 1day partition so latest_movers_date resolves the seeded day —
@@ -1783,6 +1789,11 @@ class TestOptionsPcr:
         movers_cache = MoversSnapshotCache()
         summary_cache = SummaryCache()
         warm_date_str: str = warm_date
+        # The warm job's composite key: candidate_key + the master content token
+        # (the app's `_underlying_kinds_cached` law) — and the SAME kinds map
+        # threaded into the compute, so the warmed stamps match the route's.
+        count, latest = master_revision(store)
+        kinds = build_underlying_kind_map(store.list_index_equity_instruments())
         movers_cache.get_or_compute(
             candidate_key(
                 asset="options",
@@ -1792,7 +1803,8 @@ class TestOptionsPcr:
                 time=None,
                 expiry_tier=tier,
                 expiry_track=track,
-            ),
+            )
+            + f"|m={count}:{latest}",
             generation=summary_cache.generation,
             compute=lambda: compute_options_candidates(
                 lake_root=tmp_path,
@@ -1802,6 +1814,7 @@ class TestOptionsPcr:
                 expiry_tier=tier,
                 expiry_track=track,
                 exchange=exchange,
+                underlying_kinds=kinds,
             ),
         )
 
