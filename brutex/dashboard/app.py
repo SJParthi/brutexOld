@@ -6023,15 +6023,21 @@ def build_app(
         return _render_reports_html()
 
     @app.get("/movers", response_class=HTMLResponse)
-    async def movers_page() -> str:
+    async def movers_page() -> HTMLResponse:
         """GET /movers — the reference-only markets-screen-style movers page (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
         A point-in-time snapshot view (Spot / Futures / Options tabs; single date
         + timeframe + auto-filled time; click-to-sort on every column) over the
         ingested lake. The page loads on open + on every control change / manual
         Refresh (no auto-poll timer); each load is an O(P) one-time lake pass.
+
+        ``Cache-Control: no-store`` so a redeployed page is never shadowed by a
+        browser-cached older ``movers.html`` whose time-dropdown logic no longer
+        matches (DEC-MOVERS-TIME-SNAP-UX-001 — the operator's observed 09:15
+        reset was the stale pre-#1243 page served from the browser cache; the
+        exact ``/db`` precedent, DEC-DB-VIEWER-NOSTORE-001).
         """
-        return _render_movers_html()
+        return HTMLResponse(_render_movers_html(), headers={"Cache-Control": "no-store"})
 
     @app.get("/results", response_class=HTMLResponse)
     async def results_page() -> str:

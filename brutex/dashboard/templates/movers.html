@@ -249,7 +249,15 @@ const TF_MIN = {
   "14minute":14,"15minute":15,"30minute":30,"1hour":60,"2hour":120,"3hour":180,
   "4hour":240,"1day":375,
 };
-const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", sort:{idx:null,dir:1} };
+/* state.instant (DEC-MOVERS-TIME-SNAP-UX-001): the ONE persistent explicit
+   as-of INSTANT as a minute-of-day int (null = Latest / no explicit pick).
+   Written ONLY by the #time onchange handler (an explicit user pick) — a TF
+   switch, the daily branch, an asset-tab switch, and the echo-adopt block
+   NEVER write it, so the pick survives every TF walk (incl. through 1day)
+   and re-snaps to the containing bucket of the new timeframe. state.time
+   stays the per-request SENT value, now DERIVED from the instant by
+   fillTimes() via BXMoversTime.snapTime. */
+const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", instant:null, sort:{idx:null,dir:1} };
 let rowsData = [];
 /* Prebuild-gate auto-recovery timer (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2):
    while the pull pipeline gates the movers (payload `gated: true`), re-poll
@@ -305,23 +313,33 @@ const SAMPLE = {
 };
 
 /* Auto-fill the as-of TIME dropdown for the chosen timeframe
-   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): a "Latest" default ("" ⇒ the backend
-   whole-day cut ⇒ the latest traded minute, IDENTICAL across every timeframe)
-   + the intraday grid, PRESERVING a retained explicit pick across TF switches
-   only when it is still a valid slot. NO first-slot pin (the pre-fix bug that
-   froze a coarse TF at a partial-bucket close). Grid strings come from
-   BXMoversTime.defaultTimeOptions — numeric-generated "HH:MM" + one static
-   literal, so the innerHTML stays XSS-safe (DEC-DASHBOARD-XSS-HARDENING-001). */
+   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 + DEC-MOVERS-TIME-SNAP-UX-001): a
+   "Latest" default ("" ⇒ the backend whole-day cut ⇒ the latest traded
+   minute, IDENTICAL across every timeframe) + the intraday grid, PERSISTING
+   an explicit pick across TF switches by SNAPPING the retained instant to
+   the new timeframe's CONTAINING bucket (1min@15:29 → 3min selects the
+   completed 15:27-labeled bucket; round-trips exactly). THE MAPPING LAW
+   (bx-movers-time.js): each option's label = bucket-START HH:MM (the /db row
+   label) and value = bucket-FINAL HH:MM (min(start+m−1, 15:29), the SENT
+   ?time= cutoff) — the backend's inclusive-≤ raw-1m cut then serves the
+   COMPLETED /db-equal bar, never a forming partial. NO first-slot pin and NO
+   Latest fallback on a non-slot pick (the two pre-fix reset bugs). Grid
+   strings come from BXMoversTime.timeOptionPairs — numeric-generated "HH:MM"
+   + one static literal, so the innerHTML stays XSS-safe
+   (DEC-DASHBOARD-XSS-HARDENING-001). */
 function fillTimes() {
   const m = TF_MIN[$("interval").value] || 375, sel = $("time");
+  // NOTE: state.instant is deliberately NOT touched anywhere in here — the
+  // explicit pick survives the daily branch too (a 1min→1day→1min round-trip
+  // re-snaps to the original instant; DEC-MOVERS-TIME-SNAP-UX-001).
   if (m >= 375) { sel.innerHTML = '<option value="">(daily)</option>'; sel.disabled = true; state.time=""; return; }
   sel.disabled = false;
   let opts = '<option value="">Latest</option>';
-  for (const hhmm of BXMoversTime.defaultTimeOptions(m)) opts += `<option>${hhmm}</option>`;
+  for (const p of BXMoversTime.timeOptionPairs(m)) opts += `<option value="${p.value}">${p.label}</option>`;
   sel.innerHTML = opts;
-  const resolved = BXMoversTime.resolveTime(state.time, m);   // "" (Latest) or a retained valid pick
-  sel.value = resolved;
-  state.time = resolved;   // NOT the selected first slot — the resolved default/retained pick
+  const snapped = BXMoversTime.snapTime(state.instant, m);   // "" (Latest) or the bucket-FINAL sent value
+  sel.value = snapped;
+  state.time = snapped;   // the DERIVED sent value — never the first slot, never a Latest reset
 }
 /* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 + the hostile-review
    legend-desync fix): recompute the " *" legend from the CURRENT rowsData every time
@@ -634,18 +652,38 @@ async function load() {
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
     showPcr(j);
-    /* Honest as-of label (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): an intraday DEFAULT
-       (blank time) reads "latest (HH:MM)" from the additive latest_time echo — NOT
-       the wrong "(daily)" it used to print — while the CUT stays whole-day; an
-       explicit pick shows its minute; a daily TF reads "(daily)". */
-    const isDaily = (TF_MIN[j.interval] || 375) >= 375;
-    const asofTime = j.time ? j.time
+    /* Honest as-of label (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 +
+       DEC-MOVERS-TIME-SNAP-UX-001): an intraday DEFAULT (blank time) reads
+       "latest (HH:MM)" from the additive latest_time echo — NOT the wrong
+       "(daily)" it used to print — while the CUT stays whole-day; an explicit
+       multi-minute pick shows its BUCKET SPAN ("15:27–15:29" — the /db label
+       to the sent bucket-final cutoff, making the containing-bucket snap
+       visible); 1minute keeps the plain minute; a daily TF reads "(daily)".
+       A Latest cut whose last minute falls MID-bucket is labelled a FORMING
+       bar (item 4 — derived 100% client-side from the existing latest_time
+       echo via BXMoversTime.formingInfo; a malformed/absent echo abstains to
+       the plain label, never a wrong forming claim). textContent only. */
+    const asofM = TF_MIN[j.interval] || 375;
+    const isDaily = asofM >= 375;
+    const pickedMin = j.time ? BXMoversTime.cutoffMinute(j.time) : null;
+    const asofTime = j.time ? ((!isDaily && asofM > 1 && pickedMin !== null)
+                       ? `${BXMoversTime.minuteToHHMM(BXMoversTime.bucketStart(pickedMin, asofM))}–${j.time}`
+                       : j.time)
                    : isDaily ? "(daily)"
                    : (j.latest_time ? `latest (${j.latest_time})` : "latest");
-    $("asof").textContent = `as-of ${(j.date||"")} ${asofTime} · ${j.interval||""}`;
-    /* Adopt an EXPLICIT echoed as-of so subsequent TF switches reuse the identical
-       minute — reflected via .value / .textContent (never innerHTML of server data),
-       injecting an off-grid minute as a selectable option (XSS-safe). */
+    const formingInfo = (!j.time && !isDaily && j.latest_time)
+      ? BXMoversTime.formingInfo(j.latest_time, asofM) : null;
+    const formingNote = (formingInfo && formingInfo.forming)
+      ? ` · forming ${j.interval||""} bar — includes trades up to ${j.latest_time} only; completed bar closes at ${formingInfo.closesAt}`
+      : "";
+    $("asof").textContent = `as-of ${(j.date||"")} ${asofTime} · ${j.interval||""}${formingNote}`;
+    /* Defensive adopt of an EXPLICIT echoed as-of — reflected via .value /
+       .textContent (never innerHTML of server data), injecting an off-grid
+       minute as a selectable option (XSS-safe). A no-op BY CONSTRUCTION since
+       DEC-MOVERS-TIME-SNAP-UX-001: the server echoes the raw sent value
+       (movers_snapshot `"time": time`), so j.time === state.time always. It
+       must NEVER write state.instant — only an explicit user pick does — so a
+       hypothetical divergent echo can never forward-drift the instant. */
     if (j.time && state.time !== j.time) {
       state.time = j.time;
       const tsel = $("time");
@@ -709,7 +747,10 @@ $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
   renderPills(); load();
 });
 $("interval").onchange = () => { fillTimes(); load(); };
-$("time").onchange = () => { state.time = $("time").value; load(); };
+/* The ONLY writer of state.instant (DEC-MOVERS-TIME-SNAP-UX-001): an explicit
+   user pick. The picked option's value is the bucket-FINAL sent cutoff — its
+   minute IS the new persistent instant; "" (explicit Latest) → null. */
+$("time").onchange = () => { state.time = $("time").value; state.instant = BXMoversTime.cutoffMinute($("time").value); load(); };
 /* ~200 ms trailing debounce for the two NUMBER inputs (DEC-DASHBOARD-JS-PERF-001):
    a spinner run fires a discrete `change` per click — debouncedLoad coalesces the
    burst into ONE fetch. The selects + date keep the immediate load (a single

@@ -18,7 +18,38 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
+_Last updated: 2026-07-09 (DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1631 —
+the `/movers` selected as-of TIME now PERSISTS across timeframe switches and
+SNAPS to the completed bucket of the new TF containing the instant
+(operator-reported: a TF change reset the pick — to 09:15 on the stale
+pre-#1243 page via the first-option innerHTML autoselect, to "Latest" on
+current main via `bxResolveTime`'s not-a-slot `""` fallback; both captured
+verbatim, both killed). ONE mapping law, pinned: each intraday dropdown
+option is `label = bucket-START HH:MM` (the /db row label) / `value =
+bucket-FINAL HH:MM` (`min(start+m−1, 15:29)`, the SENT `?time=` cutoff) — so
+an explicit pick ALWAYS serves the completed /db-equal bar
+(`_stored_serves_cutoff`-aligned for every non-last slot; the always-`15:29`
+last slot rides the resample path byte-equal on non-divisor TFs), closing the
+operator's 24360.00-vs-24355.1 forming-cut confusion at the root. NEW
+persistent `state.instant` (minute-of-day; written ONLY by an explicit pick,
+never by a TF switch / 1day round-trip / adopt) + pure `bxSnapTime` /
+`bxBucketStart` / `bxBucketFinal` / `bxTimeOptionPairs` / `bxCutoffMinute` /
+`bxFormingInfo` on the COMMON `bx-movers-time.js` (`bxResolveTime` superseded
++ deleted); "Latest" applies only when no explicit pick exists; a mid-bucket
+Latest is labelled `forming <tf> bar — includes trades up to HH:MM only;
+completed bar closes at HH:MM` (client-derived from the existing
+`latest_time` echo — zero payload change); /db gains a static
+bucket-START-label stepnote. PLUS the `/movers` route ships `Cache-Control:
+no-store` (the /db precedent — the browser-cache staleness that served the
+operator the pre-#1243 09:15 page). HONEST: the containing-bucket snap can
+extend the effective as-of by up to m−1 minutes (disclosed in the span
+label); explicit coarse-TF picks now show the COMPLETED bar where they showed
+a forming cut — a SANCTIONED operator-specified correction; node goldens pin
+LOGIC, substring tests pin PRESENCE — no headless-browser claim. FRONTEND
+display/UX + one response header — every payload key byte-identical;
+READ-ONLY dashboard; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change.)
+Earlier: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
 the sweep CLI log-volume guard: `brutex sweep`/`sweep-all`/`sweep-daemon` now
 configure the ONE COMMON structlog seam
 (`observability/logging.configure_logging` — the seam `cmd_dashboard` already
@@ -1646,7 +1677,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
+- **Active branch:** `claude/movers-time-snap-ux` (**DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1631** —
+  the `/movers` selected as-of TIME persists across timeframe switches and SNAPS to the completed bucket of the
+  new TF containing the instant (operator-reported reset: 09:15 on the stale pre-#1243 page via first-option
+  innerHTML autoselect, "Latest" on current main via `bxResolveTime`'s not-a-slot `""` fallback — both captured
+  verbatim by a DOM-shim node harness, both killed). ONE mapping law: option `label = bucket-START HH:MM` (the
+  /db row label) / `value = bucket-FINAL HH:MM` (`min(start+m−1, 15:29)`, the SENT `?time=` cutoff) — an explicit
+  pick always serves the COMPLETED /db-equal bar (every non-last slot `_stored_serves_cutoff`-aligned; the
+  always-`15:29` last slot resample-path byte-equal on non-divisor TFs), closing the 24360.00-vs-24355.1
+  forming-cut confusion; NEW persistent `state.instant` written ONLY by an explicit pick (survives TF walks +
+  1day round-trips; round-trip 1→3→5→1min exact — a 25,560-case ordered-TF-pair property); `bxResolveTime`
+  superseded + DELETED; mid-bucket Latest labelled "forming <tf> bar — … completed bar closes at HH:MM"
+  (client-derived from the existing `latest_time` echo); explicit multi-minute picks show the bucket SPAN
+  ("15:27–15:29"); /db gains a static bucket-START-label stepnote; the `/movers` route ships `Cache-Control:
+  no-store` (the /db DEC-DB-VIEWER-NOSTORE-001 precedent — the browser-cache staleness that served the operator
+  the pre-#1243 page). HONEST: the snap can extend the effective as-of by up to m−1 minutes (disclosed in the
+  span label); coarse-TF explicit picks now show the COMPLETED bar — a SANCTIONED operator-specified correction;
+  node goldens pin LOGIC, substring tests pin PRESENCE — no headless-browser claim; `_MOVERS_TEMPLATE_CACHE`
+  still needs a restart per redeploy (envelope note). FRONTEND display/UX + one response header — every payload
+  key byte-identical, Latest requests byte-identical; READ-ONLY dashboard; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean, `mypy --strict` clean
+  on the touched app.py, pyright 0 errors.)
+  Earlier: `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
   the sweep CLI log-volume guard: ONE `main()`-dispatch guard configures the COMMON
   `observability/logging.configure_logging` seam at INFO by default for
   `sweep`/`sweep-all`/`sweep-daemon`, with the fail-loud `BRUTEX_LOG_LEVEL` override
@@ -3911,7 +3963,14 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/sweep-log-level-guard`
+- **Active feature branch:** `claude/movers-time-snap-ux`
+  (DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1631 — the `/movers` selected
+  as-of TIME persists across TF switches + snaps to the completed containing
+  bucket (label = bucket-START, sent value = bucket-FINAL — the /db-equal
+  completed bar); `bxResolveTime` deleted; forming-bar Latest label; /db
+  bucket-label stepnote; `/movers` `Cache-Control: no-store`; READ-ONLY
+  dashboard display/UX; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
   `main()` sweep dispatch AND inside every spawn worker
