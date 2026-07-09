@@ -52,6 +52,15 @@ var BX_SCREENER_COLUMNS = [
   { key: "metrics.dsr", label: "DSR", type: "num", explain: "dsr" },
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
+  // Losing-streak resilience columns (the sibling block; dotted keys resolve
+  // row.resilience.* / row.metrics.* generically; null → "—", never a
+  // fabricated 0, and a null value sorts LAST — never sortable-into-a-lie).
+  { key: "metrics.max_consecutive_losses", label: "Worst streak", type: "num", explain: "max_consecutive_losses" },
+  { key: "resilience.losing_streak_p95", label: "Cold streak P95", type: "num", explain: "losing_streak_p95" },
+  { key: "resilience.worst_streak_pnl_paisa", label: "Worst streak ₹", type: "num", money: true, explain: "worst_streak_pnl" },
+  { key: "resilience.longest_underwater_days", label: "Underwater days", type: "num", explain: "longest_underwater" },
+  { key: "resilience.worst_loss_month_count", label: "Worst-month losses", type: "num", explain: "worst_loss_month" },
+  { key: "resilience.win_rate_year_spread", label: "Win-rate swing", type: "num", explain: "win_rate_year_spread" },
   { key: "vix_band", label: "VIX band", type: "vix", explain: "vix_band" },
   { key: "family_id", label: "Family", type: "str", explain: "family_id" },
   { key: "mask_hex", label: "Mask", type: "str", explain: "mask_hex" }

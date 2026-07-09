@@ -86,6 +86,18 @@
   .story-cell .v { font-size:18px; font-weight:800; margin-top:4px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
   .vixband { margin-top:10px; padding:8px 12px; border:1px solid var(--border-strong);
     border-radius:8px; font-size:12px; color:var(--yellow); display:inline-block; }
+  .story-cell .sub { font-size:11px; color:var(--muted); margin-top:4px; overflow-wrap:anywhere; }
+  .story-cell .badge-bad { color:var(--red); font-weight:700; }
+  .story-cell .badge-ok { color:var(--green); }
+  .resilience-locate { margin-top:12px; padding:8px 12px; border:1px solid var(--border-strong);
+    border-radius:8px; font-size:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .resilience-locate input { width:96px; font:inherit; font-size:12px; padding:4px 6px;
+    border:1px solid var(--border-strong); border-radius:6px; background:var(--surface-2); color:var(--text); }
+  .resilience-verdict { font-weight:700; }
+  .resilience-verdict.ok { color:var(--green); }
+  .resilience-verdict.warn { color:var(--yellow); }
+  .resilience-verdict.bad { color:var(--red); }
+  .resilience-verdict.na { color:var(--muted); }
   .pager { display:flex; gap:10px; align-items:center; margin-top:10px; font-size:12px; }
   .pager button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
     padding:6px 12px; font:inherit; font-size:12px; color:var(--text); background:var(--surface-2); }
@@ -189,6 +201,50 @@
     <div class="note" id="stArith"></div>
   </section>
 
+  <!-- Losing-streak resilience hero panel (the sibling sidecar block →
+       row.resilience.* + the max from row.metrics.max_consecutive_losses).
+       Every value is textContent-rendered; a NULL/absent record reads "—". -->
+  <section aria-label="Losing-streak resilience" id="stResilienceSection">
+    <h3>🥶 Losing-streak resilience — can you hold this strategy through a cold run?</h3>
+    <div class="story-grid">
+      <div class="story-cell" data-explain="max_consecutive_losses">
+        <div class="k">Worst cold streak</div>
+        <div class="v" id="stResWorstStreak">—</div>
+        <div class="sub" id="stResWorstStreakSub"></div>
+      </div>
+      <div class="story-cell" data-explain="worst_streak_pnl">
+        <div class="k">That streak cost</div>
+        <div class="v" id="stResCost">—</div>
+        <div class="sub" id="stResCostSub"></div>
+      </div>
+      <div class="story-cell" data-explain="longest_underwater">
+        <div class="k">Longest underwater</div>
+        <div class="v" id="stResUnderwater">—</div>
+        <div class="sub" id="stResUnderwaterBadge"></div>
+      </div>
+      <div class="story-cell" data-explain="worst_loss_month">
+        <div class="k">Worst month</div>
+        <div class="v" id="stResWorstMonth">—</div>
+        <div class="sub" id="stResWorstMonthSub"></div>
+      </div>
+      <div class="story-cell" data-explain="win_rate_year_spread">
+        <div class="k">Win-rate stability</div>
+        <div class="v" id="stResWinSpread">—</div>
+      </div>
+      <div class="story-cell" data-explain="resilience_guide">
+        <div class="k">Hold-through guide</div>
+        <div class="sub" id="stResGuide">—</div>
+      </div>
+    </div>
+    <div class="resilience-locate">
+      <label for="stResLossesIn">Where am I now?</label>
+      <input id="stResLossesIn" type="number" min="0" step="1" inputmode="numeric" placeholder="losses in a row">
+      <span>losses in →</span>
+      <span id="stResLocate" class="resilience-verdict na">enter a number</span>
+    </div>
+    <div class="note">Signal-only backtest · gross of brokerage &amp; taxes · per-unit (no sizing).</div>
+  </section>
+
   <div id="bxTip" hidden></div>
 
 <script>
@@ -210,7 +266,8 @@
     symbol: null,
     interval: null,
     trades: [],
-    candles: []
+    candles: [],
+    resilienceRow: null // the loaded row, for the pure self-locate verdict
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -485,10 +542,47 @@
         /* [W3-R4]: the ONE shared band builder — a null-lo/hi writer band
            reads the honest not-stamped copy, never "between null–null". */
         byId('stVixBand').textContent = window.BXOneclick.vixBandText(row.vix_band);
+        fillResilience(row);
         state.interval = tfToInterval(row.tf);
         loadTrades();
       }
     );
+  }
+
+  /* Fill the losing-streak resilience panel from the sibling block (pure
+     BXOneclick.resilienceCells; money via the shared exact converter). Every
+     value reaches the DOM via textContent — never a string-to-HTML sink. */
+  function fillResilience(row) {
+    state.resilienceRow = row;
+    var c = window.BXOneclick.resilienceCells(row, money);
+    byId('stResWorstStreak').textContent = c.worstStreak;
+    byId('stResWorstStreakSub').textContent = c.worstStreakSub;
+    byId('stResCost').textContent = c.cost;
+    byId('stResCostSub').textContent = c.costSub;
+    byId('stResUnderwater').textContent = c.underwater;
+    var badge = byId('stResUnderwaterBadge');
+    badge.textContent = c.underwaterBadge;
+    badge.className = 'sub' + (c.badgeLevel === 'bad' ? ' badge-bad' : c.badgeLevel === 'ok' ? ' badge-ok' : '');
+    byId('stResWorstMonth').textContent = c.worstMonth;
+    byId('stResWorstMonthSub').textContent = c.worstMonthSub;
+    byId('stResWinSpread').textContent = c.winSpread;
+    byId('stResGuide').textContent = c.guide;
+    updateSelfLocate();
+  }
+
+  /* The pure "you are N losses in" self-locate verdict — zero backend, only
+     the shipped numbers (P95 + max). Colour tracks the verdict level. */
+  function updateSelfLocate() {
+    var out = byId('stResLocate');
+    var raw = byId('stResLossesIn').value;
+    if (!state.resilienceRow || raw === '') {
+      out.textContent = 'enter a number';
+      out.className = 'resilience-verdict na';
+      return;
+    }
+    var v = window.BXOneclick.resilienceSelfLocate(Number(raw), state.resilienceRow);
+    out.textContent = v.symbol + ' ' + v.text;
+    out.className = 'resilience-verdict ' + v.level;
   }
 
   function loadManifestSymbol(next) {
@@ -525,6 +619,7 @@
       state.tradeIdx = null;
       loadTrades();
     });
+    byId('stResLossesIn').addEventListener('input', updateSelfLocate);
     function go() {
       byId('stRunId').textContent = state.runId;
       loadManifestSymbol(loadRow);

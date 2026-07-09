@@ -161,6 +161,194 @@ function bxVixBandCellText(band) {
   return "not stamped";
 }
 
+/* ── Losing-streak resilience (sibling sidecar → /strategy hero panel +
+   /operator rank-1 hooks; DEC-<resilience>). The MAX cold streak reads from
+   row.metrics.max_consecutive_losses (the existing agg field — no rival
+   column persisted); every other cell reads from row.resilience.* (the
+   sibling block). NULL/absent (stats_live !== true) → every cell "—" + the
+   honest unavailable guide, NEVER a fabricated streak (R27/Golden Rule #1).
+   All ₹ are GROSS of costs, per-unit (no sizing) — the panel caveat. ── */
+
+/** The honest "no resilience stats" copy (ONE constant — parity-failed/no-trades). */
+var BX_RESILIENCE_UNAVAILABLE =
+  "Resilience stats unavailable (re-simulation parity mismatch or no trades).";
+
+/** A value or the honest em-dash when null/undefined (never a fabricated 0). */
+function bxResDash(value) {
+  return value === null || value === undefined ? "—" : String(value);
+}
+
+/**
+ * ISO-8601 UTC → "YYYY-MM-DD HH:MM IST" (pure epoch arithmetic — the fixed
+ * +05:30 IST offset, TZ-invariant like bx-chart's bxIstDateOfEpoch); "—" for
+ * a null/unparseable input (never a NaN string).
+ *
+ * @param {*} isoUtc - the worst-streak start/end ISO-8601 UTC string.
+ * @returns {string} the IST datetime, or "—".
+ */
+function bxIstDateTime(isoUtc) {
+  if (typeof isoUtc !== "string" || isoUtc === "") {
+    return "—";
+  }
+  var t = Date.parse(isoUtc);
+  if (isNaN(t)) {
+    return "—";
+  }
+  var d = new Date(t + 330 * 60000).toISOString();
+  return d.slice(0, 10) + " " + d.slice(11, 16) + " IST";
+}
+
+/**
+ * The plain-English hold-through guide (client-side, only shipped numbers;
+ * R27 — never an invented cause). Branch order: 0-loss first (no streaks),
+ * then still-underwater (lower-bound honesty), then the normal envelope read.
+ *
+ * @param {object} r - the row.resilience block (stats_live true).
+ * @returns {string} the guide sentence.
+ */
+function bxResilienceGuide(r) {
+  if (r.losing_streak_count === 0) {
+    return (
+      "This strategy had NO losing streaks in the backtest — treat any live " +
+      "cold run as unmapped territory and size down."
+    );
+  }
+  if (r.still_underwater_at_end === true) {
+    return (
+      "This strategy had NOT recovered by the backtest end — the " +
+      bxResDash(r.longest_underwater_days) +
+      "-day underwater figure is a lower bound, not a promise of recovery."
+    );
+  }
+  return (
+    "Inside its envelope: cold streaks typically run " +
+    bxResDash(r.losing_streak_p50) +
+    ", 95% stay at or under " +
+    bxResDash(r.losing_streak_p95) +
+    " — hold if you're inside it, reassess only past its worst ever."
+  );
+}
+
+/**
+ * The /strategy resilience panel cell strings (pure; textContent-rendered —
+ * never a string-to-HTML sink). The MAX reads from row.metrics.max_consecutive_losses;
+ * every other cell from row.resilience.* . A NULL/absent record
+ * (stats_live !== true) → every cell "—" + the unavailable guide. Money
+ * cells format via the injected fmtMoney (bx-explain owns the ONE exact
+ * paisa→₹ converter, §11 COMMON); a missing formatter reads "—" (honest,
+ * never raw paisa).
+ *
+ * @param {object} row - a top100 contract row.
+ * @param {Function} [fmtMoney] - signed integer-paisa → ₹ string.
+ * @returns {object} the cell strings for the panel.
+ */
+function bxResilienceCells(row, fmtMoney) {
+  var m = row && row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  var r = row && row.resilience && typeof row.resilience === "object" ? row.resilience : null;
+  var money = typeof fmtMoney === "function" ? fmtMoney : function () {
+    return "—";
+  };
+  if (!r || r.stats_live !== true) {
+    return {
+      live: false,
+      worstStreak: "—",
+      worstStreakSub: "—",
+      cost: "—",
+      costSub: "—",
+      underwater: "—",
+      underwaterBadge: "—",
+      badgeLevel: "na",
+      worstMonth: "—",
+      worstMonthSub: "",
+      winSpread: "—",
+      guide: BX_RESILIENCE_UNAVAILABLE
+    };
+  }
+  var hasWorst = r.worst_streak_pnl_paisa !== null && r.worst_streak_pnl_paisa !== undefined;
+  var pct = r.worst_streak_pnl_pct;
+  var pctText = pct === null || pct === undefined ? "—" : String(pct) + "%";
+  var hasLen = r.worst_streak_len !== null && r.worst_streak_len !== undefined;
+  // A missing/failed money formatter reads a clean "—" (never "— (pct%)").
+  var costMoney = hasWorst ? money(r.worst_streak_pnl_paisa) : "—";
+  return {
+    live: true,
+    worstStreak: bxResDash(m.max_consecutive_losses) + " in a row",
+    worstStreakSub:
+      "typical " + bxResDash(r.losing_streak_p50) + " · P95 " + bxResDash(r.losing_streak_p95),
+    cost: hasWorst && costMoney !== "—" ? costMoney + " (" + pctText + ")" : "—",
+    costSub: hasLen
+      ? String(r.worst_streak_len) +
+        " losses · " +
+        bxIstDateTime(r.worst_streak_start) +
+        " → " +
+        bxIstDateTime(r.worst_streak_end)
+      : "no losing runs recorded",
+    underwater:
+      bxResDash(r.longest_underwater_trades) +
+      " trades · " +
+      bxResDash(r.longest_underwater_days) +
+      " days",
+    underwaterBadge: r.still_underwater_at_end === true ? "STILL UNDERWATER at backtest end" : "● recovered",
+    badgeLevel: r.still_underwater_at_end === true ? "bad" : "ok",
+    worstMonth:
+      r.worst_loss_month === null || r.worst_loss_month === undefined
+        ? "no losing month"
+        : String(r.worst_loss_month) + " (" + bxResDash(r.worst_loss_month_count) + " losses)",
+    worstMonthSub:
+      r.worst_loss_week === null || r.worst_loss_week === undefined
+        ? ""
+        : "worst week " + String(r.worst_loss_week),
+    winSpread:
+      r.win_rate_year_spread === null || r.win_rate_year_spread === undefined
+        ? "—"
+        : "swing " + String(r.win_rate_year_spread),
+    guide: bxResilienceGuide(r)
+  };
+}
+
+/**
+ * The pure "you are N losses in" self-locate verdict (zero backend — compares
+ * ONLY the shipped numbers: P95 from row.resilience.losing_streak_p95, MAX
+ * from row.metrics.max_consecutive_losses). A live-streak counter is out of
+ * Track-1 scope (signal-only, DEC-LIVE-REMOVE-001) — this locates the operator
+ * against the backtest envelope only.
+ *
+ * @param {number} n - losses-in-a-row the operator typed.
+ * @param {object} row - the top100 row.
+ * @returns {{level: string, symbol: string, text: string}} the verdict.
+ */
+function bxResilienceSelfLocate(n, row) {
+  var m = row && row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  var r = row && row.resilience && typeof row.resilience === "object" ? row.resilience : null;
+  var maxN =
+    typeof m.max_consecutive_losses === "number" && isFinite(m.max_consecutive_losses)
+      ? m.max_consecutive_losses
+      : null;
+  if (!r || r.stats_live !== true || maxN === null) {
+    return { level: "na", symbol: "○", text: "resilience stats unavailable for this strategy" };
+  }
+  if (typeof n !== "number" || !isFinite(n) || n < 0 || Math.floor(n) !== n) {
+    return { level: "na", symbol: "○", text: "enter a whole number of losses in a row" };
+  }
+  // A 0-loss strategy has p95 === null → the envelope collapses to max (0), so
+  // n === 0 reads ok and any n ≥ 1 reads unprecedented (never the warn tier).
+  var p95 =
+    typeof r.losing_streak_p95 === "number" && isFinite(r.losing_streak_p95)
+      ? r.losing_streak_p95
+      : maxN;
+  if (n <= p95) {
+    return { level: "ok", symbol: "●", text: "inside envelope — historically normal, hold" };
+  }
+  if (n <= maxN) {
+    return { level: "warn", symbol: "▲", text: "rare but seen — this strategy has been here and recovered" };
+  }
+  return {
+    level: "bad",
+    symbol: "✕",
+    text: "unprecedented — deeper than anything in the backtest. Reassess."
+  };
+}
+
 /**
  * Funnel write-precedence law (C-M2, pure): the live source may always
  * write; the manifest fill applies ONLY while NO sweep is running.
@@ -519,6 +707,15 @@ function bxFunnelProvenance(source, runId) {
     setOc("r1_cpcv", metricText(m.cpcv_pass_pct));
     setOc("r1_trades", metricText(m.trades));
     setOc("r1_vix_band", vixBandText(row.vix_band));
+    // Losing-streak resilience rank-1 hooks (the sibling block; absent → "—").
+    var r = row.resilience && typeof row.resilience === "object" ? row.resilience : {};
+    setOc(
+      "r1_worst_streak_pct",
+      r.worst_streak_pnl_pct === null || r.worst_streak_pnl_pct === undefined
+        ? "—"
+        : String(r.worst_streak_pnl_pct) + "%"
+    );
+    setOc("r1_uw_days", metricText(r.longest_underwater_days));
   }
 
   /* Build the #combosBody rows from the top-100 artifact. Cells carry the
@@ -1097,6 +1294,7 @@ function bxFunnelProvenance(source, runId) {
     TIMELINE_RING_CAP: BX_TIMELINE_RING_CAP,
     TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
     VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
+    RESILIENCE_UNAVAILABLE: BX_RESILIENCE_UNAVAILABLE,
     ringPush: bxRingPush,
     ringFilter: bxRingFilter,
     eventLineText: bxEventLineText,
@@ -1104,6 +1302,10 @@ function bxFunnelProvenance(source, runId) {
     funnelProvenance: bxFunnelProvenance,
     vixBandText: bxVixBandText,
     vixBandCellText: bxVixBandCellText,
+    resilienceCells: bxResilienceCells,
+    resilienceSelfLocate: bxResilienceSelfLocate,
+    resilienceGuide: bxResilienceGuide,
+    istDateTime: bxIstDateTime,
     oneshotFetch: bxOneshotFetch,
     renderChainMap: renderChainMap,
     selectRun: function (runId) {
@@ -1131,12 +1333,17 @@ if (typeof module !== "undefined" && module.exports) {
     BX_TIMELINE_RING_CAP: BX_TIMELINE_RING_CAP,
     BX_TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
     BX_VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
+    BX_RESILIENCE_UNAVAILABLE: BX_RESILIENCE_UNAVAILABLE,
     bxRingPush: bxRingPush,
     bxRingFilter: bxRingFilter,
     bxEventLineText: bxEventLineText,
     bxFunnelWriteAllowed: bxFunnelWriteAllowed,
     bxFunnelProvenance: bxFunnelProvenance,
     bxVixBandText: bxVixBandText,
-    bxVixBandCellText: bxVixBandCellText
+    bxVixBandCellText: bxVixBandCellText,
+    bxResilienceCells: bxResilienceCells,
+    bxResilienceSelfLocate: bxResilienceSelfLocate,
+    bxResilienceGuide: bxResilienceGuide,
+    bxIstDateTime: bxIstDateTime
   };
 }
