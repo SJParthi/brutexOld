@@ -174,16 +174,19 @@ class TestLimiterTeeth:
         entered = threading.Event()
         proceed = threading.Event()
 
-        def _blocked() -> None:
+        def _blocked() -> str:
             entered.set()
             proceed.wait(timeout=10.0)
+            return "released"
 
         async def _main() -> int:
             task = asyncio.ensure_future(offload(_blocked))
             await asyncio.to_thread(entered.wait, 10.0)
             held = offload.borrowed_tokens
             proceed.set()
-            await task
+            # A real assertion (not a bare ``await task``): the offload passes
+            # the worker's return value through after the release.
+            assert await task == "released"
             return held
 
         try:
