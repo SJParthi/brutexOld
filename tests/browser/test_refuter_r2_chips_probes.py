@@ -117,9 +117,14 @@ def test_s1_stale_tier_response_repaints_cross_labeled(
     with page.expect_response(lambda r: "expiry=Next" in r.url) as released:
         pending[0].continue_()
     released.value.finished()
-    # Settle window: the stale resume point is one microtask after the fetch
-    # resolves — give the page a real slice so a regression WOULD repaint.
-    page.wait_for_timeout(600)
+    # Settle flush (the r4d idiom — NO blind wall-clock wait): the stale
+    # resume point is a microtask/task after the fetch resolves, so drain the
+    # page event loop with evaluate roundtrips around a frozen-clock
+    # fast_forward. A regression WOULD repaint inside this deterministic
+    # window (verified: the pre-fix repro still fails under this flush).
+    page.evaluate("() => Promise.resolve()")
+    page.clock.fast_forward(200)
+    page.evaluate("() => Promise.resolve()")
 
     # The Far paint survives un-clobbered: tier word only (empty third tier),
     # no July expiry, no next-tier rows, selection + tab still Far.
