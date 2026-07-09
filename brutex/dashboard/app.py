@@ -161,6 +161,7 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
     pending_asset_payload,
 )
+from brutex.dashboard.movers_underlying_class import build_underlying_kind_map
 from brutex.dashboard.movers_warm import (
     MoversWarmResult,
     futures_warm_grid,
@@ -1759,6 +1760,48 @@ def build_app(
     # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
     # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
     _options_strikes_cache = MoversSnapshotCache()
+    # The Futures/Options underlying-CLASS kind map cache (DEC-MOVERS-UNDERLYING-CLASS-001):
+    # the `{underlying → index|stock}` map built from the STORED instrument master
+    # (`build_underlying_kind_map`, an O(underlyings) read) stamps each F&O candidate's
+    # `underlying_kind` for the RANK-time `All | Indices | Stocks` filter. The map is a
+    # pure function of the instrument MASTER, so it is keyed on the master CONTENT
+    # revision (`master_revision` — the `_nav_latency_key` component) at a FIXED
+    # generation=0. Review round 1: the original generation-only key missed a keyless
+    # `load-instruments`, which moves the master WITHOUT bumping the write generation
+    # (the documented master_revision trap the sibling nav-latency caches close) — and
+    # a write-generation key would ALSO rebuild pointlessly on every mid-pull write
+    # tick (the #920 lesson), which the content token avoids. Built on the threadpool
+    # worker (it reads `store.connection`). SPOT needs no map (its class comes from
+    # the lake segment). REUSES the COMMON cache.
+    _movers_kind_cache = MoversSnapshotCache()
+    # The cache-key STEM for the underlying-kind map; the master content token is
+    # folded in by `_underlying_kinds_cached` — the ONE key-law home (review round 1).
+    movers_kind_key = "movers_underlying_kinds"
+
+    def _underlying_kinds_cached(store: Any) -> tuple[dict[str, str], str]:
+        """Return ``({F&O underlying → kind}, master_token)``, memoised on the master content token.
+
+        The ONE home of the underlying-kind-map key law (review round 1 — previously
+        two copy-pasted ``get_or_compute`` sites keyed on the write generation alone):
+        the map is a pure function of the instrument MASTER, so the key folds
+        :func:`master_revision` — the content token a keyless ``load-instruments``
+        moves WITHOUT bumping the write generation — at a FIXED ``generation=0``
+        (the ``_nav_latency_key`` / ``_sweep_leaderboard_cache`` token-in-key
+        precedent). The returned *master_token* MUST also be folded into the F&O
+        candidate cache keys by every caller (the movers route AND the post-pull
+        warmer), because the computed candidates carry the map's verdict STAMPED per
+        row — a fresh map beside a stale stamped candidate set would still
+        misclassify (the same staleness class, closed end-to-end).
+        """
+        count, latest = master_revision(store)
+        master_token = f"{count}:{latest}"
+        kinds: dict[str, str] = _movers_kind_cache.get_or_compute(
+            f"{movers_kind_key}|m={master_token}",
+            generation=0,
+            compute=lambda: build_underlying_kind_map(store.list_index_equity_instruments()),
+        )
+        return kinds, master_token
+
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -3926,6 +3969,15 @@ def build_app(
                 # ONE memoised discovery walk shared by every job in this warm
                 # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
                 warm_datasets = _warm_datasets(gen)
+                # The stored-master kind map + its content token (review round 1):
+                # thread the SAME kinds the route computes with AND fold the SAME
+                # master token into the candidate key, so a warmed entry (a) carries
+                # CORRECT `underlying_kind` stamps (previously the warm computed with
+                # the default `underlying_kinds=None`, stamping everything unknown —
+                # an Indices/Stocks click on a freshly-warmed coordinate returned
+                # EMPTY rows) and (b) is actually HIT by the route's composite key
+                # (key parity, CLAUDE.md §11 COMMON).
+                underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
                     tier = normalize_futures_tier(raw_tier)
@@ -3939,7 +3991,8 @@ def build_app(
                                 date=warm_date,
                                 time=None,
                                 expiry_tier=tier,
-                            ),
+                            )
+                            + f"|m={kinds_token}",
                             generation=gen,
                             compute=lambda: compute_futures_candidates(
                                 lake_root=lake_root,
@@ -3949,6 +4002,7 @@ def build_app(
                                 exchange=exch,
                                 expiry_tier=tier,
                                 datasets=warm_datasets,
+                                underlying_kinds=underlying_kinds,
                             ),
                             # force_fresh — the warm re-seed must never be served
                             # its own pull-active floor's stale pre-pull entry
@@ -3985,6 +4039,9 @@ def build_app(
                 # ONE memoised discovery walk shared by every job in this warm
                 # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
                 warm_datasets = _warm_datasets(gen)
+                # The stored-master kind map + its content token (review round 1 —
+                # see the futures warm above): correct stamps + route key parity.
+                underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
@@ -4017,7 +4074,8 @@ def build_app(
                                 time=None,
                                 expiry_tier=tier,
                                 expiry_track=trk,
-                            ),
+                            )
+                            + f"|m={kinds_token}",
                             generation=gen,
                             compute=lambda: compute_options_candidates(
                                 lake_root=lake_root,
@@ -4030,6 +4088,7 @@ def build_app(
                                 datasets=warm_datasets,
                                 calendar_expiries=calendar_expiries,
                                 registry_chain_for=registry_chain_for,
+                                underlying_kinds=underlying_kinds,
                             ),
                             # force_fresh — the warm re-seed must never be served
                             # its own pull-active floor's stale pre-pull entry
@@ -5614,6 +5673,7 @@ def build_app(
         track: str | None = Query(default=None),
         exchange: str | None = Query(default=None),
         min_volume: int = Query(default=0, ge=0),
+        underlying_class: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
@@ -5668,6 +5728,13 @@ def build_app(
             whole-day bar). A malformed value is a 400.
         top_n
             Ranking depth for each category (1..500; default 100 — DEC-MOVERS-COMPLETENESS-001).
+        underlying_class
+            ``All`` / ``Indices`` / ``Stocks`` underlying-class filter
+            (DEC-MOVERS-UNDERLYING-CLASS-001) applied at RANK time on all three
+            tabs; blank / unknown ⇒ ``all`` (byte-identical default — no filtering).
+            SPOT class comes from the lake segment; FUTURES/OPTIONS from the stored
+            instrument-master ``is_index`` kind map. An unclassifiable underlying is
+            in ``all`` but excluded from both ``Indices`` and ``Stocks`` (counted).
 
         **Honest envelope (Golden Rule #10):** the snapshot is only as good as the
         ingested lake — an empty lake (or a store with no lake root) returns an
@@ -5744,6 +5811,7 @@ def build_app(
                             top_n=top_n,
                             skipped=0,
                             min_volume=min_volume,
+                            underlying_class=underlying_class,
                         )
                     )
                 if asset == "options":
@@ -5756,6 +5824,7 @@ def build_app(
                             top_n=top_n,
                             skipped=0,
                             min_volume=min_volume,
+                            underlying_class=underlying_class,
                         )
                     )
                 return JSONResponse(
@@ -5767,6 +5836,7 @@ def build_app(
                         top_n=top_n,
                         skipped=0,
                         min_volume=min_volume,
+                        underlying_class=underlying_class,
                     )
                 )
             lake_root = store_path.parent
@@ -5871,14 +5941,27 @@ def build_app(
                         cache=_options_strikes_cache,
                         generation=generation,
                     )
-                    key = candidate_key(
-                        asset="options",
-                        exchange=exch,
-                        interval=interval,
-                        date=date_str,
-                        time=time,
-                        expiry_tier=tier,
-                        expiry_track=trk,
+                    # The stored-master index-vs-stock kind map for the RANK-time
+                    # `All | Indices | Stocks` filter (DEC-MOVERS-UNDERLYING-CLASS-001) —
+                    # memoised on the master CONTENT token via the ONE
+                    # `_underlying_kinds_cached` helper (review round 1: a keyless
+                    # load-instruments moves the master with NO generation bump). The
+                    # class itself is NOT a candidate_key coordinate (rank-time filter
+                    # over the shared set), but the MASTER token IS folded into the key
+                    # below — the candidates carry the map's verdict STAMPED per row,
+                    # so stale stamps would defeat a fresh map.
+                    underlying_kinds, kinds_token = _underlying_kinds_cached(store)
+                    key = (
+                        candidate_key(
+                            asset="options",
+                            exchange=exch,
+                            interval=interval,
+                            date=date_str,
+                            time=time,
+                            expiry_tier=tier,
+                            expiry_track=trk,
+                        )
+                        + f"|m={kinds_token}"
                     )
                     opt_cands = _movers_cache.get_or_compute(
                         key,
@@ -5894,6 +5977,7 @@ def build_app(
                             datasets=movers_datasets,
                             calendar_expiries=calendar_expiries,
                             registry_chain_for=registry_chain_for,
+                            underlying_kinds=underlying_kinds,
                         ),
                     )
                     return build_options_payload(
@@ -5909,6 +5993,7 @@ def build_app(
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
                         pcr=opt_cands.pcr,
                         latest_time=latest_time,
+                        underlying_class=underlying_class,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -5917,13 +6002,23 @@ def build_app(
                     # cache + rank independently (never a stale Near row served for
                     # a Far request) — DEC-MOVERS-FUTURES-TIER-001.
                     fut_tier = normalize_futures_tier(expiry)
-                    key = candidate_key(
-                        asset="futures",
-                        exchange=exch,
-                        interval=interval,
-                        date=date_str,
-                        time=time,
-                        expiry_tier=fut_tier,
+                    # The stored-master kind map for the RANK-time class filter
+                    # (DEC-MOVERS-UNDERLYING-CLASS-001) — memoised on the master
+                    # CONTENT token via the ONE `_underlying_kinds_cached` helper
+                    # (review round 1); the master token is ALSO folded into the
+                    # candidate key below (the stamped-verdict staleness class —
+                    # see the options arm above).
+                    underlying_kinds, kinds_token = _underlying_kinds_cached(store)
+                    key = (
+                        candidate_key(
+                            asset="futures",
+                            exchange=exch,
+                            interval=interval,
+                            date=date_str,
+                            time=time,
+                            expiry_tier=fut_tier,
+                        )
+                        + f"|m={kinds_token}"
                     )
                     fut_cands = _movers_cache.get_or_compute(
                         key,
@@ -5936,6 +6031,7 @@ def build_app(
                             exchange=exch,
                             datasets=movers_datasets,
                             expiry_tier=fut_tier,
+                            underlying_kinds=underlying_kinds,
                         ),
                     )
                     return build_futures_payload(
@@ -5948,6 +6044,7 @@ def build_app(
                         expiry_tier=fut_cands.expiry_tier,
                         min_volume=min_volume,
                         latest_time=latest_time,
+                        underlying_class=underlying_class,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -5988,6 +6085,7 @@ def build_app(
                     stored_reads=spot_cands.stored_reads,
                     resampled_reads=spot_cands.resampled_reads,
                     latest_time=latest_time,
+                    underlying_class=underlying_class,
                 )
 
             payload = await _run_lake(_resolve)
