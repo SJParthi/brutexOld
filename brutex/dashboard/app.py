@@ -5225,8 +5225,16 @@ def build_app(
         else derives ``files_scanned × FIRST_SCAN_PER_FILE_BUDGET_S`` (the
         conservative 2 ms/file budget). ``None`` on a first-ever lake / a
         foreign-shaped sentinel — the holder then uses the bare 30-min
-        floor. Runs ON the census daemon thread (lake I/O), guarded by the
-        holder's hint fence.
+        floor. NON-FINITE sentinel values are junk, never a hint (round-1
+        refuter: ``Infinity`` is valid JSON to Python's tolerant decoder,
+        passes ``> 0``, and would have yielded an INFINITE stall bound —
+        staleness detection silently disabled; the holder's
+        ``_stale_bound_locked`` carries the same guard as a second belt);
+        the ``files_scanned`` arm is a non-negative int (structurally
+        finite) whose product with the per-file budget is guarded against
+        an absurd-magnitude ``OverflowError`` → ``None``. Runs ON the
+        census daemon thread (lake I/O), guarded by the holder's hint
+        fence.
         """
         from brutex.data.lake_heal import load_last_sweep
 
@@ -5240,13 +5248,18 @@ def build_app(
         if (
             isinstance(duration_ms, (int, float))
             and not isinstance(duration_ms, bool)
+            and math.isfinite(duration_ms)
             and duration_ms > 0
         ):
             return float(duration_ms) / 1000.0
         files = sweep.get("files_scanned")
         if isinstance(files, bool) or not isinstance(files, int) or files < 0:
             return None
-        return files * FIRST_SCAN_PER_FILE_BUDGET_S
+        try:
+            return files * FIRST_SCAN_PER_FILE_BUDGET_S
+        except OverflowError:
+            # An int too large for float conversion — junk sentinel.
+            return None
 
     # DEC-LAKE-CENSUS-NONBLOCKING-001: the census holder — the scan runs on a
     # DEDICATED named daemon thread (zero AnyIO threadpool tokens), single-flight

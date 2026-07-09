@@ -215,9 +215,12 @@ class TestLakeUniquenessRoute:
         }
         assert payload["healed_total"] == 0
         assert payload["last_sweep_utc"] is None
-        # DEC-LAKE-CENSUS-NONBLOCKING-001: the four ADDITIVE scan-state keys
+        # DEC-LAKE-CENSUS-NONBLOCKING-001: the ADDITIVE scan-state keys
         # (every verdict key above is byte-compatible with the pre-fix payload).
         assert payload["scan_in_progress"] is False
+        assert payload["scan_stalled"] is False
+        assert payload["refresh_probe_wedged"] is False
+        assert payload["refresh_probe_wedged_s"] is None
         assert payload["scan_error"] is None
         assert isinstance(payload["as_of_utc"], str)
         progress = payload["scan_progress"]
@@ -420,6 +423,48 @@ class TestCensusEstimateSeam:
         assert payload["findings_total"] == 0  # the scan itself still landed
         assert payload["scan_progress"]["files_total_estimate"] is None
 
+    @pytest.mark.parametrize("junk_ms", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_sentinel_duration_falls_to_the_files_arm(
+        self, store: InstrumentStore, junk_ms: float
+    ) -> None:
+        """Round-1 refuter FINDING 2 (route arm): ``Infinity`` IS valid input to
+        Python's tolerant JSON decoder and passed the ``> 0`` gate — the hint
+        would have seeded an INFINITE stall bound. The ``math.isfinite`` guard
+        rejects it and the hint falls to the ``files_scanned`` derivation; the
+        route serves the verdict + the honest estimate normally."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": junk_ms}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert payload["scan_stalled"] is False
+        assert payload["refresh_probe_wedged"] is False
+
+    def test_absurd_magnitude_files_scanned_hint_degrades_never_a_crash(
+        self, store: InstrumentStore
+    ) -> None:
+        """A ``files_scanned`` int too large for float conversion raises
+        ``OverflowError`` in the per-file hint derivation — mapped to ``None``
+        (bare-floor bound); the estimate itself (a plain int) still serves."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(_json.dumps({"files_scanned": 10**400}), encoding="utf-8")
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 10**400
+        assert payload["scan_stalled"] is False
+
     def test_sentinel_duration_ms_arm_serves_normally(self, store: InstrumentStore) -> None:
         """A sentinel carrying a recorded duration exercises the duration-first
         bound-hint arm — the route serves the verdict identically."""
@@ -468,6 +513,11 @@ class TestUniverseChipMarkers:
         assert "(rescanning…" in body
         assert "census scan failed" in body
         assert "census scan stalled" in body  # the ADD-3 loud-staleness arm
+        # The refresh-probe-wedge note (round-1 refuter FINDING 1) renders
+        # beside the served verdict — distinct from a stalled scan.
+        assert "refresh probe wedged" in body
+        assert "refresh_probe_wedged" in body
+        assert "refresh_probe_wedged_s" in body
         assert "scan_in_progress" in body
         assert "scan_stalled" in body
         assert text.count("setInterval(loadLakeUniqueness") == 1
@@ -510,6 +560,43 @@ class TestExtremePermutations:
         # skips — the scanner's documented seam contract).
         assert payload["scan_progress"]["files_scanned"] == 2
 
+    def test_store_path_vanishing_mid_flight_hits_the_daemon_thread_belts(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The route gates ``path`` per REQUEST, but the estimate / bound-hint /
+        scan-builder reads happen LATER on the daemon thread — a store whose
+        path degrades between arming and the scan rides each helper's own
+        not-a-Path belt (null estimate, bare-floor hint, the builder's honest
+        ``{"present": false}``) — never a crash, never a fabricated verdict."""
+        real_path = store.path
+        flip = {"gone": False}
+        monkeypatch.setattr(
+            InstrumentStore,
+            "path",
+            property(lambda self: "gone-mid-flight" if flip["gone"] else real_path),
+        )
+        bodies: list[Callable[[], None]] = []
+        client = TestClient(
+            app_module.build_app(
+                app_module.DashboardState(),
+                instrument_store=store,
+                summary_cache=SummaryCache(),
+                census_spawn=bodies.append,
+            ),
+            raise_server_exceptions=False,
+        )
+        first = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert first["scan_in_progress"] is True  # armed; the body is queued
+        assert "findings_total" not in first
+        flip["gone"] = True
+        bodies.pop()()  # the daemon body runs AFTER the path vanished
+        flip["gone"] = False
+        snap = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert snap["present"] is False  # the builder's own honest gate landed
+        assert snap["scan_progress"]["files_total_estimate"] is None
+        assert snap["scan_error"] is None
+        assert snap["scan_stalled"] is False
+
     def test_scan_crash_route_keeps_serving_the_last_verdict(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -539,3 +626,4 @@ class TestExtremePermutations:
         )
         assert "vanished" not in payload["scan_error"]
         assert payload["scan_stalled"] is False
+        assert payload["refresh_probe_wedged"] is False

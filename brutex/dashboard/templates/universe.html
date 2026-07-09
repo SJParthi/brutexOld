@@ -1252,6 +1252,16 @@ async function loadLakeUniqueness() {
     }
     if (m.scan_stalled) {
       verdict.textContent += " ⚠️ (census scan stalled" + startedAgo + ")";
+    } else if (m.refresh_probe_wedged) {
+      /* The refresh PROBE wedged behind this served verdict (distinct from a
+         stalled scan — the verdict stands, only its freshness check is stuck;
+         judged server-side from the probe's OWN arming stamp, never the old
+         scan's started_utc). Minutes from refresh_probe_wedged_s; a missing/
+         non-numeric value degrades to omission of the count. */
+      const ws = m.refresh_probe_wedged_s;
+      const mins = (typeof ws === "number" && isFinite(ws))
+        ? " (" + Math.max(0, Math.round(ws / 60)) + "m)" : "";
+      verdict.textContent += " ⚠️ refresh probe wedged" + mins;
     } else if (m.scan_in_progress) {
       verdict.textContent += " (rescanning… " + (p.files_scanned || 0) + " files)";
     }

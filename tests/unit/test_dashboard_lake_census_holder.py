@@ -5,8 +5,9 @@ Covers the whole holder contract at 100% line+branch:
 * SINGLE-FLIGHT — concurrent ``maybe_refresh`` calls spawn exactly ONE check
   thread; an in-flight scan is never duplicated and never waited on;
 * the O(1) ``snapshot`` — the honest no-verdict-yet warming arm, the landed
-  verdict merged with the four additive keys, live progress counting via the
-  scanner's ``per_file_pause`` seam;
+  verdict merged with the additive scan-state keys (incl. the split
+  ``scan_stalled`` / ``refresh_probe_wedged`` staleness pair), live progress
+  counting via the scanner's ``per_file_pause`` seam;
 * the ERROR arm — a raised scan stores ``scan_error``, keeps the last-known
   verdict serving, and re-arms after the BASE floor (never a fabricated
   verdict, never a wedged holder);
@@ -116,6 +117,8 @@ class TestSnapshotWarmingArm:
             "present": True,
             "scan_in_progress": False,
             "scan_stalled": False,
+            "refresh_probe_wedged": False,
+            "refresh_probe_wedged_s": None,
             "scan_error": None,
             "as_of_utc": None,
             "scan_progress": {
@@ -167,7 +170,7 @@ class TestSnapshotWarmingArm:
 
 
 class TestVerdictSnapshot:
-    """A landed verdict merges byte-compatible keys + the four additive ones."""
+    """A landed verdict merges byte-compatible keys + the additive scan-state ones."""
 
     def test_landed_verdict_merges_additive_keys(self) -> None:
         stamps = iter(["start-1", "as-of-1"])
@@ -179,6 +182,9 @@ class TestVerdictSnapshot:
         assert snap["findings_total"] == 2
         assert snap["engine_clean"] is False
         assert snap["scan_in_progress"] is False
+        assert snap["scan_stalled"] is False
+        assert snap["refresh_probe_wedged"] is False
+        assert snap["refresh_probe_wedged_s"] is None
         assert snap["scan_error"] is None
         assert snap["as_of_utc"] == "as-of-1"
         assert snap["scan_progress"]["started_utc"] == "start-1"
@@ -735,10 +741,19 @@ class TestProbeWedgeStalled:
             assert snap["scan_stalled"] is True
             assert "findings_total" not in snap  # never a fabricated verdict
             assert snap["scan_progress"]["started_utc"] is None  # honest: no scan yet
+            # The first-boot probe episode IS the warming state: scan_stalled
+            # (scan_in_progress is also true) — never the payload-present
+            # refresh_probe_wedged verdict.
+            assert snap["scan_in_progress"] is True
+            assert snap["refresh_probe_wedged"] is False
+            assert snap["refresh_probe_wedged_s"] is None
             holder.snapshot()  # second read: still stalled, NO second WARN
             stall_warns = [w for w in rec.warnings if w[0] == "lake_census.scan_stalled"]
             assert len(stall_warns) == 1
             assert stall_warns[0][1]["phase"] == "probe"
+            # Probe-phase WARN stamps are honestly None — never a reused stamp.
+            assert stall_warns[0][1]["started_utc"] is None
+            assert stall_warns[0][1]["files_scanned"] is None
         finally:
             release.set()
         deadline = time.time() + 10.0
@@ -817,6 +832,19 @@ class TestFirstScanBoundHint:
         assert holder.maybe_refresh() is True
         assert probes == [(SCAN_STALE_FLOOR_S + 1.0, True)]
 
+    @pytest.mark.parametrize("junk_hint", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_hint_degrades_to_the_bare_floor(self, junk_hint: float) -> None:
+        """Round-1 refuter FINDING 2: ``inf`` yielded an INFINITE first-scan
+        bound (staleness detection silently disabled) and ``nan`` poisoned the
+        ``max`` — a non-finite hint now degrades to the bare 30-min floor."""
+        clock = _FakeClock()
+        probes: list[tuple[float, bool]] = []
+        holder = self._stalling_probe_holder(
+            clock, lambda: junk_hint, probes, [SCAN_STALE_FLOOR_S + 1.0]
+        )
+        assert holder.maybe_refresh() is True
+        assert probes == [(SCAN_STALE_FLOOR_S + 1.0, True)]
+
     def test_hint_is_inert_after_the_first_landed_scan(self) -> None:
         """Post-first-completion the 2× last-duration law governs, not the hint."""
         gen = {"n": 0}
@@ -848,3 +876,129 @@ class TestFirstScanBoundHint:
         clock.advance(121.0)
         assert holder.maybe_refresh() is True
         assert seen == [True]
+
+
+class TestRefreshProbeWedged:
+    """Round-1 refuter FINDING 1: a wedged REFRESH probe behind a LANDED
+    verdict is the DISTINCT ``refresh_probe_wedged`` verdict — never a
+    contradictory "✅ CLEAN yet census scan stalled" pair, and never judged
+    from (or warned with) the PREVIOUS scan's ``started_utc``."""
+
+    def test_wedged_refresh_probe_reads_distinct_flag_not_scan_stalled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """payload present + in-flight probe past the bound → wedged verdict.
+
+        Deterministic wedge: the queued-body spawn seam arms the probe episode
+        without ever running it — exactly the shape of a generation probe hung
+        on a stalled lake volume. Pre-fix this read ``scan_stalled: true``
+        with ``scan_in_progress: false`` and warned with the OLD scan's
+        ``started_utc`` (the refuter's inconsistent-signal repro).
+        """
+        rec = _RecordingLog()
+        monkeypatch.setattr(lake_census_holder_module, "_LOG", rec)
+        bodies: list[Callable[[], None]] = []
+        clock = _FakeClock()
+        scan = _CountingScan()
+        holder = _holder(scan, clock=clock, spawn=bodies.append)
+        assert holder.maybe_refresh() is True
+        bodies.pop()()  # land the first scan (duration 0 → bound = bare floor)
+        clock.advance(3.0)  # past the base adaptive/check floors
+        assert holder.maybe_refresh() is True  # arm the refresh probe (body queued = wedged)
+        clock.advance(SCAN_STALE_FLOOR_S)  # exactly AT the bound — NOT wedged (strict >)
+        snap = holder.snapshot()
+        assert snap["refresh_probe_wedged"] is False
+        assert snap["scan_stalled"] is False
+        clock.advance(1.0)  # strictly past → the DISTINCT wedged verdict
+        snap = holder.snapshot()
+        assert snap["findings_total"] == 0  # the landed verdict keeps serving
+        assert snap["scan_in_progress"] is False
+        assert snap["scan_stalled"] is False  # NEVER "stalled scan" here
+        assert snap["refresh_probe_wedged"] is True
+        # Judged from the episode's OWN arming stamp — elapsed since arming,
+        # NOT since the old scan's start.
+        assert snap["refresh_probe_wedged_s"] == SCAN_STALE_FLOOR_S + 1.0
+        # The OLD scan's started_utc still serves in scan_progress (last
+        # scan's record) — but the WARN below must NOT reuse it.
+        assert isinstance(snap["scan_progress"]["started_utc"], str)
+        holder.snapshot()  # second read: still wedged, NO second WARN
+        stall_warns = [w for w in rec.warnings if w[0] == "lake_census.scan_stalled"]
+        assert len(stall_warns) == 1
+        assert stall_warns[0][1]["phase"] == "probe"
+        assert stall_warns[0][1]["elapsed_s"] == SCAN_STALE_FLOOR_S + 1.0
+        assert stall_warns[0][1]["started_utc"] is None  # never the old scan's stamp
+        assert stall_warns[0][1]["files_scanned"] is None
+        # The wedged probe finally completes (generation unchanged → serve
+        # stale, no rescan) — BOTH staleness flags clear.
+        bodies.pop()()
+        done = holder.snapshot()
+        assert done["refresh_probe_wedged"] is False
+        assert done["refresh_probe_wedged_s"] is None
+        assert done["scan_stalled"] is False
+        assert scan.calls == 1
+
+
+class TestRunScanNeverStrandsScanning:
+    """Round-1 refuter FINDING 3: ONE try/finally spans the scan setup + body —
+    NO exit of ``_run_scan`` can strand ``_scanning`` true (a stranded flag
+    read ``scan_in_progress`` forever while the fallback baseline kept
+    ``scan_stalled`` unreachable — a silent permanent warming state)."""
+
+    def test_raising_now_utc_in_setup_lands_the_error_arm_not_a_stranded_flag(
+        self,
+    ) -> None:
+        clock = _FakeClock()
+        flip = {"broken": True}
+
+        def _flaky_now_utc() -> str:
+            if flip["broken"]:
+                raise RuntimeError("wall-clock backend gone /mnt/lake")
+            return "2026-07-09T00:00:00+00:00"
+
+        scan = _CountingScan()
+        holder = _holder(scan, clock=clock, now_utc=_flaky_now_utc)
+        assert holder.maybe_refresh() is True
+        snap = holder.snapshot()
+        # Pre-fix: _scanning stranded True → scan_in_progress forever with a
+        # ~0 belt baseline (never stalled) — the silent forever-warming.
+        assert snap["scan_in_progress"] is False
+        assert snap["scan_stalled"] is False
+        assert scan.calls == 0  # the setup raised BEFORE the scan body
+        # The SAME sanitised error arm as a scan raise (token + class name;
+        # the raw text carried a path-like detail — never served).
+        assert snap["scan_error"] == (
+            "census scan failed (RuntimeError) — see server log (lake_census.scan_failed)"
+        )
+        assert "/mnt/lake" not in snap["scan_error"]
+        # Base-floor re-arm: the next poll past ~2 s retries and recovers.
+        flip["broken"] = False
+        clock.advance(3.0)
+        assert holder.maybe_refresh() is True
+        assert holder.scans_completed == 1
+        assert holder.snapshot()["scan_error"] is None
+
+    def test_raising_now_utc_at_the_success_landing_still_resets_scanning(
+        self,
+    ) -> None:
+        """A raise AFTER the scan body (the as-of stamp) exits through the
+        finally belt — ``_scanning`` reset, the honest error arm stamped."""
+        clock = _FakeClock()
+        calls = {"n": 0}
+
+        def _second_call_raises() -> str:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("wall clock died mid-landing")
+            return "2026-07-09T00:00:00+00:00"
+
+        scan = _CountingScan()
+        holder = _holder(scan, clock=clock, now_utc=_second_call_raises)
+        assert holder.maybe_refresh() is True
+        assert scan.calls == 1  # the scan itself RAN
+        snap = holder.snapshot()
+        assert snap["scan_in_progress"] is False  # the finally belt reset it
+        assert "findings_total" not in snap  # the landing never completed
+        assert snap["scan_error"] == (
+            "census scan failed (RuntimeError) — see server log (lake_census.scan_failed)"
+        )
+        assert holder.scans_completed == 0

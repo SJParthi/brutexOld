@@ -46,6 +46,7 @@ No module-global state (CLAUDE.md §4): constructed in
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -220,28 +221,42 @@ class LakeCensusHolder:
         """The O(1) route payload: last-known verdict + honest scan state.
 
         A landed verdict's keys are byte-compatible with the pre-fix payload
-        (``census_to_dict`` shape) with FIVE additive keys stamped on top:
+        (``census_to_dict`` shape) with the additive keys stamped on top:
         ``scan_in_progress`` / ``scan_error`` / ``as_of_utc`` /
         ``scan_progress`` (``files_scanned`` + ``files_total_estimate`` +
-        ``started_utc``) / ``scan_stalled``. Before the first scan lands the
-        payload is the NEW honest warming arm — ``{"present": true}`` plus the
-        same five keys and NO verdict fields (a verdict is never fabricated,
+        ``started_utc``) / ``scan_stalled`` / ``refresh_probe_wedged`` (+
+        ``refresh_probe_wedged_s``). Before the first scan lands the payload
+        is the NEW honest warming arm — ``{"present": true}`` plus the same
+        additive keys and NO verdict fields (a verdict is never fabricated,
         Golden Rule #1).
 
-        LOUD STALENESS (never a silent forever-warming): an in-flight scan
+        LOUD STALENESS (never a silent forever-warming): an in-flight episode
         older than ``max(2 × the last landed scan's duration,
         SCAN_STALE_FLOOR_S)`` — seeded on the FIRST scan from the L3
-        sentinel hint — reads ``scan_stalled: true`` + ONE
-        ``lake_census.scan_stalled`` WARN per episode (``phase="scan"``) —
-        DETECTION not termination (the #999 stance: the daemon thread cannot
-        be killed; the last-known verdict keeps serving). The SAME verdict
-        covers a wedged check PREFIX (``phase="probe"`` — the generation
-        probe is lake I/O and can hang BEFORE the scan body sets
-        ``_scanning``; without this arm a first-ever boot would read
-        ``scan_in_progress`` with ``started_utc=None`` FOREVER, a silent
-        forever-warming). A backwards clock (skew: now < baseline) can never
-        false-flag — negative elapsed is below every bound. Completion /
-        error clears the flag.
+        sentinel hint — is flagged + WARNed ONCE per episode
+        (``lake_census.scan_stalled``) — DETECTION not termination (the #999
+        stance: the daemon thread cannot be killed; the last-known verdict
+        keeps serving). The flag is SPLIT so the pair can never contradict
+        (the round-1 refuter's "✅ CLEAN yet census scan stalled" repro):
+
+        * ``scan_stalled`` — ONLY where ``scan_in_progress`` is also true: a
+          wedged SCAN body (``phase="scan"``, judged from the scan's own
+          start stamp) or a wedged FIRST-BOOT check prefix with no payload
+          to serve (``phase="probe"`` — the generation probe is lake I/O and
+          can hang BEFORE the scan body sets ``_scanning``; without this arm
+          a first boot would read ``scan_in_progress`` with
+          ``started_utc=None`` FOREVER, a silent forever-warming);
+        * ``refresh_probe_wedged`` — a wedged REFRESH probe while a landed
+          payload keeps serving (``scan_in_progress`` false): judged from
+          the episode's OWN arming stamp (``_last_check_at``), NEVER the
+          previous scan's ``started_utc`` (whose age is meaningless here),
+          with ``refresh_probe_wedged_s`` = seconds since arming.
+
+        The once-per-episode WARN carries ``started_utc``/``files_scanned``
+        ONLY for ``phase="scan"`` — a probe episode never reuses the
+        PREVIOUS scan's stamps. A backwards clock (skew: now < baseline)
+        can never false-flag — negative elapsed is below every bound.
+        Completion / error clears both flags.
         """
         stall_warn: dict[str, Any] | None = None
         with self._lock:
@@ -251,8 +266,11 @@ class LakeCensusHolder:
             # A first-ever in-flight check with no payload ALWAYS proceeds to
             # the scan (nothing to serve → needs_scan unconditionally), so it
             # honestly reads in-progress even before the scan body is entered.
-            base["scan_in_progress"] = self._scanning or (self._in_flight and self._payload is None)
+            in_progress = self._scanning or (self._in_flight and self._payload is None)
+            base["scan_in_progress"] = in_progress
             stalled = False
+            probe_wedged = False
+            probe_wedged_s: float | None = None
             phase: str | None = None
             baseline: float | None = None
             if self._scanning:
@@ -264,9 +282,10 @@ class LakeCensusHolder:
                 phase = "scan"
             elif self._in_flight:
                 # The check PREFIX (generation probe / bound-hint read — lake
-                # I/O) wedged before the scan body: judge from the arming
-                # stamp. ``_last_check_at`` is always set when arming (same
-                # lock block in ``maybe_refresh``) — narrowing belt again.
+                # I/O) wedged before the scan body: judge from the episode's
+                # OWN arming stamp. ``_last_check_at`` is always set when
+                # arming (same lock block in ``maybe_refresh``) — narrowing
+                # belt again.
                 check_at = self._last_check_at
                 baseline = check_at if check_at is not None else self._clock()
                 phase = "probe"
@@ -274,17 +293,29 @@ class LakeCensusHolder:
                 elapsed = self._clock() - baseline
                 bound = self._stale_bound_locked()
                 if elapsed > bound:
-                    stalled = True
+                    if in_progress:
+                        # A wedged scan / first-boot probe — the warming or
+                        # rescanning state itself is stalled.
+                        stalled = True
+                    else:
+                        # A wedged refresh probe BEHIND a served verdict —
+                        # the distinct honest signal (never "stalled scan").
+                        probe_wedged = True
+                        probe_wedged_s = elapsed
                     if not self._stall_warned:
                         self._stall_warned = True
                         stall_warn = {
                             "phase": phase,
                             "elapsed_s": elapsed,
                             "bound_s": bound,
-                            "started_utc": self._started_utc,
-                            "files_scanned": self._files_scanned,
+                            # Scan-phase stamps ONLY — a probe episode never
+                            # reuses the previous scan's started_utc / count.
+                            "started_utc": (self._started_utc if phase == "scan" else None),
+                            "files_scanned": (self._files_scanned if phase == "scan" else None),
                         }
             base["scan_stalled"] = stalled
+            base["refresh_probe_wedged"] = probe_wedged
+            base["refresh_probe_wedged_s"] = probe_wedged_s
             base["scan_error"] = self._error
             base["as_of_utc"] = self._as_of_utc
             base["scan_progress"] = {
@@ -306,11 +337,19 @@ class LakeCensusHolder:
         a bigger lake's legitimately-slow first scan is not false-flagged);
         after it, ``max(2 × last landed duration, SCAN_STALE_FLOOR_S)`` —
         generous, and self-scaling once a real scan duration is known.
+
+        NON-FINITE HINT GUARD (round-1 refuter): a poisoned sentinel hint
+        (``inf``/``-inf``/``nan``) is IGNORED — ``max(inf, floor)`` would
+        yield an INFINITE bound (staleness detection silently disabled
+        forever) and ``max(nan, floor)`` is order-dependent — so the bound
+        degrades to the bare :data:`SCAN_STALE_FLOOR_S`, never wider.
         """
         if self._scan_stale_after_s is not None:
             return self._scan_stale_after_s
         if self._scans_completed == 0:
-            hint = self._first_bound_hint if self._first_bound_hint is not None else 0.0
+            hint = self._first_bound_hint
+            if hint is None or not math.isfinite(hint):
+                hint = 0.0
             return max(hint, SCAN_STALE_FLOOR_S)
         return max(2.0 * self._compute_duration, SCAN_STALE_FLOOR_S)
 
@@ -405,7 +444,19 @@ class LakeCensusHolder:
                 self._in_flight = False
 
     def _run_scan(self, gen: int | None) -> None:
-        """Run ONE census scan and land its outcome — success OR honest error."""
+        """Run ONE census scan and land its outcome — success OR honest error.
+
+        ONE try/finally spans the setup AND the scan (round-1 refuter): a
+        raise ANYWHERE after ``_scanning`` flips true (the ``now_utc`` seam,
+        an allocation failure inside the lock block, the scan itself, the
+        success-landing stamp) is guaranteed to leave ``_scanning`` False on
+        exit — a stranded true flag would read ``scan_in_progress`` FOREVER
+        while the belt baseline made ``scan_stalled`` unreachable (elapsed
+        ≈ 0 against a fresh fallback clock). Every raise lands the SAME
+        sanitised error arm (token + class name; base-floor re-arm), and the
+        wall stamps are read OUTSIDE the lock blocks so those blocks stay
+        pure assignments.
+        """
         estimate: int | None = None
         if self._files_total_estimate is not None:
             try:
@@ -414,15 +465,27 @@ class LakeCensusHolder:
                 _LOG.warning("lake_census.estimate_failed", error=str(exc))
                 estimate = None
         started = self._clock()
-        with self._lock:
-            self._scanning = True
-            self._files_scanned = 0
-            self._estimate = estimate
-            self._started_utc = self._now_utc()
-            self._scan_started_clock = started
-            self._stall_warned = False  # a new scan opens a new stall episode
         try:
+            started_utc = self._now_utc()
+            with self._lock:
+                self._scanning = True
+                self._files_scanned = 0
+                self._estimate = estimate
+                self._started_utc = started_utc
+                self._scan_started_clock = started
+                self._stall_warned = False  # a new scan opens a new stall episode
             payload = self._scan(self._count_file)
+            finished = self._clock()
+            as_of_utc = self._now_utc()
+            with self._lock:
+                self._scanning = False
+                self._payload = payload
+                self._generation_at = gen
+                self._computed_at = finished
+                self._compute_duration = max(finished - started, 0.0)
+                self._as_of_utc = as_of_utc
+                self._error = None
+                self._scans_completed += 1
         except Exception as exc:  # pylint: disable=broad-except — an erroring scan must not kill polls
             # The FULL detail (exception text — which may carry absolute lake
             # paths) goes to the server log ONLY; the served ``scan_error`` is
@@ -431,29 +494,25 @@ class LakeCensusHolder:
             # sanitisation stance; CodeQL py/stack-trace-exposure).
             _LOG.warning("lake_census.scan_failed", error=str(exc), error_type=type(exc).__name__)
             with self._lock:
-                self._scanning = False
                 # HONEST error state: the last-known verdict (if any) keeps
                 # serving with ``scan_error`` stamped; a verdict is NEVER
                 # fabricated. The base floor (duration reset to 0) lets the
                 # next poll past ~2 s re-arm instead of waiting out a stale
                 # 120 s adaptive floor from the previous slow success.
+                # (``_scanning`` is reset by the finally belt below.)
                 self._error = (
                     f"census scan failed ({type(exc).__name__}) — "
                     "see server log (lake_census.scan_failed)"
                 )
                 self._computed_at = self._clock()
                 self._compute_duration = 0.0
-            return
-        finished = self._clock()
-        with self._lock:
-            self._scanning = False
-            self._payload = payload
-            self._generation_at = gen
-            self._computed_at = finished
-            self._compute_duration = max(finished - started, 0.0)
-            self._as_of_utc = self._now_utc()
-            self._error = None
-            self._scans_completed += 1
+        finally:
+            with self._lock:
+                if self._scanning:
+                    # Reached ONLY on a raise between the setup flip and the
+                    # success landing (the success arm already reset it) —
+                    # the guarantee that no exit strands ``scan_in_progress``.
+                    self._scanning = False
 
     def _count_file(self) -> None:
         """The per-file progress tick (the scanner's ``per_file_pause`` seam)."""
