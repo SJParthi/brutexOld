@@ -121,20 +121,34 @@ function bxPaisaToRupees(paisa) {
  * C-M4b), so a partially-loaded list can never read as a whole-run claim.
  *
  * @param {object[]} rows - contract trade rows ({pnl_paisa, costs_paisa}).
- * @returns {object} {ok, rows_counted, invalid_rows, gross_pnl_paisa,
- *          total_costs_paisa, net_paisa, lines: string[]}.
+ * @returns {object} {ok, rows_counted, invalid_rows, null_cost_rows,
+ *          gross_pnl_paisa, total_costs_paisa, net_paisa, lines: string[]}.
  */
 function bxTradeArithmetic(rows) {
   var gross = 0;
   var costs = 0;
   var counted = 0;
   var invalid = 0;
+  var nullCosts = 0;
   for (var i = 0; i < (rows ? rows.length : 0); i++) {
     var p = rows[i].pnl_paisa;
     var c = rows[i].costs_paisa;
+    /* Ruling-18 NULL-BY-DESIGN costs ([W2-4] DEC-ONECLICK-TOP100-OBJECT-
+       ROOT-001): production trade rows carry costs_paisa:null until P5 —
+       folding null into the non-integer bucket excluded EVERY real trade
+       ("net ₹0.00 across 0 trades"). A null cost is a KNOWN-unverified
+       cost, never a corrupt number: it contributes ₹0 and is COUNTED
+       (null_cost_rows) with its own honest caveat line. */
+    var nullCost = c === null || c === undefined;
+    if (nullCost) {
+      c = 0;
+    }
     if (!Number.isSafeInteger(p) || !Number.isSafeInteger(c)) {
       invalid += 1; // counted, never coerced (R27)
       continue;
+    }
+    if (nullCost) {
+      nullCosts += 1;
     }
     gross += p;
     costs += c;
@@ -146,6 +160,12 @@ function bxTradeArithmetic(rows) {
     "− Σ costs = ₹" + bxPaisaToRupees(costs),
     "= net ₹" + bxPaisaToRupees(net) + " — sum of the " + counted + " trades loaded below"
   ];
+  if (nullCosts > 0) {
+    lines.push(
+      nullCosts +
+        " row(s) carry null costs (by design until P5) — counted at ₹0.00, so the net is GROSS of those costs"
+    );
+  }
   if (invalid > 0) {
     lines.push(invalid + " row(s) had non-integer paisa values and were EXCLUDED from the sum");
   }
@@ -153,6 +173,7 @@ function bxTradeArithmetic(rows) {
     ok: invalid === 0,
     rows_counted: counted,
     invalid_rows: invalid,
+    null_cost_rows: nullCosts,
     gross_pnl_paisa: gross,
     total_costs_paisa: costs,
     net_paisa: net,
