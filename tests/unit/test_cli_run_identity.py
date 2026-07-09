@@ -65,6 +65,10 @@ _STATUS = ("git", "status", "--porcelain")
 _SHA = "a" * 40
 
 
+def _ls_files(path: str) -> tuple[str, ...]:
+    return ("git", "ls-files", "--error-unmatch", "--", path)
+
+
 # ────────────────────────── _git_identity ──────────────────────────
 
 
@@ -131,14 +135,90 @@ def test_git_identity_status_probe_failure_returns_clean_sha() -> None:
     assert _git_identity(cwd=Path("/repo"), runner=runner) == _SHA
 
 
+# ───────────────── enclosing-repo guard (PR-4 review) ─────────────────
+
+
+def test_git_identity_tracked_file_returns_sha() -> None:
+    # tracked_path given AND `ls-files --error-unmatch` succeeds (the file IS
+    # tracked here) — the SHA is trusted exactly as an editable/source deploy.
+    tracked = "/repo/brutex/cli.py"
+    calls: list[dict[str, Any]] = []
+    runner = _make_runner(
+        {_HEAD: _FakeProc(_SHA + "\n"), _ls_files(tracked): _FakeProc(""), _STATUS: _FakeProc("")},
+        calls=calls,
+    )
+    assert _git_identity(cwd=Path("/repo"), tracked_path=Path(tracked), runner=runner) == _SHA
+    # The ls-files probe ran in the SAME cwd, through the SAME runner seam.
+    ls = [c for c in calls if tuple(c["argv"])[:2] == ("git", "ls-files")]
+    assert ls and ls[0]["cwd"] == Path("/repo")
+
+
+def test_git_identity_untracked_file_in_enclosing_repo_returns_none() -> None:
+    # Enclosing foreign repo: `rev-parse HEAD` resolves the ENCLOSING repo's
+    # HEAD, but `ls-files --error-unmatch` on brutex's file exits non-zero (the
+    # path is not tracked here) — so the SHA is REJECTED → None → honest fallback.
+    tracked = "/enclosing/venv/site-packages/brutex/cli.py"
+    runner = _make_runner(
+        {
+            _HEAD: _FakeProc(_SHA + "\n"),
+            _ls_files(tracked): subprocess.CalledProcessError(1, _ls_files(tracked)),
+            _STATUS: _FakeProc(""),
+        }
+    )
+    assert _git_identity(cwd=Path("/enclosing"), tracked_path=Path(tracked), runner=runner) is None
+
+
+def test_git_identity_real_enclosing_repo_untracked_file_falls_back(tmp_path: Path) -> None:
+    """Real git end-to-end: a brutex package unpacked (untracked) inside an
+    UNRELATED enclosing checkout yields None — never the enclosing repo's HEAD.
+
+    `_resolve_code_commit_sha` then falls back to ``brutex-{__version__}``.
+    """
+    import shutil
+
+    if shutil.which("git") is None:  # pragma: no cover — git present in CI
+        pytest.skip("git not available")
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+    }
+    enclosing = tmp_path / "enclosing"
+    enclosing.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=enclosing, check=True, capture_output=True)
+    (enclosing / "README").write_text("enclosing repo\n")
+    subprocess.run(["git", "add", "README"], cwd=enclosing, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "init"],
+        cwd=enclosing,
+        check=True,
+        capture_output=True,
+        env=git_env,
+    )
+    # A brutex package unpacked (and left UNtracked) inside the enclosing repo.
+    nested = enclosing / "venv" / "site-packages" / "brutex"
+    nested.mkdir(parents=True)
+    cli_file = nested / "cli.py"
+    cli_file.write_text("# nested wheel, untracked by the enclosing repo\n")
+    # rev-parse HEAD resolves the ENCLOSING repo, but the guard rejects it.
+    assert _git_identity(cwd=nested, tracked_path=cli_file) is None
+    # And with tracked_path omitted the (unguarded) seam WOULD trust that HEAD —
+    # proving the guard, not git availability, is what produces the fallback.
+    assert _git_identity(cwd=nested) is not None
+
+
 # ────────────────────── _resolve_code_commit_sha ──────────────────────
 
 
 def test_resolve_code_commit_sha_uses_package_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Path] = {}
 
-    def _fake(*, cwd: Path, runner: Any = None) -> str:
+    def _fake(*, cwd: Path, tracked_path: Path | None = None, runner: Any = None) -> str:
         captured["cwd"] = cwd
+        assert tracked_path is not None
+        captured["tracked_path"] = tracked_path
         return _SHA
 
     monkeypatch.setattr("brutex.cli._git_identity", _fake)
@@ -149,26 +229,35 @@ def test_resolve_code_commit_sha_uses_package_dir(monkeypatch: pytest.MonkeyPatc
         assert _resolve_code_commit_sha() == _SHA
     finally:
         os.chdir(original)
-    import brutex.cli as cli_mod
+    from brutex import cli as cli_mod
 
-    assert captured["cwd"] == Path(cli_mod.__file__).resolve().parent
+    pkg_file = Path(cli_mod.__file__).resolve()
+    assert captured["cwd"] == pkg_file.parent
+    # THIS file is passed as the tracked_path so the resolved repo is confirmed
+    # to actually track brutex before its HEAD is trusted (enclosing-repo guard).
+    assert captured["tracked_path"] == pkg_file
 
 
 def test_resolve_code_commit_sha_falls_back_when_no_git(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("brutex.cli._git_identity", lambda *, cwd, runner=None: None)
+    monkeypatch.setattr(
+        "brutex.cli._git_identity", lambda *, cwd, tracked_path=None, runner=None: None
+    )
     assert _resolve_code_commit_sha() == f"brutex-{__version__}"
 
 
 def test_resolve_code_commit_sha_returns_git_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("brutex.cli._git_identity", lambda *, cwd, runner=None: f"{_SHA}-dirty")
+    monkeypatch.setattr(
+        "brutex.cli._git_identity",
+        lambda *, cwd, tracked_path=None, runner=None: f"{_SHA}-dirty",
+    )
     assert _resolve_code_commit_sha() == f"{_SHA}-dirty"
 
 
 def test_resolve_code_commit_sha_real_git_is_cwd_invariant(tmp_path: Path) -> None:
     """End-to-end: the real git seam yields the SAME identity from any CWD."""
-    import brutex.cli as cli_mod
+    from brutex import cli as cli_mod
 
     pkg_dir = Path(cli_mod.__file__).resolve().parent
     if _git_identity(cwd=pkg_dir) is None:

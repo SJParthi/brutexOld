@@ -6133,13 +6133,15 @@ def cmd_sweep(
 def _git_identity(
     *,
     cwd: Path,
+    tracked_path: Path | None = None,
     runner: Callable[..., Any] | None = None,
 ) -> str | None:
     """Resolve the git HEAD SHA of the repo rooted at *cwd*, dirty-suffixed.
 
     Returns the 40-char HEAD SHA (with a ``-dirty`` suffix when the working tree
     has uncommitted changes), or ``None`` when git is unavailable / *cwd* is not
-    a checkout (the caller then falls back to the pinned package version).
+    a checkout that TRACKS *tracked_path* (the caller then falls back to the
+    pinned package version).
 
     Two run-identity completeness guarantees (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001):
 
@@ -6151,6 +6153,29 @@ def _git_identity(
       uncommitted, edited working tree can never serve stale pre-edit identity
       (RIF-2 / audit C9). If HEAD resolves but the dirty probe itself fails, the
       clean SHA is returned rather than a fabricated (unverified) dirty flag.
+
+    Enclosing-repo guard (PR-4 review): ``git`` walks parent directories for a
+    ``.git``, so a brutex package nested inside an UNRELATED enclosing repository
+    (a non-editable wheel unpacked into a venv that itself lives inside another
+    checkout) would resolve the ENCLOSING repo's HEAD — a FALSE code identity for
+    brutex. When *tracked_path* is given, a ``git ls-files --error-unmatch`` probe
+    (same ``cwd``, same *runner* seam) CONFIRMS the resolved repo actually tracks
+    that file BEFORE the SHA is trusted; a non-zero exit (the path is not tracked
+    here) ⇒ ``None`` ⇒ the honest ``brutex-{__version__}`` fallback. The
+    editable / source deployment (file tracked by brutex's own repo) is
+    unaffected — only the nested-enclosing-repo case changes.
+
+    Honest limits (Golden Rule #10):
+
+    * The ``-dirty`` suffix is a single boolean flag, NOT a working-tree digest —
+      it collapses EVERY uncommitted state into one identity, so two DIFFERENT
+      uncommitted edits over the same HEAD share ``<sha>-dirty`` and are NOT
+      distinguished (dirty-state distinctness is not captured; a committed SHA is
+      the only genuinely fork/collision-free code identity).
+    * Dirty detection is best-effort: ``git status --porcelain`` also reports
+      UNTRACKED non-ignored files, so a stray build artifact flips the flag to
+      ``-dirty``; and a timed-out / errored status probe drops the flag and serves
+      the clean SHA.
 
     *runner* injects the subprocess entry point (defaults to ``subprocess.run``)
     so the git seam is fully unit-testable without a live repository.
@@ -6172,6 +6197,21 @@ def _git_identity(
     sha = head.stdout.strip()
     if not sha:
         return None
+    if tracked_path is not None:
+        # Confirm the resolved repo actually TRACKS this file before trusting its
+        # HEAD — an enclosing foreign repo would otherwise serve a false identity.
+        # `ls-files --error-unmatch` exits non-zero when the path is untracked here.
+        try:
+            run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
+                ["git", "ls-files", "--error-unmatch", "--", str(tracked_path)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+                cwd=cwd,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
     try:
         status = run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
             ["git", "status", "--porcelain"],
@@ -6191,13 +6231,17 @@ def _resolve_code_commit_sha() -> str:
 
     Golden Rule #1/#4: the run-identity's ``code_commit_sha`` must be a REAL value,
     never a placeholder. Delegates to :func:`_git_identity` rooted at the BruteX
-    package directory (``Path(__file__).parent``), so the SHA is INVARIANT to the
-    process working directory and carries a ``-dirty`` suffix on an uncommitted
-    tree (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001). If git is unavailable (e.g. a wheel
-    install with no repo), falls back to the pinned ``brutex.__version__`` — still
-    a real, traceable code identity.
+    package directory (``Path(__file__).parent``), passing THIS file as the
+    ``tracked_path`` so the resolved repo is confirmed to actually track brutex
+    (an enclosing foreign repo around a nested wheel is rejected → the honest
+    fallback, not its HEAD). The SHA is INVARIANT to the process working directory
+    and carries a ``-dirty`` suffix on an uncommitted tree
+    (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001). If git is unavailable (e.g. a wheel
+    install with no repo) or the resolved repo does not track brutex, falls back
+    to the pinned ``brutex.__version__`` — still a real, traceable code identity.
     """
-    sha = _git_identity(cwd=Path(__file__).resolve().parent)
+    pkg_file = Path(__file__).resolve()
+    sha = _git_identity(cwd=pkg_file.parent, tracked_path=pkg_file)
     if sha is not None:
         return sha
     return f"brutex-{__version__}"
@@ -6223,12 +6267,16 @@ def _indicator_version() -> str:
 
         parts.append(f"fno_math-{fno_math.__version__}")
     except (ImportError, AttributeError):
+        # No built fno_math wheel (source checkout) → drop only its token and
+        # keep the deterministic order; a missing kernel never fails identity.
         pass
     try:
         import trading_core
 
         parts.append(f"trading_core-{trading_core.__version__}")
     except (ImportError, AttributeError):
+        # No built trading_core wheel → drop only its token; the remaining
+        # tokens still form a real, traceable indicator-stack identity.
         pass
     return "+".join(parts)
 
