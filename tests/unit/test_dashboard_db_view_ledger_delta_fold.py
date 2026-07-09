@@ -50,7 +50,9 @@ import duckdb
 import pytest
 from brutex.dashboard.db_view import (
     _DUCKDB_RETRY_DELAY_S,
+    _UNKNOWN_WINDOW_STATUS,
     _WINDOW_KEY_COLUMNS,
+    WINDOW_PAGE_CACHE_CAPACITY,
     _build_window_payload_duckdb,
     _ledger_scan_source,
     _ledger_stamp_token,
@@ -59,6 +61,7 @@ from brutex.dashboard.db_view import (
     _window_severity_order_sql,
     _window_symbol_map_token,
     build_window_payload,
+    make_window_payload_caches,
     phase_progress_payload,
 )
 from brutex.dashboard.movers_cache import MoversSnapshotCache
@@ -759,14 +762,20 @@ def test_page_rows_cached_within_stamp_and_recomputed_on_stamp_move(tmp_path: Pa
     _write_delta(tmp_path, [_row("BANKNIFTY", "SUCCESS", bars=3)])
     conn = duckdb.connect()
     cache = _FamilyCountingCache()
-    first = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0)
+    first = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0
+    )
     assert cache.computes == {"window-counts": 1, "window-page": 1}
     for _ in range(5):
-        repeat = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0)
+        repeat = build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0
+        )
         assert repeat["windows"] == first["windows"]
     assert cache.computes == {"window-counts": 1, "window-page": 1}  # pure hits
     _write_delta(tmp_path, [_row("SENSEX", "FAILED")])  # the stamp moves
-    moved = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0)
+    moved = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0
+    )
     assert cache.computes == {"window-counts": 2, "window-page": 2}
     assert any(r["symbol"] == "SENSEX" for r in moved["windows"])  # fresh rows served
 
@@ -794,13 +803,31 @@ def test_page_cache_fresh_compute_byte_identical(tmp_path: Path) -> None:
         {"market": "nonsense"},
     ]
     for kwargs in permutations:
-        cached_arm = build_window_payload(
-            tmp_path, conn=conn, count_cache=MoversSnapshotCache(), generation=0, **kwargs
-        )
         uncached_arm = build_window_payload(
             tmp_path, conn=conn, count_cache=None, generation=0, **kwargs
         )
-        assert cached_arm == uncached_arm, f"cached-vs-uncached drift for {kwargs}"
+        # Every injection arm — both caches (the production wiring), counts-only,
+        # page-only — must produce the identical fresh payload.
+        both = build_window_payload(
+            tmp_path,
+            conn=conn,
+            count_cache=MoversSnapshotCache(),
+            page_cache=MoversSnapshotCache(),
+            generation=0,
+            **kwargs,
+        )
+        counts_only = build_window_payload(
+            tmp_path, conn=conn, count_cache=MoversSnapshotCache(), generation=0, **kwargs
+        )
+        page_only = build_window_payload(
+            tmp_path, conn=conn, page_cache=MoversSnapshotCache(), generation=0, **kwargs
+        )
+        for arm_name, arm in (
+            ("both", both),
+            ("counts_only", counts_only),
+            ("page_only", page_only),
+        ):
+            assert arm == uncached_arm, f"{arm_name}-vs-uncached drift for {kwargs}"
 
 
 def test_page_cache_distinct_filter_page_coordinates_never_collide(tmp_path: Path) -> None:
@@ -817,29 +844,39 @@ def test_page_cache_distinct_filter_page_coordinates_never_collide(tmp_path: Pat
     conn = duckdb.connect()
     cache = MoversSnapshotCache()
     failed = build_window_payload(
-        tmp_path, conn=conn, count_cache=cache, generation=0, status="FAILED"
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="FAILED"
     )
     empty = build_window_payload(
-        tmp_path, conn=conn, count_cache=cache, generation=0, status="EMPTY"
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="EMPTY"
     )
     paged = build_window_payload(
-        tmp_path, conn=conn, count_cache=cache, generation=0, limit=1, offset=1
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, limit=1, offset=1
     )
     assert [r["symbol"] for r in failed["windows"]] == ["BANKNIFTY"]
     assert [r["symbol"] for r in empty["windows"]] == ["SENSEX"]
     assert len(paged["windows"]) == 1
     # Repeat each coordinate — served from ITS own cached page, never a sibling's.
     assert (
-        build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0, status="FAILED")
+        build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="FAILED"
+        )
         == failed
     )
     assert (
-        build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0, status="EMPTY")
+        build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="EMPTY"
+        )
         == empty
     )
     assert (
         build_window_payload(
-            tmp_path, conn=conn, count_cache=cache, generation=0, limit=1, offset=1
+            tmp_path,
+            conn=conn,
+            count_cache=cache,
+            page_cache=cache,
+            generation=0,
+            limit=1,
+            offset=1,
         )
         == paged
     )
@@ -867,22 +904,32 @@ def test_page_cache_symbol_map_change_rekeys_within_one_stamp(tmp_path: Path) ->
     cache = _FamilyCountingCache()
     map_a = {"13": "NIFTY"}
     map_b = {"13": "RENAMED"}
-    build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0, symbol_for_id=map_a)
+    build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, symbol_for_id=map_a
+    )
     assert cache.computes["window-page"] == 1
-    build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0, symbol_for_id=map_b)
+    build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, symbol_for_id=map_b
+    )
     assert cache.computes["window-page"] == 2  # a different map content = a different page key
-    build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0, symbol_for_id=map_a)
+    build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, symbol_for_id=map_a
+    )
     assert cache.computes["window-page"] == 2  # …and the first map's page is still warm
     assert cache.computes["window-counts"] == 1  # counts carry no symbols — ONE entry throughout
 
 
 def test_midpull_floor_throttles_recomputes_bounded_and_logged(tmp_path: Path) -> None:
-    """THE change-1 teeth (fails pre-fix): with the production-shaped floored
-    cache (``pull_active_probe`` + ``adaptive_floor=True`` — the app.py
-    ``_window_counts_cache`` construction) and an IN-PROCESS pull live, a stamp
-    move within the #920 floor serves the PRIOR stamp's counts+page STALE
-    (zero recomputes, ``movers_cache.stale_served`` logged — bounded + visible),
-    and the floor RELEASES both when it ages past and the moment the pull ends.
+    """THE change-1 teeth (fails pre-fix): with the PRODUCTION-shaped cache pair
+    (`make_window_payload_caches` — the `_LEDGER_READ_CACHE` probe/floor shape:
+    constant-True stamp-moved probe + the 120 s cap), a ledger stamp move
+    within the #920 floor serves the PRIOR stamp's counts+page STALE (zero
+    recomputes, ``movers_cache.stale_served`` logged — bounded + visible), and
+    the floor RELEASES once the entries age past it. The churn here is
+    writer-agnostic — exactly the CROSS-PROCESS CLI shape too (no in-process
+    pull exists in this test; the constant-True probe floors it regardless —
+    the round-2 review's option (a), closing the probe asymmetry vs the
+    round-1 ``_pull_live`` wiring).
 
     Pre-fix this test fails at the first stale assertion: the stamp token lived
     IN the cache key (fixed ``generation=0``), so a stamp move was a cache MISS
@@ -893,49 +940,48 @@ def test_midpull_floor_throttles_recomputes_bounded_and_logged(tmp_path: Path) -
     _write_delta(tmp_path, [_row("BANKNIFTY", "SUCCESS", bars=3)])
     conn = duckdb.connect()
     now = {"t": 100.0}
-    pull_live = {"on": True}
-    floored = MoversSnapshotCache(
-        pull_active_probe=lambda: pull_live["on"],
-        adaptive_floor=True,
-        clock=lambda: now["t"],
+    counts_inner, page_inner = make_window_payload_caches(clock=lambda: now["t"])
+    counts = _FamilyCountingCache(counts_inner)
+    page = _FamilyCountingCache(page_inner)
+    first = build_window_payload(
+        tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
     )
-    cache = _FamilyCountingCache(floored)
-    first = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0)
-    assert cache.computes == {"window-counts": 1, "window-page": 1}
-    # A mid-pull delta append moves the stamp — but the entries are age-0,
-    # inside the min(max(2 s, own duration), 600 s) floor, and the pull is
-    # live → the PRIOR stamp is served stale with ZERO recomputes, logged.
+    assert counts.computes == {"window-counts": 1}
+    assert page.computes == {"window-page": 1}
+    # A delta append moves the stamp (a CLI-style cross-process flush — no pull
+    # anywhere) — the entries are age-0, inside the min(max(2 s, own duration),
+    # 120 s) floor → the PRIOR stamp is served stale, ZERO recomputes, logged.
     _write_delta(tmp_path, [_row("SENSEX", "FAILED")])
     with capture_logs() as logs:
-        stale = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0)
-    assert cache.computes == {"window-counts": 1, "window-page": 1}
+        stale = build_window_payload(
+            tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
+        )
+    assert counts.computes == {"window-counts": 1}
+    assert page.computes == {"window-page": 1}
     assert stale["counts"] == first["counts"]  # the bounded-stale serve (no SENSEX yet)
     assert not any(r["symbol"] == "SENSEX" for r in stale["windows"])
     assert _events(logs, "movers_cache.stale_served")  # never a silent illusion
-    # The floor AGES OUT (entry older than the effective floor) → fresh recompute.
-    now["t"] += 601.0  # past even the 600 s cap, whatever the measured duration
-    aged = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0)
-    assert cache.computes == {"window-counts": 2, "window-page": 2}
+    # The floor AGES OUT (past even the 120 s cap, whatever the measured
+    # durations) → fresh recompute of BOTH families sees the delta row.
+    now["t"] += 121.0
+    aged = build_window_payload(
+        tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
+    )
+    assert counts.computes == {"window-counts": 2}
+    assert page.computes == {"window-page": 2}
     assert any(r["symbol"] == "SENSEX" for r in aged["windows"])
-    # A further stamp move AFTER the pull ends recomputes immediately (probe False).
-    _write_delta(tmp_path, [_row("RELIANCE", "EMPTY")])
-    pull_live["on"] = False
-    ended = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=0)
-    assert cache.computes == {"window-counts": 3, "window-page": 3}
-    assert any(r["symbol"] == "RELIANCE" for r in ended["windows"])
 
 
 def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
-    """The pull-progress poll shares the floored counts entry: mid-pull a stamp
-    move within the floor serves the prior counts (zero recomputes), and the
-    stale serve is logged — the same bounded envelope as the windows page."""
+    """The pull-progress poll shares the floored counts entry: a stamp move
+    within the floor serves the prior counts (zero recomputes), the stale serve
+    is logged, and the floor releases on aging — the same bounded envelope as
+    the windows page (production counts instance via the factory)."""
     _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
     conn = duckdb.connect()
     now = {"t": 50.0}
-    floored = MoversSnapshotCache(
-        pull_active_probe=lambda: True, adaptive_floor=True, clock=lambda: now["t"]
-    )
-    cache = _FamilyCountingCache(floored)
+    counts_inner, _page_inner = make_window_payload_caches(clock=lambda: now["t"])
+    cache = _FamilyCountingCache(counts_inner)
     path = wls.ledger_path(tmp_path)
     rows = phase_progress_payload(conn, path, current_phase="spot", count_cache=cache, generation=0)
     assert next(r for r in rows if r["phase"] == "spot")["done"] == 1
@@ -948,9 +994,59 @@ def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
     assert cache.computes == {"window-counts": 1}  # floor-stale serve, no recount
     assert next(r for r in stale_rows if r["phase"] == "spot")["done"] == 1  # prior stamp
     assert _events(logs, "movers_cache.stale_served")
-    now["t"] += 601.0  # the floor passes → the delta row lands
+    now["t"] += 121.0  # past the 120 s cap → the delta row lands
     fresh_rows = phase_progress_payload(
         conn, path, current_phase="spot", count_cache=cache, generation=0
     )
     assert cache.computes == {"window-counts": 2}
     assert next(r for r in fresh_rows if r["phase"] == "spot")["done"] == 2
+
+
+def test_make_window_payload_caches_dedicated_small_page_instance() -> None:
+    """The round-2 MEDIUM fold's structural pin: the factory returns TWO
+    distinct instances — the page cache SMALL (`WINDOW_PAGE_CACHE_CAPACITY`,
+    bounding retained pages to ≤ capacity × min(limit, WINDOW_ROWS_CAP) rows,
+    and structurally unable to LRU-evict the counts entries) — both riding the
+    `_LEDGER_READ_CACHE` probe/floor shape (constant-True probe, floor on,
+    120 s cap)."""
+    counts_cache, page_cache = make_window_payload_caches()
+    assert counts_cache is not page_cache
+    assert page_cache.capacity == WINDOW_PAGE_CACHE_CAPACITY == 8
+    assert counts_cache.capacity == MoversSnapshotCache().capacity  # the 256 default
+    for instance in (counts_cache, page_cache):
+        assert instance._adaptive_floor is True
+        assert instance._adaptive_floor_cap_s == 120.0
+        probe = instance._pull_active_probe
+        assert probe is not None and probe() is True  # constant-True stamp-moved probe
+
+
+def test_unknown_status_values_collapse_to_one_page_key(tmp_path: Path) -> None:
+    """Round-2 hardening: every NOT-allow-listed ?status= value collapses onto
+    the ONE `_UNKNOWN_WINDOW_STATUS` sentinel BEFORE key minting — N distinct
+    bogus values cost ONE page compute + ONE counts entry (no key churn), serve
+    empty rows / matched=0 (legacy parity, pinned against the uncached arm),
+    and a KNOWN status still pages normally."""
+    _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5), _row("BANKNIFTY", "FAILED")])
+    _write_delta(tmp_path, [_row("SENSEX", "EMPTY")])
+    conn = duckdb.connect()
+    cache = _FamilyCountingCache()
+    bogus = ("BOGUS", "definitely-not-a-status", "%%%", "planned-ish", "__UNKNOWN_STATUS__")
+    payloads = [
+        build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status=value
+        )
+        for value in bogus
+    ]
+    assert cache.computes == {"window-counts": 1, "window-page": 1}  # ONE key for all five
+    uncached = build_window_payload(tmp_path, conn=conn, status="BOGUS")
+    for payload in payloads:
+        assert payload["windows"] == []
+        assert payload["matched"] == 0
+        assert payload == uncached  # legacy parity, cached == uncached
+    # A KNOWN status is untouched by the allow-list: real rows, its own key.
+    failed = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="FAILED"
+    )
+    assert [r["symbol"] for r in failed["windows"]] == ["BANKNIFTY"]
+    assert cache.computes == {"window-counts": 1, "window-page": 2}
+    assert _UNKNOWN_WINDOW_STATUS not in repr(failed)  # the sentinel never leaks into a payload

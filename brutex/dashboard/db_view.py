@@ -3635,6 +3635,18 @@ def _window_row(
 #: death). Counts are ALWAYS complete; only the row list is capped.
 WINDOW_ROWS_CAP: int = 20_000
 
+#: Resident-entry bound for the DEDICATED /coverage/windows page-row cache
+#: (DEC-WINDOWS-MIDPULL-FLOOR-001, hostile-review round-2 MEDIUM fold): a page
+#: entry holds up to ``min(limit, WINDOW_ROWS_CAP)`` projected row-dicts (the
+#: route's DEFAULT limit is the 20k cap), so the page family must NOT share the
+#: 256-cap counts instance — worst-case resident there would be ~256 × 20k-row
+#: pages, and page-key churn could LRU-evict the tiny counts entries. A small
+#: dedicated instance bounds retained pages to ≤ this capacity ×
+#: ``min(limit, WINDOW_ROWS_CAP)`` rows (8 × 20k = 160k row-dicts worst case —
+#: stated, not hidden) while the handful of live UI coordinates
+#: (market × status × page) stay warm.
+WINDOW_PAGE_CACHE_CAPACITY: int = 8
+
 #: Severity-first display order for the capped row list: actionable rows
 #: (FAILED, then EMPTY) surface before the bulk statuses, so the cap can never
 #: hide what the operator must act on.
@@ -3645,6 +3657,14 @@ _WINDOW_STATUS_ORDER: Final[dict[str, int]] = {
     "SKIPPED": 3,
     "PLANNED": 4,
 }
+
+#: Canonical sentinel every NOT-allow-listed ``?status=`` value collapses onto
+#: BEFORE cache-key minting (DEC-WINDOWS-MIDPULL-FLOOR-001, round-2 hardening):
+#: an unknown status matches nothing on both payload paths (legacy parity), so
+#: without the collapse each distinct bogus value would mint a fresh page-cache
+#: key AND pay a full fold. The sentinel's SQL arm is the literal ``1 = 0``,
+#: never a ``status = <sentinel>`` bind.
+_UNKNOWN_WINDOW_STATUS: Final[str] = "__UNKNOWN_STATUS__"
 
 
 def _ledger_stamp_moved() -> bool:
@@ -3726,6 +3746,47 @@ def _reset_ledger_read_cache() -> None:
     """Test seam — replaces the dict-clear idiom of the retired module dicts."""
     global _LEDGER_READ_CACHE  # noqa: PLW0603 — the documented test seam
     _LEDGER_READ_CACHE = _make_ledger_read_cache()
+
+
+def make_window_payload_caches(
+    *, clock: Callable[[], float] = _monotonic_clock
+) -> tuple[MoversSnapshotCache, MoversSnapshotCache]:
+    """Construct the ``(counts_cache, page_cache)`` pair for ``/coverage/windows``.
+
+    DEC-WINDOWS-MIDPULL-FLOOR-001 — the ONE construction point (`app.py` wires
+    it verbatim; parameters exist ONCE, the ``_make_ledger_read_cache``
+    precedent). Both instances ride the SAME probe/floor shape as the sibling
+    :data:`_LEDGER_READ_CACHE` — the constant-``True``
+    :func:`_ledger_stamp_moved` probe + the tighter
+    :data:`_LEDGER_READ_FLOOR_CAP_S` (120 s) cap — because these caches'
+    generation IS the ledger stamp digest: steady state never reaches the
+    floor branch (the stamp is immobile → every read is a generation hit), and
+    a stamp move from ANY process — an in-process pull's delta flush AND a
+    cross-process CLI ``brutex fetch`` (which an in-process
+    ``BackgroundPullJob.running`` probe would be blind to) — is floor-bounded
+    ``min(max(2 s, the family's own compute duration), 120 s)`` + logged
+    (``movers_cache.stale_served``), never silent (hostile-review round-2
+    MINOR fold, option (a) — supersedes the round-1 ``_pull_live`` probe whose
+    floor never covered CLI churn). The PAGE instance is a SMALL dedicated
+    cache (:data:`WINDOW_PAGE_CACHE_CAPACITY`) so retained pages stay bounded
+    and page-key churn can never evict the counts entries (round-2 MEDIUM
+    fold — see the capacity constant's envelope). *clock* is injectable so the
+    floor tests are deterministic (production keeps the monotonic default).
+    """
+    counts_cache = MoversSnapshotCache(
+        pull_active_probe=_ledger_stamp_moved,
+        adaptive_floor=True,
+        adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        clock=clock,
+    )
+    page_cache = MoversSnapshotCache(
+        capacity=WINDOW_PAGE_CACHE_CAPACITY,
+        pull_active_probe=_ledger_stamp_moved,
+        adaptive_floor=True,
+        adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        clock=clock,
+    )
+    return counts_cache, page_cache
 
 
 #: The ledger's incremental-delta sub-directory name (DEC-LEDGER-DELTA-FLUSH-001).
@@ -4387,14 +4448,17 @@ def phase_progress_payload(
     stamp token stays the COMPLETE content signal — mid-pull ``mark_dirty``
     fires per window tick, far more often than the ≥2 s ledger flush, and a
     full save / delta append / cross-process CLI write each move the token →
-    the generation (never stale past the floor, Golden Rule #1). While an
-    IN-PROCESS pull runs, the production cache
-    (``app.py`` ``_window_counts_cache`` — ``pull_active_probe`` +
-    ``adaptive_floor=True``) may serve the PRIOR stamp's counts for at most
-    ``min(max(2 s, the count's own compute duration), 600 s)`` per the #920
-    ≤50%-duty law, every stale serve logged ``movers_cache.stale_served`` —
-    bounded + visible, never silent. The *generation* parameter is retained
-    for signature compatibility.
+    the generation (never stale past the floor, Golden Rule #1). The
+    production cache (``app.py``, built by :func:`make_window_payload_caches`)
+    rides the SAME probe/floor shape as the sibling :data:`_LEDGER_READ_CACHE`
+    — the constant-``True`` :func:`_ledger_stamp_moved` probe + the 120 s
+    :data:`_LEDGER_READ_FLOOR_CAP_S` cap — so ANY stamp churn (an in-process
+    pull's delta flush AND a cross-process CLI pull's) may serve the PRIOR
+    stamp's counts for at most ``min(max(2 s, the count's own compute
+    duration), 120 s)`` per the #920 ≤50%-duty law, every stale serve logged
+    ``movers_cache.stale_served`` — bounded + visible, never silent; steady
+    state (immobile stamp) never reaches the floor branch. The *generation*
+    parameter is retained for signature compatibility.
 
     **Mid-pull deltas (DEC-LEDGER-DELTA-O-PAGE-001, supersedes the O(records)
     Python branch of DEC-LEDGER-DELTA-FLUSH-001):** pending deltas are folded
@@ -4539,6 +4603,7 @@ def _build_window_payload_duckdb(
     count_cache: WindowCountsCache | None,
     generation: int,
     since: str | None = None,
+    page_cache: WindowCountsCache | None = None,
 ) -> dict[str, Any]:
     """The ``/coverage/windows`` payload via DuckDB — stamp-cached counts AND page rows.
 
@@ -4582,17 +4647,25 @@ def _build_window_payload_duckdb(
     delta name set, a CLI cross-process write moves both); mid-pull
     ``mark_dirty`` fires per window tick, far more often than the ≥2 s ledger
     flush, so the app-side write generation is deliberately NOT used here. The
-    *generation* parameter is retained for signature compatibility. While an
-    IN-PROCESS pull runs, the production cache (``app.py``
-    ``_window_counts_cache`` — ``pull_active_probe`` + ``adaptive_floor=True``)
-    may serve a family's PRIOR-stamp entry for at most ``min(max(2 s, that
-    family's own compute duration), 600 s)`` (the #920 ≤50%-duty law), every
-    stale serve logged ``movers_cache.stale_served`` — bounded + visible, never
-    silent; the families floor independently, so one bounded-stale poll may mix
-    counts and rows from adjacent stamps (≤ one floor window apart, self-heals
-    on the next past-floor poll). A CROSS-PROCESS CLI pull has no in-process
-    probe signal, so its stamp moves recompute immediately (the honest sibling
-    envelope — stated, not hidden).
+    *generation* parameter is retained for signature compatibility. The counts
+    ride the injected *count_cache*; the page rows ride the injected
+    *page_cache* — a SMALL DEDICATED instance
+    (:data:`WINDOW_PAGE_CACHE_CAPACITY`; a page entry holds up to ``min(limit,
+    WINDOW_ROWS_CAP)`` projected row-dicts, so sharing the 256-cap counts
+    instance risked GB-scale retention and page-churn eviction of the counts
+    entries). Both production instances (``app.py``, built by
+    :func:`make_window_payload_caches`) ride the SAME probe/floor shape as the
+    sibling :data:`_LEDGER_READ_CACHE` — the constant-``True``
+    :func:`_ledger_stamp_moved` probe + the 120 s
+    :data:`_LEDGER_READ_FLOOR_CAP_S` cap — so ANY stamp churn (an in-process
+    pull's delta flush AND a cross-process CLI pull's) may serve a family's
+    PRIOR-stamp entry for at most ``min(max(2 s, that family's own compute
+    duration), 120 s)`` (the #920 ≤50%-duty law), every stale serve logged
+    ``movers_cache.stale_served`` — bounded + visible, never silent; steady
+    state (immobile stamp) never reaches the floor branch. The families floor
+    independently, so one bounded-stale poll may mix counts and rows from
+    adjacent stamps (≤ one floor window apart, self-heals on the next
+    past-floor poll).
 
     *since* (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the current pull's journal
     ``started`` wall-UTC instant, or ``None`` when no real pull-start is known.
@@ -4632,6 +4705,19 @@ def _build_window_payload_duckdb(
         if not {"empty_streak", "in_pull_fetches"}.issubset(available):
             raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
     counts_since: dict[str, dict[str, int]] | None = None
+    # STATUS ALLOW-LIST (DEC-WINDOWS-MIDPULL-FLOOR-001, round-2 hardening):
+    # an unknown ?status= value matches nothing on BOTH payload paths (legacy
+    # parity), but each DISTINCT bogus value would otherwise mint a fresh
+    # page-cache key + pay a full fold — so every not-known status collapses
+    # onto ONE canonical sentinel BEFORE key minting, and the sentinel's page
+    # arm is the literal `1 = 0` (never `status = <sentinel>` — airtight even
+    # against a hypothetical stored row equal to the sentinel string).
+    wanted_status_raw = status.upper() if status else None
+    wanted_status = (
+        _UNKNOWN_WINDOW_STATUS
+        if wanted_status_raw is not None and wanted_status_raw not in _WINDOW_STATUS_ORDER
+        else wanted_status_raw
+    )
     # STABLE keys + a stamp-digest generation (DEC-WINDOWS-MIDPULL-FLOOR-001,
     # restructured from stamp-token-IN-key at generation=0): the composite stamp
     # token (base mtime + the pending delta name set) still carries the COMPLETE
@@ -4666,7 +4752,6 @@ def _build_window_payload_duckdb(
                 compute=lambda: _window_counts_since(conn, source, since),
             )
 
-    wanted_status = status.upper() if status else None
     valid_buckets = ("spot", "options", "futures")
     if market is None:
         buckets = list(valid_buckets)
@@ -4702,7 +4787,9 @@ def _build_window_payload_duckdb(
             where_params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
         elif market is not None:
             where.append("1 = 0")  # unrecognized market → no rows (legacy parity)
-        if wanted_status:
+        if wanted_status == _UNKNOWN_WINDOW_STATUS:
+            where.append("1 = 0")  # unknown status → no rows (legacy parity, ONE key)
+        elif wanted_status:
             where.append("status = ?")
             where_params.append(wanted_status)
         else:
@@ -4755,7 +4842,7 @@ def _build_window_payload_duckdb(
             )
         return page
 
-    if count_cache is None:
+    if page_cache is None:
         rows = _page_rows()
     else:
         # The page-row cache (DEC-WINDOWS-MIDPULL-FLOOR-001): the row-page query
@@ -4763,18 +4850,24 @@ def _build_window_payload_duckdb(
         # within one stamp (only the counts were cached — measured 33 ms @ 50
         # pending deltas → 158 ms @ 400 per warm poll, 2026-07-09). Memoise the
         # projected rows per (stamp, filters, page, symbol-map content) on the
-        # SAME injected cache instance (REUSE, no new cache class — CLAUDE.md
-        # §11): a repeat poll within one stamp is an O(1) handoff; a fresh stamp
-        # recomputes ONCE per page coordinate; the LRU bounds retained pages.
-        # The filter/page segment rides one tuple `repr` (unambiguous — a
-        # client-supplied `market`/`status` string can never forge a key
-        # collision through a bare `|` join); the symbol-map token keeps a
-        # master reload from serving stale display names.
+        # injected DEDICATED page instance (the SAME MoversSnapshotCache class —
+        # no new cache class, CLAUDE.md §11 — but its OWN small-capacity
+        # instance, `make_window_payload_caches`: a page entry holds up to
+        # min(limit, WINDOW_ROWS_CAP) row-dicts, so sharing the 256-cap counts
+        # instance risked GB-scale retention AND page-key churn evicting the
+        # tiny counts entries — round-2 MEDIUM fold): a repeat poll within one
+        # stamp is an O(1) handoff; a fresh stamp recomputes ONCE per page
+        # coordinate; the small LRU bounds retained pages. The filter/page
+        # segment rides one tuple `repr` (unambiguous — a client-supplied
+        # `market`/`status` string can never forge a key collision through a
+        # bare `|` join; unknown statuses are already collapsed onto the ONE
+        # sentinel above); the symbol-map token keeps a master reload from
+        # serving stale display names.
         page_key = (
             f"window-page|{ledger_glob}|"
             f"{(market, wanted_status, limit, offset, _window_symbol_map_token(symbol_for_id))!r}"
         )
-        rows = count_cache.get_or_compute(page_key, generation=stamp_generation, compute=_page_rows)
+        rows = page_cache.get_or_compute(page_key, generation=stamp_generation, compute=_page_rows)
     payload: dict[str, Any] = {
         "source": "ledger",
         "count": total,
@@ -4831,6 +4924,7 @@ def build_window_payload(
     generation: int = 0,
     since: str | None = None,
     retry_sleep: Callable[[float], None] | None = None,
+    page_cache: WindowCountsCache | None = None,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
@@ -4931,6 +5025,7 @@ def build_window_payload(
                 count_cache=count_cache,
                 generation=generation,
                 since=since,
+                page_cache=page_cache,
             )
 
         try:

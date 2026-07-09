@@ -175,7 +175,7 @@ def test_midpull_window_payload_flat_vs_ledger_depth(tmp_path: Path) -> None:
 
         def _poll() -> None:
             payload = build_window_payload(
-                lake, conn=conn, count_cache=cache, generation=0, limit=500
+                lake, conn=conn, count_cache=cache, page_cache=cache, generation=0, limit=500
             )
             assert payload["source"] == "ledger"
             assert payload["count"] == depth  # the fold served every distinct key
@@ -227,13 +227,15 @@ def test_midpull_counts_no_recompute_within_stamp(
     monkeypatch.setattr(wls, "load_window_ledger", _counting_load)
     conn = duckdb.connect()
     cache = _SentinelCountCache()
-    first = build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
+    first = build_window_payload(lake, conn=conn, count_cache=cache, page_cache=cache, generation=0)
     assert first["source"] == "ledger"
     assert cache.count_computes == 1
     assert cache.page_computes == 1
     cache.frozen = True  # any further recompute now raises
     for _ in range(20):
-        repeat = build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
+        repeat = build_window_payload(
+            lake, conn=conn, count_cache=cache, page_cache=cache, generation=0
+        )
         assert repeat["counts"] == first["counts"]
         assert repeat["windows"] == first["windows"]
     assert cache.count_computes == 1  # 20 polls, zero recounts
@@ -242,11 +244,13 @@ def test_midpull_counts_no_recompute_within_stamp(
     cache.frozen = False
     ledger.record(_key(0), raw_bars=99, error_type=None, bars_appended=99, now=_NOW)
     assert wls.append_ledger_delta(ledger, lake) == 1
-    build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
+    build_window_payload(lake, conn=conn, count_cache=cache, page_cache=cache, generation=0)
     assert cache.count_computes == 2
     assert cache.page_computes == 2
     cache.frozen = True
-    build_window_payload(lake, conn=conn, count_cache=cache, generation=0)  # hit again
+    build_window_payload(
+        lake, conn=conn, count_cache=cache, page_cache=cache, generation=0
+    )  # hit again
     conn.close()
     assert parses["n"] == 0, "the SQL fast path must never fall back to a Python ledger parse"
 
@@ -316,10 +320,10 @@ def test_delta_fold_cost_scales_with_files_not_polls(tmp_path: Path) -> None:
     # (i) repeat-poll flatness: pure hits (counts AND page) at both delta counts.
     for lake in (lake5, lake50):
         cache = _SentinelCountCache()
-        build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
+        build_window_payload(lake, conn=conn, count_cache=cache, page_cache=cache, generation=0)
         cache.frozen = True
         for _ in range(10):
-            build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
+            build_window_payload(lake, conn=conn, count_cache=cache, page_cache=cache, generation=0)
         assert cache.count_computes == 1
         assert cache.page_computes == 1
 
@@ -661,7 +665,7 @@ def test_accumulation_regime_warm_poll_bounded(tmp_path: Path) -> None:
     def _time(lake: Path, cache: _SentinelCountCache) -> float:
         def _poll() -> None:
             payload = build_window_payload(
-                lake, conn=conn, count_cache=cache, generation=0, limit=500
+                lake, conn=conn, count_cache=cache, page_cache=cache, generation=0, limit=500
             )
             assert payload["source"] == "ledger"
 
@@ -685,7 +689,9 @@ def test_accumulation_regime_warm_poll_bounded(tmp_path: Path) -> None:
         assert cache.page_computes == 1
         cache.frozen = True
         for _ in range(10):
-            build_window_payload(lake, conn=conn, count_cache=cache, generation=0, limit=500)
+            build_window_payload(
+                lake, conn=conn, count_cache=cache, page_cache=cache, generation=0, limit=500
+            )
     conn.close()
     # (ii) the absolute accumulation bound — the pre-fix page-refold regime
     # (158 ms measured) FAILS this; ~×24 measured slack for slower CI boxes.

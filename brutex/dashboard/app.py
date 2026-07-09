@@ -95,6 +95,7 @@ from brutex.dashboard.db_view import (
     list_option_series,
     list_registry_contracts,
     list_registry_expiries,
+    make_window_payload_caches,
     phase_progress_payload,
     query_candles,
     query_option_candles,
@@ -1546,24 +1547,28 @@ def build_app(
     # COMMON generation-stamped LRU `MoversSnapshotCache` (CLAUDE.md §11 — it is a
     # generic keyed cache; no movers coupling, just the shared implementation).
     _candle_count_cache = MoversSnapshotCache()
-    # The /coverage/windows counts + page-row cache (DEC-COVERAGE-WINDOWS-O1-001 +
+    # The /coverage/windows counts + page-row caches (DEC-COVERAGE-WINDOWS-O1-001 +
     # DEC-WINDOWS-MIDPULL-FLOOR-001): the `GROUP BY market, status` bucketed counts
     # AND the projected row page over the window ledger are invariant within one
     # ledger stamp, so both families are memoised behind the composite-stamp-token
     # generation db_view derives (`revision_generation` — NOT `_summary_cache.
     # generation`, which mark_dirty bumps per window tick) — a repeat poll within
-    # one stamp is O(1), any ledger flush moves the stamp → recompute. Dedicated
-    # instance so the window families never share a key namespace with the candle
-    # int-totals above. Opted into the PULL-TIME adaptive floor exactly like the
-    # discovery memos below (`pull_active_probe` + `adaptive_floor=True` — the
-    # ported #920 pattern): mid-pull the ledger deltas accrue ~1 file/2 s and each
-    # fresh stamp's fold is O(total rows + delta footers), so an unfloored cache
-    # recomputed counts+page back-to-back on every 4 s poll as the delta count
-    # grew (the multi-hour-pull 4 s+ poll class); while `_pull_live()` reads True
-    # a stamp-mismatched entry younger than min(max(2 s, its own compute
-    # duration), 600 s) is served STALE (logged `movers_cache.stale_served`,
-    # never silent), and the moment the pull ends the probe reads False → fresh.
-    _window_counts_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    # one stamp is O(1), any ledger flush moves the stamp → recompute. Mid-pull the
+    # deltas accrue ~1 file/2 s and each fresh stamp's fold is O(total rows +
+    # delta footers), so an unfloored cache recomputed counts+page back-to-back
+    # on every 4 s poll as the delta count grew (the multi-hour-pull 4 s+ poll
+    # class). Built by the ONE db_view factory (`make_window_payload_caches` —
+    # parameters exist ONCE): both instances ride the `_LEDGER_READ_CACHE`
+    # probe/floor shape (constant-True stamp-moved probe + the 120 s cap), so a
+    # stamp-mismatched entry younger than min(max(2 s, its own compute
+    # duration), 120 s) is served STALE (logged `movers_cache.stale_served`,
+    # never silent) on ANY churn — an in-process pull's flushes AND a
+    # cross-process CLI pull's — while steady state never reaches the floor
+    # branch. The PAGE family gets its own SMALL instance (capacity 8; a page
+    # entry holds up to min(limit, WINDOW_ROWS_CAP)=20k row-dicts, so it must
+    # not share the 256-cap counts instance nor evict its tiny entries); both
+    # stay outside the candle int-total cache's key namespace above.
+    _window_counts_cache, _window_page_cache = make_window_payload_caches()
     # The FOUR discovery-walk memos below additionally opt into the PULL-TIME
     # adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the ported #920
     # pattern): during a pull the write generation bumps on EVERY window tick,
@@ -5292,6 +5297,9 @@ def build_app(
                 # LIMIT/OFFSET + cached GROUP BY) instead of an O(N) Python scan per poll.
                 conn=store.connection,
                 count_cache=_window_counts_cache,
+                # The DEDICATED small page-row instance (DEC-WINDOWS-MIDPULL-FLOOR-001
+                # round-2 MEDIUM fold — see the construction comment above).
+                page_cache=_window_page_cache,
                 generation=_summary_cache.generation,
                 # Per-run honesty (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the last
                 # REAL pull's journal `started` instant — None (no journal / dry-run
