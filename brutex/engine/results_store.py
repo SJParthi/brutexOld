@@ -92,7 +92,7 @@ import hashlib
 import io
 import math
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Final
@@ -100,6 +100,7 @@ from typing import Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.period_stats import validate_period_stats
 from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.strategies.sweep import COMBO_HASH_HEX_LEN
@@ -182,6 +183,20 @@ _METRIC_FIELDS: Final[tuple[str, ...]] = (
 _NULLABLE_METRIC_FIELDS: Final[tuple[str, ...]] = ("deflated_sharpe",)
 #: Float64 price columns — Decimal rupees snapped to the 2dp tick grid at write.
 _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
+#: Utf8 **optional** canonical-JSON temporal-stats columns
+#: (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — appended after ``deflated_sharpe``
+#: per the optional-column LAW (module docstring): ``str | None = None`` fields
+#: read via ``record.get`` so a pre-extension store loads them as an honest
+#: ``None``. Written EMIT-ON-PRESENT (iff any row carries a value — a pure,
+#: deterministic function of the row set), so the all-None flush stays
+#: BYTE-IDENTICAL to the pre-extension writer (frozen-golden-pinned).
+#: Cell/cross-sum laws live in ONE place: :mod:`brutex.engine.period_stats`.
+_TEMPORAL_JSON_FIELDS: Final[tuple[str, ...]] = (
+    "stats_by_year_json",
+    "stats_by_quarter_json",
+    "stats_by_month_json",
+    "temporal_judged_years_json",
+)
 
 #: Numeric columns a leaderboard may rank by (metrics + money + counts).
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
@@ -290,13 +305,36 @@ class ResultRow:
         Price-family representatives as :class:`~decimal.Decimal` rupees. Must be
         finite and ``>= 0``; normalised to two decimals via
         :func:`brutex.money.round_money` (``ROUND_HALF_UP``) at construction.
+    stats_by_year_json, stats_by_quarter_json, stats_by_month_json
+        OPTIONAL canonical-JSON per-period finalist stats
+        (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): ``{"2021": [n_trades,
+        net_pnl_paisa, wins, max_dd_paisa], …}`` with ``"YYYY"`` / ``"YYYYQn"``
+        / ``"YYYY-MM"`` keys — int cells ONLY (exact paisa; ``win_rate`` is
+        derivable, never stored), zero-trade buckets ABSENT. Cross-sum-VALIDATED
+        at construction/load against the row's own ``total_trades`` /
+        ``net_pnl_paisa`` / ``winning_trades`` and the quarter/year == Σ-months
+        identities (:func:`brutex.engine.period_stats.validate_period_stats`),
+        then canonically re-encoded — fabricated cells are structurally
+        impossible. Per-period ``max_dd_paisa`` is realized-at-exit,
+        trade-close-granular, INTRA-PERIOD-RESET — it splits (and so
+        systematically UNDERSTATES) boundary-spanning drawdowns, does NOT roll
+        up across horizons, and never supersedes the row's global
+        ``max_drawdown_paisa``, the ONLY authoritative risk figure. All four
+        temporal columns are all-present or all-``None`` per row (a partial set
+        is a torn capture — rejected).
+    temporal_judged_years_json
+        OPTIONAL canonical-JSON judged-year list (``["2020", …]``) — the
+        serve-time denominator that makes a zero-trade judged year (absent
+        bucket, hollow cell) distinguishable from an out-of-window year (not in
+        this list). Present iff the three stats columns are.
 
     Raises
     ------
     ResultsStoreError
         On a malformed ``run_id``, an empty context label, an out-of-range or
         negative-where-absolute money field, a negative or inconsistent trade
-        count, a non-finite metric, or a non-finite / negative price.
+        count, a non-finite metric, a non-finite / negative price, or an
+        invalid / torn / cross-sum-violating temporal column set.
     """
 
     run_id: str
@@ -322,6 +360,12 @@ class ResultRow:
     avg_entry_price: Decimal
     avg_exit_price: Decimal
     deflated_sharpe: float | None = None
+    # ── Optional temporal-stats columns (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001),
+    #    appended after deflated_sharpe per the optional-column LAW ──
+    stats_by_year_json: str | None = None
+    stats_by_quarter_json: str | None = None
+    stats_by_month_json: str | None = None
+    temporal_judged_years_json: str | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -398,6 +442,45 @@ class ResultRow:
             # Snap to the 2dp tick grid so the row is canonical (DEC-SPOT-PRICE-2DP-001).
             object.__setattr__(self, name, round_money(price))
 
+        self._validate_temporal_columns()
+
+    def _validate_temporal_columns(self) -> None:
+        """Validate + canonicalise the four optional temporal-stats columns.
+
+        DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the columns are all-present or
+        all-``None`` per row (a partial set is a TORN capture — rejected loudly,
+        never half-loaded); when present they are decoded, cross-sum-validated
+        against this row's own totals, and re-encoded CANONICALLY in place
+        (:func:`brutex.engine.period_stats.validate_period_stats` — one law,
+        one home) so the in-memory row is byte-canonical regardless of the
+        stored spelling (the price-snap philosophy — Golden Rule #4).
+        """
+        values = [getattr(self, name) for name in _TEMPORAL_JSON_FIELDS]
+        present = [value for value in values if value is not None]
+        if not present:
+            return
+        if len(present) != len(_TEMPORAL_JSON_FIELDS):
+            missing = [name for name in _TEMPORAL_JSON_FIELDS if getattr(self, name) is None]
+            raise ResultsStoreError(
+                f"ResultRow temporal columns must be all-present or all-None "
+                f"(a partial set is a torn capture); missing: {', '.join(missing)}"
+            )
+        year_json, quarter_json, month_json, judged_json = values
+        try:
+            canonical = validate_period_stats(
+                stats_by_year_json=str(year_json),
+                stats_by_quarter_json=str(quarter_json),
+                stats_by_month_json=str(month_json),
+                temporal_judged_years_json=str(judged_json),
+                total_trades=self.total_trades,
+                net_pnl_paisa=self.net_pnl_paisa,
+                winning_trades=self.winning_trades,
+            )
+        except ValueError as exc:
+            raise ResultsStoreError(f"ResultRow temporal stats invalid: {exc}") from exc
+        for name, value in zip(_TEMPORAL_JSON_FIELDS, canonical, strict=True):
+            object.__setattr__(self, name, value)
+
 
 @dataclass(frozen=True, slots=True)
 class FlushResult:
@@ -464,9 +547,10 @@ class ResultsStore:
         Returns
         -------
         bool
-            ``True`` if the row was newly added; ``False`` if an identical row
-            for the same ``run_id`` was already present (a silent no-op — the
-            idempotence guarantee).
+            ``True`` if the row was newly added; ``False`` if a row for the
+            same ``run_id`` was already present — an identical re-append (the
+            silent idempotent no-op) OR a temporal ENRICHMENT (below): either
+            way the row COUNT did not grow.
 
         Raises
         ------
@@ -474,22 +558,48 @@ class ResultsStore:
             If a *different* row is already stored under the same ``run_id`` —
             a run-identity collision means upstream non-determinism and is never
             silently overwritten (Golden Rule #4).
+
+        **Temporal enrichment carve-out (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001,
+        the D16 rule — ships with the columns, never separable):** the
+        same-run_id conflict compare covers every REQUIRED field ALWAYS; for
+        the four optional :data:`_TEMPORAL_JSON_FIELDS`, ``None`` on either
+        side is NOT a conflict and the POPULATED value WINS (a deterministic
+        enrichment-in-place, logged ``results_store.temporal_enriched``), so a
+        capture-toggled redo over an existing store enriches instead of
+        crashing mid-grid. Both-present-and-DIFFERENT stays a conflict: the
+        stats are a pure function of the trades, which are a pure function of
+        the run identity — a true mismatch is a reproducibility breach.
         """
         existing = self._rows.get(row.run_id)
         if existing is not None:
             if existing == row:
                 return False
-            differing = tuple(
-                f.name
-                for f in fields(ResultRow)
-                if getattr(existing, f.name) != getattr(row, f.name)
-            )
-            _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
-            raise ResultsStoreError(
-                f"run-identity conflict for {row.run_id}: a different result is already "
-                f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
-                f"map to one result (Golden Rule #4) — refusing to overwrite."
-            )
+            merged = _merge_temporal_enrichment(existing, row)
+            if merged is None:
+                differing = tuple(
+                    f.name
+                    for f in fields(ResultRow)
+                    if getattr(existing, f.name) != getattr(row, f.name)
+                )
+                _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
+                raise ResultsStoreError(
+                    f"run-identity conflict for {row.run_id}: a different result is already "
+                    f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
+                    f"map to one result (Golden Rule #4) — refusing to overwrite."
+                )
+            if merged != existing:
+                enriched = tuple(
+                    name
+                    for name in _TEMPORAL_JSON_FIELDS
+                    if getattr(existing, name) is None and getattr(merged, name) is not None
+                )
+                self._rows[row.run_id] = merged
+                _LOG.info(
+                    "results_store.temporal_enriched",
+                    run_id=row.run_id,
+                    enriched_fields=enriched,
+                )
+            return False
         self._rows[row.run_id] = row
         return True
 
@@ -652,10 +762,26 @@ class ResultsStore:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
 
+        # EMIT-ON-PRESENT temporal columns (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001):
+        # written iff ANY row carries a non-None value — a PURE, deterministic
+        # function of the row set (same rows ⇒ same presence verdict ⇒ same
+        # schema ⇒ same bytes), so re-flushing an unchanged store stays
+        # byte-identical (Golden Rule #4) AND the all-None flush is
+        # BYTE-IDENTICAL to the pre-extension writer (pinned by the frozen
+        # sweep goldens + the fixture bytes-equality test).
+        temporal_present = any(
+            getattr(row, name) is not None for row in ordered for name in _TEMPORAL_JSON_FIELDS
+        )
+        if temporal_present:
+            for name in _TEMPORAL_JSON_FIELDS:
+                # None keeps None (→ Parquet null) for rows without capture.
+                columns[name] = [getattr(row, name) for row in ordered]
+
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
         # fixed insertion order above (identity → mask limbs → money → counts →
-        # metrics → deflated → prices) for a reproducible byte stream.
+        # metrics → deflated → prices → [temporal, emit-on-present]) for a
+        # reproducible byte stream.
         df = pl.DataFrame(
             columns,
             schema={
@@ -666,6 +792,7 @@ class ResultsStore:
                 **dict.fromkeys(
                     (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS), pl.Float64
                 ),
+                **(dict.fromkeys(_TEMPORAL_JSON_FIELDS, pl.Utf8) if temporal_present else {}),
             },
         )
         bio = io.BytesIO()
@@ -769,6 +896,12 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
     :class:`ResultsStoreSchemaError`.
     """
     deflated = record.get("deflated_sharpe")
+    # Optional temporal columns (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — the SAME
+    # presence-tolerant record.get law: absent column OR stored null → None.
+    year_json = record.get("stats_by_year_json")
+    quarter_json = record.get("stats_by_quarter_json")
+    month_json = record.get("stats_by_month_json")
+    judged_json = record.get("temporal_judged_years_json")
     return ResultRow(
         run_id=str(record["run_id"]),
         instrument=str(record["instrument"]),
@@ -796,6 +929,45 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         max_drawdown_pct=float(record["max_drawdown_pct"]),  # type: ignore[arg-type]
         avg_entry_price=Decimal(str(record["avg_entry_price"])),
         avg_exit_price=Decimal(str(record["avg_exit_price"])),
+        stats_by_year_json=None if year_json is None else str(year_json),
+        stats_by_quarter_json=None if quarter_json is None else str(quarter_json),
+        stats_by_month_json=None if month_json is None else str(month_json),
+        temporal_judged_years_json=None if judged_json is None else str(judged_json),
+    )
+
+
+def _merge_temporal_enrichment(existing: ResultRow, row: ResultRow) -> ResultRow | None:
+    """The D16 append-enrichment merge — or ``None`` when the pair is a true conflict.
+
+    DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: two rows for one run-identity may
+    LEGALLY differ ONLY in the four optional temporal columns, and only in the
+    ``None``-vs-populated direction (a capture-toggled redo re-computed the
+    SAME finalist with capture on/off). Field-wise: any non-temporal
+    difference ⇒ ``None`` (conflict); a temporal field populated on BOTH sides
+    with different bytes ⇒ ``None`` (the stats are a pure function of the run
+    identity — a mismatch is a reproducibility breach); else the populated
+    value wins per field and the merged row is returned. Per-row all-or-none
+    validation (``_validate_temporal_columns``) guarantees the merge never
+    manufactures a mixed-capture row.
+    """
+    for f in fields(ResultRow):
+        if f.name in _TEMPORAL_JSON_FIELDS:
+            continue
+        if getattr(existing, f.name) != getattr(row, f.name):
+            return None
+    merged: dict[str, str | None] = {}
+    for name in _TEMPORAL_JSON_FIELDS:
+        ours: str | None = getattr(existing, name)
+        theirs: str | None = getattr(row, name)
+        if ours is not None and theirs is not None and ours != theirs:
+            return None
+        merged[name] = ours if ours is not None else theirs
+    return replace(
+        existing,
+        stats_by_year_json=merged["stats_by_year_json"],
+        stats_by_quarter_json=merged["stats_by_quarter_json"],
+        stats_by_month_json=merged["stats_by_month_json"],
+        temporal_judged_years_json=merged["temporal_judged_years_json"],
     )
 
 
