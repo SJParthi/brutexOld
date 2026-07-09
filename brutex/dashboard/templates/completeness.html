@@ -317,11 +317,25 @@ function renderOptions(rows) {
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 
+let lastBoardTxt = null;
+let lastLiveLine = "";
+
 async function poll() {
+  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
+     ZERO fetches; the interval keeps ticking (hidden ticks are free) and the
+     visibilitychange listener below re-polls immediately on return. */
+  if (document.hidden) return;
   try {
     const r = await fetch("/api/v1/completeness/scoreboard");
-    if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
-    const board = await r.json();
+    if (!r.ok) { lastBoardTxt = null; liveTxt.textContent = "error " + r.status; return; }
+    /* Skip-render-when-unchanged (DEC-DASHBOARD-POLL-HYGIENE-001): the ~750-row
+       options table is a full innerHTML rebuild — compare the RAW response text
+       and replay the heartbeat line instead of rebuilding identical DOM every
+       4 s (the coverage.html / fetch_windows.html sibling memo). */
+    const txt = await r.text();
+    if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return; }
+    lastBoardTxt = txt;
+    const board = JSON.parse(txt);
     renderCards(board);
     renderSpot(board.spot.per_symbol || []);
     renderOptions(board.options.per_underlying || []);
@@ -329,14 +343,20 @@ async function poll() {
     const op = (board.options.per_underlying || []).length;
     statusEl.textContent = sp + " scored spot symbols · " + op
       + " option underlyings · spot = exact (window-ledger) · options = stability, not a fabricated %";
-    liveTxt.textContent = "live · " + sp + " spot · " + op + " options";
+    lastLiveLine = "live · " + sp + " spot · " + op + " options";
+    liveTxt.textContent = lastLiveLine;
   } catch (e) {
+    lastBoardTxt = null;
     liveTxt.textContent = "offline";
   }
 }
 
 poll();
 setInterval(poll, 4000);
+/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001). */
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden) poll();
+});
 </script>
 </body>
 </html>

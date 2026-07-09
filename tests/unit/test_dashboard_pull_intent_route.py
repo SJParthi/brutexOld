@@ -88,9 +88,11 @@ def store(tmp_path: Path) -> Iterator[InstrumentStore]:
 
 @pytest.fixture
 def intent_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PullIntentStore:
-    # ONE lake root for the intent sidecar AND the job's account single-flight
-    # flock (BRUTEX_LAKE_ROOT), so the resume probe and the job contend on the
-    # same lock — exactly the production wiring in cmd_dashboard.
+    # The intent sidecar lives under BRUTEX_LAKE_ROOT; since
+    # DEC-GREEKS-BULK-REENRICH-001 fix round 2 the JOB's cross-process flock
+    # keys on the STORE-derived WRITE root (the instrument store's parent =
+    # tmp_path here), and the resume probe follows it — deliberately DISTINCT
+    # from this env root so a probe/lock split-brain regression fails loudly.
     lake = tmp_path / "lake"
     lake.mkdir()
     monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(lake))
@@ -321,18 +323,24 @@ def test_manual_real_pull_autoclears_the_resume_banner_end_to_end(
 
 
 def test_refused_manual_pull_keeps_the_resume_banner_end_to_end(
-    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    store: InstrumentStore,
+    intent_store: PullIntentStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Round-3 hostile-review regression (DEC-RESUME-BANNER-AUTOCLEAR-001,
-    # started-gated): a peer-held account single-flight flock makes
+    # started-gated): a peer-held single-flight flock makes
     # BackgroundPullJob.start refuse (started=False) — NO pull launches, so the
     # CRITICAL crash-loop banner must survive the refused attempt (previously
     # persist_intent_for_launch dropped it BEFORE start() ran, permanently
-    # losing the banner for the process lifetime).
+    # losing the banner for the process lifetime). The peer flocks the
+    # STORE-derived WRITE root (`_job_lake_root_resolver` — the store's parent,
+    # DEC-GREEKS-BULK-REENRICH-001 fix round 2), NOT the env lake root — the
+    # same root the job itself contends on.
     _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     intent_store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
-    with pull_singleflight_lock(intent_store.lake_root):
+    with pull_singleflight_lock(store.path.parent):
         resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"})
         assert resp.status_code == 200
         assert resp.json()["started"] is False, "the peer-held flock refuses the launch"
@@ -370,6 +378,23 @@ def test_liveproof_without_intent_store_is_untouched(
 
 
 # ── the app.state.brutex_resume_pipeline seam ────────────────────────────────
+
+
+def test_resume_singleflight_probe_keys_on_the_job_root(tmp_path: Path) -> None:
+    """The peer probe contends on the RESOLVER root — held ⇒ False, free ⇒ True."""
+    job_root = tmp_path / "job-root"
+    job_root.mkdir()
+    probe = app_module._resume_singleflight_probe(lambda: job_root)
+    assert probe() is True, "a free job-root flock reads acquirable"
+    with pull_singleflight_lock(job_root):
+        assert probe() is False, "a held job-root flock reads a live peer"
+    assert probe() is True, "released ⇒ acquirable again"
+
+
+def test_resume_singleflight_probe_none_root_mirrors_the_lockless_job() -> None:
+    """A ``None`` root means the jobs take NO lock — nothing to probe, resume may fire."""
+    probe = app_module._resume_singleflight_probe(lambda: None)
+    assert probe() is True
 
 
 def test_resume_seam_absent_without_intent_store(
@@ -442,14 +467,21 @@ def test_resume_over_cap_refuses_with_alert_and_banner_no_launch(
 
 
 def test_resume_peer_held_flock_burns_no_token_and_fails_no_progress(
-    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    store: InstrumentStore,
+    intent_store: PullIntentStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     intent_store.write(
         PullIntent(symbols="NIFTY", symbol=None, from_date=None, to_date=None, restarts=0)
     )
-    with pull_singleflight_lock(intent_store.lake_root):
+    # A live peer's BackgroundPullJob flocks the STORE-derived WRITE root
+    # (`_job_lake_root_resolver` — the store's parent, DEC-GREEKS-BULK-REENRICH-001
+    # fix round 2), NOT the env lake root; the resume probe must contend on the
+    # SAME lock file or a healthy peer costs a restart token.
+    with pull_singleflight_lock(store.path.parent):
         client.app.state.brutex_resume_pipeline()  # type: ignore[attr-defined]
     reloaded = intent_store.load()
     assert reloaded is not None

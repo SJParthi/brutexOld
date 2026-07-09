@@ -6,6 +6,19 @@
 > copy time. **Golden Rule #1:** every path below traces to the cited
 > `file:line` on this build (2026-07-03).
 
+> **Amendment (2026-07-07, DEC-SWEEP-NIGHTLY-AUTOMATION-001, MIGRATION.md
+> #1541):** the MECHANIZED nightly path is `brutex nightly backup` /
+> `brutex nightly restore` (`docs/runbooks/nightly-automation.md` §4-5) for
+> the stores it covers — the window ledger (+deltas), `instruments.duckdb`,
+> `registry.duckdb`, `catalog.duckdb`, the lake `audit/` and the whole
+> `sweeps/` results tree — with sealed hash-verified snapshots, a
+> verify-everything-then-write restore (destination `window_ledger/deltas/`
+> cleared of manifest-extraneous files; `ledger.parquet` strictly LAST, the
+> law §4 below states), and a CI restore drill on every push. **`bars/` is
+> deliberately NOT in the automated set** (re-pullable) — the tar/rsync/
+> Time-Machine recipe below REMAINS the full-lake (incl. `bars/`) manual
+> path. No law below changes.
+
 ## 0. Where the lake is
 
 The lake root resolves as `$BRUTEX_LAKE_ROOT`, else `~/.brutex/lake`
@@ -42,6 +55,12 @@ DEC-AWS-ONLY-CREDS-001), and `~/.brutex/cache/ntm_constituents.csv` (the NTM
 last-good cache, DEC-NTM-CACHE-FIRST-001 #892).
 
 ## 2. Backup (suggested shape)
+
+> **AUTOMATED by `brutex backup` — DEC-BACKUP-OFFBOX-001 (MIGRATION.md
+> #1596), see `docs/runbooks/backup-offbox.md`; the tar recipe below
+> remains the manual fallback.** The restore-ORDER law (§3) and the
+> consistency argument (§4) below stand verbatim and are what the
+> automated system's restore procedure follows.
 
 Never back up during a running pull — take (or wait on) the single-flight
 lock semantics of `data-fetch-runday.md` §6a first (a pull holds

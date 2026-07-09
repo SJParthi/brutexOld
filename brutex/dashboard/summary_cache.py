@@ -471,7 +471,12 @@ class SummaryCache:
                 # exactly one woken waiter re-registers and becomes the new
                 # computer. Unbounded wait is deliberate + honest: pre-fix,
                 # every cold poller duplicated the wedged scan and hung anyway
-                # — now at most ONE scan is in flight to wedge.
+                # — now at most ONE scan is in flight to wedge. When this
+                # runs on a dashboard offload worker, the waiting THREAD holds
+                # a LAKE-limiter token (DEC-DASHBOARD-LAKE-IO-LIMITER-001):
+                # wedged waiters are bounded by the 32-token lake pool and can
+                # no longer exhaust AnyIO's default 40-token pool — the waiter
+                # SEMANTICS here are deliberately unchanged.
                 decision.wait()
                 continue
             gen_at_start = decision

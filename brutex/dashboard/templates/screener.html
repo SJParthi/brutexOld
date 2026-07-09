@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — Strategy screener (top-100 Best-of-Best)</title>
+<!-- DEC-OPERATOR-PAGE-REAL-001 · R36 STRATEGY SCREENER.
+     One fetch of /api/v1/oneclick/top100 → client-side filter/sort over the
+     full artifact (win% · DD · PF · VIX band · TF · direction). The COLS
+     config is the ONE shared BXScreener.COLUMNS (§11 COMMON — the movers
+     config-table STRUCTURE without its innerHTML row builder): rows are
+     built with createElement + textContent ONLY, so no artifact-derived
+     string can ever parse as markup (F-M1/F-M2). Row click → /strategy
+     (≤2 clicks: Overview → Winners → strategy — R36). Failures land in the
+     BXUI errorCard with Retry (F-M4); "Loading…" is never a terminal state.
+     Every number arrives from the artifact contracts — loud "awaiting real
+     run artifact" until a run exists (never invented figures, R27). -->
+<style>
+  :root {
+    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+    --border: #1E222D; --border-strong: #2B313F;
+    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
+    --red: #FF5C5C;
+    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+    --r-sm:8px; --r-md:10px; --r-pill:999px;
+    --ctl-h:38px; --gutter:clamp(16px,3vw,24px);
+    --elev-2:0 10px 30px rgba(0,0,0,.45);
+    --ease:cubic-bezier(.22,.61,.36,1);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+    background:
+      radial-gradient(ellipse at top, rgba(157,123,255,0.07), transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
+      var(--bg);
+  }
+  header {
+    display:flex; align-items:center; gap:14px; padding:16px 24px;
+    border-bottom:1px solid var(--border); flex-wrap:wrap;
+  }
+  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
+    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sub { color:var(--muted); font-size:12px; }
+  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
+  .topnav a { color:var(--blue); text-decoration:none; }
+  .topnav a:hover { color:var(--text-bright); }
+  .ticker { padding:8px 24px; border-bottom:1px solid var(--border); font-size:12px;
+    color:var(--muted); font-variant-numeric:tabular-nums; }
+  .strip { display:flex; align-items:center; gap:12px; padding:10px 24px; flex-wrap:wrap;
+    border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); }
+  .oc-fixture-badge { padding:4px 10px; border:1.5px solid var(--purple); border-radius:6px;
+    color:var(--purple); font-size:10.5px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
+  .mode-btn { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
+    padding:6px 12px; font:inherit; font-size:12px; font-weight:700; color:var(--text);
+    background:var(--surface-2); }
+  .controls { display:flex; gap:12px; padding:14px 24px; border-bottom:1px solid var(--border);
+    flex-wrap:wrap; align-items:flex-end; }
+  .ctl { display:flex; flex-direction:column; gap:4px; }
+  .ctl label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
+  .ctl select, .ctl input {
+    background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
+    border-radius:var(--r-md); min-height:var(--ctl-h); padding:0 12px; font:inherit; font-size:13px;
+    color-scheme:dark; min-width:110px;
+  }
+  .count { padding:10px 24px; font-size:12px; color:var(--muted); }
+  .tablewrap { margin:0 24px 24px; background:var(--surface); border:1px solid var(--border);
+    border-radius:12px; overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th, td { padding:9px 12px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
+    cursor:pointer; user-select:none; position:sticky; top:0; background:var(--surface); }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:var(--surface-2); }
+  td.pos { color:var(--green-bright); }
+  td.neg { color:var(--red); }
+  .showall { margin:0 24px 24px; }
+  .showall button { cursor:pointer; border:1px dashed var(--border-strong); border-radius:var(--r-md);
+    padding:9px 16px; font:inherit; font-size:12px; color:var(--muted); background:transparent; }
+  #bxTip { position:absolute; z-index:1200; max-width:340px; background:var(--surface-3);
+    border:1px solid var(--border-strong); border-radius:8px; padding:8px 10px; font-size:12px;
+    color:var(--text); box-shadow:var(--elev-2); pointer-events:none; }
+  .jargon { display:inline; }
+  .plain-eng { display:none; }
+  body.share-mode .jargon { display:none; }
+  body.share-mode .plain-eng { display:inline; }
+</style>
+<link rel="stylesheet" href="/static/bx-theme.css">
+<link rel="stylesheet" href="/static/bx-design.css">
+<script defer src="/static/bx-ui.js"></script>
+<script defer src="/static/bx-poll.js"></script>
+<script defer src="/static/bx-explain.js"></script>
+<script defer src="/static/bx-screener.js"></script>
+<script defer src="/static/bx-oneclick.js"></script>
+<script defer src="/static/bx-rate-monitor.js"></script>
+<script defer src="/static/bx-liveproof.js"></script>
+</head>
+<body class="operator-mode">
+  <header>
+    <div class="logo">BruteX</div>
+    <div class="sub">Strategy screener — the global top-100 Best-of-Best (filter/sort · row click opens the strategy page)</div>
+    <nav class="topnav" aria-label="Primary">
+      <a href="/">Operator</a>
+      <a href="/universe">Universe</a>
+      <a href="/db">Database</a>
+      <a href="/coverage">Coverage</a>
+      <a href="/movers">Movers</a>
+      <a href="/results">Results</a>
+      <a href="/reports">Reports</a>
+    </nav>
+    <button id="bxModeToggle" class="mode-btn" type="button" title="Beginner = plain English · Pro = technical (R33 toggle — one shared mechanism)">Pro ✓</button>
+  </header>
+
+  <!-- R36 "always visible" ticker strip (shared component — bx-oneclick.js) -->
+  <div class="ticker"><span id="bxTickerStrip">sweep: — · no runs yet — awaiting real run artifact</span></div>
+
+  <div class="strip">
+    <span>run <code id="scRunId">—</code></span>
+    <span class="oc-fixture-badge" id="ocFixtureBadge" hidden>FIXTURE DATA — BRUTEX_ONECLICK_FIXTURE_ROOT active</span>
+    <span id="scDetail">awaiting real run artifact — run a sweep from the Operator page Run controls</span>
+  </div>
+
+  <div class="controls">
+    <div class="ctl"><label for="scTf">Timeframe</label>
+      <select id="scTf"><option value="">All</option></select></div>
+    <div class="ctl"><label for="scDir">Direction</label>
+      <select id="scDir"><option value="">All</option></select></div>
+    <div class="ctl"><label for="scMinWin">Min win %</label>
+      <input id="scMinWin" type="number" step="any" placeholder="any"></div>
+    <div class="ctl"><label for="scMinPf">Min PF</label>
+      <input id="scMinPf" type="number" step="any" placeholder="any"></div>
+    <div class="ctl"><label for="scMaxDd">Max |DD| (paisa)</label>
+      <input id="scMaxDd" type="number" step="any" placeholder="any"></div>
+    <div class="ctl"><label for="scVixLo">VIX band ≥</label>
+      <input id="scVixLo" type="number" step="any" placeholder="any"></div>
+    <div class="ctl"><label for="scVixHi">VIX band ≤</label>
+      <input id="scVixHi" type="number" step="any" placeholder="any"></div>
+  </div>
+
+  <div class="count" id="scCount">no rows loaded yet — awaiting real run artifact</div>
+  <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+       the artifact order is its R30 preset (default min_dd_first), which
+       deliberately DIFFERS from /results (Rank-by metric, descending);
+       loadRows fills the live preset via textContent — no sort is changed. -->
+  <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
+
+  <div id="scPanel"></div>
+  <div class="tablewrap">
+    <table id="scTable">
+      <thead><tr id="scHead"></tr></thead>
+      <tbody id="scRows"></tbody>
+    </table>
+  </div>
+  <div class="showall" id="scShowAllWrap" hidden>
+    <button id="scShowAll" type="button">show all rows (render capped — an oversized/corrupt artifact never freezes the tab)</button>
+  </div>
+
+  <div id="bxTip" hidden></div>
+
+<script>
+/* Strategy screener (DEC-OPERATOR-PAGE-REAL-001).
+   DOM LAW: rows/cells are built with document.createElement + textContent
+   ONLY — zero string-to-DOM sinks in this script (the movers COLS-array
+   STRUCTURE is adopted WITHOUT its innerHTML row builder, F-M1).
+   Sorting: BXScreener.compare (full-precision relational compare; every tie
+   breaks rank-ascending — a TOTAL order). Filtering: BXScreener.applyFilters
+   (a null-VIX-band row under an active band filter is EXCLUDED-but-COUNTED,
+   F-m3). Money cells render via BXExplain.paisaToRupees (exact integer
+   paisa→2dp rupees); metrics render full precision, NEVER re-rounded. */
+(function () {
+  'use strict';
+  var RENDER_CAP = 200; // 100 rows render directly; the cap guards corrupt/oversized artifacts
+  var state = {
+    runId: null,
+    rows: [],
+    rowCount: null,
+    sort: { field: 'rank', type: 'num', dir: 'asc' },
+    showAll: false
+  };
+
+  function byId(id) { return document.getElementById(id); }
+
+  function money(paisa) {
+    if (!window.BXExplain) { return '—'; }
+    var r = window.BXExplain.paisaToRupees(paisa);
+    if (r === null) { return '—'; }
+    return (Number(paisa) >= 0 ? '+₹' : '−₹') + r.replace(/^-/, '');
+  }
+
+  function cellText(row, col) {
+    var v = window.BXScreener.fieldValue(row, col.key);
+    if (col.key === 'conditions') {
+      return Array.isArray(v) ? v.join(' × ') : '—';
+    }
+    if (col.type === 'vix') {
+      /* [W3-R4]: the ONE shared compact band cell — a null-lo/hi writer band
+         reads "not stamped" (R31 honest NULL), never "null–null". */
+      return window.BXOneclick.vixBandCellText(v);
+    }
+    if (v === null || v === undefined) { return '—'; }
+    if (col.money) { return money(v); }
+    return String(v); // full precision — metrics are NEVER re-rounded (R27)
+  }
+
+  function buildHead() {
+    var head = byId('scHead');
+    while (head.firstChild) { head.removeChild(head.firstChild); }
+    var cols = window.BXScreener.COLUMNS;
+    for (var i = 0; i < cols.length; i++) {
+      var th = document.createElement('th');
+      th.setAttribute('data-field', cols[i].key);
+      th.setAttribute('data-type', cols[i].type);
+      th.setAttribute('data-explain', cols[i].explain);
+      var arrow = state.sort.field === cols[i].key ? (state.sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+      th.textContent = cols[i].label + arrow;
+      head.appendChild(th);
+    }
+  }
+
+  function currentFilters() {
+    var num = function (id) {
+      var raw = (byId(id).value || '').trim();
+      return raw === '' ? null : Number(raw);
+    };
+    var filters = {};
+    var tf = byId('scTf').value;
+    if (tf) { filters.tf = [tf]; }
+    var dir = byId('scDir').value;
+    if (dir) { filters.direction = dir; }
+    var minWin = num('scMinWin');
+    if (minWin !== null) { filters.min_win_rate = minWin; }
+    var minPf = num('scMinPf');
+    if (minPf !== null) { filters.min_pf = minPf; }
+    var maxDd = num('scMaxDd');
+    if (maxDd !== null) { filters.max_abs_dd_paisa = maxDd; }
+    var lo = num('scVixLo');
+    if (lo !== null) { filters.vix_lo = lo; }
+    var hi = num('scVixHi');
+    if (hi !== null) { filters.vix_hi = hi; }
+    return filters;
+  }
+
+  function render() {
+    buildHead();
+    var applied = window.BXScreener.applyFilters(state.rows, currentFilters());
+    var sorted = window.BXScreener.sortRows(
+      applied.rows, state.sort.field, state.sort.type, state.sort.dir
+    );
+    var tbody = byId('scRows');
+    while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
+    var cap = state.showAll ? sorted.length : Math.min(sorted.length, RENDER_CAP);
+    var cols = window.BXScreener.COLUMNS;
+    for (var i = 0; i < cap; i++) {
+      var row = sorted[i];
+      var tr = document.createElement('tr');
+      tr.setAttribute('data-rank', String(row.rank));
+      for (var c = 0; c < cols.length; c++) {
+        var tdEl = document.createElement('td');
+        var text = cellText(row, cols[c]);
+        if (cols[c].money) {
+          var raw = window.BXScreener.fieldValue(row, cols[c].key);
+          if (typeof raw === 'number') { tdEl.className = raw < 0 ? 'neg' : 'pos'; }
+        }
+        tdEl.setAttribute('data-explain', cols[c].explain);
+        tdEl.textContent = text;
+        tr.appendChild(tdEl);
+      }
+      tbody.appendChild(tr);
+    }
+    var wrap = byId('scShowAllWrap');
+    wrap.hidden = state.showAll || sorted.length <= RENDER_CAP;
+    // Count line: the DENOMINATOR is the payload's row_count — never an
+    // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3);
+    // the NUMERATOR is the count actually RENDERED — when the render cap
+    // truncated the table it says so ([W2-5] DEC-ONECLICK-TOP100-OBJECT-
+    // ROOT-001: "500 of 500 shown" over a 200-row table was a lie).
+    var total = state.rowCount === null ? '?' : String(state.rowCount);
+    var line = String(cap) + ' of ' + total + ' shown';
+    if (cap < sorted.length) {
+      line += ' (render cap ' + String(RENDER_CAP) + ' — use Show all)';
+    }
+    if (applied.null_vix_excluded > 0) {
+      line += ' ' + window.BXScreener.nullVixNote(applied.null_vix_excluded);
+    }
+    byId('scCount').textContent = line;
+  }
+
+  function fillFilterOptions() {
+    var tfSeen = {};
+    var dirSeen = {};
+    var tfSel = byId('scTf');
+    var dirSel = byId('scDir');
+    for (var i = 0; i < state.rows.length; i++) {
+      tfSeen[String(state.rows[i].tf)] = true;
+      dirSeen[String(state.rows[i].direction)] = true;
+    }
+    function fill(sel, seen) {
+      while (sel.childNodes.length > 1) { sel.removeChild(sel.lastChild); }
+      var keys = Object.keys(seen).sort();
+      for (var k = 0; k < keys.length; k++) {
+        var opt = document.createElement('option');
+        opt.value = keys[k];
+        opt.textContent = keys[k];
+        sel.appendChild(opt);
+      }
+    }
+    fill(tfSel, tfSeen);
+    fill(dirSel, dirSeen);
+  }
+
+  function loadRows(runId) {
+    state.runId = runId;
+    byId('scRunId').textContent = runId;
+    window.BXOneclick.oneshotFetch(
+      '/api/v1/oneclick/top100?run_id=' + encodeURIComponent(runId),
+      byId('scPanel'),
+      function (payload) {
+        var fx = byId('ocFixtureBadge');
+        if (fx) { fx.hidden = !payload.fixture_root_active; }
+        if (payload.status === 'ok' || payload.status === 'partial') {
+          state.rows = payload.rows || [];
+          state.rowCount = payload.row_count === undefined ? null : payload.row_count;
+          // [11] sort-basis label: name the ACTUAL artifact preset (fallback
+          // to the default name when the payload carries none) — label only.
+          byId('scSortBasis').textContent =
+            'sort basis: artifact preset '
+            + (typeof payload.preset === 'string' && payload.preset
+              ? payload.preset : 'min_dd_first (default)')
+            + ' — differs from /results (Rank-by metric, descending);'
+            + ' column clicks re-sort this page only';
+          byId('scDetail').textContent =
+            payload.status === 'partial'
+              ? 'PARTIAL artifact: ' + String(payload.detail)
+              : (payload.empty_note ? String(payload.empty_note) : 'top-100 artifact loaded');
+          fillFilterOptions();
+          render();
+        } else {
+          state.rows = [];
+          state.rowCount = null;
+          byId('scDetail').textContent = String(payload.detail || 'awaiting real run artifact');
+          render();
+        }
+      }
+    );
+  }
+
+  function init() {
+    buildHead();
+    // Delegated th-click sort (ONE listener — survives head rebuilds).
+    byId('scHead').addEventListener('click', function (ev) {
+      var th = ev.target.closest('th');
+      if (!th) { return; }
+      var field = th.getAttribute('data-field');
+      if (state.sort.field === field) {
+        state.sort.dir = state.sort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        state.sort = { field: field, type: th.getAttribute('data-type'), dir: 'desc' };
+      }
+      render();
+    });
+    // Row click → the strategy page (≤2 clicks law, R36).
+    byId('scRows').addEventListener('click', function (ev) {
+      var tr = ev.target.closest('tr');
+      if (!tr || !state.runId) { return; }
+      window.location.href =
+        '/strategy?run_id=' + encodeURIComponent(state.runId) +
+        '&rank=' + encodeURIComponent(tr.getAttribute('data-rank') || '1');
+    });
+    ['scTf', 'scDir', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+      byId(id).addEventListener('input', render);
+    });
+    byId('scShowAll').addEventListener('click', function () {
+      state.showAll = true;
+      render();
+    });
+    var tip = byId('bxTip');
+    if (tip && window.BXExplain) {
+      window.BXExplain.bindExplainHover(document.body, tip);
+    }
+    // run_id from the query string wins; else the latest discovered run.
+    var params = new URLSearchParams(window.location.search);
+    var rid = params.get('run_id');
+    if (rid) {
+      loadRows(rid);
+    } else {
+      window.BXOneclick.oneshotFetch('/api/v1/oneclick/runs', byId('scPanel'), function (runs) {
+        if (runs.latest_run_id) {
+          loadRows(runs.latest_run_id);
+        } else {
+          byId('scDetail').textContent = String(runs.detail || 'awaiting real run artifact');
+        }
+      });
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>
