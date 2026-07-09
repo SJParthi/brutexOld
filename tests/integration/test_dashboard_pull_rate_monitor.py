@@ -235,9 +235,7 @@ class TestPullRateRoute:
         assert "issued (admission)" in js.text
         # New blurb: only req/min//10min//hour are claimed AS their issue counts;
         # req/sec 'achieved' is named a DIFFERENT (meter-measured) population.
-        assert (
-            "req/min, req/10min and req/hour ARE these trailing-window ISSUE counts" in js.text
-        )
+        assert "req/min, req/10min and req/hour ARE these trailing-window ISSUE counts" in js.text
         assert "a " + "different population" in js.text
         # Header comment rescope: req/sec is no longer claimed to BE the 1s count.
         assert "ISSUED (admission) count" in js.text

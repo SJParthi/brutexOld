@@ -233,9 +233,7 @@ class TestUniverseSummary:
             _equity("Some Long Company Name", security_id=7),
         ]
         # The lean-store shape: BOTH equities' symbols are in the eligible set.
-        eligible = frozenset(
-            {(Exchange.NSE, "RELIANCE"), (Exchange.NSE, "Some Long Company Name")}
-        )
+        eligible = frozenset({(Exchange.NSE, "RELIANCE"), (Exchange.NSE, "Some Long Company Name")})
         summary = universe_summary(
             candidates, fno_eligible=eligible, reference_only_ids=frozenset({7})
         )

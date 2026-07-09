@@ -172,9 +172,7 @@ def test_summary_threads_reference_ids_for_stock_split(store: InstrumentStore) -
         "stock_count_total": 2,
     }
     # The badge's population equals the Stocks tab's population (the label truth).
-    assert cache.summary(store)["stock_count_total"] == len(
-        cache.instruments(store, kind="stock")
-    )
+    assert cache.summary(store)["stock_count_total"] == len(cache.instruments(store, kind="stock"))
 
 
 def test_instruments_per_kind_cached_independently(store: InstrumentStore) -> None:
