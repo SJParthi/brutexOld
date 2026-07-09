@@ -31,8 +31,8 @@
  * DOM layer is browser-only and pinned by SOURCE-STRING tests (presence,
  * not execution — the tests/browser Playwright job (#1557) does not
  * drive the Operator page). Load order: bx-ui.js,
- * bx-poll.js, bx-explain.js (and bx-chart.js on chart pages) must load
- * BEFORE this file.
+ * bx-poll.js, bx-explain.js, bx-copy.js (and bx-chart.js on chart pages)
+ * must load BEFORE this file.
  */
 "use strict";
 
@@ -124,9 +124,9 @@ function bxFunnelWriteAllowed(source, sweepRunning) {
  */
 function bxFunnelProvenance(source, runId) {
   if (source === "live") {
-    return "live run " + String(runId);
+    return "live sweep " + String(runId);
   }
-  return "completed run " + String(runId) + " · manifest";
+  return "completed run " + String(runId);
 }
 
 /* ── Browser-only widget layer below (pinned by source-string tests). ── */
@@ -255,7 +255,7 @@ function bxFunnelProvenance(source, runId) {
     if (awaiting) {
       if (payload.status === "awaiting") {
         awaiting.textContent =
-          window.BXExplain ? window.BXExplain.AWAITING_TEXT : "awaiting real run artifact";
+          window.BXExplain ? window.BXExplain.AWAITING_TEXT : "waiting for run data";
         awaiting.hidden = false;
       } else {
         awaiting.hidden = true;
@@ -263,9 +263,23 @@ function bxFunnelProvenance(source, runId) {
     }
     var pill = byId("ocRunPill");
     if (pill && payload.pill) {
-      pill.textContent = String(payload.pill.state);
-      pill.setAttribute("title", "derived from: " + String(payload.pill.derived_from));
-      pill.className = "oc-pill oc-pill-" + String(payload.pill.state).replace(/[^a-z]/g, "-");
+      // Display text via the ONE copy catalog; the CSS class stays keyed on
+      // the RAW payload token, and the verbatim state + derived_from stay
+      // reachable in the title (DEC-OPERATOR-PAGE-CLEANVIEW-001 Law 2).
+      var rawState = String(payload.pill.state);
+      var pillCopy = window.BXCopy ? window.BXCopy.token("pill", rawState) : null;
+      pill.textContent = pillCopy && pillCopy.matched ? pillCopy.text : rawState;
+      pill.setAttribute(
+        "title",
+        "server state: " + rawState + " · derived from: " + String(payload.pill.derived_from)
+      );
+      pill.className = "oc-pill oc-pill-" + rawState.replace(/[^a-z]/g, "-");
+    }
+    if (window.BXHero && window.BXHero.oneclick) {
+      window.BXHero.oneclick({
+        suspect: !!(payload.manifest && payload.manifest.suspect === true),
+        latestRunId: payload.run_id
+      });
     }
     var fx = byId("ocFixtureBadge");
     if (fx) {
@@ -308,9 +322,12 @@ function bxFunnelProvenance(source, runId) {
     }
     setOc("run_id", String(m.run_id === undefined ? payload.run_id : m.run_id));
     if (m.suspect === true) {
-      setOc("suspect", "SUSPECT — tripwire fired; treat this run's numbers as unverified");
+      setOc(
+        "suspect",
+        "NEEDS REVIEW — a self-check flagged this run; treat its numbers as unverified"
+      );
     } else if (m.suspect === false) {
-      setOc("suspect", "no tripwire fired");
+      setOc("suspect", "self-checks clean");
     }
   }
 
@@ -344,7 +361,7 @@ function bxFunnelProvenance(source, runId) {
     window.BXUI.clear(host);
     if (!entries.length) {
       host.appendChild(
-        window.BXUI.el("div", "oc-sub", "per-stage timings — awaiting real run artifact")
+        window.BXUI.el("div", "oc-sub", "stage timings appear while a run executes")
       );
       return;
     }
@@ -410,6 +427,9 @@ function bxFunnelProvenance(source, runId) {
       if (link.count !== undefined && link.count !== null) {
         chip.appendChild(window.BXUI.el("span", "oc-chain-count", String(link.count)));
       }
+      // Surface the payload's derived_from VERBATIM, tooltip-only (J15 —
+      // previously dropped on the floor; never remapped).
+      chip.title = String(link.derived_from || "");
       host.appendChild(chip);
     }
   }
@@ -524,13 +544,34 @@ function bxFunnelProvenance(source, runId) {
         var note = byId("ocTop100Note");
         if (note) {
           if (payload.status === "ok" || payload.status === "partial") {
-            note.textContent =
-              String(payload.row_count) +
-              " winner(s) stored" +
-              (payload.empty_note ? " — " + String(payload.empty_note) : "") +
-              (payload.status === "partial" ? " — PARTIAL: " + String(payload.detail) : "");
+            if (payload.row_count === 0) {
+              // A REAL zero is a fact, not an error — the catalog line alone
+              // (the redundant "0 winner(s) stored" echo is suppressed).
+              if (window.BXCopy) {
+                window.BXCopy.apply(note, payload.empty_note, {
+                  fallback: "the run finished with no surviving strategies"
+                });
+              } else {
+                note.textContent = String(payload.empty_note || "");
+              }
+            } else {
+              note.textContent = String(payload.row_count) + " strategies survived";
+            }
+            if (payload.status === "partial") {
+              note.appendChild(document.createTextNode(" · "));
+              var partChip = document.createElement("span");
+              partChip.className = "bx-chip warn";
+              if (window.BXCopy) {
+                window.BXCopy.apply(partChip, payload.detail);
+              } else {
+                partChip.textContent = String(payload.detail);
+              }
+              note.appendChild(partChip);
+            }
+          } else if (window.BXCopy) {
+            window.BXCopy.apply(note, payload.detail, { fallback: "waiting for run data" });
           } else {
-            note.textContent = String(payload.detail || "awaiting real run artifact");
+            note.textContent = String(payload.detail || "waiting for run data");
           }
         }
         if (payload.status === "ok" || payload.status === "partial") {
@@ -544,7 +585,7 @@ function bxFunnelProvenance(source, runId) {
       .catch(function () {
         var note = byId("ocTop100Note");
         if (note) {
-          note.textContent = "top-100 read failed — retrying on the next run refresh";
+          note.textContent = "Couldn't load the winner list — retrying automatically.";
         }
       });
   }
@@ -577,13 +618,43 @@ function bxFunnelProvenance(source, runId) {
       tr.appendChild(td(String(r.exit_reason), null));
       tr.appendChild(td(pnl === null ? "—" : paisaText(pnl), pnl !== null && pnl < 0 ? "neg" : "pos"));
       tr.appendChild(td(r.costs_paisa === undefined ? "—" : paisaText(r.costs_paisa), "dim"));
-      // Additive #1275 honesty flag: mae/mfe carry their granularity ("1m"|"tf").
-      var gran = typeof r.mae_granularity === "string" ? " (" + r.mae_granularity + ")" : "";
-      tr.appendChild(td(metricText(r.mae) + gran, null));
-      tr.appendChild(td(metricText(r.mfe) + gran, null));
-      // R31 honest NULL: a missing VIX renders "null — not stamped", never 0.
-      tr.appendChild(td(r.vix_entry === null || r.vix_entry === undefined ? "null" : metricText(r.vix_entry), null));
-      tr.appendChild(td(r.vix_exit === null || r.vix_exit === undefined ? "null" : metricText(r.vix_exit), null));
+      // Additive honesty flag: mae/mfe carry their measurement granularity —
+      // remapped for display (" · per-minute" / " · per-candle"), raw token
+      // kept in the cell title (Law 2); an unknown token keeps the old
+      // verbatim "(<token>)" shape.
+      var gran = "";
+      var granTitle = "";
+      if (typeof r.mae_granularity === "string") {
+        var granCopy = window.BXCopy ? window.BXCopy.token("granularity", r.mae_granularity) : null;
+        gran = granCopy && granCopy.matched ? granCopy.text : " (" + r.mae_granularity + ")";
+        granTitle = granCopy && granCopy.matched ? "server: " + r.mae_granularity : "";
+      }
+      var maeCell = td(metricText(r.mae) + gran, null);
+      var mfeCell = td(metricText(r.mfe) + gran, null);
+      if (granTitle) {
+        maeCell.title = granTitle;
+        mfeCell.title = granTitle;
+      }
+      tr.appendChild(maeCell);
+      tr.appendChild(mfeCell);
+      // R31 honest NULL: a missing VIX renders the em-dash absent-value
+      // convention (absent is never 0) with the reason in the title.
+      var vinCell = td(
+        r.vix_entry === null || r.vix_entry === undefined ? "—" : metricText(r.vix_entry),
+        null
+      );
+      if (r.vix_entry === null || r.vix_entry === undefined) {
+        vinCell.title = "VIX not recorded for this trade";
+      }
+      tr.appendChild(vinCell);
+      var voutCell = td(
+        r.vix_exit === null || r.vix_exit === undefined ? "—" : metricText(r.vix_exit),
+        null
+      );
+      if (r.vix_exit === null || r.vix_exit === undefined) {
+        voutCell.title = "VIX not recorded for this trade";
+      }
+      tr.appendChild(voutCell);
       tbody.appendChild(tr);
     }
   }
@@ -596,9 +667,7 @@ function bxFunnelProvenance(source, runId) {
     window.BXUI.clear(host);
     var series = window.BXChart.equitySeries(rows || []);
     if (series.empty) {
-      host.appendChild(
-        window.BXUI.el("div", "oc-sub", "no trades yet — awaiting real run artifact")
-      );
+      host.appendChild(window.BXUI.el("div", "oc-sub", "no trades to chart yet"));
       return;
     }
     var svg = window.BXChart.svgEl("svg", { viewBox: "0 0 1000 220", preserveAspectRatio: "none" });
@@ -607,9 +676,9 @@ function bxFunnelProvenance(source, runId) {
       svg.appendChild(path);
     }
     host.appendChild(svg);
-    var noteBits = ["per-trade close equity — minute-path equity lands with P3"];
+    var noteBits = ["equity measured at each trade close"];
     if (series.overflow) {
-      noteBits.push("OVERFLOW: cumulative paisa left the safe-integer range — curve truncated");
+      noteBits.push("total too large to chart exactly — curve truncated");
     }
     if (series.invalid_rows) {
       noteBits.push(String(series.invalid_rows) + " invalid row(s) skipped");
@@ -639,7 +708,14 @@ function bxFunnelProvenance(source, runId) {
         }
         var badge = byId("ocTradesSource");
         if (badge) {
-          badge.textContent = "source: " + String(payload.source);
+          // Display via the ONE copy catalog; the raw token stays in the
+          // title. The fixture arm stays LOUD ("TEST DATA" — C-M5).
+          var rawSource = String(payload.source);
+          var srcCopy = window.BXCopy ? window.BXCopy.token("source", rawSource) : null;
+          badge.textContent = "source: " + (srcCopy && srcCopy.matched ? srcCopy.text : rawSource);
+          if (srcCopy && srcCopy.matched) {
+            badge.title = "server: " + rawSource;
+          }
         }
         var note = byId("ocTradesNote");
         var tbody = byId("ocTradesBody");
@@ -648,17 +724,33 @@ function bxFunnelProvenance(source, runId) {
             renderTradeRows(tbody, payload.rows || []);
           }
           if (note) {
-            var total = payload.total === null || payload.total === undefined
-              ? "unknown total"
-              : "of " + String(payload.total);
-            note.textContent =
-              String((payload.rows || []).length) + " trade(s) shown " + total +
-              (payload.status === "partial" ? " — PARTIAL: " + String(payload.detail) : "");
+            var shown = (payload.rows || []).length;
+            if (payload.total === null || payload.total === undefined) {
+              note.textContent = "Showing " + String(shown) + " trades (total unknown)";
+            } else {
+              note.textContent =
+                "Showing " + String(shown) + " of " + String(payload.total) + " trades";
+            }
+            if (payload.status === "partial") {
+              note.appendChild(document.createTextNode(" · "));
+              var tradeChip = document.createElement("span");
+              tradeChip.className = "bx-chip warn";
+              if (window.BXCopy) {
+                window.BXCopy.apply(tradeChip, payload.detail);
+              } else {
+                tradeChip.textContent = String(payload.detail);
+              }
+              note.appendChild(tradeChip);
+            }
           }
           renderEquity(payload.rows || []);
         } else {
           if (note) {
-            note.textContent = String(payload.detail || "awaiting real run artifact");
+            if (window.BXCopy) {
+              window.BXCopy.apply(note, payload.detail, { fallback: "waiting for run data" });
+            } else {
+              note.textContent = String(payload.detail || "waiting for run data");
+            }
           }
           renderEquity([]);
         }
@@ -686,11 +778,28 @@ function bxFunnelProvenance(source, runId) {
     for (var i = 0; i < checks.length; i++) {
       var check = checks[i];
       var row = window.BXUI.el("div", "oc-verify-row", null);
-      row.appendChild(
-        window.BXUI.el("span", "oc-verify-state oc-verify-" + String(check.state), String(check.state))
+      // State chip: display text via the ONE copy catalog; the CSS class
+      // stays keyed on the RAW payload token (oc-verify-<raw>) and the raw
+      // token stays in the title. Check NAMES render verbatim by design.
+      var rawVerify = String(check.state);
+      var verifyCopy = window.BXCopy ? window.BXCopy.token("verify", rawVerify) : null;
+      var stateChip = window.BXUI.el(
+        "span",
+        "oc-verify-state oc-verify-" + rawVerify,
+        verifyCopy && verifyCopy.matched ? verifyCopy.text : rawVerify
       );
+      if (verifyCopy && verifyCopy.matched) {
+        stateChip.title = "server: " + rawVerify;
+      }
+      row.appendChild(stateChip);
       row.appendChild(window.BXUI.el("span", "oc-verify-name", String(check.id) + " · " + String(check.name)));
-      row.appendChild(window.BXUI.el("span", "oc-verify-detail", String(check.detail)));
+      var detailEl = window.BXUI.el("span", "oc-verify-detail", "");
+      if (window.BXCopy) {
+        window.BXCopy.apply(detailEl, check.detail);
+      } else {
+        detailEl.textContent = String(check.detail);
+      }
+      row.appendChild(detailEl);
       host.appendChild(row);
     }
     var fr = byId("ocVerifyFunnel");
@@ -853,19 +962,24 @@ function bxFunnelProvenance(source, runId) {
     }
     var bits = [];
     if (progress && progress.running) {
-      bits.push("sweep: RUNNING");
+      bits.push("sweep running");
       if (progress.done !== undefined && progress.total !== undefined) {
-        bits.push(String(progress.done) + "/" + String(progress.total) + " tuples");
+        bits.push(String(progress.done) + " of " + String(progress.total) + " tested");
       }
     } else {
-      bits.push("sweep: idle");
+      bits.push("sweep idle");
     }
     if (runsPayload && runsPayload.latest_run_id) {
       bits.push("latest run " + String(runsPayload.latest_run_id));
     } else {
-      bits.push("no runs yet — awaiting real run artifact");
+      bits.push("no completed runs yet");
     }
     strip.textContent = bits.join(" · "); // ONE text node, textContent only
+    if (window.BXHero && window.BXHero.oneclick) {
+      window.BXHero.oneclick({
+        latestRunId: runsPayload ? runsPayload.latest_run_id : null
+      });
+    }
   }
 
   /* ── Beginner/Pro toggle (ONE shared mechanism — bx-explain.js) ── */

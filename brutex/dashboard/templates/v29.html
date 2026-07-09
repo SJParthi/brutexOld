@@ -2173,7 +2173,9 @@
      Run bar · awaiting banner · chain map · timeline · VERIFY-ME panel ·
      run controls. All values arrive via textContent from the
      /api/v1/oneclick/* contracts — never markup interpolation. */
-  .oc-awaiting { display: flex; align-items: center; gap: 10px; margin: 14px var(--gutter) 0; padding: 9px 14px; border: 1px solid rgba(255,183,77,0.4); border-radius: 8px; background: linear-gradient(90deg, rgba(255,183,77,0.12), rgba(255,183,77,0.04)); font-size: 12px; color: var(--yellow); font-weight: 700; }
+  /* Awaiting is a CALM empty state, not an alarm (DEC-OPERATOR-PAGE-CLEANVIEW-001):
+     rule VALUES only changed — amber is reserved for genuine NOTICE states. */
+  .oc-awaiting { display: flex; align-items: center; gap: 10px; margin: 14px var(--gutter) 0; padding: 9px 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-2); font-size: 12px; color: var(--muted); font-weight: 600; }
   .oc-runbar { display: flex; align-items: center; gap: 12px; margin: 14px var(--gutter) 0; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
   .oc-pill { padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border-strong); font-weight: 800; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
   .oc-pill-complete { color: var(--green-bright); border-color: var(--green-dim); }
@@ -2215,6 +2217,23 @@
   .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
   .oc-chain-stage { font-weight: 800; }
   .oc-chain-count { color: var(--muted); font-weight: 600; }
+  /* ══ Clean-view IA (DEC-OPERATOR-PAGE-CLEANVIEW-001): status hero ·
+     Advanced run-controls collapse · diagnostics demotion. Tokens only. ══ */
+  .oc-hero { display: flex; align-items: center; gap: 14px; margin: 16px var(--gutter) 0; padding: 16px 20px; }
+  .oc-hero #bxHeroLine { font-size: 22px; font-weight: 800; color: var(--text-bright); letter-spacing: -0.01em; }
+  .oc-hero #bxHeroLine.hero-ok { color: var(--green-bright); }
+  .oc-hero #bxHeroLine.hero-warn { color: var(--yellow); }
+  .oc-hero #bxHeroLine.hero-bad { color: var(--red); }
+  .oc-hero #bxHeroLine.hero-muted { color: var(--text-bright); }
+  .oc-hero #bxHeroSub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .oc-advanced { margin-top: 12px; }
+  .oc-advanced summary { cursor: pointer; font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+  .oc-advanced[open] summary { color: var(--text); }
+  .oc-diagnostics summary { cursor: pointer; font-size: 12px; font-weight: 700; color: var(--muted); }
+  .oc-diagnostics[open] summary { color: var(--text); }
+  .oc-diag-badge { font-size: 11px; font-weight: 700; margin-left: 6px; }
+  .oc-diag-badge.oc-diag-warn { color: var(--yellow); }
+  .oc-diag-badge.oc-diag-bad { color: var(--red); font-weight: 800; }
   .oc-strip-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 11px; }
   .oc-strip-stage { min-width: 90px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
   .oc-strip-bar { flex: 1; height: 8px; border-radius: 4px; background: rgba(0,0,0,0.3); overflow: hidden; }
@@ -2252,6 +2271,9 @@
      document order, so BXOneclick sees every dependency namespace). -->
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
+<!-- Render-time plain-English copy catalog (DEC-OPERATOR-PAGE-CLEANVIEW-001):
+     server strings remap at display time only — payload bytes untouched. -->
+<script defer src="/static/bx-copy.js"></script>
 <script defer src="/static/bx-chart.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
 </head>
@@ -2301,7 +2323,7 @@
     <a href="/reports">Reports</a>
   </nav>
   <div class="mode-bar-right">
-    <button id="bxModeToggle" class="oc-source-badge" type="button" title="Beginner = plain English everywhere · Pro = technical masks/stats (R33 toggle — one shared mechanism)">Pro ✓</button>
+    <button id="bxModeToggle" class="oc-source-badge" type="button" title="Beginner shows plain English · Pro shows technical detail">Pro ✓</button>
     <div class="mode-toggle">
       <button data-mode="operator" class="active">⚙ Operator</button>
       <button data-mode="share">✨ Share</button>
@@ -2317,27 +2339,9 @@
   </div>
 </div>
 
-<div class="sweep-id show-operator-only">
-  <span>RUN <code data-bind="sweep_id">—</code></span>
-  <span>SNAPSHOT <span data-bind="snapshot_at">—</span></span>
-  <span>SELECTED <code data-oc="run_id">—</code></span>
-  <span data-oc="suspect">verification pending — see the VERIFY-ME panel below</span>
-</div>
-
-<!-- Live sweep-progress panel (DEC-SWEEP-WIRE-GA-001) — populated by the
-     supervisor's SweepProgress via /api/v1/sweep-progress every 2s. Hidden
-     until the first running/done snapshot arrives (data-sweep-panel is
-     un-hidden by the poller below). HONEST: the unit is the grid TUPLE, so the
-     rate is tuples/sec (per-mask progress lives inside run_persisted_sweep). -->
-<div class="sweep-progress show-operator-only" id="sweepProgressPanel" hidden>
-  <span>SWEEP <code data-sweep="state">idle</code></span>
-  <span><strong data-sweep="percent">0</strong>% done</span>
-  <span><code data-sweep="evaluated">0</code>/<code data-sweep="enumerated">0</code> tuples</span>
-  <span><code data-sweep="combos_per_sec">0</code> tuples/s</span>
-  <span>ETA <code data-sweep="eta_seconds">—</code></span>
-  <span><code data-sweep="survivors">0</code> survivors</span>
-  <span><code data-sweep="skipped">0</code> skipped</span>
-</div>
+<!-- The run-identity strip + live sweep-progress panel MOVED into the
+     collapsed System-details block below (DEC-OPERATOR-PAGE-CLEANVIEW-001
+     diagnostics demotion) — ids + poller wiring unchanged. -->
 
 <div class="brand-watermark show-share-only">
   <div class="handle">@brutex_sj</div>
@@ -2350,30 +2354,16 @@
      mode-bar + sweep strips above stay full-bleed. -->
 <main class="bx-wrap bx-wrap--wide">
 
-<!-- ══ LIVE SYSTEM HEARTBEAT (DEC-DASHBOARD-UX-ANIMATE-001) ══════════════
-     REAL pipeline state from real endpoints — /api/v1/pull/rate,
-     /api/v1/sweep-progress (shared with the poller below, zero extra
-     sockets) and /api/v1/liveproof. Each slot: skeleton shimmer → data /
-     honest idle / honest "unreachable — retrying". Never a terminal
-     "Loading…". -->
-<section class="hb show-operator-only" id="bxHeartbeat" aria-label="Live system status">
-  <div class="hb-head">
-    <span class="hb-title">System heartbeat</span>
-    <span class="hb-sub">live endpoints — the report below is fed from real run artifacts</span>
-  </div>
-  <div class="hb-grid">
-    <div class="bx-card hb-card" id="hbPull">
-      <div class="hb-label"><span class="bx-live-dot" id="hbPullDot"></span> Pull rate</div>
-      <div id="hbPullBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
-    </div>
-    <div class="bx-card hb-card" id="hbSweep">
-      <div class="hb-label"><span class="bx-live-dot" id="hbSweepDot"></span> Sweep progress</div>
-      <div id="hbSweepBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
-    </div>
-    <div class="bx-card hb-card" id="hbProof">
-      <div class="hb-label"><span class="bx-live-dot" id="hbProofDot"></span> Live proof</div>
-      <div id="hbProofBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
-    </div>
+<!-- ══ STATUS HERO (DEC-OPERATOR-PAGE-CLEANVIEW-001) ══════════════════════
+     ONE plain-English line answering "what is the system doing right now?",
+     fed by the EXISTING pollers only (decorator-wrapped hooks + two one-line
+     fan-outs — zero new sockets). The heartbeat cards moved into the
+     collapsed System-details block below. textContent-only; no ₹ anywhere. -->
+<section class="bx-card oc-hero show-operator-only" id="bxStatusHero" aria-label="System status">
+  <span class="bx-live-dot" id="bxHeroDot"></span>
+  <div>
+    <div id="bxHeroLine" class="hero-muted">Idle — ready to run</div>
+    <div id="bxHeroSub">latest results below · start a sweep from the Run panel</div>
   </div>
 </section>
 
@@ -2383,24 +2373,23 @@
      fed from /api/v1/oneclick/* artifact contracts via bx-oneclick.js —
      textContent only, never markup interpolation. -->
 <div class="oc-runbar show-operator-only" id="ocRunBar">
-  <span id="bxTickerStrip">sweep: — · no runs yet — awaiting real run artifact</span>
-  <span class="oc-pill" id="ocRunPill">pending</span>
+  <span id="bxTickerStrip">sweep idle · no completed runs yet</span>
+  <span class="oc-pill" id="ocRunPill">no run yet</span>
   <label>run
     <select id="ocRunSelect" title="completed runs, newest first"></select>
   </label>
-  <span class="oc-fixture-badge" id="ocFixtureBadge" hidden>FIXTURE DATA — BRUTEX_ONECLICK_FIXTURE_ROOT active</span>
-  <span class="oc-updated" id="ocUpdated">updated — awaiting first poll</span>
+  <span class="oc-fixture-badge" id="ocFixtureBadge" hidden title="server: BRUTEX_ONECLICK_FIXTURE_ROOT active">TEST DATA — fixture override active (not real market results)</span>
+  <span class="oc-updated" id="ocUpdated">updated — waiting for first refresh</span>
 </div>
 <div class="oc-awaiting show-operator-only" id="ocAwaiting" role="note">
-  awaiting real run artifact — run a sweep from the Run controls; this page never shows invented numbers
+  No completed run yet — press Run Sweep below. Every number on this page comes from a real run — nothing is ever invented.
 </div>
 
 <section class="oc-section show-operator-only" id="ocRunControls" aria-label="Run controls">
   <h3>▶ Run controls</h3>
-  <div class="oc-sub">The ONE canonical Run button (moved here from /reports — R25/O-b).
-    Sweep-only: this button NEVER pulls — pull/prebuild/heal live on /universe (R3).
-    Blank selectors keep the engine defaults (all 3 indices · all 21 timeframes ·
-    2020-01-01 → today).</div>
+  <div class="oc-sub">Start a brute-force sweep. Leave any field blank to use the defaults
+    (all 3 indices · all 21 timeframes · 2020-01-01 → today). This button NEVER pulls
+    market data — pulls live on the Universe page.</div>
   <div class="oc-controls-row">
     <label>SYMBOLS
       <select id="swSymbols" multiple size="3" title="blank = all 3, NIFTY-first">
@@ -2439,30 +2428,37 @@
     </label>
   </div>
   <div class="oc-controls-row">
-    <label>CONDITION-SUBSET
-      <select id="swConditions" multiple size="2" disabled title="condition-subset — not wired yet, lands at merge-integration (P1 backend --conditions exists)">
-        <option>(disabled)</option>
-      </select>
-    </label>
-    <span class="oc-disabled-note">condition-subset — not wired yet, lands at merge-integration (P1 backend --conditions exists)</span>
-  </div>
-  <div class="oc-controls-row">
     <button class="oc-run-btn" id="run-sweep" type="button">🚀 Run Sweep</button>
-    <button class="oc-cascade-btn" id="run-cascade" type="button">🪜 Run cascade</button>
-    <span class="oc-disabled-note" id="ocPreflight">estimator not wired yet — lands at merge-integration (P1); every time estimate is PROVISIONAL until the smoke run calibrates it (R23)</span>
+    <span class="oc-disabled-note" id="ocPreflight">Time estimate: not available yet — a finished sweep reports its own timing.</span>
   </div>
   <div class="oc-msg" id="sweep-msg"></div>
   <div id="sweep-bar" style="display:none;margin-top:10px;height:8px;border-radius:4px;background:#1b2030;overflow:hidden;">
     <div id="sweep-bar-fill" style="height:100%;width:0%;background:var(--green);transition:width .4s;"></div>
   </div>
-  <div class="oc-msg" id="cascade-msg"></div>
+  <details class="oc-advanced">
+    <summary>Advanced</summary>
+    <div class="oc-sub">Re-run the 9-filter statistical verification on the most recent completed
+      sweep. This starts no new backtest — every full sweep already runs this check automatically.</div>
+    <div class="oc-controls-row">
+      <label>CONDITION FILTER
+        <select id="swConditions" multiple size="2" disabled title="Condition filter — not available yet (coming in a later update)">
+          <option>(disabled)</option>
+        </select>
+      </label>
+      <span class="oc-disabled-note">Condition filter — not available yet (coming in a later update)</span>
+    </div>
+    <div class="oc-controls-row">
+      <button class="oc-cascade-btn" id="run-cascade" type="button">↻ Re-verify latest run</button>
+    </div>
+    <div class="oc-msg" id="cascade-msg"></div>
+  </details>
 </section>
 
 <header>
   <div class="picker">
     <span class="rank-pill" data-oc="r1_rank" data-explain="rank">—</span>
-    <span class="strategy-name" data-oc="r1_name">— awaiting real run artifact —</span>
-    <span class="meta"><span data-oc="sel_symbols">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · <span data-oc="tested_rank_line">rank line awaits the top-100 artifact</span></span>
+    <span class="strategy-name" data-oc="r1_name">no run selected yet</span>
+    <span class="meta"><span data-oc="sel_symbols">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · <span data-oc="tested_rank_line">rank appears after the first completed run</span></span>
   </div>
   <div class="date-range">📅 <span data-oc="date_range">—</span></div>
   <nav class="tabs">
@@ -2483,31 +2479,31 @@
     </div>
     <div class="verdict-text">
       <span class="tldr">In plain English</span>
-      Best stored winner: <strong data-oc="r1_name">—</strong>. Net P&amp;L
+      Best winner: <strong data-oc="r1_name">—</strong>. Net P&amp;L
       <strong class="pos" data-oc="r1_net" data-explain="net_pnl_paisa">—</strong>
       over <span data-oc="r1_trades" data-explain="trades">—</span> trades ·
       <span data-oc="r1_vix_band" data-explain="vix_band">no VIX band</span>.
-      Every number on this card comes from the stored run artifact — nothing is invented (R27).
+      Every number on this card comes from the stored run — nothing is invented.
     </div>
     <div class="verdict-rank-box">
       <div class="verdict-rank-big shake-on-reveal" data-oc="r1_rank">—</div>
-      <div class="verdict-rank-small">of <span data-oc="actual_tested">—</span> tested combos</div>
+      <div class="verdict-rank-small">of <span data-oc="actual_tested">—</span> combinations tested</div>
     </div>
   </div>
 
   <section class="hero">
     <div class="hero-cards">
-      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = net trade P&L from the stored run artifact (R27: Σ trade P&L − full costs).">
+      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = net profit after all costs, from the stored run.">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4 12l8 10 8-10L12 2z"/></svg>EDGE</div>
         <div class="big" data-oc="r1_net" data-explain="net_pnl_paisa">—</div>
-        <div class="sub">net P&amp;L · buy-&amp;-hold baseline lands with P3</div>
+        <div class="sub">net P&amp;L · buy-&amp;-hold comparison coming soon</div>
       </div>
       <div class="card green anim-card" style="animation-delay: 0.35s" data-tooltip="RISK = worst drop in equity from a peak.">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7v6c0 5.5 3.8 10.7 10 12 6.2-1.3 10-6.5 10-12V7l-10-5z"/></svg>RISK</div>
         <div class="big" data-oc="r1_max_dd" data-explain="max_dd_paisa">—</div>
-        <div class="sub">max drawdown (stored)</div>
+        <div class="sub">max drawdown</div>
       </div>
       <div class="card green anim-card" style="animation-delay: 0.45s" data-tooltip="CONSISTENCY = return per unit of bumpiness (full-precision Sharpe — never rounded).">
         <div class="dot"></div>
@@ -2515,7 +2511,7 @@
         <div class="big" data-oc="r1_sharpe" data-explain="sharpe">—</div>
         <div class="sub"><span class="jargon">Sharpe (full precision)</span><span class="plain-eng" style="display:none">Steady gains, low volatility</span></div>
       </div>
-      <div class="card yellow anim-card" style="animation-delay: 0.55s" data-tooltip="Statistical confidence that this edge is real, not luck (actual DSR + CPCV pass %).">
+      <div class="card yellow anim-card" style="animation-delay: 0.55s" data-tooltip="Statistical confidence that this edge is real, not luck.">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2v6.5L3 12l6 3.5V22h6v-6.5l6-3.5-6-3.5V2H9z"/></svg><span class="jargon">REAL OR FLUKE?</span><span class="plain-eng" style="display:none">PROOF</span></div>
         <div class="big" data-oc="r1_dsr" data-explain="dsr">—</div>
@@ -2525,7 +2521,7 @@
 
     <div class="equity-wrap">
       <div class="chart-header">
-        <span class="chart-title">Equity curve <span class="dim" style="font-size:10px">per-trade close equity — minute-path equity lands with P3</span></span>
+        <span class="chart-title">Equity curve <span class="dim" style="font-size:10px">equity measured at each trade close</span></span>
         <div class="legend">
           <span class="eq">Equity</span>
         </div>
@@ -2534,7 +2530,7 @@
            trades API; empty/awaiting renders an honest note, never a
            fabricated polyline. -->
       <div class="equity-host" id="ocEquityHost">
-        <div class="oc-sub">no trades yet — awaiting real run artifact</div>
+        <div class="oc-sub">no trades to chart yet</div>
       </div>
     </div>
   </section>
@@ -2542,7 +2538,7 @@
   <details open class="show-operator-only">
     <summary>Standard metrics<span class="hint">— how is it making money?</span></summary>
     <div class="body">
-      <div class="oc-sub" id="ocTop100Note">awaiting real run artifact — the metrics below fill from top100.json</div>
+      <div class="oc-sub" id="ocTop100Note">metrics appear after the first completed run</div>
       <div class="kpi-strip">
         <div class="kpi-cell"><div class="k">Net P&amp;L</div><div class="v" data-oc="r1_net" data-explain="net_pnl_paisa">—</div></div>
         <div class="kpi-cell"><div class="k">Max DD</div><div class="v" data-oc="r1_max_dd" data-explain="max_dd_paisa">—</div></div>
@@ -2560,7 +2556,7 @@
             <tr><td>Net P&amp;L</td><td data-oc="r1_net">—</td></tr>
             <tr><td>Trades</td><td data-oc="r1_trades">—</td></tr>
             <tr><td>SL/TP arm</td><td data-oc="r1_arm">—</td></tr>
-            <tr><td>Buy &amp; hold baseline</td><td>— (lands with P3 — O-n)</td></tr>
+            <tr><td>Buy &amp; hold baseline</td><td>— (coming soon)</td></tr>
           </table>
         </div>
         <div class="panel">
@@ -2594,21 +2590,21 @@
         <span class="auto-hero-badge">Auto-picked</span>
         <span style="margin-left: 8px; padding: 4px 12px; background: linear-gradient(135deg, var(--purple), var(--pink)); color: white; border-radius: 6px; font-size: 10px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;">9-filter institutional pipeline</span>
       </div>
-      <div class="hero-collapse-line">From <span class="big-num" data-oc="actual_enumerated">—</span> enumerated ideas → <span class="winner-num" data-oc="r1_rank">—</span> best stored winner</div>
+      <div class="hero-collapse-line">From <span class="big-num" data-oc="actual_enumerated">—</span> ideas tested → <span class="winner-num" data-oc="r1_rank">—</span> best winner</div>
       <h2>Top stored strategies · survived the 9-filter institutional pipeline</h2>
-      <div class="sub">No manual configuration. The brute-force engine tests every combo of the selection — stop-loss + take-profit grids AND signal-driven exits — then 9 institutional statistical filters in sequence (López de Prado / Bailey / White / Hansen rigor). The counts on this page come from the selected run's manifest — never a stale hardcoded figure (R20).</div>
+      <div class="sub">No manual configuration. The brute-force engine tests every combo of the selection — stop-loss + take-profit grids AND signal-driven exits — then 9 institutional statistical filters in sequence (López de Prado / Bailey / White / Hansen rigor). The counts on this page come from the selected run itself — never a stale hardcoded figure.</div>
       <div class="auto-flow">
         <div class="auto-flow-step tested">
           <div class="big" data-oc="actual_enumerated">—</div>
-          <div class="lbl">Enumerated<br>this run</div>
+          <div class="lbl">Ideas generated<br>this run</div>
         </div>
         <div class="auto-flow-step real">
           <div class="big" data-oc="actual_tested">—</div>
-          <div class="lbl">Tested<br>this run</div>
+          <div class="lbl">Actually tested<br>this run</div>
         </div>
         <div class="auto-flow-step safe">
           <div class="big" data-oc="actual_skipped">—</div>
-          <div class="lbl">Skipped<br>(dedup — R6)</div>
+          <div class="lbl">Skipped<br>(duplicates)</div>
         </div>
         <div class="auto-flow-step top">
           <div class="big">⭐ Top 100</div>
@@ -2626,7 +2622,7 @@
       <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 18px;">
         <span style="font-size: 26px; animation: float 3s ease-in-out infinite;">🌪️</span>
         <h3 style="font-size: 19px; font-weight: 800; letter-spacing: -0.01em;">The funnel · every candidate collapses through the gates</h3>
-        <span class="oc-sub" id="ocFunnelProvenance" style="margin-left:auto; margin-bottom:0;">funnel source: — (no live sweep, no run selected)</span>
+        <span class="oc-sub" id="ocFunnelProvenance" style="margin-left:auto; margin-bottom:0;">source: — (no run selected)</span>
       </div>
       <div class="funnel-horizontal">
         <span class="step-num" data-bind="step_0_all_candidates">—</span><span class="fn-arrow">→</span>
@@ -2660,7 +2656,7 @@
           <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #9D7BFF;"></div></div>
           <div class="funnel25-right">
             <div class="big" data-bind="step_0_all_candidates">—</div>
-            <div class="dim">awaiting run</div>
+            <div class="dim">no run yet</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.15s">
@@ -2671,7 +2667,7 @@
           <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
             <div class="big" data-bind="step_1_cheap_prefilter">—</div>
-            <div class="dim">awaiting run</div>
+            <div class="dim">no run yet</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.30s">
@@ -2682,7 +2678,7 @@
           <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
             <div class="big" data-bind="step_2_real_edge_test">—</div>
-            <div class="dim">awaiting run</div>
+            <div class="dim">no run yet</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.45s">
@@ -2693,7 +2689,7 @@
           <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
             <div class="big" data-bind="step_3_unseen_data">—</div>
-            <div class="dim">awaiting run</div>
+            <div class="dim">no run yet</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.60s">
@@ -2706,7 +2702,7 @@
           <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
             <div class="big" data-bind="step_4_best_of_n">—</div>
-            <div class="dim">awaiting run</div>
+            <div class="dim">no run yet</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.75s">
@@ -2717,7 +2713,7 @@
           <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
             <div class="big" data-bind="step_7_three_windows">—</div>
-            <div class="dim">awaiting run</div>
+            <div class="dim">no run yet</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.90s">
@@ -2729,18 +2725,18 @@
           <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
             <div class="big" data-bind="step_8_sealed_lockbox">—</div>
-            <div class="dim">awaiting run</div>
+            <div class="dim">no run yet</div>
           </div>
         </div>
         <div class="funnel25-row survivor" style="--delay: 1.05s">
           <div class="funnel25-left">
             <div class="lab gold">👑 RANK 1</div>
-            <div class="name">Best stored winner <span data-oc="r1_name" style="color:var(--muted)">—</span></div>
+            <div class="name">Best winner <span data-oc="r1_name" style="color:var(--muted)">—</span></div>
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #FFB74D;"></div></div>
           <div class="funnel25-right">
             <div class="big gold"><span data-bind="winners_top_n">—</span> of <span data-bind="step_8_sealed_lockbox">—</span></div>
-            <div class="dim">awaiting run</div>
+            <div class="dim">no run yet</div>
           </div>
         </div>
       </div>
@@ -2756,11 +2752,11 @@
           <div style="font-size: 18px; font-weight: 800; color: var(--green-bright); margin-top: 3px; font-variant-numeric: tabular-nums;" data-oc="actual_tested">—</div>
         </div>
         <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px;">
-          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">SKIPPED · DEDUP (R6)</div>
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">SKIPPED · DUPLICATES</div>
           <div style="font-size: 18px; font-weight: 800; color: var(--text-bright); margin-top: 3px; font-variant-numeric: tabular-nums;" data-oc="actual_skipped">—</div>
         </div>
         <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px;">
-          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">BEST STORED WINNER</div>
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">BEST WINNER</div>
           <div style="font-size: 18px; font-weight: 800; color: var(--yellow); margin-top: 3px;" data-oc="r1_rank">—</div>
         </div>
       </div>
@@ -2844,7 +2840,7 @@
          The setup → status → action story returns with P3's phrase table. -->
     <div class="top-combos-header">
       <h2><span class="trophy">🏆</span> Top combos from the selected run</h2>
-      <div class="meta" id="comboMeta">rows fill from top100.json — awaiting real run artifact</div>
+      <div class="meta" id="comboMeta">winners appear here after the first completed run</div>
     </div>
 
     <!-- FILTER BAR -->
@@ -2900,13 +2896,13 @@
 <div id="tab-trades" class="tab-content">
   <!-- R24 every-trade-visible: rows come from the trades API (contract row
        shape entry/exit ts+px · direction · lots · exit reason · P&L · costs ·
-       MAE · MFE · VIX). PRODUCTION default is the honest AwaitingTradesReader
-       ("trades land at merge-integration") — never invented rows. -->
+       MAE · MFE · VIX). The production reader serves honest awaiting states —
+       never invented rows. -->
   <div class="trades-wrap">
     <div class="trades-header">
       <h2>List of trades · <span data-oc="r1_rank">—</span> <span data-oc="r1_name" class="dim">—</span></h2>
-      <span class="oc-source-badge" id="ocTradesSource">source: none</span>
-      <span class="count" id="ocTradesNote">awaiting real run artifact — trades appear once the run's results-depth sidecars land</span>
+      <span class="oc-source-badge" id="ocTradesSource">source: —</span>
+      <span class="count" id="ocTradesNote">trades appear once the run finishes writing its trade files</span>
     </div>
     <div id="ocTradesError"></div>
     <table class="trades-table">
@@ -2924,59 +2920,118 @@
          smoothness bell curve was DELETED — no distribution artifact exists
          yet (DEC-OPERATOR-PAGE-REAL-001). -->
     <div class="sweep-hero">
-      <div class="sweep-hero-stat"><div class="num" data-oc="actual_enumerated">—</div><div class="lab">Enumerated<br>(manifest actual)</div></div>
-      <div class="sweep-hero-stat"><div class="num" data-oc="actual_tested">—</div><div class="lab">Tested<br>(manifest actual)</div></div>
-      <div class="sweep-hero-stat"><div class="num" data-oc="actual_skipped">—</div><div class="lab">Skipped<br>(dedup — R6)</div></div>
-      <div class="sweep-hero-stat"><div class="num" data-oc="r1_rank">—</div><div class="lab">Best stored<br>winner rank</div></div>
+      <div class="sweep-hero-stat"><div class="num" data-oc="actual_enumerated">—</div><div class="lab">Ideas generated<br>(this run)</div></div>
+      <div class="sweep-hero-stat"><div class="num" data-oc="actual_tested">—</div><div class="lab">Tested<br>(this run)</div></div>
+      <div class="sweep-hero-stat"><div class="num" data-oc="actual_skipped">—</div><div class="lab">Skipped<br>(duplicates)</div></div>
+      <div class="sweep-hero-stat"><div class="num" data-oc="r1_rank">—</div><div class="lab">Best<br>winner rank</div></div>
     </div>
-    <div class="oc-sub" style="margin-top:12px;">Selected run <span data-oc="run_id">—</span> · window <span data-oc="date_range">—</span> · symbols <span data-oc="sel_symbols">—</span> · <span data-oc="suspect">verification pending</span></div>
+    <div class="oc-sub" style="margin-top:12px;">Selected run <span data-oc="run_id">—</span> · window <span data-oc="date_range">—</span> · symbols <span data-oc="sel_symbols">—</span> · <span data-oc="suspect">not yet verified</span></div>
   </div>
 </div>
+
+<!-- ══ System details (DEC-OPERATOR-PAGE-CLEANVIEW-001 diagnostics demotion):
+     the run-identity strip + live sweep-progress panel + the three heartbeat
+     cards, moved here wholesale — every id and poller wiring unchanged (all
+     pollers address ids; location-independent). Collapsed by default; the
+     #bxDiagBadge and the status hero above are the loud escalation path —
+     the block is never auto-opened. ══ -->
+<details id="bxDiagnostics" class="oc-section oc-diagnostics show-operator-only">
+  <summary>🔧 System details <span id="bxDiagBadge" class="oc-diag-badge"></span></summary>
+
+  <div class="sweep-id show-operator-only">
+    <span>RUN <code data-bind="sweep_id">—</code></span>
+    <span>SNAPSHOT <span data-bind="snapshot_at">—</span></span>
+    <span>SELECTED <code data-oc="run_id">—</code></span>
+    <span data-oc="suspect">not yet verified — see the Verify panel below</span>
+  </div>
+
+  <!-- Live sweep-progress panel (DEC-SWEEP-WIRE-GA-001) — populated by the
+       supervisor's SweepProgress via /api/v1/sweep-progress every 2s. Hidden
+       until the first running/done snapshot arrives (data-sweep-panel is
+       un-hidden by the poller below). HONEST: the supervised unit is the grid
+       combo group, so the rate is combos/s (per-mask progress lives inside
+       run_persisted_sweep). -->
+  <div class="sweep-progress show-operator-only" id="sweepProgressPanel" hidden>
+    <span>SWEEP <code data-sweep="state">idle</code></span>
+    <span><strong data-sweep="percent">0</strong>% done</span>
+    <span><code data-sweep="evaluated">0</code>/<code data-sweep="enumerated">0</code> tested</span>
+    <span><code data-sweep="combos_per_sec">0</code> combos/s</span>
+    <span>ETA <code data-sweep="eta_seconds">—</code></span>
+    <span><code data-sweep="survivors">0</code> survivors</span>
+    <span><code data-sweep="skipped">0</code> skipped</span>
+  </div>
+
+  <!-- LIVE SYSTEM HEARTBEAT (DEC-DASHBOARD-UX-ANIMATE-001) — REAL pipeline
+       state from real endpoints: /api/v1/pull/rate, /api/v1/sweep-progress
+       (shared with the poller below, zero extra sockets) and
+       /api/v1/liveproof. Each slot: skeleton shimmer → data / honest idle /
+       honest "unreachable — retrying". Never a terminal "Loading…". -->
+  <section class="hb show-operator-only" id="bxHeartbeat" aria-label="Live system status">
+    <div class="hb-head">
+      <span class="hb-title">System heartbeat</span>
+      <span class="hb-sub">live status — updates automatically</span>
+    </div>
+    <div class="hb-grid">
+      <div class="bx-card hb-card" id="hbPull">
+        <div class="hb-label"><span class="bx-live-dot" id="hbPullDot"></span> Pull rate</div>
+        <div id="hbPullBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
+      </div>
+      <div class="bx-card hb-card" id="hbSweep">
+        <div class="hb-label"><span class="bx-live-dot" id="hbSweepDot"></span> Sweep progress</div>
+        <div id="hbSweepBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
+      </div>
+      <div class="bx-card hb-card" id="hbProof">
+        <div class="hb-label"><span class="bx-live-dot" id="hbProofDot"></span> Live proof</div>
+        <div id="hbProofBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
+      </div>
+    </div>
+  </section>
+</details>
 
 <!-- ══ Live run observability (DEC-OPERATOR-PAGE-REAL-001) — always
      visible, never tab-gated: chain map (R41) · per-stage progress strips ·
      searchable timeline (capped client ring) · R44 VERIFY-ME panel. ══ -->
 <section class="oc-section show-operator-only" id="ocChainSection" aria-label="Run chain map">
   <h3>🔗 Chain map</h3>
-  <div class="oc-sub">preflight → sweep → gates → rank → refine → cascade → artifacts → display — link states are SERVER truth (green/amber/red/pending); an unknown stage reads pending, never green.</div>
-  <div id="ocChainMap"><span class="oc-chain-link oc-chain-pending">awaiting real run artifact</span></div>
+  <div class="oc-sub">The pipeline stages of the selected run. Colors come from the server — an unknown stage shows pending, never green.</div>
+  <div id="ocChainMap"><span class="oc-chain-link oc-chain-pending">no run selected yet</span></div>
 </section>
 
 <section class="oc-section show-operator-only" id="ocProgressSection" aria-label="Per-stage progress">
   <h3>⏱ Per-stage progress</h3>
-  <div id="ocProgressStrips"><div class="oc-sub">per-stage timings — awaiting real run artifact</div></div>
+  <div id="ocProgressStrips"><div class="oc-sub">stage timings appear while a run executes</div></div>
 </section>
 
 <section class="oc-section show-operator-only" id="ocTimelineSection" aria-label="Run timeline">
   <h3>📜 Run timeline</h3>
   <div class="oc-controls-row" style="margin-top:0;">
-    <label>search (window-scoped — filters the loaded ring only, not the whole file)
-      <input id="ocTimelineSearch" type="text" placeholder="e.g. tripwire">
+    <label>search recent events (searches only the events loaded below)
+      <input id="ocTimelineSearch" type="text" placeholder="filter events…">
     </label>
     <button class="oc-cascade-btn" id="ocTimelineEarlier" type="button" style="padding:7px 12px;font-size:11px;">load earlier</button>
-    <span class="oc-sub" id="ocTimelineLabel" style="margin-bottom:0;">live tail — the newest events stream in below</span>
+    <span class="oc-sub" id="ocTimelineLabel" style="margin-bottom:0;">newest events appear below as they happen</span>
   </div>
   <div id="ocTimeline"></div>
 </section>
 
 <section class="oc-section show-operator-only" id="ocVerifyPanel" aria-label="VERIFY-ME panel">
-  <h3>🛡 VERIFY ME — the 7 operator acceptance checks (R44)</h3>
-  <div class="oc-sub">Trust is EARNED by your own hands, never promised: pass / fail / ready (awaiting your judgment) / awaiting / not_wired. Operator-judged checks can never exceed "ready" server-side.</div>
+  <h3>🛡 VERIFY ME — 7 checks you can run yourself</h3>
+  <div class="oc-sub">Trust is earned, never promised. Each check reads: passed / failed / your call / waiting on data / not available yet. Checks that need your own eyes never show better than "your call".</div>
   <div id="ocVerifyError"></div>
-  <div id="ocVerifyChecks"><div class="oc-verify-row"><span class="oc-verify-state oc-verify-awaiting">awaiting</span><span class="oc-verify-name">checks load once a run is selected</span><span class="oc-verify-detail">awaiting real run artifact</span></div></div>
+  <div id="ocVerifyChecks"><div class="oc-verify-row"><span class="oc-verify-state oc-verify-awaiting">waiting on data</span><span class="oc-verify-name">checks load once a run is selected</span><span class="oc-verify-detail">waiting for run data</span></div></div>
   <div class="oc-controls-row">
-    <button class="oc-cascade-btn" id="ocVerifyChainBtn" type="button">▶ Replay audit chain (O(file) — runs on click only)</button>
+    <button class="oc-cascade-btn" id="ocVerifyChainBtn" type="button">▶ Replay audit chain (reads the whole event log — runs only when you click)</button>
     <button class="oc-run-btn" id="ocVerifyRefreshBtn" type="button" style="padding:8px 14px;">↻ Refresh checks</button>
   </div>
-  <h3 style="margin-top:16px;">Funnel reconcile (check #7)</h3>
-  <div id="ocVerifyFunnel"><div class="oc-verify-line">funnel reconcile awaiting — no run selected</div></div>
+  <h3 style="margin-top:16px;">Do the counts add up? (check #7)</h3>
+  <div id="ocVerifyFunnel"><div class="oc-verify-line">arithmetic check runs once a run is selected</div></div>
 </section>
 
 <footer>
-  <span class="show-operator-only">run <span data-oc="run_id">—</span> · verification lives in the VERIFY-ME panel above (R44 — never a pre-printed PASS)</span>
+  <span class="show-operator-only">run <span data-oc="run_id">—</span> · verification status lives in the Verify panel above — never a pre-printed pass</span>
   <span class="show-share-only">@brutex_sj · brute-force backtest</span>
   <span class="ok-row">
-    <span>BruteX · operator page · fed from real run artifacts only</span>
+    <span>BruteX · operator page · every number comes from real runs</span>
   </span>
 </footer>
 
@@ -3486,6 +3541,46 @@
     // (skip-render discipline, DEC-DASHBOARD-JS-PERF-001 style).
     const lastSig = { pull: '', sweep: '', proof: '' };
 
+    // ── Clean-view tier doctrine (DEC-OPERATOR-PAGE-CLEANVIEW-001) ──
+    // A feed blip on an IDLE page is NEUTRAL ("reconnecting…"), escalates to
+    // NOTICE after ~6 consecutive fails (~30 s — the escalated wording keeps
+    // the honest "unreachable — retrying" needle), and is an ALERT only when
+    // the last-KNOWN state was ACTIVE (idle can never go red). Presentation
+    // only — cadence, guards and scheduling are untouched.
+    const slotFails = { pull: 0, sweep: 0, proof: 0 };
+    const lastKnown = { pull: 'absent', sweep: 'absent', proof: 'absent' };
+    const slotTone = { pull: '', sweep: '', proof: '' };
+
+    function slotFeedError(key, activeNow, escalated, quiet) {
+      slotFails[key] += 1;
+      if (activeNow && slotFails[key] >= 2) {
+        setSlot(key, 'bad', escalated, 'retrying automatically');
+      } else if (slotFails[key] >= 6) {
+        setSlot(key, 'warn', escalated, 'retrying automatically');
+      } else {
+        setSlot(key, 'idle', quiet, '');
+      }
+    }
+
+    // #bxDiagBadge escalation out of the collapsed System-details block:
+    // red when any slot is ALERT-tier, amber when NOTICE, else empty.
+    function updateDiagBadge() {
+      const badge = document.getElementById('bxDiagBadge');
+      if (!badge) return;
+      const tones = [slotTone.pull, slotTone.sweep, slotTone.proof];
+      const failing = tones.filter((t) => t === 'bad').length;
+      if (failing > 0) {
+        badge.textContent = '· ' + failing + ' feed' + (failing > 1 ? 's' : '') + ' failing';
+        badge.className = 'oc-diag-badge oc-diag-bad';
+      } else if (tones.indexOf('warn') !== -1) {
+        badge.textContent = '· degraded';
+        badge.className = 'oc-diag-badge oc-diag-warn';
+      } else {
+        badge.textContent = '';
+        badge.className = 'oc-diag-badge';
+      }
+    }
+
     function setDot(dot, state) {
       if (!dot) return;
       dot.classList.remove('live-ok', 'live-warn', 'live-down');
@@ -3515,6 +3610,9 @@
         slot.body.appendChild(sub);
       }
       setDot(slot.dot, tone === 'ok' ? 'ok' : tone === 'warn' ? 'warn' : tone === 'bad' ? 'down' : '');
+      // Tier registry + diagnostics-badge write (DEC-OPERATOR-PAGE-CLEANVIEW-001).
+      slotTone[key] = tone;
+      updateDiagBadge();
     }
 
     function fmtRps(n) {
@@ -3523,39 +3621,53 @@
 
     // ── sweep slot: fed by the existing 2 s poller via the hooks above ──
     window.__bxHbSweep = function (sp) {
-      if (!sp || sp.state === 'idle') { setSlot('sweep', 'idle', 'idle — no sweep running', 'start one from the Results page or the CLI'); return; }
+      slotFails.sweep = 0;
+      lastKnown.sweep = sp && sp.state ? String(sp.state) : 'absent';
+      if (!sp || sp.state === 'idle') { setSlot('sweep', 'idle', 'no sweep running', 'start one below'); return; }
       const pct = (sp.percent === null || sp.percent === undefined) ? '0' : String(sp.percent);
       const rate = (typeof sp.combos_per_sec === 'number') ? sp.combos_per_sec : 0;
       const main = String(sp.state) + ' · ' + pct + '% done';
-      const note = String(sp.evaluated ?? 0) + '/' + String(sp.enumerated ?? 0) + ' tuples · ' +
-        fmtRps(rate) + ' tuples/s · ' + String(sp.survivors ?? 0) + ' survivors';
+      const note = String(sp.evaluated ?? 0) + ' of ' + String(sp.enumerated ?? 0) + ' tested · ' +
+        fmtRps(rate) + '/s · ' + String(sp.survivors ?? 0) + ' winners';
       // state machine: idle → running → done | error (engine/sweep_progress.py)
       setSlot('sweep', sp.state === 'error' ? 'bad' : 'ok', main, note);
     };
     window.__bxHbSweepErr = function (_e) {
-      setSlot('sweep', 'bad', 'sweep feed unreachable — retrying', 'the 2 s poller keeps retrying automatically');
+      slotFeedError('sweep', lastKnown.sweep === 'running',
+        'sweep status unreachable — retrying', 'sweep status reconnecting…');
     };
 
     // ── pull slot: /api/v1/pull/rate every 5 s ──
+    function pullWasActive() {
+      // The last-KNOWN state during an outage — the only honest client signal.
+      return lastKnown.pull === 'flowing' || lastKnown.pull === 'stalled' ||
+        lastKnown.pull === 'local' || lastKnown.pull === 'failing';
+    }
     async function pollPull() {
       if (document.hidden) return;
       try {
         const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/pull/rate', 10000) : fetch('/api/v1/pull/rate'));
-        if (!r.ok) { setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 5 s'); return; }
+        if (!r.ok) { slotFeedError('pull', pullWasActive(), 'pull status unreachable — retrying', 'pull status reconnecting…'); return; }
         const d = await r.json();
         const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
+        slotFails.pull = 0;
+        lastKnown.pull = state;
+        // Status-hero fan-out (DEC-OPERATOR-PAGE-CLEANVIEW-001) — ⚠ flagged
+        // for sibling-merge coordination; one appended line, nothing else in
+        // this poller changed.
+        window.__bxHeroPull && window.__bxHeroPull(d);
         if (state === 'flowing') {
-          setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
-            'pull active · measured completed rate');
+          setSlot('pull', 'ok', 'pulling at ' + fmtRps(d.req_per_sec_achieved) + ' req/s (allowed ' + fmtRps(d.req_per_sec_allowed) + ')',
+            'data pull in progress');
         } else if (state === 'stalled') {
-          setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
+          setSlot('pull', 'warn', 'pull running — data flow paused', 'waiting on the data vendor · usually recovers on its own');
         } else if (state === 'done') {
           setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
         } else {
-          setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
+          setSlot('pull', 'idle', 'no data pull running', 'pulls start from the Universe page');
         }
       } catch (e) {
-        setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'retries every 5 s');
+        slotFeedError('pull', pullWasActive(), 'pull status unreachable — retrying', 'pull status reconnecting…');
       }
     }
 
@@ -3571,12 +3683,16 @@
       if (document.hidden) return;
       try {
         const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/liveproof', 10000) : fetch('/api/v1/liveproof'));
-        if (!r.ok) { setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 10 s'); return; }
+        if (!r.ok) { slotFeedError('proof', false, 'health checks unreachable — retrying', 'health checks reconnecting…'); return; }
         const d = await r.json();
+        slotFails.proof = 0;
+        lastKnown.proof = 'reachable';
+        // Status-hero fan-out (DEC-OPERATOR-PAGE-CLEANVIEW-001) — one line.
+        window.__bxHeroProof && window.__bxHeroProof(d);
         const pre = verdictTone(d && d.preflight);
         const prb = verdictTone(d && d.probes);
         if (pre === null && prb === null) {
-          setSlot('proof', 'idle', 'not yet run', 'preflight + probes run around the first real pull');
+          setSlot('proof', 'idle', 'Not yet run', 'system checks run automatically around the first data pull');
           return;
         }
         const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
@@ -3587,7 +3703,7 @@
         else if (worst === 'warn') setSlot('proof', 'warn', 'checks degraded', head);
         else setSlot('proof', 'bad', 'checks FAILING', head || 'see the live-proof pill for the failing stages');
       } catch (e) {
-        setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'retries every 10 s');
+        slotFeedError('proof', false, 'health checks unreachable — retrying', 'health checks reconnecting…');
       }
     }
 
@@ -3624,9 +3740,9 @@
       sweepFill.style.width = pct.toFixed(1) + '%';
       const rate = p.combos_per_sec ? Math.round(p.combos_per_sec).toLocaleString() : '0';
       sweepMsg.textContent =
-        p.state + ' · ' + pct.toFixed(1) + '% · enumerated=' + (p.enumerated || 0) +
-        ' · evaluated=' + (p.evaluated || 0) + ' · survivors=' + (p.survivors || 0) +
-        ' · ' + rate + ' combos/sec';
+        'Sweep running — ' + pct.toFixed(1) + '% · ' + (p.evaluated || 0).toLocaleString() +
+        ' of ' + (p.enumerated || 0).toLocaleString() + ' tested · ' +
+        (p.survivors || 0) + ' winners so far · ' + rate + '/s';
     }
 
     async function pollRunSweep() {
@@ -3636,17 +3752,24 @@
         renderSweep(p);
         if (!p.running && p.state !== 'idle') {
           clearInterval(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
-          sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
-            ' survivor(s). The report above refreshes from the new run artifacts.';
+          // A failed sweep must never read as finished (unknown/bad is never
+          // green — DEC-OPERATOR-PAGE-CLEANVIEW-001 tier doctrine).
+          if (p.state === 'error') {
+            sweepMsg.textContent = 'Sweep failed — see System details below.';
+          } else {
+            sweepMsg.textContent = '✅ Sweep finished — ' + (p.survivors || 0) +
+              ' winning strategies. The results above update automatically.';
+          }
         }
       } catch (e) {
-        sweepMsg.textContent = 'Could not read sweep progress: ' + e;
+        sweepMsg.textContent = 'Progress feed temporarily unavailable — retrying automatically.';
+        sweepMsg.title = String(e); // raw error reachable, never shouted
       }
     }
 
     sweepBtn.onclick = async () => {
       sweepBtn.disabled = true;
-      sweepMsg.textContent = 'Starting the brute-force sweep…';
+      sweepMsg.textContent = 'Starting the sweep…';
       const q = new URLSearchParams();
       const symSel = document.getElementById('swSymbols');
       const syms = symSel ? Array.from(symSel.selectedOptions).map(o => o.value).join(',') : '';
@@ -3671,7 +3794,9 @@
         const r = await fetch('/api/v1/sweep/run?' + q.toString(), { method: 'POST' });
         const j = await r.json();
         if (r.status === 400) {
-          sweepMsg.textContent = 'Sweep refused: ' + (j.detail || ('HTTP ' + r.status));
+          // The validator's detail is operator-grade English — verbatim after
+          // the plain prefix (Law 2: server truth stays reachable).
+          sweepMsg.textContent = "Couldn't start: " + (j.detail || ('error ' + r.status));
           sweepBtn.disabled = false; return;
         }
         if (!j.started) {
@@ -3684,7 +3809,8 @@
         sweepPoll = setInterval(pollRunSweep, 1200);
         pollRunSweep();
       } catch (e) {
-        sweepMsg.textContent = 'Sweep request failed: ' + e;
+        sweepMsg.textContent = "Couldn't reach the server — check the connection and try again.";
+        sweepMsg.title = String(e);
         sweepBtn.disabled = false;
       }
     };
@@ -3694,19 +3820,20 @@
     if (cascadeBtn && cascadeMsg) {
       cascadeBtn.onclick = async () => {
         cascadeBtn.disabled = true;
-        cascadeMsg.textContent = 'Running the nine-filter cascade…';
+        cascadeMsg.textContent = 'Re-checking the latest run through the 9 statistical filters…';
         try {
           const r = await fetch('/api/v1/cascade/run', { method: 'POST' });
           const j = await r.json();
           if (j.ok) {
             cascadeMsg.textContent =
-              'Cascade done — sweep ' + j.sweep_id.slice(0, 16) + ' · pools=' + j.pools +
-              ' · candidates=' + j.candidates + ' · survivors=' + j.survivors;
+              'Verification finished — ' + j.survivors + ' of ' + j.candidates +
+              ' candidates survived (run ' + j.sweep_id.slice(0, 8) + ')';
           } else {
-            cascadeMsg.textContent = 'Cascade error: ' + (j.error || ('HTTP ' + r.status));
+            cascadeMsg.textContent = 'Verification failed: ' + (j.error || ('error ' + r.status));
           }
         } catch (e) {
-          cascadeMsg.textContent = 'Cascade request failed: ' + e;
+          cascadeMsg.textContent = "Couldn't reach the server — try again.";
+          cascadeMsg.title = String(e);
         } finally {
           cascadeBtn.disabled = false;
         }
@@ -3732,6 +3859,141 @@
       });
     }
   });
+
+  // ==================== DEC-OPERATOR-PAGE-CLEANVIEW-001 — status hero ====================
+  // ONE plain-English line answering "what is the system doing right now?".
+  // Fed ONLY by the existing pollers: the sweep hooks are decorator-wrapped
+  // at install (zero edits inside pollSweepProgress), the pull/proof feeds
+  // arrive via the two one-line fan-outs in pollPull()/pollProof(), and the
+  // one-click layer notifies via the guarded window.BXHero.oneclick. No new
+  // sockets, no poller-body changes, textContent only, no ₹ anywhere.
+  (function () {
+    const line = document.getElementById('bxHeroLine');
+    const sub = document.getElementById('bxHeroSub');
+    const dot = document.getElementById('bxHeroDot');
+    if (!line || !sub) return;
+    const S = {
+      sweep: null,        // latest sweep-progress payload
+      sawRunning: false,  // a done only counts as "this session" after a running
+      doneSurvivors: 0,
+      doneThisSession: false,
+      pull: 'absent',     // last-known pull flow_state
+      pullStalledTicks: 0,
+      proofFailing: false,
+      suspect: false,
+      feedOut: false      // sweep feed outage (idle suffix only — never red)
+    };
+    // Hero-local helpers (the template's fmtEta is IIFE-scoped — do NOT
+    // reach into sibling IIFEs).
+    function fmtHeroEta(secs) {
+      if (typeof secs !== 'number' || !isFinite(secs) || secs < 0) return '';
+      const s = Math.round(secs);
+      if (s < 60) return '~' + s + 's left';
+      if (s < 3600) return '~' + Math.floor(s / 60) + 'm left';
+      return '~' + Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm left';
+    }
+    function heroNum(n) {
+      return (typeof n === 'number' && isFinite(n)) ? n.toLocaleString() : '0';
+    }
+    function tone(cls) {
+      line.className = 'hero-' + cls;
+      if (dot) {
+        dot.classList.remove('live-ok', 'live-warn', 'live-down');
+        if (cls === 'ok') dot.classList.add('live-ok');
+        else if (cls === 'warn') dot.classList.add('live-warn');
+        else if (cls === 'bad') dot.classList.add('live-down');
+      }
+    }
+    function render() {
+      const sp = S.sweep;
+      // 1 · a running sweep wins everything.
+      if (sp && sp.state === 'running') {
+        const pct = (sp.percent === null || sp.percent === undefined) ? '0' : String(sp.percent);
+        const eta = fmtHeroEta(sp.eta_seconds);
+        line.textContent = 'Sweep running — ' + pct + '%' + (eta ? ' · ' + eta : '');
+        sub.textContent = heroNum(sp.evaluated) + ' of ' + heroNum(sp.enumerated) +
+          ' tested · ' + heroNum(sp.survivors) + ' winners so far';
+        tone('ok');
+        return;
+      }
+      // 2 · an active data pull.
+      if (S.pull === 'flowing' || S.pull === 'local') {
+        line.textContent = 'Data pull in progress';
+        sub.textContent = 'fetching market data';
+        tone('ok');
+        return;
+      }
+      // 3 · attention needed — the ONLY red.
+      const sweepBroken = !!(sp && (sp.state === 'error' || sp.state === 'failed'));
+      if (S.pullStalledTicks >= 2 || sweepBroken || S.proofFailing) {
+        const reason = sweepBroken ? 'the sweep stopped with an error'
+          : S.proofFailing ? 'system health checks are failing'
+            : 'the data pull has stopped moving';
+        line.textContent = 'Attention needed — ' + reason;
+        sub.textContent = 'details under System details below';
+        tone('bad');
+        return;
+      }
+      // 4 · the selected run is flagged.
+      if (S.suspect) {
+        line.textContent = 'Latest run needs review — a self-check flagged its numbers';
+        sub.textContent = 'see the Verify panel below';
+        tone('warn');
+        return;
+      }
+      // 5 · a sweep finished during this session.
+      if (S.doneThisSession) {
+        line.textContent = 'Sweep finished — ' + heroNum(S.doneSurvivors) + ' strategies passed';
+        sub.textContent = 'results updated below';
+        tone('ok');
+        return;
+      }
+      // 6 · idle (a feed blip while idle is a muted suffix — never red).
+      line.textContent = 'Idle — ready to run';
+      sub.textContent = 'latest results below · start a sweep from the Run panel' +
+        (S.feedOut ? ' · reconnecting…' : '');
+      tone('muted');
+    }
+    window.BXHero = {
+      sweep: function (sp) {
+        S.sweep = sp || null;
+        S.feedOut = false;
+        if (sp && sp.state === 'running') S.sawRunning = true;
+        if (sp && sp.state === 'done' && S.sawRunning) {
+          S.doneThisSession = true;
+          S.doneSurvivors = (typeof sp.survivors === 'number') ? sp.survivors : 0;
+        }
+        render();
+      },
+      sweepErr: function () { S.feedOut = true; render(); },
+      pull: function (d) {
+        const st = (d && typeof d.flow_state === 'string') ? d.flow_state : 'absent';
+        S.pull = st;
+        S.pullStalledTicks = st === 'stalled' ? S.pullStalledTicks + 1 : 0;
+        render();
+      },
+      proof: function (d) {
+        function kind(block) { return block && block.verdict ? block.verdict.kind : null; }
+        const worst = [kind(d && d.preflight), kind(d && d.probes)];
+        S.proofFailing = worst.indexOf('fail') !== -1 || worst.indexOf('error') !== -1;
+        render();
+      },
+      oneclick: function (info) {
+        if (info && typeof info.suspect === 'boolean') S.suspect = info.suspect;
+        render();
+      }
+    };
+    // The pull/proof fan-out entry points (guarded at the call sites).
+    window.__bxHeroPull = window.BXHero.pull;
+    window.__bxHeroProof = window.BXHero.proof;
+    // Decorator-wrap the existing sweep hooks at install — zero edits inside
+    // pollSweepProgress; the heartbeat IIFE above already installed its own.
+    const prevSweepOk = window.__bxHbSweep;
+    window.__bxHbSweep = function (p) { if (prevSweepOk) prevSweepOk(p); window.BXHero.sweep(p); };
+    const prevSweepErr = window.__bxHbSweepErr;
+    window.__bxHbSweepErr = function (e) { if (prevSweepErr) prevSweepErr(e); window.BXHero.sweepErr(e); };
+    render();
+  })();
 </script>
 
 </body>

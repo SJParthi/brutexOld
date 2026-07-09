@@ -5,8 +5,8 @@
  * UI: every line below is a FIXED, hand-written LOOKUP (never generated
  * text); an unknown key returns "" — the UI shows nothing rather than an
  * invented sentence. The per-CONDITION plain-English phrase table (R33) is
- * P3's zone — bxModeText appends the honest "(plain-English phrasing lands
- * with the P3 phrase table)" note until it merges.
+ * P3's zone — bxModeText appends the honest "(plain-English version not
+ * written yet)" note until it merges.
  *
  * Readability bar (amended R35 — the ESW playbook): one sentence per idea,
  * everyday anchors, role-framing ("the worst pain along the way"), no
@@ -28,14 +28,15 @@
 
 /**
  * The awaiting-banner wording — ONE constant so the substring pin and the
- * UI cannot drift (C-NIT-3). Matches the adapter's "awaiting real run
- * artifact" detail vocabulary.
+ * UI cannot drift (C-NIT-3). Plain-English since the clean-view pass
+ * (DEC-OPERATOR-PAGE-CLEANVIEW-001); byte-lockstep with the v29 template
+ * default and the test pin.
  *
  * @type {string}
  */
 var BX_AWAITING_TEXT =
-  "awaiting real run artifact — run a sweep from the Run controls; " +
-  "this page never shows invented numbers";
+  "No completed run yet — press Run Sweep below. Every number on this " +
+  "page comes from a real run — nothing is ever invented.";
 
 /**
  * The fixed metric → one-plain-English-line table (R36 hover lines; R27: a
@@ -163,8 +164,8 @@ function bxTradeArithmetic(rows) {
 /**
  * Pick the display text for the active mode (R33-toggle). Beginner mode
  * renders the artifact-provided plain string IF present; otherwise the
- * technical label + the honest "(plain-English phrasing lands with the P3
- * phrase table)" note — NEVER an invented sentence (R33-table is P3's).
+ * technical label + the honest "(plain-English version not written yet)"
+ * note — NEVER an invented sentence (R33-table is P3's).
  *
  * @param {string} mode - "beginner" | "pro".
  * @param {string} techText - the technical label (always present).
@@ -178,7 +179,7 @@ function bxModeText(mode, techText, plainText) {
   if (typeof plainText === "string" && plainText.length > 0) {
     return plainText;
   }
-  return String(techText) + " (plain-English phrasing lands with the P3 phrase table)";
+  return String(techText) + " (plain-English version not written yet)";
 }
 
 /* ── Browser-only DOM helpers (pinned by source-string tests). ── */
