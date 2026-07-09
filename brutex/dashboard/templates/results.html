@@ -5,19 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BruteX — Sweep leaderboard</title>
 <style>
-  :root {
-    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
-    --border: #1E222D; --border-strong: #2B313F;
-    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
-    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
-    --red: #FF5C5C;
-    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
-    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
-    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
-    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
-    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
-  }
+  /* DEC-DASHBOARD-VISUAL-OVERHAUL-001 (Batch A): the design tokens, keyframes,
+     canonical header/brandmark/topnav skin, keyboard focus ring and the
+     reduced-motion kill block all come from the TWO shared sheets linked
+     below (bx-theme.css + bx-design.css — the ONE token source; the inline
+     duplicates were REMOVED). This block keeps ONLY page-specific layout +
+     the leaderboard cell accents. */
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); height: 100%; }
   body {
@@ -28,100 +21,70 @@
       radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
       var(--bg);
   }
-  @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
-  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
-  .topnav a:hover { color:var(--text-bright); }
-  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
-
-  header {
-    display:flex; align-items:center; gap:14px; padding:16px 24px;
-    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
-  }
-  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
-    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .sub { color:var(--muted); font-size:12px; }
-  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
-  .topnav a { color:var(--blue); text-decoration:none; }
-  .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
-  /* Truthful heartbeat (DEC-DASHBOARD-UX-ANIMATE-001, fix R-2): the dot is
-     NEUTRAL grey until the leaderboard fetch resolves — bx-design's
-     .bx-live-dot state classes (live-ok / live-warn / live-down) drive the
+  .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:var(--fs-1); color:var(--muted); }
+  /* Truthful heartbeat (DEC-DASHBOARD-UX-ANIMATE-001, fix R-2): the dot rides
+     the shared .bx-live-dot — NEUTRAL grey until the leaderboard fetch
+     resolves; the state classes (live-ok / live-warn / live-down) drive the
      color from the REAL outcome; it never pulses green while offline. */
-  .live .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
 
   .controls { display:flex; gap:12px; padding:14px 24px; border-bottom:1px solid var(--border);
-    animation: fadeInDown .6s .04s ease both; flex-wrap:wrap; align-items:flex-end; }
+    animation: bxFadeInDown .6s .04s var(--ease) both; flex-wrap:wrap; align-items:flex-end; }
   .ctl { display:flex; flex-direction:column; gap:4px; }
-  .ctl label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
+  .ctl label { font-size:var(--fs-0); color:var(--muted); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
   .ctl select, .ctl input {
     background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
-    border-radius:var(--r-md); min-height:var(--ctl-h); padding:0 12px; font:inherit; font-size:13px;
+    border-radius:var(--r-md); min-height:38px; padding:0 12px; font:inherit; font-size:var(--fs-2);
     color-scheme:dark; min-width:130px;
   }
-  .ctl select:focus, .ctl input:focus { outline:none; border-color:var(--blue);
-    box-shadow:0 0 0 3px rgba(91,141,239,.18); }
+  .ctl select:focus, .ctl input:focus { outline:none; border-color:var(--accent);
+    box-shadow:0 0 0 3px var(--info-bg); }
   .refreshbtn { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
-    min-height:var(--ctl-h); padding:0 16px; font:inherit; font-size:13px; font-weight:700;
+    min-height:38px; padding:0 16px; font:inherit; font-size:var(--fs-2); font-weight:700;
     color:var(--text-bright); background:var(--surface-2); transition:.15s var(--ease); }
-  .refreshbtn:hover { border-color:var(--blue); box-shadow:0 0 18px rgba(91,141,239,.3); transform:translateY(-1px); }
+  .refreshbtn:hover { border-color:var(--accent); box-shadow:var(--elev-1); transform:translateY(-1px); }
 
+  /* KPI strip: the 4 cards ride the shared .bx-kpi / .bx-kpi-v / .bx-microlabel
+     components (bx-design.css); this grid keeps the page rhythm + skeletons. */
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
-    gap:16px; padding:18px 24px 6px; animation: fadeInUp .5s ease both; align-content:start; }
-  .card { display:flex; flex-direction:column; gap:6px;
-    background:linear-gradient(160deg,var(--surface),var(--surface-2));
-    border:1px solid var(--border-strong); border-radius:16px; padding:16px 18px;
-    transition:transform .18s var(--ease), border-color .18s var(--ease), box-shadow .18s var(--ease); }
-  .card:hover { transform:translateY(-3px); border-color:var(--border-strong); box-shadow:var(--elev-2); }
-  .card .v { font-size:24px; font-weight:800; color:var(--text-bright); font-variant-numeric:tabular-nums; }
-  .card .v.warn { color:var(--yellow); }
-  .card .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
-  .cards .bx-skel-card { border-radius:16px; }
+    gap:16px; padding:18px 24px 6px; animation: bxFadeInUp .5s var(--ease) both; align-content:start; }
+  .cards .bx-skel-card { border-radius:var(--r-md); }
 
-  .sectiontitle { padding:14px 24px 2px; font-size:12px; color:var(--muted);
+  .sectiontitle { padding:14px 24px 2px; font-size:var(--fs-1); color:var(--muted);
     text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
-  .panelwrap { padding:6px 24px 24px; animation: fadeInUp .5s ease both; }
-  .panel { overflow:auto; background:var(--surface); border:1px solid var(--border); border-radius:14px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
-    font-weight:700; text-align:left; padding:10px 14px; z-index:1; font-size:11px;
-    text-transform:uppercase; letter-spacing:.5px; cursor:pointer; white-space:nowrap; user-select:none; }
-  thead th:hover { color:var(--text-bright); }
-  thead th.sorted::after { content:" \25be"; color:var(--blue); }
-  thead th.sorted.asc::after { content:" \25b4"; color:var(--blue); }
-  tbody td { padding:9px 14px; border-top:1px solid var(--border); }
-  tbody tr:hover { background:var(--surface-2); }
+  .panelwrap { padding:6px 24px 24px; animation: bxFadeInUp .5s var(--ease) both; }
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--r-lg); }
+
+  /* Sortable-header affordance (design-system C5): EVERY column advertises
+     sortability with a neutral dim ↕; the active column keeps the accent ▾/▴.
+     Glyphs ride CSS content, so the string-built thead markup is unchanged. */
+  th.bx-th-sort::after { content:" \2195"; color:var(--muted); opacity:.55; }
+  th.bx-th-sort.sorted::after { content:" \25be"; color:var(--accent); opacity:1; }
+  th.bx-th-sort.sorted.asc::after { content:" \25b4"; color:var(--accent); opacity:1; }
+
+  /* Leaderboard cell accents over the shared .bx-table skin. */
   .rank { font-weight:800; color:var(--blue); font-variant-numeric:tabular-nums; }
   .sym { font-weight:700; color:var(--text-bright); }
-  .num { font-variant-numeric:tabular-nums; text-align:right; }
   .pnl.pos { color:var(--green); } .pnl.neg { color:var(--red); }
+  /* Rank-1 podium row — the .bx-card--rank1 treatment mapped onto a table ROW
+     via the same --ok tokens (tinted band + green leading accent), keyed off
+     the REAL rank so a client re-sort keeps the podium on rank #1. */
+  tbody tr.rank1 td { background: var(--ok-bg); }
+  tbody tr.rank1 td:first-child { box-shadow: inset 3px 0 0 var(--green); }
   /* Fix R-6: a very long conditions string clips with an ellipsis (the full
      text stays in the DOM textContent AND in the title tooltip — CSS-only). */
-  .cond { color:var(--text); font-size:12px; display:inline-block; max-width:420px;
+  .cond { color:var(--text); font-size:var(--fs-1); display:inline-block; max-width:420px;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }
   .cond.none { color:var(--muted); font-style:italic; }
   .erabanner { display:none; margin:12px 24px 0; padding:10px 14px; border:1px solid var(--yellow);
-    border-radius:var(--r-md); background:rgba(255,183,77,.09); color:var(--yellow);
-    font-size:13px; line-height:1.6; }
+    border-radius:var(--r-md); background:var(--warn-bg); color:var(--yellow);
+    font-size:var(--fs-2); line-height:1.6; }
   .erabanner.show { display:block; }
   .empty { color:var(--muted); font-size:14px; padding:40px 20px; text-align:center; line-height:1.7; }
   .empty .ei { font-size:30px; display:block; margin-bottom:10px; opacity:.65; }
-  #status { padding:4px 24px 12px; font-size:12px; color:var(--muted); }
-  .foot { padding:6px 24px 26px; font-size:11px; color:var(--muted); line-height:1.6; }
+  #status { padding:4px 24px 12px; font-size:var(--fs-1); color:var(--muted); }
+  .foot { padding:6px 24px 26px; font-size:var(--fs-0); color:var(--muted); line-height:1.6; }
 
-  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
-    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after {
-      animation-duration: .001ms !important; animation-iteration-count: 1 !important;
-      transition-duration: .001ms !important; scroll-behavior: auto !important;
-    }
-  }
   @media (max-width: 680px) {
-    header { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
     .live { margin-left: 0; }
     .cards { grid-template-columns: 1fr 1fr; padding: 14px; gap: 12px; }
     .controls { padding: 12px 14px; }
@@ -205,7 +168,7 @@
   </div>
   <div id="status"></div>
 
-  <div class="panelwrap"><div class="panel" id="panel">
+  <div class="panelwrap"><div class="panel bx-tablewrap" id="panel">
     <div class="bx-skel-grid" aria-hidden="true">
       <span class="bx-skel bx-skel-row"></span>
       <span class="bx-skel bx-skel-row"></span>
@@ -232,6 +195,9 @@
    Read-only: fetches /api/v1/sweep/leaderboard on open + on every filter change /
    manual Refresh and renders the ranked sweep winners as a click-to-sort table, with
    an honest empty-state when no sweep has been run yet. Escape-before-innerHTML (XSS).
+   A store-FAULT payload (error/error_type markers — store_error_payload, the
+   DEC-SWEEP-RESULTS-DEPTH-001 Ruling-10/C3 degrade) renders a DISTINCT error card
+   naming the error_type, never the friendly empty hero (no blank illusion).
 
    DEC-DASHBOARD-UX-ANIMATE-001 layer (styling/state only — every rendered VALUE is
    byte-identical, DEC-SURFACE-TRIAL-001): skeleton shimmer while pending (via the
@@ -328,12 +294,14 @@ function ensureCards() {
   cardVals = [];
   cardsEl.textContent = "";
   for (const [label] of CARD_DEFS) {
+    /* Shared KPI components (bx-design.css .bx-kpi / .bx-kpi-v / .bx-microlabel);
+       the value keeps the tabular-nums face + the value-gated .warn tint. */
     const card = document.createElement("div");
-    card.className = "card";
+    card.className = "bx-kpi";
     const v = document.createElement("span");
-    v.className = "v";
+    v.className = "bx-kpi-v";
     const l = document.createElement("span");
-    l.className = "l";
+    l.className = "bx-microlabel";
     l.textContent = label;
     card.appendChild(v);
     card.appendChild(l);
@@ -404,6 +372,46 @@ function failState(label, opts) {
   }
 }
 
+/* Store-fault honesty (the audit MAJOR — DEC-SWEEP-RESULTS-DEPTH-001 Ruling 10 /
+   package C3): the backend degrades a corrupt/unreadable ResultsStore into a 200
+   payload carrying explicit error/error_type markers
+   (sweep_results_view.store_error_payload) precisely so a store FAULT can never
+   masquerade as the friendly "No sweeps yet" hero. Render a DISTINCT error card
+   NAMING the error_type — createElement/textContent only (the repo XSS law); the
+   KPI cards read honest "—" unknowns, never the payload's structural zeros. */
+function renderStoreError(board) {
+  ROWS = [];
+  renderCardsUnknown();
+  eraBanner.textContent = "";
+  eraBanner.classList.remove("show");
+  const errType = String(board.error_type || "unknown");
+  const detail = String(board.error);
+  const title = "results store error (" + errType + ")";
+  if (window.BXUI) {
+    BXUI.errorCard(panel, {
+      title: title,
+      hint: detail + " — not an empty leaderboard: the sweep store could not be read.",
+      retry: load,
+    });
+  } else {
+    panel.textContent = "";
+    const box = document.createElement("div");
+    box.className = "bx-state error";
+    const head = document.createElement("div");
+    head.className = "headline";
+    head.textContent = title;
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = detail;
+    box.appendChild(head);
+    box.appendChild(hint);
+    panel.appendChild(box);
+  }
+  statusEl.textContent = title + " — " + detail;
+  liveTxt.textContent = "store error";
+  setDot("down");
+}
+
 /* Fill a <select> with options, preserving the current value when still valid. */
 function fillSelect(el, values) {
   const cur = el.value;
@@ -444,14 +452,23 @@ function renderTable() {
     return;
   }
   sortRows();
+  /* Every th advertises sortability (.bx-th-sort neutral ↕, accent ▾/▴ when
+     active); numeric columns carry .num (the shared right-aligned tabular-nums
+     face) on th AND td; rank #1 keeps the podium row tint wherever a client
+     re-sort places it. Same esc()-before-innerHTML pipeline as ever. */
   const head = COLS.map(([k, lbl]) => {
-    const cls = k === sortKey ? "sorted" + (sortAsc ? " asc" : "") : "";
+    const cls = "bx-th-sort" + (NUMERIC.has(k) ? " num" : "")
+      + (k === sortKey ? " sorted" + (sortAsc ? " asc" : "") : "");
     return '<th data-k="' + esc(k) + '" class="' + cls + '">' + lbl + "</th>";
   }).join("");
   const body = ROWS.map((r) =>
-    "<tr>" + COLS.map(([, , render]) => "<td>" + render(r) + "</td>").join("") + "</tr>"
+    "<tr" + (Number(r.rank) === 1 ? ' class="rank1"' : "") + ">"
+      + COLS.map(([k, , render]) =>
+        "<td" + (NUMERIC.has(k) ? ' class="num"' : "") + ">" + render(r) + "</td>").join("")
+      + "</tr>"
   ).join("");
-  panel.innerHTML = "<table><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table>";
+  panel.innerHTML = '<table class="bx-table bx-table--dense bx-table--zebra"><thead><tr>'
+    + head + "</tr></thead><tbody>" + body + "</tbody></table>";
   /* Entrance stagger on FRESH data only — a sort click re-renders instantly
      (first-render-only guard: the flag is armed by load(), consumed here). */
   if (animateRows) {
@@ -491,6 +508,13 @@ async function load() {
     const r = await (window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url));
     if (!r.ok) { failState("error " + r.status, { status: r.status }); return; }
     const board = await r.json();
+    /* A store-fault degrade payload (error/error_type markers) is a 200 that
+       is NOT "no sweeps yet" — route it to the distinct honest error card
+       BEFORE any count/hero rendering could launder it into an empty state. */
+    if (board && board.error) {
+      renderStoreError(board);
+      return;
+    }
     renderCards(board);
     /* Snapshot-era honesty (DEC-RESULTS-SURFACE-HONESTY-001): when the ranked
        rows span more than one data era, say so LOUDLY. textContent only — the
