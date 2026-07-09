@@ -236,6 +236,10 @@ def test_hero_flags_a_suspect_run(new_page: NewPageFactory, tmp_path: Path) -> N
     expect(pill).to_have_class("oc-pill oc-pill-suspect")
     title = page.get_attribute("#ocRunPill", "title") or ""
     assert "server state: suspect" in title
+    # Review round 1: a manifest-carrying run HIDES the awaiting banner — the
+    # author-origin display:flex used to defeat the hidden attribute, so
+    # "No completed run yet" rendered beside this very pill/hero.
+    expect(page.locator("#ocAwaiting")).to_be_hidden()
     _screenshot(page, "after-suspect.png")
 
 

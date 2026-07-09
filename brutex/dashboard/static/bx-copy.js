@@ -137,6 +137,14 @@ var BX_COPY_RULES = [
     tier: "neutral"
   },
   {
+    /* A run IS selected here — the fixture simply lacks that rank; the
+       generic "waiting for a sweep run" wording would be false (review
+       round 1). */
+    re: /^awaiting real run artifact — no trades fixture for rank (\d+)$/,
+    text: "No test-data trades stored for strategy #$1.",
+    tier: "neutral"
+  },
+  {
     /* Generic — deliberately LAST of the awaiting family. */
     re: /^awaiting real run artifact\b/,
     text: "Waiting for a sweep run — nothing to show yet.",
@@ -168,12 +176,20 @@ var BX_COPY_RULES = [
     tier: "alert"
   },
   {
+    /* The trades partial twin of the top100 row rule (review round 1). */
+    re: /^trade row (\d+) is not an object — rows kept up to it$/,
+    text: "Part of the trade list couldn't be read — showing the readable entries.",
+    tier: "notice"
+  },
+  {
     re: /^row (\d+) (?:is not an object|missing contract keys).*rows kept up to it$/,
     text: "Part of the winner list couldn't be read — showing the readable entries.",
     tier: "notice"
   },
   {
-    re: /^manifest\.json (?:is not valid JSON|missing contract keys|unreadable\/corrupt)/,
+    /* All FOUR corrupt-manifest siblings (the "is not a JSON object" arm was
+       a catalog gap rendering filename jargon — review round 1). */
+    re: /^manifest\.json (?:is not valid JSON|is not a JSON object|missing contract keys|unreadable\/corrupt)/,
     text: "Run record damaged — couldn't be read.",
     tier: "alert"
   },
@@ -193,13 +209,20 @@ var BX_COPY_RULES = [
     tier: "neutral"
   },
   {
+    /* The provisional caveat rides the ALERT verdicts too (review round 1 —
+       under the ASSUMED algorithm a reported break could itself be a false
+       alarm of the assumed algorithm; T-M1 covers EVERY verdict). */
     re: /^chain break at line (\d+)/,
-    text: "Activity log BROKEN at record $1 — treat this run as unverified.",
+    text:
+      "Activity log BROKEN at record $1 — treat this run as unverified. " +
+      "Verification method is provisional until the audit component ships.",
     tier: "alert"
   },
   {
     re: /^(?:unparseable record at line \d+|record at line \d+ carries no hash)/,
-    text: "Activity log damaged partway through — treat this run as unverified.",
+    text:
+      "Activity log damaged partway through — treat this run as unverified. " +
+      "Verification method is provisional until the audit component ships.",
     tier: "alert"
   },
   {
@@ -209,7 +232,9 @@ var BX_COPY_RULES = [
   },
   {
     re: /^events\.jsonl unreadable: /,
-    text: "Activity log file couldn't be read.",
+    text:
+      "Activity log file couldn't be read. Verification method is " +
+      "provisional until the audit component ships.",
     tier: "alert"
   },
   {
@@ -305,6 +330,11 @@ function bxCopyApply(el, raw, opts) {
     el.textContent = (o.prefix || "") + r.text;
     if (r.matched && s) {
       el.title = "server: " + s;
+    } else if (typeof el.removeAttribute === "function") {
+      // Not remapped ⇒ NO server attribution: clear any stale "server: …"
+      // title a previous render left on this reused element (Law 2 — a
+      // wrong audit trail is worse than none; review round 1).
+      el.removeAttribute("title");
     }
   }
   return r;

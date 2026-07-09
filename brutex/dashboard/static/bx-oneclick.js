@@ -254,8 +254,19 @@ function bxFunnelProvenance(source, runId) {
     var awaiting = byId("ocAwaiting");
     if (awaiting) {
       if (payload.status === "awaiting") {
-        awaiting.textContent =
-          window.BXExplain ? window.BXExplain.AWAITING_TEXT : "waiting for run data";
+        // The fixed "No completed run yet" wording is TRUE only when NO run
+        // is selected at all. A SELECTED run in the awaiting state means the
+        // run EXISTS but its record artifact is missing (no production
+        // manifest writer until P2) — render the server detail via the
+        // catalog ("Run record not written yet."), never a false no-run
+        // claim (review round 1).
+        if (state.selectedRunId && window.BXCopy) {
+          window.BXCopy.apply(awaiting, payload.detail, { fallback: "waiting for run data" });
+        } else {
+          awaiting.textContent =
+            window.BXExplain ? window.BXExplain.AWAITING_TEXT : "waiting for run data";
+          awaiting.removeAttribute("title");
+        }
         awaiting.hidden = false;
       } else {
         awaiting.hidden = true;
@@ -440,11 +451,18 @@ function bxFunnelProvenance(source, runId) {
     return Array.isArray(row.conditions) ? row.conditions.join(" × ") : "—";
   }
 
-  function fillRankOneCard(rows) {
+  function fillRankOneCard(rows, status) {
     if (!rows.length) {
       // T-M2: an EMPTY-but-valid artifact keeps the awaiting em-dashes —
-      // the card NEVER indexes rows[0].
-      setOc("r1_name", "no winners stored for this run");
+      // the card NEVER indexes rows[0]. A PARTIAL zero is DAMAGE, not a
+      // real zero: the winner count is unknown, so the no-winners outcome
+      // claim is reserved for status "ok" (review round 1).
+      setOc(
+        "r1_name",
+        status === "partial"
+          ? "winner list unreadable — count unknown"
+          : "no winners stored for this run"
+      );
       return;
     }
     var row = rows[0];
@@ -544,9 +562,11 @@ function bxFunnelProvenance(source, runId) {
         var note = byId("ocTop100Note");
         if (note) {
           if (payload.status === "ok" || payload.status === "partial") {
-            if (payload.row_count === 0) {
+            if (payload.row_count === 0 && payload.status === "ok") {
               // A REAL zero is a fact, not an error — the catalog line alone
-              // (the redundant "0 winner(s) stored" echo is suppressed).
+              // (the redundant "0 winner(s) stored" echo is suppressed). The
+              // outcome sentence is GATED on status "ok": the server sets
+              // empty_note ONLY for a genuine zero (review round 1).
               if (window.BXCopy) {
                 window.BXCopy.apply(note, payload.empty_note, {
                   fallback: "the run finished with no surviving strategies"
@@ -554,8 +574,15 @@ function bxFunnelProvenance(source, runId) {
               } else {
                 note.textContent = String(payload.empty_note || "");
               }
+            } else if (payload.row_count === 0) {
+              // PARTIAL with zero READABLE rows is DAMAGE, not a real zero —
+              // the true winner count is unknown; never a run-outcome claim
+              // (review round 1). The damage chip below names the defect.
+              note.textContent = "winner count unknown — the stored list couldn't be read";
+              note.removeAttribute("title");
             } else {
               note.textContent = String(payload.row_count) + " strategies survived";
+              note.removeAttribute("title"); // no server string backs this direct write
             }
             if (payload.status === "partial") {
               note.appendChild(document.createTextNode(" · "));
@@ -575,7 +602,7 @@ function bxFunnelProvenance(source, runId) {
           }
         }
         if (payload.status === "ok" || payload.status === "partial") {
-          fillRankOneCard(payload.rows || []);
+          fillRankOneCard(payload.rows || [], payload.status);
           renderCombosRows(payload);
           if (payload.rows && payload.rows.length && payload.row_count !== undefined) {
             setOc("tested_rank_line", "#" + String(payload.rows[0].rank) + " of " + String(payload.row_count) + " stored winners");
@@ -586,6 +613,7 @@ function bxFunnelProvenance(source, runId) {
         var note = byId("ocTop100Note");
         if (note) {
           note.textContent = "Couldn't load the winner list — retrying automatically.";
+          note.removeAttribute("title"); // no server string backs this direct write
         }
       });
   }
@@ -715,6 +743,8 @@ function bxFunnelProvenance(source, runId) {
           badge.textContent = "source: " + (srcCopy && srcCopy.matched ? srcCopy.text : rawSource);
           if (srcCopy && srcCopy.matched) {
             badge.title = "server: " + rawSource;
+          } else {
+            badge.removeAttribute("title"); // never a stale server attribution
           }
         }
         var note = byId("ocTradesNote");
@@ -731,6 +761,7 @@ function bxFunnelProvenance(source, runId) {
               note.textContent =
                 "Showing " + String(shown) + " of " + String(payload.total) + " trades";
             }
+            note.removeAttribute("title"); // no server string backs this direct write
             if (payload.status === "partial") {
               note.appendChild(document.createTextNode(" · "));
               var tradeChip = document.createElement("span");

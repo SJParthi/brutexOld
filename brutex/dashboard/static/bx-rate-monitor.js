@@ -195,8 +195,8 @@
       "#" + OVERLAY_ID + " .bxrm-grid .gv.bxrm-stale{color:var(--red,#FF5C5C);}" +
       "#" + OVERLAY_ID + " .bxrm-grid .gv.bxrm-stale-warn{color:var(--yellow,#FFB74D);}" +
       // Idle collapse (DEC-OPERATOR-PAGE-CLEANVIEW-001): a quiet widget shrinks
-      // to a one-line pill; hover (or a click-to-pin) restores the full card.
-      // ADDITIVE rules only — no pre-existing rule above is edited.
+      // to a one-line pill; hover restores the full card and a click opens the
+      // full overlay. ADDITIVE rules only — no pre-existing rule above is edited.
       "#" + WIDGET_ID + ".bxrm-min:not(:hover) > :not(.bxrm-head) { display: none; }" +
       "#" + WIDGET_ID + ".bxrm-min:not(:hover) { min-width: 0; opacity: 0.7; padding: 6px 10px; border-radius: 999px; }";
     var style = document.createElement("style");
@@ -279,15 +279,12 @@
       ]
     );
     w.addEventListener("click", openOverlay);
-    // Click-to-pin (DEC-OPERATOR-PAGE-CLEANVIEW-001): a click also pins the
-    // widget open so the idle collapse stands down until clicked again.
-    // Presentation only — DOM nodes and the poll machinery are unchanged.
-    w.addEventListener("click", function () {
-      userPinnedOpen = !userPinnedOpen;
-      if (userPinnedOpen) {
-        w.classList.remove("bxrm-min");
-      }
-    });
+    // Deliberately NO second click listener (review round 1): the interim
+    // click-to-pin toggle shared this element with openOverlay, so every
+    // overlay peek silently flipped an invisible pin and left the idle
+    // widget permanently expanded. Click = the full overlay (pre-existing
+    // UX); a quiet-idle peek is the CSS :hover expand; the collapse stays
+    // purely state-driven (idle/done + not stale) in render().
     document.body.appendChild(w);
     return w;
   }
@@ -508,8 +505,9 @@
   var lastData = null;
 
   // ── Idle-collapse state (DEC-OPERATOR-PAGE-CLEANVIEW-001 — presentation
-  //    only; the poll machinery below is untouched) ──
-  var userPinnedOpen = false; // click-to-pin: the collapse stands down
+  //    only; the poll machinery below is untouched). No click-to-pin flag:
+  //    the interim toggle collided with the click→openOverlay binding on the
+  //    same element (review round 1) — collapse is state-driven only. ──
   var ageStaleCls = "";       // renderAge's last staleness class ("" = fresh)
 
   // ── Self-recovering poll state (DEC-PULL-UI-STALENESS-001) ──
@@ -576,13 +574,14 @@
     lastData = data;
     var state = data && typeof data.flow_state === "string" ? data.flow_state : "idle";
     // Idle collapse (DEC-OPERATOR-PAGE-CLEANVIEW-001): a quiet widget (idle or
-    // done, not pinned open, not stale) renders as a one-line pill; any active
-    // or degraded state restores the full card. Presentation only.
+    // done, not stale) renders as a one-line pill; any active or degraded
+    // state restores the full card. Presentation only; hover peeks, click
+    // opens the overlay (no pin state — review round 1).
     var wroot = document.getElementById(WIDGET_ID);
     if (wroot) {
       wroot.classList.toggle(
         "bxrm-min",
-        (state === "idle" || state === "done") && !userPinnedOpen && !ageStaleCls
+        (state === "idle" || state === "done") && !ageStaleCls
       );
     }
     // flow_detail (DEC-PIPELINE-PHASE-UI-HONESTY-001): non-empty only for the amber

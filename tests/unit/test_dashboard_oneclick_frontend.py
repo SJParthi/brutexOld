@@ -261,6 +261,35 @@ class TestCopyCatalogWiring:
         js = _js(_ONECLICK)
         assert 'chip.title = String(link.derived_from || "");' in js
 
+    def test_partial_zero_never_fabricates_the_real_zero_outcome(self) -> None:
+        """Review round 1: the run-outcome sentence ("finished with no
+        surviving strategies") is GATED on status "ok" — a DAMAGED top100
+        (partial, 0 readable rows) renders the honest count-unknown line and
+        the rank-1 card never claims "no winners stored"."""
+        js = _js(_ONECLICK)
+        assert 'if (payload.row_count === 0 && payload.status === "ok") {' in js
+        assert "winner count unknown — the stored list couldn't be read" in js
+        assert '"winner list unreadable — count unknown"' in js
+        assert "fillRankOneCard(payload.rows || [], payload.status);" in js
+
+    def test_awaiting_banner_uses_the_server_detail_for_a_selected_run(self) -> None:
+        """Review round 1: a SELECTED run in the awaiting state renders the
+        server detail via the catalog ("Run record not written yet." — the
+        record artifact is what's missing), never the false "No completed
+        run yet" claim; the fixed constant survives for the genuinely-no-run
+        state (the C-NIT-3 pin above)."""
+        js = _js(_ONECLICK)
+        assert "if (state.selectedRunId && window.BXCopy) {" in js
+
+    def test_direct_write_arms_clear_any_stale_server_title(self) -> None:
+        """Review round 1 (Law 2): a direct textContent write on a REUSED
+        note/badge element clears the previous state's 'server: …' title —
+        a wrong audit attribution is worse than none."""
+        js = _js(_ONECLICK)
+        assert js.count('removeAttribute("title")') >= 5
+        copy_js = _js(_COPY)
+        assert 'el.removeAttribute("title");' in copy_js
+
 
 class TestChartAndExplainSourcePins:
     """The browser-only halves of bx-chart.js / bx-explain.js (source pins)."""

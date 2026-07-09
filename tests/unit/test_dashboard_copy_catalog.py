@@ -148,6 +148,13 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
         "neutral",
     ),
     (
+        # Review round 1: a run IS selected — the fixture just lacks the rank;
+        # the generic "waiting for a sweep run" wording would be false.
+        "awaiting real run artifact — no trades fixture for rank 3",
+        "No test-data trades stored for strategy #3.",
+        "neutral",
+    ),
+    (
         "awaiting real run artifact",
         "Waiting for a sweep run — nothing to show yet.",
         "neutral",
@@ -188,12 +195,25 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
         "notice",
     ),
     (
+        # Review round 1: the trades partial twin no longer renders verbatim.
+        "trade row 4 is not an object — rows kept up to it",
+        "Part of the trade list couldn't be read — showing the readable entries.",
+        "notice",
+    ),
+    (
         "0 winners stored for this run",
         "the run finished with no surviving strategies",
         "neutral",
     ),
     (
         "manifest.json is not valid JSON",
+        "Run record damaged — couldn't be read.",
+        "alert",
+    ),
+    (
+        # Review round 1: the FOURTH corrupt-manifest sibling
+        # (oneclick_artifacts "is not a JSON object") joins the rule.
+        "manifest.json is not a JSON object",
         "Run record damaged — couldn't be read.",
         "alert",
     ),
@@ -210,18 +230,24 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
         "neutral",
     ),
     (
+        # Review round 1: the provisional caveat rides the ALERT verdicts too
+        # (under the ASSUMED algorithm a reported break could itself be a
+        # false alarm of the assumed algorithm — T-M1 covers EVERY verdict).
         "chain break at line 42",
-        "Activity log BROKEN at record 42 — treat this run as unverified.",
+        "Activity log BROKEN at record 42 — treat this run as unverified. "
+        "Verification method is provisional until the audit component ships.",
         "alert",
     ),
     (
         "unparseable record at line 9",
-        "Activity log damaged partway through — treat this run as unverified.",
+        "Activity log damaged partway through — treat this run as unverified. "
+        "Verification method is provisional until the audit component ships.",
         "alert",
     ),
     (
         "record at line 9 carries no hash",
-        "Activity log damaged partway through — treat this run as unverified.",
+        "Activity log damaged partway through — treat this run as unverified. "
+        "Verification method is provisional until the audit component ships.",
         "alert",
     ),
     (
@@ -231,7 +257,8 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "events.jsonl unreadable: [Errno 13]",
-        "Activity log file couldn't be read.",
+        "Activity log file couldn't be read. Verification method is "
+        "provisional until the audit component ships.",
         "alert",
     ),
     (
@@ -365,6 +392,27 @@ class TestCopyCatalogGolden:
         out2 = _node_call('C.apply(null, null, {fallback: "waiting for run data"})')
         assert out2["text"] == "waiting for run data"
 
+    def test_apply_clears_a_stale_server_title_on_a_reused_element(self) -> None:
+        """Review round 1: a matched→unmatched transition on a REUSED element
+        must never keep the previous state's 'server: …' attribution — a
+        wrong audit trail is worse than none (Law 2)."""
+        out = _node_call(
+            "(() => { const el = {textContent: '', title: undefined,"
+            "  removeAttribute(name) { if (name === 'title') { this.title = undefined; } }};"
+            "  C.apply(el, ARGS[0][0], {});"
+            "  const mid = el.title;"
+            "  C.apply(el, ARGS[0][1], {});"
+            "  return {mid: mid === undefined ? null : mid,"
+            "          text: el.textContent,"
+            "          title: el.title === undefined ? null : el.title}; })()",
+            json.dumps(["awaiting real run artifact", "novel verbatim detail"]),
+        )
+        assert out == {
+            "mid": "server: awaiting real run artifact",
+            "text": "novel verbatim detail",
+            "title": None,
+        }
+
 
 # ---------------------------------------------------------------------------
 # v29 template: user-visible text is jargon-free (pure Python — no node)
@@ -440,6 +488,25 @@ class TestOperatorPageVisibleTextClean:
         assert "--yellow" not in body, "yellow text survived on .oc-awaiting"
         assert "var(--muted)" in body
         assert "var(--surface-2)" in body
+
+    def test_awaiting_banner_hidden_attribute_actually_hides(self) -> None:
+        """Review round 1: the author-origin ``display: flex`` on
+        ``.oc-awaiting`` beats the UA ``[hidden]{display:none}`` rule — the
+        explicit override must exist or ``awaiting.hidden = true`` never
+        hides the banner (it rendered beside a live run's own pill/hero)."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert ".oc-awaiting[hidden] { display: none; }" in html
+
+    def test_heartbeat_pointer_and_hero_collapse_labels_are_accurate(self) -> None:
+        """Review round 1 copy accuracy: the Run button sits ABOVE the
+        diagnostics block ("below" pointed the wrong way), and the
+        hero-collapse line binds the ENUMERATED count — "generated", never
+        the page's other meaning of "tested"."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "start one from the Run panel above" in html
+        assert "start one below" not in html
+        assert "ideas generated" in html
+        assert "ideas tested" not in html
 
     def test_directions_options_submit_buy_sell(self) -> None:
         """Folded bugfix: the backend accepts BUY/SELL only — long/short

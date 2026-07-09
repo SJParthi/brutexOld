@@ -2176,6 +2176,11 @@
   /* Awaiting is a CALM empty state, not an alarm (DEC-OPERATOR-PAGE-CLEANVIEW-001):
      rule VALUES only changed — amber is reserved for genuine NOTICE states. */
   .oc-awaiting { display: flex; align-items: center; gap: 10px; margin: 14px var(--gutter) 0; padding: 9px 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-2); font-size: 12px; color: var(--muted); font-weight: 600; }
+  /* The author-origin display:flex above beats the UA [hidden]{display:none}
+     rule — without this override `awaiting.hidden = true` never hides the
+     banner (review round 1: "No completed run yet" rendered beside a live
+     run's own pill/hero). */
+  .oc-awaiting[hidden] { display: none; }
   .oc-runbar { display: flex; align-items: center; gap: 12px; margin: 14px var(--gutter) 0; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
   .oc-pill { padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border-strong); font-weight: 800; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
   .oc-pill-complete { color: var(--green-bright); border-color: var(--green-dim); }
@@ -2593,7 +2598,7 @@
         <span class="auto-hero-badge">Auto-picked</span>
         <span style="margin-left: 8px; padding: 4px 12px; background: linear-gradient(135deg, var(--purple), var(--pink)); color: white; border-radius: 6px; font-size: 10px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;">9-filter institutional pipeline</span>
       </div>
-      <div class="hero-collapse-line">From <span class="big-num" data-oc="actual_enumerated">—</span> ideas tested → <span class="winner-num" data-oc="r1_rank">—</span> best winner</div>
+      <div class="hero-collapse-line">From <span class="big-num" data-oc="actual_enumerated">—</span> ideas generated → <span class="winner-num" data-oc="r1_rank">—</span> best winner</div>
       <h2>Top stored strategies · survived the 9-filter institutional pipeline</h2>
       <div class="sub">No manual configuration. The brute-force engine tests every combo of the selection — stop-loss + take-profit grids AND signal-driven exits — then 9 institutional statistical filters in sequence (López de Prado / Bailey / White / Hansen rigor). The counts on this page come from the selected run itself — never a stale hardcoded figure.</div>
       <div class="auto-flow">
@@ -3626,7 +3631,7 @@
     window.__bxHbSweep = function (sp) {
       slotFails.sweep = 0;
       lastKnown.sweep = sp && sp.state ? String(sp.state) : 'absent';
-      if (!sp || sp.state === 'idle') { setSlot('sweep', 'idle', 'no sweep running', 'start one below'); return; }
+      if (!sp || sp.state === 'idle') { setSlot('sweep', 'idle', 'no sweep running', 'start one from the Run panel above'); return; }
       const pct = (sp.percent === null || sp.percent === undefined) ? '0' : String(sp.percent);
       const rate = (typeof sp.combos_per_sec === 'number') ? sp.combos_per_sec : 0;
       const main = String(sp.state) + ' · ' + pct + '% done';
