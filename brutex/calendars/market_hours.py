@@ -263,3 +263,6 @@ class MarketHoursGuard:
             return False
         ist_dt = self.clock()
         return market_hours_blocked_now(ist_dt, is_trading_day(ist_dt.date()))
+
+
+# DEC-GROWW-MARKET-HOURS-GUARD-001 — re-snapshot marker (PR-body event-snapshot gate).
