@@ -1453,6 +1453,64 @@ def _execute_candle_page_resilient(
     return out_columns, list(cursor.fetchall())
 
 
+def _retry_candle_read_once[T](
+    operation: Callable[[], T],
+    *,
+    source: str,
+    retry_sleep: Callable[[float], None] | None,
+) -> T:
+    """Run one candle count/page read, retrying ONCE on a transient ``duckdb.Error``.
+
+    DEC-DB-CANDLES-TORN-READ-RETRY-001 — the ``/db`` candle-pager twin of the
+    window-ledger torn-read guard (DEC-WINDOW-TORN-READ-RETRY-001, see
+    :func:`build_window_payload` / :func:`phase_progress_payload`): the candle
+    lake writers land atomically (``os.replace``), but a pager request performs
+    MULTIPLE independent ``read_parquet`` opens (COUNT + page SELECT + the
+    cursor ``fetchall`` streaming read), so a live pull's replace landing
+    between/inside them surfaces as a transient ``duckdb.Error`` that
+    previously 500'd the page. *operation* is re-run ONCE after
+    :data:`_DUCKDB_RETRY_DELAY_S` (via *retry_sleep*, injectable for tests;
+    ``None`` = the ALIASED module default ``from time import sleep`` — the bare
+    name ``time`` here is ``datetime.time``). What the second attempt re-reads
+    has TWO shapes (review fold — the original "every operation re-globs"
+    claim was true only of the first): the LEGACY count/page operations
+    rebuild their glob / file list from the partition directory per attempt,
+    so the retry reads the freshly-replaced files; the #1228 manifest PRUNED
+    page (:func:`_stats_pruned_page`) re-plans from the request's captured
+    ``_StatsReadContext`` snapshot — a FIXED rel-path list, not a fresh glob —
+    which stays correct because an ``os.replace``'d file's CONTENT is re-read
+    on the retry and any stat-token movement is caught by
+    :func:`_stats_tokens_intact` (⇒ whole-request legacy degrade), so the
+    retry never serves a torn or stale manifest page. The retry covers the
+    WHOLE execute+fetch — including :func:`_execute_candle_page_resilient`'s
+    ``fetchall`` (outside its own corrupt-skip ``try``), the pruned page's
+    ``fetchall``, and the corrupt-file degrade path's unguarded re-run — the
+    exact windows the corrupt-skip ladder never guarded.
+
+    Honest envelope (Golden Rule #10): retry-once NARROWS the race, it does
+    not eliminate it — a SECOND replace landing inside the retry window still
+    raises (a genuine SQL bug likewise still propagates after one bounded
+    pause, mirroring the ledger guard's contract — never silently swallowed).
+    """
+    try:
+        return operation()
+    except duckdb.Error as exc:
+        # Torn read (reader-side multi-open race vs the atomic lake writer) —
+        # retry ONCE. The retry runs OUTSIDE any lock (the injected count
+        # cache computes unlocked and caches NOTHING on a raise — the
+        # phase_progress_payload precedent), so the second attempt recomputes
+        # cleanly and a retried success is cached normally.
+        _LOG.warning(
+            "db.candle_read_retry",
+            source=source,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        sleeper = _default_sleep if retry_sleep is None else retry_sleep
+        sleeper(_DUCKDB_RETRY_DELAY_S)
+        return operation()
+
+
 #: The intervals the SPOT coverage/completeness VERDICTS actually read — the
 #: single FETCHED granularity (``1minute``, DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
 #: plus the derived ``1day`` daily anchor. The 19 derived intraday TFs the
@@ -2804,6 +2862,7 @@ def query_candles(
     generation: int = 0,
     registry_path: Path | None = None,
     use_stats_manifest: bool = False,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """Read one page of OHLCV candles for a partition set (DEC-DB-QUERY-001).
 
@@ -2881,6 +2940,23 @@ def query_candles(
         default ``False`` keeps every direct caller byte-identical to the
         legacy query pattern, and the ``BRUTEX_LAKE_STATS_MANIFEST=off`` kill
         switch forces legacy even when ``True``.
+    retry_sleep
+        Injectable sleeper for the torn-read retry-once guard
+        (DEC-DB-CANDLES-TORN-READ-RETRY-001, the DEC-WINDOW-TORN-READ-RETRY-001
+        idiom): a live pull's atomic ``os.replace`` landing between/inside
+        this request's independent ``read_parquet`` opens (COUNT + page
+        SELECT + ``fetchall``) surfaces as a transient ``duckdb.Error`` — each
+        read is retried ONCE after :data:`_DUCKDB_RETRY_DELAY_S` over a
+        freshly-rebuilt glob/file list (see :func:`_retry_candle_read_once`).
+        ``None`` (the default) sleeps for real. HONEST envelope: retry-once
+        narrows the race, it does not eliminate it — a second replace inside
+        the retry window still raises; and a CACHED total served beside a
+        LIVE page read can lag a concurrent writer within one generation
+        (inherent to the DEC-DB-CANDLE-COUNT-CACHE-001 generation-keyed
+        design) — when the page returned rows, the returned ``total`` is
+        therefore raised to at least ``offset + len(rows)`` (an OBSERVED
+        lower bound); an EMPTY page never adjusts the total (it proves
+        nothing — ``offset + 0`` is a bound only for k > 0 rows).
 
     Returns
     -------
@@ -3030,13 +3106,19 @@ def query_candles(
     # closure from the stamped per-file counts instead (zero footer I/O beyond
     # the ≤few straddler files) — same number, revalidated THIS request.
     def _legacy_count_total() -> int:
-        rows = _execute_parquet_resilient(
-            conn,
-            base,
-            f"SELECT {distinct_count_sql(('timestamp',))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
-            list(where_params),
-            source=skip_source,
-        )
+        # The COUNT execute+fetch rides the torn-read retry-once guard
+        # (DEC-DB-CANDLES-TORN-READ-RETRY-001): the resilient helper rebuilds
+        # its glob from `base` per attempt, so the retry re-globs fresh.
+        def _run_count() -> list[tuple[Any, ...]]:
+            return _execute_parquet_resilient(
+                conn,
+                base,
+                f"SELECT {distinct_count_sql(('timestamp',))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+                list(where_params),
+                source=skip_source,
+            )
+
+        rows = _retry_candle_read_once(_run_count, source=skip_source, retry_sleep=retry_sleep)
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
     def _count_total() -> int:
@@ -3061,29 +3143,44 @@ def query_candles(
     # BEFORE the page runs — the pruner flips ``served`` off on a mid-request
     # failure, and the degrade law below needs the pre-page verdict).
     manifest_total_candidate = stats_ctx is not None and stats_ctx.served
-    pruned = _stats_pruned_page(
-        stats_ctx,
-        select=select,
-        columns=columns,
-        where_sql=where_sql,
-        where_params=list(where_params),
-        qualify_sql=qualify_sql,
-        order_sql=order_sql,
-        descending=descending,
-        limit=safe_limit,
-        offset=safe_offset,
-        count_cache=count_cache,
-        generation=generation,
-    )
-    if pruned is not None:
-        out_columns, raw_rows = pruned
-    else:
-        out_columns, raw_rows = _execute_candle_page_resilient(
+
+    # Both page forms ride the torn-read retry-once guard
+    # (DEC-DB-CANDLES-TORN-READ-RETRY-001): the pruned form's own fail-closed
+    # ladder catches execute-time unreadable-file errors, but its ``fetchall``
+    # streaming read sits outside that ladder — and the legacy form's
+    # ``fetchall`` + corrupt-skip degrade re-run were likewise unguarded. Each
+    # attempt re-plans / re-globs from the partition directory.
+    def _run_pruned_page() -> tuple[list[str], list[tuple[Any, ...]]] | None:
+        return _stats_pruned_page(
+            stats_ctx,
+            select=select,
+            columns=columns,
+            where_sql=where_sql,
+            where_params=list(where_params),
+            qualify_sql=qualify_sql,
+            order_sql=order_sql,
+            descending=descending,
+            limit=safe_limit,
+            offset=safe_offset,
+            count_cache=count_cache,
+            generation=generation,
+        )
+
+    def _run_legacy_page() -> tuple[list[str], list[tuple[Any, ...]]]:
+        return _execute_candle_page_resilient(
             conn,
             base,
             f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
             [*where_params, safe_limit, safe_offset],
             source=skip_source,
+        )
+
+    pruned = _retry_candle_read_once(_run_pruned_page, source=skip_source, retry_sleep=retry_sleep)
+    if pruned is not None:
+        out_columns, raw_rows = pruned
+    else:
+        out_columns, raw_rows = _retry_candle_read_once(
+            _run_legacy_page, source=skip_source, retry_sleep=retry_sleep
         )
         if manifest_total_candidate:
             # Whole-request degrade law (DEC-LAKE-STATS-MANIFEST-001): the
@@ -3105,6 +3202,17 @@ def query_candles(
                     generation=generation,
                     compute=_legacy_count_total,
                 )
+    # Honest observed lower bound (DEC-DB-CANDLES-TORN-READ-RETRY-001): the
+    # generation-keyed CACHED total can lag a LIVE page read within one
+    # generation (a concurrent writer between the COUNT and the page — the
+    # skew is inherent to the DEC-DB-CANDLE-COUNT-CACHE-001 design, documented
+    # not eliminated). When the page returned rows, the total is raised to at
+    # least ``offset + len(rows)`` — an OBSERVED lower bound. An EMPTY page
+    # proves nothing (``offset + 0`` is only a bound for k > 0 rows) and must
+    # never adjust the total: an unconditional clamp fabricated
+    # ``total == offset`` for any offset past the end (review fold).
+    if raw_rows:
+        total = max(total, safe_offset + len(raw_rows))
     if stats_ctx is not None:
         _LOG.info(
             _STATS_READ_EVENT,
@@ -4114,6 +4222,7 @@ def query_option_candles(
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
     use_stats_manifest: bool = False,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """Read one page of expired-option bars for a series (DEC-DB-QUERY-001).
 
@@ -4171,6 +4280,19 @@ def query_option_candles(
         + best-effort reseed. The production route passes ``True``; the pure
         default ``False`` keeps direct callers byte-identical, and the
         ``BRUTEX_LAKE_STATS_MANIFEST=off`` kill switch forces legacy.
+    retry_sleep
+        Injectable sleeper for the torn-read retry-once guard — the
+        expired-options twin of the :func:`query_candles` parameter
+        (DEC-DB-CANDLES-TORN-READ-RETRY-001): this pager runs the SAME
+        two-query COUNT + page shape over the series glob, so a live pull's
+        atomic ``os.replace`` mid-request tears identically. Each read is
+        retried ONCE after :data:`_DUCKDB_RETRY_DELAY_S` over a
+        freshly-rebuilt glob/file list (see :func:`_retry_candle_read_once`);
+        ``None`` (the default) sleeps for real. Same honest envelope: the
+        race is narrowed, not eliminated, and when the page returned rows the
+        returned ``total`` is raised to at least ``offset + len(rows)`` (an
+        observed lower bound; an EMPTY page never adjusts the total — it
+        proves nothing).
 
     Returns
     -------
@@ -4277,13 +4399,19 @@ def query_option_candles(
         file set as the flat glob): a corrupt file is skipped + counted out of
         the total, never a 500 (DEC-ENGINE-MISC-PACK-002).
         """
-        rows = _execute_parquet_resilient(
-            conn,
-            base,
-            f"SELECT {distinct_count_sql(('side', 'timestamp'))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
-            list(where_params),
-            source=skip_source,
-        )
+
+        # The COUNT execute+fetch rides the torn-read retry-once guard
+        # (DEC-DB-CANDLES-TORN-READ-RETRY-001; re-globs fresh per attempt).
+        def _run_count() -> list[tuple[Any, ...]]:
+            return _execute_parquet_resilient(
+                conn,
+                base,
+                f"SELECT {distinct_count_sql(('side', 'timestamp'))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+                list(where_params),
+                source=skip_source,
+            )
+
+        rows = _retry_candle_read_once(_run_count, source=skip_source, retry_sleep=retry_sleep)
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
     def _count_total() -> int:
@@ -4305,29 +4433,41 @@ def query_option_candles(
         )
     page_select = DEDUP_STAR_SELECT_SQL if select == "*" else select
     manifest_total_candidate = stats_ctx is not None and stats_ctx.served
-    pruned = _stats_pruned_page(
-        stats_ctx,
-        select=select,
-        columns=columns,
-        where_sql=where_sql,
-        where_params=list(where_params),
-        qualify_sql=qualify_sql,
-        order_sql=order_sql,
-        descending=descending,
-        limit=safe_limit,
-        offset=safe_offset,
-        count_cache=count_cache,
-        generation=generation,
-    )
-    if pruned is not None:
-        out_columns, raw_rows = pruned
-    else:
-        out_columns, raw_rows = _execute_candle_page_resilient(
+
+    # Both page forms ride the torn-read retry-once guard — the
+    # expired-options twin of the query_candles wiring
+    # (DEC-DB-CANDLES-TORN-READ-RETRY-001; re-plans / re-globs per attempt).
+    def _run_pruned_page() -> tuple[list[str], list[tuple[Any, ...]]] | None:
+        return _stats_pruned_page(
+            stats_ctx,
+            select=select,
+            columns=columns,
+            where_sql=where_sql,
+            where_params=list(where_params),
+            qualify_sql=qualify_sql,
+            order_sql=order_sql,
+            descending=descending,
+            limit=safe_limit,
+            offset=safe_offset,
+            count_cache=count_cache,
+            generation=generation,
+        )
+
+    def _run_legacy_page() -> tuple[list[str], list[tuple[Any, ...]]]:
+        return _execute_candle_page_resilient(
             conn,
             base,
             f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
             [*where_params, safe_limit, safe_offset],
             source=skip_source,
+        )
+
+    pruned = _retry_candle_read_once(_run_pruned_page, source=skip_source, retry_sleep=retry_sleep)
+    if pruned is not None:
+        out_columns, raw_rows = pruned
+    else:
+        out_columns, raw_rows = _retry_candle_read_once(
+            _run_legacy_page, source=skip_source, retry_sleep=retry_sleep
         )
         if manifest_total_candidate:
             # Whole-request degrade law: never pair a manifest total with a
@@ -4342,6 +4482,14 @@ def query_option_candles(
                     generation=generation,
                     compute=_legacy_count_total,
                 )
+    # Honest observed lower bound — the expired-options twin of the
+    # query_candles clamp (DEC-DB-CANDLES-TORN-READ-RETRY-001): when the page
+    # returned rows the total is raised to at least ``offset + len(rows)``
+    # (an OBSERVED lower bound); an EMPTY page proves nothing and never
+    # adjusts the total (the unconditional clamp fabricated
+    # ``total == offset`` past the end — review fold).
+    if raw_rows:
+        total = max(total, safe_offset + len(raw_rows))
     if stats_ctx is not None:
         _LOG.info(
             _STATS_READ_EVENT,
