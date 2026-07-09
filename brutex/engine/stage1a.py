@@ -715,6 +715,25 @@ class Stage1AMatrixBuilder:
             the pivots are warm but the swept Fib anchor is cold (R-2).
         """
         if prev_ohlc is None:
+            if self._fib_anchor is not FibAnchorKind.PREV_DAY and has_muhurat_session(today):
+                # First-day-Muhurat shape (round-2 review, DEC-MUHURAT-WEEKLY-
+                # ANCHOR-ABSTAIN-001 precision fold): when the bar stream STARTS
+                # on a Muhurat date (an operator from-date landing exactly on
+                # e.g. 2024-11-01), this no-prior-day early return used to run
+                # BEFORE the Muhurat abstain below, so the session rolled with
+                # ZERO WARNs — silently violating the "one WARN per Muhurat
+                # session" law. The weekly anchor is just as ineligible here
+                # (the resolvers refuse a non-trading `today` regardless of
+                # history), so the SAME abstain WARN now fires; the returned
+                # ``None`` bundle then clears ALL anchor-dependent bits — a
+                # strictly WIDER abstain than fib=None (no prior day exists, so
+                # the pivots are cold too). PREV_DAY streams stay silent (the
+                # event is weekly-anchor-specific) and byte-identical.
+                _LOG.warning(
+                    _MUHURAT_WEEKLY_ANCHOR_EVENT,
+                    day=today.isoformat(),
+                    fib_anchor=self._fib_anchor.value,
+                )
             return None
         pivots = compute_pivot_levels(
             today,
@@ -745,7 +764,9 @@ class Stage1AMatrixBuilder:
             # path, clearing ONLY the Group-4 Fib bits via _NON_FIB_MASK (the
             # ADR-0012 combo-ineligible convention) while the warm prev-day
             # pivots stay. One WARN per Muhurat session (each IST day rolls
-            # exactly once); look-ahead-clean — keyed on `today`'s own IST date.
+            # exactly once, and the first-day-Muhurat shape is covered by the
+            # prev_ohlc-is-None arm above — round-2 review fold);
+            # look-ahead-clean — keyed on `today`'s own IST date.
             _LOG.warning(
                 _MUHURAT_WEEKLY_ANCHOR_EVENT,
                 day=today.isoformat(),

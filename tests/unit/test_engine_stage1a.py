@@ -589,6 +589,48 @@ def test_prev_day_anchor_over_muhurat_bars_unchanged_no_abstain_warn() -> None:
     assert not [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
 
 
+@pytest.mark.parametrize("anchor", _WEEKLY_ANCHORS)
+def test_first_day_muhurat_stream_emits_the_abstain_warn(anchor: FibAnchorKind) -> None:
+    # Round-2 review fix: a bar stream whose FIRST day IS the Muhurat session
+    # (an operator from-date landing exactly on e.g. 2024-11-01) used to hit
+    # the prev_ohlc-is-None early return BEFORE the abstain branch and roll
+    # the session with ZERO warns — silently violating the "one WARN per
+    # Muhurat session" law. The abstain WARN now fires on the no-prior-day
+    # arm too; the None anchor bundle still clears ALL anchor-dependent bits
+    # (a strictly WIDER abstain than fib=None — no prior day exists, so the
+    # pivots are cold too). FAILS with the fix reverted (zero warns pre-fix).
+    from structlog.testing import capture_logs
+
+    bars = [
+        _day_bar(_date(2024, 11, 1), "104.00", "104.50", "103.50", "104.20"),
+        _day_bar(_date(2024, 11, 4), "104.00", "104.00", "104.00", "104.00"),
+    ]
+    with capture_logs() as logs:
+        masks = build_bar_bits(bars, fib_anchor=anchor)
+    assert len(masks) == 2
+    assert masks[0] & FIB_DEPENDENT_MASK == 0  # no anchors at all on day 1
+    warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+    assert len(warns) == 1  # exactly ONE per Muhurat session — first-day arm
+    assert warns[0]["day"] == "2024-11-01"
+    assert warns[0]["fib_anchor"] == anchor.value
+
+
+def test_first_day_muhurat_prev_day_stream_stays_silent() -> None:
+    # The first-day-Muhurat WARN is weekly-anchor-specific: a PREV_DAY stream
+    # starting on the Muhurat date stays silent + byte-identical (the event
+    # names an ineligible WEEKLY anchor; PREV_DAY has none to be ineligible).
+    from structlog.testing import capture_logs
+
+    bars = [
+        _day_bar(_date(2024, 11, 1), "104.00", "104.50", "103.50", "104.20"),
+        _day_bar(_date(2024, 11, 4), "104.00", "104.00", "104.00", "104.00"),
+    ]
+    with capture_logs() as logs:
+        masks = build_bar_bits(bars)  # default PREV_DAY
+    assert len(masks) == 2
+    assert not [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+
+
 def test_weekly_anchor_regular_days_still_resolve_via_common_resolver() -> None:
     # The non-Muhurat arm still dispatches to the COMMON resolver: with 5
     # completed regular sessions in history, the 6th day's rolling-weekly Fib

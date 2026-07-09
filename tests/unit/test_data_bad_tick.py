@@ -380,6 +380,76 @@ def test_majority_dropped_warn_not_fired_at_or_below_equal_split() -> None:
     assert not [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
 
 
+def test_head_escape_band_threshold_adjacent_spike_kept_median_reference_pin() -> None:
+    # DOCUMENTED PRECISION (round-2 review): a HEAD bar is judged against the
+    # head MEDIAN, not its immediate predecessor — so a threshold-adjacent
+    # spike that is >= 4x its NEIGHBOR yet < 4x the median rides the escape
+    # band [4*min(other head closes), 4*median) and is KEPT, silently (the
+    # pre-fix pairwise #1616 screen dropped it: 400.5 >= 4*100). The band is
+    # exactly as wide as the head-bar dispersion (~1% on real minute data), so
+    # only a threshold-adjacent ~4.00-4.04x spike can escape; the x10
+    # threat-model class sits far outside the band and is always caught.
+    rows = [(_D1, c) for c in (100.0, 400.5, 101.0, 100.5, 100.8)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [True] * 5
+    assert not logs
+    # The pairwise predicate WOULD have flagged it (the pre-fix reference) …
+    assert is_bad_tick(100.0, 400.5) is True
+    # … but the head median (101) does not: 400.5 < 4 * 101 = 404.
+    assert is_bad_tick(101.0, 400.5) is False
+    # The x10 class is still always caught (far outside the escape band).
+    x10 = [(_D1, c) for c in (100.0, 1000.0, 101.0, 100.5, 100.8)]
+    with capture_logs() as logs:
+        assert _mask(x10) == [True, False, True, True, True]
+    assert len([e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]) == 1
+
+
+def test_minimal_corrupt_majority_shapes_emit_only_the_skip_warn() -> None:
+    # DOCUMENTED PRECISION (round-2 review): on the MINIMAL corrupt-majority
+    # shapes the SURVIVORS are the corruption, yet the strict skipped > kept
+    # gate cannot fire — a 3-bar session with a 2-of-3 corrupt head skips
+    # 1 < keeps 2 (the 4-bar 2v2 split is pinned above at the equal-split
+    # boundary) — so only the ordinary skip WARN discloses. Real NSE sessions
+    # carry 60-375 bars, so a real corrupt-majority head cascades far past
+    # the gate: the companion 6-bar shape below fires BOTH warns.
+    rows = [(_D1, c) for c in (100.0, 1000.0, 1000.0)]
+    with capture_logs() as logs:
+        # Median = 1000 (the corruption): the healthy bar is dropped, the two
+        # corrupt survivors are kept — and NO collapse warn can fire.
+        assert _mask(rows) == [False, True, True]
+    assert len([e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]) == 1
+    assert not [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    # The SAME corrupt head with healthy successors cascades past the gate.
+    longer = [(_D1, c) for c in (100.0, 1000.0, 1000.0, 100.0, 101.0, 100.0)]
+    with capture_logs() as logs:
+        assert _mask(longer) == [False, True, True, False, False, False]
+    collapse = [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    assert len(collapse) == 1
+    assert collapse[0]["skipped"] == 4
+    assert collapse[0]["kept"] == 2
+
+
+def test_healthy_median_short_session_collapse_warn_after_perfect_screen() -> None:
+    # DOCUMENTED PRECISION (round-2 review): the collapse WARN is a coarse
+    # "most of this session was screened away — inspect the partition"
+    # signal, NOT proof the survivors are corrupt — on a short session with a
+    # HEALTHY median and two differently-corrupt head bars the screen works
+    # PERFECTLY (both corruptions dropped, the healthy bar kept), yet
+    # skipped(2) > kept(1) still fires it. Mask untouched; disclosure only.
+    rows = [(_D1, 400.0), (_D1, 100.0), (_D1, 20.0)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [False, True, False]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 2
+    assert warns[0]["first_ref_close"] == 100.0
+    assert warns[0]["first_close"] == 400.0
+    collapse = [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    assert len(collapse) == 1
+    assert collapse[0]["skipped"] == 2
+    assert collapse[0]["kept"] == 1
+
+
 def test_head_verdict_is_bounded_forward_looking_truncation_pin() -> None:
     # DOCUMENTED LIMIT (round-1 review): the head vote reads up to 2 FOLLOWING
     # same-session bars, so the SAME leading bar's verdict legitimately differs

@@ -51,7 +51,16 @@ seeded from EVIDENCE, not trust:
   buffered (a fixed 3-element buffer — O(1)) and each is judged against the
   **median close of the head window** (a 2-of-3 majority vote): a poison head
   bar — at ANY of positions 1/2/3 — is itself dropped, and the surviving head
-  bars seed the baseline;
+  bars seed the baseline. PRECISION (round-2 review): "poison" for a HEAD bar
+  means ``>= max_ratio``x (or ``<= 1/max_ratio``x) the head MEDIAN, not the
+  bar's immediate predecessor — so a head spike that is ``>= 4x`` its
+  neighbor yet ``< 4x`` the median is KEPT, silently. That escape band,
+  ``[max_ratio * min(other head closes), max_ratio * median)``, is exactly as
+  wide as the head-bar dispersion (~1% of price on real minute data), so only
+  a threshold-adjacent ~4.00-4.04x spike can ride it (the pre-fix pairwise
+  #1616 screen dropped such a bar; the trade for killing its poison-head
+  cascade); the ``x10`` threat-model class sits far outside the band and is
+  always caught;
 * a genuine overnight / half-day / Muhurat reopen gap can still NEVER
   false-trip: consecutive real head minutes agree with each other (a real
   ``4x`` move across the first 3 minutes is impossible under the NSE circuit
@@ -90,10 +99,19 @@ Honest limits (disclosed, not papered over):
   vendor-scaling threat model makes a corrupt RUN of opening minutes a
   realistic shape — majority evidence is the best a bounded in-session
   screen can do. The per-session skip WARN fires, and a session whose
-  skipped count exceeds its kept count ADDITIONALLY fires one
-  :data:`BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT` WARN (the
-  corrupt-head-out-vote signature: the surviving bars are then more likely
-  the corruption than the data — mask unchanged, disclosure only);
+  skipped count STRICTLY exceeds its kept count ADDITIONALLY fires one
+  :data:`BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT` WARN — a coarse "most of
+  this session was screened away — inspect the partition" signal, NOT proof
+  the survivors are corrupt (round-2 review precision, both directions: on a
+  short session with a HEALTHY median and two differently-corrupt head bars
+  the screen works PERFECTLY — both corruptions dropped, the healthy bar
+  kept — yet the WARN still fires; conversely the strict ``skipped > kept``
+  gate CANNOT fire on the minimal corrupt-majority shapes, where the
+  survivors ARE the corruption — a 3-bar session with a 2-of-3 corrupt head
+  skips 1 < keeps 2, and a 4-bar 2v2 split is not a strict majority — so
+  those emit only the ordinary skip WARN; real NSE sessions carry 60-375
+  bars, so a real corrupt-majority head cascades far past the gate and DOES
+  fire it). Mask unchanged, disclosure only;
 * the **head verdict is bounded-forward-looking** — a session-head bar's KEEP
   verdict reads up to 2 FOLLOWING same-session bars (the median vote), so a
   load truncated INSIDE a session's first 3 bars can keep a poison head bar
@@ -158,11 +176,16 @@ BAD_TICK_SKIP_EVENT: Final[str] = "feed.bad_tick_skipped"
 #: (no third witness → no offender identified → never destroy real data).
 BAD_TICK_HEAD_UNCONFIRMED_EVENT: Final[str] = "feed.bad_tick_head_unconfirmed"
 
-#: One structlog event per session whose SKIPPED count exceeds its KEPT count —
-#: the corrupt-majority-head out-vote signature (module docstring, honest
-#: limits): when the screen destroys MOST of a session, the surviving bars are
-#: more likely the corruption than the data. Disclosure only — the keep mask is
-#: unchanged; remediation is a re-pull / lake-heal of the named partition.
+#: One structlog event per session whose SKIPPED count STRICTLY exceeds its
+#: KEPT count — a coarse "most of this session was screened away — inspect the
+#: partition" disclosure (module docstring, honest limits). It usually marks
+#: the corrupt-majority-head out-vote collapse, but it is NOT proof the
+#: survivors are corrupt (a healthy-median short session with two
+#: differently-corrupt head bars trips it after a PERFECT screen), and the
+#: minimal corrupt-majority shapes (3-bar 2-of-3 corrupt; 4-bar 2v2) sit at or
+#: below the strict-majority gate and emit only the ordinary skip WARN.
+#: Disclosure only — the keep mask is unchanged; remediation is a re-pull /
+#: lake-heal of the named partition.
 BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT: Final[str] = "feed.bad_tick_session_majority_dropped"
 
 #: Falsy literals that DISABLE the (default-ON) screen — the mirror of the
@@ -236,8 +259,9 @@ class BadTickScreen:
     :data:`BAD_TICK_HEAD_UNCONFIRMED_EVENT` WARN per inconsistent-but-kept
     2-bar session (the disclosed unconfirmable-head limit), and one
     :data:`BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT` WARN per session whose
-    skipped count exceeds its kept count (the corrupt-majority-head collapse
-    signature — module docstring, honest limits).
+    skipped count STRICTLY exceeds its kept count (the coarse
+    most-of-session-screened-away disclosure — module docstring, honest
+    limits).
 
     The instance carries only CONFIGURATION (``source`` / ``max_ratio`` /
     ``log``); all per-session state is local to :meth:`screen_mask`, so one
@@ -366,12 +390,16 @@ class BadTickScreen:
                 )
                 kept_in_session = session_rows - skipped
                 if skipped > kept_in_session:
-                    # Corrupt-majority signature (module docstring, honest
-                    # limits): the screen destroyed MOST of the session — a
-                    # corrupt 2-of-3 head has out-voted the median and
-                    # cascade-dropped the healthy remainder, so the SURVIVING
-                    # bars are more likely the corruption than the data. Mask
-                    # unchanged; this louder second WARN names the collapse.
+                    # Strict-majority disclosure (module docstring, honest
+                    # limits): the screen destroyed MOST of the session. This
+                    # usually marks a corrupt 2-of-3 head out-voting the median
+                    # and cascade-dropping the healthy remainder — but it is a
+                    # coarse "inspect the partition" signal, NOT proof the
+                    # survivors are corrupt (a healthy-median short session
+                    # with two differently-corrupt head bars trips it after a
+                    # PERFECT screen), and the minimal corrupt-majority shapes
+                    # (3-bar 2-of-3; 4-bar 2v2) sit at/below the strict gate
+                    # and emit only the skip WARN above. Mask unchanged.
                     self._log.warning(
                         BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT,
                         source=self._source,

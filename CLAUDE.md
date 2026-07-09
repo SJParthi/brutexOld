@@ -50,7 +50,16 @@ corrupt bar(s) as the day's OHLC → the NEXT day's anchors poisoned — the bug
 shape re-armed at a 2-corrupt-head-bars threshold; for a corrupt run starting
 at head position 2 a strict REGRESSION vs the #1616 screen — disclosed at full
 blast radius, cascade-pinned, and loudly signalled by the NEW observe-only
-`feed.bad_tick_session_majority_dropped` WARN when skipped > kept); the head
+`feed.bad_tick_session_majority_dropped` WARN when skipped > kept — round-2
+reword: a coarse "most of the session was screened away — inspect the
+partition" disclosure, NOT proof the survivors are corrupt (it over-fires on
+a perfectly-screened healthy-median short session, and the minimal 3-bar
+2-of-3 / 4-bar 2v2 corrupt-majority shapes sit at/below its strict gate,
+emitting only the skip WARN — both directions pinned); head verdicts are
+MEDIAN-referenced, so a threshold-adjacent head spike ≥4x its NEIGHBOR yet
+<4x the median rides the disclosed narrow [4·min-neighbor, 4·median) escape
+band and is kept silently (~4.00-4.04x only; the ×10 class always caught —
+round-2 precision, pinned); the head
 verdict is bounded-FORWARD-looking (it reads ≤2 following same-session bars —
 a load truncated inside a session's first 3 bars can keep a poison head the
 full load would drop; pinned; the suffix-independence gates do not route
@@ -65,7 +74,10 @@ even its PREV_DAY tuples; ingest KEEPS Muhurat bars per #1294) — closing
 abstains on a `has_muhurat_session(today)` date (fib=None rides the EXISTING
 `_NON_FIB_MASK` clear — the ADR-0012 combo-ineligible convention; warm pivots
 kept) with ONE `stage1a.muhurat_weekly_anchor_ineligible` WARN per Muhurat
-session; the weekly resolvers' raise stays BYTE-UNTOUCHED (test-pinned honest
+session (incl. a stream whose FIRST day IS the Muhurat date — the round-2 fix
+on the no-prior-day arm, previously ZERO warns there; PREV_DAY first-day
+streams stay silent + byte-identical, both arms pinned); the weekly
+resolvers' raise stays BYTE-UNTOUCHED (test-pinned honest
 refusal for direct callers); PREV_DAY + non-Muhurat behavior byte-identical;
 all 6 real boundaries × both anchors test-pinned + a REAL `run_sweep_grid`
 whole-grid completion regression; RESIDUAL (round-1 disclosure): the abstain
@@ -77,7 +89,8 @@ carries its own validator stub header, MIGRATION.md #1626. ENGINE UNCHANGED — 
 F&O lake REFERENCE_ONLY; no scope/vocab/rate-cap/lake-schema change;
 `bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
 suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
---strict` clean, pyright at the 46-error pre-change baseline, 0 new.)
+--strict` clean, pyright at the pre-change baseline, 0 new (round-2
+post-merge: 40 errors = the f028fe65 main baseline exactly).)
 Earlier: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
 the sweep CLI log-volume guard: `brutex sweep`/`sweep-all`/`sweep-daemon` now
 configure the ONE COMMON structlog seam
@@ -1738,7 +1751,16 @@ hostile-review pass._
   shape re-armed at a 2-corrupt-head-bars threshold; for a corrupt run starting
   at head position 2 a strict REGRESSION vs the #1616 screen — disclosed at full
   blast radius, cascade-pinned, and loudly signalled by the NEW observe-only
-  `feed.bad_tick_session_majority_dropped` WARN when skipped > kept); the head
+  `feed.bad_tick_session_majority_dropped` WARN when skipped > kept — round-2
+  reword: a coarse "most of the session was screened away — inspect the
+  partition" disclosure, NOT proof the survivors are corrupt (it over-fires on
+  a perfectly-screened healthy-median short session, and the minimal 3-bar
+  2-of-3 / 4-bar 2v2 corrupt-majority shapes sit at/below its strict gate,
+  emitting only the skip WARN — both directions pinned); head verdicts are
+  MEDIAN-referenced, so a threshold-adjacent head spike ≥4x its NEIGHBOR yet
+  <4x the median rides the disclosed narrow [4·min-neighbor, 4·median) escape
+  band and is kept silently (~4.00-4.04x only; the ×10 class always caught —
+  round-2 precision, pinned); the head
   verdict is bounded-FORWARD-looking (it reads ≤2 following same-session bars —
   a load truncated inside a session's first 3 bars can keep a poison head the
   full load would drop; pinned; the suffix-independence gates do not route
@@ -1753,7 +1775,10 @@ hostile-review pass._
   abstains on a `has_muhurat_session(today)` date (fib=None rides the EXISTING
   `_NON_FIB_MASK` clear — the ADR-0012 combo-ineligible convention; warm pivots
   kept) with ONE `stage1a.muhurat_weekly_anchor_ineligible` WARN per Muhurat
-  session; the weekly resolvers' raise stays BYTE-UNTOUCHED (test-pinned honest
+  session (incl. a stream whose FIRST day IS the Muhurat date — the round-2 fix
+  on the no-prior-day arm, previously ZERO warns there; PREV_DAY first-day
+  streams stay silent + byte-identical, both arms pinned); the weekly
+  resolvers' raise stays BYTE-UNTOUCHED (test-pinned honest
   refusal for direct callers); PREV_DAY + non-Muhurat behavior byte-identical;
   all 6 real boundaries × both anchors test-pinned + a REAL `run_sweep_grid`
   whole-grid completion regression; RESIDUAL (round-1 disclosure): the abstain
@@ -1765,7 +1790,8 @@ hostile-review pass._
   F&O lake REFERENCE_ONLY; no scope/vocab/rate-cap/lake-schema change;
   `bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
   suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
-  --strict` clean, pyright at the 46-error pre-change baseline, 0 new.)
+  --strict` clean, pyright at the pre-change baseline, 0 new (round-2
+  post-merge: 40 errors = the f028fe65 main baseline exactly).)
   Earlier: `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
   the sweep CLI log-volume guard: ONE `main()`-dispatch guard configures the COMMON
   `observability/logging.configure_logging` seam at INFO by default for
