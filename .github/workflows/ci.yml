@@ -1551,6 +1551,16 @@ jobs:
           else
             echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
           fi
+          # DEC-WRITE-DEADLINE-ZOMBIE-SLIM-001 (MIGRATION.md #1646): strict gate
+          # on the durable-write freeze guard (append_with_deadline one-shot pop
+          # handoff + lock-order inversion WARN + env resolver). Injectable sink
+          # fakes, so standalone-gateable with no growwapi/network. 100%
+          # line+branch over the three suites.
+          if compgen -G "tests/unit/test_groww_write_deadline_zombie.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.write_deadline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_write_deadline.py tests/unit/test_write_deadline_lock_order.py tests/unit/test_groww_write_deadline_zombie.py
+          else
+            echo "(write_deadline zombie test file not present yet — gate inactive)"
+          fi
           # DEC-FORM-WINNER-PERSIST-001: strict gates on the durable &-underlying
           # form-winner map (symbol_form_preference — probe-evidence fold +
           # schema_meta persist/load) and the ONE shared schema_meta key/value
