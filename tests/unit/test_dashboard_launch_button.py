@@ -114,6 +114,29 @@ class TestLaunchStateRoute:
         assert payload["cards"]["futures"]["enabled"] is True
         assert "PR #1264" not in payload["cards"]["futures"]["reason"]
 
+    def test_futures_card_disabled_when_alias_unavailable(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The UNAVAILABLE futures CARD arm: disabled + the probe's reason.
+
+        Covers ``_card_payload``'s ``reason = futures.reason`` branch (the
+        #1311-fold flip of ``test_state_payload`` to available=True left it
+        unexercised) via a monkeypatched probe, mirroring the 400-arm test.
+        """
+        monkeypatch.setattr(
+            lb,
+            "probe_futures_alias",
+            lambda: lb.FuturesAvailability(available=False, reason=lb.FUTURES_DEPENDENCY_NOTE),
+        )
+        payload = client.get("/api/v1/launch/state").json()
+        assert payload["futures"]["available"] is False
+        card = payload["cards"]["futures"]
+        assert card["enabled"] is False
+        assert card["reason"] == lb.FUTURES_DEPENDENCY_NOTE
+        assert "PR #1264" in card["reason"]
+        # The spot card is untouched by the futures probe.
+        assert payload["cards"]["spot"]["enabled"] is True
+
     def test_state_without_store_is_honest(self, bare_client: TestClient) -> None:
         payload = bare_client.get("/api/v1/launch/state").json()
         assert payload["lake_root"] is None
