@@ -22,8 +22,10 @@ _EXP = date(2025, 6, 26)
 _EXP_B = date(2025, 7, 3)
 
 
-def _leg(underlying: str, opt_type: str, *, oi: int | None, volume: int) -> PcrLeg:
-    return PcrLeg(underlying=underlying, opt_type=opt_type, oi=oi, volume=volume)
+def _leg(
+    underlying: str, opt_type: str, *, oi: int | None, volume: int, symbol: str = ""
+) -> PcrLeg:
+    return PcrLeg(underlying=underlying, opt_type=opt_type, oi=oi, volume=volume, symbol=symbol)
 
 
 class TestComputePcrRows:
@@ -217,6 +219,120 @@ class TestPcrRowJson:
         )
 
     def test_dataclasses_are_frozen(self) -> None:
+        leg = _leg("NIFTY", "CE", oi=1, volume=1)
+        with pytest.raises(AttributeError):
+            leg.oi = 2  # type: ignore[misc]
+        row = compute_pcr_rows([leg], legs_total={"NIFTY": 1}, target_expiry={"NIFTY": _EXP})[0]
+        assert isinstance(row, UnderlyingPcr)
+        with pytest.raises(AttributeError):
+            row.underlying = "X"  # type: ignore[misc]
+
+
+class TestOiMissingSymbols:
+    """The NAMED missing-OI legs (DEC-MOVERS-HEADER-CHIPS-001) — the additive
+    emit-on-nonempty ``oi_missing_symbols`` wire key over the new defaulted
+    ``PcrLeg.symbol`` capture."""
+
+    def test_legacy_four_field_construction_defaults_symbol_empty(self) -> None:
+        # Back-compat: every pre-change constructor (no ``symbol``) stays
+        # valid — the field is defaulted LAST.
+        leg = PcrLeg(underlying="NIFTY", opt_type="CE", oi=None, volume=1)
+        assert leg.symbol == ""
+
+    def test_names_collect_only_null_oi_legs_sorted(self) -> None:
+        rows = compute_pcr_rows(
+            [
+                _leg("NIFTY", "PE", oi=None, volume=1, symbol="NSE-NIFTY-26Jun25-24000-PE"),
+                _leg("NIFTY", "CE", oi=100, volume=1, symbol="NSE-NIFTY-26Jun25-24000-CE"),
+                _leg("NIFTY", "CE", oi=None, volume=1, symbol="NSE-NIFTY-26Jun25-23000-CE"),
+            ],
+            legs_total={"NIFTY": 3},
+            target_expiry={"NIFTY": _EXP},
+        )
+        # Sorted lake symbols; the OI-carrying leg is NEVER named.
+        assert rows[0].oi_missing_symbols == (
+            "NSE-NIFTY-26Jun25-23000-CE",
+            "NSE-NIFTY-26Jun25-24000-PE",
+        )
+        assert rows[0].pcr.oi.missing_legs == 2
+
+    def test_empty_symbol_null_oi_leg_is_counted_but_never_named(self) -> None:
+        # A legacy caller that never captured the symbol: the fold still
+        # COUNTS the missing cell; the name list honestly omits it.
+        rows = compute_pcr_rows(
+            [
+                _leg("NIFTY", "PE", oi=None, volume=1),
+                _leg("NIFTY", "CE", oi=None, volume=1, symbol="NSE-NIFTY-26Jun25-24000-CE"),
+            ],
+            legs_total={"NIFTY": 2},
+            target_expiry={"NIFTY": _EXP},
+        )
+        assert rows[0].oi_missing_symbols == ("NSE-NIFTY-26Jun25-24000-CE",)
+        assert rows[0].pcr.oi.missing_legs == 2
+        payload = pcr_row_json(rows[0])
+        assert payload["oi_missing_symbols"] == ["NSE-NIFTY-26Jun25-24000-CE"]
+        assert payload["oi_missing_legs"] == 2
+
+    def test_key_is_absent_when_no_leg_is_named(self) -> None:
+        # EMIT-ON-NONEMPTY: a full-OI chain (and a legacy empty-symbol-only
+        # chain) serializes WITHOUT the key — existing payloads byte-identical.
+        rows = compute_pcr_rows(
+            [_leg("NIFTY", "CE", oi=100, volume=1, symbol="NSE-NIFTY-26Jun25-24000-CE")],
+            legs_total={"NIFTY": 1},
+            target_expiry={"NIFTY": _EXP},
+        )
+        assert rows[0].oi_missing_symbols == ()
+        assert "oi_missing_symbols" not in pcr_row_json(rows[0])
+
+    def test_full_coverage_row_serializes_to_the_exact_pre_change_dict(self) -> None:
+        # The BYTE-IDENTITY arm: key SET + values equal the pre-change wire
+        # shape (frozen-compared) when no leg is named.
+        rows = compute_pcr_rows(
+            [
+                _leg("NIFTY", "PE", oi=300, volume=30, symbol="NSE-NIFTY-26Jun25-24000-PE"),
+                _leg("NIFTY", "CE", oi=200, volume=20, symbol="NSE-NIFTY-26Jun25-24000-CE"),
+            ],
+            legs_total={"NIFTY": 2},
+            target_expiry={"NIFTY": _EXP},
+        )
+        payload = pcr_row_json(rows[0])
+        assert frozenset(payload) == frozenset(
+            {
+                "underlying",
+                "display_underlying",
+                "expiry",
+                "oi_pcr",
+                "oi_status",
+                "vol_pcr",
+                "vol_status",
+                "put_oi",
+                "call_oi",
+                "put_volume",
+                "call_volume",
+                "oi_missing_legs",
+                "volume_missing_legs",
+                "legs_read",
+                "legs_total",
+                "coverage",
+                "coverage_note",
+            }
+        )
+
+    def test_wire_cap_at_50_names_with_true_count_in_oi_missing_legs(self) -> None:
+        # 60 null-OI named legs → 50 names on the wire (sorted prefix), the
+        # TRUE count rides the pre-existing oi_missing_legs int.
+        legs = [
+            _leg("NIFTY", "CE", oi=None, volume=1, symbol=f"NSE-NIFTY-26Jun25-{24000 + i}-CE")
+            for i in range(60)
+        ]
+        rows = compute_pcr_rows(legs, legs_total={"NIFTY": 60}, target_expiry={"NIFTY": _EXP})
+        assert len(rows[0].oi_missing_symbols) == 60  # the model keeps them all
+        payload = pcr_row_json(rows[0])
+        assert len(payload["oi_missing_symbols"]) == 50  # the wire cap
+        assert payload["oi_missing_symbols"] == sorted(leg.symbol for leg in legs)[:50]
+        assert payload["oi_missing_legs"] == 60  # the honest true count
+
+    def test_dataclass_stays_frozen_with_the_new_fields(self) -> None:
         leg = _leg("NIFTY", "CE", oi=1, volume=1)
         with pytest.raises(AttributeError):
             leg.oi = 2  # type: ignore[misc]

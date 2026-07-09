@@ -1493,6 +1493,9 @@ class TestOptionsPcr:
         # Volume is non-null by the session reader's contract — pinned 0 on the
         # wire (the field exists for the primitive's other callers).
         assert row["volume_missing_legs"] == 0
+        # BYTE-IDENTITY (DEC-MOVERS-HEADER-CHIPS-001): a full-OI chain carries
+        # NO oi_missing_symbols key — the additive key is emit-on-nonempty.
+        assert "oi_missing_symbols" not in row
 
     def test_daily_interval_folds_the_whole_day(
         self, store: InstrumentStore, tmp_path: Path
@@ -1573,6 +1576,37 @@ class TestOptionsPcr:
         assert Fraction(row["vol_pcr"]) == Fraction(50, 100)
         assert row["coverage"] == "partial"
         assert row["coverage_note"] == "1 leg(s) missing OI"
+        # DEC-MOVERS-HEADER-CHIPS-001: the missing-OI leg is NAMED on the wire
+        # (the additive emit-on-nonempty key) — exactly the fold's
+        # oi.missing_legs class, so the Coverage-badge reveal can list it.
+        assert row["oi_missing_symbols"] == [_PE]
+
+    def test_missing_oi_legs_are_named_and_sorted_on_the_wire(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # BOTH legs carry null OI cells → both named, lexicographically sorted
+        # (deterministic payload; DEC-MOVERS-HEADER-CHIPS-001); the true count
+        # rides the pre-existing oi_missing_legs.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_CE,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="100", volume=100, oi=None)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_PE,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="80", volume=50, oi=None)],
+        )
+        row = self._get(store, {"interval": "1day", "date": "2024-06-13"})["pcr"][0]
+        assert row["oi_missing_symbols"] == sorted([_CE, _PE])
+        assert row["oi_missing_legs"] == 2
+        # The OI ratio is honestly null (both sums 0 → zero call denominator).
+        assert row["oi_pcr"] is None
+        assert row["oi_status"] == "zero_denominator"
 
     def test_all_call_chain_reads_an_exact_zero_ratio(
         self, store: InstrumentStore, tmp_path: Path

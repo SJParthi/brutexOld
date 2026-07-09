@@ -24,6 +24,13 @@ from brutex.data.pcr import PcrCorruptionError, PcrResult, compute_pcr
 
 __all__ = ["PcrLeg", "UnderlyingPcr", "compute_pcr_rows", "pcr_row_json"]
 
+#: Wire cap on the named missing-OI legs per PCR row
+#: (DEC-MOVERS-HEADER-CHIPS-001) — the capped-names precedent (the prebuild
+#: quarantine headline's "+K more"): the TRUE count always rides the
+#: pre-existing ``oi_missing_legs`` int, so the cap loses no honesty, only
+#: payload bytes on a pathological chain.
+_OI_MISSING_SYMBOLS_CAP = 50
+
 
 @dataclass(frozen=True, slots=True)
 class PcrLeg:
@@ -43,12 +50,19 @@ class PcrLeg:
     volume
         Cumulative session volume ≤ the as-of cutoff (non-null by the
         session reader's contract).
+    symbol
+        The lake contract symbol, for the missing-OI reveal
+        (DEC-MOVERS-HEADER-CHIPS-001); ``""`` = uncaptured (legacy callers) —
+        defaulted LAST so every pre-existing constructor stays valid, and an
+        empty symbol is simply never NAMED (the count still rides
+        ``oi_missing_legs``).
     """
 
     underlying: str
     opt_type: str
     oi: int | None
     volume: int
+    symbol: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +82,20 @@ class UnderlyingPcr:
     pcr
         The COMMON primitive's result — both variants + coverage, no field
         duplication.
+    oi_missing_symbols
+        The sorted lake symbols of the READ legs whose OI cell is null —
+        exactly the fold's ``oi.missing_legs`` class, NAMED
+        (DEC-MOVERS-HEADER-CHIPS-001). NEVER-read legs (the
+        ``legs_read < legs_total`` shortfall) are deliberately unnamed —
+        counted in the coverage pair, disclosed at the display layer.
+        Defaulted LAST (back-compat).
     """
 
     underlying: str
     display_underlying: str
     expiry: date_cls
     pcr: PcrResult
+    oi_missing_symbols: tuple[str, ...] = ()
 
 
 def compute_pcr_rows(
@@ -169,6 +191,14 @@ def compute_pcr_rows(
                 display_underlying=names.get(underlying, underlying),
                 expiry=target_expiry[underlying],
                 pcr=pcr,
+                # The NAMED missing-OI class (DEC-MOVERS-HEADER-CHIPS-001):
+                # exactly the fold's ``oi.missing_legs`` legs — READ legs with
+                # a null OI cell. Sorted (deterministic payload); an
+                # empty-symbol leg (a legacy caller that never captured the
+                # symbol) is counted by the fold but never NAMED here.
+                oi_missing_symbols=tuple(
+                    sorted(leg.symbol for leg in group if leg.oi is None and leg.symbol)
+                ),
             )
         )
     return tuple(rows)
@@ -185,6 +215,13 @@ def pcr_row_json(row: UnderlyingPcr) -> dict[str, Any]:
     coverage label and the COMMON server-composed
     :meth:`~brutex.data.pcr.PcrResult.coverage_note`.
 
+    EMIT-ON-NONEMPTY additive key (DEC-MOVERS-HEADER-CHIPS-001, the
+    ``_option_row`` EMIT-ON-FALSE precedent): ``oi_missing_symbols`` — the
+    sorted lake symbols of the read legs whose OI cell is null, capped at
+    :data:`_OI_MISSING_SYMBOLS_CAP` (the true count is the pre-existing
+    ``oi_missing_legs``) — appears ONLY when at least one leg is named, so a
+    full-coverage lake's payload stays byte-identical to the pre-change wire.
+
     Parameters
     ----------
     row
@@ -196,7 +233,7 @@ def pcr_row_json(row: UnderlyingPcr) -> dict[str, Any]:
         The wire-shape dict (see the DEC-MOVERS-OPTIONS-PCR-001 contract).
     """
     pcr = row.pcr
-    return {
+    payload: dict[str, Any] = {
         "underlying": row.underlying,
         "display_underlying": row.display_underlying,
         "expiry": row.expiry.isoformat(),
@@ -215,3 +252,6 @@ def pcr_row_json(row: UnderlyingPcr) -> dict[str, Any]:
         "coverage": pcr.coverage_label,
         "coverage_note": pcr.coverage_note(),
     }
+    if row.oi_missing_symbols:
+        payload["oi_missing_symbols"] = list(row.oi_missing_symbols[:_OI_MISSING_SYMBOLS_CAP])
+    return payload
