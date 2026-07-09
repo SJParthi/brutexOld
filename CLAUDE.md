@@ -57,7 +57,9 @@ composite_score /results join stays DEFERRED (results-storage seam,
 coordinator brokering). DISPLAY zone + one additive display route — ENGINE
 UNCHANGED (NIFTY/BANKNIFTY/SENSEX); engine writers byte-untouched; both
 oneclick modules 100% line+branch standalone; ruff/ruff-format/`mypy
---strict`/pyright clean; `node --check` clean.)
+--strict`/pyright clean; `node --check` clean. Any per-round record lives
+ONLY in the §1 Active-branch blurb + the MIGRATION.md entry — this header
+carries pointers, never round narration.)
 Earlier: 2026-07-09 (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 —
 the one-click `top100.json` READER-ADOPTS-WRITER fix for the 3/3
 refuter-confirmed BLOCKER: the SHIPPED engine writer
