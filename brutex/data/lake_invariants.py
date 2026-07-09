@@ -103,6 +103,11 @@ OPTIONS_SEGMENT: Final[str] = "OPTIONS"
 #: The ``bars/`` segments in census display order.
 _BAR_SEGMENTS: Final[tuple[str, ...]] = ("INDEX", "CASH", "FNO")
 
+#: The number of leading ``bars/``-relative path parts that form a
+#: ``(exchange, segment, symbol)`` coordinate (used by
+#: :func:`_engine_coord_from_path` on the path-parse-failure branch).
+_COORD_PART_COUNT: Final[int] = 3
+
 #: Human label for the engine-index verdict lines.
 _ENGINE_LABEL: Final[str] = "NIFTY/BANKNIFTY/SENSEX"
 
@@ -519,6 +524,26 @@ def _bar_files(
     return sorted(base.glob(pattern))
 
 
+def _engine_coord_from_path(path: Path, lake_root: Path) -> tuple[str, str, str] | None:
+    """The ``(exchange, segment, symbol)`` of a ``bars/`` file, read POSITIONALLY.
+
+    Used ONLY on the path-parse-failure branch, where ``parse_partition_path``
+    could not decode the file yet the census must still know whether the file
+    lives on an :data:`ENGINE_INDEX_COORDS` series (a corrupt engine PATH must
+    flip the engine verdict — DEC-AUDIT-CENSUS-HONESTY-001). ``_bar_files``
+    guarantees the six-segment ``bars/exch/seg/sym/interval/yyyy/mm.parquet``
+    layout, so the first three parts under ``bars/`` are the coordinate; returns
+    ``None`` for any path that is not under ``bars/`` or is too shallow.
+    """
+    try:
+        parts = path.relative_to(lake_root / BAR_DIR_NAME).parts
+    except ValueError:
+        return None
+    if len(parts) < _COORD_PART_COUNT:
+        return None
+    return (parts[0], parts[1], parts[2])
+
+
 def _classify_overlap(
     lake_root: Path,
     coords: PartitionCoords,
@@ -664,6 +689,17 @@ def scan_lake_invariants(
         except PartitionError:
             files_skipped += 1
             _note_first_skip(path)
+            # DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review MAJOR): an ENGINE-index
+            # file whose PATH fails to parse (a non-integer / month-13 year dir
+            # under bars/NSE/INDEX/NIFTY/...) is STILL an unreadable engine file —
+            # derive its (exchange, segment, symbol) POSITIONALLY from the glob
+            # tail (`_bar_files` guarantees the six-segment
+            # bars/exch/seg/sym/interval/yyyy/mm.parquet shape) so it flips the
+            # engine verdict too. Without this the CLI/json mis-attribute it as a
+            # reference-only skip ("ENGINE verified CLEAN") while doctor — which
+            # scopes per-coord and counts ALL skips — FAILs, so the two disagree.
+            if _engine_coord_from_path(path, lake_root) in ENGINE_INDEX_COORDS:
+                engine_files_skipped += 1
             continue
         coords = PartitionCoords(
             exchange=cast(str, parsed["exchange"]),
@@ -1015,6 +1051,7 @@ def census_to_dict(
         "files_scanned": census.files_scanned,
         "files_skipped": census.files_skipped,
         "engine_files_skipped": census.engine_files_skipped,
+        "first_skipped_path": census.first_skipped_path,
         "segments": [
             {
                 "segment": row.segment,

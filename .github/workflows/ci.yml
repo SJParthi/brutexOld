@@ -476,10 +476,10 @@ jobs:
           # (MIGRATION.md #1258) added the `wheel_source_digest` stages whose
           # dedicated suite lives in `test_doctor_wheel_source_digest.py`;
           # DEC-AUDIT-CENSUS-HONESTY-001 (renumber on merge) added the
-          # `check_lake_uniqueness` UNREADABLE-skip FAIL arms whose dedicated
-          # tests live in `test_audit_census_honesty.py` — the module's
-          # covering set is ALL FOUR files (the first three read < 100% since
-          # the skip arms landed), so the gate runs them together.
+          # `check_lake_uniqueness` UNREADABLE-skip FAIL arms whose tests live
+          # in `test_doctor.py`'s `TestLakeUniquenessSkipHonesty` (the stem-
+          # matched home, so the per-module discovery gate covers them too), so
+          # the covering set stays these three files run together.
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest \
               --cov=brutex.doctor \
@@ -488,8 +488,7 @@ jobs:
               --cov-fail-under=100 \
               tests/unit/test_doctor.py \
               tests/unit/test_doctor_wheel_freshness.py \
-              tests/unit/test_doctor_wheel_source_digest.py \
-              tests/unit/test_audit_census_honesty.py
+              tests/unit/test_doctor_wheel_source_digest.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi

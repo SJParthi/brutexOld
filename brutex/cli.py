@@ -2058,9 +2058,13 @@ def cmd_lake_audit_unique(
     NEVER heals; the command is read-only by contract — then folds the
     per-segment census and prints it as a human table or ``--json`` (the SAME
     dict shape ``GET /api/v1/universe/lake-uniqueness`` serves). Exit codes
-    (the ``cmd_audit_verify`` semantics): :data:`EXIT_OK` (0) clean,
-    :data:`EXIT_USER_ERROR` (1) re-documented here as "poisoned partitions
-    found", :data:`EXIT_INTERNAL_ERROR` (2) the scan itself errored.
+    (the cron-facing contract, DEC-AUDIT-CENSUS-HONESTY-001): :data:`EXIT_OK`
+    (0) ONLY when the scan is COMPLETE and clean — zero findings AND zero
+    skipped/unreadable files; :data:`EXIT_USER_ERROR` (1) on ANY poisoned
+    finding OR ANY skipped file (a skip leaves the census incomplete, so it can
+    never certify clean — the disambiguation line names whether the cause is
+    engine data or a reference-only file, and a missing lake root also raises
+    this); :data:`EXIT_INTERNAL_ERROR` (2) the scan itself errored.
 
     HONEST cost (Golden Rule #10): the scan is O(files-in-scope) with one
     key-column read per file (NOT O(1)) — bound it with the coordinate
