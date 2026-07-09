@@ -39,6 +39,11 @@ _TOPNAV_PAGES = {
     "/coverage/windows": dashboard_app._render_fetch_windows_html,
     "/coverage/options": dashboard_app._render_expired_options_html,
     "/completeness": dashboard_app._render_completeness_html,
+    # DEC-OPERATOR-PAGE-REAL-001: the screener + strategy pages carry the
+    # canonical topnav (sub-pages — their own hrefs are NOT nav entries, so
+    # no link is aria-current; the ≤1-current guard covers that contract).
+    "/screener": dashboard_app._render_screener_html,
+    "/strategy": dashboard_app._render_strategy_html,
 }
 
 #: Render helpers that intentionally do NOT carry the canonical top-nav — listed

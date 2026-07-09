@@ -1,0 +1,6 @@
+# DEC-OPERATOR-PAGE-REAL-001: the one-click artifact fixture corpus is a
+# CONTRACT-shaped `runs/` directory TREE (the adapter reads
+# `<results_root>/runs/<run_id>/...`), but the ROOT .gitignore excludes any
+# `runs/` directory (runtime sweep output). Re-include THIS committed fixture
+# tree only — runtime lakes stay ignored everywhere else.
+!runs/
