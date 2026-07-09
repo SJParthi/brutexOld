@@ -236,7 +236,7 @@ def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
     round 1 fix: the prior ``parts[1]`` read TRUNCATED it to ``"BAJAJ"``,
     mis-keying the grouping / display name / underlying-spot probe AND the
     underlying-class lookup (a sanctioned correction, ledgered in
-    ``MIGRATION.md`` #1633).
+    ``MIGRATION.md`` #1650).
 
     Parameters
     ----------

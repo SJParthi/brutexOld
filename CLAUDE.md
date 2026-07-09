@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1633 —
+_Last updated: 2026-07-09 (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1650 —
 the `/movers` page gains an `All | Indices | Stocks` underlying-class filter on
 all THREE tabs (Spot / Futures / Options), mirroring DEC-MOVERS-MIN-VOLUME-001
 (#1034) EXACTLY: ONE COMMON `brutex/dashboard/movers_underlying_class.py`
@@ -38,7 +38,7 @@ cached set, so — unlike the #917 expiry tier — it is NOT in `candidate_key`
 (threading it would triple-cache an identical set); cache-independence is proven
 by a route test (Indices vs Stocks over one coordinate → different rows,
 `movers_cache.size()==1`). ADVERSARIAL-REVIEW FIX ROUND folded (same branch,
-pre-merge, MIGRATION.md #1633): the F&O class lookup now NORMALISES the parsed
+pre-merge, MIGRATION.md #1650): the F&O class lookup now NORMALISES the parsed
 token into the map's `primary_fno_underlying` key space (a hyphenated/aliased
 underlying — `BAJAJ-AUTO` — previously misclassified `unknown` and dropped from
 BOTH classes; `parse_future_symbol` made right-anchored + hyphen-preserving,
@@ -50,7 +50,7 @@ post-pull warmer threads the kinds + shares the composite key — warmed rows we
 previously all-`unknown`); full frozen default-payload equality pinned on all
 three tabs; the head's CI pyright red (a mis-annotated `-> TestClient` test
 helper) fixed — the per-round record lives ONLY in the §1 Active-branch blurb +
-MIGRATION.md #1633; this header carries the one-line summary, never the
+MIGRATION.md #1650; this header carries the one-line summary, never the
 round-by-round story. DISPLAY-zone read-only — ENGINE UNCHANGED
 (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change;
 `movers_underlying_class.py` + `movers_snapshot.py` + `movers_futures.py` +
@@ -1774,7 +1774,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-underlying-class` (**DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1633** —
+- **Active branch:** `claude/movers-underlying-class` (**DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1650** —
   the `/movers` page gains an `All | Indices | Stocks` underlying-class filter on all THREE tabs
   (Spot / Futures / Options), mirroring DEC-MOVERS-MIN-VOLUME-001 (#1034) EXACTLY: ONE COMMON
   `brutex/dashboard/movers_underlying_class.py` (`normalize_underlying_class` blank/unknown → `all`;
@@ -1788,7 +1788,7 @@ hostile-review pass._
   three tabs). DELIBERATE DEVIATION (ledgered): the class is a RANK-time filter over the SHARED cached set,
   so — unlike the #917 expiry tier — it is NOT in `candidate_key`; cache-independence is proven by a route
   test (Indices vs Stocks over one coordinate → different rows, `movers_cache.size()==1`).
-  ADVERSARIAL-REVIEW FIX ROUND folded (same branch, pre-merge — #1633, renumber history #1631→#1632→#1633 as PRs #1352/#1354 landed holding the prior claims): the F&O class lookup normalises the
+  ADVERSARIAL-REVIEW FIX ROUND folded (same branch, pre-merge — #1650, renumber history #1631→#1632→#1633→#1650 as PRs #1352/#1354 landed holding the prior claims and the slot wave reserved #1633–#1649): the F&O class lookup normalises the
   hyphen-preserving parsed token into the map's `primary_fno_underlying` key space (`BAJAJ-AUTO` previously
   misclassified `unknown`; `parse_future_symbol` right-anchored, mirroring `parse_fno_symbol`); the kind map
   + the stamped F&O candidate keys fold the `master_revision` CONTENT token via ONE
@@ -4229,8 +4229,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/movers-underlying-class`
-  (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1633 — renumber history
-  #1631→#1632→#1633 as PRs #1352/#1354 landed holding the prior claims; the `/movers` page gains
+  (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1650 — renumber history
+  #1631→#1632→#1633→#1650 (PRs #1352/#1354 took the first two; the slot wave
+  reserved #1633–#1649); the `/movers` page gains
   an `All | Indices | Stocks` underlying-class filter on all THREE tabs, a
   rank-time filter over the SHARED cached candidate set (the #1034 min_volume
   template); SPOT class from the lake segment, FUTURES/OPTIONS from the six-step
