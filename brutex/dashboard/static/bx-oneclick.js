@@ -45,21 +45,62 @@ var BX_TIMELINE_RING_LABEL =
 
 /**
  * Append records to the ring, trimming the OLDEST from the front past cap
- * (pure — mutates and returns `ring`).
+ * (pure — mutates and returns `ring`). When the optional `seen` dedup map
+ * is given, each trimmed-out record's canonical-line key is EVICTED from it
+ * (the ONE trim site — Breaker B #5 memory-leak fix: pre-fix, keys were
+ * inserted before the trim and never evicted, a 153.6 B/event GC-immune
+ * growth on a long-lived operator tab).
  *
  * @param {object[]} ring - the ring array (oldest first).
  * @param {object[]} records - new records to append.
  * @param {number} cap - the capacity (BX_TIMELINE_RING_CAP).
+ * @param {Object<string, boolean>} [seen] - optional dedup map keyed on
+ *   bxEventLineText; trimmed records' keys are deleted from it.
  * @returns {object[]} the same ring, trimmed to cap.
  */
-function bxRingPush(ring, records, cap) {
+function bxRingPush(ring, records, cap, seen) {
   for (var i = 0; i < records.length; i++) {
     ring.push(records[i]);
   }
   if (ring.length > cap) {
-    ring.splice(0, ring.length - cap);
+    var dropped = ring.splice(0, ring.length - cap);
+    if (seen) {
+      for (var j = 0; j < dropped.length; j++) {
+        delete seen[bxEventLineText(dropped[j])];
+      }
+    }
   }
   return ring;
+}
+
+/**
+ * Dedup-gate `records` against `seen` then push the fresh ones onto the
+ * ring, evicting trimmed-out keys (pure — mutates `ring` + `seen`).
+ *
+ * WINDOW-SCOPED DEDUP SEMANTIC: the capped ring IS the dedup window —
+ * `seen` holds exactly the keys of the records currently inside the ring
+ * (bounded at `cap` keys, never whole-history), so an event whose key has
+ * LEFT the window MAY legitimately be re-admitted if the server re-sends
+ * it. That matches the honest "showing last 5,000 events" label; dedup
+ * stays exact for everything inside the window.
+ *
+ * @param {object[]} ring - the ring array (oldest first).
+ * @param {Object<string, boolean>} seen - key → true for in-ring records.
+ * @param {object[]} records - candidate records (keyed on bxEventLineText).
+ * @param {number} cap - the capacity (BX_TIMELINE_RING_CAP).
+ * @returns {number} how many records were actually admitted.
+ */
+function bxRingAdd(ring, seen, records, cap) {
+  var fresh = [];
+  for (var i = 0; i < records.length; i++) {
+    var key = bxEventLineText(records[i]);
+    if (!seen[key]) {
+      seen[key] = true;
+      fresh.push(records[i]);
+    }
+  }
+  bxRingPush(ring, fresh, cap, seen);
+  return fresh.length;
 }
 
 /**
@@ -397,7 +438,10 @@ function bxFunnelProvenance(source, runId) {
     selectedRunId: null,
     sweepRunning: false,
     ring: [],
-    ringSeen: {}, // canonical-line dedupe for the load-earlier pager
+    // Canonical-line dedupe, WINDOW-scoped: holds exactly the keys inside
+    // the ring (bxRingAdd evicts trimmed keys), so it is bounded at
+    // BX_TIMELINE_RING_CAP — never whole-history (Breaker B #5).
+    ringSeen: {},
     eventsCursor: -1, // -1 = tail-anchored first page
     earlierCursor: 0 // forward cursor for the "load earlier" pager
   };
@@ -1023,15 +1067,9 @@ function bxFunnelProvenance(source, runId) {
   /* ── Timeline: capped ring + window-scoped search + load-earlier pager ── */
 
   function ringAdd(records) {
-    var fresh = [];
-    for (var i = 0; i < records.length; i++) {
-      var key = bxEventLineText(records[i]);
-      if (!state.ringSeen[key]) {
-        state.ringSeen[key] = true;
-        fresh.push(records[i]);
-      }
-    }
-    bxRingPush(state.ring, fresh, BX_TIMELINE_RING_CAP);
+    // Window-scoped dedup + bounded seen set — the ONE pure core
+    // (bxRingAdd) owns the gate + the trimmed-key eviction.
+    bxRingAdd(state.ring, state.ringSeen, records, BX_TIMELINE_RING_CAP);
     if (state.ring.length >= BX_TIMELINE_RING_CAP) {
       setText("ocTimelineLabel", BX_TIMELINE_RING_LABEL); // loud, honest cap label
     }
@@ -1291,6 +1329,7 @@ function bxFunnelProvenance(source, runId) {
     TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
     VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     ringPush: bxRingPush,
+    ringAdd: bxRingAdd,
     ringFilter: bxRingFilter,
     eventLineText: bxEventLineText,
     funnelWriteAllowed: bxFunnelWriteAllowed,
@@ -1332,6 +1371,7 @@ if (typeof module !== "undefined" && module.exports) {
     BX_TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
     BX_VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     bxRingPush: bxRingPush,
+    bxRingAdd: bxRingAdd,
     bxRingFilter: bxRingFilter,
     bxEventLineText: bxEventLineText,
     bxFunnelWriteAllowed: bxFunnelWriteAllowed,

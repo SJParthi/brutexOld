@@ -301,3 +301,118 @@ class TestWinnerDetailWiring:
             "one_regime_wonder:",
         ):
             assert key in js, key
+
+
+class TestRingSeenBoundedToWindow:
+    """bxRingAdd — the timeline dedup set is BOUNDED by the ring window.
+
+    Breaker B #5 fold (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): pre-fix,
+    ``ringAdd`` inserted into ``ringSeen`` unconditionally BEFORE the
+    5,000-cap trim and a trimmed-out event's key was NEVER evicted — a
+    real-Chromium-measured 153.6 B/event GC-immune growth (+146.9 MB @ 1M
+    events) on a long-lived operator tab during a multi-hour sweep (the
+    finder's harness baselines; control run +0.06 MB class). Post-fix the
+    ONE pure core ``bxRingAdd`` owns the dedup gate + the trimmed-key
+    eviction, so ``ringSeen`` holds exactly the in-ring keys — WINDOW-scoped
+    dedup: exact inside the window, and a key that LEFT the window may
+    legitimately be re-admitted if re-sent.
+    """
+
+    def test_unique_id_flood_growth_flattens_to_the_ring_cap(self) -> None:
+        # 5,025 unique-id events in 201 pages of 25 — the pre-fix seen set
+        # read 5,025 keys and kept growing; post-fix it flattens AT the cap.
+        out = _node_call(
+            """(() => {
+              const cap = O.BX_TIMELINE_RING_CAP;
+              const ring = []; const seen = {};
+              for (let p = 0; p < 201; p++) {
+                const batch = [];
+                for (let i = 0; i < 25; i++) {
+                  const n = p * 25 + i;
+                  batch.push({ ts_utc: 'T' + n, kind: 'k', payload: { n: n } });
+                }
+                O.bxRingAdd(ring, seen, batch, cap);
+              }
+              return { cap: cap, ring: ring.length, seen: Object.keys(seen).length };
+            })()"""
+        )
+        assert out["cap"] == 5000
+        assert out["ring"] == 5000
+        assert out["seen"] <= out["cap"]  # the leak law: bounded by the window
+        assert out["seen"] == 5000  # exactly the in-ring keys, nothing more
+
+    def test_repeating_id_control_run_stays_at_the_distinct_count(self) -> None:
+        # The control shape the growth run must flatten LIKE: 5,025 events
+        # over 100 distinct ids — seen never exceeds the distinct count.
+        out = _node_call(
+            """(() => {
+              const cap = O.BX_TIMELINE_RING_CAP;
+              const ring = []; const seen = {};
+              for (let p = 0; p < 201; p++) {
+                const batch = [];
+                for (let i = 0; i < 25; i++) {
+                  const n = (p * 25 + i) % 100;
+                  batch.push({ ts_utc: 'T' + n, kind: 'k', payload: { n: n } });
+                }
+                O.bxRingAdd(ring, seen, batch, cap);
+              }
+              return { ring: ring.length, seen: Object.keys(seen).length };
+            })()"""
+        )
+        assert out == {"ring": 100, "seen": 100}
+
+    def test_dedup_stays_exact_inside_the_window(self) -> None:
+        out = _node_call(
+            """(() => {
+              const cap = O.BX_TIMELINE_RING_CAP;
+              const ring = []; const seen = {};
+              const a = { ts_utc: 'A', kind: 'k', payload: {} };
+              const first = O.bxRingAdd(ring, seen, [a], cap);
+              const second = O.bxRingAdd(ring, seen, [a, a], cap);
+              return { first: first, second: second, ring: ring.length };
+            })()"""
+        )
+        assert out == {"first": 1, "second": 0, "ring": 1}
+
+    def test_key_that_left_the_window_may_be_readmitted(self) -> None:
+        # The documented WINDOW-scoped semantic: after a cap-sized flood
+        # pushes A out of the ring, a re-sent A is legitimately re-admitted
+        # (never a whole-history dedup), and seen == the in-ring key set.
+        out = _node_call(
+            """(() => {
+              const cap = O.BX_TIMELINE_RING_CAP;
+              const ring = []; const seen = {};
+              const a = { ts_utc: 'A', kind: 'k', payload: {} };
+              O.bxRingAdd(ring, seen, [a], cap);
+              const flood = [];
+              for (let i = 0; i < cap; i++) {
+                flood.push({ ts_utc: 'F' + i, kind: 'k', payload: {} });
+              }
+              O.bxRingAdd(ring, seen, flood, cap);
+              const aEvicted = !seen[O.bxEventLineText(a)];
+              const readmitted = O.bxRingAdd(ring, seen, [a], cap);
+              const ringKeys = ring.map(O.bxEventLineText);
+              const invariant =
+                Object.keys(seen).length === new Set(ringKeys).size &&
+                ringKeys.every((k) => seen[k] === true);
+              return {
+                aEvicted: aEvicted,
+                readmitted: readmitted,
+                seen: Object.keys(seen).length,
+                invariant: invariant
+              };
+            })()"""
+        )
+        assert out == {"aEvicted": True, "readmitted": 1, "seen": 5000, "invariant": True}
+
+    def test_ring_add_is_the_wired_core_and_documents_the_semantic(self) -> None:
+        js = _ONECLICK_JS.read_text(encoding="utf-8")
+        assert "function bxRingAdd(ring, seen, records, cap)" in js
+        assert "WINDOW-SCOPED DEDUP SEMANTIC" in js
+        # The DOM-layer ringAdd delegates to the ONE pure core.
+        assert "bxRingAdd(state.ring, state.ringSeen, records, BX_TIMELINE_RING_CAP);" in js
+        # The pre-fix leak shape (insert-before-trim into state.ringSeen at
+        # the poll path) is DEAD — the poll path holds no direct insert.
+        assert (
+            js.count("state.ringSeen[key] = true;") == 1
+        )  # load-earlier only (room-bounded, never trims)
