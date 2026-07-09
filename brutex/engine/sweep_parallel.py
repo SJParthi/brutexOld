@@ -178,6 +178,7 @@ from brutex.engine.sweep_run import (
     direction_label,
 )
 from brutex.engine.sweep_supervisor import (
+    RESUME_STORE_GUARD_WARN_CAP,
     SUPERVISOR_ACTION_ABORT,
     SUPERVISOR_ACTION_COMPLETE,
     SUPERVISOR_ACTION_START,
@@ -192,6 +193,7 @@ from brutex.engine.sweep_supervisor import (
     tuple_cache_params,
     tuple_label,
 )
+from brutex.engine.tuple_complete import missing_tuple_artifacts, resume_store_guard_enabled
 from brutex.models import BruteXError
 from brutex.observability.logging import configure_process_logging_best_effort
 from brutex.orchestrator.audit import BufferedAuditCollector, BufferedAuditRecord
@@ -1060,6 +1062,8 @@ class ParallelGridDriver:
     __slots__ = (
         "_bars_for",
         "_grid",
+        "_guard_warns",
+        "_guard_warns_suppressed",
         "_guards",
         "_heap",
         "_ingest_audit",
@@ -1073,6 +1077,8 @@ class ParallelGridDriver:
         "_root",
         "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
+        "_store_guard",
+        "_store_guard_forced",
         "_subject",
         "_workers",
     )
@@ -1204,6 +1210,17 @@ class ParallelGridDriver:
         #: resume classifies them VISIBLY as ``quarantined_prior``, regardless of
         #: the checkpoint/cache state (DEC-SWEEP-STALL-OOM-GUARDS-001).
         self._quarantined: frozenset[str] = frozenset()
+        #: Resume store guard state (DEC-SWEEP-RESUME-STORE-GUARD-001): the kill
+        #: switch is resolved ONCE per run (parent-side, in :meth:`run` — the
+        #: gates never execute in workers, so no spawn env-divergence surface);
+        #: ``_store_guard_forced`` counts tuples whose MISSING persisted
+        #: artifacts forced a re-dispatch, ``_guard_warns*`` implement the
+        #: capped WARN discipline (RESUME_STORE_GUARD_WARN_CAP, shared with the
+        #: sequential driver).
+        self._store_guard = False
+        self._store_guard_forced = 0
+        self._guard_warns = 0
+        self._guard_warns_suppressed = 0
 
     def run(self) -> SupervisedGridSummary:
         """Execute the whole grid in parallel; return the aggregate tally.
@@ -1216,6 +1233,12 @@ class ParallelGridDriver:
         test (``test_..._modulo_ts``). ``ts_utc`` participates in the chain hash, so
         the chains are not literally byte-for-byte across runs.
         """
+        # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the
+        # kill switch ONCE, before any tuple work — junk raises HERE (pre
+        # progress/audit), never mid-run. Parent-side only: the gates never
+        # execute in workers.
+        self._store_guard = resume_store_guard_enabled()
+
         sweep_id = grid_identity(self._grid)
         total = count_sweep_tuples(self._grid)
 
@@ -1283,6 +1306,13 @@ class ParallelGridDriver:
                 )
             raise
 
+        if self._guard_warns_suppressed:
+            _LOG.warning(
+                "sweep_parallel.resume_store_guard_forced_suppressed",
+                subject=self._subject,
+                suppressed=self._guard_warns_suppressed,
+                total_forced=self._store_guard_forced,
+            )
         payload = {
             "sweep_id": sweep_id,
             "tuples_total": total,
@@ -1299,6 +1329,10 @@ class ParallelGridDriver:
             "ranked": acc.ranked,
             "persisted": acc.persisted,
         }
+        if self._store_guard_forced:
+            # Additive EMIT-ON-NONZERO (chain-safe; a zero-forced payload is
+            # byte-identical to pre-guard) — DEC-SWEEP-RESUME-STORE-GUARD-001.
+            payload["store_guard_forced"] = self._store_guard_forced
         quarantine_note = (
             f" · {acc.tuples_quarantined_prior} QUARANTINED-prior "
             f"(see {quarantine_sidecar_path(self._root)})"
@@ -1332,6 +1366,7 @@ class ParallelGridDriver:
             persisted=acc.persisted,
             tuples_failed=acc.tuples_failed,
             tuples_quarantined_prior=acc.tuples_quarantined_prior,
+            store_guard_forced=self._store_guard_forced,
         )
 
     def _drive(
@@ -1433,11 +1468,31 @@ class ParallelGridDriver:
         checkpoint/cache state. A dispatched tuple's ``_Dispatched`` record carries
         its ``mask·bar`` work estimate so :meth:`_await_next_result` can size the
         heavy-grid stall bound (DEC-SWEEP-STALL-OOM-GUARDS-001).
+
+        RESUME STORE GUARD (DEC-SWEEP-RESUME-STORE-GUARD-001): BOTH skip tiers
+        honour a skip ONLY when the tuple's persisted artifacts (store Parquet
+        + completion sentinel + trial-stats sidecar) are INTACT at stat level
+        (:func:`~brutex.engine.tuple_complete.missing_tuple_artifacts` — ≤3
+        lstats, zero reads/hashing, computed at most ONCE per tuple and reused
+        across the two tiers); a MISSING artifact falls through to a worker
+        dispatch, where ``run_persisted_sweep``'s ``_sentinel_resume``
+        self-heals with a byte-identical redo. MISSING-only by contract —
+        corruption heals when the tuple re-enters. The quarantined_prior tier
+        stays FIRST and UNGATED (a quarantined tuple must stay visibly
+        quarantined). The parallel driver computes the store path directly
+        from ``(self._root, tuple_, self._grid)`` — it never holds a
+        ``store_for`` closure.
         """
         if self._quarantined and tuple_label(tuple_) in self._quarantined:
             return _skip_outcome(index, tuple_, "quarantined_prior")
+        guard_missing: tuple[str, ...] = ()
+        guard_checked = False
         if index < resume_from:
-            return _skip_outcome(index, tuple_, "resume")
+            guard_missing = self._guard_missing(tuple_)
+            guard_checked = True
+            if not guard_missing:
+                return _skip_outcome(index, tuple_, "resume")
+            self._record_forced(index, tuple_, guard_missing, tier="checkpoint")
         if self._guards.cache.seen(
             tuple_.k,
             tuple_.instrument,
@@ -1448,13 +1503,51 @@ class ParallelGridDriver:
             indicator_version=self._grid.indicator_version,
             code_commit_sha=self._grid.code_commit_sha,
         ):
-            return _skip_outcome(index, tuple_, "cache")
+            if not guard_checked:
+                guard_missing = self._guard_missing(tuple_)
+                if guard_missing:
+                    self._record_forced(index, tuple_, guard_missing, tier="cache")
+            if not guard_missing:
+                return _skip_outcome(index, tuple_, "cache")
+            # A forced tuple's cache hit is NOT honoured (artifacts missing) —
+            # fall through to dispatch; the checkpoint-tier WARN (if any) is
+            # not duplicated here.
         bars = self._bars_for(tuple_.instrument, tuple_.tf.label)
         future = pool.submit(_run_tuple_in_worker, index, tuple_, bars)
         pending[future] = _Dispatched(
             index=index, tuple_=tuple_, work=self._tuple_work(tuple_, len(bars))
         )
         return None
+
+    def _guard_missing(self, tuple_: SweepTuple) -> tuple[str, ...]:
+        """The tuple's missing persisted artifacts, or ``()`` when guard OFF — O(1).
+
+        ≤3 lstats + one small BLAKE3 path digest (the same digest the run path
+        computes) per call; the caller evaluates it at most ONCE per tuple and
+        reuses the answer across the resume + cache tiers.
+        """
+        if not self._store_guard:
+            return ()
+        return missing_tuple_artifacts(tuple_store_path(self._root, tuple_, self._grid))
+
+    def _record_forced(
+        self, index: int, tuple_: SweepTuple, missing: tuple[str, ...], *, tier: str
+    ) -> None:
+        """Count + WARN (capped) one guard-forced tuple — the sequential twin."""
+        self._store_guard_forced += 1
+        if self._guard_warns >= RESUME_STORE_GUARD_WARN_CAP:
+            self._guard_warns_suppressed += 1
+            return
+        self._guard_warns += 1
+        _LOG.warning(
+            "sweep_parallel.resume_store_guard_forced",
+            subject=self._subject,
+            index=index,
+            tuple=tuple_label(tuple_),
+            store_path=str(tuple_store_path(self._root, tuple_, self._grid)),
+            missing=list(missing),
+            tier=tier,
+        )
 
     def _tuple_work(self, tuple_: SweepTuple, n_bars: int) -> float:
         """The tuple's ``mask·bar`` work estimate = ``C(n_unique, k) × N_bars``.

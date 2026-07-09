@@ -821,13 +821,45 @@ def load_or_create_store(path: Path) -> ResultsStore:
     return ResultsStore(path=path)
 
 
+@dataclass(frozen=True, slots=True)
+class TupleStoreProvider:
+    """The default ``store_for`` callable, with a path-only probe seam.
+
+    Byte-identical in behaviour to the bare lambda it replaces
+    (DEC-SWEEP-RESUME-STORE-GUARD-001): calling it is exactly
+    ``load_or_create_store(tuple_store_path(root, tuple_, grid))``, so it still
+    satisfies ``Callable[[SweepTuple], ResultsStore]`` everywhere the lambda
+    did. It ADDITIONALLY exposes :meth:`store_path` — the pure path resolver —
+    so the resume store guard in
+    :func:`~brutex.engine.sweep_supervisor.run_supervised_grid` can stat a
+    skipped tuple's persisted artifacts WITHOUT opening (and thereby
+    load-or-creating) the store. Never pickled: the parallel workers rebuild
+    their stores in-worker from ``(grid, root)``.
+    """
+
+    root: Path
+    grid: SweepGridConfig
+
+    def store_path(self, tuple_: SweepTuple) -> Path:
+        """Return the tuple's deterministic Parquet path (no I/O) — O(1)."""
+        return tuple_store_path(self.root, tuple_, self.grid)
+
+    def __call__(self, tuple_: SweepTuple) -> ResultsStore:
+        """Load-or-create the tuple's store (the original lambda body, verbatim)."""
+        return load_or_create_store(self.store_path(tuple_))
+
+
 def make_store_for(root: Path, grid: SweepGridConfig) -> Callable[[SweepTuple], ResultsStore]:
     """Return a ``store_for`` callback that maps a tuple to its load-or-create store.
 
     The default store provider for :func:`run_sweep_grid`: it resolves the
     deterministic :func:`tuple_store_path` under *root* and returns a
     :func:`load_or_create_store` for it — giving the grid its
-    lossless, byte-identical re-run guarantee out of the box.
+    lossless, byte-identical re-run guarantee out of the box. Since
+    DEC-SWEEP-RESUME-STORE-GUARD-001 the returned callable is a
+    :class:`TupleStoreProvider` (call behaviour byte-identical to the prior
+    lambda), whose ``store_path`` seam auto-activates the supervisor's resume
+    store guard for every ``make_store_for`` caller.
 
     Parameters
     ----------
@@ -841,7 +873,7 @@ def make_store_for(root: Path, grid: SweepGridConfig) -> Callable[[SweepTuple], 
     Callable[[SweepTuple], ResultsStore]
         The per-tuple store factory.
     """
-    return lambda tuple_: load_or_create_store(tuple_store_path(root, tuple_, grid))
+    return TupleStoreProvider(root=root, grid=grid)
 
 
 class TupleDiffCheck(Protocol):
@@ -1238,6 +1270,7 @@ __all__ = [
     "SweepTuple",
     "Timeframe",
     "TupleDiffCheck",
+    "TupleStoreProvider",
     "bloom_capacity_hint",
     "count_sweep_tuples",
     "iter_sweep_tuples",

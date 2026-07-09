@@ -6426,6 +6426,19 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the kill
+    # switch EAGERLY too — a junk BRUTEX_SWEEP_RESUME_STORE_GUARD is a clean
+    # pre-sweep user-config error, never a mid-launch traceback (both sweep
+    # drivers re-resolve the same switch at their own entry; this eager pass
+    # only front-loads the failure).
+    from brutex.engine.tuple_complete import resume_store_guard_enabled
+
+    try:
+        resume_store_guard_enabled()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
     # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). The catalog FILE is
     # deliberately NOT gated — sweep-all reconciles the catalog from the lake

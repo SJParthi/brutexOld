@@ -79,18 +79,34 @@ tuple+grid identity (incl. ``condition_bits``, ``k``, ``top_k``, ``min_hits``,
 changed knob computes a different key and is never falsely skipped — the
 cache-skip path has no preload-and-reflush safety net, so its key is
 intentionally stricter than the per-tuple Parquet path digest.
+
+RESUME STORE GUARD (DEC-SWEEP-RESUME-STORE-GUARD-001): BOTH skip tiers —
+checkpoint-resume AND cache — historically fired before ANY store touch, so a
+tuple whose persisted artifacts had been DELETED (store Parquet / completion
+sentinel / trial-stats sidecar) was skipped forever and its finalist rows were
+PERMANENTLY missing with a clean exit (the S5b confirmed defect). Both tiers
+now honour a skip ONLY when :func:`~brutex.engine.tuple_complete.missing_tuple_artifacts`
+reads the tuple's three artifacts INTACT (≤3 lstats, zero reads, zero
+hashing — O(1) per skipped tuple); a missing artifact FORCES the tuple back
+through ``run_one_tuple``, whose ``_sentinel_resume`` self-heals with a
+byte-identical redo. The gate detects MISSING artifacts ONLY — a
+present-but-corrupt artifact still skips here and heals when the tuple
+re-enters (``_sentinel_resume`` re-hash) or opens on the run path (G1
+quarantine). Kill switch ``BRUTEX_SWEEP_RESUME_STORE_GUARD`` (default ON;
+fail-loud on junk).
 """
 
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import os
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import blake3
 import structlog
@@ -113,6 +129,7 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
 from brutex.engine.sweep_run import SweepComboError, _direction_label
 from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.engine.tuple_complete import missing_tuple_artifacts, resume_store_guard_enabled
 
 if TYPE_CHECKING:
     # Annotation-only — keep the `fastbloom_rs` / `lmdb` PyO3 wheels (pulled by
@@ -164,6 +181,13 @@ SUPERVISOR_ACTION_ABORT: Final[str] = _ACTION_ABORT
 
 #: Default supervisor worker name for the (single) sweep thread's heartbeat.
 DEFAULT_WORKER_NAME: Final[str] = "sweep-worker-0"
+
+#: Cap on per-tuple ``resume_store_guard_forced`` WARNs per driver run
+#: (DEC-SWEEP-RESUME-STORE-GUARD-001; the movers prev-close capped-20-WARN
+#: precedent) — forced tuples past the cap stay COUNTED, only the per-tuple
+#: log line is suppressed (one summarising line carries the overflow count).
+#: Shared by the sequential AND parallel drivers (CLAUDE.md §11 COMMON).
+RESUME_STORE_GUARD_WARN_CAP: Final[int] = 20
 
 #: The idle snapshot the dashboard route serves before any sweep has started.
 _IDLE_PROGRESS: Final[dict[str, Any]] = {
@@ -274,6 +298,15 @@ class SupervisedGridSummary:
         hole is always visible; delete the sidecar entries (after relieving the
         memory pressure) and resume to genuinely recompute them. Always ``0`` on
         the sequential path (only the parallel driver quarantines).
+    store_guard_forced
+        Tuples the resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001)
+        FORCED back through ``run_one_tuple`` because a persisted artifact
+        (store Parquet / completion sentinel / trial-stats sidecar) was
+        MISSING at skip time — the S5b "delete some stores, re-run, silently
+        lose finalists" mode, now self-healed byte-identically by the
+        existing ``_sentinel_resume`` redo. A forced tuple is NOT counted in
+        ``skipped_resume`` / ``skipped_cache`` (it genuinely ran). ``0``
+        whenever the guard is disabled/inert or nothing was missing.
     """
 
     sweep_id: str
@@ -290,6 +323,7 @@ class SupervisedGridSummary:
     persisted: int
     tuples_failed: int
     tuples_quarantined_prior: int = 0
+    store_guard_forced: int = 0
 
 
 def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
@@ -524,6 +558,7 @@ def run_supervised_grid(
     reuse_bar_bits: bool = True,
     diffcheck: TupleDiffCheck | None = None,
     store_quarantine: StoreQuarantine | None = None,
+    store_path_for: Callable[[SweepTuple], Path] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
 
@@ -540,9 +575,23 @@ def run_supervised_grid(
        ``resumed_count`` + ``resume_from`` and ONE progress publish
        (DEC-SWEEP-SCALE-OPERABILITY-001) — so a restart pays O(1) audit/progress disk
        I/O instead of one fsync'd write per resumed tuple; no store touched,
-       no re-record.
+       no re-record. RESUME STORE GUARD (DEC-SWEEP-RESUME-STORE-GUARD-001):
+       when active, the prefix is pre-scanned with
+       :func:`~brutex.engine.tuple_complete.missing_tuple_artifacts` (≤3
+       lstats per tuple, zero reads/hashing) and a tuple whose persisted
+       store/sentinel/sidecar is MISSING is FORCED back through
+       ``run_one_tuple`` (its ``_sentinel_resume`` self-heals with a
+       byte-identical redo) instead of being skipped — the S5b operator
+       scenario ("massive pull → delete → re-run must never silently lose
+       data"). The gate detects MISSING artifacts only, never CORRUPTED ones
+       (corruption is ``_sentinel_resume``'s job when the tuple re-enters).
+       DISCLOSED consequence: a checkpointed NO-BARS tuple persists zero
+       artifacts, so under the guard it re-probes ``bars_for`` on every
+       resume and re-settles as no-bars (its count shifts ``skipped_resume``
+       → ``tuples_skipped_no_bars``) — the fail-safe direction is re-verify.
     3. Elif ``guards.cache.seen(tuple key)``: skip as **cached** (progress + audit
-       + ``checkpoint.record``).
+       + ``checkpoint.record``) — ALSO store-guard-gated: a cache hit whose
+       persisted artifacts are missing falls through to ``run_one_tuple``.
     4. Else ``run_one_tuple``: a :class:`~brutex.engine.sweep_run.SweepComboError`
        → **failed** skip ("Resilient: skip + continue" — progress.advance
        (processed-but-failed) + audit ``TUPLE_FAILED`` naming the offending combo,
@@ -625,6 +674,18 @@ def run_supervised_grid(
         of the WP-5 supervisor edit scope: the sequential spine is the only
         caller of ``run_one_tuple`` on the CLI path, so the seams MUST thread
         through here to reach it.
+    store_path_for
+        Optional ``tuple -> Path`` resolver for the resume store guard
+        (DEC-SWEEP-RESUME-STORE-GUARD-001). When ``None`` (default) the
+        guard duck-types ``store_for.store_path`` — present on the
+        :class:`~brutex.engine.sweep_orchestrator.TupleStoreProvider` that
+        :func:`~brutex.engine.sweep_orchestrator.make_store_for` returns, so
+        every production caller auto-activates. A bespoke-lambda
+        ``store_for`` with neither seam leaves the guard honestly INERT (one
+        ``resume_store_guard_inert`` INFO; behaviour byte-identical to
+        pre-guard). The kill switch ``BRUTEX_SWEEP_RESUME_STORE_GUARD=0``
+        disables the guard entirely (restoring the pre-guard skip loop —
+        and with it the S5b silent-loss mode; an informed escape hatch).
 
     Returns
     -------
@@ -634,11 +695,36 @@ def run_supervised_grid(
     Raises
     ------
     ValueError
-        If ``skip_empty=False`` and a tuple has no bars (after an abort line).
+        If ``skip_empty=False`` and a tuple has no bars (after an abort line),
+        or — BEFORE any tuple work, pre-loop — if
+        ``BRUTEX_SWEEP_RESUME_STORE_GUARD`` is set to an unrecognised value
+        (fail-loud: a typo must neither silently disarm a data-loss guard nor
+        silently arm anything).
     """
+    # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the kill
+    # switch ONCE, before any tuple work — junk raises HERE, never mid-run.
+    guard_enabled = resume_store_guard_enabled()
+
     sweep_id = grid_identity(grid)
     total = count_sweep_tuples(grid)
     subject = f"sweep:{sweep_id[:16]}"
+
+    # The guard's path probe: the explicit kwarg wins; else duck-type the
+    # provider seam make_store_for's TupleStoreProvider carries; else the
+    # guard is honestly INERT for bespoke-lambda library callers (logged once,
+    # behaviour byte-identical to pre-guard).
+    path_probe: Callable[[SweepTuple], Path] | None = None
+    if guard_enabled:
+        if store_path_for is not None:
+            path_probe = store_path_for
+        else:
+            candidate = getattr(store_for, "store_path", None)
+            if callable(candidate):
+                # Duck-typed: the provider's method IS `tuple -> Path` (the
+                # TupleStoreProvider contract); the cast is type-narrowing only.
+                path_probe = cast("Callable[[SweepTuple], Path]", candidate)
+        if path_probe is None:
+            _LOG.info("sweep_supervisor.resume_store_guard_inert", subject=subject)
 
     guards.checkpoint.load()
     resume_from = guards.checkpoint.next_index
@@ -673,7 +759,53 @@ def run_supervised_grid(
     # count honest against an oversized checkpoint cursor (never more than the
     # grid holds); ``skipped_resume`` keeps its exact prior meaning.
     resume_count = min(resume_from, total)
-    skipped_resume = resume_count
+
+    # Resume store guard, WARN discipline: one WARN per forced tuple naming
+    # index + label + store path + missing artifact names + tier, CAPPED at
+    # RESUME_STORE_GUARD_WARN_CAP with one summarising overflow line (counted,
+    # never per-row past the cap — the movers prev-close precedent).
+    guard_warns = 0
+    guard_warns_suppressed = 0
+
+    def _warn_forced(
+        index: int, label: str, missing: tuple[str, ...], tier: str, store_path: Path
+    ) -> None:
+        nonlocal guard_warns, guard_warns_suppressed
+        if guard_warns >= RESUME_STORE_GUARD_WARN_CAP:
+            guard_warns_suppressed += 1
+            return
+        guard_warns += 1
+        _LOG.warning(
+            "sweep_supervisor.resume_store_guard_forced",
+            subject=subject,
+            index=index,
+            tuple=label,
+            store_path=str(store_path),
+            missing=list(missing),
+            tier=tier,
+        )
+
+    # Checkpoint tier of the guard (DEC-SWEEP-RESUME-STORE-GUARD-001): pre-scan
+    # the already-complete prefix's persisted artifacts (≤3 lstats + one small
+    # BLAKE3 path digest per tuple — O(resume_count) time, O(#forced) memory;
+    # a lightweight second islice enumeration of the prefix, disclosed) and
+    # FORCE any tuple with a MISSING artifact back through run_one_tuple. The
+    # gate is MISSING-only by contract: a present-but-corrupt artifact still
+    # skips here and heals only when the tuple re-enters (_sentinel_resume).
+    forced: set[int] = set()
+    if path_probe is not None and resume_count > 0:
+        for prefix_index, prefix_tuple in enumerate(
+            itertools.islice(iter_sweep_tuples(grid), resume_count)
+        ):
+            store_path = path_probe(prefix_tuple)
+            missing = missing_tuple_artifacts(store_path)
+            if missing:
+                forced.add(prefix_index)
+                _warn_forced(
+                    prefix_index, _tuple_label(prefix_tuple), missing, "checkpoint", store_path
+                )
+    skipped_resume = resume_count - len(forced)
+    cache_forced = 0
     tuples_failed = 0
     enumerated = 0
     conflict_pruned = 0
@@ -714,41 +846,59 @@ def run_supervised_grid(
 
     try:
         if resume_count > 0:
-            # ONE in-memory progress batch for the whole resumed prefix (the
-            # ``advance`` calls only mutate counters under a lock — zero disk
-            # I/O; the single ``on_progress`` publish below is the only write),
-            # then ONE summarising hash-chained audit line. The chain stays
-            # verifiable — the summary is an ordinary seq/prev_hash/entry_hash
-            # entry — and its payload reconstructs the skipped set exactly:
-            # the enumeration indices ``[0, resumed_count)`` (Golden Rule #7).
-            for _ in range(resume_count):
+            # ONE in-memory progress batch for the whole INTACT resumed prefix
+            # (the ``advance`` calls only mutate counters under a lock — zero
+            # disk I/O; the single ``on_progress`` publish below is the only
+            # write), then ONE summarising hash-chained audit line. The chain
+            # stays verifiable — the summary is an ordinary
+            # seq/prev_hash/entry_hash entry. A guard-FORCED prefix tuple is
+            # NOT batch-advanced here — it ticks once on its own run path
+            # below, so total ticks == total (never a double advance). At zero
+            # forced the payload + log are byte-identical to pre-guard; the
+            # ``store_guard_forced`` keys are additive EMIT-ON-NONZERO
+            # (per-line hash chain ⇒ new payload keys are chain-safe).
+            for _ in range(skipped_resume):
                 guards.progress.advance(survived=False, skipped=True)
             if on_progress is not None:
                 on_progress(guards.progress.snapshot())
+            resume_payload: dict[str, Any] = {
+                "resumed_count": skipped_resume,
+                "resume_from": resume_from,
+            }
+            if forced:
+                resume_payload["store_guard_forced"] = len(forced)
+                resume_payload["store_guard_forced_indices"] = sorted(forced)[
+                    :RESUME_STORE_GUARD_WARN_CAP
+                ]
             guards.audit.append(
                 action=_ACTION_TUPLE_RESUME,
                 subject=subject,
-                payload={"resumed_count": resume_count, "resume_from": resume_from},
+                payload=resume_payload,
             )
             _LOG.info(
                 "sweep_supervisor.resume_batch",
                 subject=subject,
-                resumed_count=resume_count,
+                resumed_count=skipped_resume,
                 resume_from=resume_from,
             )
         for index, tuple_ in enumerate(iter_sweep_tuples(grid)):
             guards.watchdog.beat(guards.worker_name)
 
-            if index < resume_from:
+            if index < resume_from and index not in forced:
                 # Already-complete resumed prefix: counted + summarised ONCE
                 # above (DEC-SWEEP-SCALE-OPERABILITY-001) — zero per-tuple audit /
                 # progress / label work here. The generator is still stepped
-                # sequentially (unavoidable) but with no disk I/O.
+                # sequentially (unavoidable) but with no disk I/O. A FORCED
+                # prefix tuple (missing persisted artifacts) falls through —
+                # DIRECTLY to run_one_tuple, bypassing the cache tier below
+                # (artifacts known-missing: no redundant re-stat, no wrong
+                # cache skip; checkpoint.record is a monotonic no-op for it,
+                # cache.record re-records idempotently on success).
                 continue
 
             label = _tuple_label(tuple_)
 
-            if guards.cache.seen(
+            if index not in forced and guards.cache.seen(
                 tuple_.k,
                 tuple_.instrument,
                 tuple_.tf.label,
@@ -758,16 +908,30 @@ def run_supervised_grid(
                 indicator_version=grid.indicator_version,
                 code_commit_sha=grid.code_commit_sha,
             ):
-                skipped_cache += 1
-                if not had_failure:
-                    guards.checkpoint.record(index)
-                _advance(current=label, survived=False, skipped=True)
-                guards.audit.append(
-                    action=_ACTION_TUPLE_CACHE,
-                    subject=subject,
-                    payload={"index": index, "tuple": label},
-                )
-                continue
+                # Cache tier of the resume store guard: a cache hit is honoured
+                # ONLY when the tuple's persisted artifacts are intact (one
+                # lazy ≤3-lstat probe); a MISSING artifact falls through to
+                # run_one_tuple exactly like the checkpoint tier (the
+                # cache-only S5b reproducer proved this tier equally blind).
+                forced_by_cache = False
+                if path_probe is not None:
+                    cache_store_path = path_probe(tuple_)
+                    cache_missing = missing_tuple_artifacts(cache_store_path)
+                    if cache_missing:
+                        forced_by_cache = True
+                        cache_forced += 1
+                        _warn_forced(index, label, cache_missing, "cache", cache_store_path)
+                if not forced_by_cache:
+                    skipped_cache += 1
+                    if not had_failure:
+                        guards.checkpoint.record(index)
+                    _advance(current=label, survived=False, skipped=True)
+                    guards.audit.append(
+                        action=_ACTION_TUPLE_CACHE,
+                        subject=subject,
+                        payload={"index": index, "tuple": label},
+                    )
+                    continue
 
             # "Resilient: skip + continue" — a combo that raises mid-evaluation
             # surfaces as a SweepComboError. Skip the WHOLE tuple, count it,
@@ -863,6 +1027,13 @@ def run_supervised_grid(
             if on_tuple is not None:
                 on_tuple(tuple_, summary)
 
+        if guard_warns_suppressed:
+            _LOG.warning(
+                "sweep_supervisor.resume_store_guard_forced_suppressed",
+                subject=subject,
+                suppressed=guard_warns_suppressed,
+                total_forced=len(forced) + cache_forced,
+            )
         payload = {
             "sweep_id": sweep_id,
             "tuples_total": total,
@@ -878,6 +1049,10 @@ def run_supervised_grid(
             "ranked": ranked,
             "persisted": persisted,
         }
+        if forced or cache_forced:
+            # Additive EMIT-ON-NONZERO (chain-safe; the zero-forced payload is
+            # byte-identical to pre-guard).
+            payload["store_guard_forced"] = len(forced) + cache_forced
         guards.progress.finish(
             detail=(
                 f"{tuples_run} run · {skipped_cache} cached · "
@@ -917,6 +1092,7 @@ def run_supervised_grid(
         ranked=ranked,
         persisted=persisted,
         tuples_failed=tuples_failed,
+        store_guard_forced=len(forced) + cache_forced,
     )
 
 
@@ -1052,6 +1228,7 @@ def idle_progress() -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_WORKER_NAME",
+    "RESUME_STORE_GUARD_WARN_CAP",
     "SUPERVISOR_ACTION_ABORT",
     "SUPERVISOR_ACTION_COMPLETE",
     "SUPERVISOR_ACTION_START",
