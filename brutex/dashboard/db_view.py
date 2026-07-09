@@ -2812,10 +2812,22 @@ def query_candles(
     — no data duplication, the lake stays the single source of truth.
     The glob is scoped to ONE ``(symbol, interval)`` (its whole-year/month
     files only), and the page is ``LIMIT``-bounded — so a click never
-    materialises more than ``limit`` rows in Python regardless of how many
-    years are stored (DuckDB additionally skips row-groups via min/max stats;
-    this is engine cost, not directory pruning). *start* / *end* are inclusive
-    ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC calendar date.
+    materialises more than ``limit`` rows in PYTHON regardless of how many
+    years are stored. HONEST engine-cost envelope
+    (DEC-LATENCY-HONESTY-BATCH-001, Golden Rule #10 — corrects the prior
+    "DuckDB additionally skips row-groups via min/max stats" claim, which this
+    query shape DEFEATS): the read-side dedup ``QUALIFY`` window
+    (DEC-LAKE-READ-UNIQUE-001) must rank every row of the partition before
+    ``LIMIT`` applies, and the date bounds compare a derived
+    ``(timestamp AT TIME ZONE …)::DATE`` expression that DuckDB does not prune
+    through against the raw ``timestamp`` column's row-group min/max stats —
+    so each paging click is a full-partition columnar scan ENGINE-side
+    (O(partition rows), not O(page)). That scan is flat enough to pass the
+    shared-CI < 8× depth-ratio gate (``tests/bench/test_db_candle_query_o1.py``);
+    genuine row-group pruning would need stats-compatible raw-column
+    predicates — named future work, not claimed. *start* / *end* are inclusive
+    ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC calendar date
+    (IST for the derived ``1day`` — see :func:`_date_bounds`).
     Returns an empty
     page (never raises) when the partition set has no Parquet files yet.
 

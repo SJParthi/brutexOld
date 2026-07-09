@@ -1427,13 +1427,10 @@ def build_app(
         if summary_cache is not None
         else SummaryCache(revision_probe=_lake_revision_probe_or_none(instrument_store))
     )
-    # The /movers point-in-time snapshot cache (DEC-MOVERS-O1-LATENCY-001): caches
-    # the expensive, top_n-independent candidate set per snapshot coordinate so a
-    # sub-filter / top_n / re-selection is an O(1) hit + a cheap re-rank, never a
-    # lake re-scan. It is invalidated for free by the SAME write-generation signal
-    # as the coverage SummaryCache (a pull/materialize bumps `_summary_cache`'s
-    # generation, which the movers cache stamps every entry with).
-    _movers_cache = movers_cache if movers_cache is not None else MoversSnapshotCache()
+    # The /movers point-in-time snapshot cache (DEC-MOVERS-O1-LATENCY-001) is
+    # constructed BELOW — after `_pull_live` exists — so it can wire the SAME
+    # pull-time adaptive floor its floored siblings carry
+    # (DEC-LATENCY-HONESTY-BATCH-001; see the construction site's comment).
     # The /universe backend snapshot cache (DEC-UNIVERSE-BACKEND-CACHE-001): caches
     # the lean base reads (eligible set + IDX/EQ candidates + reference-only ids) +
     # the derived summary / per-kind instrument rows, keyed by the master's own
@@ -1536,6 +1533,33 @@ def build_app(
     # via `stamp_freshness` (duty_degraded / snapshot_age_s — visible, never
     # silent).
     _summary_cache.set_pull_active_probe(_pull_live)
+    # The /movers point-in-time snapshot cache (DEC-MOVERS-O1-LATENCY-001): caches
+    # the expensive, top_n-independent candidate set per snapshot coordinate so a
+    # sub-filter / top_n / re-selection is an O(1) hit + a cheap re-rank, never a
+    # lake re-scan. It is invalidated for free by the SAME write-generation signal
+    # as the coverage SummaryCache (a pull/materialize bumps `_summary_cache`'s
+    # generation, which the movers cache stamps every entry with).
+    #
+    # SANCTIONED design-pin change (DEC-LATENCY-HONESTY-BATCH-001, supersedes the
+    # movers-rows carve-out recorded in `movers_cache.py`'s module docstring under
+    # DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001): this cache now ALSO opts into the
+    # pull-time adaptive floor its floored siblings below carry. It was the lone
+    # bare instance, so during a pull every window-tick generation bump forced a
+    # full O(instruments × bars-read) candidate re-scan per /movers poll —
+    # back-to-back, the exact scan-storm class #920 fixed. The floor serves a
+    # generation-MISMATCHED entry only while a pull is genuinely running in this
+    # process AND the entry is younger than min(max(2 s, its own scan duration),
+    # 600 s) — so a poll during a pull may serve a snapshot up to that
+    # floor-window stale (each stale serve is LOGGED `movers_cache.stale_served`,
+    # never silent), and never pre-pull data BEYOND the floor window; the moment
+    # the pull ends the probe reads False → fresh recompute, and the post-pull
+    # movers warm re-seeds at the end generation. An INJECTED cache (tests /
+    # legacy callers) is used verbatim — byte-identical to before.
+    _movers_cache = (
+        movers_cache
+        if movers_cache is not None
+        else MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    )
     # The /db candle-pager TOTAL cache (DEC-DB-CANDLE-COUNT-CACHE-001): the page
     # `COUNT(*)` over `read_parquet(glob)` is O(files) (a Parquet-footer read per
     # monthly file — ~8 ms at 6 years, growing as the lake deepens) and was
@@ -1903,15 +1927,26 @@ def build_app(
 
     @app.get("/api/v1/sweep-progress")
     async def api_sweep_progress() -> JSONResponse:
-        """GET /api/v1/sweep-progress — O(1) live brute-force sweep progress (DEC-SWEEP-WIRE-GA-001).
+        """GET /api/v1/sweep-progress — live brute-force sweep progress (DEC-SWEEP-WIRE-GA-001).
 
         The dashboard panel for the guarantee-&-assurance layer: percent / ETA /
         tuples-per-sec / survivors / skipped, populated by the supervisor's
         :class:`~brutex.engine.sweep_progress.SweepProgress` (wired into
         :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`). Serves the
         freshest of the cross-process file bridge, the in-process push, or an idle
-        snapshot — a pure O(1) read that never touches the lake or the store lock
-        and never raises (see :meth:`DashboardState.sweep_progress_view`).
+        snapshot, and never raises (see :meth:`DashboardState.sweep_progress_view`).
+
+        HONEST envelope (DEC-LATENCY-HONESTY-BATCH-001, Golden Rule #10 —
+        supersedes the prior "a pure O(1) read that never touches the lake"
+        claim, which was FALSE): when a sweep-progress path is configured,
+        every poll performs ONE synchronous ``path.exists()`` + small-JSON
+        ``read_progress`` of the lake-volume file bridge
+        (``<lake>/sweeps/progress/sweep-progress.json``) ON the event loop —
+        so a stalled lake volume can block the loop for the duration of that
+        stat + read (the same class the ``RateBridgeCache`` bounds for
+        ``/api/v1/pull/rate``). Offloading/memoising this read is a NAMED
+        follow-up (owned by a separate change), not claimed here. It holds the
+        state lock only briefly and never takes the results-store lock.
         """
         return JSONResponse(state.sweep_progress_view())
 
@@ -3671,6 +3706,14 @@ def build_app(
                                 exchange=exch,
                                 datasets=warm_datasets,
                             ),
+                            # force_fresh (DEC-LATENCY-HONESTY-BATCH-001 review
+                            # fold): now that the production movers cache is
+                            # FLOORED, the still-`running` job's own pull-active
+                            # floor could serve a stale pre-pull entry back into
+                            # this warm re-seed — the exact class the discovery
+                            # warm already guards (warm_discovery_memos), so the
+                            # movers warm mirrors its documented pattern.
+                            force_fresh=True,
                         )
                         return len(cands.snapshots)
 
@@ -3725,6 +3768,10 @@ def build_app(
                                 expiry_tier=tier,
                                 datasets=warm_datasets,
                             ),
+                            # force_fresh — the warm re-seed must never be served
+                            # its own pull-active floor's stale pre-pull entry
+                            # (DEC-LATENCY-HONESTY-BATCH-001; see the spot job).
+                            force_fresh=True,
                         )
                         return len(cands.movers)
 
@@ -3802,6 +3849,10 @@ def build_app(
                                 calendar_expiries=calendar_expiries,
                                 registry_chain_for=registry_chain_for,
                             ),
+                            # force_fresh — the warm re-seed must never be served
+                            # its own pull-active floor's stale pre-pull entry
+                            # (DEC-LATENCY-HONESTY-BATCH-001; see the spot job).
+                            force_fresh=True,
                         )
                         return len(cands.movers)
 

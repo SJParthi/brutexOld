@@ -30,9 +30,17 @@ stale illusion).
 
 ## Opt-in PULL-TIME adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001)
 
-A generation MISMATCH normally forces an immediate recompute — correct for the
-movers candidate sets (a pull must never serve pre-pull movers rows), but
-punishing for the **discovery-walk memos** that ride this same class (the
+A generation MISMATCH normally forces an immediate recompute. The original
+design (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001) deliberately kept the movers
+candidate-set instance on that strict rule ("a pull must never serve pre-pull
+movers rows") and floored only the discovery-walk memos; that carve-out is
+SUPERSEDED by DEC-LATENCY-HONESTY-BATCH-001 — the production ``/movers``
+candidate cache now ALSO opts in, so during an active pull a poll may serve a
+snapshot up to the floor window stale (bounded, logged, pull-scoped — never
+pre-pull data beyond the floor window; see the sanctioned-change comment at
+its ``app.py`` construction site). The strict always-recompute rule remains
+the DEFAULT for any instance that does not opt in. The floor exists because a
+mismatch is punishing for the **discovery-walk memos** that ride this same class (the
 ``/db`` datasets triple-walk, the spot + F&O cascades, the latest-movers-date
 resolve): during a pull the write generation bumps on EVERY window tick, so a
 poll re-paid the full ``O(datasets)`` ``bars/`` walk back-to-back — the exact
@@ -60,9 +68,17 @@ hidden — Golden Rule #10).
   pull) still pays the real ``O(instruments × bars-read)`` lake scan — this is
   NOT claimed away. The cache bounds how OFTEN that cost is paid (once per
   coordinate per generation), it does not make the scan itself O(1).
-* Memory is **bounded**: an LRU keeps at most ``capacity`` snapshots resident
-  (``O(capacity)`` space), so a long session that views thousands of coordinates
-  never grows without bound — the least-recently-used snapshot is evicted.
+* Memory is bounded in **ENTRY COUNT** (``capacity``), NOT in bytes
+  (DEC-LATENCY-HONESTY-BATCH-001 corrects the prior unqualified "memory is
+  bounded" wording): an LRU keeps at most ``capacity`` snapshots resident —
+  ``O(capacity)`` ENTRIES, so a long session that views thousands of
+  coordinates never grows without bound in count (the least-recently-used
+  snapshot is evicted) — but each entry retains its WHOLE payload, so total
+  resident bytes are ``capacity × payload-size``: large payloads (e.g. sweep
+  scans keyed per revision) can retain gigabytes at the default capacity
+  (≈256 × 4 MiB ≈ 1 GiB — the latency audit's probe figure, arithmetically
+  derived, not re-measured on this branch). A byte-watermark / size-aware
+  eviction is a NAMED follow-up, not claimed.
 * An opted-in instance may serve a **bounded-stale** entry while a pull runs
   (age < the adaptive floor, capped at ``adaptive_floor_cap_s``); the staleness
   window closes the moment the pull ends (probe ``False`` → recompute) and the
