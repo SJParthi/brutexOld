@@ -80,14 +80,14 @@ ONE coordinator-confirmed fold of five member PRs in binding order: **#1330
 DEC-SWEEP-UNKILLABLE-CORE-001** (MIGRATION.md #1594 / ADR-0019 — the UNKILLABLE sweep run
 core; its single-flight mechanism `engine/sweep_singleflight.py` is the train-WINNING
 variant by coordinator rule), **#1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001** (#1632,
-renumbered from #1623 at the fold — the sweep-cache resume Bloom auto-grow gains 25%
+renumbered #1623 → #1631 → #1632 across the folds — the sweep-cache resume Bloom auto-grow gains 25%
 headroom ABOVE the persisted digest count so a within-wall over-capacity resume genuinely
 self-heals instead of advancing one tuple per restart; the 16 GiB wall refusal preserved),
-**#1336 DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001** (#1633, renumbered from #1622 — the
+**#1336 DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001** (#1633, renumbered #1622 → #1632 → #1633 — the
 ACTIVE gate config + non-default selection knobs folded into the `_tuple_digest` store
 address via the NEW COMMON `engine/sweep_identity.py` leaf, byte-stable at defaults
 (`5b020e892247deac`); C5 typed `ResultsStoreGateConflictError` tuple-scoped skip), **#1350
-DEC-SWEEP-RESUME-STORE-GUARD-001** (#1634, renumbered from #1623 — BOTH sweep skip tiers
+DEC-SWEEP-RESUME-STORE-GUARD-001** (#1634, renumbered #1623 → #1633 → #1634 — BOTH sweep skip tiers
 (checkpoint + dedup-cache, sequential AND parallel drivers) gated on intact on-disk tuple
 artifacts so a delete-then-re-run never silently loses finalists; kill switch
 `BRUTEX_SWEEP_RESUME_STORE_GUARD`, MISSING-only by contract), and the **#1351 tests+docs
@@ -96,7 +96,9 @@ oracle property harness + the runbook partition-delete-behind-SUCCESS-ledger foo
 no DEC by the test-only exemption; coordinator-merge instruction honored). Post-#1228 main
 tip folded (DEC-LAKE-STATS-MANIFEST-001 #1614). HONEST (Golden Rule #10): each member was
 hostile-reviewed on ITS OWN diff — the fold's conflict re-derivations (CLAUDE.md blurbs, the
-cli.py citation row, the ledger renumbers — now #1632/#1633/#1634 after the T2 main fold's tail shift) are train-level seams disclosed
+cli.py citation row, the #1632/#1633/#1634 ledger renumbers — shifted once more at the
+2026-07-09 post-#1352 main fold, main having taken #1631 for
+DEC-ONECLICK-TOP100-OBJECT-ROOT-001) are train-level seams disclosed
 in the train PR body. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate
 change.
 Review-round history is deliberately not narrated in this header — each member DEC's
@@ -1908,7 +1910,8 @@ hostile-review pass._
   (MIGRATION.md #1594 / ADR-0019; its single-flight mechanism WINS all competing variants) →
   #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1632) → #1336
   DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 (#1633) → #1350 DEC-SWEEP-RESUME-STORE-GUARD-001
-  (#1634) → the #1351 tests+docs rider; ledger renumbers noted in-entry; post-#1228 main tip
+  (#1634) → the #1351 tests+docs rider; ledger renumbers noted in-entry (shifted once more at
+  the 2026-07-09 post-#1352 main fold — main took #1631); post-#1228 main tip
   folded. See the §1 header blurb for the member one-liners. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX.)
   Earlier: `claude/sweep-unkillable-core` (**DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1594 /
@@ -4423,7 +4426,7 @@ hostile-review pass._
   DEC-SWEEP-RESUME-STORE-GUARD-001 (#1634) + the #1351 tests+docs rider; see §1 Active
   branch for the full blurb)
   Earlier: `claude/dedup-c1-tuple-digest-identity`
-  (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001, MIGRATION.md #1633 (renumbered from #1622 across the train folds) — the residual
+  (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001, MIGRATION.md #1633 (renumbered #1622 → #1632 → #1633 across the T1 train folds) — the residual
   C1/C2 stale-serve fix: fold the ACTIVE gate config + non-default SELECTION
   knobs (`top_k`/`min_hits`/`max_combos`) into the per-tuple store ADDRESS
   (`_tuple_digest`) via a NEW COMMON `sweep_identity.py` leaf + a supervisor
