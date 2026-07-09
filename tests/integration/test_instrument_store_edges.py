@@ -1054,7 +1054,6 @@ class TestCoverageWriteDeadline:
         transient raise unwinds the ``_synchronized`` wrapper on the OWNING
         thread, so a second thread acquires the lock within a small bound.
         """
-        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_coverage(_coverage_cell("NIFTY"))  # healthy prior row
             # A whitebox view that already HOLDS the read lock from a healthy
@@ -1062,6 +1061,10 @@ class TestCoverageWriteDeadline:
             # next execute drops the stale hold BEFORE the wedge raise.
             stale_view = s.connection
             stale_view.execute("SELECT 1")
+            # Shrink the deadline only AFTER the open + the healthy prior write —
+            # a healthy DuckDB open/DDL/write under a 0.2 s shrink races runner
+            # load (the test_metadata_pull hazard class, CI run 28972139338).
+            monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
             proxy = _CoverageGateConn(s._conn)
             s._conn = proxy
             start = _time.monotonic()
@@ -1145,6 +1148,10 @@ class TestCoverageWriteDeadline:
             # store resumes — prior row intact, deferred row present, reads work
             # (incl. the store-wide wrapper check self-healing off the latch).
             _wait_until_healed(s)
+            # Healed ⇒ back on the REAL deadline: the healthy recovery writes
+            # below must never race the 0.2 s wedge shrink on a loaded runner
+            # (the test_metadata_pull hazard class, CI run 28972139338).
+            monkeypatch.delenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", raising=False)
             assert s.get_meta("schema_version") == str(SCHEMA_VERSION)
             assert s.schema_version == SCHEMA_VERSION
             # The split read view self-heals off the same latch (fix round 4).
@@ -1161,8 +1168,10 @@ class TestCoverageWriteDeadline:
     def test_wedged_close_skips_both_raw_closes_and_warns(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
         s = InstrumentStore.open(tmp_path / "db")
+        # Shrink only AFTER the open — a healthy open/DDL under a 0.2 s shrink
+        # races runner load (the test_metadata_pull hazard class).
+        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
         proxy = _CoverageGateConn(s._conn)
         s._conn = proxy
         read_conn: Any = s._read_conn

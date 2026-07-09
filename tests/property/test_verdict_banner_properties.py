@@ -2,26 +2,35 @@
 
 Hypothesis invariants over arbitrary verdict dicts:
 
-* **kind ↔ colour bijection** — each of the four contract kinds always maps to
-  its one fixed ``(css_class, colour)`` and back, for ANY headline / action /
-  pending count;
+* **kind ↔ colour bijection** — each contract kind always maps to its one fixed
+  ``(css_class, colour)`` and back, for ANY headline / action / pending count;
 * **retry button mirrors needs_operator** — ``show_retry_button`` is exactly the
   verdict's own ``needs_operator`` flag (the COMMON pass-through, never re-derived);
 * **verbatim pass-through** — ``headline`` / ``action`` are copied unchanged and
   ``pending_windows`` round-trips through ``int(...)``;
-* **fail-closed** — any kind outside the four ALWAYS raises ``ValueError``.
+* **fail-closed** — any kind outside the contract set ALWAYS raises ``ValueError``.
+
+``_KINDS`` below is this file's INDEPENDENT hand-written oracle of the contract
+kind set. ``test_kinds_oracle_matches_production`` pins it against the
+production ``_KIND_STYLE`` keys, so a kind added on one side without the other
+fails LOUDLY here instead of surfacing as a hypothesis falsifying example
+(2026-07-08: hypothesis's constant injection generated the then-missing
+``'credentials_missing'`` in ``test_unknown_kind_always_raises`` — this drift
+pin makes that failure mode structural, not probabilistic).
 
 The helper is pure (no Rust wheel, no lake), so this runs on a bare checkout.
 """
 
 from __future__ import annotations
 
-from brutex.dashboard.verdict_banner import banner_for
+from brutex.dashboard.verdict_banner import _KIND_STYLE, banner_for
 from hypothesis import given
 from hypothesis import strategies as st
 
 _KINDS = (
+    "credentials_missing",
     "auth_expired",
+    "mass_empty_halt",
     "transient_residual",
     "known_gap_only",
     "clean",
@@ -29,14 +38,31 @@ _KINDS = (
     "quarantined_symbols",
 )
 _EXPECTED = {
+    "credentials_missing": ("verdict--red", "red"),
     "auth_expired": ("verdict--red", "red"),
+    "mass_empty_halt": ("verdict--red", "red"),
     "transient_residual": ("verdict--amber", "amber"),
     "known_gap_only": ("verdict--grey", "grey"),
     "clean": ("verdict--green", "green"),
     "quota_exhausted": ("verdict--amber", "amber"),
     "quarantined_symbols": ("verdict--grey", "grey"),
 }
-_NEEDS_OPERATOR = {"auth_expired", "transient_residual"}
+_NEEDS_OPERATOR = {
+    "credentials_missing",
+    "auth_expired",
+    "mass_empty_halt",
+    "quota_exhausted",
+    "transient_residual",
+}
+
+
+def test_kinds_oracle_matches_production() -> None:
+    # The drift pin: this file's independent kind oracle must name EXACTLY the
+    # production style-map kinds — a kind added to `_KIND_STYLE` (or removed)
+    # without updating this oracle fails here by name, never as a
+    # constant-injected hypothesis falsifying example.
+    assert set(_KINDS) == set(_KIND_STYLE)
+    assert dict(_KIND_STYLE) == _EXPECTED
 
 
 @given(

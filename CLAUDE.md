@@ -18,7 +18,48 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
+_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
+write-time PER-FILE lake STATS manifest: NEW leaf
+`brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
+dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
+row counts + timestamp bounds + `mtime_ns:size` stat tokens captured under
+the still-held partition flock), the per-file stats/paging EXTENSION of the
+shipped DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-DISCOVERY manifest —
+claiming the #867/#1025 named future work: the `/db` candle +
+expired-options pagers serve totals / pages / stored-life spans
+MANIFEST-FIRST in O(page-files), served ONLY after full per-request
+revalidation (parse + key echo + sum invariant · file-SET equality ·
+per-file stat-token equality · month-bounds sanity; ANY failure ⇒ the
+byte-identical legacy live scan + one fallback log + read-side reseed;
+post-query TOCTOU re-stat; a manifest total is NEVER paired with a degraded
+page). Write hooks at all five partition-locked chokepoints (spot writer
+both branches + heal rewrite/quarantine + option writer merge/heal +
+`lake_heal._quarantine_move`) are best-effort + incremental + LAZILY
+accreted (absent shard = one cheap probe: key digest + one failed `os.stat`,
+probed FIRST — round 2; the prebuild storm costs one probe per write;
+seeding is read-side only), keyed on the NEW explicit
+`WriteResult.file_rewritten` (bytes RENDERED, never `bars_added`). Kill
+switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ byte-identical legacy scans
+(modulo the sanctioned unconditional ORDER BY tie-order pin).
+HONEST: a hit is O(page-files) Parquet work + an O(D) per-consult
+revalidation stat sweep (D = the ONE dataset's month files) — NOT literal
+O(1); the FIRST star-select click per (generation × file-state) also pays
+one O(D)-footer union-order DESCRIBE (memoised); the first view per dataset
+pays today's O(files) once (the seed), and a permanently-REJECTED seed
+(un-healed poison / 0-row parquet) is LATCHED per (dataset, generation) so
+the doomed scan never repays per click — review-hardened across the refuter
+rounds + the post-merge ENDGAME reconciles (LakeWriteHalt-safe reads ·
+probe-first hooks · bounded 16 MiB shard read · FIFO-shard hang fix · the
+EXECUTED m4pro run 28888100079 A/B gate + 3.0× paging strict-tier
+recalibration · the wired-and-executed zero-survivor mutation gate); the
+per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1614 — this header deliberately stopped narrating rounds after freezing at
+round 2 once (endgame round 2); a same-`(mtime_ns,size)` in-place
+overwrite stays the documented stat-token residual. Results-safe — never in run identity / partition bytes /
+`data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
+parity-pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; all five touched
+modules 100% line+branch).
+Earlier: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
 the sweep CLI log-volume guard: `brutex sweep`/`sweep-all`/`sweep-daemon` now
 configure the ONE COMMON structlog seam
 (`observability/logging.configure_logging` — the seam `cmd_dashboard` already
@@ -1663,7 +1704,135 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
+- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
+  write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
+  DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
+  O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
+  `partition_lock` + `lake_manifest` only — cycle discipline; one atomically-replaced 0o600 JSON shard per dataset
+  carrying per-file DISTINCT-identity-key row counts, timestamp bounds, and `mtime_ns:size` stat tokens captured
+  under the still-held partition flock). The `/db` candle + expired-options pagers serve totals / pages /
+  stored-life spans MANIFEST-FIRST — the page query binds ONLY the files the (bounds, direction, offset, limit)
+  window needs via a prefix-sum planner + rebased OFFSET — and ONLY after full per-request revalidation
+  (parse+version+key echo+sum invariant · file-SET equality walk · per-file stat-token equality · month-bounds
+  sanity vs the rel-path UTC month); ANY failure ⇒ the byte-identical legacy live scan + one
+  `lake.stats_manifest.fallback` log + best-effort read-side reseed; post-query TOCTOU re-stat of every touched
+  file; the degrade law reruns total+page+span together on the full legacy path — a manifest total is never paired
+  with a degraded page. Five write hooks (spot writer both branches keyed on the NEW `WriteResult.file_rewritten` —
+  bytes RENDERED, never `bars_added` · heal rewrite/quarantine · option writer merge/heal ·
+  `lake_heal._quarantine_move` shard unlink) are ALL inside the already-held partition locks, best-effort (never
+  raise into the pull; `LakeWriteHalt` from `.locks/` creation deliberately propagates), incremental (one row
+  upsert, never a rescan), and LAZILY accreted (absent shard = one cheap probe — a key digest + one failed
+  `os.stat`, probed FIRST via the public `partition_stats_tracked` so an unviewed write never stats dest / folds
+  frame bounds [round 2]; seeding is read-side only — the prebuild's ~10⁵-10⁶ derived-TF writes cost one probe
+  each). Kill switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ hooks +
+  reads no-op ⇒ byte-identical legacy scans (modulo the sanctioned tie-order pin below, which applies
+  unconditionally); shard flock via the COMMON `partition_write_lock` with fail-loud
+  `STATS_LOCK_TIMEOUT_S=5.0` (env `BRUTEX_STATS_LOCK_TIMEOUT_S`; 5+75 < 90 s write-deadline pin). SANCTIONED
+  behavior change: both pagers' ORDER BY gains the physical `filename, file_row_number` tiebreaker so an options
+  CE+PE same-minute tie has ONE total order on the pruned AND the full path. HONEST (Golden Rule #10): a hit is
+  O(page-files) Parquet work + an O(D) per-consult revalidation stat sweep (D = the dataset's month files, ~80) —
+  NOT literal O(1) (only the repeat TOTAL/span lookup is O(1) via the generation cache — a repeat PAGE click
+  re-pays the O(D) revalidation + O(page-files) read; the FIRST star-select click per (generation × file-state)
+  additionally pays ONE O(D)-footer union-order DESCRIBE, memoised on the file-state fingerprint — measured 72/72
+  files on that first click, 1 thereafter [the bench's 1-file figure is the warmed-memo click]); the FIRST view
+  per dataset/invalidation pays today's
+  O(files) scan once, and a permanently-REJECTED seed (un-healed poison / an out-of-band 0-row parquet — the
+  distinct `empty_file` reason) is LATCHED per (dataset, generation) so the doomed grouped scan never repays per
+  click, and the degrade-law LEGACY recount memoises under its own `legacytotal|` generation key so a
+  persistently-unprunable page (heterogeneous star union) recounts ONCE per generation, never per click [round 2];
+  a viewed dataset's write pays one bounded shard flock + small fsync'd JSON rewrite (the wall-clock A/B gate
+  asserting the median overhead under the 12 ms merge-budget floor is wired into the self-hosted bench-m4pro
+  workflow AND FIRST EXECUTED on the real M4-Pro tier 2026-07-07, actions run 28888100079: the A/B
+  merge-budget gate GREEN — the measured median overhead lives in that run's log; the SAME run measured the
+  O(page) paging click's strict wall-clock ratio at 1.53× (t_small=2.272 ms, t_large=3.485 ms — this entry's
+  OWN documented O(D) statx sweep, 66 extra month files), so the paging gate's strict-tier ceiling was
+  recalibrated 1.1× → 3.0× (`METADATA_SWEEP_STRICT_CEILING` in `tests/bench/_o1_tiers.py`, the
+  DEC-O1-CACHE-TIER-001 precedent; the shared-CI 8.0× default unchanged) while the deterministic
+  file-touch/fs-op-count probes — all green on the same run — remain the PRIMARY O(page) teeth
+  [round 4 history: the gate previously executed in NO workflow while this line presented it as an operative
+  pin — since wired AND executed, the ENDGAME round-1 reconcile of the stale "DORMANT / NOT yet executed"
+  wording that outlived the run]; the
+  deterministic byte-parity/anti-storm teeth run in shared CI; unviewed = one probe, pinned); a same-`(mtime_ns,size)`
+  in-place overwrite is the documented stat-token residual; the new module's mutation gate is WIRED into the
+  weekly Mutation workflow's per-module ZERO-survivor mutmut loop AND was EXECUTED in-session [round 8 — the
+  refuter caught the prior "rides the weekly Mutation workflow (not verified in-session)" wording while NO
+  `--paths-to-mutate` in mutation.yml named the module, an unwired gate presented as a deferred one: now wired
+  (`TestMutationWorkflowWiring` pins the pair) and measured — 473 pre-hardening mutants → 84 pending, killed by
+  the `TestMutationHardening` pins; round-8 enumeration 456 mutants / 0 survived / 0 suspicious. ENDGAME
+  round 2 re-measured 462 enumerated — 196/462 machine-verified 0-survivors in-session (the run was stopped at the session budget; the interim-shape run reached 353/462 with exactly ONE
+  survivor — the annotation mutant below, since eliminated; every restructured line's mutants were also
+  hand-applied + KILLED; the WIRED weekly Mutation gate enforces the full zero-survivor law) after PURGING the round-8 fd-sentinel / bounded-read / dead-`"unknown"`
+  line pragmas — the refuter proved they suppressed KILLABLE, NON-equivalent mutants (a `+1` fd sentinel
+  closes STDOUT on the absent path; a shortened read bound truncates an exactly-at-cap shard) while three doc
+  surfaces called the whole residue "provably-equivalent": the loader now returns `DatasetStats | str`
+  (the exactly-one-of-two contract STRUCTURAL in the type — the defensive dead `"unknown"` literal is gone),
+  the fd handoff is a plain `owned` boolean pinned by an `os.close` spy (`test_loader_fd_close_discipline`:
+  stuck-True double-closes, stuck-False leaks — an interim `fd: int | None` sentinel was itself caught by the
+  re-enumeration, its annotation-only `int & None` mutant unkillable since a local annotation is never
+  evaluated [PEP 526]), and the read bound is a cap-sized read + ONE-byte over-cap probe (still race-free,
+  still ≤ cap+1 bytes) pinned by the inside-the-JSON-padded exact-at-cap boundary test; the ONLY remaining
+  pragmas are the `field=` names feeding messages the loader's `except` clauses DISCARD — the genuinely
+  equivalent residue]. REVIEW ROUND 1 (refuter panel — every CONFIRMED finding fixed with
+  a fails-before regression): the option-writer CI 100% gate joined its new suite (was RED at 94.74%); the
+  read-side seed catches `LakeWriteHalt` (a disk-full seed can never 500 a /db read; write-hook propagation
+  untouched); deep-nested-JSON shards fail closed to the `parse` clause (RecursionError caught); the `file_set`
+  fallback rel lists are capped at 20 + true counts; provenance `db.stats_manifest.read` raised DEBUG→INFO;
+  `seed_dataset_stats` documented honestly as LAST-WRITER-WINS (clobber detected + reseeded next read, pinned);
+  the `BRUTEX_STATS_LOCK_TIMEOUT_S` × 90 s write-deadline interaction documented + doc-pinned (not clamped — leaf
+  discipline); the spec §10 hypothesis paging-equivalence + Σ-pages==total + concurrent-writer thread-fuzz
+  properties landed (multi-process soak / crash-loop stress / CLI cross-process leg stay named follow-ups).
+  REVIEW ROUND 2 (refuter panel — every CONFIRMED finding fixed at root cause): the degrade-law recount memo +
+  the probe-first hooks + the star-DESCRIBE disclosure above; the spec §10 bench (c) lake-size-flatness gate
+  landed (a served click's os.stat/os.scandir counts + touched files EXACTLY equal on a bare vs
+  48-dataset-padded lake — deterministic op-count teeth, no wall-clock flake); the seed-skip `missing` list
+  capped at the now-public `FALLBACK_REL_LOG_CAP` + true count; the kill-switch docstrings' "byte-identical"
+  overclaim softened; the #1614 GATES counts refreshed.
+  ROUND 3: the OverflowError timestamp class + plain-ValueError/UnicodeDecodeError shard-byte escapes fail
+  closed; the option-writer distinct-key merge baseline. ROUND 4: a star-projection column name carrying `"`
+  (an out-of-band parquet) now joins the fail-closed degrade ladder — legacy rerun + one `star_columns`
+  fallback log instead of a persistent per-click HTTP 400 on both pagers; the shard read is BOUNDED
+  (`MAX_SHARD_BYTES` 16 MiB, ~1000× a real shard — an out-of-band multi-GB shard fails closed `oversized` /
+  corrupt-unlink instead of being read whole where a MemoryError would raise into the pull); the A/B +
+  O(page) benches wired into bench-m4pro.yml (workflow-wiring pin test) + this blurb's stale "pins" wording
+  fixed; the route-level integration now proves manifest-served TOTALS on the wire via a fresh app (the
+  control run's shared count cache had cushioned the equality).
+  ROUND 6: a NON-REGULAR inode planted at the shard path (FIFO/device/socket) no longer HANGS the reader or
+  the partition-locked write/heal hooks forever — the loader opens `O_RDONLY | O_NONBLOCK` + `S_ISREG`-checks
+  the OPEN descriptor, the NEW fail-closed `not_regular` clause (read side legacy-falls-back + the seed's
+  `os.replace` heals the inode, wire-pinned; write side corrupt-unlinks; SIGALRM-watchdog regressions pin the
+  pre-fix >5 s hang on BOTH sites); the OPTIONS pager's `db.stats_manifest.read` provenance is now
+  content-asserted (a swapped `page_source` label mutant passed the whole suite before; the spot pin gains its
+  `kind` assertion). ROUND 7: the #1025 route-level count-cache pin regains its wire-level anti-STALENESS
+  teeth (two genuinely NEW `(side,timestamp)` option bars written through the PRODUCTION writer before the
+  generation bump — a stale serve answers the old total and fails — with the no-recount law still pinned); a
+  DIRECTORY planted at the shard path is healed via `shutil.rmtree` (`dir_shard_removed`, warn-only contract
+  kept) instead of re-emitting the `corrupt_unlinked`+`unlink_failed` warn pair on every later write; the
+  EMPTY-planned page (offset past the in-bound end) now runs the SAME post-query TOCTOU re-stat via the ONE
+  extracted `_stats_tokens_intact` helper (both call sites — no copy).
+  ENDGAME (post-merge refuter reconciles): round 1 — the stale "DORMANT / NOT yet executed" A/B-gate wording
+  reconciled to the EXECUTED m4pro run 28888100079 (A/B gate GREEN; the paging strict ceiling recalibrated
+  1.1× → 3.0× `METADATA_SWEEP_STRICT_CEILING` off its measured 1.53×), + the §1↔§3 active-branch consistency
+  pin. Round 2 — the killable-mutant pragma purge above; §2 Rule 5's stale "strict tier DORMANT until the
+  operator registers the runner" claim reconciled to the LIVE runner (+ the metadata-sweep allowance now named
+  beside the cache-tier one); the frozen `_Last updated:` header's per-round narration replaced with a
+  stale-proof pointer to this blurb + MIGRATION.md #1614; bench-m4pro.yml's paging-gate comments repointed
+  from the stale "ratio_ceiling() 1.1× tier" to the real `metadata_sweep_ceiling` 3.0× — each with a
+  deterministic doc-pin regression (`test_claude_md_branch_consistency.py` + `TestBenchWorkflowWiring`).
+  Round 3 — the Unicode-digit month-rel hole (MINOR, the ONLY tamper class that SERVED instead of failing
+  closed): the month-grammar regexes' Unicode-aware `\d` + `int()` accepted a planted `٢٠٢٣/١٢.parquet` as
+  (2023, 12) with valid bounds, passing ALL FOUR clauses while sorting lexicographically AFTER every ASCII rel
+  — the confirmed repro served a chronologically MISORDERED /db page (Jan-2024 where legacy serves Dec-2023);
+  fixed at root cause with `re.ASCII` grammar + a clause-1 STRUCTURAL chronology law (every rel must parse,
+  new fail-closed `rel_grammar` clause; the parsed (year, month) sequence must be strictly increasing —
+  subsuming the lexicographic sorted+unique check), each regression pinned fails-before incl. the end-to-end
+  misordered-page repro; plus the #1614 round-2 GATES exactness reconcile (474/148 + 221 → the measured
+  476/148 + 222; round-3 tree measures 482/152, 232 tests).
+  Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
+  Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +
+  `lake_heal.py` + `db_view.py` ALL 100% line+branch; ruff/ruff-format clean, `mypy --strict`
+  clean, pyright 0 errors in every touched/new file).
+  Earlier: `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
   the sweep CLI log-volume guard: ONE `main()`-dispatch guard configures the COMMON
   `observability/logging.configure_logging` seam at INFO by default for
   `sweep`/`sweep-all`/`sweep-daemon`, with the fail-loud `BRUTEX_LOG_LEVEL` override
@@ -3823,14 +3992,21 @@ hostile-review pass._
    the raw 1.1× is too noisy to gate there without flaking), and the
    decreed strict **1.1×** tier is enforced where
    `BRUTEX_M4PRO_STRICT=1` on the dedicated self-hosted M4-Pro runner
-   (DEC-O1-STRICT-TIER-001; per `bench-m4pro.yml` that tier is DORMANT
-   until the operator registers the runner — the shared-CI tier is what
-   actually gates every push today), with a measured **3×** cache-tier
-   allowance for ratio tests whose big/small workloads cross a CPU
-   cache tier (DEC-O1-CACHE-TIER-001 — memory-tier physics, not an
-   algorithmic regression; `cache_tier_ceiling` never returns looser
-   than the shared default). Any regression past its tier's ceiling
-   fails CI.
+   (DEC-O1-STRICT-TIER-001; the runner is REGISTERED and LIVE —
+   2026-07-07, `bench-m4pro.yml` header + actions run 28888100079 — so
+   the strict tier EXECUTES on that workflow's path-triggered pushes,
+   while the shared-CI tier remains the gate on every push), with a
+   measured **3×** cache-tier allowance for ratio tests whose big/small
+   workloads cross a CPU cache tier (DEC-O1-CACHE-TIER-001 —
+   memory-tier physics, not an algorithmic regression;
+   `cache_tier_ceiling` never returns looser than the shared default)
+   and a measured **3×** metadata-sweep allowance for ratio tests whose
+   big/small workloads differ by a feature's own documented O(D)
+   metadata sweep (DEC-LAKE-STATS-MANIFEST-001 —
+   `metadata_sweep_ceiling` / `METADATA_SWEEP_STRICT_CEILING` in
+   `tests/bench/_o1_tiers.py`, calibrated off run 28888100079's
+   measured 1.53×; likewise never looser than the shared default). Any
+   regression past its tier's ceiling fails CI.
 6. **Rate-limit safety.** Groww publishes type-level limits (the
    **"Live Data"** group — Market Quote / LTP / OHLC — is **10 r/s,
    300/min**; `docs/groww/api-reference/01-introduction.md:130-134`).
@@ -3975,7 +4151,10 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/sweep-log-level-guard`
+- **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
+  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
+  PER-FILE lake STATS manifest; matches §1's Active branch line)
+  Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
   `main()` sweep dispatch AND inside every spawn worker
@@ -3987,18 +4166,24 @@ hostile-review pass._
   `sweep_runs/` sibling root + the production `TradeStoreReader` over the
   #1275 results-depth sidecars; DISPLAY zone only; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/peaceful-newton-fehcc3`
+  (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 — the bulk Greeks
+  v1→v2 re-enrichment backfill: expired contracts + CLI-only lakes
+  re-stamped to the current formula/inputs; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/operator-page-real-rebuild`
   (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 — the Operator page (/)
   wired to the sweep-oneclick artifact contracts + NEW /screener + /strategy;
   DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
-  Earlier: `claude/peaceful-newton-fehcc3`
-  (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 — the bulk Greeks v1→v2
-  re-enrichment backfill for expired option contracts + CLI-fetch-only lakes;
-  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/sweep-stall-oom-guards`
   (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 — the parallel grid-sweep
   gains a heavy-grid-aware stall watchdog + a distinct `BrokenProcessPool`
   quarantine; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/intelligent-hamilton-qf3w38`
+  (DEC-SWEEP-NIGHTLY-AUTOMATION-001, MIGRATION.md #1612 — the R9 nightly
+  zero-click chain + R50 backup/restore + launchd scheduling; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active-branch chain for the
+  full blurb)
   Earlier: `claude/elegant-johnson-cgufi7`
   (DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1617 — renumbered
   #1538→#1557→#1581→#1598→#1610→#1617; the final hop past main's #1616
