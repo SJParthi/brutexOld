@@ -18,7 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
+_Last updated: 2026-07-09 (DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1623 —
+the operator-page (v29 at /) CLEAN-VIEW pass, frontend/templates/static/tests
+ONLY — ZERO Python source edits, API payload bytes UNTOUCHED (the 326-test
+payload-pin family passes UNMODIFIED — the wire held): every dev-jargon copy
+site remapped to plain English at RENDER time through the ONE NEW catalog
+`bx-copy.js` (verbatim server string kept in `title="server: …"`, unknown
+strings pass through VERBATIM — never suppression; CSS classes stay keyed on
+the RAW payload tokens); 3-tier NEUTRAL/NOTICE/ALERT state doctrine (red only
+when failing AND actionable; empty ≠ zero ≠ error); ONE primary Run Sweep
+button with the cascade DEMOTED under Advanced as "↻ Re-verify latest run"
+(ids/handlers/endpoints byte-unchanged); NEW #bxStatusHero + a collapsed
+diagnostics <details> (nodes relocated byte-intact; VERIFY-ME + timeline
+deliberately NOT moved); the rate widget collapses to a pill when idle and
+the red STALE verdict is RESERVED for a feed outage DURING an active pull
+(idle-stale = amber "feed quiet — …", never red; append-only after the
+pinned chain); calm designed empty states (.bx-empty); the sweep DIRECTIONS
+picker's long/short option values — a guaranteed 400 against
+`sweep_runner._normalise_directions`'s BUY/SELL vocabulary — fixed
+frontend-side. Every honesty semantic preserved + test-pinned (awaiting
+visually distinct from real zeros; no invented numbers; fixture badge + chip
+loud whenever active; "ready" never green / not_wired never passing; the
+chain "provisional" caveat inline in every chain verdict; None lots/costs
+"—"); anti-jargon is MECHANICAL (node-executed catalog golden + a
+comment-stripped visible-text scan = 0 hits) + a NEW opt-in browser evidence
+module. Named follow-up DEC-SCREENER-STRATEGY-CLEANVIEW-001 (the
+screener/strategy deep copy clean). DISPLAY zone only — ENGINE UNCHANGED
+(NIFTY/BANKNIFTY/SENSEX); bx-poll.js/bx-liveproof.js/bx-ui.js untouched;
+sibling poll hygiene/cadence/guards untouched.)
+Earlier: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
 the P4 merge-integration rebind of the one-click display adapter onto the
 SHIPPED #1275 results-depth artifacts: the ONE discovery seam
 (`oneclick_artifacts.runs_root`) repoints `<results_root>/runs/` → the
@@ -1618,7 +1646,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
+- **Active branch:** `claude/operator-page-cleanview` (**DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1623** — the
+  operator-page (v29 at `/`) CLEAN-VIEW pass, frontend/templates/static/tests ONLY (ZERO Python source edits — 14
+  files: 5 static + 3 templates + 6 tests; API payload bytes UNTOUCHED, the 326-test payload-pin family passes
+  UNMODIFIED): dev-jargon copy → plain English at RENDER time through the ONE NEW catalog
+  `brutex/dashboard/static/bx-copy.js` (token maps + ordered pattern rules; every remapped element keeps the
+  VERBATIM server string in `title="server: …"`; unknown strings pass through VERBATIM — never suppression; CSS
+  classes stay keyed on RAW payload tokens — `oc-pill-<raw>`/`oc-verify-<raw>`, display TEXT only); the 3-tier
+  NEUTRAL/NOTICE/ALERT state doctrine (red requires failing AND actionable; idle is quiet; empty ≠ zero ≠ error);
+  ONE primary Run Sweep button — the cascade DEMOTED under Advanced as "↻ Re-verify latest run", ids/handlers/
+  endpoints byte-unchanged; NEW `#bxStatusHero` (decorator-fed, zero poller-body edits beyond two one-line
+  fan-outs) + `<details id="bxDiagnostics">` demoting the sweep-id strip/progress panel/heartbeat with nodes
+  relocated BYTE-INTACT (VERIFY-ME + timeline deliberately NOT moved); the rate widget collapses to a pill when
+  idle and the red STALE verdict is RESERVED for a feed outage DURING an active pull (idle-stale = amber "feed
+  quiet — …"; the gate APPEND-ONLY after the pinned if/else chain); calm `.bx-empty` empty states; and the
+  DIRECTIONS fix — the form's `long`/`short` option values 400'd against `sweep_runner._normalise_directions`
+  (BUY/SELL only), values now submit `BUY`/`SELL`. Honesty semantics preserved + test-pinned (awaiting visually
+  distinct from real zeros; no invented numbers; fixture badge + source chip loud whenever active; verify `ready`
+  never green / `not_wired` never passing; the chain "provisional" caveat inline in EVERY chain verdict; None
+  lots/costs render "—"); anti-jargon MECHANICAL (node-executed catalog golden, 63 tests + a comment-stripped v29
+  visible-text scan = 0 hits) + NEW opt-in browser evidence module (hero states, idle-no-red vs active-red,
+  screenshots + timing). Named follow-up DEC-SCREENER-STRATEGY-CLEANVIEW-001 — the screener/strategy DEEP copy
+  clean (they gain only the bx-copy tag + the shared ticker line here). DISPLAY zone only — ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX); `bx-poll.js`/`bx-liveproof.js`/`bx-ui.js` untouched; sibling poll
+  hygiene/cadence/guards untouched; node --check + ruff clean; dashboard family 1991 tests green.)
+  Earlier: `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
   P4 merge-integration rebind, built ON TOP of PR #1280's `claude/operator-page-real-rebuild` head (the eventual PR
   targets main only after #1280 merges): the one-click discovery seam repoints `<results_root>/runs/` → the Ruling-4
   `sweep_runs/` SIBLING root (mirror-pinned to `trade_store.sweep_run_dir`; NO legacy `runs/` fallback — the fixture
@@ -3870,12 +3922,21 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/oneclick-sweep-runs-rebind`
+- **Active feature branch:** `claude/operator-page-cleanview`
+  (DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1623 — the operator-page
+  clean-view pass: render-time plain-English copy catalog `bx-copy.js`
+  (verbatim-server tooltips, unknown strings pass through) + one-Run-button
+  consolidation + status hero/diagnostics demotion + quiet-idle rate widget
+  with active-pull-gated STALE red + the DIRECTIONS BUY/SELL fix;
+  frontend-only, payload bytes untouched, honesty semantics test-pinned;
+  DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1
+  Active branch for the full blurb)
+  Earlier: `claude/oneclick-sweep-runs-rebind`
   (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 — the P4
   merge-integration rebind: oneclick discovery repointed to the Ruling-4
   `sweep_runs/` sibling root + the production `TradeStoreReader` over the
   #1275 results-depth sidecars; DISPLAY zone only; ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/operator-page-real-rebuild`
   (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 — the Operator page (/)
   wired to the sweep-oneclick artifact contracts + NEW /screener + /strategy;
