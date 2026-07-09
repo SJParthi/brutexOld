@@ -454,15 +454,35 @@ def _add_sweep_grid_args(
         default=None,
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
+    # ── Overfit/DSR gate — ON BY DEFAULT (DEC-RESULTS-TRUST-HONESTY-001 ·
+    # B2b, a SANCTIONED default-behavior change): every default sweep now
+    # runs the DEC-RANKING-OVERFIT-001 Deflated-Sharpe gate; the paired
+    # --no-overfit-gate flag is the explicit escape. CLI-DEFAULT-ONLY — the
+    # library default SweepRunConfig.overfit stays None (byte-identical
+    # engine contract; the frozen sweep goldens construct configs directly
+    # and pass UNMODIFIED). set_defaults below is the ONE default authority
+    # for the shared flag pair.
     parser.add_argument(
         "--overfit-gate",
         action="store_true",
         dest="overfit_gate",
         help=(
             "Enable the Stage-3 multiple-testing overfit gate (Deflated Sharpe) "
-            "per leaderboard (DEC-RANKING-OVERFIT-001); off by default"
+            "per leaderboard (DEC-RANKING-OVERFIT-001); ON by default since "
+            "DEC-RESULTS-TRUST-HONESTY-001 — this flag is the explicit no-op twin "
+            "of --no-overfit-gate"
         ),
     )
+    parser.add_argument(
+        "--no-overfit-gate",
+        action="store_false",
+        dest="overfit_gate",
+        help=(
+            "Disable the default-on overfit/DSR gate (DEC-RESULTS-TRUST-HONESTY-001 "
+            "escape hatch) — restores the pre-flip ungated ranking"
+        ),
+    )
+    parser.set_defaults(overfit_gate=True)
     # ── Temporal-robustness year gate (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) ──
     # The shipped default is OBSERVE (capture + count would-be kills, filter
     # nothing) so per-period stats accumulate from day one; the observe→gate
@@ -6334,7 +6354,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     max_combos: int | None,
     data_snapshot_hash: str | None,
     fib_anchors: str = "prev_day",
-    overfit_gate: bool = False,
+    # ON by default (DEC-RESULTS-TRUST-HONESTY-001 · B2b — the sanctioned
+    # default flip; --no-overfit-gate / overfit_gate=False is the escape).
+    # The LIBRARY default SweepRunConfig.overfit stays None — this is the
+    # CLI-surface default only.
+    overfit_gate: bool = True,
     dsr_min: float = 0.95,
     temporal_mode: str | None = None,
     temporal_min_profitable_frac: float | None = None,
