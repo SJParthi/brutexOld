@@ -185,7 +185,7 @@ class TestDefaultRunnerArm:
 
 
 class TestMissingStoreThreading:
-    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2): the adapter
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 1 M2): the adapter
     threads the sweep's run-scoped FAILED allowance + the quarantined-prior
     IDENTITY set (round 2 M1) into the pass +
     mirrors the pass's OWN computed ``missing_store_unexplained`` onto stderr,
@@ -281,7 +281,7 @@ class TestMissingStoreThreading:
 
 
 class TestReferenceUnreadableWarn:
-    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M4): the
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 2 M4): the
     reference-loader reconcile's ``unreadable`` list is no longer DISCARDED —
     a corrupt/unreadable reference (VIX/1day/1m) month is surfaced LOUDLY so a
     holed reference series is never silently stamped canonical."""
@@ -331,7 +331,7 @@ class TestReferenceUnreadableWarn:
 
 
 class TestDepthQuarantinedLabels:
-    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M1): the cli
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 2 M1): the cli
     helper reads the durable ``.sweep_quarantine.json`` sidecar (#1608) via the
     COMMON loader, sweep-scoped + fail-soft."""
 

@@ -6409,7 +6409,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval=interval,
                 )
                 corrupt_partitions.extend(reconcile_result.unreadable)
-        # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): a CORRUPT / version-
+        # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1636): a CORRUPT / version-
         # incompatible Parquet partition the reconcile SKIPPED is an INTERIOR data
         # hole invisible in the swept output — Stage-1A rolls _prev_day_ohlc from
         # whatever bar precedes the next session, so day N's "prev day" silently
@@ -6922,7 +6922,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval="1minute",
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
-                # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2 +
+                # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 1 M2 +
                 # round 2 M1): the RUN-SCOPED FAILED allowance ONLY (a
                 # SweepComboError-failed tuple wrote no store THIS run —
                 # run-scoped, freshly computed; it cannot over-claim for
@@ -8644,7 +8644,7 @@ def _warn_unreadable_reference_partitions(
 ) -> int:
     """LOUD capped WARN naming corrupt/unreadable reference partition(s).
 
-    DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M4). The
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 2 M4). The
     results-depth REFERENCE reconcile (VIX 1m + reference 1day/1m) must NEVER
     fail the sweep — a corrupt/unreadable reference month is NOT a launch
     refusal here (unlike the sweep-launch reconcile, which refuses; the depth
@@ -8723,7 +8723,7 @@ def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _ma
                     symbol=symbol,
                     interval=interval,
                 )
-                # #1636 round 2 M4: a corrupt reference month is skipped by the
+                # #1637 round 2 M4: a corrupt reference month is skipped by the
                 # reconcile — surface it LOUDLY (never fail the sweep) so a holed
                 # reference series is never silently stamped canonical.
                 _warn_unreadable_reference_partitions(
@@ -8758,7 +8758,7 @@ def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _ma
 def _depth_quarantined_labels(out_root: Path, sweep_id: str) -> frozenset[str]:
     """The quarantined-prior tuple IDENTITY set for the results-depth pass.
 
-    DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M1). Reads the
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 2 M1). Reads the
     durable ``<out_root>/.sweep_quarantine.json`` sidecar (#1608) through the
     COMMON :func:`~brutex.engine.sweep_parallel.load_quarantined_tuple_labels`
     — sweep-scoped by *sweep_id*, and itself FAIL-SOFT (a missing / corrupt /
@@ -8810,7 +8810,7 @@ def _run_results_depth_adapter(
     (``load_quarantined_tuple_labels`` — #1608). Both are threaded into the pass
     so a bars-present, not-quarantined missing-store count beyond the FAILED
     allowance raises one ``results_depth.missing_store_unexplained`` WARN + one
-    mirrored stderr line (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1636).
+    mirrored stderr line (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1637).
     The identity attribution closes the round-2 masking: a STALE quarantine
     sidecar entry for a tuple whose store now exists can no longer LAUNDER an
     unrelated deletion into a silent green run (a COUNT allowance could be spent
@@ -8886,7 +8886,7 @@ def _run_results_depth_adapter(
         f"top100={'written' if report.top100_written else 'FAILED'} "
         f"entries={report.top100_entries}"
     )
-    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2): mirror the
+    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1637, review round 1 M2): mirror the
     # pass's OWN unexplained count (report.missing_store_unexplained — the ONE
     # formula lives in the pass) onto stderr so a cron tail sees it; the
     # sweep's exit path is UNCHANGED (return stays True — observability, not a
