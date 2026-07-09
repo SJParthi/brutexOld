@@ -930,10 +930,20 @@ async function load() {
       baseNote = j.note || "";
       refreshBaselineLegend(baseNote);
       showPcr(j);  /* load() hid the panel above — an identical repeat must restore it. */
-      /* Identical payload ⇒ the source line is refreshed but the verify pass is
-         NOT re-run — the chip already reports exactly this snapshot
-         (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). */
       refreshProvenance();
+      /* Re-PROVE, never re-ASSERT (round-3 refuter fold): an identical MOVERS
+         payload says nothing about the /db SIDE, so the verify pass re-runs on
+         this path too. The prior "the chip already reports exactly this
+         snapshot" rationale was wrong twice over: (1) a transient probe
+         failure ("verify unavailable" — timeout/network) wedged for the whole
+         session because every ↻ Refresh took this path and re-probed nothing;
+         (2) a green chip went STALE-GREEN over /db content that drifted
+         underneath (a heal/quarantine/manual partition edit touches no window
+         ledger, so the movers bytes stay identical) — a false green on the
+         guarantee surface (Golden Rule #1). Bounded: K ≤ 5 debounced probes
+         per EXPLICIT user re-load only — nothing on this page polls when idle
+         (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). */
+      scheduleVerify();
       return;
     }
     lastRenderSig = sig;

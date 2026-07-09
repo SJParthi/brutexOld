@@ -1,26 +1,27 @@
-"""Round-2 REFUTER PROOF (DEC-MOVERS-DB-PROVENANCE-VERIFY-001) — the
-skip-render verify wedge.
+"""Round-3 FIXED-BEHAVIOR PINS (DEC-MOVERS-DB-PROVENANCE-VERIFY-001) — the
+skip-render path re-PROVES the verify chip.
 
-These tests PIN THE CURRENT (defective) behavior in real Chromium: the
-load() skip-render-when-unchanged fast path (movers.html — byte-identical
-body for the byte-identical coordinate) refreshes the provenance line but
-deliberately does NOT re-schedule the verify pass, so an explicit ↻ Refresh
-can NEVER re-prove the chip while the snapshot is unchanged (e.g. any time
-after market close). Two lies follow:
+Round-2 refuter history: these two tests originally PROVED (in real Chromium)
+that the load() skip-render-when-unchanged fast path (movers.html —
+byte-identical body for the byte-identical coordinate) refreshed the
+provenance line but did NOT re-schedule the verify pass, so an explicit
+↻ Refresh could never re-prove the chip while the snapshot bytes were
+unchanged (any time between pulls — the server-side MoversSnapshotCache
+serves identical JSON per write-generation). Two lies followed:
 
-* a transient probe failure wedges the chip on "verify unavailable" for the
-  rest of the session — every ↻ Refresh takes the skip path and re-probes
-  nothing, even though /db answers fine again;
-* a green chip goes STALE-GREEN: /db content that changed underneath
-  (partition heal/quarantine/manual edit — anything that does not touch the
-  window ledger, so the movers write-generation and therefore the payload
-  bytes stay identical) is still reported "✓ matches /db" on every refresh.
+* FALSE-UNAVAILABLE WEDGE — one transient probe failure left the chip on
+  "verify unavailable" for the rest of the session; every ↻ Refresh took the
+  skip path and issued ZERO probes even after /db healed;
+* STALE GREEN — a green chip kept claiming "✓ matches /db" across every
+  refresh while /db content diverged underneath (heal/quarantine/manual edit
+  — nothing that touches the window ledger moves the movers payload bytes).
 
-The anti-vacuity legs prove the same pass DOES recover/flip on a real
-re-render (a sort click), so the wedge is precisely the skip path.
-
-If a fix lands (skip path re-schedules verify), BOTH `wedge` asserts here
-FAIL — flip them into the fixed-behavior pins then.
+The round-3 fix calls scheduleVerify() on the skip path (bounded: K ≤ 5
+debounced probes per EXPLICIT user re-load; the page never polls when idle),
+and per the round-2 docstring's own instruction the wedge asserts are FLIPPED
+here into the fixed-behavior pins: a ↻ Refresh on the skip path re-paints
+"verify: checking top N vs /db…" synchronously, re-probes, and lands the
+TRUE verdict — green after /db heals, LOUD red after /db diverges.
 """
 
 from __future__ import annotations
@@ -47,8 +48,9 @@ _DB_CANDLES_GLOB = "**/api/v1/db/candles**"
 
 #: Deterministic load()-completed barrier: plant a sentinel note, click ↻,
 #: wait until the note is neither the sentinel nor "Loading…" — the skip path
-#: restores the real note as its LAST DOM write, and scheduleVerify (if it had
-#: been called) paints the chip SYNCHRONOUSLY before load() returns.
+#: restores the real note BEFORE calling scheduleVerify, and both run in the
+#: same synchronous continuation, so once the note settles the chip is
+#: guaranteed repainted to the "checking…" state.
 _PLANT_SENTINEL = "() => { document.getElementById('noteText').textContent = 'BX-SENTINEL'; }"
 _NOTE_SETTLED = (
     "() => { const t = document.getElementById('noteText').textContent;"
@@ -57,10 +59,10 @@ _NOTE_SETTLED = (
 _CHIP_TEXT = "() => document.getElementById('verifyChip').textContent"
 
 
-def test_refuter_unavailable_wedge_survives_refresh(
+def test_refresh_reproves_after_transient_probe_failure(
     new_page: NewPageFactory, tmp_path: Path
 ) -> None:
-    """A transient probe failure wedges the chip across every ↻ Refresh."""
+    """↻ Refresh (skip path) recovers the chip after a transient probe failure."""
     fixture = build_movers_app(tmp_path)
     # aborted probes log net::ERR_FAILED console errors by design here
     session = new_page(fixture, expect_console_clean=False)
@@ -71,34 +73,32 @@ def test_refuter_unavailable_wedge_survives_refresh(
     chip = session.page.locator("#verifyChip")
     session.page.clock.fast_forward(200)  # fire the frozen 150 ms debounce
     expect(chip).to_have_text("verify unavailable (network)")
+    assert session.request_count("/api/v1/db/candles") == 1  # the aborted probe
 
-    # /db heals — the next verify pass WOULD succeed.
+    # /db heals — the next verify pass succeeds.
     session.page.unroute(_DB_CANDLES_GLOB)
 
-    # ↻ Refresh: byte-identical payload → the skip-render fast path.
+    # ↻ Refresh: byte-identical payload → the skip-render fast path, which now
+    # re-schedules the verify pass (round-3 fix) instead of replaying the dead
+    # "unavailable" verdict for the rest of the session.
     session.page.evaluate(_PLANT_SENTINEL)
     with session.page.expect_response(_MOVERS_GLOB):
         session.page.locator("#refresh").click()
     session.page.wait_for_function(_NOTE_SETTLED)
-    # WEDGE: verify was NOT re-scheduled (scheduleVerify would have painted
-    # "verify: checking top 2 vs /db…" synchronously) …
-    assert session.page.evaluate(_CHIP_TEXT) == "verify unavailable (network)"
-    # … and no debounce timer is pending either.
-    session.page.clock.fast_forward(1_000)
-    assert session.page.evaluate(_CHIP_TEXT) == "verify unavailable (network)"
-    assert session.request_count("/api/v1/db/candles") == 1  # only the aborted one
-
-    # Anti-vacuity: a REAL re-render (sort click) re-verifies and goes green.
-    session.page.locator("#head th").first.click()
+    # FIXED: scheduleVerify() painted the "checking…" state synchronously …
+    assert session.page.evaluate(_CHIP_TEXT).startswith("verify: checking top ")
+    # … and firing the debounce re-probes the healed /db → a TRUE green.
     session.page.clock.fast_forward(200)
     expect(chip).to_have_class("pos")
+    expect(chip).to_have_text(re.compile(r"^✓ matches /db"))
+    assert session.request_count("/api/v1/db/candles") == 2  # aborted + healed
     assert session.page_errors == []
 
 
-def test_refuter_stale_green_masks_db_divergence_across_refresh(
+def test_refresh_reproves_and_flips_red_on_db_divergence(
     new_page: NewPageFactory, tmp_path: Path
 ) -> None:
-    """A green chip stays green across ↻ Refresh though /db now disagrees."""
+    """↻ Refresh (skip path) re-probes and goes LOUD red when /db diverged."""
     fixture = build_movers_app(tmp_path)
     session = new_page(fixture)
     freeze_page_clock(session.page)
@@ -126,13 +126,10 @@ def test_refuter_stale_green_masks_db_divergence_across_refresh(
     with session.page.expect_response(_MOVERS_GLOB):
         session.page.locator("#refresh").click()
     session.page.wait_for_function(_NOTE_SETTLED)
-    session.page.clock.fast_forward(1_000)
-    # WEDGE (false green): the chip still claims "✓ matches /db".
-    txt = session.page.evaluate(_CHIP_TEXT)
-    assert txt.startswith("✓ matches /db"), txt
-
-    # Anti-vacuity: a real re-render sees the divergence and goes LOUD red.
-    session.page.locator("#head th").first.click()
+    # FIXED: the skip path re-scheduled the pass (synchronous "checking…" paint) …
+    assert session.page.evaluate(_CHIP_TEXT).startswith("verify: checking top ")
+    # … and the re-probe sees the divergence: a LOUD red naming the exact cell
+    # + both values — never a replayed stale green (Golden Rule #1).
     session.page.clock.fast_forward(200)
     expect(chip).to_have_class("neg")
     expect(chip).to_have_text(re.compile(r"✗ /db MISMATCH — NIFTY LTP"))
