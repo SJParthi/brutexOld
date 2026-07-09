@@ -227,8 +227,10 @@ def build_top100_payload(
     Returns
     -------
     dict
-        ``{status, run_id, rows[], row_count, empty_note, detail, revision,
-        fixture_root_active}``.
+        ``{status, run_id, rows[], row_count, preset, empty_note, detail,
+        revision, fixture_root_active}`` — ``preset`` is the artifact's R30
+        ranking token (the client's sort-basis label source; ``null`` until
+        the object root parsed — the label then falls back honestly).
     """
     empty_note = (
         "0 winners stored for this run" if top100.status == "ok" and not top100.rows else None
@@ -238,6 +240,7 @@ def build_top100_payload(
         "run_id": run_id,
         "rows": list(top100.rows),
         "row_count": len(top100.rows),
+        "preset": top100.preset,
         "empty_note": empty_note,
         "detail": top100.detail,
         "revision": top100.revision,
