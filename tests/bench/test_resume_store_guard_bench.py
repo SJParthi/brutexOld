@@ -71,6 +71,7 @@ from brutex.engine.sweep_progress import SweepProgress
 from brutex.engine.sweep_run import ComboDedup
 from brutex.engine.sweep_supervisor import SweepGuards, grid_identity, run_supervised_grid
 from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.engine.tuple_complete import missing_tuple_artifacts
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 
@@ -275,10 +276,9 @@ def test_structural_probe_counts_and_zero_store_opens(
     skipped tuple (≤3 stat probes each, by the predicate's construction),
     ZERO evaluations with the guard off, and ZERO store opens either way."""
     base, grid = fixture_50
-    import brutex.engine.sweep_supervisor as sup_mod
 
     calls = {"predicate": 0, "store_for": 0}
-    real_predicate = sup_mod.missing_tuple_artifacts
+    real_predicate = missing_tuple_artifacts
 
     def _counting_predicate(store_path: Path) -> tuple[str, ...]:
         calls["predicate"] += 1
@@ -296,7 +296,9 @@ def test_structural_probe_counts_and_zero_store_opens(
             calls["store_for"] += 1
             return provider(tuple_)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(sup_mod, "missing_tuple_artifacts", _counting_predicate)
+    monkeypatch.setattr(
+        "brutex.engine.sweep_supervisor.missing_tuple_artifacts", _counting_predicate
+    )
 
     def _resume(*, guard: bool) -> None:
         if guard:

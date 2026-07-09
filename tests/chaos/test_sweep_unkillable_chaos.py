@@ -697,13 +697,16 @@ def test_g6_concurrent_second_sweep_refused_and_winner_chain_verifies(
     ) as core:
         # A second sweep-lock acquisition while `core` holds it MUST be refused
         # at __enter__ (SweepAlreadyRunningError). pytest.raises is the tooth —
-        # a wrongly-granted lock enters the body, leaves the flag True, and the
-        # assert below fails loudly. The flag is a non-raising body so the
-        # post-`with` assertions stay genuinely reachable.
-        second_sweep_entered = False
+        # a wrongly-granted lock enters the body, appends the marker, and the
+        # assert below fails loudly. A marker LIST (not a bare bool) keeps the
+        # post-`with` assertions visibly reachable to static analysis — a
+        # `flag = True` body constant-folds into an always-failing assert on
+        # the normal-exit CFG path, so CodeQL marked everything after it
+        # unreachable; list contents are not constant-propagated.
+        second_sweep_entries: list[str] = []
         with pytest.raises(SweepAlreadyRunningError) as excinfo, sweep_run_lock(out):
-            second_sweep_entered = True
-        assert not second_sweep_entered, "the second sweep must never proceed"
+            second_sweep_entries.append("second sweep body ran")
+        assert not second_sweep_entries, "the second sweep must never proceed"
         assert excinfo.value.holder_pid == os.getpid()
         run_id = core.run_id
         core.set_exit_code(0)
