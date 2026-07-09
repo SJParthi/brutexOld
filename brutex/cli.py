@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import math
 import os
 import shutil
 import sys
@@ -104,6 +105,69 @@ class CliUserError(Exception):
     ``[brutex] <message>`` on stderr + :data:`EXIT_USER_ERROR` — never a raw
     traceback. CLI layer ONLY: library code keeps its own error hierarchies.
     """
+
+
+def _configure_sweep_logging() -> None:
+    """Bound the sweep CLI's structlog volume — INFO default (disk-fill guard).
+
+    A bare ``brutex sweep`` / ``sweep-all`` / ``sweep-daemon`` process
+    previously ran with structlog UNCONFIGURED, whose default wrapper class
+    filters at NOTSET — so the engine's per-trade DEBUG events
+    (``trade_sim.entry`` / ``trade_sim.exit``, two per simulated trade)
+    streamed unfiltered to stderr: a MEASURED 870 MB of log output on a small
+    ~200-session composite-run fixture, which on the §8 production 2-4 day
+    full-grid run is a disk-fill risk (disk-full mid-sweep → ``LakeWriteHalt``
+    = a run-killer) plus severe I/O overhead
+    (DEC-SWEEP-LOG-VOLUME-GUARD-001). This guard routes through the ONE
+    COMMON :func:`brutex.observability.logging.configure_logging` seam (the
+    same seam ``cmd_dashboard`` configures at startup) at INFO by default,
+    with the fail-loud ``$BRUTEX_LOG_LEVEL`` operator override
+    (``DEBUG``/``INFO``/``WARNING``/``ERROR``, case-insensitive; junk →
+    :class:`CliUserError` → one loud ``[brutex] …`` line + exit 1, never a
+    silent fallback). It runs at the ``main()`` dispatch, BEFORE the engine
+    modules are even imported, so every engine logger's first use binds the
+    filtering wrapper (structlog caches on first use).
+
+    Honest envelope (Golden Rule #10): this bounds LOG VOLUME ONLY — a
+    sink-level threshold. No event's level is changed and nothing at WARNING
+    or ERROR is dropped; the hash-chained audit JSONL records
+    (``engine.sweep_audit.SweepAuditWriter`` /
+    ``orchestrator.audit.AuditWriter``) are direct file appends, NOT
+    structlog events, so the Golden-Rule-#8 audit trail is byte-untouched at
+    every level (verified: neither module imports structlog). When structlog
+    is ALREADY configured in this process the guard defers entirely (after
+    validating the env var): the dashboard's in-process sweep job
+    (``run_sweep_from_request`` → ``cmd_sweep_all``) runs after
+    ``cmd_dashboard`` configured INFO + the rotating file sink at startup —
+    reconfiguring here would drop that file sink, and structlog's first-use
+    logger cache would ignore a mid-process swap anyway.
+
+    PARALLEL WORKERS (R4 fold): the production sweep is parallel — SPAWN
+    workers start from a CLEAN interpreter and do NOT inherit this process's
+    structlog config, so the pool initializer
+    (``engine.sweep_parallel._worker_init``) applies the SAME bound
+    worker-side via
+    :func:`brutex.observability.logging.configure_process_logging_best_effort`
+    (``$BRUTEX_LOG_LEVEL`` propagates to spawn children through the
+    environment). The dashboard-launched sweep inherits that automatically —
+    it funnels into the same ``run_parallel_grid`` → ``_worker_init`` path.
+
+    OPERATOR NOTE: ``BRUTEX_LOG_LEVEL=ERROR`` also silences the WARNING-level
+    operational events (stall-watchdog / quarantine / skip warnings) an
+    unattended long sweep relies on — INFO (the default) or WARNING is
+    recommended; ERROR is an opt-in hazard, accepted deliberately.
+    """
+    import structlog
+
+    from brutex.observability.logging import configure_logging, resolve_env_log_level
+
+    try:
+        level = resolve_env_log_level()
+    except ValueError as exc:
+        raise CliUserError(str(exc)) from exc
+    if structlog.is_configured():
+        return
+    configure_logging(level=level, json_renderer=False)
 
 
 def default_condition_bits() -> list[int]:
@@ -625,6 +689,76 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Bound the re-open to the first N matching windows (default: all matching)",
+    )
+
+    # ── greeks-backfill (DEC-GREEKS-BULK-REENRICH-001) — bulk v1→v2 re-enrich ──
+    greeks_backfill = sub.add_parser(
+        "greeks-backfill",
+        help=(
+            "Bulk re-enrich the F&O options lake's Greeks overlay to the current "
+            "formula/inputs (v1→v2) — reaches EXPIRED contracts + CLI-pulled lakes "
+            "the pull-side pass never touches. Stamp-driven + idempotent; the scan "
+            "is O(files), NOT O(1). --dry-run = scan + plan only (zero writes, "
+            "zero checkpoint, zero Telegram)"
+        ),
+    )
+    greeks_backfill.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    greeks_backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Scan + report only — zero writes, zero checkpoint mutation, zero Telegram",
+    )
+    greeks_backfill.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Skip the stamp prefilter and feed EVERY option contract to the "
+            "driver's value-checked reuse gate — the escape for the "
+            "stamp-invisible rate/spot VALUE-drift class (slower; still "
+            "idempotent — unchanged bars are never rewritten). Not combinable "
+            "with --limit (force-mode selection is stamp-independent, so a "
+            "limited force run would re-select the same head every run)"
+        ),
+    )
+    greeks_backfill.add_argument(
+        "--expired-only",
+        action="store_true",
+        help="Only contracts whose expiry is strictly before today (IST)",
+    )
+    greeks_backfill.add_argument(
+        "--batch",
+        type=int,
+        default=None,
+        help=(
+            "Contracts per batch (default 25 or $BRUTEX_GREEKS_BACKFILL_BATCH); "
+            "one durable checkpoint write per batch while the run is error-free "
+            "(the resume mark never advances past an errored contract)"
+        ),
+    )
+    greeks_backfill.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "Bound this invocation to the first N stale contracts — incremental "
+            "chipping in the DEFAULT stamp-driven mode only (the next run "
+            "self-resumes the remainder because completed contracts classify "
+            "current); refused with --force"
+        ),
+    )
+    greeks_backfill.add_argument(
+        "--pause-s",
+        type=float,
+        default=None,
+        help=(
+            "Seconds slept between batches (default 0 or "
+            "$BRUTEX_GREEKS_BACKFILL_PAUSE_S — the gentleness throttle)"
+        ),
     )
 
     # ── detect-session-drift (DEC-CALENDAR-OBSERVED-SESSIONS-001) ──
@@ -2144,6 +2278,236 @@ def cmd_reopen_skipped(
         "throttle-poisoned ones recover their data (re-opened windows are "
         "breaker-exempt deliberate re-checks — the re-pull cannot re-trip on them)."
     )
+    return EXIT_OK
+
+
+def cmd_greeks_backfill(
+    *,
+    lake_root: Path | None,
+    dry_run: bool,
+    force: bool,
+    expired_only: bool,
+    batch: int | None,
+    limit: int | None,
+    pause_s: float | None,
+) -> int:
+    """Bulk Greeks v1→v2 re-enrich — ``brutex greeks-backfill`` (DEC-GREEKS-BULK-REENRICH-001).
+
+    The gap-b fix of MIGRATION.md #1188: a CLI-``brutex fetch``-only lake (and
+    every EXPIRED contract) gets its Greeks overlay re-stamped to the current
+    formula/inputs with ZERO dashboard dependency. Scan (HONEST cost: O(files)
+    — one bounded stamp-column read per month partition, never O(1)) → plan →
+    bounded batches through the EXISTING
+    :func:`brutex.data.greeks_enrich.enrich_greeks_for_targets` driver (its
+    value-checked reuse gate + honest demotions do the correctness work; a
+    Greek is never fabricated). ``--dry-run`` is FULLY INERT: scan + plan
+    print only — zero writes, zero checkpoint mutation, zero Telegram.
+
+    Exit codes: :data:`EXIT_OK` (0) when every planned contract settled clean
+    (or dry-run), :data:`EXIT_USER_ERROR` (1) re-documented here as "N
+    contract(s) errored (re-runnable — they keep their stale stamps, so the
+    next run retries them automatically)"; a pull-wide halt
+    (:class:`~brutex.data.errors.LakeWriteHalt` /
+    :class:`~brutex.data.errors.GreeksEnrichPoolBroken`) fires the CRITICAL
+    pull-halt Telegram alert then RE-RAISES (the ``cmd_fetch`` convention) —
+    the checkpoint survives, so the next run resumes.
+
+    **Single-flight guard (the ``cmd_reopen_skipped`` convention):** the WET
+    run holds the lake-root
+    :func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock`
+    for its whole duration — the SAME ``flock`` a dashboard/CLI pull (and the
+    dashboard backfill job) holds — so "one lake-writer job at a time" is
+    enforced on the CLI surface too. Without it a CLI backfill racing a live
+    pull could read a live contract's bars BEFORE the pull's spot minutes
+    landed, compute v2-stamped ``NO_SPOT`` NULLs, and latest-wins-overwrite
+    the pull enrich's freshly-solved OK Greeks (the write spine's documented
+    safety rests on the single-ENRICH-PASS-per-lake model). Contention
+    REFUSES loudly (``EXIT_USER_ERROR``); ``--dry-run`` stays lock-free
+    (read-only — zero writes to protect).
+
+    ``--force`` combined with ``--limit`` is REFUSED (:class:`CliUserError`):
+    force-mode selection is stamp-independent, so a limited force run would
+    re-select the SAME first N contracts every run — the incremental-chipping
+    promise holds only for the default stamp-driven mode.
+
+    **Eager config validation (fix round 5):** when ``--batch`` / ``--pause-s``
+    are omitted, their env twins (``$BRUTEX_GREEKS_BACKFILL_BATCH`` /
+    ``$BRUTEX_GREEKS_BACKFILL_PAUSE_S``) are resolved HERE — before the
+    O(files) scan and the single-flight lock — so a misconfigured env refuses
+    as the standard one-line :class:`CliUserError` instead of wasting the whole
+    scan and escaping as a raw ``ValueError`` traceback; the resolved values
+    are passed to :func:`~brutex.data.greeks_backfill.run_greeks_backfill`
+    (whose internal resolution stays as the second belt for programmatic
+    callers).
+
+    **Dashboard freshness (fix round 2):** the backfill never touches the
+    window ledger, so a CONCURRENTLY-RUNNING dashboard's cross-process
+    revision probe (DEC-HARDENING-LEFTOVERS-001) would not see its writes;
+    every bar-writing batch therefore touches the durable
+    ``<lake>/.greeks_backfill/revision.json`` freshness marker, which
+    :func:`brutex.dashboard.lake_revision.lake_revision` folds into its
+    composite token — a running dashboard serves the NEW Greeks on its next
+    poll, no restart required.
+    """
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_singleflight_lock,
+    )
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+    from brutex.data.greeks_backfill import (
+        dry_run_backfill_report,
+        plan_greeks_backfill,
+        resolve_backfill_batch_size,
+        resolve_backfill_pause_s,
+        run_greeks_backfill,
+        scan_stale_greeks_targets,
+    )
+    from brutex.data.greeks_enrich import resolve_risk_free_source
+    from brutex.notifications.sweep_alerts import emit_greeks_backfill_complete_alert
+    from brutex.options.risk_free import RiskFreeError
+
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="greeks-backfill")
+    if batch is not None and batch < 1:
+        raise CliUserError(f"--batch must be >= 1, got {batch}")
+    if limit is not None and limit < 1:
+        raise CliUserError(f"--limit must be >= 1, got {limit}")
+    if force and limit is not None:
+        raise CliUserError(
+            "--force with --limit never progresses: force-mode selection is "
+            "stamp-independent, so every run re-selects the SAME first "
+            f"{limit} sorted contract(s) and the remainder is unreachable — "
+            "incremental chipping (--limit) works only in the default "
+            "stamp-driven mode. Drop --force or drop --limit."
+        )
+    if pause_s is not None:
+        # Non-finite refused eagerly (fix round 4): argparse's ``type=float``
+        # happily parses "inf"/"nan" — ``inf`` would crash the wet run
+        # mid-batch with a raw ``OverflowError`` from ``time.sleep`` AFTER the
+        # operator already paid the full O(files) scan, and ``nan`` compares
+        # False to everything so the pause would be SILENTLY disabled.
+        if not math.isfinite(pause_s):
+            raise CliUserError(f"--pause-s must be finite, got {pause_s}")
+        if pause_s < 0:
+            raise CliUserError(f"--pause-s must be >= 0, got {pause_s}")
+    if batch is None:
+        # ENV twin resolved EAGERLY (fix round 5, refuter-confirmed): with the
+        # flag omitted, $BRUTEX_GREEKS_BACKFILL_BATCH used to be parsed only
+        # inside run_greeks_backfill — AFTER the operator paid the full
+        # O(files) scan and the single-flight lock — and its ValueError escaped
+        # main() as a raw traceback (DEC-CLI-USER-ERROR-HYGIENE-001 reserves
+        # those for genuine code bugs, not operator config). A misconfigured
+        # env now refuses in <1 ms with the standard one-liner, zero partial
+        # work — the same eager posture the flag twins above already get.
+        try:
+            batch = resolve_backfill_batch_size()
+        except ValueError as exc:
+            raise CliUserError(str(exc)) from exc
+    if pause_s is None:
+        # The --pause-s env twin ($BRUTEX_GREEKS_BACKFILL_PAUSE_S) — same
+        # rationale: "inf"/"nan"/junk must refuse BEFORE the scan, not detonate
+        # mid-batch after it (the fix-round-4 flag fix's own stated harm).
+        try:
+            pause_s = resolve_backfill_pause_s()
+        except ValueError as exc:
+            raise CliUserError(str(exc)) from exc
+    try:
+        rate_source = resolve_risk_free_source()
+    except RiskFreeError as exc:
+        # Fail-fast BEFORE any scan: never price with a rate the operator did
+        # not configure (Golden Rule #1) — zero partial work.
+        raise CliUserError(
+            f"risk-free source misconfigured ($BRUTEX_RISK_FREE_CSV): {exc}"
+        ) from exc
+    scan = scan_stale_greeks_targets(
+        resolved,
+        rate_source=rate_source,
+        expired_only=expired_only,
+        force=force,
+        limit=limit,
+    )
+    plan = plan_greeks_backfill(
+        scan, rate_source=rate_source, force=force, expired_only=expired_only
+    )
+    print(
+        f"[brutex] greeks-backfill plan {plan.backfill_id[:12]} — "
+        f"{len(plan.targets)} contract(s) targeted "
+        f"({scan.stale_null} unstamped, {scan.stale_v1} v1, "
+        f"{scan.stale_inputs_drift} inputs-drift, {scan.stale_unfixable} unfixable, "
+        f"{scan.current} current, "
+        f"{scan.futures_skipped} futures, {scan.probe_failed} unreadable file(s) skipped; "
+        f"scan cost: O(files) — {scan.files_probed} file(s) probed)"
+    )
+    if scan.stale_unfixable > 0:
+        # Honest loud census (fix rounds 4-7): these contracts carry stale/null
+        # stamps the enrich driver cannot act on — rows it SKIPS by design
+        # (non-finite OHLC — IVX-2) or rows its keep-first dedup / own-month
+        # bound never sees — so re-targeting them would loop forever while the
+        # run read green. They need a lake repair, not a re-run — say so on
+        # stderr, every mode.
+        print(
+            f"[brutex] greeks-backfill — {scan.stale_unfixable} contract(s) UNFIXABLE "
+            "(stale/null-stamped row(s) the enrich driver cannot act on: non-finite "
+            "OHLC it skips by design — repair the poisoned partition(s), lake_heal "
+            "cannot value-edit them — or duplicate-timestamp/foreign-month rows its "
+            "dedup/month-bound read never sees — lake_heal's row-removing heals "
+            "apply; excluded from targeting either way).",
+            file=sys.stderr,
+        )
+    if dry_run:
+        report = dry_run_backfill_report(plan)
+        print(f"[brutex] {report.note}")
+        return EXIT_OK
+
+    def _progress(completed: int, total: int, bars: int, errored: int, label: str) -> None:
+        """One honest line per batch (CLI stdout is the sanctioned print surface)."""
+        print(
+            f"[brutex] greeks-backfill {completed}/{total} contracts · "
+            f"{bars} bars written · {errored} errored · {label}"
+        )
+
+    try:
+        # WET run only: hold the lake-root single-flight flock for the whole
+        # write pass, so a live pull (dashboard or CLI) on the SAME lake is
+        # mutually excluded — never a concurrent second enrich pass whose
+        # stale-read→late-write could latest-wins-clobber freshly-solved
+        # Greeks. The scan above is read-only and deliberately lock-free.
+        with pull_singleflight_lock(resolved):
+            try:
+                report = run_greeks_backfill(
+                    resolved,
+                    plan=plan,
+                    rate_source=rate_source,
+                    batch_size=batch,
+                    pause_s=pause_s,
+                    on_progress=_progress,
+                )
+            except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+                # The cmd_fetch halt convention: ONE best-effort CRITICAL Telegram
+                # alert, then re-raise so the CLI exits non-zero and the checkpoint
+                # survives for the next run's resume.
+                _emit_pull_halt_alert(exc)
+                raise
+    except PullAlreadyRunningError as exc:
+        print(
+            f"[brutex] greeks-backfill REFUSED — a pull (or another backfill) is currently "
+            f"running against this lake ({exc}). Running the backfill concurrently with a "
+            "lake writer could overwrite freshly-solved Greeks with stale-read NULLs "
+            "(one lake-writer job at a time). Wait for it to finish (or stop it), then "
+            "re-run.",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    emit_greeks_backfill_complete_alert(report)
+    print(f"[brutex] {report.note}")
+    if report.errored > 0:
+        print(
+            f"[brutex] greeks-backfill — {report.errored} contract(s) errored "
+            "(re-runnable: they keep their stale stamps, so re-running this "
+            "command retries exactly them).",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     return EXIT_OK
 
 
@@ -8450,6 +8814,16 @@ def _dispatch(argv: list[str] | None) -> int:
             market=args.market,
             limit=args.limit,
         )
+    if args.command == "greeks-backfill":
+        return cmd_greeks_backfill(
+            lake_root=args.lake_root,
+            dry_run=args.dry_run,
+            force=args.force,
+            expired_only=args.expired_only,
+            batch=args.batch,
+            limit=args.limit,
+            pause_s=args.pause_s,
+        )
     if args.command == "detect-session-drift":
         return cmd_detect_session_drift(lake_root=args.lake_root, month=args.month)
     if args.command == "auth":  # pragma: no cover — interactive / thin print shims
@@ -8520,6 +8894,16 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_notify_test()
     if args.command == "wipe":
         return cmd_wipe(execute=args.execute, assume_yes=args.yes)
+    if args.command in {"sweep", "sweep-all", "sweep-daemon"}:
+        # DEC-SWEEP-LOG-VOLUME-GUARD-001: bound the engine's structlog output
+        # at INFO (fail-loud $BRUTEX_LOG_LEVEL override) BEFORE any engine
+        # module's first logger use — an unconfigured sweep process streamed
+        # per-trade DEBUG events to stderr (measured 870 MB on a ~200-session
+        # fixture; a disk-fill run-killer on the 2-4 day grid run). ONE COMMON
+        # call site covering all three sweep entries (sweep-daemon reuses
+        # cmd_sweep_all; the dashboard sweep job is already configured by
+        # cmd_dashboard at startup and the guard defers to it).
+        _configure_sweep_logging()
     if args.command == "backup":
         return cmd_backup(args)
     if args.command == "sweep":
