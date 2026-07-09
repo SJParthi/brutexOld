@@ -34,10 +34,11 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -70,6 +71,7 @@ from brutex.calendars.nse import MUHURAT_SESSIONS
 from brutex.dashboard.movers_cache import MoversSnapshotCache, revision_generation
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
@@ -87,6 +89,20 @@ from brutex.data.lake_read import (
     dedup_latest_source_sql,
     dedup_qualify_sql,
     distinct_count_sql,
+)
+from brutex.data.lake_stats_manifest import (
+    FALLBACK_REL_LOG_CAP,
+    KIND_BARS,
+    KIND_OPTIONS,
+    DatasetStats,
+    StatsFileRow,
+    file_token_matches,
+    load_valid_dataset_stats,
+    parse_rel_month,
+    scan_dataset_rels,
+    seed_dataset_stats,
+    stat_token,
+    stats_manifest_enabled,
 )
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
 from brutex.data.moneyness import (
@@ -1968,6 +1984,722 @@ def list_option_series(
     ]
 
 
+# ─── Lake STATS-manifest read integration (DEC-LAKE-STATS-MANIFEST-001) ──────
+#
+# The read half of the per-file stats manifest (the #867/#1025 named future
+# work): when a request opts in (``use_stats_manifest=True`` — the production
+# /db routes do; the pure-function default stays ``False`` so every direct
+# caller keeps the byte-identical legacy query pattern) AND the kill switch
+# (``BRUTEX_LAKE_STATS_MANIFEST``) is not ``off``, the candle pagers consult
+# the dataset's validated stats shard to (a) answer the page TOTAL from the
+# stamped per-file DISTINCT-key counts and (b) PRUNE the page query's file list
+# to only the files the requested page needs — true O(page) in partition depth.
+# ANY validation/read failure falls back to the byte-identical legacy live
+# scan (one ``lake.stats_manifest.fallback`` log naming the clause) and the
+# read side reseeds the shard best-effort — the reader NEVER serves a number
+# it could not revalidate against the live directory THIS request.
+
+_STATS_INSIDE: Final[str] = "inside"
+_STATS_OUTSIDE: Final[str] = "outside"
+_STATS_STRADDLE: Final[str] = "straddle"
+
+#: The reader-side fallback event — deliberately the SAME event name the leaf
+#: module's validation gate emits, so one grep finds every manifest→legacy
+#: demotion with the failed clause named (never a silent fallback).
+_STATS_FALLBACK_EVENT: Final[str] = "lake.stats_manifest.fallback"
+
+#: Per-request provenance event (the #1145 stored-first honesty pattern):
+#: names whether the page was manifest-served or ran the legacy live scan.
+#: Emitted at INFO — production logging defaults to INFO, and an operator must
+#: be able to POSITIVELY confirm the O(page-files) path is being taken (a
+#: DEBUG-only event made a healthy manifest-served page invisible while only
+#: fallbacks surfaced — the silent-degradation gap in reverse).
+_STATS_READ_EVENT: Final[str] = "db.stats_manifest.read"
+
+#: Read-side seed skipped/aborted event (best-effort — never an error).
+_STATS_SEED_SKIPPED_EVENT: Final[str] = "db.stats_manifest.seed_skipped"
+
+
+def _stats_file_verdict(
+    row: StatsFileRow, start: date | None, end: date | None, *, ist_dates: bool
+) -> str:
+    """Classify ONE manifest file row against the inclusive date bounds.
+
+    The ONE shared classifier used by BOTH the manifest TOTAL and the page
+    planner (so ``total ≡ Σ pages`` by construction). The row's stamped UTC
+    bounds are converted to the SAME calendar the SQL ``WHERE`` compares —
+    the IST date for the derived ``1day`` interval (:data:`_IST_DATE_EXPR`),
+    the UTC date otherwise (:data:`_UTC_DATE_EXPR`). ``timestamp → calendar
+    date`` is monotonic under a fixed offset, so the file-level verdict is
+    exact (this is how the midnight-IST = prior-day-18:30-UTC ``1day`` skew is
+    handled: the IST calendar itself classifies, and a file the bounds cut
+    through is demoted to a straddler — scanned, never guessed).
+
+    Returns
+    -------
+    str
+        ``"outside"`` — no bar of the file can match the ``WHERE``
+        (contributes 0); ``"inside"`` — every bar matches (contributes the
+        stamped distinct count); ``"straddle"`` — the bounds cut through the
+        file (its in-bound count must be SCANNED).
+    """
+    lo = (row.min_ts.astimezone(_IST) if ist_dates else row.min_ts).date()
+    hi = (row.max_ts.astimezone(_IST) if ist_dates else row.max_ts).date()
+    if (end is not None and lo > end) or (start is not None and hi < start):
+        return _STATS_OUTSIDE
+    if (start is None or lo >= start) and (end is None or hi <= end):
+        return _STATS_INSIDE
+    return _STATS_STRADDLE
+
+
+@dataclass
+class _StatsReadContext:
+    """Per-request stats-manifest state for ONE dataset + one bounds set.
+
+    Built once per request by :func:`_stats_read_context` (``None`` when the
+    feature is off), consumed by the reader's TOTAL closure, the page pruner,
+    and the span fold. ``served`` starts ``True`` only when the shard passed
+    the FULL anti-illusion validation AND every straddler count succeeded; a
+    mid-request failure (pruned-read error / column mismatch / moved stat
+    token) flips it ``False`` so every later consumer of the SAME request
+    (span fold, provenance) degrades to legacy together (the whole-request
+    degrade law).
+
+    Attributes
+    ----------
+    conn, lake_root, kind, key, base, identity
+        The dataset coordinates + the DuckDB connection the request owns.
+    stats
+        The validated shard, or ``None`` when validation failed (⇒ the read
+        side reseeds after the legacy scan — :attr:`should_seed`).
+    effective
+        Per-file IN-BOUND distinct-key counts in rel-ascending (chronological)
+        order: the stamped ``rows`` for a fully-inside file, ``0`` for a fully
+        outside one, the live bounded count for a straddler.
+    straddlers
+        The straddler rows (their counts came from a live scan, so the
+        post-query TOCTOU re-stat covers them too).
+    served
+        Whether the manifest may serve THIS request (see above).
+    """
+
+    conn: Any
+    lake_root: Path
+    kind: str
+    key: dict[str, str]
+    base: Path
+    identity: tuple[str, ...]
+    stats: DatasetStats | None
+    effective: tuple[tuple[StatsFileRow, int], ...] = ()
+    straddlers: tuple[StatsFileRow, ...] = ()
+    served: bool = False
+
+    @property
+    def should_seed(self) -> bool:
+        """Whether the read side should rebuild the shard after the legacy scan.
+
+        ``True`` only when the shard failed validation outright (absent /
+        corrupt / stale) — a mid-request degrade keeps the existing shard (the
+        next request revalidates it; the writers keep it fresh).
+        """
+        return self.stats is None
+
+    @property
+    def total(self) -> int:
+        """The manifest total for the request bounds — ``Σ`` in-bound counts.
+
+        With no bounds every file is "inside" so this is exactly the shard's
+        ``row_count`` (zero Parquet I/O); with bounds it is the hybrid
+        stamped + ≤straddler-scanned sum, additive across files because no
+        identity key spans two UTC-month files (validated per request by the
+        month-bounds clause).
+        """
+        return sum(count for _row, count in self.effective)
+
+    def ist_span(self) -> tuple[str | None, str | None]:
+        """The dataset's stored-life IST-date span from the validated bounds.
+
+        ``timestamp → IST date`` is monotonic, so the fold over per-file
+        bounds equals the legacy ``MIN``/``MAX`` over :data:`_IST_DATE_EXPR`
+        exactly. ``(None, None)`` when the shard did not validate (the caller
+        then runs the legacy scan — kept as a guarded branch, not an assert,
+        per the no-bare-assumptions discipline).
+        """
+        stats = self.stats
+        if stats is None:
+            return (None, None)
+        return (
+            stats.min_ts.astimezone(_IST).date().isoformat(),
+            stats.max_ts.astimezone(_IST).date().isoformat(),
+        )
+
+    def plan_page(
+        self, *, descending: bool, limit: int, offset: int
+    ) -> tuple[list[StatsFileRow], int]:
+        """Translate ``(direction, offset, limit)`` → (file sublist, rebased offset).
+
+        Prefix-sums over the per-file in-bound counts: walk the files in the
+        page's own direction (rel-ascending for ASC, reversed for DESC — the
+        UTC-month partition law makes file order ≡ timestamp order, enforced
+        STRUCTURALLY by the shard loader's clause-1 ASCII-month-grammar +
+        strictly-increasing-chronology check, so no validating shard can
+        plan a misordered page — endgame round 3), skip the
+        files wholly before the window, stop at the first file wholly after
+        it, and rebase the ``OFFSET`` to be local to the first selected file.
+        The returned sublist is re-sorted rel-ASCENDING regardless of page
+        direction (the keep-FIRST ``QUALIFY`` filename order — dedup semantics
+        preserved). An out-of-range offset returns an empty sublist (the page
+        is empty, exactly like the legacy query past the end).
+        """
+        walk = tuple(reversed(self.effective)) if descending else self.effective
+        selected: list[StatsFileRow] = []
+        rebased = 0
+        cum = 0
+        for row, count in walk:
+            if count == 0:
+                continue
+            file_start = cum
+            cum += count
+            if cum <= offset:
+                continue
+            if file_start >= offset + limit:
+                break
+            if not selected:
+                rebased = offset - file_start
+            selected.append(row)
+        return (sorted(selected, key=lambda r: r.rel), rebased)
+
+
+def _stats_fingerprint(stats: DatasetStats) -> str:
+    """Digest the validated file set's ``(rel, mtime_ns, size)`` triples. O(D).
+
+    Folded into the star-projection memo key so a memoised union-column list
+    can NEVER be served for a file state other than the exact one it was
+    derived from (any file change → new fingerprint → new key → re-describe);
+    rels are month-grammar paths (clause 4) so the ``:``/``;`` join is
+    unambiguous.
+    """
+    token = ";".join(f"{row.rel}:{row.mtime_ns}:{row.size}" for row in stats.files)
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _stats_read_context(
+    conn: Any,
+    lake_root: Path,
+    *,
+    kind: str,
+    key: dict[str, str],
+    base: Path,
+    identity: tuple[str, ...],
+    where_sql: str,
+    where_params: list[Any],
+    ist_dates: bool,
+    start: str | None,
+    end: str | None,
+    use_stats_manifest: bool,
+) -> _StatsReadContext | None:
+    """Build the per-request stats-manifest context, or ``None`` when off.
+
+    ``None`` ⇒ the feature is disabled for this request (the caller left
+    ``use_stats_manifest`` at its pure default, or the
+    ``BRUTEX_LAKE_STATS_MANIFEST=off`` kill switch is set): no shard is read,
+    no fallback is logged, no seed will run — byte-identical legacy behaviour.
+
+    Otherwise the shard goes through the FULL anti-illusion validation
+    (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats`) and,
+    when it holds, every file is classified against the bounds via the ONE
+    shared :func:`_stats_file_verdict`; each straddler pays ONE bounded
+    ``COUNT(DISTINCT …)`` over ONLY its own file (the identical WHERE the
+    legacy count uses, bound through the same ``read_parquet(?)`` list seam).
+    A straddler read failing (corrupt file) demotes the WHOLE request to
+    legacy (``served=False``) — never a half-manifest number.
+    """
+    if not use_stats_manifest or not stats_manifest_enabled():
+        return None
+    stats = load_valid_dataset_stats(lake_root, kind=kind, key=key)
+    ctx = _StatsReadContext(
+        conn=conn,
+        lake_root=lake_root,
+        kind=kind,
+        key=key,
+        base=base,
+        identity=identity,
+        stats=stats,
+    )
+    if stats is None:
+        return ctx
+    start_d = _parse_iso_date(start, "start") if start is not None else None
+    end_d = _parse_iso_date(end, "end") if end is not None else None
+    effective: list[tuple[StatsFileRow, int]] = []
+    straddlers: list[StatsFileRow] = []
+    for row in stats.files:
+        verdict = _stats_file_verdict(row, start_d, end_d, ist_dates=ist_dates)
+        if verdict == _STATS_OUTSIDE:
+            effective.append((row, 0))
+            continue
+        if verdict == _STATS_INSIDE:
+            effective.append((row, row.rows))
+            continue
+        straddlers.append(row)
+        sql = f"SELECT {distinct_count_sql(identity)} FROM read_parquet(?, union_by_name=true){where_sql}"  # noqa: S608  # nosec B608 - constant fragments over read_parquet(?) with a bound file list; values bound
+        try:
+            fetched = conn.execute(sql, [[str(base / row.rel)], *where_params]).fetchone()
+        except movers_read_skip_errors() as exc:
+            _LOG.info(
+                _STATS_FALLBACK_EVENT,
+                kind=kind,
+                key=dict(key),
+                clause="straddler_read",
+                rel=row.rel,
+                error=str(exc),
+            )
+            return ctx
+        if fetched is None:
+            _LOG.info(
+                _STATS_FALLBACK_EVENT,
+                kind=kind,
+                key=dict(key),
+                clause="straddler_read",
+                rel=row.rel,
+            )
+            return ctx
+        effective.append((row, int(fetched[0])))
+    ctx.effective = tuple(effective)
+    ctx.straddlers = tuple(straddlers)
+    ctx.served = True
+    return ctx
+
+
+def _stats_star_columns(
+    ctx: _StatsReadContext,
+    *,
+    count_cache: CandleCountCache | None,
+    generation: int,
+) -> list[str] | None:
+    """Resolve a star-select page's union column ORDER for the pruned read.
+
+    A ``SELECT *`` page's column set under ``union_by_name=true`` is the union
+    of the schemas of the files ACTUALLY read — so a pruned sublist could
+    silently present fewer/other columns than the legacy full-glob read on a
+    schema-heterogeneous dataset (e.g. a partially Greeks-enriched F&O tree).
+    The pruned path therefore resolves the FULL union order first (ONE
+    ``DESCRIBE`` over the validated file list — an O(D)-footer read) and
+    projects it EXPLICITLY, memoised behind the injected generation cache
+    under a key that folds in the validated file-state fingerprint
+    (:func:`_stats_fingerprint`) — a memoised order can never be served for a
+    file state other than the one it described (no staleness envelope at
+    all). ``None`` cache ⇒ the DESCRIBE runs inline (correct, the O(page) win
+    is smaller — the production routes always inject the cache). Returns
+    ``None`` on a describe failure (the caller degrades to legacy).
+    """
+    stats = ctx.stats
+    if stats is None:
+        return None
+    paths = [str(ctx.base / row.rel) for row in stats.files]
+    sql = f"SELECT column_name FROM (DESCRIBE SELECT {DEDUP_STAR_SELECT_SQL} FROM {DEDUP_PARQUET_SOURCE_SQL})"  # noqa: S608  # nosec B608 - constant fragments over read_parquet(?) with a bound file list
+
+    def _describe() -> tuple[str, ...]:
+        rows = ctx.conn.execute(sql, [paths]).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    key_token = "|".join(ctx.key[name] for name in sorted(ctx.key))
+    memo_key = f"statcols|{ctx.kind}|{key_token}|{_stats_fingerprint(stats)}"
+    try:
+        if count_cache is None:
+            return list(_describe())
+        return list(count_cache.get_or_compute(memo_key, generation=generation, compute=_describe))
+    except movers_read_skip_errors() as exc:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="star_columns",
+            error=str(exc),
+        )
+        return None
+
+
+def _stats_tokens_intact(ctx: _StatsReadContext, planned: Sequence[StatsFileRow]) -> bool:
+    """Post-query TOCTOU re-stat over the request's touched files.
+
+    Re-stats the pruned page sublist (*planned*) AND the straddler-counted
+    files (their live bounded counts fed the manifest total, so a straddler
+    replaced between its ``COUNT`` and the response must degrade too). ANY
+    moved token logs the ``stat_token_moved`` fallback clause, flips
+    ``ctx.served`` off (the whole-request degrade law), and returns ``False``
+    — the caller discards the pruned result and re-runs on the legacy path.
+    """
+    for row in (*planned, *ctx.straddlers):
+        if not file_token_matches(ctx.base / row.rel, row):
+            _LOG.info(
+                _STATS_FALLBACK_EVENT,
+                kind=ctx.kind,
+                key=dict(ctx.key),
+                clause="stat_token_moved",
+                rel=row.rel,
+            )
+            ctx.served = False
+            return False
+    return True
+
+
+def _stats_pruned_page(
+    ctx: _StatsReadContext | None,
+    *,
+    select: str,
+    columns: tuple[str, ...] | None,
+    where_sql: str,
+    where_params: list[Any],
+    qualify_sql: str,
+    order_sql: str,
+    descending: bool,
+    limit: int,
+    offset: int,
+    count_cache: CandleCountCache | None,
+    generation: int,
+) -> tuple[list[str], list[tuple[Any, ...]]] | None:
+    """Execute the page over ONLY the files it needs — or ``None`` ⇒ run legacy.
+
+    The manifest page path (true O(page) in partition depth): plan the minimal
+    file sublist + rebased local ``OFFSET`` via :meth:`_StatsReadContext.plan_page`,
+    then execute the IDENTICAL SQL shape the legacy page uses (same
+    SELECT/WHERE/QUALIFY/ORDER/LIMIT — only the ``read_parquet(?)`` binding
+    changes from the whole glob to the sublist). Exactness rests on the
+    UTC-month partition law (no identity key spans two files), validated per
+    request by the month-bounds clause.
+
+    Fail-closed ladder — ANY of the following returns ``None`` and flips
+    ``ctx.served`` off so the WHOLE request re-runs on the legacy path (a
+    manifest total is never paired with a degraded page):
+
+    * the star-projection resolve fails (:func:`_stats_star_columns`);
+    * a resolved column name is un-quotable (contains ``"`` —
+      :func:`_quote_ident`'s reject; an out-of-band parquet can carry such a
+      name, and the legacy star path never quotes names, so it must degrade,
+      never escape as a route-level 400 — review round 4);
+    * the pruned execute raises an unreadable-file error;
+    * the cursor's column set differs from the expected projection;
+    * the post-query TOCTOU re-stat finds ANY touched file's stat token moved
+      (the pruned sublist AND the straddler-counted files).
+
+    An empty planned sublist (offset past the end / empty bounded range) skips
+    the query and returns the expected columns with zero rows — byte-identical
+    to the legacy query returning no rows. It still runs the SAME post-query
+    re-stat over the straddler-counted files first (review round 7): their
+    live counts fed the manifest total, so a straddler replaced between its
+    bounded ``COUNT`` and this response degrades the whole request exactly
+    like a non-empty page would.
+    """
+    if ctx is None or not ctx.served:
+        return None
+    if columns is not None:
+        expected = list(columns)
+        page_select = select
+    else:
+        star = _stats_star_columns(ctx, count_cache=count_cache, generation=generation)
+        if star is None:
+            ctx.served = False
+            return None
+        expected = star
+        try:
+            page_select = ", ".join(_quote_ident(column) for column in star)
+        except ValueError as exc:
+            # A physical column name carrying a double quote (an out-of-band
+            # parquet — exactly the tamper class every other clause fails
+            # closed on) previously escaped this ladder as a raw ValueError →
+            # a persistent per-click HTTP 400, while the legacy path (star
+            # ``SELECT * EXCLUDE`` — never quotes names) renders fine
+            # (review round 4). Degrade the WHOLE request instead.
+            _LOG.info(
+                _STATS_FALLBACK_EVENT,
+                kind=ctx.kind,
+                key=dict(ctx.key),
+                clause="star_columns",
+                error=str(exc),
+            )
+            ctx.served = False
+            return None
+    planned, rebased = ctx.plan_page(descending=descending, limit=limit, offset=offset)
+    if not planned:
+        if not _stats_tokens_intact(ctx, planned):
+            return None
+        return (expected, [])
+    paths = [str(ctx.base / row.rel) for row in planned]
+    sql = f"SELECT {page_select} FROM {DEDUP_PARQUET_SOURCE_SQL}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?"  # noqa: S608  # nosec B608 - validated select + constant fragments; file list and values bound
+    try:
+        cursor = ctx.conn.execute(sql, [paths, *where_params, limit, rebased])
+    except movers_read_skip_errors() as exc:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="page_read",
+            error=str(exc),
+        )
+        ctx.served = False
+        return None
+    out_columns = [str(col[0]) for col in (cursor.description or [])]
+    raw_rows = list(cursor.fetchall())
+    if out_columns != expected:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="page_columns",
+            expected=expected,
+            got=out_columns,
+        )
+        ctx.served = False
+        return None
+    if not _stats_tokens_intact(ctx, planned):
+        return None
+    return (out_columns, raw_rows)
+
+
+def _stats_utc_ts(value: Any) -> datetime | None:
+    """Normalize a DuckDB ``MIN``/``MAX`` timestamp cell to an aware-UTC datetime.
+
+    The lake stores UTC instants; DuckDB may hand them back tz-aware (a
+    ``TIMESTAMPTZ`` column, session-zone offset) or naive (a plain
+    ``TIMESTAMP`` — UTC wall time by the lake contract). Anything that is not
+    a datetime at all (an empty/NULL aggregate) returns ``None`` — the seed
+    aborts rather than guesses.
+    """
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _seed_stats_manifest(
+    conn: Any,
+    lake_root: Path,
+    *,
+    kind: str,
+    key: dict[str, str],
+    base: Path,
+    identity: tuple[str, ...],
+) -> bool:
+    """Write-behind rebuild of a dataset's stats shard after a legacy scan.
+
+    The ONLY seeding mechanism (lazy accretion — the writers never create a
+    shard): called best-effort after a request whose shard failed validation,
+    once the legacy scan has already answered the request. ONE grouped
+    ``COUNT(DISTINCT key)`` + ``MIN``/``MAX`` per file over the SAME file set
+    (≈ the cost of the count the request just paid); every file's stat token
+    is captured BEFORE the scan and re-checked AFTER — ANY movement, stray
+    non-month file, unreadable file, empty file, or unexpected result shape
+    aborts the seed (logged ``db.stats_manifest.seed_skipped``; the dataset
+    simply stays legacy-served — never a wrong shard). Never raises into the
+    request — INCLUDING a :class:`~brutex.data.errors.LakeWriteHalt` from the
+    shard-lock ``.locks/`` creation on a full disk: this runs on the /db READ
+    request thread, where there is no pull to halt and the viewer's pinned
+    contract is "never a 500", so the halt is caught here, logged
+    (``db.stats_manifest.seed_skipped`` with the halt's reason), and the seed
+    is simply skipped (the WRITE hooks' LakeWriteHalt propagation is
+    untouched — a full disk still halts the pull). The seeded rows carry
+    ``raw_hash=None`` (forensics-only field — hashing every partition would
+    defeat the point; the next writer upsert restamps its file's hash).
+
+    Returns
+    -------
+    bool
+        ``True`` iff the rebuilt shard was written.
+    """
+    try:
+        rels = sorted(scan_dataset_rels(lake_root, kind, key))
+    except OSError as exc:
+        _LOG.info(
+            _STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="scan_failed", error=str(exc)
+        )
+        return False
+    if not rels:
+        _LOG.info(_STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="no_files")
+        return False
+    for rel in rels:
+        if parse_rel_month(kind, rel) is None:
+            _LOG.info(
+                _STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="non_month_file", rel=rel
+            )
+            return False
+    pre: dict[str, os.stat_result] = {}
+    for rel in rels:
+        try:
+            pre[rel] = os.stat(base / rel)
+        except OSError as exc:
+            _LOG.info(
+                _STATS_SEED_SKIPPED_EVENT,
+                kind=kind,
+                key=key,
+                reason="stat_failed",
+                rel=rel,
+                error=str(exc),
+            )
+            return False
+    paths = [str(base / rel) for rel in rels]
+    sql = f'SELECT filename, {distinct_count_sql(identity)}, MIN("timestamp"), MAX("timestamp") FROM read_parquet(?, union_by_name=true, filename=true) GROUP BY filename'  # noqa: S608  # nosec B608 - constant fragments over read_parquet(?) with a bound file list
+    try:
+        grouped = conn.execute(sql, [paths]).fetchall()
+    except movers_read_skip_errors() as exc:
+        _LOG.info(
+            _STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="scan_failed", error=str(exc)
+        )
+        return False
+    rows: list[StatsFileRow] = []
+    seen: set[str] = set()
+    for filename, count, raw_min, raw_max in grouped:
+        rel = os.path.relpath(str(filename), str(base)).replace(os.sep, "/")
+        if rel not in pre or rel in seen:
+            _LOG.info(
+                _STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="unexpected_file", rel=rel
+            )
+            return False
+        seen.add(rel)
+        min_ts = _stats_utc_ts(raw_min)
+        max_ts = _stats_utc_ts(raw_max)
+        if min_ts is None or max_ts is None:
+            _LOG.info(_STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="no_bounds", rel=rel)
+            return False
+        rows.append(
+            StatsFileRow(
+                rel=rel,
+                rows=int(count),
+                min_ts=min_ts,
+                max_ts=max_ts,
+                mtime_ns=pre[rel].st_mtime_ns,
+                size=pre[rel].st_size,
+                raw_hash=None,
+            )
+        )
+    if seen != set(rels):
+        # A rel with NO group row either held ZERO identity rows (an
+        # out-of-band 0-row parquet — the production writers never render an
+        # empty partition) or vanished/moved mid-scan. Distinguish them by
+        # re-statting the missing rels against the pre-scan tokens: all
+        # present + unmoved ⇒ the PERMANENT ``empty_file`` condition (the
+        # dataset stays legacy-served until the file is removed), anything
+        # moved ⇒ the transient ``file_set_changed``.
+        missing = sorted(set(rels) - seen)
+
+        def _rel_unmoved(rel: str) -> bool:
+            try:
+                return stat_token(os.stat(base / rel)) == stat_token(pre[rel])
+            except OSError:
+                return False
+
+        unmoved = all(_rel_unmoved(rel) for rel in missing)
+        # Capped enumeration (review round 2 — the same log-volume guard the
+        # leaf module's file_set fallback event carries): frequency is bounded
+        # by the per-(dataset, generation) seed latch, but a pathological
+        # dataset with thousands of zero-row/vanished files must still never
+        # inflate one structured log line to ~100 KB; the honest TRUE total
+        # rides ``missing_count``.
+        _LOG.info(
+            _STATS_SEED_SKIPPED_EVENT,
+            kind=kind,
+            key=key,
+            reason="empty_file" if unmoved else "file_set_changed",
+            missing=missing[:FALLBACK_REL_LOG_CAP],
+            missing_count=len(missing),
+        )
+        return False
+    for rel in rels:
+        try:
+            post = os.stat(base / rel)
+        except OSError as exc:
+            _LOG.info(
+                _STATS_SEED_SKIPPED_EVENT,
+                kind=kind,
+                key=key,
+                reason="post_stat_failed",
+                rel=rel,
+                error=str(exc),
+            )
+            return False
+        if post.st_mtime_ns != pre[rel].st_mtime_ns or post.st_size != pre[rel].st_size:
+            _LOG.info(_STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="file_moved", rel=rel)
+            return False
+    try:
+        return seed_dataset_stats(lake_root, kind=kind, key=key, files=rows)
+    except LakeWriteHalt as exc:
+        # ``seed_dataset_stats`` deliberately lets a LakeWriteHalt from the
+        # shard-lock ``.locks/`` creation PROPAGATE (correct for the WRITE
+        # hooks — a full disk must halt the pull). This caller runs on the
+        # /db READ request thread where there is NO pull to halt and the
+        # routes catch only ValueError, so an uncaught halt would 500 a
+        # read-only paging click (pre-manifest, /db reads performed zero lake
+        # writes — this class could never surface). Skip the write-behind
+        # seed instead: the dataset simply stays legacy-served.
+        _LOG.warning(_STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason=exc.reason)
+        return False
+
+
+def _stats_seed_key(kind: str, key: Mapping[str, str]) -> str:
+    """Build the per-dataset cache key for the seed-attempt latch. O(1).
+
+    Keyed on the dataset coordinates ONLY — never bounds / paging (the seed is
+    bounds-invariant, so one latch covers every click on the dataset); the
+    ``statseed|`` prefix keeps it disjoint from the count / span /
+    star-projection keys sharing the SAME injected cache.
+    """
+    token = "|".join(key[name] for name in sorted(key))
+    return f"statseed|{kind}|{token}"
+
+
+def _seed_stats_once(
+    conn: Any,
+    lake_root: Path,
+    *,
+    kind: str,
+    key: dict[str, str],
+    base: Path,
+    identity: tuple[str, ...],
+    count_cache: CandleCountCache | None,
+    generation: int,
+) -> bool:
+    """Run the write-behind seed behind a FAILED-attempt latch per generation.
+
+    The raw seed (:func:`_seed_stats_manifest`) pays one full O(dataset-rows)
+    grouped scan. For a dataset whose seed is REJECTED every time — a
+    foreign-month-poisoned partition awaiting ``lake_heal`` (the G-RACE-1
+    class), an out-of-band 0-row parquet, a corrupt file — an unlatched caller
+    would repay that doomed scan on EVERY paging click: a permanent ~2×
+    per-click regression on exactly the datasets the manifest honestly
+    disables itself for, contradicting the "pays today's price ONCE" law. So
+    the production path (injected *count_cache*) memoises a small MUTABLE
+    latch per ``(dataset, generation)``: the FIRST failed attempt flips it and
+    every later click within the generation skips the seed outright (one
+    ``db.stats_manifest.seed_skipped`` ``reason="attempt_blocked"`` DEBUG
+    event — the rejection itself was already logged loudly by that first
+    attempt). A SUCCESSFUL seed never blocks, so an out-of-band invalidation
+    within the SAME generation still falls back and reseeds (the
+    fallback→reseed healing contract, integration-pinned); the generation
+    bump after any pull/heal re-enables a blocked dataset (a healed partition
+    is re-attempted naturally). Best-effort envelope: an LRU eviction of the
+    latch merely re-attempts once — never a wrong number, only a scan.
+    ``count_cache=None`` (the pure default) attempts every time —
+    behaviour-identical to before (the purity contract; the production /db
+    routes always inject the cache).
+    """
+
+    def _attempt() -> bool:
+        return _seed_stats_manifest(
+            conn, lake_root, kind=kind, key=key, base=base, identity=identity
+        )
+
+    if count_cache is None:
+        return _attempt()
+    latch: dict[str, bool] = count_cache.get_or_compute(
+        _stats_seed_key(kind, key), generation=generation, compute=lambda: {"blocked": False}
+    )
+    if latch.get("blocked"):
+        _LOG.debug(_STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="attempt_blocked")
+        return False
+    seeded = _attempt()
+    if not seeded:
+        latch["blocked"] = True
+    return seeded
+
+
 class CandleCountCache(Protocol):
     """The minimal generation-stamped cache contract the candle readers need.
 
@@ -2035,6 +2767,25 @@ def option_candle_span_key(series: str) -> str:
     return f"optspan|{series}"
 
 
+def _degraded_total_key(count_key: str) -> str:
+    """Cache key for the degrade-law LEGACY recount of a page total. O(1).
+
+    DELIBERATELY disjoint from the plain count key (the ``legacytotal|``
+    prefix — a plain spot key opens with a validated exchange token, an
+    options key with ``opt|``): under the whole-request degrade law the plain
+    key may hold a MANIFEST-served total, which must never be paired with a
+    degraded page, so the degraded recount memoises under its OWN key. The
+    degraded legacy total is paging-invariant exactly like the plain total
+    (same ``(coords, start, end)`` → the same resilient ``COUNT``), so a
+    dataset whose pruned page fails PERSISTENTLY — e.g. a schema-heterogeneous
+    star union whose sublist cannot bind the full-union projection — pays the
+    O(files) legacy recount ONCE per generation instead of on every paging
+    click (review round 2: the "pays today's price ONCE" law extended to the
+    degraded corner; a pull/heal bumps the generation → recount, never stale).
+    """
+    return f"legacytotal|{count_key}"
+
+
 def query_candles(
     conn: Any,
     lake_root: Path,
@@ -2052,6 +2803,7 @@ def query_candles(
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
     registry_path: Path | None = None,
+    use_stats_manifest: bool = False,
 ) -> dict[str, Any]:
     """Read one page of OHLCV candles for a partition set (DEC-DB-QUERY-001).
 
@@ -2103,6 +2855,20 @@ def query_candles(
         ladder; an absent/empty/unreadable registry — or the ``None`` default —
         degrades gracefully to the observed ladder, honestly labelled via the
         ``strike_step_confidence`` payload field.
+    use_stats_manifest
+        Opt into the per-file lake STATS manifest (DEC-LAKE-STATS-MANIFEST-001):
+        the page ``total`` + the default-range span are answered from the
+        dataset's VALIDATED stats shard and the page query's file list is
+        PRUNED to only the files the page needs — true O(page) in partition
+        depth. Served ONLY after full per-request revalidation (parse + key
+        echo + file-set + per-file stat token + month bounds); ANY failure —
+        including a mid-request pruned-read error or a moved stat token —
+        re-runs the WHOLE request on the byte-identical legacy path (one
+        ``lake.stats_manifest.fallback`` log) and reseeds the shard
+        best-effort. The production ``/db`` routes pass ``True``; the pure
+        default ``False`` keeps every direct caller byte-identical to the
+        legacy query pattern, and the ``BRUTEX_LAKE_STATS_MANIFEST=off`` kill
+        switch forces legacy even when ``True``.
 
     Returns
     -------
@@ -2188,7 +2954,18 @@ def query_candles(
     # logged (``db.parquet_skip``), counted out, and the page degrades to its readable
     # subset (never a fabricated bar).
     source = "read_parquet(?, union_by_name=true)"
-    order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
+    # DETERMINISTIC page order (DEC-LAKE-STATS-MANIFEST-001): the physical
+    # ``filename, file_row_number`` tiebreaker (both live in the dedup scan
+    # source, never in the projection) pins equal-timestamp rows to their
+    # keep-FIRST physical order. Spot bars are timestamp-unique after the
+    # QUALIFY dedup, so this is a no-op here — it exists so the ONE shared
+    # order shape is total-ordered on the options pager too (where CE+PE share
+    # a minute and the prior bare ``ORDER BY timestamp`` tie order was
+    # engine-whim — plan-dependent, so a pruned file-list read could legally
+    # reorder ties vs the full-glob read; Golden Rule #7).
+    order_sql = (
+        ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC") + ", filename, file_row_number"
+    )
     skip_source = f"candle:{exchange}/{segment}/{symbol}/{interval}"
     # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): a partition poisoned
     # before the write-side uniqueness fix can physically carry duplicate
@@ -2206,6 +2983,27 @@ def query_candles(
     if columns is not None and any(c in FNO_GREEKS_COLUMN_TYPES for c in columns):
         select = _greeks_tolerant_select(conn, base, columns, source=skip_source)
 
+    # Per-request stats-manifest context (DEC-LAKE-STATS-MANIFEST-001): ``None``
+    # when the request did not opt in / the kill switch is off (byte-identical
+    # legacy — not even a shard read). Built AFTER the empty-partition early
+    # return above (an empty dataset has no shard by contract) and BEFORE the
+    # total, so the count closure and the page pruner share ONE validation +
+    # ONE set of straddler counts (total ≡ Σ pages by construction).
+    stats_ctx = _stats_read_context(
+        conn,
+        lake_root,
+        kind=KIND_BARS,
+        key={"exchange": exchange, "segment": segment, "symbol": symbol, "interval": interval},
+        base=base,
+        identity=("timestamp",),
+        where_sql=where_sql,
+        where_params=list(where_params),
+        ist_dates=interval == _DAILY_INTERVAL,
+        start=start,
+        end=end,
+        use_stats_manifest=use_stats_manifest,
+    )
+
     # The page total is a `COUNT(*)` over `read_parquet(glob)` — DuckDB answers it
     # from each Parquet file's FOOTER metadata, so it is O(files), NOT O(1): on a
     # deep multi-year partition it re-reads every monthly file's footer on EVERY
@@ -2216,8 +3014,10 @@ def query_candles(
     # O(1) hit, and a pull/materialize bumps the generation → recompute (the SAME
     # write-invalidation signal the movers cache uses — never a stale total). When
     # no cache is injected (the pure-function default), the COUNT runs inline,
-    # behaviour-identical to before.
-    def _count_total() -> int:
+    # behaviour-identical to before. A VALIDATED stats manifest answers the
+    # closure from the stamped per-file counts instead (zero footer I/O beyond
+    # the ≤few straddler files) — same number, revalidated THIS request.
+    def _legacy_count_total() -> int:
         rows = _execute_parquet_resilient(
             conn,
             base,
@@ -2226,6 +3026,11 @@ def query_candles(
             source=skip_source,
         )
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
+
+    def _count_total() -> int:
+        if stats_ctx is not None and stats_ctx.served:
+            return stats_ctx.total
+        return _legacy_count_total()
 
     if count_cache is None:
         total = _count_total()
@@ -2240,13 +3045,63 @@ def query_candles(
     # A `*` projection must exclude the two synthetic dedup-ordering columns so
     # the page schema stays byte-identical to the plain read (Golden Rule #7).
     page_select = DEDUP_STAR_SELECT_SQL if select == "*" else select
-    out_columns, raw_rows = _execute_candle_page_resilient(
-        conn,
-        base,
-        f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
-        [*where_params, safe_limit, safe_offset],
-        source=skip_source,
+    # Whether THIS request's total may have been manifest-served (captured
+    # BEFORE the page runs — the pruner flips ``served`` off on a mid-request
+    # failure, and the degrade law below needs the pre-page verdict).
+    manifest_total_candidate = stats_ctx is not None and stats_ctx.served
+    pruned = _stats_pruned_page(
+        stats_ctx,
+        select=select,
+        columns=columns,
+        where_sql=where_sql,
+        where_params=list(where_params),
+        qualify_sql=qualify_sql,
+        order_sql=order_sql,
+        descending=descending,
+        limit=safe_limit,
+        offset=safe_offset,
+        count_cache=count_cache,
+        generation=generation,
     )
+    if pruned is not None:
+        out_columns, raw_rows = pruned
+    else:
+        out_columns, raw_rows = _execute_candle_page_resilient(
+            conn,
+            base,
+            f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
+            [*where_params, safe_limit, safe_offset],
+            source=skip_source,
+        )
+        if manifest_total_candidate:
+            # Whole-request degrade law (DEC-LAKE-STATS-MANIFEST-001): the
+            # manifest validated but its pruned page path failed mid-request —
+            # recompute the total on the SAME legacy resilient path the page
+            # just ran, so a manifest total is never paired with a degraded
+            # page (the count cache keeps its normal entry; it was valid when
+            # computed and the generation bump remains its invalidation). The
+            # DEGRADED recount memoises under its own disjoint key so a
+            # PERSISTENTLY unprunable page never re-pays the O(files) legacy
+            # COUNT per click (review round 2 — see _degraded_total_key).
+            if count_cache is None:
+                total = _legacy_count_total()
+            else:
+                total = count_cache.get_or_compute(
+                    _degraded_total_key(
+                        candle_count_key(exchange, segment, symbol, interval, start, end)
+                    ),
+                    generation=generation,
+                    compute=_legacy_count_total,
+                )
+    if stats_ctx is not None:
+        _LOG.info(
+            _STATS_READ_EVENT,
+            kind=KIND_BARS,
+            symbol=symbol,
+            interval=interval,
+            validated=stats_ctx.stats is not None,
+            page_source="manifest" if pruned is not None else "live_scan",
+        )
     # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix,
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
     # coercion (shared helper).
@@ -2322,6 +3177,14 @@ def query_candles(
     if is_fno and (start is None or end is None):
 
         def _stored_life() -> tuple[str | None, str | None]:
+            # Manifest-first span (DEC-LAKE-STATS-MANIFEST-001): the validated
+            # per-file bounds fold to the identical MIN/MAX IST dates
+            # (timestamp → IST date is monotonic) with zero Parquet I/O; a
+            # non-served request (validation failed OR the page degraded
+            # mid-request — the whole-request degrade law) runs the legacy
+            # resilient scan byte-identically.
+            if stats_ctx is not None and stats_ctx.served:
+                return stats_ctx.ist_span()
             return _fno_stored_ist_span_resilient(
                 conn, base, source=source, skip_source=skip_source
             )
@@ -2336,6 +3199,24 @@ def query_candles(
             )
     else:
         stored_start_ist, stored_end_ist = (None, None)
+    if stats_ctx is not None and stats_ctx.should_seed:
+        # Read-side write-behind seed (the ONLY seeding mechanism, lazy
+        # accretion): the shard was absent/invalid and the legacy scan just
+        # answered this request — rebuild it best-effort so the NEXT click is
+        # manifest-served. Never raises; any anomaly aborts the seed, and a
+        # FAILED attempt is latched per (dataset, generation) so a
+        # permanently-unseedable dataset never repays the grouped scan on
+        # every click (see _seed_stats_once).
+        _seed_stats_once(
+            conn,
+            lake_root,
+            kind=KIND_BARS,
+            key={"exchange": exchange, "segment": segment, "symbol": symbol, "interval": interval},
+            base=base,
+            identity=("timestamp",),
+            count_cache=count_cache,
+            generation=generation,
+        )
     applied_range = resolve_applied_range(
         is_fno=is_fno,
         explicit_start=start,
@@ -3220,6 +4101,7 @@ def query_option_candles(
     offset: int = 0,
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
+    use_stats_manifest: bool = False,
 ) -> dict[str, Any]:
     """Read one page of expired-option bars for a series (DEC-DB-QUERY-001).
 
@@ -3269,6 +4151,14 @@ def query_option_candles(
         :func:`option_candle_span_key` (series-only key), so the applied-range chip
         (DEC-DB-UX-PACK-001 Feature 2) never re-runs its MIN/MAX scan on a paging
         click. The expired-options twin of the spot :func:`query_candles` cache.
+    use_stats_manifest
+        Opt into the per-file lake STATS manifest (DEC-LAKE-STATS-MANIFEST-001)
+        — the expired-options twin of the :func:`query_candles` parameter:
+        manifest-first total / span / file-list-pruned page after full
+        per-request revalidation, ANY failure ⇒ the byte-identical legacy scan
+        + best-effort reseed. The production route passes ``True``; the pure
+        default ``False`` keeps direct callers byte-identical, and the
+        ``BRUTEX_LAKE_STATS_MANIFEST=off`` kill switch forces legacy.
 
     Returns
     -------
@@ -3330,7 +4220,16 @@ def query_option_candles(
     # (``db.parquet_skip``), omitted, and the page degrades to its readable
     # subset (never a fabricated bar).
     source = "read_parquet(?, union_by_name=true)"
-    order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
+    # DETERMINISTIC page order (DEC-LAKE-STATS-MANIFEST-001): a CE + PE pair
+    # shares one timestamp, and the prior bare ``ORDER BY timestamp`` left the
+    # tie order to the engine's plan (a pruned file-list read could legally
+    # order the pair differently than the full-glob read). The physical
+    # ``filename, file_row_number`` tiebreaker (dedup-source columns, never
+    # projected) pins ties to their keep-FIRST physical order — one total
+    # order for BOTH paths (Golden Rule #7).
+    order_sql = (
+        ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC") + ", filename, file_row_number"
+    )
     skip_source = f"option-candle:{series}"
     # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): the expired-options
     # rolling identity is the COMPOSITE ``(side, timestamp)`` — the SAME key the
@@ -3340,7 +4239,25 @@ def query_option_candles(
     page_source = DEDUP_PARQUET_SOURCE_SQL
     qualify_sql = dedup_qualify_sql(("side", "timestamp"))
 
-    def _count_total() -> int:
+    # Per-request stats-manifest context (DEC-LAKE-STATS-MANIFEST-001) — the
+    # expired-options twin of the spot wiring; options roll a 1-minute table,
+    # so the classifier uses the UTC calendar (never IST dates here).
+    stats_ctx = _stats_read_context(
+        conn,
+        lake_root,
+        kind=KIND_OPTIONS,
+        key={"series": series},
+        base=base,
+        identity=("side", "timestamp"),
+        where_sql=where_sql,
+        where_params=list(where_params),
+        ist_dates=False,
+        start=start,
+        end=end,
+        use_stats_manifest=use_stats_manifest,
+    )
+
+    def _legacy_count_total() -> int:
         """Run the O(files) deduped-total footer-scan over the whole series glob.
 
         Routed through the COMMON :func:`_execute_parquet_resilient` (the series
@@ -3357,6 +4274,11 @@ def query_option_candles(
         )
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
+    def _count_total() -> int:
+        if stats_ctx is not None and stats_ctx.served:
+            return stats_ctx.total
+        return _legacy_count_total()
+
     # The page total is paging-invariant, so memoise it per (series, start, end)
     # behind the injected generation-stamped cache (DEC-LAKE-READ-O1-AUDIT-001) —
     # a prev/next click is then an O(1) hit instead of re-reading every Parquet
@@ -3370,13 +4292,52 @@ def query_option_candles(
             compute=_count_total,
         )
     page_select = DEDUP_STAR_SELECT_SQL if select == "*" else select
-    out_columns, raw_rows = _execute_candle_page_resilient(
-        conn,
-        base,
-        f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
-        [*where_params, safe_limit, safe_offset],
-        source=skip_source,
+    manifest_total_candidate = stats_ctx is not None and stats_ctx.served
+    pruned = _stats_pruned_page(
+        stats_ctx,
+        select=select,
+        columns=columns,
+        where_sql=where_sql,
+        where_params=list(where_params),
+        qualify_sql=qualify_sql,
+        order_sql=order_sql,
+        descending=descending,
+        limit=safe_limit,
+        offset=safe_offset,
+        count_cache=count_cache,
+        generation=generation,
     )
+    if pruned is not None:
+        out_columns, raw_rows = pruned
+    else:
+        out_columns, raw_rows = _execute_candle_page_resilient(
+            conn,
+            base,
+            f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
+            [*where_params, safe_limit, safe_offset],
+            source=skip_source,
+        )
+        if manifest_total_candidate:
+            # Whole-request degrade law: never pair a manifest total with a
+            # degraded page; the degraded recount memoises under its own
+            # disjoint generation-stamped key (see query_candles /
+            # _degraded_total_key — review round 2).
+            if count_cache is None:
+                total = _legacy_count_total()
+            else:
+                total = count_cache.get_or_compute(
+                    _degraded_total_key(option_candle_count_key(series, start, end)),
+                    generation=generation,
+                    compute=_legacy_count_total,
+                )
+    if stats_ctx is not None:
+        _LOG.info(
+            _STATS_READ_EVENT,
+            kind=KIND_OPTIONS,
+            series=series,
+            validated=stats_ctx.stats is not None,
+            page_source="manifest" if pruned is not None else "live_scan",
+        )
     # Options roll a 1-minute table, so the bar always renders full HH:MM:SS (no
     # date-only collapse); options carry no spot derived %-columns.
     rows = _render_candle_rows(raw_rows, out_columns, "1minute")
@@ -3393,8 +4354,13 @@ def query_option_candles(
         F&O span reader (``_fno_stored_ist_span_resilient``) — a corrupt file is
         skipped, an all-unreadable / readable-but-empty series yields
         ``(None, None)`` (``_iso_date_or_none`` maps each ``NULL`` through), never
-        a 500, never a fabricated span (DEC-ENGINE-MISC-PACK-002).
+        a 500, never a fabricated span (DEC-ENGINE-MISC-PACK-002). A VALIDATED,
+        non-degraded stats manifest folds the span from the stamped per-file
+        bounds instead — identical dates, zero Parquet I/O
+        (DEC-LAKE-STATS-MANIFEST-001).
         """
+        if stats_ctx is not None and stats_ctx.served:
+            return stats_ctx.ist_span()
         rows = _execute_parquet_resilient(
             conn,
             base,
@@ -3417,6 +4383,19 @@ def query_option_candles(
             )
     else:
         stored_start_ist, stored_end_ist = (None, None)
+    if stats_ctx is not None and stats_ctx.should_seed:
+        # Read-side write-behind seed — the options twin (see query_candles);
+        # same failed-attempt latch per (dataset, generation).
+        _seed_stats_once(
+            conn,
+            lake_root,
+            kind=KIND_OPTIONS,
+            key={"series": series},
+            base=base,
+            identity=("side", "timestamp"),
+            count_cache=count_cache,
+            generation=generation,
+        )
     return {
         "series": series,
         "interval": "1minute",
