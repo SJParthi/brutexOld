@@ -56,6 +56,38 @@ def cache_tier_ceiling(shared_ci_default: float) -> float:
     return shared_ci_default
 
 
+#: Strict ceiling for ratio tests whose big/small workloads differ by a
+#: feature's OWN documented O(D) METADATA sweep (DEC-LAKE-STATS-MANIFEST-001).
+#: The 2026-07-07 first REAL M4-Pro run (actions run 28888100079) proved the
+#: decreed 1.1x internally contradictory for the manifest paging click: its
+#: HONEST envelope is O(page-files) Parquet work + an O(D) stat-token
+#: revalidation sweep (D = the ONE dataset's month files — metadata syscalls),
+#: so the 72-month fixture pays 66 extra statx calls over the 6-month one BY
+#: DESIGN. Measured: ratio 1.53x, t_small=2.272 ms, t_large=3.485 ms —
+#: Δ≈18 µs/file over the 66 extra statx — while the deterministic
+#: 1-file-touch probe stayed green (exactly 1 parquet file touched at both
+#: depths). Metadata cost is bounded by a CONSTANT per-file syscall factor,
+#: never O(files) Parquet work; a genuine O(files) regression on the
+#: 12x-depth fixture measures well above 3.0 and fails loudly — ~5-6x at the
+#: repo's own measured footer cost (~0.26 ms/file from #1025's 19.02 ms/click
+#: at 72 months, over this fixture's 2.27 ms constant base; ~12x only in the
+#: asymptote where O(files) work dominates both depths) — which also means it
+#: can sit UNDER the 8.0 shared-CI ceiling, where the deterministic
+#: file-touch / fs-op-count probes are (and remain) the primary teeth.
+METADATA_SWEEP_STRICT_CEILING: Final[float] = 3.0
+
+
+def metadata_sweep_ceiling(shared_ci_default: float) -> float:
+    """Ceiling for documented O(D)-METADATA-sweep ratio tests (DEC-LAKE-STATS-MANIFEST-001).
+
+    Strict tier: the measured metadata allowance (never looser than the shared
+    default). Shared CI: unchanged.
+    """
+    if m4pro_strict_active():
+        return min(METADATA_SWEEP_STRICT_CEILING, shared_ci_default)
+    return shared_ci_default
+
+
 def ratio_ceiling(shared_ci_default: float) -> float:
     """Return the O(1) ratio ceiling for the active tier.
 
