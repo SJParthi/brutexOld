@@ -4198,8 +4198,6 @@ def test_pull_cooperative_cancel_at_window_boundary(registry: RegistryStore) -> 
     later buckets, drains + persists via the ``finally``, and returns an honest
     report — every un-fetched window stays PLANNED/unsettled (re-pulled next time).
     """
-    from brutex.adapters.groww.ingest import IngestReport  # noqa: F401  (kept explicit)
-
     sdk = _FakeSDK()
     sink = _RecordingSink()
     selected = registry.list_contracts(underlying="NIFTY")
