@@ -422,7 +422,10 @@ class TestKindMapMasterRevisionFreshness:
         # Call-count spy (review round 1 NIT): within ONE (generation,
         # master_revision) the O(underlyings) map build runs at most once across
         # repeated futures AND options polls — the memo actually memoises.
-        import brutex.dashboard.app as app_module
+        # ONE import style per module (CodeQL py/import-and-import-from): the
+        # sibling movers-suite `from … import app as app_module` idiom, beside
+        # the file's top-level `from brutex.dashboard.app import …`.
+        from brutex.dashboard import app as app_module
 
         _seed_futures(tmp_path)
         _seed_options(tmp_path)
