@@ -774,6 +774,62 @@ def test_legacy_resume_peer_active_skips_quietly_and_cleans_synth_intent(
     assert store.banner.snapshot() is None
 
 
+def test_legacy_resume_peer_active_preserves_operator_intent_written_in_window(
+    tmp_path: Path,
+) -> None:
+    """Boot-window race regression: an operator intent persisted BETWEEN the
+    synthetic write and the PEER_ACTIVE cleanup is PRESERVED — ownership is
+    re-derived at cleanup time (exact equality against the instance this call
+    wrote), never assumed from entry-time state, so the cleanup can never
+    delete the operator's click."""
+    store = PullIntentStore(tmp_path)
+    operator_intent = _intent(symbols="NIFTY", restarts=0)
+
+    def _probe() -> bool:
+        # The race window: our synthetic intent is already on disk; the
+        # operator's REAL click lands before the PEER_ACTIVE cleanup runs.
+        assert store.load() is not None, "the synthetic intent was persisted first"
+        assert store.write(operator_intent)
+        return False  # a peer pull holds the flock ⇒ PEER_ACTIVE
+
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=_probe)
+    assert action is ResumeAction.PEER_ACTIVE
+    assert launched == []
+    assert store.load() == operator_intent, "the operator's intent survives the cleanup"
+    assert store.banner.snapshot() is None
+
+
+def test_legacy_resume_peer_active_created_at_alone_defeats_a_false_match(
+    tmp_path: Path,
+) -> None:
+    """An operator intent that HAPPENS to be whole-universe (the synthetic
+    shape: all-``None`` quadruple, ``restarts=0``) but carries a DIFFERENT
+    ``created_at`` must NOT false-match the synthetic intent — ``created_at``
+    participates in the frozen-dataclass equality, so it is preserved."""
+    store = PullIntentStore(tmp_path)
+    operator_intent = _intent(
+        symbols=None,
+        symbol=None,
+        from_date=None,
+        to_date=None,
+        restarts=0,
+        created_at="2020-01-01T00:00:00+00:00",
+    )
+
+    def _probe() -> bool:
+        assert store.write(operator_intent)
+        return False
+
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=_probe)
+    assert action is ResumeAction.PEER_ACTIVE
+    assert launched == []
+    assert store.load() == operator_intent, (
+        "a whole-universe operator intent with its own created_at is NOT ours"
+    )
+
+
 def test_legacy_resume_peer_active_leaves_preexisting_intent_untouched(
     tmp_path: Path,
 ) -> None:
