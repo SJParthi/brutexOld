@@ -376,6 +376,8 @@ def test_lake_census_scan_never_starves_the_shared_threadpool(
     assert scan.thread_names == ["brutex-lake-census"], (
         f"the scan must run on the dedicated census daemon thread, saw {scan.thread_names}"
     )
+
+
 # ── DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 — the /api/v1/sweep-progress file read ──
 
 
