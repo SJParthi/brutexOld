@@ -64,6 +64,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+import structlog
+
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
@@ -86,9 +88,13 @@ from brutex.dashboard.movers_snapshot import (
     warn_prev_baseline_noncontiguous,
 )
 from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
+from brutex.data.lake_keys import StockDriftMap, spot_recovery_candidates
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
+
+_LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "DEFAULT_FUTURES_INTERVAL",
@@ -974,6 +980,110 @@ def _underlying_spot_ltp(
     return None
 
 
+class _SpotLtpResolver:
+    """Per-candidates-compute underlying-spot resolver with the drift-recovery ladder.
+
+    The movers twin of the Greeks spot-join recovery
+    (``greeks_enrich.read_spot_join_with_recovery``, DEC-GREEKS-SPOTJOIN-STOCK-001
+    #1482): the exact-key probe (:func:`_underlying_spot_ltp`, byte-unchanged) runs
+    FIRST on every call — a resolving lake pays ZERO extra I/O and NO log — and
+    ONLY on an exact miss does the resolver walk the ONE COMMON
+    :func:`~brutex.data.lake_keys.spot_recovery_candidates` ladder (index aliases
+    both directions + the #911 ``"<EXCH>-<underlying>"``/stripped forms + the
+    APPENDED evidence-grounded ``stock_drift`` rung), probing each candidate over
+    the SAME two spot segments. Pre-fix, a spelling-drifted stock spot dir (the
+    #1482 class — vendor-folded chain underlying ``BAJAJAUTO`` vs the master's
+    on-disk ``BAJAJ-AUTO``) silently blanked spot/premium on the Futures tab and
+    read ``?`` moneyness on the Options tab even though the spot data EXISTED.
+
+    Ladder discipline (bounded per compute, never per row):
+
+    * the :func:`~brutex.data.spot_drift.load_stock_drift_map` build (master
+      vocabulary → O(spot dirs) scan → verified map) runs LAZILY at most ONCE per
+      resolver — and only after a first exact miss, so a fully-resolving lake
+      never builds it;
+    * the recovery OUTCOME is memoised per ``(exchange, underlying)`` — the
+      winning recovered key (re-probed per row, exactly like the exact key is
+      today) or the honest exhaustion (``None``, no re-walk) — so the ladder walk
+      and the ONE ``movers.spot_key_recovered`` INFO (rung-attributed via the
+      #1482 pinned prefix invariant) fire once per underlying per compute even on
+      a many-contract options chain.
+
+    Fail-soft mirrors #1482 exactly: no master / a confirmed master-read error →
+    the loader's ``None`` → the ladder minus the stock rung → today's honest
+    no-spot; a ≥2-master ambiguous fold is POISONED inside the builder (capped
+    ``spot_drift.ambiguous_master`` WARNs) and never guessed between;
+    ``MemoryError`` re-raises raw; a corrupt candidate partition raises the
+    normal movers skip-error set into the caller's per-row quarantine. NO
+    ``'%26'``→``'&'`` recovery — the stored-key encoding is UNVERIFIED and the
+    #1482 pledge stands verbatim (Golden Rule #1). Read-time recovery ONLY —
+    nothing on disk is renamed or healed.
+    """
+
+    def __init__(
+        self, lake_root: Path, *, day: date_cls, cutoff_min: int | None, source: str
+    ) -> None:
+        self._lake_root = lake_root
+        self._day = day
+        self._cutoff_min = cutoff_min
+        self._source = source
+        self._drift_loaded = False
+        self._drift: StockDriftMap | None = None
+        self._recovered: dict[tuple[str, str], str | None] = {}
+
+    def _stock_drift(self) -> StockDriftMap | None:
+        """Build the #1482 evidence-grounded map at most once, lazily (fail-soft)."""
+        if not self._drift_loaded:
+            self._drift_loaded = True
+            self._drift = load_stock_drift_map(self._lake_root)
+        return self._drift
+
+    def _probe(self, *, exchange: str, underlying: str) -> Decimal | None:
+        """One spot probe under one key — the exact-key reader, byte-unchanged."""
+        return _underlying_spot_ltp(
+            self._lake_root,
+            exchange=exchange,
+            underlying=underlying,
+            day=self._day,
+            cutoff_min=self._cutoff_min,
+        )
+
+    def ltp(self, *, exchange: str, underlying: str) -> Decimal | None:
+        """The underlying's spot LTP — exact key first, then the recovery ladder."""
+        exact = self._probe(exchange=exchange, underlying=underlying)
+        if exact is not None:
+            return exact
+        memo_key = (exchange, underlying)
+        if memo_key in self._recovered:
+            recovered_key = self._recovered[memo_key]
+            if recovered_key is None:
+                return None
+            return self._probe(exchange=exchange, underlying=recovered_key)
+        drift = self._stock_drift()
+        candidates = spot_recovery_candidates(underlying, exchange, stock_drift=drift)
+        alias_count = len(candidates)
+        if drift:
+            # The extra 2-arg call runs only on the already-cold exhausted-primary
+            # path with a truthy map — pure string ops, O(1)-bounded (the #1482
+            # rung-attribution idiom, byte-for-byte).
+            alias_count = len(spot_recovery_candidates(underlying, exchange))
+        for idx, candidate in enumerate(candidates):
+            value = self._probe(exchange=exchange, underlying=candidate)
+            if value is not None:
+                self._recovered[memo_key] = candidate
+                _LOG.info(
+                    "movers.spot_key_recovered",
+                    source=self._source,
+                    exchange=exchange,
+                    underlying=underlying,
+                    recovered_key=candidate,
+                    rung="stock_drift" if idx >= alias_count else "alias_ladder",
+                )
+                return value
+        self._recovered[memo_key] = None
+        return None
+
+
 def _discover_futures(
     lake_root: Path,
     *,
@@ -1104,6 +1214,11 @@ def compute_futures_candidates(
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
     expected_session_for = make_expected_session_resolver(day)
+    # ONE per-compute spot resolver (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3
+    # fold-in): exact-key probes stay byte-identical; a drifted stock spot dir
+    # (the #1482 class) recovers via the COMMON ladder, walked once per
+    # underlying. The candidates cache memoises the whole result per coordinate.
+    spot_resolver = _SpotLtpResolver(lake_root, day=day, cutoff_min=cutoff_min, source="futures")
     for underlying, contracts in by_underlying.items():
         chosen = select_expiry_tier(
             [(sym, exp) for sym, _exch, exp in contracts], on_date=day, tier=tier
@@ -1135,9 +1250,7 @@ def compute_futures_candidates(
             oi_baseline = resolve_prev_oi(
                 lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
             )
-            spot_ltp = _underlying_spot_ltp(
-                lake_root, exchange=exchange, underlying=underlying, day=day, cutoff_min=cutoff_min
-            )
+            spot_ltp = spot_resolver.ltp(exchange=exchange, underlying=underlying)
         except skip_errors as exc:
             # A corrupt / unreadable Parquet for ONE future must not 500 the screen —
             # skip it (logged + counted), never fabricate (DEC-MOVERS-CORRUPT-SKIP-001).

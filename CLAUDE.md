@@ -35,9 +35,24 @@ reject→accept — exactly what options//db/Greeks already accepted; every
 well-formed vendor `DDMmmYY` symbol byte-identical, non-hyphenated rows
 byte-parity-pinned end-to-end, `&`-names (M&M — no hyphen in the grammar) were
 and remain correct. `movers_options` already delegated; `futures_warm_grid`
-needed zero change. READ-ONLY dashboard display fix — ENGINE UNCHANGED —
+needed zero change. SAME-PR FOLD-IN (W3 spot-drift ladder): the movers
+underlying-spot probe now walks the #1482 (DEC-GREEKS-SPOTJOIN-STOCK-001)
+drift-recovery ladder on an exact-key MISS — NEW
+`movers_futures._SpotLtpResolver`, ONE per-candidates-compute instance in
+BOTH the futures and options loops: exact probe byte-unchanged FIRST; the
+COMMON `lake_keys.spot_recovery_candidates(..., stock_drift=)` ladder only on
+a miss, fed by a LAZY at-most-once `spot_drift.load_stock_drift_map`
+(master-verified; ambiguity POISONED + capped warns; no-master fail-softs to
+today's honest no-spot; MemoryError re-raises), the recovery OUTCOME memoised
+per (exchange, underlying) with ONE rung-attributed
+`movers.spot_key_recovered` INFO — so a spelling-drifted stock spot dir
+(chain `BAJAJAUTO` vs on-disk `BAJAJ-AUTO`, executed repro) no longer blanks
+futures spot/premium or reads `?` options moneyness; a resolving lake never
+builds the map (spy-pinned byte-identity); NO `%26`→`&` recovery — the #1482
+pledge stands; read-time recovery only, nothing healed on disk. READ-ONLY
+dashboard display fix — ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
-`movers_futures.py` 100% line+branch.)
+`movers_futures.py` + `movers_options.py` BOTH 100% line+branch.)
 Earlier: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
@@ -1715,8 +1730,20 @@ hostile-review pass._
   underlying and let the warm grid cache the wrong rows (executed real-lake repro). Disclosed sanctioned delta:
   junk lake-dir expiry tokens the shape-stricter twin rejected (`30SEP25` etc.) now accept exactly as
   options//db/Greeks already did; well-formed vendor symbols + non-hyphenated rows byte-identical (pinned);
-  `&`-names were and remain correct (pinned). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
-  `movers_futures.py` 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  `&`-names were and remain correct (pinned). SAME-PR FOLD-IN (W3 spot-drift ladder): the movers underlying-spot
+  probe gains the #1482 (DEC-GREEKS-SPOTJOIN-STOCK-001) drift-recovery ladder — NEW `movers_futures._SpotLtpResolver`,
+  ONE per-candidates-compute instance in BOTH the futures loop and the options moneyness loop: the exact-key
+  `_underlying_spot_ltp` probe (byte-unchanged) runs FIRST; only an exact MISS walks the COMMON
+  `lake_keys.spot_recovery_candidates(..., stock_drift=)` ladder over the same two spot segments, fed by a LAZY
+  at-most-once `spot_drift.load_stock_drift_map` (master-verified unique-fold map; ambiguity POISONED + capped
+  warns; no-master / read error fail-softs to today's honest no-spot; MemoryError re-raises), with the recovery
+  OUTCOME memoised per (exchange, underlying) + ONE rung-attributed `movers.spot_key_recovered` INFO per compute —
+  so a spelling-drifted stock spot dir (chain `BAJAJAUTO` vs the master's on-disk `BAJAJ-AUTO`; executed repro on
+  the REAL computes) no longer blanks futures spot/premium or reads a silent `?` options moneyness. A resolving
+  lake never builds the map (spy-pinned byte-identity, index symbols untouched); NO `%26`→`&` recovery (the #1482
+  pledge stands); read-time recovery ONLY — nothing healed on disk. READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX;
+  `movers_futures.py` + `movers_options.py` BOTH 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
   Earlier: `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
@@ -4121,8 +4148,12 @@ hostile-review pass._
   (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md #1631 — the `/movers`
   Futures contract-symbol parse right-anchored by DELEGATING to the canonical
   `data/fno_symbol.parse_fno_symbol`; hyphenated underlyings keep their full
-  name so spot + premium resolve; READ-ONLY dashboard fix; ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  name so spot + premium resolve; + the W3 fold-in: the movers spot probe
+  (futures premium + options moneyness) walks the #1482 spot-drift recovery
+  ladder on an exact-key miss via the per-compute
+  `movers_futures._SpotLtpResolver`; READ-ONLY dashboard fix; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
+  blurb)
   Earlier: `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
   PER-FILE lake STATS manifest; matches §1's Earlier chain entry)

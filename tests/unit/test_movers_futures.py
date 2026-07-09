@@ -956,6 +956,269 @@ class TestHyphenatedUnderlyingEndToEnd:
         assert bajaj.premium == Decimal("120.00")
 
 
+# ── DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in: the #1482 spot-drift ──
+# recovery ladder on the movers spot probe. Fails-before: a spelling-drifted
+# stock spot dir (vendor-folded chain underlying BAJAJAUTO vs the master's
+# on-disk BAJAJ-AUTO) yielded spot=None / premium=None on the REAL compute even
+# though the spot data existed (executed repro 2026-07-09).
+
+
+def _eq_instrument(symbol: str) -> object:
+    """A minimal NSE cash-equity master row (the test_spot_drift `_eq` pattern)."""
+    from brutex.data.instrument_store import Instrument
+    from brutex.models import Exchange, InstrumentType, Segment
+
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def _seed_master(lake: Path, *symbols: str) -> None:
+    """Write a REAL DuckDB instrument master at ``<lake>/instruments.duckdb``."""
+    from brutex.data.instrument_store import InstrumentStore
+
+    lake.mkdir(parents=True, exist_ok=True)
+    with InstrumentStore.open(lake / "instruments.duckdb") as store:
+        store.upsert_many(
+            [_eq_instrument(s) for s in symbols],  # type: ignore[misc]
+            snapshot_date=date(2024, 1, 1),
+            run_id="test-movers-drift",
+            csv_source_sha256="0" * 64,
+        )
+
+
+def _write_drifted_lake(tmp_path: Path) -> None:
+    """The #1482 drift shape: chain underlying BAJAJAUTO, spot dir BAJAJ-AUTO."""
+    from brutex.data.parquet_writer import ParquetWriter
+
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="FNO",
+        symbol="NSE-BAJAJAUTO-27Jun24-FUT",
+        interval="1minute",
+        bars=[_fut_min_bar(close="8130", volume=70, oi=700)],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="BAJAJ-AUTO",
+        interval="1minute",
+        bars=[_spot_min_bar(close="8010")],
+    )
+    _seed_master(tmp_path, "BAJAJ-AUTO")
+
+
+class TestStockDriftSpotRecovery:
+    def test_drifted_stock_spot_and_premium_recover(self, tmp_path: Path) -> None:
+        """The fails-before flip: the drifted stock resolves spot + premium
+        exactly like the Greeks enrichment does (rung-attributed, one log)."""
+        _write_drifted_lake(tmp_path)
+        with capture_logs() as logs:
+            got = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        bajaj = next(m for m in got.movers if m.underlying == "BAJAJAUTO")
+        # Pre-fix (executed repro): spot=None / premium=None despite the REAL
+        # bars/NSE/CASH/BAJAJ-AUTO partition + the master carrying BAJAJ-AUTO.
+        assert bajaj.spot == Decimal("8010.00")
+        assert bajaj.premium == Decimal("120.00")
+        assert got.skipped == 0
+        events = [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+        assert len(events) == 1
+        assert events[0]["source"] == "futures"
+        assert events[0]["underlying"] == "BAJAJAUTO"
+        assert events[0]["recovered_key"] == "BAJAJ-AUTO"
+        assert events[0]["rung"] == "stock_drift"
+
+    def test_non_drifted_lake_byte_identity_zero_drift_io(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every exact-key probe resolves ⇒ the drift map is NEVER built (spy),
+        no recovery log fires, and the rows are the pre-fold-in values
+        byte-for-byte (index NIFTY + hyphenated stock alike)."""
+        import brutex.dashboard.movers_futures as mf
+
+        _write_hyphen_lake(tmp_path)
+
+        def _never(lake_root: Path) -> None:
+            raise AssertionError("load_stock_drift_map must not run on a resolving lake")
+
+        monkeypatch.setattr(mf, "load_stock_drift_map", _never)
+        with capture_logs() as logs:
+            got = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        by_underlying = {m.underlying: m for m in got.movers}
+        assert by_underlying["NIFTY"].spot == Decimal("22000.00")
+        assert by_underlying["NIFTY"].premium == Decimal("10.00")
+        assert by_underlying["BAJAJ-AUTO"].spot == Decimal("8010.00")
+        assert by_underlying["BAJAJ-AUTO"].premium == Decimal("120.00")
+        assert not [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+
+    def test_missing_spot_no_master_stays_honest_none(self, tmp_path: Path) -> None:
+        """No spot dir anywhere + no instrument master: the loader fail-softs to
+        ``None`` and the row keeps today's honest spot=None / premium=None."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-BAJAJAUTO-27Jun24-FUT",
+            interval="1minute",
+            bars=[_fut_min_bar(close="8130", volume=70, oi=700)],
+        )
+        with capture_logs() as logs:
+            got = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        bajaj = next(m for m in got.movers if m.underlying == "BAJAJAUTO")
+        assert bajaj.spot is None
+        assert bajaj.premium is None
+        assert not [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+
+    def test_ambiguous_master_fold_poisoned_no_recovery(self, tmp_path: Path) -> None:
+        """Two REAL master instruments share the fold ⇒ the #1482 builder
+        POISONS it (capped warn) and the spot stays an honest ``None`` —
+        never a guess between real instruments."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-BAJAJAUTO-27Jun24-FUT",
+            interval="1minute",
+            bars=[_fut_min_bar(close="8130", volume=70, oi=700)],
+        )
+        writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="BAJAJ-AUTO",
+            interval="1minute",
+            bars=[_spot_min_bar(close="8010")],
+        )
+        _seed_master(tmp_path, "BAJAJ-AUTO", "BAJAJ AUTO")  # both fold to BAJAJAUTO
+        with capture_logs() as logs:
+            got = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        bajaj = next(m for m in got.movers if m.underlying == "BAJAJAUTO")
+        assert bajaj.spot is None
+        assert bajaj.premium is None
+        assert [e for e in logs if e["event"] == "spot_drift.ambiguous_master"]
+        assert not [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+
+
+class TestSpotLtpResolver:
+    """Direct resolver-branch coverage: the per-compute memo + lazy drift build."""
+
+    def test_recovery_outcome_memoised_one_walk_one_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two calls for the SAME drifted underlying: the drift map builds once,
+        ONE log fires, and the second call re-probes the memoised recovered key
+        (exactly like the exact key is re-probed per row today)."""
+        import brutex.dashboard.movers_futures as mf
+        from brutex.dashboard.movers_futures import _SpotLtpResolver
+
+        _write_drifted_lake(tmp_path)
+        loads: list[int] = []
+        real_load = mf.load_stock_drift_map
+
+        def _counting(lake_root: Path) -> object:
+            loads.append(1)
+            return real_load(lake_root)
+
+        monkeypatch.setattr(mf, "load_stock_drift_map", _counting)
+        resolver = _SpotLtpResolver(
+            tmp_path, day=date(2024, 6, 13), cutoff_min=None, source="futures"
+        )
+        with capture_logs() as logs:
+            first = resolver.ltp(exchange="NSE", underlying="BAJAJAUTO")
+            second = resolver.ltp(exchange="NSE", underlying="BAJAJAUTO")
+        assert first == second == Decimal("8010.00")
+        assert loads == [1]
+        assert len([e for e in logs if e["event"] == "movers.spot_key_recovered"]) == 1
+
+    def test_exhaustion_memoised_no_rewalk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuinely spot-less underlying exhausts the ladder ONCE — the
+        second call answers the memoised honest ``None`` with zero re-walk."""
+        import brutex.dashboard.movers_futures as mf
+        from brutex.dashboard.movers_futures import _SpotLtpResolver
+
+        walks: list[str] = []
+        real_candidates = mf.spot_recovery_candidates
+
+        def _counting(underlying: str, exchange: str, **kwargs: object) -> tuple[str, ...]:
+            walks.append(underlying)
+            return real_candidates(underlying, exchange, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(mf, "spot_recovery_candidates", _counting)
+        loads: list[int] = []
+        real_load = mf.load_stock_drift_map
+
+        def _counting_load(lake_root: Path) -> object:
+            loads.append(1)
+            return real_load(lake_root)
+
+        monkeypatch.setattr(mf, "load_stock_drift_map", _counting_load)
+        resolver = _SpotLtpResolver(
+            tmp_path, day=date(2024, 6, 13), cutoff_min=None, source="futures"
+        )
+        assert resolver.ltp(exchange="NSE", underlying="GHOST") is None
+        assert resolver.ltp(exchange="NSE", underlying="GHOST") is None
+        # No master ⇒ drift=None ⇒ exactly ONE ladder build on the first call;
+        # the second call answers from the exhaustion memo.
+        assert walks == ["GHOST"]
+        # A SECOND missing underlying walks its own ladder but REUSES the
+        # already-loaded drift verdict — the loader still ran exactly once.
+        assert resolver.ltp(exchange="NSE", underlying="GHOST2") is None
+        assert walks == ["GHOST", "GHOST2"]
+        assert loads == [1]
+
+    def test_alias_ladder_rung_attribution_without_drift_map(self, tmp_path: Path) -> None:
+        """A #911 ``"<EXCH>-<underlying>"`` legacy dir recovers on the alias
+        ladder (drift map honestly ``None`` — no master) and the log says so."""
+        from brutex.dashboard.movers_futures import _SpotLtpResolver
+        from brutex.data.parquet_writer import ParquetWriter
+
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-BAJAJAUTO",
+            interval="1minute",
+            bars=[_spot_min_bar(close="8010")],
+        )
+        resolver = _SpotLtpResolver(
+            tmp_path, day=date(2024, 6, 13), cutoff_min=None, source="futures"
+        )
+        with capture_logs() as logs:
+            got = resolver.ltp(exchange="NSE", underlying="BAJAJAUTO")
+        assert got == Decimal("8010.00")
+        events = [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+        assert len(events) == 1
+        assert events[0]["recovered_key"] == "NSE-BAJAJAUTO"
+        assert events[0]["rung"] == "alias_ladder"
+
+
 # ── DEC-MOVERS-MIN-VOLUME-001: the opt-in Top-Volume floor (futures) ──
 
 
