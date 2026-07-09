@@ -10,7 +10,10 @@ a temp dir and freezes the three artifacts
 ``tests/golden/fixtures/``. The consuming test
 (``tests/golden/test_preopen_prevday_golden.py``) rebuilds the SAME lake and
 asserts byte equality — so the contiguity fix is proven a pure guard (the
-contiguous arm is byte-unchanged). Never regenerate these on the post-fix
+contiguous arm is byte-unchanged). The lake builder + renderers live in the
+shared ``tests/golden/_preopen_prevday_harness.py`` (imported by BOTH sides,
+so the generator never imports the test module — the CodeQL
+``py/cyclic-import`` break, alerts 887 + 888). Never regenerate these on the post-fix
 tree; the pre-fix capture IS the oracle (Golden Rule #1) — and the refusal is
 now MECHANICAL (the DEC-PREOPEN-PREVDAY-COMMON-001 hostile-review fold): when
 any fixture already exists, :func:`main` raises ``SystemExit`` instead of
@@ -28,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.golden.test_preopen_prevday_golden import (
+from tests.golden._preopen_prevday_harness import (
     FIXTURES,
     GOLDEN_DAY_XLSX,
     GOLDEN_MINUTE_XLSX,
