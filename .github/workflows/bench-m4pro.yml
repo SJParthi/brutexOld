@@ -54,6 +54,16 @@ on:
       - "tests/bench/test_engine_results_store_o1.py"
       - "tests/bench/test_market_structure_o1.py"
       - "tests/bench/_o1_tiers.py"
+      # DEC-LAKE-STATS-MANIFEST-001 (review round 4): the stats-manifest
+      # write-path A/B wall-clock gate (BRUTEX_M4PRO_ABS-gated) and the
+      # /db O(page) paging ratio gate (strict tier via metadata_sweep_ceiling
+      # — _o1_tiers.py METADATA_SWEEP_STRICT_CEILING = 3.0x, recalibrated off
+      # run 28888100079's measured 1.53x per MIGRATION.md #1614 CALIBRATION;
+      # NOT the ratio_ceiling() 1.1x tier) previously executed in NO
+      # workflow — the env vars are set only here, and this workflow neither
+      # listed nor invoked the files.
+      - "tests/bench/test_stats_manifest_write_ab.py"
+      - "tests/bench/test_db_paging_o_page.py"
       - "tests/bench/test_absolute_baseline.py"
       - "tests/bench/_abs_baseline_registry.py"
       - "tests/bench/baselines/**"
@@ -318,6 +328,30 @@ jobs:
             tests/bench/test_engine_results_store_o1.py \
             tests/bench/test_market_structure_o1.py \
             tests/bench/test_throughput_canary.py -q --tb=short -p no:cacheprovider
+
+      - name: Run stats-manifest write A/B + /db O(page) paging gates
+        run: |
+          . .venv/bin/activate
+          # DEC-LAKE-STATS-MANIFEST-001 (review round 4): the wall-clock A/B
+          # merge-budget gate (test_stats_manifest_write_ab.py TestWallClockAB,
+          # skipif-gated on BRUTEX_M4PRO_ABS=1 — set in the job env above) and
+          # the strict-tier O(page) paging ratio gate (test_db_paging_o_page.py
+          # — its strict ceiling routes through metadata_sweep_ceiling(8.0),
+          # i.e. _o1_tiers.py METADATA_SWEEP_STRICT_CEILING = 3.0x under
+          # BRUTEX_M4PRO_STRICT=1, the endgame recalibration off run
+          # 28888100079's measured 1.53x [MIGRATION.md #1614 CALIBRATION]; it
+          # never calls ratio_ceiling() and does NOT enforce the decreed 1.1x,
+          # the feature's own documented O(D) statx sweep makes that
+          # internally contradictory) previously executed in NO workflow: this
+          # workflow is the ONLY one setting those env vars, and it neither
+          # listed the files in `paths` nor ran them, so the 12 ms
+          # merge-budget assertion was a permanently-skipped test. The
+          # deterministic byte-parity / anti-storm / file-touch teeth
+          # in both files also run on shared CI (ci.yml's bare
+          # `pytest tests/bench`) at the robust tier. -s -rA surface the
+          # measured median overhead + ratios (DEC-M4PRO-BENCH-SURFACE-001).
+          pytest tests/bench/test_stats_manifest_write_ab.py \
+            tests/bench/test_db_paging_o_page.py -q -s -rA --tb=short -p no:cacheprovider
 
       - name: Measure absolute hot-path benchmarks (DEC-BENCH-ABS-BASELINE-001)
         run: |
