@@ -6199,7 +6199,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     Bloom→exact dedup, a hash-chained audit log, and one load-or-create Parquet
     store per tuple (idempotent, lossless re-run — Golden Rule #7).
     """
-    from brutex.data.catalog import Catalog, CatalogError
+    from brutex.data.catalog import Catalog
+    from brutex.data.errors import CatalogError
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
@@ -6357,6 +6358,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     try:
         _catalog_ctx = Catalog.open(catalog)
     except CatalogError as exc:
+        # NOTE: this substring match is coupled to DuckDB's lock-conflict message
+        # text ("Conflicting lock is held …") and could drift across DuckDB
+        # versions; a message change would fall through to the loud re-raise
+        # below (fail-safe), never silently mask real contention.
         if "Conflicting lock" not in str(exc):
             raise
         print(
