@@ -444,3 +444,100 @@ def test_retry_failed_selection_off_loop_real_server(
         expect_status=400,
         expect_detail=b"GHOST",
     )
+
+
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-001 — a wedged lake must not starve the pool ──
+
+
+def test_wedged_lake_offloads_do_not_starve_liveness_routes(
+    server: _RealServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """44 wedged LAKE offloads must leave /api/v1/pull/rate + /api/v1/state fast.
+
+    The measured M4 repro: all 59+ dashboard offload sites shared AnyIO's
+    DEFAULT 40-token limiter and only the rate-bridge read was
+    deadline-guarded, so 40 wedged lake reads pinned every token — the 41st
+    offload queued 2701 ms and the deadline-guarded ``/api/v1/pull/rate``
+    could not even START (its bound holds only GIVEN a free token — #1522's
+    own stated envelope). Post-fix the lake reads ride the app's dedicated
+    32-token ``LakeOffload`` limiter: 44 concurrent wedged lake requests pin
+    at most 32 lake workers (the rest queue on the lake limiter — no thread
+    pile-up), the DEFAULT pool stays free, and BOTH liveness probes answer
+    fast. Pre-fix (every site on ``run_in_threadpool``) this test FAILS: the
+    44 wedges exhaust the default pool and the /pull/rate probe waits out the
+    whole stall.
+
+    Budgets are generous for CI noise: the probes get 2.5 s against a 6 s
+    stall — an unambiguous separation either way.
+    """
+    entered_lock = threading.Lock()
+    entered_count = 0
+    entered_reached = threading.Event()
+    release = threading.Event()
+    wedge_target = 32  # the lake limiter's full size — every token pinned
+
+    def _stalled_revision(*_a: object, **_k: object) -> str:
+        nonlocal entered_count
+        with entered_lock:
+            entered_count += 1
+            if entered_count >= wedge_target:
+                entered_reached.set()
+        release.wait(timeout=6.0)
+        return "rev-wedged-token"
+
+    # The generation probe (`_summary_cache.generation` → lake_revision) runs
+    # INSIDE the offloaded closure of /api/v1/db/fno/underlyings (#1622), and
+    # OUTSIDE the cache lock (#1154) — so every concurrent request wedges its
+    # OWN lake worker: the exact pool-exhaustion shape of the M4 repro.
+    monkeypatch.setattr("brutex.dashboard.app.lake_revision", _stalled_revision)
+
+    results: list[dict[str, Any]] = []
+    threads: list[threading.Thread] = []
+
+    def _fire(slot: dict[str, Any]) -> None:
+        try:
+            slot["status"], slot["body"] = _get(
+                server.port, "/api/v1/db/fno/underlyings", timeout=30.0
+            )
+        except Exception as exc:  # pragma: no cover - only on a hung/failed offload
+            slot["error"] = repr(exc)
+
+    try:
+        for _ in range(44):
+            slot: dict[str, Any] = {}
+            results.append(slot)
+            thread = threading.Thread(target=_fire, args=(slot,), daemon=True)
+            threads.append(thread)
+            thread.start()
+        assert entered_reached.wait(timeout=10.0), (
+            f"only {entered_count} lake offloads entered the wedge — the lake "
+            "limiter should admit exactly its token count"
+        )
+        # Every lake token is now pinned on a wedged read. The liveness routes
+        # must still answer fast on the DEFAULT pool.
+        for path in ("/api/v1/pull/rate", "/api/v1/state"):
+            start = time.perf_counter()
+            status, _ = _get(server.port, path, timeout=10.0)
+            elapsed = time.perf_counter() - start
+            assert status == 200
+            assert elapsed < 2.5, (
+                f"{path} took {elapsed * 1000:.0f}ms while 32 lake offloads were "
+                "wedged — the lake reads are starving the default AnyIO pool "
+                "(regression: the dedicated lake limiter is not binding)."
+            )
+        # The limiter BINDS: no more than its 32 tokens ever entered the wedge
+        # while it was held (the remaining 12 queued on the lake limiter).
+        with entered_lock:
+            held_peak = entered_count
+        assert held_peak <= wedge_target, (
+            f"{held_peak} lake offloads ran concurrently — the 32-token lake "
+            "limiter is not bounding the wedge"
+        )
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=20.0)
+    assert all(not t.is_alive() for t in threads), "wedged lake requests never completed"
+    for slot in results:
+        assert "error" not in slot, f"a wedged request failed: {slot.get('error')}"
+        assert slot["status"] == 200

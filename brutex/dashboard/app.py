@@ -45,7 +45,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -233,6 +233,9 @@ from brutex.dashboard.spot_cascade import (
 )
 from brutex.dashboard.summary_cache import LAKE_UNIQUENESS, OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.sweep_progress_cache import SweepProgressCache
+
+if TYPE_CHECKING:  # runtime import is LAZY inside build_app — anyio is [ui]-only
+    from brutex.dashboard.lake_offload import LakeOffload
 from brutex.dashboard.sweep_results_view import (
     DEFAULT_TOP_N as SWEEP_LEADERBOARD_DEFAULT_TOP_N,
 )
@@ -1152,6 +1155,7 @@ def build_app(
     universe_cache: UniverseSnapshotCache | None = None,
     rate_bridge_cache: RateBridgeCache | None = None,
     sweep_progress_cache: SweepProgressCache | None = None,
+    lake_offload: LakeOffload | None = None,
     prebuild_gate: PrebuildGate | None = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
     pull_phase_probe: Callable[[], str | None] | None = None,
@@ -1222,6 +1226,16 @@ def build_app(
         payload honestly labelled ``unverified``. Injected so tests drive the
         slow-read / cache-hit / provenance behaviour deterministically;
         ``None`` (the default) builds a fresh production cache.
+    lake_offload
+        Optional :class:`~brutex.dashboard.lake_offload.LakeOffload` — the
+        dedicated bounded CapacityLimiter every LAKE-touching offload site
+        rides (DEC-DASHBOARD-LAKE-IO-LIMITER-001): a wedged lake volume pins
+        at most its 32 lake tokens, leaving AnyIO's DEFAULT 40-token pool
+        free for the liveness / in-memory / CPU offloads (``/pull/rate``,
+        ``/sweep-progress``, the report renders, the log tail), which a lake
+        outage therefore can no longer starve. Injected so tests size the
+        limiter deterministically; ``None`` (the default) builds one at the
+        env-resolved production size.
     prebuild_gate
         Optional :class:`~brutex.dashboard.prebuild_gate.PrebuildGate` gating
         the ``/api/v1/movers`` screens while the one-click pull pipeline runs
@@ -1339,6 +1353,9 @@ def build_app(
         )
         from fastapi.staticfiles import StaticFiles
 
+        # Lazy like fastapi itself: lake_offload imports anyio, which ships
+        # with the [ui] extra only (the app.py wheel-free-import doctrine).
+        from brutex.dashboard.lake_offload import LakeOffload as _LakeOffload
         from brutex.dashboard.trusted_host import BracketAwareTrustedHostMiddleware
     except ImportError as exc:
         raise RuntimeError(
@@ -1495,6 +1512,18 @@ def build_app(
     _sweep_progress_cache = (
         sweep_progress_cache if sweep_progress_cache is not None else SweepProgressCache()
     )
+    # The dedicated LAKE-I/O capacity limiter (DEC-DASHBOARD-LAKE-IO-LIMITER-001
+    # — the #1522/#1622 named follow-up, audit M4): EVERY lake-touching offload
+    # below rides `_run_lake` (a `run_in_threadpool` twin bound to this app's
+    # OWN 32-token AnyIO CapacityLimiter) instead of the DEFAULT shared
+    # 40-token pool, so a wedged lake volume pins at most the 32 lake tokens
+    # and the liveness/in-memory/CPU offloads — the deadline-guarded
+    # /pull/rate + /sweep-progress memos, the .xlsx/.zip renders, the local
+    # log tail — keep the default pool to themselves and stay responsive
+    # through a lake outage (the measured repro: the 41st offload queued
+    # 2701 ms behind 40 wedged workers, starving even the bounded /pull/rate).
+    # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
+    _run_lake = lake_offload if lake_offload is not None else _LakeOffload()
 
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
@@ -2003,7 +2032,7 @@ def build_app(
           * per-underlying instrument count (for the chart strip)
         """
         store = _require_store()
-        stats = await run_in_threadpool(_collect_store_stats, store)
+        stats = await _run_lake(_collect_store_stats, store)
         return JSONResponse(stats)
 
     @app.get("/api/v1/instruments")
@@ -2031,7 +2060,7 @@ def build_app(
             keep responses snappy even on large universes.
         """
         store = _require_store()
-        rows = await run_in_threadpool(
+        rows = await _run_lake(
             lambda: _query_instruments(
                 store,
                 underlying=underlying,
@@ -2061,7 +2090,7 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"expiries": []})
         lake = lake_root.parent
-        series = await run_in_threadpool(
+        series = await _run_lake(
             lambda: list_option_series(store.connection, lake, underlying_symbol=underlying)
         )
         seen: set[tuple[str, str, int | None]] = set()
@@ -2110,7 +2139,7 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"contracts": [], "limit": limit})
         lake = lake_root.parent
-        series = await run_in_threadpool(
+        series = await _run_lake(
             lambda: list_option_series(store.connection, lake, underlying_symbol=underlying)
         )
         rows = [
@@ -2154,7 +2183,7 @@ def build_app(
         cannot freeze the whole dashboard.
         """
         store = _require_store()
-        return JSONResponse(await run_in_threadpool(_universe_cache.summary, store))
+        return JSONResponse(await _run_lake(_universe_cache.summary, store))
 
     @app.get("/api/v1/universe/instruments")
     async def api_universe_instruments(
@@ -2182,7 +2211,7 @@ def build_app(
             # per-kind base reads run on a threadpool worker, never the event loop
             # (the classifier's ValueError for a bad kind still propagates out of
             # run_in_threadpool → 400, before any caching).
-            rows = await run_in_threadpool(lambda: _universe_cache.instruments(store, kind=kind))
+            rows = await _run_lake(lambda: _universe_cache.instruments(store, kind=kind))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
@@ -2252,7 +2281,7 @@ def build_app(
             )
             return candidates, [row["symbol"] for row in stock_rows]
 
-        candidates, held_symbols = await run_in_threadpool(_held_universe)
+        candidates, held_symbols = await _run_lake(_held_universe)
 
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
@@ -2269,7 +2298,7 @@ def build_app(
                 }
             )
         # The cache lives beside the lake at <lake>/index_constituents/.
-        result = await run_in_threadpool(
+        result = await _run_lake(
             resolve_constituents,
             symbol,
             cache_root=lake_root.parent,
@@ -2387,7 +2416,7 @@ def build_app(
         # DuckDB read on the lake volume — run it on a worker (the #1622 doctrine)
         # so a slow/stalled volume can never freeze the loop at click time. The
         # unknown-symbol 400 stays OUT here (the api_universe_instruments idiom).
-        instrument = await run_in_threadpool(store.get, symbol)
+        instrument = await _run_lake(store.get, symbol)
         if instrument is None:
             raise HTTPException(
                 status_code=400,
@@ -2403,7 +2432,7 @@ def build_app(
             # the loop so the rest of the dashboard stays responsive DURING a pull
             # (DEC-DASHBOARD-PULL-ASYNC-001). The vendor-bound pull duration itself
             # is unchanged (vendor rate-limit), but it no longer blocks the UI.
-            report = await run_in_threadpool(
+            report = await _run_lake(
                 pull_candles,
                 instrument,
                 lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
@@ -2719,7 +2748,7 @@ def build_app(
             )
 
         try:
-            instruments, detail = await run_in_threadpool(_resolve_selection)
+            instruments, detail = await _run_lake(_resolve_selection)
         except ValueError as exc:
             # resolve_pull_symbols' fail-CLOSED empty/unknown-selection refusal
             # (byte-identical to the pre-offload per-arm catch — the other arms
@@ -2917,7 +2946,7 @@ def build_app(
             return selected, label, _require_store().reference_only_security_ids()
 
         try:
-            instruments, detail, reference_only_ids = await run_in_threadpool(_resolve_selection)
+            instruments, detail, reference_only_ids = await _run_lake(_resolve_selection)
         except ValueError as exc:
             # resolve_pull_symbols' fail-CLOSED refusal (byte-identical to the
             # pre-offload per-arm catch).
@@ -3082,9 +3111,7 @@ def build_app(
             return resolved, year_grid, _require_store().reference_only_security_ids()
 
         try:
-            instruments, years, reference_only_ids = await run_in_threadpool(
-                _resolve_composite_selection
-            )
+            instruments, years, reference_only_ids = await _run_lake(_resolve_composite_selection)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         skipped_reference_only = [
@@ -3314,7 +3341,7 @@ def build_app(
                 _select_bulk_targets("index") + _select_bulk_targets("stock")
             )
 
-        selected, underlying_kinds = await run_in_threadpool(_resolve_direct_selection)
+        selected, underlying_kinds = await _run_lake(_resolve_direct_selection)
         if not selected:
             raise HTTPException(
                 status_code=400,
@@ -4254,7 +4281,7 @@ def build_app(
         byte-identical).
         """
         return JSONResponse(
-            await run_in_threadpool(
+            await _run_lake(
                 lambda: _launch_pipeline(
                     symbols=symbols,
                     symbol=symbol,
@@ -4372,7 +4399,7 @@ def build_app(
             )
 
         try:
-            instruments, target_source = await run_in_threadpool(_resolve_targets)
+            instruments, target_source = await _run_lake(_resolve_targets)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         detail = f"retry {symbols or symbol or (kind or 'all')} spot ({target_source})"
@@ -4669,7 +4696,7 @@ def build_app(
                 generation=_summary_cache.generation,
             )
 
-        snap["phases"] = await run_in_threadpool(_phases)
+        snap["phases"] = await _run_lake(_phases)
         return JSONResponse(snap)
 
     @app.get("/api/v1/universe/pull-verdict")
@@ -4811,7 +4838,7 @@ def build_app(
                 compute=_build,
             )
 
-        return JSONResponse(await run_in_threadpool(_cached_build))
+        return JSONResponse(await _run_lake(_cached_build))
 
     @app.get("/api/v1/coverage/spot")
     async def api_coverage_spot() -> JSONResponse:
@@ -4875,7 +4902,7 @@ def build_app(
                 SPOT, build_spot_coverage_payload(rows, spot_window_rollup(lake))
             )
 
-        return JSONResponse(await run_in_threadpool(_rows_and_rollup))
+        return JSONResponse(await _run_lake(_rows_and_rollup))
 
     @app.get("/api/v1/completeness/scoreboard")
     async def api_completeness_scoreboard() -> JSONResponse:
@@ -4998,9 +5025,7 @@ def build_app(
             return _summary_cache.stamp_freshness(
                 SPOT, build_completeness_scoreboard([], {}, [], {})
             )
-        board: dict[str, Any] = await run_in_threadpool(
-            _build_completeness_board, store, lake_root.parent
-        )
+        board: dict[str, Any] = await _run_lake(_build_completeness_board, store, lake_root.parent)
         return board
 
     async def _completeness_csv() -> str:
@@ -5009,7 +5034,7 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return scoreboard_to_csv(build_completeness_scoreboard([], {}, [], {}))
-        csv_text: str = await run_in_threadpool(_build_completeness_csv, store, lake_root.parent)
+        csv_text: str = await _run_lake(_build_completeness_csv, store, lake_root.parent)
         return csv_text
 
     @app.get("/api/v1/completeness/scoreboard.csv")
@@ -5064,7 +5089,7 @@ def build_app(
                 compute=lambda: _build_per_symbol_completeness(store, lake),
             )
 
-        per_symbol = await run_in_threadpool(_cached_per_symbol)
+        per_symbol = await _run_lake(_cached_per_symbol)
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -5137,7 +5162,7 @@ def build_app(
         line+branch); READ-ONLY, no pull. No store wired → 503.
         """
         _require_store()
-        report = await run_in_threadpool(_build_mapping_integrity_report_cached)
+        report = await _run_lake(_build_mapping_integrity_report_cached)
         return JSONResponse(report_to_dict(report))
 
     @app.get("/api/v1/universe/mapping-integrity.csv")
@@ -5154,7 +5179,7 @@ def build_app(
         wired → 503.
         """
         _require_store()
-        report = await run_in_threadpool(_build_mapping_integrity_report_cached)
+        report = await _run_lake(_build_mapping_integrity_report_cached)
         return Response(
             content=mapping_integrity_to_csv(report),
             media_type="text/csv; charset=utf-8",
@@ -5184,7 +5209,7 @@ def build_app(
         IDX/EQ spot by symbol AND token, else orphan/ambiguous/disagreement/empty). READ-ONLY;
         ``{"present": false}`` until the instrument master has been loaded once. No store → 503.
         """
-        snapshot = await run_in_threadpool(_read_master_integrity)
+        snapshot = await _run_lake(_read_master_integrity)
         if snapshot is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
@@ -5200,7 +5225,7 @@ def build_app(
         formula-injection-safe). READ-ONLY; a one-line placeholder until the master is loaded.
         No store → 503.
         """
-        snapshot = await run_in_threadpool(_read_master_integrity)
+        snapshot = await _run_lake(_read_master_integrity)
         if snapshot is None:
             content = (
                 "BruteX — Instrument-Master Integrity Audit\n"
@@ -5233,7 +5258,7 @@ def build_app(
         within-expiry mismatch is RED; cross-expiry lot revisions are informational. READ-ONLY;
         ``{"present": false}`` until the master has been loaded once. No store → 503.
         """
-        snapshot = await run_in_threadpool(_read_economics_integrity)
+        snapshot = await _run_lake(_read_economics_integrity)
         if snapshot is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
@@ -5248,7 +5273,7 @@ def build_app(
         formula-injection-safe). READ-ONLY; a one-line placeholder until the master is loaded;
         no store → 503.
         """
-        snapshot = await run_in_threadpool(_read_economics_integrity)
+        snapshot = await _run_lake(_read_economics_integrity)
         if snapshot is None:
             content = (
                 "BruteX — Instrument-Master Economics Integrity Audit\n"
@@ -5283,7 +5308,7 @@ def build_app(
         ``skipped_count <= max(10, ceil(0.1% of in-scope rows))``. READ-ONLY;
         ``{"present": false}`` until the master has been loaded once. No store → 503.
         """
-        snapshot = await run_in_threadpool(_read_parse_skips)
+        snapshot = await _run_lake(_read_parse_skips)
         if snapshot is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
@@ -5361,7 +5386,7 @@ def build_app(
         ``{"present": false}``.
         """
         _require_store()
-        payload = await run_in_threadpool(_build_lake_census_payload_cached)
+        payload = await _run_lake(_build_lake_census_payload_cached)
         return JSONResponse(payload)
 
     @app.get("/api/v1/coverage/windows")
@@ -5428,7 +5453,7 @@ def build_app(
                 since=last_pull_start_utc(lake),
             )
 
-        return JSONResponse(await run_in_threadpool(_payload))
+        return JSONResponse(await _run_lake(_payload))
 
     @app.get("/api/v1/coverage/options")
     async def api_coverage_options() -> JSONResponse:
@@ -5466,7 +5491,7 @@ def build_app(
             # thread (DEC-DASHBOARD-FASTREAD-001).
             return summarize_option_datasets(store.connection, lake)
 
-        rows = await run_in_threadpool(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
         # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
         # mirrors /coverage/spot: a pull-time stale serve is visible, never silent.
         return JSONResponse(
@@ -5559,7 +5584,7 @@ def build_app(
             # which is one flock syscall on the lake volume, so it runs on a
             # threadpool worker — never on the event loop (the app.py offload
             # doctrine, DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
-            gate = await run_in_threadpool(_prebuild_gate.snapshot)
+            gate = await _run_lake(_prebuild_gate.snapshot)
             if gate.blocking:
                 return JSONResponse(
                     gated_movers_payload(
@@ -5849,7 +5874,7 @@ def build_app(
                     latest_time=latest_time,
                 )
 
-            payload = await run_in_threadpool(_resolve)
+            payload = await _run_lake(_resolve)
             return JSONResponse(payload)
         except PcrCorruptionError as exc:
             # Lake VALUE corruption (an out-of-band negative OI/volume cell —
@@ -6005,7 +6030,7 @@ def build_app(
                 "basis": report_basis,
             }
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/reports/preopen.xlsx")
     async def api_preopen_xlsx(
@@ -6049,11 +6074,7 @@ def build_app(
                 basis=report_basis,
             )
 
-        rows = (
-            await run_in_threadpool(_build_rows, lake_root.parent)
-            if isinstance(lake_root, Path)
-            else []
-        )
+        rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
         # Self-describing download name (DEC-REPORT-FILENAME-001): basis +
         # the selected symbols + the range — never a selection-blind static name.
         filename = report_filename(
@@ -6129,11 +6150,7 @@ def build_app(
                 basis=report_basis,
             )
 
-        rows = (
-            await run_in_threadpool(_build_rows, lake_root.parent)
-            if isinstance(lake_root, Path)
-            else []
-        )
+        rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
         # One xlsx per year + zip packing is CPU-bound over every report row —
         # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
         blob = await run_in_threadpool(
@@ -6228,7 +6245,7 @@ def build_app(
                 "survivors": report.n_survived,
             }
 
-        status_code, payload = await run_in_threadpool(_run)
+        status_code, payload = await _run_lake(_run)
         return JSONResponse(payload, status_code=status_code)
 
     @app.post("/api/v1/sweep/run")
@@ -6509,7 +6526,7 @@ def build_app(
             )
 
         try:
-            return JSONResponse(await run_in_threadpool(_resolve))
+            return JSONResponse(await _run_lake(_resolve))
         except ResultsStoreError as exc:
             # C3 (DEC-SWEEP-RESULTS-DEPTH-001): a typed store fault escaping the
             # per-store skip net degrades to the honest error payload — 200 with
@@ -6630,7 +6647,7 @@ def build_app(
                 f"oc_runs|rev={rev}|fx={fixture_active}", generation=0, compute=_fresh
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/manifest")
     async def api_oneclick_manifest(
@@ -6704,7 +6721,7 @@ def build_app(
                 compute=_fresh,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/top100")
     async def api_oneclick_top100(
@@ -6750,7 +6767,7 @@ def build_app(
                 compute=_fresh,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/events")
     async def api_oneclick_events(
@@ -6814,7 +6831,7 @@ def build_app(
             )
             return _oneclick_cache.get_or_compute(key, generation=0, compute=_fresh)
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/trades")
     async def api_oneclick_trades(
@@ -6851,7 +6868,7 @@ def build_app(
                 fixture_root_active=fixture_root is not None,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(
@@ -6915,7 +6932,7 @@ def build_app(
                 fixture_root_active=fixture_active,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/logs")
     async def api_logs(
@@ -6950,7 +6967,7 @@ def build_app(
         Tolerates a missing table (count 0) so a fresh/empty store works.
         """
         store = _require_store()
-        tables = await run_in_threadpool(lambda: table_summary(store.connection))
+        tables = await _run_lake(lambda: table_summary(store.connection))
         return JSONResponse({"tables": tables})
 
     @app.get("/api/v1/db/table/{name}")
@@ -6971,7 +6988,7 @@ def build_app(
         """
         store = _require_store()
         try:
-            payload = await run_in_threadpool(
+            payload = await _run_lake(
                 lambda: sample_rows(store.connection, name, limit=limit, offset=offset)
             )
         except ValueError as exc:
@@ -7010,7 +7027,7 @@ def build_app(
         """
         store = _require_store()
         try:
-            columns = await run_in_threadpool(lambda: list_columns(store.connection, name))
+            columns = await _run_lake(lambda: list_columns(store.connection, name))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"table": name, "columns": columns})
@@ -7047,7 +7064,7 @@ def build_app(
         parsed_filters = _parse_filters(f or [])
         columns = tuple(column) if column else None
         try:
-            payload = await run_in_threadpool(
+            payload = await _run_lake(
                 lambda: query_table(
                     store.connection,
                     name,
@@ -7122,7 +7139,7 @@ def build_app(
         # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
         # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
         return JSONResponse(
-            await run_in_threadpool(
+            await _run_lake(
                 lambda: _db_datasets_cache.get_or_compute(
                     DB_DATASETS_KEY, generation=_summary_cache.generation, compute=_datasets
                 )
@@ -7146,7 +7163,7 @@ def build_app(
         lake = lake_root.parent
         # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
         # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
-        index: FnoCascadeIndex = await run_in_threadpool(
+        index: FnoCascadeIndex = await _run_lake(
             lambda: _fno_cascade_cache.get_or_compute(
                 FNO_CASCADE_KEY,
                 generation=_summary_cache.generation,
@@ -7221,9 +7238,7 @@ def build_app(
         if idx is None:
             return JSONResponse({"underlying": underlying, "expiries": [], "expiry_counts": []})
         expiries = list(idx.expiries(underlying))
-        listed_by_expiry = await run_in_threadpool(
-            lambda: _fno_listed_by_expiry(underlying, expiries)
-        )
+        listed_by_expiry = await _run_lake(lambda: _fno_listed_by_expiry(underlying, expiries))
         return JSONResponse(
             {
                 "underlying": underlying,
@@ -7277,7 +7292,7 @@ def build_app(
 
         # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
         # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
-        index: SpotCascadeIndex = await run_in_threadpool(
+        index: SpotCascadeIndex = await _run_lake(
             lambda: _spot_cascade_cache.get_or_compute(
                 SPOT_CASCADE_KEY, generation=_summary_cache.generation, compute=_build
             )
@@ -7333,7 +7348,7 @@ def build_app(
         lake = store_path.parent
         columns = tuple(column) if column else None
         try:
-            payload = await run_in_threadpool(
+            payload = await _run_lake(
                 lambda: query_candles(
                     store.connection,
                     lake,
@@ -7448,7 +7463,7 @@ def build_app(
                 "offset": offset,
             }
 
-        return JSONResponse(await run_in_threadpool(_load))
+        return JSONResponse(await _run_lake(_load))
 
     @app.get("/api/v1/db/options")
     async def api_db_options(
@@ -7478,7 +7493,7 @@ def build_app(
         lake = lake_root.parent
         columns = tuple(column) if column else None
         try:
-            payload = await run_in_threadpool(
+            payload = await _run_lake(
                 lambda: query_option_candles(
                     store.connection,
                     lake,
@@ -7539,7 +7554,7 @@ def build_app(
             return payload
 
         try:
-            return JSONResponse(await run_in_threadpool(_load))
+            return JSONResponse(await _run_lake(_load))
         except RegistryError:
             # A corrupt / truncated / version-incompatible registry.duckdb makes
             # RegistryStore.open raise RegistryError (a BruteXError, NOT a ValueError):
@@ -7590,7 +7605,7 @@ def build_app(
             return payload
 
         try:
-            return JSONResponse(await run_in_threadpool(_load))
+            return JSONResponse(await _run_lake(_load))
         except RegistryError:
             # Corrupt / unreadable registry.duckdb → honest 200 empty-state, mirroring
             # the expiries route (DEC-DASHBOARD-EMPTY-STATE-001). A malformed expiry_date
