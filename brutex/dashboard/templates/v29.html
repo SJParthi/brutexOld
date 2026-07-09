@@ -2411,10 +2411,13 @@
       <input id="swK" type="number" min="1" max="5" placeholder="default">
     </label>
     <label>DIRECTIONS
+      <!-- Folded frontend bugfix (DEC-OPERATOR-PAGE-CLEANVIEW-001): the
+           backend validator accepts BUY/SELL only — the previous long/short
+           VALUES 400'd every non-default pick. Values fixed; labels plain. -->
       <select id="swDirections">
         <option value="">both (default)</option>
-        <option value="long">long</option>
-        <option value="short">short</option>
+        <option value="BUY">long (buy)</option>
+        <option value="SELL">short (sell)</option>
       </select>
     </label>
     <label>SL
