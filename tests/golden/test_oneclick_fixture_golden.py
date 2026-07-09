@@ -28,41 +28,41 @@ from brutex.dashboard import oneclick_view as ov
 from tests.golden import generate_oneclick_fixture as gen
 
 _FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "oneclick"
-_RUNS = _FIXTURE_ROOT / "runs"
+_RUNS = _FIXTURE_ROOT / "sweep_runs"
 
 #: The committed corpus, byte-pinned (regenerate + refresh deliberately only).
 _EXPECTED_SHA256: dict[str, str] = {
-    "runs/r-20260707-fixt01/events.jsonl": (
+    "sweep_runs/r-20260707-fixt01/events.jsonl": (
         "9fc78ff471650116ab4efa8a1318ece908027d7485d0d9ea75655f71ac6171ad"
     ),
-    "runs/r-20260707-fixt01/manifest.json": (
+    "sweep_runs/r-20260707-fixt01/manifest.json": (
         "344184a57b869707f2497d8a4a78687c051da7a9c8dca6191c18a0f010cb4a7a"
     ),
-    "runs/r-20260707-fixt01/top100.json": (
+    "sweep_runs/r-20260707-fixt01/top100.json": (
         "85c6bf848afd8c89ebf32b0c0bd674d6dbbe59d785eee92e1adbe0da2f0b0e69"
     ),
-    "runs/r-20260707-fixt01/trades/rank-0001.json": (
+    "sweep_runs/r-20260707-fixt01/trades/rank-0001.json": (
         "3b2c4ce7d42ff046c27e6a262128f1fd2273f51ef78932ac6d9f4c1edf977386"
     ),
-    "runs/r-corrupt01/events.jsonl": (
+    "sweep_runs/r-corrupt01/events.jsonl": (
         "98d5bf94846e2a31a9251c5bef552346de8c9b8a9e485a79dd88338d29b134f5"
     ),
-    "runs/r-corrupt01/top100.json": (
+    "sweep_runs/r-corrupt01/top100.json": (
         "cb42f6c86411c80e6987d6de8c79e00a67eb5199ab8d6e13b18843f2ff0ac544"
     ),
-    "runs/r-empty01/top100.json": (
+    "sweep_runs/r-empty01/top100.json": (
         "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
     ),
-    "runs/r-hostile01/events.jsonl": (
+    "sweep_runs/r-hostile01/events.jsonl": (
         "c8150cf2c68dfd432632e96c6fed3221caa8e524bd9849458ba7a59c1c3b5ba9"
     ),
-    "runs/r-hostile01/manifest.json": (
+    "sweep_runs/r-hostile01/manifest.json": (
         "cdcabe6fdd16bf59275c8c2bc3b9470e0f07830f17714bd381d06c456b4a7422"
     ),
-    "runs/r-hostile01/top100.json": (
+    "sweep_runs/r-hostile01/top100.json": (
         "08aa0ac074cf5408adc83351d4d4fdbbcfda39723fa1b7ecc6d9b4ea93dc59db"
     ),
-    "runs/r-short01/top100.json": (
+    "sweep_runs/r-short01/top100.json": (
         "9bfd33205aeefd7db6278858c9e9a0160128d6a0098864912f386ef4e669678b"
     ),
 }
@@ -70,17 +70,18 @@ _EXPECTED_SHA256: dict[str, str] = {
 
 class TestCorpusPinned:
     def test_sha256_manifest_matches_the_committed_corpus(self) -> None:
-        # The corpus proper is the ``runs/`` tree the generator owns; the
-        # sibling ``.gitignore`` is git PLUMBING (the ``!runs/`` re-include —
-        # the root .gitignore ignores any runs/ dir), not fixture data, so it
-        # is excluded from the drift manifest (stage-3 fix: it was added
-        # after the manifest was pinned and failed this pin at HEAD).
+        # The corpus proper is the ``sweep_runs/`` tree the generator owns
+        # (migrated from ``runs/`` under Ruling 4 /
+        # DEC-ONECLICK-SWEEP-RUNS-REBIND-001 — bytes unchanged, only the tree
+        # name moved, so the per-file SHAs are the pre-migration values). The
+        # old sibling ``.gitignore`` re-include is GONE: the root .gitignore
+        # ignores ``runs/`` dirs, not ``sweep_runs/``.
         actual = {
             path.relative_to(_FIXTURE_ROOT).as_posix(): hashlib.sha256(
                 path.read_bytes()
             ).hexdigest()
             for path in sorted(_FIXTURE_ROOT.rglob("*"))
-            if path.is_file() and path.name != ".gitignore"
+            if path.is_file()
         }
         assert actual == _EXPECTED_SHA256
 
