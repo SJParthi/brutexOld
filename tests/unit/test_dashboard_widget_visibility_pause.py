@@ -101,28 +101,24 @@ def test_poll_guard_is_first_statement_before_any_fetch(name: str) -> None:
 def test_no_fetch_outside_the_guarded_poll(name: str) -> None:
     """Every network call in the widget sits AFTER the guard — no unguarded side-channel.
 
-    ``bx-rate-monitor.js`` (post-#1241) routes every request through its bounded
-    ``fetchJson`` helper: the ONE raw ``fetch(`` lives inside that helper's
-    definition, and every ``fetchJson(`` CALL SITE sits after the guard inside
-    the guarded ``poll()``.
+    BOTH widgets now route every request through their bounded ``fetchJson``
+    helper (``bx-rate-monitor.js`` since #1241; ``bx-liveproof.js`` since
+    DEC-WINDOWS-COUNTS-ONLY-001 M15 — the previously-bare fetch gained the
+    sibling's abort-deadline discipline): the ONE raw ``fetch(`` lives inside
+    that helper's definition, and every ``fetchJson(`` CALL SITE sits after the
+    guard inside the guarded ``poll()``.
     """
     js = _widget_js(name)
     guard_pos = js.index(_GUARDS[name])
-    if name == "bx-rate-monitor.js":
-        assert js.count("fetch(") == 1, f"{name}: raw fetch( must live ONLY in fetchJson"
-        assert js.index("fetch(") > js.index("function fetchJson(url)"), (
-            f"{name}: the raw fetch( must sit inside the fetchJson helper"
-        )
-        call_sites = [
-            pos for pos in _find_all(js, "fetchJson(") if not js[:pos].endswith("function ")
-        ]
-        assert call_sites, f"{name}: no fetchJson call sites found"
-        assert all(pos > guard_pos for pos in call_sites), (
-            f"{name}: a fetchJson call appears before the document.hidden guard"
-        )
-    else:
-        first_fetch = js.index("fetch(")
-        assert guard_pos < first_fetch, f"{name}: a fetch appears before the document.hidden guard"
+    assert js.count("fetch(") == 1, f"{name}: raw fetch( must live ONLY in fetchJson"
+    assert js.index("fetch(") > js.index("function fetchJson(url)"), (
+        f"{name}: the raw fetch( must sit inside the fetchJson helper"
+    )
+    call_sites = [pos for pos in _find_all(js, "fetchJson(") if not js[:pos].endswith("function ")]
+    assert call_sites, f"{name}: no fetchJson call sites found"
+    assert all(pos > guard_pos for pos in call_sites), (
+        f"{name}: a fetchJson call appears before the document.hidden guard"
+    )
 
 
 def _find_all(js: str, needle: str) -> list[int]:
