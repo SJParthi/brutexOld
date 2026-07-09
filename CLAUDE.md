@@ -437,7 +437,7 @@ REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
 `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
 --strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
 UNMODIFIED.)
-Earlier: 2026-07-08 (DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001, MIGRATION.md #1623 —
+Earlier: 2026-07-08 (DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001, MIGRATION.md #1631 —
 Phase P1 of the one-click institutional sweep: the R4 hard data preflight (real
 NSE calendar coverage, DISK-verified 1-minute months, G1 derived-freshness reuse,
 lake-invariant/quarantine check, sweep-vs-pull exclusion probe, futures-execution
