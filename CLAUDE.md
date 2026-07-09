@@ -18,7 +18,50 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1632 —
+_Last updated: 2026-07-09 (DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1633 —
+the `/movers` selected as-of TIME now PERSISTS across timeframe switches and
+SNAPS to the completed bucket of the new TF containing the instant
+(operator-reported: a TF change reset the pick — to 09:15 on the stale
+pre-#1243 page via the first-option innerHTML autoselect, to "Latest" on
+current main via `bxResolveTime`'s not-a-slot `""` fallback; both captured
+verbatim, both killed). ONE mapping law, pinned: each intraday dropdown
+option is `label = bucket-START HH:MM` (the /db row label) / `value =
+bucket-FINAL HH:MM` (`min(start+m−1, 15:29)`, the SENT `?time=` cutoff) — so
+an explicit pick serves the completed /db-equal bar WHEN the lake holds the
+bucket in full (`_stored_serves_cutoff`-aligned for every non-last slot; the
+always-`15:29` last slot rides the resample path byte-equal on non-divisor
+TFs), closing the operator's 24360.00-vs-24355.1 partial-cut confusion at
+the root. NEW
+persistent `state.instant` (minute-of-day; written ONLY by an explicit pick,
+never by a TF switch / 1day round-trip / adopt) + pure `bxSnapTime` /
+`bxBucketStart` / `bxBucketFinal` / `bxTimeOptionPairs` / `bxCutoffMinute` /
+`bxStoredCutInfo` on the COMMON `bx-movers-time.js` (`bxResolveTime`
+superseded + deleted); "Latest" applies only when no explicit pick exists; a
+Latest over a day whose stored data ends mid-session (day incomplete in the
+DB — pull still in progress / truncated day) is labelled `data through HH:MM
+— day incomplete in DB`, plus `; completed <tf> bar would close HH:MM` only
+when the latest stored minute additionally falls mid-bucket (the operator's
+FINAL stored-data-only spec — the "forming bar" concept is CUT as a feature,
+the label speaks only about the STORED DATA; client-derived from the
+existing `latest_time` echo — zero payload change; a finalized day never
+shows it on any TF); /db gains a static
+bucket-START-label stepnote. PLUS the `/movers` route ships `Cache-Control:
+no-store` (the /db precedent — the browser-cache staleness that served the
+operator the pre-#1243 09:15 page). HONEST: the containing-bucket snap can
+extend the effective as-of by up to m−1 minutes (disclosed in the span
+label); explicit coarse-TF picks now show the COMPLETED bar where they showed
+a mid-bucket partial cut — a SANCTIONED operator-specified correction; a pick
+whose bucket-final lies BEYOND the day's last stored minute (a day incomplete
+in the DB) serves exactly the data stored so far under its completed-span
+label, undetectable client-side (`latest_time` is echoed only on Latest
+requests — the pinned DEC-MOVERS-ASOF-LATEST-DEFAULT-001 scoping;
+envelope-pinned; named follow-up
+DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001); node goldens pin
+LOGIC, substring tests pin PRESENCE — no headless-browser claim. FRONTEND
+display/UX + one response header — every payload key byte-identical;
+READ-ONLY dashboard; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change.)
+Earlier: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1632 —
 the `/movers` stored-read FRESHNESS GUARD: a prebuilt stored TF / `1day` day
 slice is now VERIFIED against a fresh re-derive of the raw 1-minute base
 before it is served (the CUT stored frame — the exact served bytes — judged
@@ -1801,7 +1844,34 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1632** — the
+- **Active branch:** `claude/movers-time-snap-ux` (**DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1633** —
+  the `/movers` selected as-of TIME persists across timeframe switches and SNAPS to the completed bucket of the
+  new TF containing the instant (operator-reported reset: 09:15 on the stale pre-#1243 page via first-option
+  innerHTML autoselect, "Latest" on current main via `bxResolveTime`'s not-a-slot `""` fallback — both captured
+  verbatim by a DOM-shim node harness, both killed). ONE mapping law: option `label = bucket-START HH:MM` (the
+  /db row label) / `value = bucket-FINAL HH:MM` (`min(start+m−1, 15:29)`, the SENT `?time=` cutoff) — an explicit
+  pick serves the COMPLETED /db-equal bar WHEN the lake holds the bucket in full (every non-last slot
+  `_stored_serves_cutoff`-aligned; the always-`15:29` last slot resample-path byte-equal on non-divisor TFs),
+  closing the 24360.00-vs-24355.1 partial-cut confusion; NEW persistent `state.instant` written ONLY by an explicit pick (survives TF walks +
+  1day round-trips; round-trip 1→3→5→1min exact — a 24,282-case ordered-TF-pair (src ≠ dst) property); `bxResolveTime`
+  superseded + DELETED; a Latest over a day incomplete in the DB labelled "data through HH:MM — day incomplete
+  in DB[; completed <tf> bar would close HH:MM]" (the operator's FINAL stored-data-only spec — the "forming bar"
+  concept is CUT; client-derived from the existing `latest_time` echo; a finalized day never shows it); explicit multi-minute picks show the bucket SPAN
+  ("15:27–15:29"); /db gains a static bucket-START-label stepnote; the `/movers` route ships `Cache-Control:
+  no-store` (the /db DEC-DB-VIEWER-NOSTORE-001 precedent — the browser-cache staleness that served the operator
+  the pre-#1243 page). HONEST: the snap can extend the effective as-of by up to m−1 minutes (disclosed in the
+  span label); coarse-TF explicit picks now show the COMPLETED bar — a SANCTIONED operator-specified correction;
+  a pick whose bucket-final lies BEYOND the day's last stored minute (a day incomplete in the DB) serves
+  exactly the data stored so far under its completed-span label — undetectable client-side because `latest_time`
+  is echoed only on Latest requests (the pinned DEC-MOVERS-ASOF-LATEST-DEFAULT-001 scoping); envelope-pinned
+  (`test_pick_beyond_end_of_data_serves_the_stored_latest_envelope`), the explicit-pick echo + stored-data note
+  is the named follow-up DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001;
+  node goldens pin LOGIC, substring tests pin PRESENCE — no headless-browser claim; `_MOVERS_TEMPLATE_CACHE`
+  still needs a restart per redeploy (envelope note). FRONTEND display/UX + one response header — every payload
+  key byte-identical, Latest requests byte-identical; READ-ONLY dashboard; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean, `mypy --strict` clean
+  on the touched app.py, pyright 0 errors.)
+  Earlier: `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1632** — the
   `/movers` stored-read FRESHNESS GUARD: every prebuilt stored TF / `1day` day slice is verified against a fresh
   re-derive of the raw 1-minute base before it is served (the NEW pure `stored_day_frame_is_stale` delegating to the
   ONE existing `compare_derived_freshness`; the 1day branch value-plane-compares against the canonical
@@ -4269,7 +4339,17 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-stored-freshness-guard`
+- **Active feature branch:** `claude/movers-time-snap-ux`
+  (DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1633 — the `/movers` selected
+  as-of TIME persists across TF switches + snaps to the completed containing
+  bucket (label = bucket-START, sent value = bucket-FINAL — the /db-equal
+  completed bar when the lake holds the bucket in full; a pick beyond the
+  day's last stored minute serves exactly the data stored so far — named
+  follow-up DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001); `bxResolveTime`
+  deleted; the day-incomplete-in-DB stored-data Latest label; /db
+  bucket-label stepnote; `/movers` `Cache-Control: no-store`; READ-ONLY
+  dashboard display/UX; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/movers-stored-freshness-guard`
   (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1632 — the `/movers`
   stored-read freshness guard: a stale prebuilt TF / `1day` day slice is
   detected against the raw 1-minute base and falls back to the 1-minute
@@ -4280,9 +4360,6 @@ hostile-review pass._
   1-minute-aware with missing-1day-bar coherence; READ-ONLY dashboard + the
   CLI sweep-preflight refusal; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
-  Earlier: `claude/dazzling-pasteur-jf8s3w`
-  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
-  PER-FILE lake STATS manifest; matches §1's Earlier chain entry)
   Earlier: `claude/oneclick-top100-object-root`
   (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 — the one-click
   `top100.json` reader-adopts-writer blocker fix: object root + the ONE
@@ -4294,6 +4371,9 @@ hostile-review pass._
   VIX-band copy on all three band sites ([W3-R3] arm repro verified dead);
   DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
+  Earlier: `claude/dazzling-pasteur-jf8s3w`
+  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
+  PER-FILE lake STATS manifest; matches §1's Earlier chain entry)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the

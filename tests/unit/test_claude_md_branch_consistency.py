@@ -135,11 +135,14 @@ class TestHeaderRoundNarrationRetired:
     per-round records instead; these pins keep the narration from returning.
 
     The pin is scoped to the DEC-LAKE-STATS-MANIFEST-001 entry WHEREVER it
-    sits in the ``_Last updated:`` chain — every later feature branch
-    legitimately prepends its own header entry (pushing this one behind an
-    ``Earlier:`` marker), and the original top-of-header extraction broke on
-    exactly that (PR #1358 CI red), violating this module's own
-    stay-green-across-future-branches design rule.
+    sits in the ``_Last updated:`` chain — the ``_Last updated:`` slot while
+    it is the newest entry, a demoted ``Earlier:`` entry once a successor
+    decision takes the slot (every later feature branch legitimately
+    prepends its own header entry, pushing this one behind an ``Earlier:``
+    marker; this module's own "stay green across future branches without
+    edits" law). The original top-of-header extraction broke on exactly
+    that — the FIRST successor fold (the DEC-MOVERS-TIME-SNAP-UX-001 merge
+    fold; PR #1358 CI red).
     """
 
     def test_header_points_at_the_authoritative_records(self) -> None:
