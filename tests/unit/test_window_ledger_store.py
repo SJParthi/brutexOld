@@ -3016,7 +3016,7 @@ class TestSharedPullLedgerScope:
 
     def _counting(self, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
         """Spy on the begin-time full load (`load_or_migrate_window_ledger`)."""
-        import brutex.data.window_ledger_store as wls
+        from brutex.data import window_ledger_store as wls
 
         real = wls.load_or_migrate_window_ledger
         calls: list[Path] = []

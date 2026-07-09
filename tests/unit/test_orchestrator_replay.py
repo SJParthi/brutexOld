@@ -266,7 +266,7 @@ class TestReplayAuditToDiff:
         ``raising=False``: post-fix the module no longer binds
         ``read_entries`` at all; pre-fix the module-global lookup resolved at
         call time, so this spy intercepts and FAILS the pre-fix code."""
-        import brutex.orchestrator.replay as replay_mod
+        from brutex.orchestrator import replay as replay_mod
 
         def _boom(_path: Path) -> list[object]:
             raise AssertionError("read_entries called — chain materialised")

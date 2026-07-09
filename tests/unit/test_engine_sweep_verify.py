@@ -271,7 +271,7 @@ class TestRecordedContext:
         ride ``iter_entries``, never the whole-chain ``read_entries`` list —
         the pre-fix code resolved ``read_entries`` at call time (function-
         local import), so this spy FAILS on the pre-fix implementation."""
-        import brutex.orchestrator.audit as audit_mod
+        from brutex.orchestrator import audit as audit_mod
 
         def _boom(_path: Path) -> list[object]:
             raise AssertionError("read_entries called — chain materialised")
@@ -784,7 +784,7 @@ class TestRecordedStage3FromAudit:
     ) -> None:
         """Memory-shape pin: the reader rides ``iter_entries``, never the
         whole-chain ``read_entries`` list (spy fails on the pre-fix code)."""
-        import brutex.orchestrator.audit as audit_mod
+        from brutex.orchestrator import audit as audit_mod
 
         def _boom(_path: Path) -> list[object]:
             raise AssertionError("read_entries called — chain materialised")
