@@ -35,6 +35,8 @@ from brutex.dashboard.pull_intent import (
     resolve_pull_intent_resume,
     restart_cap_message,
     run_auto_resume,
+    run_legacy_resume,
+    synthesize_legacy_intent,
 )
 
 
@@ -711,3 +713,162 @@ def test_run_default_probe_uses_the_real_flock(tmp_path: Path) -> None:
     free_action = run_auto_resume(store, launch=launched.append)
     assert free_action is ResumeAction.FIRED
     assert len(launched) == 1
+
+
+# ── synthesize_legacy_intent + run_legacy_resume (DEC-AUTO-RESUME-INPROCESS-001) ──
+
+
+def test_synthesize_legacy_intent_is_whole_universe_fresh() -> None:
+    """The synthesized legacy intent is the whole-universe default pull, restarts=0."""
+    from datetime import datetime
+
+    intent = synthesize_legacy_intent()
+    assert intent.symbols is None
+    assert intent.symbol is None
+    assert intent.from_date is None
+    assert intent.to_date is None
+    assert intent.restarts == 0
+    # created_at is a real UTC ISO timestamp (forensics), parseable round-trip.
+    parsed = datetime.fromisoformat(intent.created_at)
+    assert parsed.tzinfo is not None
+    # The synthesized intent survives the store's strict payload round trip.
+    assert PullIntent.from_payload(intent.to_payload()) == intent
+
+
+def test_legacy_resume_fires_whole_universe_with_bumped_token(tmp_path: Path) -> None:
+    """Fresh lake ⇒ synthesized intent persisted, token bumped BEFORE launch, FIRED."""
+    store = PullIntentStore(tmp_path)
+    launched: list[PullIntent] = []
+
+    def _launch(intent: PullIntent) -> None:
+        on_disk = store.load()
+        assert on_disk is not None
+        assert on_disk.restarts == 1, "the token is burnt (persisted) BEFORE the launch"
+        launched.append(intent)
+
+    action = run_legacy_resume(store, launch=_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.FIRED
+    assert len(launched) == 1
+    fired = launched[0]
+    assert (fired.symbols, fired.symbol, fired.from_date, fired.to_date) == (
+        None,
+        None,
+        None,
+        None,
+    ), "the legacy resume re-fires the WHOLE-universe pipeline pull"
+    assert fired.restarts == 1
+
+
+def test_legacy_resume_peer_active_skips_quietly_and_cleans_synth_intent(
+    tmp_path: Path,
+) -> None:
+    """A held peer flock ⇒ PEER_ACTIVE — no launch, no banner, and the intent
+    THIS call synthesized is cleaned up (the next boot re-decides from the
+    ledger, never an unconditional intent-arm whole-universe re-fire)."""
+    store = PullIntentStore(tmp_path)
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: False)
+    assert action is ResumeAction.PEER_ACTIVE
+    assert launched == []
+    assert store.load() is None, "the synthesized intent must not outlive the skip"
+    assert store.banner.snapshot() is None
+
+
+def test_legacy_resume_peer_active_leaves_preexisting_intent_untouched(
+    tmp_path: Path,
+) -> None:
+    """PEER_ACTIVE over a PRE-existing intent burns no token and deletes nothing."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(restarts=1))
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: False)
+    assert action is ResumeAction.PEER_ACTIVE
+    assert launched == []
+    persisted = store.load()
+    assert persisted is not None
+    assert persisted == _intent(restarts=1), "a pre-existing intent survives verbatim"
+    assert store.banner.snapshot() is None
+
+
+def test_legacy_resume_over_cap_alerts_banners_and_never_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A surviving over-cap intent refuses through the legacy arm: ONE CRITICAL
+    alert (the default `emit_restart_cap_alert` binding) + red banner, no launch,
+    intent KEPT for forensics — the inherited cap surface, verbatim."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(symbols=None, symbol=None, restarts=MAX_AUTO_RESTARTS))
+    alerts: list[PullIntent] = []
+    monkeypatch.setattr(pull_intent_module, "emit_restart_cap_alert", alerts.append)
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: True)
+    assert action is ResumeAction.OVER_CAP
+    assert launched == []
+    assert len(alerts) == 1, "exactly ONE CRITICAL alert on the over-cap refusal"
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == "critical"
+    assert store.path.exists(), "the over-cap intent is kept for forensics"
+
+
+def test_legacy_resume_never_overwrites_a_preexisting_intent(tmp_path: Path) -> None:
+    """A pre-existing intent (escape hatch OFF boots) keeps its quadruple + count."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(symbols="NIFTY", restarts=1))
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: True)
+    assert action is ResumeAction.FIRED
+    assert len(launched) == 1
+    assert launched[0].symbols == "NIFTY", "the existing quadruple survives verbatim"
+    assert launched[0].restarts == 2, "the existing crash-loop count keeps accruing"
+
+
+def test_legacy_resume_write_failure_raises_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unpersistable synthesized intent REFUSES with RuntimeError (never silent).
+
+    The raise lands in ``maybe_resume_on_boot``'s guard in production — one
+    honest ``auto_resume.error`` + verdict ``error``, never a false ``resumed``.
+    """
+    store = PullIntentStore(tmp_path)
+
+    def _boom(dest: Path, write_to: Any, **kwargs: Any) -> None:
+        raise OSError("unwritable lake volume")
+
+    monkeypatch.setattr(pull_intent_module, "atomic_write_simple", _boom)
+    launched: list[PullIntent] = []
+    with pytest.raises(RuntimeError, match="could not be persisted"):
+        run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: True)
+    assert launched == []
+
+
+def test_legacy_resume_launch_valueerror_clears_intent_and_banners(tmp_path: Path) -> None:
+    """The inherited ValueError-clears law: a deterministic refusal never loops."""
+    store = PullIntentStore(tmp_path)
+
+    def _launch(intent: PullIntent) -> None:
+        raise ValueError("stale selection no longer resolves")
+
+    action = run_legacy_resume(store, launch=_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.LAUNCH_FAILED
+    assert store.load() is None, "a deterministic refusal clears the intent (no loop)"
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == "critical"
+    assert "stale" in banner["message"]
+
+
+def test_legacy_resume_transient_launch_error_keeps_intent(tmp_path: Path) -> None:
+    """The inherited RuntimeError-keeps law: a transient failure retries ≤ cap."""
+    store = PullIntentStore(tmp_path)
+
+    def _launch(intent: PullIntent) -> None:
+        raise RuntimeError("credentials not yet fixed at boot")
+
+    action = run_legacy_resume(store, launch=_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.LAUNCH_FAILED
+    persisted = store.load()
+    assert persisted is not None
+    assert persisted.restarts == 1, "the intent survives (token burnt) — retried ≤ cap"
+    assert store.banner.snapshot() is not None

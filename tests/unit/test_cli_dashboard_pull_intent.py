@@ -75,6 +75,10 @@ def test_cmd_dashboard_builds_and_threads_the_intent_store(
     assert probes["resume_kwargs"]["intent_store"] is intent_store
     seam = probes["resume_kwargs"]["resume_pipeline"]
     assert seam is probes["app"].state.brutex_resume_pipeline
+    # DEC-AUTO-RESUME-INPROCESS-001: the legacy arm's IN-PROCESS seam is wired
+    # beside it — the resume runs through the app's own launcher, never a child.
+    legacy_seam = probes["resume_kwargs"]["resume_legacy"]
+    assert legacy_seam is probes["app"].state.brutex_resume_legacy
     assert probes["resume_lake_root"] == tmp_path
 
 
@@ -98,4 +102,9 @@ def test_cmd_dashboard_store_build_failure_degrades_and_still_binds(
     # No store ⇒ the app never exposes the seam ⇒ the launcher gets None (legacy).
     assert probes["resume_kwargs"]["intent_store"] is None
     assert probes["resume_kwargs"]["resume_pipeline"] is None
+    # No store ⇒ no in-process legacy seam either: the launcher's legacy arm
+    # then reports the honest `error` verdict — never a DOA subprocess child
+    # (DEC-AUTO-RESUME-INPROCESS-001).
+    assert probes["resume_kwargs"]["resume_legacy"] is None
     assert not hasattr(probes["app"].state, "brutex_resume_pipeline")
+    assert not hasattr(probes["app"].state, "brutex_resume_legacy")

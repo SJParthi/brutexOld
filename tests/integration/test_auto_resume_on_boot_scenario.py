@@ -19,6 +19,7 @@ ledger, not just a hand-built count snapshot.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger
@@ -127,3 +128,70 @@ def test_failed_window_on_real_ledger_triggers_resume() -> None:
     )
     assert verdict is ResumeVerdict.RESUMED
     assert len(resumed) == 1
+
+
+def test_incident_shape_inprocess_resume_with_held_store_and_durable_ledger(
+    tmp_path: Path,
+) -> None:
+    """DEC-AUTO-RESUME-INPROCESS-001 — the 2026-07-09T02:47:24Z incident shape.
+
+    A REAL durable window ledger on disk with a FAILED window, the dashboard's
+    lifetime rw ``instruments.duckdb`` handle HELD OPEN, the opt-in flag ON:
+    the boot resume must fire the IN-PROCESS launch (through the intent
+    machinery — :func:`~brutex.dashboard.pull_intent.run_legacy_resume`) —
+    exactly where the deleted subprocess child died in ~0.3 s on DuckDB's
+    exclusive cross-process file lock, stranding the failed windows silently.
+    """
+    import pytest
+
+    pytest.importorskip("duckdb", reason="the incident shape needs the real DuckDB lock")
+    pytest.importorskip("pyarrow", reason="the durable ledger store needs pyarrow")
+    from brutex.dashboard.pull_intent import (
+        PullIntent,
+        PullIntentStore,
+        ResumeAction,
+        run_legacy_resume,
+    )
+    from brutex.data.instrument_store import InstrumentStore
+    from brutex.data.window_ledger_store import load_window_ledger, save_window_ledger
+
+    lake_root = tmp_path
+    now = datetime(2026, 7, 9, tzinfo=UTC)
+
+    # The incident's ledger: a real durable ledger with a FAILED (re-pullable) window.
+    ledger = WindowLedger()
+    ledger.plan(_window(5), now=now)
+    ledger.record(_window(5), raw_bars=0, error_type="RATE_LIMIT", bars_appended=0, now=now)
+    save_window_ledger(ledger, lake_root)
+
+    # The dashboard's lifetime READ-WRITE store handle — the lock the old child died on.
+    store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        reloaded = load_window_ledger(lake_root)
+        incomplete = detect_incomplete_pull(reloaded)
+        assert incomplete is not None
+        assert incomplete.failed == 1
+
+        launched: list[PullIntent] = []
+        verdict = maybe_resume_on_boot(
+            load_ledger=lambda: load_window_ledger(lake_root),
+            resume=lambda _incomplete: run_legacy_resume(
+                PullIntentStore(lake_root),
+                launch=launched.append,
+                probe_singleflight=lambda: True,
+            ),
+            enabled=True,
+        )
+        assert verdict is ResumeVerdict.RESUMED
+        assert len(launched) == 1, "the in-process launch fires despite the held store"
+        assert launched[0].symbols is None, "the legacy resume re-fires the whole universe"
+        assert launched[0].restarts == 1, "the crash-loop token was burnt before launch"
+        # And the underlying action reports the honest FIRED outcome when driven directly.
+        direct = run_legacy_resume(
+            PullIntentStore(lake_root),
+            launch=launched.append,
+            probe_singleflight=lambda: True,
+        )
+        assert direct is ResumeAction.FIRED
+    finally:
+        store.close()

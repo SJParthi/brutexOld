@@ -81,6 +81,8 @@ __all__ = [
     "resolve_pull_intent_resume",
     "restart_cap_message",
     "run_auto_resume",
+    "run_legacy_resume",
+    "synthesize_legacy_intent",
 ]
 
 #: Structured logger — every resume decision surfaces into ``/logs``.
@@ -662,3 +664,86 @@ def run_auto_resume(
         to_date=bumped.to_date,
     )
     return ResumeAction.FIRED
+
+
+def synthesize_legacy_intent() -> PullIntent:
+    """The whole-universe :class:`PullIntent` for the LEGACY ledger-triggered resume.
+
+    DEC-AUTO-RESUME-INPROCESS-001: the legacy boot resume (opted in via
+    ``BRUTEX_AUTO_RESUME_ON_BOOT``) is triggered by the durable window ledger's
+    outstanding ``PLANNED`` / ``FAILED`` windows, not by a persisted operator
+    click — there is no request quadruple to replay, so the synthesized intent
+    is the whole-universe default pull (every ``None`` field re-derives inside
+    the ``/pull-pipeline`` route, exactly as a bare operator click would).
+    ``restarts=0`` — the crash-loop accounting starts fresh; the resume path's
+    bump-before-launch burns the first token. Pure beyond one clock read.
+    """
+    return PullIntent(
+        symbols=None,
+        symbol=None,
+        from_date=None,
+        to_date=None,
+        restarts=0,
+        created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+    )
+
+
+def run_legacy_resume(
+    store: PullIntentStore,
+    *,
+    launch: Callable[[PullIntent], None],
+    probe_singleflight: Callable[[], bool] | None = None,
+) -> ResumeAction:
+    """The LEGACY ledger-triggered boot resume, routed IN-PROCESS through the intent core.
+
+    DEC-AUTO-RESUME-INPROCESS-001 — replaces the deleted
+    ``brutex fetch --until-clean`` subprocess child, which was DOA on every
+    opted-in boot: the dashboard holds ``instruments.duckdb`` READ-WRITE for its
+    lifetime, so the child's own ``InstrumentStore.open`` hit DuckDB's exclusive
+    cross-process file lock and exited 1 in ~0.3 s (stderr inherited, never
+    captured), stranding the outstanding windows silently. Running IN-PROCESS
+    through the dashboard's own ``/pull-pipeline`` launcher needs NO second
+    store handle, so the lock class is structurally gone.
+
+    Persist a synthesized whole-universe intent (:func:`synthesize_legacy_intent`)
+    iff none is already on disk — a pre-existing intent (reachable here only when
+    the ``BRUTEX_PULL_INTENT_RESUME`` escape hatch disabled the intent arm) is
+    NEVER overwritten, so its request quadruple + crash-loop ``restarts`` count
+    survive — then delegate VERBATIM to :func:`run_auto_resume`. The legacy
+    resume thereby inherits the whole intent machinery: the single-flight peer
+    probe (a quiet :attr:`ResumeAction.PEER_ACTIVE` skip that burns no restart
+    token), the :data:`MAX_AUTO_RESTARTS` cap (over-cap ⇒ red
+    :class:`ResumeBanner` + ONE CRITICAL Telegram alert via
+    :func:`emit_restart_cap_alert`), bump-before-launch crash accounting, and
+    the ``ValueError``-clears / ``RuntimeError``-keeps launch-failure semantics.
+
+    A :attr:`ResumeAction.PEER_ACTIVE` skip CLEANS UP the intent iff THIS call
+    synthesized it (a pre-existing intent is left exactly as :func:`run_auto_resume`
+    left it): the peer pull's own finish settles the ledger, and the NEXT boot's
+    ledger detection re-decides the legacy resume — a lingering synthesized
+    intent would instead make the next boot's INTENT arm re-fire a
+    whole-universe pull unconditionally, ledger-blind.
+
+    Raises :class:`RuntimeError` iff the synthesized intent could not be
+    persisted (:meth:`PullIntentStore.write` degraded ``False`` — an unwritable
+    lake volume): without the durable intent the cap accounting cannot hold, so
+    the resume is refused LOUDLY — the raise lands in
+    :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot`'s guard,
+    which logs ``auto_resume.error`` and returns the honest ``error`` verdict
+    (never a false ``resumed``; the boot itself is unaffected).
+    """
+    synthesized = store.load() is None
+    if synthesized and not store.write(synthesize_legacy_intent()):
+        raise RuntimeError(
+            "legacy auto-resume refused: the synthesized whole-universe intent "
+            f"could not be persisted at {store.path} (unwritable lake volume?) — "
+            "without the durable intent the restart-cap accounting cannot hold"
+        )
+    _LOG.info("pull_intent.legacy_resume", path=str(store.path), synthesized=synthesized)
+    action = run_auto_resume(store, launch=launch, probe_singleflight=probe_singleflight)
+    if synthesized and action is ResumeAction.PEER_ACTIVE:
+        # The peer's finish (not this boot) owns the ledger; drop OUR synthetic
+        # intent so the next boot re-decides from the ledger, never an
+        # unconditional intent-arm whole-universe re-fire.
+        store.clear()
+    return action
