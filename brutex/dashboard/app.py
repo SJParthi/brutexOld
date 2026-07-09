@@ -1887,15 +1887,26 @@ def build_app(
 
     @app.get("/api/v1/sweep-progress")
     async def api_sweep_progress() -> JSONResponse:
-        """GET /api/v1/sweep-progress — O(1) live brute-force sweep progress (DEC-SWEEP-WIRE-GA-001).
+        """GET /api/v1/sweep-progress — live brute-force sweep progress (DEC-SWEEP-WIRE-GA-001).
 
         The dashboard panel for the guarantee-&-assurance layer: percent / ETA /
         tuples-per-sec / survivors / skipped, populated by the supervisor's
         :class:`~brutex.engine.sweep_progress.SweepProgress` (wired into
         :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`). Serves the
         freshest of the cross-process file bridge, the in-process push, or an idle
-        snapshot — a pure O(1) read that never touches the lake or the store lock
-        and never raises (see :meth:`DashboardState.sweep_progress_view`).
+        snapshot, and never raises (see :meth:`DashboardState.sweep_progress_view`).
+
+        HONEST envelope (DEC-LATENCY-HONESTY-BATCH-001, Golden Rule #10 —
+        supersedes the prior "a pure O(1) read that never touches the lake"
+        claim, which was FALSE): when a sweep-progress path is configured,
+        every poll performs ONE synchronous ``path.exists()`` + small-JSON
+        ``read_progress`` of the lake-volume file bridge
+        (``<lake>/sweeps/progress/sweep-progress.json``) ON the event loop —
+        so a stalled lake volume can block the loop for the duration of that
+        stat + read (the same class the ``RateBridgeCache`` bounds for
+        ``/api/v1/pull/rate``). Offloading/memoising this read is a NAMED
+        follow-up (owned by a separate change), not claimed here. It holds the
+        state lock only briefly and never takes the results-store lock.
         """
         return JSONResponse(state.sweep_progress_view())
 
