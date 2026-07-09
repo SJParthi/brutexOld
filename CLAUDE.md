@@ -30,7 +30,12 @@ WIDER preload-covering span is THE wrap, superseting #1285's fix-3 span; T1's
 `cmd_sweep` ("brutex sweep") + `cmd_sweep_daemon` ("brutex sweep-daemon", covering the
 between-cycle sleep) wrap their bodies; the dashboard sweep job inherits in-process, and
 #1285's `run_sweep_from_request` wrap is KEPT as a redundant-nested guard; best-effort,
-never raises; 6 new tests in `tests/unit/test_cli_sweep_keepawake.py`). #1285
+never raises; 6 new tests in `tests/unit/test_cli_sweep_keepawake.py`) + **#1306
+DEC-BACKUP-RETENTION-KNOB-GUARD-001** (MIGRATION.md #1636, renumbered from #1598 at the
+fold — the three `BRUTEX_BACKUP_KEEP_{DAILY,WEEKLY,MONTHLY}` retention knobs gain the <1
+loud-fallback guard so a 0/negative keep count can never silently DISABLE a restic
+retention tier through `forget --prune`; ops config leaf only, zero overlap with the sweep
+members — clean merge). #1285
 (MIGRATION.md #1634, renumbered from #1615 at the fold — the
 sweep scale-guards pack, THREE fixes as ONE change set, required before the institutional
 k=5 run: (1) CRITICAL worker-aware rank-memory budget (the OOM fix) —
@@ -1837,8 +1842,10 @@ hostile-review pass._
   `sweep_run_core` G9 hook nested inside — a disclosed train-fold composition;
   `cmd_sweep`; `cmd_sweep_daemon` incl. the between-cycle sleep; the dashboard job
   inherits in-process and #1285's `run_sweep_from_request` wrap is kept
-  redundant-nested). See the §1 header blurb for the full member one-liners. ENGINE
-  UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
+  redundant-nested); plus #1306 DEC-BACKUP-RETENTION-KNOB-GUARD-001 (MIGRATION.md #1636,
+  renumbered from #1598) — the backup retention keep-knob <1 loud-fallback guard (ops
+  config leaf, clean merge). See the §1 header blurb for the full member one-liners.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
   Earlier: `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
   coordinator-confirmed fold, in binding order, of #1330 DEC-SWEEP-UNKILLABLE-CORE-001
   (MIGRATION.md #1594 / ADR-0019; its single-flight mechanism WINS all competing variants) →
@@ -4318,7 +4325,8 @@ hostile-review pass._
 - **Active feature branch:** `integration/t2-sweep-hardening`
   (T2 SWEEP-HARDENING integration train — based on `integration/t1-sweep-core`; folds #1285
   DEC-SWEEP-SCALE-GUARDS-001 (#1634, renumbered from #1615) + #1305
-  DEC-SWEEP-KEEPAWAKE-001 (#1635, renumbered from #1631) so far; see §1 Active branch
+  DEC-SWEEP-KEEPAWAKE-001 (#1635, renumbered from #1631) + #1306
+  DEC-BACKUP-RETENTION-KNOB-GUARD-001 (#1636, renumbered from #1598); see §1 Active branch
   for the full blurb)
   Earlier: `integration/t1-sweep-core`
   (T1 SWEEP-CORE integration train — folds #1330 DEC-SWEEP-UNKILLABLE-CORE-001 (#1594) +
