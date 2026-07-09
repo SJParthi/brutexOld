@@ -133,16 +133,33 @@ class TestHeaderRoundNarrationRetired:
     rounds 3-8 — a within-file freshness drift baked into the header's shape.
     The header now carries a stale-proof POINTER to the two authoritative
     per-round records instead; these pins keep the narration from returning.
+
+    The pin is scoped to the DEC-LAKE-STATS-MANIFEST-001 entry WHEREVER it
+    sits in the ``_Last updated:`` chain — every later feature branch
+    legitimately prepends its own header entry (pushing this one behind an
+    ``Earlier:`` marker), and the original top-of-header extraction broke on
+    exactly that (PR #1358 CI red), violating this module's own
+    stay-green-across-future-branches design rule.
     """
 
     def test_header_points_at_the_authoritative_records(self) -> None:
         text = _CLAUDE_MD.read_text(encoding="utf-8")
-        header = _normalized_region(text, "_Last updated:", "Earlier:")
-        assert "review round 1 (which" not in header, (
+        header_start = text.index("_Last updated:")
+        header_end = text.index("## 1. Project Identity", header_start)
+        entry_start = text.find("(DEC-LAKE-STATS-MANIFEST-001", header_start, header_end)
+        assert entry_start != -1, (
+            "the CLAUDE.md _Last updated: chain lost its DEC-LAKE-STATS-MANIFEST-001 "
+            "entry — the pointer this pin guards has no home (endgame round 2)"
+        )
+        entry_end = text.find("Earlier:", entry_start, header_end)
+        if entry_end == -1:
+            entry_end = header_end
+        entry = " ".join(text[entry_start:entry_end].split())
+        assert "review round 1 (which" not in entry, (
             "the CLAUDE.md _Last updated: header resurrected per-round narration — "
             "it froze at round 2 once (endgame round 2); keep the pointer, not the story"
         )
-        assert "per-round record lives ONLY in the §1 Active-branch blurb" in header, (
+        assert "per-round record lives ONLY in the §1 Active-branch blurb" in entry, (
             "the CLAUDE.md _Last updated: header lost its pointer to the §1 blurb + "
             "MIGRATION.md per-round record (endgame round 2)"
         )
