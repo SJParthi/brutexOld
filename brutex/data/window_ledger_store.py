@@ -1911,11 +1911,16 @@ def shared_pull_ledger_scope() -> Generator[None, None, None]:
     Safety (why reuse is sound where the pipeline uses it):
 
     * the pipeline phases run **sequentially on one thread** under the
-      account-wide pull single-flight lock — no concurrent writer exists by
-      construction (``reopen_skipped`` refuses under the same lock), so the
-      re-load this scope skips could only ever have observed what this same
-      process just saved (the save is a read-MERGE-write whose merge partner is
-      our own prior save — the fold is idempotent);
+      account-wide pull single-flight lock — SAME-HOST concurrency is excluded
+      by the flock/single-flight (``reopen_skipped`` refuses under the same
+      lock), so on this host the re-load this scope skips could only ever have
+      observed what this same process just saved (the save is a
+      read-MERGE-write whose merge partner is our own prior save — the fold is
+      idempotent). CROSS-HOST the lease is DETECTION, not mutual exclusion
+      (DEC-ACCOUNT-LEASE-CROSSHOST-001): a cross-host peer's rows are folded
+      at the save's read-MERGE-write — the in-memory instance may not see them
+      until then, the same visibility as any mid-window write, and negligible
+      in practice (foreign keys never enter group-scoped ``progress_counts``);
     * each phase's END-OF-PHASE SAVE is UNCHANGED (durability byte-identical —
       the mid-pull delta flush + per-phase :func:`end_pull_ledger` cadence all
       still run); ONLY the redundant re-load is skipped;
