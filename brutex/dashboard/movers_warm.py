@@ -11,11 +11,15 @@ cold lake scan.
 ## No illusion (Golden Rule #1)
 
 The warm targets the **latest day that actually has data** (``latest_movers_date`` — the
-MAX spot ``1day`` bar's IST date), NEVER "today": the just-finished historical pull fills
-the lake only to the PREVIOUS trading day, so warming today's coordinate would cache
-EMPTY snapshots (`compute_spot_candidates` reads the exact requested date — no fallback).
-If the lake has no spot ``1day`` data yet (`latest_movers_date` is ``None``), nothing is
-warmed and ``0`` is returned — an honest "warmed nothing", never a fabricated snapshot.
+MAX of the spot ``1day`` bars' IST dates AND the spot ``1minute`` bars' IST dates, per-arm
+guarded; DEC-MOVERS-STORED-FRESHNESS-001 fold-in C), NEVER "today": the just-finished
+historical pull fills the lake only to the PREVIOUS trading day, so warming today's
+coordinate would cache EMPTY snapshots (`compute_spot_candidates` reads the exact
+requested date; on the daily tab a day with real 1-minute but no stored ``1day`` bar is
+served by the canonical re-derive, so a 1m-resolved warm date warms NON-empty daily
+snapshots too). If the lake has no spot data on EITHER arm (`latest_movers_date` is
+``None``), nothing is warmed and ``0`` is returned — an honest "warmed nothing", never a
+fabricated snapshot.
 
 ## Best-effort (the pull's success is never compromised)
 
@@ -193,16 +197,34 @@ def options_warm_grid() -> list[dict[str, str | None]]:
 
 
 def latest_movers_date(lake_root: Path) -> str | None:
-    """Return the IST date (ISO ``YYYY-MM-DD``) of the most recent spot ``1day`` bar, or ``None``.
+    """Return the IST date (ISO ``YYYY-MM-DD``) of the most recent spot bar, or ``None``.
 
-    Scans the spot ``1day`` partitions (INDEX + CASH) for ``MAX("timestamp")`` and converts
-    that instant to its IST calendar date — the latest day the movers default snapshot can
-    show WITH DATA. ``None`` when the lake has no spot ``1day`` files yet (so the caller
-    warms nothing rather than an empty "today" snapshot). Opens its own short-lived DuckDB
-    connection (self-contained, like the ``compute_*_candidates`` readers).
+    The MAX over TWO independently-guarded arms (DEC-MOVERS-STORED-FRESHNESS-001
+    fold-in C — the r2j_seam2 default-date fix): the latest spot ``1day`` bar's
+    IST date (:func:`_latest_spot_1day_date`, the historical resolver) AND the
+    latest spot ``1minute`` bar's IST date (:func:`_latest_spot_1m_date`,
+    month-pruned). During a multi-hour fetch the ``1day`` partitions only
+    materialise at the pull-END prebuild, so the 1day-only resolver pinned the
+    default ``/movers`` view to the PREVIOUS day for hours while the true latest
+    day's 1-minute bars were already stored (the executed repro: prev-day close
+    524 served while the true latest close was 305 with 106 real minutes
+    stored); the 1-minute arm sees those bars as they land.
 
-    The read is bounded to the ``1day`` partitions (intrinsically tiny — one row per trading
-    day per symbol), never the multi-year 1-minute lake.
+    Per-arm guarding is load-bearing: a corrupt 1m month file must not blank the
+    1day answer (and vice versa) — each arm degrades to ``None`` independently
+    and the fold takes the MAX of the survivors (ISO-8601 strings compare
+    correctly lexicographically). ``None`` ONLY when BOTH arms are
+    absent/unreadable — never a fabricated "today" (the route's today-fallback
+    stays the one today-source). A 1m-only never-prebuilt lake now resolves its
+    real latest 1m day (previously ``None``) — an honest improvement. On any
+    post-prebuild lake ``max(1day) == max(1m)``, so the resolved date is
+    byte-identical to the historical 1day-only answer.
+
+    Honest I/O envelope (Golden Rule #10): one O(spot-1m-file-NAMES) dir walk
+    (filenames only, zero Parquet opens) + one month-bounded columnar ``MAX``
+    on the 1m arm, plus the intrinsically-tiny 1day partition ``MAX`` — the same
+    order as :func:`latest_movers_minute`; the caller memoises it per write
+    generation on the threadpool worker.
 
     Parameters
     ----------
@@ -212,7 +234,27 @@ def latest_movers_date(lake_root: Path) -> str | None:
     Returns
     -------
     str | None
-        The latest spot ``1day`` IST date as ``YYYY-MM-DD``, or ``None`` if absent.
+        The latest spot IST date as ``YYYY-MM-DD``, or ``None`` if absent.
+    """
+    arms = [
+        arm
+        for arm in (_latest_spot_1day_date(lake_root), _latest_spot_1m_date(lake_root))
+        if arm is not None
+    ]
+    return max(arms) if arms else None
+
+
+def _latest_spot_1day_date(lake_root: Path) -> str | None:
+    """The ``1day`` arm of :func:`latest_movers_date` — the pre-fold-in body, verbatim.
+
+    Scans the spot ``1day`` partitions (INDEX + CASH) for ``MAX("timestamp")`` and converts
+    that instant to its IST calendar date — the latest day the movers default snapshot can
+    show WITH DATA. ``None`` when the lake has no spot ``1day`` files yet. Opens its own
+    short-lived DuckDB connection (self-contained, like the ``compute_*_candidates``
+    readers).
+
+    The read is bounded to the ``1day`` partitions (intrinsically tiny — one row per trading
+    day per symbol), never the multi-year 1-minute lake.
     """
     import duckdb
 
@@ -252,6 +294,83 @@ def latest_movers_date(lake_root: Path) -> str | None:
             ).fetchone()
     except (duckdb.Error, OSError) as exc:
         _LOG.warning("movers.latest_date.unreadable_lake", error=str(exc))
+        return None
+    return str(row[0]) if row is not None and row[0] is not None else None
+
+
+def _canonical_digits(token: str, width: int) -> bool:
+    """``True`` iff *token* is EXACTLY *width* ASCII decimal digits.
+
+    The DEC-CLI-GREEKS-ENRICH-001 junk-tolerance gate — the local mirror of the
+    PRIVATE :func:`brutex.data.greeks_enrich_pass._is_canonical_digits` leaf
+    (deliberately NOT imported across packages: a dashboard→greeks-pass edge for
+    a one-line predicate would couple the default poll to that module's import
+    surface; a mirror pin test keeps the two byte-equivalent). Plain ``isdigit``
+    admits NON-decimal Unicode digits (superscript ``"²024"``) whose numeric
+    semantics are junk, and non-ASCII DECIMAL digits (Arabic-Indic ``"٢٠٢٤"``)
+    would be silently accepted as a canonical year. The lake writer only ever
+    emits ASCII ``{year:04d}`` / ``{month:02d}`` names — anything else is a
+    stray dir/file to SKIP silently, never a crash on the default ``/movers``
+    poll.
+    """
+    return len(token) == width and token.isascii() and token.isdigit()
+
+
+def _latest_spot_1m_date(lake_root: Path) -> str | None:
+    """The ``1minute`` arm of :func:`latest_movers_date` — month-pruned, two stages.
+
+    Stage 1 — a FILENAME max-month scan with ZERO Parquet opens: one pass over
+    ``bars/*/{INDEX,CASH}/*/1minute/<yyyy>/<mm>.parquet`` names keeping only the
+    running-max ``(yyyy, mm)`` key and ITS file list (reset-on-greater /
+    append-on-equal — O(1) extra memory). A candidate counts only when the year
+    dir name / month stem are ASCII-decimal-gated fixed-width digits
+    (:func:`_canonical_digits` — a stray ``tmp/`` or Unicode-digit dir is
+    skipped, never a crash). Stage 2 — ONE bounded DuckDB
+    ``MAX(IST date)`` over that explicit max-month file list.
+
+    Soundness of the month prune: IST = UTC + 05:30 is MONOTONE in the stored
+    UTC timestamp, and each month file is bounded to its OWN UTC month (the
+    G-RACE-1 write law), so the globally-max timestamp — hence the max IST
+    date — always lives in the lexicographic-max ``(yyyy, mm)`` month's files.
+    (A legacy foreign-month-poisoned file that violates the write law is
+    outside this envelope — the lake heal owns that class.)
+
+    Guarded exactly like the sibling arms: ``(duckdb.Error, OSError)`` on the
+    read → one ``movers.latest_date.unreadable_1m`` WARN → ``None``, so a
+    corrupt 1m month can never blank the 1day arm's answer (the fold guards
+    per-arm). ``None`` when no canonical spot 1m month file exists.
+    """
+    import duckdb
+
+    bars = lake_root / "bars"
+    if not bars.is_dir():
+        return None
+    max_key: tuple[str, str] | None = None
+    files: list[str] = []
+    for seg in _SPOT_SEGMENTS:
+        for path in bars.glob(f"*/{seg}/*/{_MINUTE_INTERVAL}/*/*.parquet"):
+            year, month = path.parent.name, path.stem
+            if not (_canonical_digits(year, 4) and _canonical_digits(month, 2)):
+                continue
+            key = (year, month)
+            if max_key is None or key > max_key:
+                max_key, files = key, [path.as_posix()]
+            elif key == max_key:
+                files.append(path.as_posix())
+    if not files:
+        return None
+    try:
+        with duckdb.connect() as conn:
+            # DEC-THREAD-BUDGET-BOUNDS-001 — bound this ephemeral connection's
+            # thread pool (mirror `_latest_spot_1day_date`).
+            apply_duckdb_thread_bound(conn)
+            row = conn.execute(
+                "SELECT MAX((\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE) "
+                "FROM read_parquet(?, union_by_name=true)",  # nosec B608 - bound file-list parameter
+                [files],
+            ).fetchone()
+    except (duckdb.Error, OSError) as exc:
+        _LOG.warning("movers.latest_date.unreadable_1m", error=str(exc))
         return None
     return str(row[0]) if row is not None and row[0] is not None else None
 

@@ -1016,6 +1016,108 @@ class TestStoredFreshnessGuard:
             assert (bars_none, from_stored_none) == ([], False)
 
 
+# ── fold-in C: missing-1day-bar coherence (DEC-MOVERS-STORED-FRESHNESS-001) ─
+
+
+class TestDailyMissingBarCoherence:
+    """A day with REAL 1-minute but NO stored ``1day`` bar serves the canonical
+    re-derive (silent, counted ``resampled_reads``) — the same evidence the
+    drift arm already serves must not VANISH when the stored bar is merely
+    absent (the mid-pull lifecycle state: ``1day`` only materialises at the
+    pull-END prebuild)."""
+
+    def test_daily_missing_bar_derives_from_1m_silently(self, tmp_path: Path) -> None:
+        """C5 — the coherence arm: `_seed_spot` stores a 1day bar ONLY for the
+        PRIOR day; the selected day has a full 1-minute session and no stored
+        bar. The snapshot is PRESENT (previously: silently skipped), its bar is
+        the canonical ``resample_1m_to_daily`` of the day's real 1m (converges
+        with the 1minute tab), counted ``resampled_reads``, with NO
+        ``movers.stored_stale_fallback`` event (the silent-arm pin), the
+        TF-invariant value coherent, and the prev-close baseline resolved from
+        the stored PRIOR 1day bar — calendar-contiguous (Wed → Thu)."""
+        from structlog.testing import capture_logs
+
+        _seed_spot(tmp_path, "NIFTY", 20000)  # 1day bar for _PRIOR only; 1m both days
+        with capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
+            )
+        assert len(cands.snapshots) == 1
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 1)
+        snap = cands.snapshots[0]
+        # The derived day-so-far bar of the seeded session (closes 20005..20095,
+        # volumes 100..109) — byte-what-a-fresh-prebuild-would-write.
+        assert snap.ltp == Decimal("20095")
+        assert snap.volume == 1045
+        assert snap.bar_count == 1
+        # Convergence + value coherence with the 1minute tab on the SAME lake.
+        minute = compute_spot_candidates(
+            lake_root=tmp_path, interval="1minute", date=_DAY.isoformat(), time=None
+        )
+        assert snap.ltp == minute.snapshots[0].ltp
+        assert snap.value_paisa == minute.snapshots[0].value_paisa
+        # Prev-close baseline from the stored PRIOR 1day bar (base+90 = 20090),
+        # calendar-contiguous (2024-06-12 Wed → 2024-06-13 Thu) → no stamp.
+        assert snap.prev_close == Decimal("20090")
+        assert snap.prev_close_contiguous is not False
+        # SILENT by design: absent-bar derive is the normal mid-pull state.
+        assert [e for e in logs if e["event"] == "movers.stored_stale_fallback"] == []
+
+    def test_daily_no_1m_and_no_bar_stays_honest_skip(self, tmp_path: Path) -> None:
+        # A date with NEITHER a stored 1day bar NOR 1-minute (weekend/holiday/
+        # never-pulled) stays the honest skip — nothing is fabricated.
+        _seed_spot(tmp_path, "NIFTY", 20000)
+        cands = compute_spot_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-15",
+            time=None,  # Saturday
+        )
+        assert cands.snapshots == ()
+        assert cands.skipped == 1
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 0)
+
+    def test_daily_missing_bar_at_date_max_abstains(self, tmp_path: Path) -> None:
+        """The ``date.max`` saturation on the NEW arm: a missing stored bar +
+        real 1m ON ``9999-12-31`` cannot derive (``_derive_daily_bars``
+        abstains rather than overflow) → the honest skip, never an
+        ``OverflowError``, never a warn. Raw-write fixture — the lake writer
+        itself refuses year 9999 (``MAX_PARTITION_YEAR``)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from structlog.testing import capture_logs
+
+        last = date(9999, 12, 31)
+
+        def _raw_write(interval: str, stamps: list[datetime], closes: list[float]) -> None:
+            dest = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / interval / "9999"
+            dest.mkdir(parents=True, exist_ok=True)
+            table = pa.table(
+                {
+                    "timestamp": pa.array(stamps, type=pa.timestamp("us", tz="UTC")),
+                    "open": pa.array(closes, type=pa.float64()),
+                    "high": pa.array(closes, type=pa.float64()),
+                    "low": pa.array(closes, type=pa.float64()),
+                    "close": pa.array(closes, type=pa.float64()),
+                    "volume": pa.array([10] * len(stamps), type=pa.int64()),
+                    "open_interest": pa.array([None] * len(stamps), type=pa.int64()),
+                }
+            )
+            pq.write_table(table, dest / "12.parquet")
+
+        # The 1day partition exists (discovery alive) with a bar on 12-30 ONLY;
+        # 1-minute exists on 12-31 → bars=[] + base present + derive abstain.
+        _raw_write("1day", [datetime(9999, 12, 30, 3, 45, tzinfo=UTC)], [100.0])
+        _raw_write("1minute", [datetime(9999, 12, 31, 3, 45, tzinfo=UTC)], [105.0])
+        with capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date=last.isoformat(), time=None
+            )
+        assert cands.snapshots == ()
+        assert cands.skipped == 1
+        assert [e for e in logs if e["event"] == "movers.stored_stale_fallback"] == []
+
+
 # ── read_stored_day_frame edges ───────────────────────────────────────────
 
 

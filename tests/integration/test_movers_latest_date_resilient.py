@@ -172,3 +172,130 @@ class TestLatestDateMemoised:
         )
         assert resp.status_code == 200
         assert calls["n"] == 0
+
+
+# ── fold-in C (DEC-MOVERS-STORED-FRESHNESS-001): 1m-aware default date ─────
+
+
+def _minute_bar(*, day: date, hh: int, mm: int, close: str, volume: int = 100) -> CandleBar:
+    """A 1-minute bar stamped at *hh:mm* IST (stored UTC = IST − 5:30) on *day*."""
+    c = Decimal(close)
+    total = hh * 60 + mm - (5 * 60 + 30)
+    return CandleBar(
+        timestamp=datetime(day.year, day.month, day.day, total // 60, total % 60, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=volume,
+        open_interest=None,
+    )
+
+
+def _seed_mid_pull_lake(tmp_path: Path) -> None:
+    """The r2j_seam2 lake shape: 1day through D−1, 1minute through D.
+
+    Mid-fetch the day-D 1-minute bars have landed but the ``1day`` partition
+    (rewritten only by the pull-END prebuild) still stops at D−1.
+    """
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_day_bar(close="100")],  # the D−1 (2024-06-13) stored daily bar
+    )
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[
+            _minute_bar(day=date(2024, 6, 14), hh=9, mm=15, close="102"),
+            _minute_bar(day=date(2024, 6, 14), hh=9, mm=16, close="105"),
+        ],
+    )
+
+
+class TestDefaultDateIsOneMinuteAware:
+    def test_default_poll_advances_to_the_fresh_1m_day_with_daily_rows(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The combined default-date repro (C6): with 1day through D−1 and 1m
+        through D, the DEFAULT (no-date) poll resolves date == D (previously
+        pinned to D−1 for hours mid-fetch) AND the 1day tab still shows the
+        symbol — the missing-bar coherence arm derives the day-D daily bar
+        from the real 1m instead of silently losing it."""
+        _seed_mid_pull_lake(tmp_path)
+        client = _client(store, SummaryCache(ttl_floor_s=0.0))
+        resp = client.get(
+            "/api/v1/movers", params={"asset": "spot", "interval": "1day", "top_n": 5}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["date"] == "2024-06-14"  # the fresh 1m day, not the 1day max
+        (row,) = body["volume"]
+        assert row["symbol"] == "NIFTY"
+        assert row["ltp"] == "₹105.00"  # the derived day-D close off the real 1m
+        assert body["resampled_reads"] == 1  # honest provenance: derived, not stored
+
+    def test_warm_shaped_key_is_hit_by_the_default_poll(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The no-poison pin (C6): a `_warm_for_date`-shaped warm (the SAME pure
+        `latest_movers_date` + `candidate_key` at the SAME generation the route
+        reads) pre-computes the coordinate ONCE; the DEFAULT poll then hits the
+        warmed key — compute-spy count stays 1, so warm key and route key
+        cannot diverge within one generation even when the date resolves off
+        the 1m arm."""
+        from brutex.dashboard.movers_cache import candidate_key
+        from brutex.dashboard.movers_snapshot import DEFAULT_INTERVAL
+        from brutex.dashboard.movers_warm import latest_movers_date
+
+        _seed_mid_pull_lake(tmp_path)
+        calls = {"n": 0}
+        real_compute = app_module.compute_spot_candidates
+
+        def _counting(**kwargs: object) -> object:
+            calls["n"] += 1
+            return real_compute(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(app_module, "compute_spot_candidates", _counting)
+        summary_cache = SummaryCache(ttl_floor_s=0.0)
+        movers_cache = MoversSnapshotCache()
+        client = TestClient(
+            app_module.build_app(
+                app_module.DashboardState(),
+                instrument_store=store,
+                summary_cache=summary_cache,
+                movers_cache=movers_cache,
+            )
+        )
+        # The _warm_for_date shape: the SAME pure resolver + key the warm uses.
+        warm_date = latest_movers_date(tmp_path)
+        assert warm_date == "2024-06-14"
+        generation = summary_cache.generation
+        movers_cache.get_or_compute(
+            candidate_key(
+                asset="spot",
+                exchange=None,
+                interval=DEFAULT_INTERVAL,
+                date=warm_date,
+                time=None,
+            ),
+            generation=generation,
+            compute=lambda: app_module.compute_spot_candidates(
+                lake_root=tmp_path,
+                interval=DEFAULT_INTERVAL,
+                date=warm_date,
+                time=None,
+                exchange=None,
+            ),
+        )
+        assert calls["n"] == 1  # the warm paid the one compute
+        resp = client.get(
+            "/api/v1/movers", params={"asset": "spot", "interval": "1day", "top_n": 5}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["date"] == warm_date
+        assert calls["n"] == 1  # the default poll HIT the warmed key — no recompute

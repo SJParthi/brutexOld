@@ -1608,7 +1608,14 @@ def compute_spot_candidates(
       the re-derived bar serves (byte-what-a-fresh-prebuild-would-write,
       counted under ``resampled_reads`` + one capped
       ``movers.stored_stale_fallback`` WARN), while a missing 1-minute base
-      abstains to the stored bytes (verdict unknowable — never a guess).
+      abstains to the stored bytes (verdict unknowable — never a guess). A day
+      with real 1-minute but NO stored ``1day`` bar yet (the mid-pull state —
+      ``1day`` only materialises at the pull-END prebuild) serves the SAME
+      canonical re-derive SILENTLY, counted under ``resampled_reads`` (fold-in
+      C — present-but-stale and absent must not behave oppositely on the same
+      1m truth). Known unchanged limit: the daily tab still DISCOVERS symbols
+      via existing ``1day`` partitions, so a lake with ZERO ``1day``
+      partitions (never prebuilt at all) shows an empty daily tab.
     * **Intraday** (``1minute`` … ``4hour``) → discover the ``1minute``
       partitions, then read each symbol's day STORED-FIRST
       (:func:`_read_intraday_bars`, DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): the
@@ -1713,35 +1720,56 @@ def compute_spot_candidates(
                     symbol=dataset["symbol"],
                     day=day,
                 )
-                # The base read fires only where today's value read fired (I/O
-                # parity with the pre-guard code — `if bars`); an absent base
-                # is the honest ABSTAIN (verdict unknowable → pre-fix bytes).
-                base_df = (
-                    _read_cut_1m_frame(
-                        lake_root,
-                        exchange=dataset["exchange"],
-                        segment=dataset["segment"],
-                        symbol=dataset["symbol"],
-                        day=day,
-                        cutoff_min=None,
-                    )
-                    if bars
-                    else None
+                # The base read is UNCONDITIONAL on the daily branch (fold-in C
+                # of DEC-MOVERS-STORED-FRESHNESS-001 — it feeds the drift
+                # verdict when a stored bar is present OR the missing-bar
+                # derive when it is absent); an absent base is the honest
+                # ABSTAIN on both arms (verdict/derive unknowable → pre-fix
+                # bytes: stored-bar symbols serve stored, bar-less symbols
+                # stay skipped). Disclosed I/O delta: a symbol WITHOUT a bar
+                # on the day now pays one month-bounded 1m read (previously
+                # zero) — bounded by the candidate cache, ≤ the intraday tab's
+                # envelope for the same coordinate.
+                base_df = _read_cut_1m_frame(
+                    lake_root,
+                    exchange=dataset["exchange"],
+                    segment=dataset["segment"],
+                    symbol=dataset["symbol"],
+                    day=day,
+                    cutoff_min=None,
                 )
-                if bars and base_df is not None:
+                if base_df is not None:
                     derived = _derive_daily_bars(base_df, day)
-                    if derived and _daily_stored_is_stale(bars, derived):
-                        warn_stored_stale_fallback(
-                            stale_state,
-                            exchange=dataset["exchange"],
-                            segment=dataset["segment"],
-                            symbol=dataset["symbol"],
-                            interval="1day",
-                            snapshot_day=day,
-                        )
-                        # The SANCTIONED correction: serve byte-what-a-fresh-
-                        # prebuild-would-write (the same resample_1m_to_daily
-                        # law the writer runs — never an estimate).
+                    if bars:
+                        if derived and _daily_stored_is_stale(bars, derived):
+                            warn_stored_stale_fallback(
+                                stale_state,
+                                exchange=dataset["exchange"],
+                                segment=dataset["segment"],
+                                symbol=dataset["symbol"],
+                                interval="1day",
+                                snapshot_day=day,
+                            )
+                            # The SANCTIONED correction: serve byte-what-a-fresh-
+                            # prebuild-would-write (the same resample_1m_to_daily
+                            # law the writer runs — never an estimate).
+                            bars, from_stored = derived, False
+                    elif derived:
+                        # MISSING-bar coherence (fold-in C): the day has REAL
+                        # stored 1-minute but NO stored 1day bar yet (the
+                        # mid-pull lifecycle state — 1day only materialises at
+                        # the pull-END prebuild). Serve the SAME canonical
+                        # re-derive the drift arm serves for identical 1m
+                        # evidence — letting the same evidence VANISH when the
+                        # stored bar is merely absent would make present-but-
+                        # stale and absent behave oppositely on the same 1m
+                        # truth. SILENT by design (mirrors the intraday absent-
+                        # stored-day resample fallback; mid-pull this is the
+                        # NORMAL state for ~750 symbols, so a warn would be
+                        # per-build noise signalling no defect) — honesty rides
+                        # the `resampled_reads` payload provenance. No 1m for
+                        # the day / a `date.max` derive abstain keeps the
+                        # honest skip (never fabricated).
                         bars, from_stored = derived, False
             else:
                 # DEC-MOVERS-STORED-FRESHNESS-001: hoist the cut raw-1m read
