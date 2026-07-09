@@ -56,7 +56,7 @@ from typing import Any, Final, Literal
 import duckdb
 import structlog
 
-from brutex.calendars.nse import previous_trading_session
+from brutex.calendars.nse import has_muhurat_session, previous_trading_session
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
@@ -176,12 +176,16 @@ REPORT_EXCLUDED_SEGMENTS: Final[frozenset[str]] = frozenset({FNO_CANDLE_LAKE_SEG
 #: (mirrors the /movers #1535 capped-warn precedent, state kept function-local).
 _HOLE_WARN_CAP: Final[int] = 20
 
-#: The three reproduced shapes a VERIFIED prev-close hole takes — the machine
+#: The reproduced shapes a VERIFIED prev-close hole takes — the machine
 #: ``hole_shape`` field on the ``preopen.prev_close_noncontiguous`` WARN
 #: (DEC-PREOPEN-PREVDAY-COMMON-001 hostile-review fold: the original one-line
 #: detail unconditionally advised a re-pull, which is WRONG remediation for
-#: two of the three shapes). See :func:`_hole_shape` for the classification.
-_HoleShape = Literal["extra_nonsession_bar", "prebuild_lag", "missing_session"]
+#: most of the shapes; DEC-PREVSESSION-MUHURAT-COHERENCE-001 split the
+#: calendar-confirmed Muhurat boundary — a HEALTHY lake — out of the
+#: suspicious ``extra_nonsession_bar`` catch-all). See :func:`_hole_shape`.
+_HoleShape = Literal[
+    "muhurat_session_bar", "extra_nonsession_bar", "prebuild_lag", "missing_session"
+]
 
 
 def resolve_report_datasets(
@@ -390,12 +394,14 @@ def _minute_prev_close_contiguous(
     * ``trading_dates[idx − 1] != expected`` (a lake hole) →
       ``on_hole(expected, trading_dates[idx − 1])`` then ``None``: the row is
       honestly ABSENT, never a stale-anchored number. The mismatch takes the
-      three reproduced shapes :func:`_hole_shape` classifies for the WARN's
-      diagnostic — an EXTRA calendar-non-session 1-day bar AFTER the prior
-      session (``found > expected``, the Muhurat shape), the 1-day series
-      LAGGING the minute series (prebuild lag — the expected session HAS
-      minute bars), or the genuinely MISSING session; the refusal itself is
-      identical in every shape.
+      reproduced shapes :func:`_hole_shape` classifies for the WARN's
+      diagnostic — the calendar-confirmed Diwali Muhurat boundary
+      (``found > expected`` on a known Muhurat date — a HEALTHY lake,
+      DEC-PREVSESSION-MUHURAT-COHERENCE-001), an UNEXPECTED non-session 1-day
+      bar AFTER the prior session (``found > expected`` otherwise), the 1-day
+      series LAGGING the minute series (prebuild lag — the expected session
+      HAS minute bars), or the genuinely MISSING session; the refusal itself
+      is identical in every shape.
     * The prior session's minute window is MISSING (``minute_last`` lacks the
       expected session — the JUBLINGREA case, DEC-PREOPEN-PREVCLOSE-
       CONTIGUITY-001) or its close is zero → ``None`` (byte-preserved skip).
@@ -443,13 +449,21 @@ def _hole_shape(
     close would be a fabricated PREV. CLOSE). The shape only aims the
     remediation text in the WARN's ``detail``:
 
-    * ``found > expected`` → ``"extra_nonsession_bar"`` — an EXTRA
-      calendar-non-session 1-day bar sits AFTER the calendar's prior session
-      (the annual Diwali **Muhurat** shape: ingest keeps Muhurat bars per
-      DEC-INGEST-BOUNDARY-INTEGRITY-001 and the prebuild derives their 1-day
-      bar, but the calendar classifies the day a NON-session). The lake is NOT
-      missing a session — a re-pull changes nothing; the day-after row stays
-      conservatively skipped.
+    * ``found > expected`` AND :func:`brutex.calendars.nse.has_muhurat_session`
+      confirms *found* → ``"muhurat_session_bar"`` — the annual day-after-
+      Diwali boundary (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the ingest
+      legitimately keeps Muhurat bars (DEC-INGEST-BOUNDARY-INTEGRITY-001) and
+      the prebuild derives their 1-day bar, so the lake is HEALTHY and no
+      action is needed. The pre-open report is an ANCHOR-law surface, so the
+      row still stays conservatively skipped — it mirrors the engine's
+      ``stage1a.muhurat_prev_day_anchor_skip`` (#1616), while ``/movers``
+      serves the Muhurat close under the DISPLAY baseline law (stamped
+      ``prev_close_muhurat``) — the recorded two-law design.
+    * ``found > expected`` on a NON-Muhurat date → ``"extra_nonsession_bar"``
+      — an UNEXPECTED calendar-non-session 1-day bar sits AFTER the
+      calendar's prior session: honestly SUSPICIOUS (a stray write, a corrupt
+      partition, or a calendar gap) — inspect the unexpected bar; a re-pull
+      alone cannot explain it away.
     * ``found < expected`` AND the expected session IS present in the symbol's
       minute series → ``"prebuild_lag"`` — the 1-day series LAGS the 1-minute
       series (e.g. a CLI-pulled lake awaiting the pipeline prebuild,
@@ -460,12 +474,16 @@ def _hole_shape(
       re-pulling the missing session.
 
     *minute_evidence* is ``None`` on the DAILY basis (the day basis never reads
-    the 1-minute series, DEC-PREOPEN-REPORT-1DAY-001), so the daily diagnostic
-    is honestly TWO-WAY — ``extra_nonsession_bar`` vs ``missing_session`` — and
-    a daily-basis prebuild lag reads ``missing_session`` (an accepted,
-    documented limit; the minute basis, which holds the evidence, names it).
+    the 1-minute series, DEC-PREOPEN-REPORT-1DAY-001), so the daily
+    ``found < expected`` diagnostic is honestly reduced to
+    ``missing_session`` — a daily-basis prebuild lag reads ``missing_session``
+    (an accepted, documented limit; the minute basis, which holds the
+    evidence, names it). The ``found > expected`` split needs no minute
+    evidence, so both bases classify it identically.
     """
     if found > expected:
+        if has_muhurat_session(found):
+            return "muhurat_session_bar"
         return "extra_nonsession_bar"
     if minute_evidence is not None and expected in minute_evidence:
         return "prebuild_lag"
@@ -476,17 +494,30 @@ def _hole_detail(shape: _HoleShape, expected: date, found: date) -> str:
     """The honest, shape-matched remediation text for the non-contiguity WARN.
 
     One sentence per :func:`_hole_shape` verdict — the ``missing_session`` text
-    is the original (pre-fold) detail verbatim; the other two shapes name the
+    is the original (pre-fold) detail verbatim; the other shapes name the
     evidence and deliberately do NOT advise a re-pull (a re-pull cannot fix
-    either). No served value changes in any shape — the row stays skipped.
+    any of them). No served value changes in any shape — the row stays
+    skipped. DEC-PREVSESSION-MUHURAT-COHERENCE-001 split the calendar-
+    confirmed Muhurat boundary (healthy — "no action needed") out of
+    ``extra_nonsession_bar``, whose text no longer GUESSES Muhurat and is now
+    honestly suspicious ("inspect") instead of falsely reassuring.
     """
+    if shape == "muhurat_session_bar":
+        return (
+            f"row conservatively skipped — the prior real session was the "
+            f"{found.isoformat()} Diwali Muhurat session (calendar-confirmed); the "
+            f"calendar's prior REGULAR session is {expected.isoformat()}; the lake is "
+            "HEALTHY, no action needed — the pre-open anchor law refuses a Muhurat "
+            "anchor (mirrors stage1a.muhurat_prev_day_anchor_skip; /movers serves the "
+            "Muhurat close under the display law, stamped prev_close_muhurat)"
+        )
     if shape == "extra_nonsession_bar":
         return (
-            f"row conservatively skipped — an EXTRA calendar-non-session 1-day bar "
-            f"({found.isoformat()}, e.g. a Diwali Muhurat session the ingest keeps) sits "
-            f"after the prior NSE session {expected.isoformat()}; the lake is NOT missing "
-            "a session and no action is needed (the day-after row stays absent by the "
-            "correct-or-absent rule)"
+            f"row conservatively skipped — an UNEXPECTED calendar-non-session 1-day bar "
+            f"({found.isoformat()}, not a known Muhurat session) sits after the prior "
+            f"NSE session {expected.isoformat()}; inspect the unexpected bar (a stray "
+            "write / a corrupt partition / a calendar gap) — the day-after row stays "
+            "absent by the correct-or-absent rule"
         )
     if shape == "prebuild_lag":
         return (
@@ -539,15 +570,21 @@ def build_preopen_rows(
     symbol)`` dataset triple (capped at :data:`_HOLE_WARN_CAP` per build, with
     one ``preopen.prev_close_noncontiguous_suppressed`` summary past the cap).
     The WARN carries a machine ``hole_shape`` + a shape-matched ``detail``
-    (:func:`_hole_shape` / :func:`_hole_detail` — the hostile-review fold):
-    ``extra_nonsession_bar`` (an extra Muhurat-style non-session 1-day bar
-    after the prior session; no re-pull advice), ``prebuild_lag`` (the 1-day
-    series lags the minute series; remediation is the pipeline prebuild — the
-    minute basis passes its ``minute_last`` as DIAGNOSTIC evidence only, the
-    anchor is never taken from it), or ``missing_session`` (the genuine hole;
-    remediation stays "re-pull the missing session"). The daily basis passes
-    no minute evidence (it never reads the 1-minute series), so its diagnostic
-    is honestly two-way.
+    (:func:`_hole_shape` / :func:`_hole_detail` — the hostile-review fold +
+    the DEC-PREVSESSION-MUHURAT-COHERENCE-001 split): ``muhurat_session_bar``
+    (the calendar-confirmed day-after-Diwali boundary — a HEALTHY lake, no
+    action needed; the anchor-law row still stays absent, mirroring the
+    engine's #1616 Muhurat skip while /movers serves the close under the
+    display law), ``extra_nonsession_bar`` (an UNEXPECTED non-Muhurat
+    non-session 1-day bar after the prior session — honestly suspicious,
+    inspect it), ``prebuild_lag`` (the 1-day series lags the minute series;
+    remediation is the pipeline prebuild — the minute basis passes its
+    ``minute_last`` as DIAGNOSTIC evidence only, the anchor is never taken
+    from it), or ``missing_session`` (the genuine hole; remediation stays
+    "re-pull the missing session"). The daily basis passes no minute evidence
+    (it never reads the 1-minute series), so only its ``found < expected``
+    diagnostic degrades (a daily prebuild lag reads ``missing_session``); the
+    ``found > expected`` split is identical on both bases.
     """
     rows: list[PreOpenRow] = []
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per

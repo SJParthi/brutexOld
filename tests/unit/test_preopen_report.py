@@ -1914,11 +1914,14 @@ def test_build_minute_basis_holi_cluster_gap_is_not_a_hole(tmp_path: Path) -> No
 
 
 def test_build_minute_basis_muhurat_bar_day_after_is_skipped(tmp_path: Path) -> None:
-    # HONEST LIMIT (mirrors the daily guard's documented Muhurat stance): the
-    # 2024-11-01 Diwali Muhurat day is a calendar NON-session, so a lake
-    # carrying its bars has the day-after row (Mon 11-04) conservatively
-    # SKIPPED — expected prior session is Thu 2024-10-31, and the nearest lake
-    # session (the Muhurat 11-01) is not it. Correct-or-absent, never wrong.
+    # The ANCHOR-law Muhurat stance (DEC-PREVSESSION-MUHURAT-COHERENCE-001):
+    # the 2024-11-01 Diwali Muhurat day is a calendar NON-session for the
+    # prior-session walk, so a lake carrying its bars has the day-after row
+    # (Mon 11-04) conservatively SKIPPED — expected prior REGULAR session is
+    # Thu 2024-10-31 and the pre-open report follows the ENGINE anchor law
+    # (mirrors stage1a.muhurat_prev_day_anchor_skip, #1616). The WARN now
+    # names the DEFINITIVE muhurat_session_bar shape — a HEALTHY lake, "no
+    # action needed" — instead of the old extra_nonsession_bar guess.
     _both_series(
         tmp_path,
         "MUHURAT",
@@ -1941,18 +1944,22 @@ def test_build_minute_basis_muhurat_bar_day_after_is_skipped(tmp_path: Path) -> 
     assert len(events) == 1
     assert events[0]["expected_session"] == "2024-10-31"
     assert events[0]["nearest_lake_session"] == "2024-11-01"
-    # The Muhurat shape: an EXTRA non-session bar (found > expected). The
-    # detail names the extra bar and gives NO re-pull advice — the lake is
-    # not missing a session, so a re-pull cannot change the verdict.
-    assert events[0]["hole_shape"] == "extra_nonsession_bar"
-    assert "2024-11-01" in str(events[0]["detail"])
-    assert "re-pull" not in str(events[0]["detail"])
+    detail = str(events[0]["detail"])
+    assert events[0]["hole_shape"] == "muhurat_session_bar"
+    assert "2024-11-01" in detail and "2024-10-31" in detail  # names found + expected
+    assert "Muhurat" in detail
+    assert "no action needed" in detail
+    assert "re-pull" not in detail
+    # The two-law cross-reference: the detail points at the engine skip AND
+    # the /movers display-law counterpart, so an operator sees the design.
+    assert "stage1a.muhurat_prev_day_anchor_skip" in detail
+    assert "prev_close_muhurat" in detail
 
 
-def test_build_day_basis_muhurat_extra_bar_shape(tmp_path: Path) -> None:
-    # The DAILY twin of the Muhurat pin: the day basis carries no minute
-    # evidence, but found (2024-11-01) > expected (2024-10-31) needs none —
-    # the two-way daily diagnostic still names the extra-non-session shape.
+def test_build_day_basis_muhurat_bar_shape_mirror(tmp_path: Path) -> None:
+    # The DAILY twin of the Muhurat pin (day↔minute mirror parity): the
+    # found > expected split needs NO minute evidence, so the day basis names
+    # the SAME definitive muhurat_session_bar shape.
     _both_series(
         tmp_path,
         "MUHURAT",
@@ -1973,8 +1980,45 @@ def test_build_day_basis_muhurat_extra_bar_shape(tmp_path: Path) -> None:
     assert rows == []
     events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
     assert len(events) == 1
-    assert events[0]["hole_shape"] == "extra_nonsession_bar"
+    assert events[0]["hole_shape"] == "muhurat_session_bar"
+    assert "no action needed" in str(events[0]["detail"])
     assert "re-pull" not in str(events[0]["detail"])
+
+
+def test_build_minute_basis_weekend_junk_bar_reads_suspicious_shape(tmp_path: Path) -> None:
+    # A NON-Muhurat non-session 1-day bar (a stray Saturday 2024-01-06 write)
+    # after the prior session (Fri 2024-01-05) → the reworded
+    # extra_nonsession_bar shape: honestly SUSPICIOUS ("inspect"), never the
+    # old falsely-reassuring "no action is needed", never a Muhurat guess —
+    # and kills the has_muhurat_session-dropped classifier mutant on the
+    # integration path (the mutant would read muhurat_session_bar here).
+    _both_series(
+        tmp_path,
+        "JUNKBAR",
+        [
+            (date(2024, 1, 5), "100.00", "101.00"),
+            (date(2024, 1, 6), "200.00", "201.00"),  # Saturday — a stray write
+            (date(2024, 1, 8), "102.00", "103.00"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "JUNKBAR")],
+            start=date(2024, 1, 8),
+            end=date(2024, 1, 8),
+            basis="minute",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == 1
+    assert events[0]["hole_shape"] == "extra_nonsession_bar"
+    detail = str(events[0]["detail"])
+    assert "inspect" in detail
+    assert "no action" not in detail
+    assert "Diwali" not in detail  # the Muhurat guess is GONE from this shape
+    assert "re-pull" not in detail
 
 
 def test_day_basis_prebuild_lag_lake_reads_missing_session(tmp_path: Path) -> None:
@@ -2115,12 +2159,48 @@ def test_hole_warn_dual_exchange_symbol_warns_per_exchange(tmp_path: Path) -> No
 # ── the pure hole-shape classifier + shape-matched detail ────────────────────
 
 
-def test_hole_shape_extra_nonsession_bar_ignores_minute_evidence() -> None:
-    # found > expected → the Muhurat shape, with OR without minute evidence
-    # (the classification needs none).
+def test_hole_shape_muhurat_session_bar_ignores_minute_evidence() -> None:
+    # found > expected on a calendar-confirmed Muhurat date → the DEFINITIVE
+    # muhurat_session_bar shape (DEC-PREVSESSION-MUHURAT-COHERENCE-001), with
+    # OR without minute evidence (the classification needs none) — identical
+    # on both bases.
     expected, found = date(2024, 10, 31), date(2024, 11, 1)
+    assert _hole_shape(expected, found, None) == "muhurat_session_bar"
+    assert _hole_shape(expected, found, {found: Decimal("1")}) == "muhurat_session_bar"
+
+
+def test_hole_shape_muhurat_split_covers_every_covered_boundary() -> None:
+    # Every MUHURAT_SESSIONS entry classifies muhurat_session_bar against its
+    # own prior regular session — the split is table-driven, never hardcoded
+    # to 2024.
+    from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
+
+    for muhurat_day in sorted(MUHURAT_SESSIONS):
+        expected = previous_trading_session(muhurat_day, exchange="NSE")
+        assert expected is not None
+        assert _hole_shape(expected, muhurat_day, None) == "muhurat_session_bar", muhurat_day
+
+
+def test_hole_shape_extra_nonsession_bar_is_the_non_muhurat_arm() -> None:
+    # found > expected on a NON-Muhurat date (a stray Saturday bar) → the
+    # honestly-suspicious extra_nonsession_bar shape, with OR without minute
+    # evidence — kills the has_muhurat_session-dropped mutant (which would
+    # bless every later bar as muhurat_session_bar).
+    expected, found = date(2024, 1, 5), date(2024, 1, 6)
     assert _hole_shape(expected, found, None) == "extra_nonsession_bar"
     assert _hole_shape(expected, found, {found: Decimal("1")}) == "extra_nonsession_bar"
+
+
+def test_hole_shape_2026_muhurat_absent_abstains_to_extra_nonsession_bar() -> None:
+    # HONEST-LIMIT pin (documented abstain): Diwali 2026 (2026-11-08) has NO
+    # MUHURAT_SESSIONS entry (timings not notified — never fabricated), so the
+    # arm abstains to the suspicious shape. Self-limiting in production: the
+    # ingest keeps Muhurat bars via the SAME MUHURAT_SESSIONS table, so a lake
+    # cannot legitimately carry a 2026 Muhurat bar until the entry lands.
+    from brutex.calendars.nse import has_muhurat_session
+
+    assert has_muhurat_session(date(2026, 11, 8)) is False
+    assert _hole_shape(date(2026, 11, 6), date(2026, 11, 8), None) == "extra_nonsession_bar"
 
 
 def test_hole_shape_prebuild_lag_requires_minute_presence() -> None:
@@ -2139,12 +2219,30 @@ def test_hole_shape_missing_session_arms() -> None:
 
 
 def test_hole_detail_texts_are_shape_honest() -> None:
-    # Muhurat: names the extra non-session bar, no re-pull advice.
-    muhurat = _hole_detail("extra_nonsession_bar", date(2024, 10, 31), date(2024, 11, 1))
+    # Muhurat (DEC-PREVSESSION-MUHURAT-COHERENCE-001): definitive — names
+    # found + expected, "no action needed", cross-references the engine skip
+    # and the /movers display-law flag; no re-pull advice.
+    muhurat = _hole_detail("muhurat_session_bar", date(2024, 10, 31), date(2024, 11, 1))
     assert "2024-11-01" in muhurat
     assert "2024-10-31" in muhurat
+    assert "Muhurat" in muhurat
+    assert "no action needed" in muhurat
+    assert "stage1a.muhurat_prev_day_anchor_skip" in muhurat
+    assert "prev_close_muhurat" in muhurat
     assert "re-pull" not in muhurat
-    # Prebuild lag: names the pipeline prebuild, no re-pull advice.
+    # Non-Muhurat extra bar: honestly SUSPICIOUS ("inspect") — the old Muhurat
+    # guess + the falsely-reassuring "no action is needed" are GONE.
+    stray = _hole_detail("extra_nonsession_bar", date(2024, 1, 5), date(2024, 1, 6))
+    assert "2024-01-06" in stray
+    assert "2024-01-05" in stray
+    assert "inspect" in stray
+    # The old "e.g. a Diwali Muhurat session" GUESS is gone — the shape now
+    # affirmatively EXCLUDES Muhurat ("not a known Muhurat session").
+    assert "Diwali" not in stray
+    assert "not a known Muhurat session" in stray
+    assert "no action" not in stray
+    assert "re-pull" not in stray
+    # Prebuild lag: names the pipeline prebuild, no re-pull advice (verbatim).
     lag = _hole_detail("prebuild_lag", date(2024, 1, 3), date(2024, 1, 2))
     assert "2024-01-03" in lag
     assert "prebuild" in lag
