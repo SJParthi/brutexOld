@@ -26,6 +26,10 @@ pytest.importorskip("polars")
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 
+
+pytestmark = pytest.mark.usefixtures("_inert_sweep_logging_guard")  # see tests/conftest.py
+
+
 _IST = timezone(timedelta(hours=5, minutes=30))
 _EXCHANGE = "NSE"
 _SEGMENT = "INDEX"

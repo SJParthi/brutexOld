@@ -191,6 +191,7 @@ from brutex.engine.sweep_supervisor import (
     tuple_label,
 )
 from brutex.models import BruteXError
+from brutex.observability.logging import configure_process_logging_best_effort
 from brutex.orchestrator.audit import BufferedAuditCollector, BufferedAuditRecord
 
 if TYPE_CHECKING:
@@ -826,7 +827,7 @@ _WORKER_CTX: _WorkerContext | None = None
 
 
 def _worker_init(ctx: _WorkerContext) -> None:
-    """Pool ``initializer``: pin single-threaded numerics + stash the context.
+    """Pool ``initializer``: pin numerics + bound worker logging + stash the context.
 
     DETERMINISM PIN (DEC-MULTICORE-SWEEP-PHASE1-001, design §3.3): one Python
     process per core already gives the parallelism; nested BLAS / rayon / polars
@@ -845,6 +846,15 @@ def _worker_init(ctx: _WorkerContext) -> None:
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["RAYON_NUM_THREADS"] = "1"
     os.environ["POLARS_MAX_THREADS"] = "1"
+    # LOG-VOLUME GUARD (DEC-SWEEP-LOG-VOLUME-GUARD-001, R4 fold): a SPAWN
+    # worker starts from a CLEAN interpreter — the parent's structlog config
+    # is NOT inherited — and the per-trade ``trade_sim.entry``/``exit`` DEBUG
+    # events fire INSIDE the worker onto the inherited stderr fd. Bound the
+    # worker's own sink exactly like the CLI dispatch bounds the parent
+    # (INFO default; ``$BRUTEX_LOG_LEVEL`` propagates to spawn children via
+    # the environment). Best-effort by contract: the helper NEVER raises, so
+    # a logging-config failure cannot break the worker.
+    configure_process_logging_best_effort()
     global _WORKER_CTX  # noqa: PLW0603 — set-once per worker process (see the module note)
     _WORKER_CTX = ctx
 
