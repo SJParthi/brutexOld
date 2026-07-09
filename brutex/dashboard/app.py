@@ -251,6 +251,15 @@ from brutex.dashboard.sweep_runner import (
     run_sweep_from_request,
     sweep_progress_file,
 )
+from brutex.dashboard.sweep_temporal_view import (
+    TEMPORAL_HORIZONS,
+    build_sidecar_index,
+    is_valid_run_id,
+    sidecar_horizon_payload,
+    stamp_stat_token,
+    stored_horizon_payload,
+    sweep_runs_token,
+)
 from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revision
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
@@ -6378,6 +6387,131 @@ def build_app(
             # never reaches the wire — store_error_payload logs the full detail
             # server-side and serves only the stable generic markers.
             return JSONResponse(store_error_payload(exc))
+
+    @app.get("/api/v1/sweep/temporal")
+    async def api_sweep_temporal(
+        run_id: str = Query(min_length=1),
+        horizon: str = Query(min_length=1),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/temporal — one combo's per-period drill (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+
+        The ``/results`` row expander's ONE endpoint: ``quarter``/``month``
+        serve the row's STORED per-period columns (the rank-time finalist fold
+        — ``[n_trades, net_pnl_paisa, wins, max_dd_paisa]`` cells; ``quarter``
+        additionally derives the half-year n/pnl/wins roll-up server-side,
+        half-year max-DD honestly absent); ``day``/``week`` aggregate the
+        #1275 results-depth TRADES sidecars (IST exit-date / ISO-week
+        ``[n, pnl, wins]`` buckets — no DD at that granularity). The dashboard
+        NEVER re-simulates (graft 11): a pre-extension row reads ``status:
+        "absent"`` and missing depth artifacts read ``status: "awaiting"`` —
+        never a 500, never a fabricated bucket.
+
+        Validation is EAGER and disk-free: an unknown ``horizon`` or a
+        non-64-lowercase-hex ``run_id`` is a clean 400 with ZERO disk touches
+        (spy-pinned by test — a hostile run_id never reaches a path build).
+
+        Caching (the ``api_sweep_leaderboard`` two-level precedent, same
+        :class:`MoversSnapshotCache` instance): ``quarter``/``month`` key on
+        the ``sweep_results_revision`` content token (scan + run_id row index
+        computed once per revision — a repeat drill click is O(1)); ``day``/
+        ``week`` key on the ``sweep_runs`` tree token PLUS the served stamp's
+        own ``mtime_ns:size`` stat token (a rebuilt sidecar invalidates).
+        Honest envelope (Golden Rule #10): the FIRST ``day``/``week`` drill
+        per token pays the O(run dirs × stamps) index walk + an O(trades of
+        ONE combo) streamed fold; a probe outage (token ``None``) computes
+        fresh and caches NOTHING (never a stale serve, never a poisoned key).
+        """
+        if horizon not in TEMPORAL_HORIZONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown horizon {horizon!r} — one of: {', '.join(TEMPORAL_HORIZONS)}",
+            )
+        if not is_valid_run_id(run_id):
+            raise HTTPException(
+                status_code=400,
+                detail="run_id must be a 64-character lowercase-hex run identity",
+            )
+        store = _require_store()
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
+            # No lake root wired → the honest absent shape (never a 500),
+            # mirroring the /api/v1/sweep/leaderboard no-lake degrade.
+            return JSONResponse(
+                {
+                    "status": "absent",
+                    "run_id": run_id,
+                    "horizon": horizon,
+                    "detail": "no lake root wired — start the dashboard with a lake",
+                }
+            )
+        lake_root = store_path.parent
+
+        def _resolve() -> dict[str, Any]:
+            """Cache-or-compute the drill payload on a threadpool worker."""
+            if horizon in ("quarter", "month"):
+                rev = sweep_results_revision(lake_root)
+
+                def _fresh_stored() -> dict[str, Any]:
+                    scan = load_sweep_scan(lake_root)
+                    row = next((r for r in scan.rows if r.run_id == run_id), None)
+                    return stored_horizon_payload(row, run_id=run_id, horizon=horizon)
+
+                if rev is None:
+                    return _fresh_stored()
+                scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_scan|rev={rev}",
+                    generation=0,
+                    compute=lambda: load_sweep_scan(lake_root),
+                )
+                row_index = _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_temporal_index|rev={rev}",
+                    generation=0,
+                    compute=lambda: {r.run_id: r for r in scan.rows},
+                )
+                return _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_temporal|rev={rev}|run={run_id}|h={horizon}",
+                    generation=0,
+                    compute=lambda: stored_horizon_payload(
+                        row_index.get(run_id), run_id=run_id, horizon=horizon
+                    ),
+                )
+            token = sweep_runs_token(lake_root)
+            if token is None:
+                # No freshness signal → compute fresh, cache nothing (the
+                # lake_revision "None = no signal" doctrine).
+                return sidecar_horizon_payload(
+                    build_sidecar_index(lake_root).get(run_id), run_id=run_id, horizon=horizon
+                )
+            index = _sweep_leaderboard_cache.get_or_compute(
+                f"sweep_runs_index|tok={token}",
+                generation=0,
+                compute=lambda: build_sidecar_index(lake_root),
+            )
+            paths = index.get(run_id)
+            if paths is None:
+                return sidecar_horizon_payload(None, run_id=run_id, horizon=horizon)
+            stamp_tok = stamp_stat_token(paths)
+            return _sweep_leaderboard_cache.get_or_compute(
+                f"sweep_temporal|tok={token}|stamp={stamp_tok}|run={run_id}|h={horizon}",
+                generation=0,
+                compute=lambda: sidecar_horizon_payload(paths, run_id=run_id, horizon=horizon),
+            )
+
+        try:
+            return JSONResponse(await run_in_threadpool(_resolve))
+        except ResultsStoreError as exc:
+            # The C3 degrade posture, endpoint-shaped: store_error_payload logs
+            # the full detail server-side; only its stable sanitized marker
+            # reaches the wire (never str(exc), never a 500).
+            degraded = store_error_payload(exc)
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "run_id": run_id,
+                    "horizon": horizon,
+                    "detail": degraded["error"],
+                }
+            )
 
     # ── One-click artifact routes (DEC-OPERATOR-PAGE-REAL-001) ──────────
     # The ONE integration-adapter surface over the sweep-oneclick artifact

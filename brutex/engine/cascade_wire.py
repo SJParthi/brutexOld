@@ -1640,6 +1640,152 @@ def load_manifest(results_root: Path) -> CascadeManifest:
     return manifest_from_json(path.read_bytes())
 
 
+# ── /results cascade-verdict join (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) ─────────
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictMarker:
+    """One run_id's cascade verdict projected for the /results join.
+
+    Homed HERE — the module that owns :func:`report_path` + the report format —
+    per the P2-seam law: the dashboard view only imports + folds by ``run_id``,
+    it never re-derives verdict semantics. ``rejected_at`` carries the report's
+    RAW stage token (a :class:`brutex.metrics.cascade.FilterStage` ``.value``,
+    e.g. ``"walk_forward"``) or ``None`` for a pass. ``provisional`` is the
+    R2-SR-F4 pool-N-deflated flag — a provisional pass must never render as
+    proven. ``ambiguous=True`` marks a run_id that appeared in MORE THAN ONE
+    group with CONFLICTING verdicts — the join serves a loud ``?``, never a
+    coin-flip chip (Golden Rule #1).
+    """
+
+    passed: bool
+    rejected_at: str | None
+    provisional: bool
+    ambiguous: bool = False
+
+
+#: The single conflicting-duplicate marker (see :class:`VerdictMarker`).
+AMBIGUOUS_MARKER: Final[VerdictMarker] = VerdictMarker(
+    passed=False, rejected_at=None, provisional=False, ambiguous=True
+)
+
+
+def _verdict_marker_of(entry: object) -> tuple[str, VerdictMarker]:
+    """Parse ONE report verdict object into ``(candidate_id, marker)``.
+
+    Raises :class:`ValueError` on any shape violation — the caller folds every
+    such violation into the corrupt-report degrade (empty map + one WARN).
+    ``provisional`` defaults ``False`` when ABSENT (a pre-R2-SR-F4 report — the
+    additive-at-version-1 law above).
+    """
+    if not isinstance(entry, dict):
+        raise ValueError("verdict entry is not a JSON object")
+    candidate = entry.get("candidate_id")
+    passed = entry.get("passed")
+    rejected_at = entry.get("rejected_at")
+    provisional = entry.get("provisional", False)
+    if (
+        not isinstance(candidate, str)
+        or not candidate
+        or not isinstance(passed, bool)
+        or not (rejected_at is None or isinstance(rejected_at, str))
+        or not isinstance(provisional, bool)
+    ):
+        raise ValueError(f"malformed verdict entry (candidate_id={candidate!r})")
+    return candidate, VerdictMarker(passed=passed, rejected_at=rejected_at, provisional=provisional)
+
+
+def _parse_verdict_markers(payload: object) -> dict[str, VerdictMarker]:
+    """Fold a parsed report payload into the ``run_id → VerdictMarker`` map.
+
+    A duplicate ``candidate_id`` across groups with the IDENTICAL verdict keeps
+    the marker (run identity is content-addressed — the same combo judged in
+    two grids legitimately repeats); a CONFLICTING duplicate collapses to
+    :data:`AMBIGUOUS_MARKER` so the join can never serve a wrong chip.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("cascade report root is not a JSON object")
+    groups = payload.get("groups")
+    if not isinstance(groups, list):
+        raise ValueError("cascade report has no 'groups' list")
+    markers: dict[str, VerdictMarker] = {}
+    conflicts = 0
+    for group in groups:
+        if not isinstance(group, dict):
+            raise ValueError("cascade report group is not a JSON object")
+        report = group.get("report")
+        if not isinstance(report, dict):
+            raise ValueError("cascade report group has no 'report' object")
+        verdicts = report.get("verdicts")
+        if not isinstance(verdicts, list):
+            raise ValueError("cascade report group has no 'verdicts' list")
+        for entry in verdicts:
+            candidate, marker = _verdict_marker_of(entry)
+            prior = markers.get(candidate)
+            if prior is None:
+                markers[candidate] = marker
+            elif prior != marker:
+                markers[candidate] = AMBIGUOUS_MARKER
+                conflicts += 1
+    if conflicts:
+        _LOG.warning("cascade_wire.verdict_markers_ambiguous", conflicts=conflicts)
+    return markers
+
+
+def report_group_count(path: Path) -> int | None:
+    """Return the report's group count for the /results envelope, or ``None``.
+
+    ``None`` = absent / unreadable / not shaped like a report — deliberately
+    SILENT: :func:`load_verdict_markers` (always called beside this by the one
+    consumer, ``sweep_results_view.load_sweep_scan``) owns the degrade logging,
+    so a corrupt report warns exactly ONCE per scan, never twice.
+    """
+    try:
+        payload = json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    groups = payload.get("groups") if isinstance(payload, dict) else None
+    return len(groups) if isinstance(groups, list) else None
+
+
+def load_verdict_markers(path: Path) -> dict[str, VerdictMarker]:
+    """Load the ``run_id → VerdictMarker`` join map from a cascade report file.
+
+    The /results verdict-join loader (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, Q4).
+    Degrade posture (the C3 law — never a 500, never a fabricated verdict):
+
+    - ABSENT report (no cascade run yet — the normal state on a fresh lake) ⇒
+      empty map, ONE ``debug`` event (deliberately below WARN: absence is
+      first-class, the view's envelope carries ``present=false`` honestly).
+    - CORRUPT / unreadable report (bad JSON, wrong shape, I/O fault) ⇒ empty
+      map + ONE ``cascade_wire.verdict_markers_unreadable`` WARN naming the
+      path — all chips render ``—``, never a wrong verdict.
+    """
+    try:
+        raw = path.read_bytes()
+    except (FileNotFoundError, NotADirectoryError):
+        _LOG.debug("cascade_wire.verdict_markers_absent", path=str(path))
+        return {}
+    except OSError as exc:
+        _LOG.warning(
+            "cascade_wire.verdict_markers_unreadable",
+            path=str(path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return {}
+    try:
+        return _parse_verdict_markers(json.loads(raw))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        _LOG.warning(
+            "cascade_wire.verdict_markers_unreadable",
+            path=str(path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return {}
+
+
 # ── End-to-end (auto path + manual path) ──────────────────────────────────────
 
 
@@ -1828,6 +1974,7 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
 
 
 __all__ = [
+    "AMBIGUOUS_MARKER",
     "CASCADE_DIRNAME",
     "MANIFEST_FILENAME",
     "MANIFEST_VERSION",
@@ -1841,6 +1988,7 @@ __all__ = [
     "LeaderboardTrialsRecord",
     "Stage3CellRecord",
     "Stage3ManifestRecord",
+    "VerdictMarker",
     "build_candidate_input",
     "build_leaderboard_trials",
     "candidates_for_spec",
@@ -1849,9 +1997,11 @@ __all__ = [
     "cascade_config_to_dict",
     "load_bars_for_manifest",
     "load_manifest",
+    "load_verdict_markers",
     "manifest_from_json",
     "manifest_path",
     "manifest_to_json",
+    "report_group_count",
     "report_path",
     "run_and_write_from_manifest",
     "run_and_write_from_specs",

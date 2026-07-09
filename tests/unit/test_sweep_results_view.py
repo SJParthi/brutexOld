@@ -305,6 +305,10 @@ def test_to_dict_shape(tmp_path: Path) -> None:
         "mixed_snapshot_eras",
         "run_id_conflicts",
         "rows",
+        # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (graft 9): the two always-present
+        # additive envelope keys — a conscious pin update, not a drift.
+        "temporal_coverage",
+        "cascade_report",
     }
     assert isinstance(payload["rows"], list)
     assert isinstance(payload["instruments"], list)
@@ -435,7 +439,15 @@ class TestSnapshotEraHonesty:
         era = "a" * 64
         _write_sweep_start_audit(tmp_path, [_start_payload(snapshot=era)])
         payload = build_sweep_leaderboard(tmp_path).to_dict()
-        new_top_level = {"snapshot_hashes", "mixed_snapshot_eras", "run_id_conflicts"}
+        new_top_level = {
+            "snapshot_hashes",
+            "mixed_snapshot_eras",
+            "run_id_conflicts",
+            # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 additive envelope keys
+            # (their own values pinned in test_sweep_results_view_temporal.py).
+            "temporal_coverage",
+            "cascade_report",
+        }
         legacy = {k: v for k, v in payload.items() if k not in new_top_level}
         for row in legacy["rows"]:
             row.pop("snapshot_era")
