@@ -705,6 +705,11 @@ def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
     registry = _registry(tmp_path)
     monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
     coverage = _CoverageSink()
+    # Shrink the deadline only ONCE the store is open + the wedge is installed —
+    # never during the open itself, whose healthy connect/DDL would otherwise
+    # race the shrink on a loaded runner (the test_metadata_pull hazard class,
+    # CI run 28972139338).
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
     proxy = _RegistryGateConn(registry._conn, hang_on="INSERT OR REPLACE INTO expiries")
     registry._conn = proxy
     start = time.monotonic()
@@ -750,6 +755,11 @@ def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
         if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang
             pytest.fail("registry did not self-heal within the watchdog bound")
         time.sleep(0.005)
+    # The 0.2 s shrink exists ONLY for the run-1 wedge breach — the HEALED
+    # recovery pull must run under the REAL deadline, or a healthy-but-slow
+    # DuckDB write on a loaded runner falsely re-defers (the exact
+    # test_metadata_pull failure of CI run 28972139338).
+    monkeypatch.delenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", raising=False)
     sdk2 = _nifty_sdk()
     sink2 = _RecordingSink()
     report2 = _run(

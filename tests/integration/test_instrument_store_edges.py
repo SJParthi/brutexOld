@@ -1061,11 +1061,9 @@ class TestCoverageWriteDeadline:
             # next execute drops the stale hold BEFORE the wedge raise.
             stale_view = s.connection
             stale_view.execute("SELECT 1")
-            # De-flake: arm the 0.2 s wedge deadline only AT wedge-install time —
-            # the store open + the healthy prior write above must run under the
-            # generous default (a real ms-scale write on a loaded CI runner could
-            # otherwise spuriously breach 0.2 s). guard.run re-resolves the env
-            # per write batch, so the wedged write below still sees 0.2 s.
+            # Shrink the deadline only AFTER the open + the healthy prior write —
+            # a healthy DuckDB open/DDL/write under a 0.2 s shrink races runner
+            # load (the test_metadata_pull hazard class, CI run 28972139338).
             monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
             proxy = _CoverageGateConn(s._conn)
             s._conn = proxy
@@ -1150,10 +1148,10 @@ class TestCoverageWriteDeadline:
             # store resumes — prior row intact, deferred row present, reads work
             # (incl. the store-wide wrapper check self-healing off the latch).
             _wait_until_healed(s)
-            # Restore the generous default deadline — the 0.2 s wedge deadline was
-            # for the breach ONLY; a loaded CI runner must never spuriously defer
-            # the post-heal write.
-            monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
+            # Healed ⇒ back on the REAL deadline: the healthy recovery writes
+            # below must never race the 0.2 s wedge shrink on a loaded runner
+            # (the test_metadata_pull hazard class, CI run 28972139338).
+            monkeypatch.delenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", raising=False)
             assert s.get_meta("schema_version") == str(SCHEMA_VERSION)
             assert s.schema_version == SCHEMA_VERSION
             # The split read view self-heals off the same latch (fix round 4).
@@ -1170,10 +1168,9 @@ class TestCoverageWriteDeadline:
     def test_wedged_close_skips_both_raw_closes_and_warns(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # De-flake: open the store BEFORE arming the 0.2 s wedge deadline
-        # (uniform with the sibling wedge sites; guard.run re-resolves the env
-        # per write batch, so the wedged write below still sees 0.2 s).
         s = InstrumentStore.open(tmp_path / "db")
+        # Shrink only AFTER the open — a healthy open/DDL under a 0.2 s shrink
+        # races runner load (the test_metadata_pull hazard class).
         monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
         proxy = _CoverageGateConn(s._conn)
         s._conn = proxy

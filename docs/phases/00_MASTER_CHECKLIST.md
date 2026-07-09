@@ -59,7 +59,7 @@ The original master checklist said "Phase 1 — Not started." That was 11 days s
 | Dashboard skeleton | `brutex/dashboard/app.py` | ✅ DONE |
 | Bootstrap script + env-var registry | `scripts/setup/bootstrap.sh` + `docs/runbooks/ENV_VARS.md` | ✅ DONE |
 | SessionStart hook | `.claude/hooks/session-start.sh` | ✅ DONE |
-| M4 Pro absolute throughput stub | `tests/bench/test_throughput_absolute.py` + `bench-m4pro.yml` | ✅ DONE (gate dormant until runner registered) |
+| M4 Pro absolute throughput stub | `tests/bench/test_throughput_absolute.py` + `bench-m4pro.yml` | ✅ DONE (runner LIVE 2026-07-07 — the gate executes on that workflow's push triggers; `bench-m4pro.yml` header) |
 
 **Total Phase-1 progress: ~40% verified done (scaffolding), the remaining ~60% is verification-pyramid tests + invariants P-01..P-26 (some implemented, full set not enumerated).**
 

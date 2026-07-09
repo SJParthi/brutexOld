@@ -694,9 +694,10 @@ class TestStoreWriteDeadline:
             store.upsert_expiry("NSE", "NIFTY", _EXP, run_id="r1", fetched_at=_NOW)
         proxy.gate.set()  # the volume recovers
         _wait_until(lambda: not store._write_guard.wedged)
-        # Restore the generous default deadline — the 0.2 s wedge deadline was for
-        # the breach ONLY; a loaded CI runner must never spuriously defer the retry.
-        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
+        # Healed ⇒ back on the REAL deadline: the healthy retry below must never
+        # race the 0.2 s wedge shrink on a loaded runner (the test_metadata_pull
+        # hazard class, CI run 28972139338).
+        monkeypatch.delenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", raising=False)
         # The zombie's late keyed INSERT OR REPLACE landed harmlessly; the retry
         # is idempotent on the PK — exactly one row, reads work again.
         store.upsert_expiry("NSE", "NIFTY", _EXP, run_id="r2", fetched_at=_NOW)

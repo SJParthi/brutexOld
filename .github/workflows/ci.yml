@@ -1768,7 +1768,10 @@ jobs:
             echo "(brutex.strategies.runner test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_option_parquet_writer.py" > /dev/null; then
-            pytest --cov=brutex.data.option_parquet_writer --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_parquet_writer.py
+            # DEC-LAKE-STATS-MANIFEST-001: the _record_option_stats hook is
+            # covered by tests/unit/test_option_parquet_writer_stats_manifest.py, which
+            # MUST run alongside the base suite for the 100% gate to hold.
+            pytest --cov=brutex.data.option_parquet_writer --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_parquet_writer.py tests/unit/test_option_parquet_writer_stats_manifest.py
           else
             echo "(brutex.data.option_parquet_writer test file not present yet — gate inactive)"
           fi
@@ -1960,8 +1963,13 @@ jobs:
           # covered by tests/unit/test_dashboard_db_view_ledger_delta_fold.py
           # + tests/unit/test_dashboard_db_view_ledger_read_cache.py, which
           # MUST join this gate (without them the module reads 99.34%).
+          # DEC-LAKE-STATS-MANIFEST-001: the stats-manifest read integration
+          # (manifest-first totals/spans + file-list-pruned pages + the
+          # read-side seed) is covered by
+          # tests/unit/test_dashboard_db_stats_manifest.py, which MUST also
+          # join this gate.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
