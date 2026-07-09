@@ -1773,6 +1773,38 @@ def test_uncancellable_run_refuses_honestly() -> None:
     assert seen == {"req": True}
 
 
+def test_request_cancel_verdict_names_every_refusal_class() -> None:
+    """The verdict twin returns ``(cancelling, reason)`` over a stable vocabulary.
+
+    Fix round 4 (fails-before at the wire): the bool-only ``request_cancel``
+    conflated "idle" with "running-but-uncancellable", so the pull-cancel route
+    rendered "No running pull to cancel" above a visibly-running metadata pull.
+    Reasons: ``"idle"`` / ``"wrong_kind"`` / ``"uncancellable"`` / ``None`` on
+    success — and the bool wrapper stays exactly ``verdict[0]``.
+    """
+    job = _job()
+    # Idle — nothing to cancel.
+    assert job.request_cancel_verdict() == (False, "idle")
+    observed: dict[str, tuple[bool, str | None]] = {}
+
+    def work(on_progress: ProgressHook) -> None:
+        observed["wrong_kind"] = job.request_cancel_verdict(expected_kind=pull_jobs.JOB_KIND_PULL)
+        observed["success"] = job.request_cancel_verdict(expected_kind=pull_jobs.JOB_KIND_SWEEP)
+
+    assert job.start(work, total=1, job_kind=pull_jobs.JOB_KIND_SWEEP) is True
+    assert observed == {"wrong_kind": (False, "wrong_kind"), "success": (True, None)}
+
+    seen: dict[str, tuple[bool, str | None]] = {}
+
+    def work2(on_progress: ProgressHook) -> None:
+        seen["verdict"] = job.request_cancel_verdict()
+        seen["token"] = (job.cancel_requested(), None)
+
+    assert job.start(work2, total=1, cancellable=False) is True
+    # Uncancellable — refused honestly WITHOUT setting the token.
+    assert seen == {"verdict": (False, "uncancellable"), "token": (False, None)}
+
+
 def test_is_pull_halt_excludes_pull_cancelled() -> None:
     """The DELIBERATE ``PullCancelled`` carve-out is pinned (DEC-JOB-COOPERATIVE-CANCEL-001).
 

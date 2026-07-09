@@ -6322,6 +6322,31 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         )
     _should_stop = make_cancel_probe(out_root)
 
+    def _tail_cancelled(next_pass: str) -> bool:
+        """Probe the durable cancel sidecar BETWEEN the post-grid passes.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 fix round 4: the GRID consults the probe
+        at every tuple boundary, but the post-grid tail (options-sim → cascade
+        → results-depth) previously ran to completion regardless — a Stop
+        acked after the grid finished was blind for the whole tail. Probed
+        once BEFORE each pass: on a request the consumed sidecar is cleared,
+        the skip is printed loudly, and the caller exits
+        ``EXIT_SWEEP_CANCELLED`` — the grid results are already durable, the
+        sweep twin of the pull side's cancelled-tail withholding (fix round 2
+        item (h)). A pass ALREADY RUNNING is never interrupted (cooperative,
+        Golden Rule #10), and a request arriving after the LAST probe is
+        cleared at normal run end (the orphan-sidecar sweep below).
+        """
+        if not _should_stop():
+            return False
+        clear_cancel(out_root)
+        print(
+            "[brutex] sweep-all: CANCELLED at operator request — the grid results "
+            f"are already durable; the {next_pass} pass and every later post-grid "
+            "pass were skipped. Re-run this command to rebuild the skipped passes."
+        )
+        return True
+
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): refuse
     # an out-of-engine-scope launch BEFORE the catalog reconcile + bar load —
@@ -6822,6 +6847,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         )
         print(f"[brutex] live progress: {progress_path}  ·  checkpoint: {checkpoint_path}")
 
+        # ── COOPERATIVE cancel probe: grid/stage3 → options-sim boundary ──
+        # (fix round 4 — the post-grid tail was previously cancel-blind while
+        # the /api/v1/sweep/cancel route kept acking {"cancelling": true}.)
+        if _tail_cancelled("options-sim"):
+            return EXIT_SWEEP_CANCELLED
+
         # Automatic options-sim on the winners (DEC-OPTIONS-EXECUTOR-001), zero-touch +
         # non-fatal: skips cleanly when there is no rolling-option lake or a replay fails.
         if options_sim:
@@ -6837,6 +6868,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 broker=options_broker,
                 top=top,
             )
+
+        # ── COOPERATIVE cancel probe: options-sim → cascade boundary (fix round 4) ──
+        if _tail_cancelled("cascade"):
+            return EXIT_SWEEP_CANCELLED
 
         # ── AUTOMATIC Stage-4 cascade on the top-K winners (DEC-CASCADE-WIRE-001) ──
         # Re-build the cascade inputs from each tuple's persisted finalists + the
@@ -6900,6 +6935,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
                 f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
             )
+        # ── COOPERATIVE cancel probe: cascade → results-depth boundary (fix round 4) ──
+        if _tail_cancelled("results-depth"):
+            return EXIT_SWEEP_CANCELLED
+
         # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
         # The ONE run-end results-depth block — trade capture → aggregates →
         # sidecar trio → baselines → the global top-100 artifact — strictly
@@ -6951,6 +6990,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 "pass was SKIPPED (no trade sidecars / baselines / top-100 refresh this run)"
             )
 
+        # Orphan-sidecar sweep at NORMAL run end (fix round 4): a cancel request
+        # arriving AFTER the last between-pass probe is unobservable by this run
+        # (cooperative — a running pass is never interrupted); previously it
+        # orphaned until the NEXT launch's stale-sidecar clear, where a fresh run
+        # would report clearing "a STALE cancel request" that was really a late
+        # one. Clear it here, loudly — the run genuinely completed.
+        if clear_cancel(out_root):
+            print(
+                "[brutex] sweep-all: a cancel request arrived after the LAST "
+                "post-grid probe — too late to observe; the run completed normally "
+                "and the orphan sidecar was cleared (it can never cancel a future run)."
+            )
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
         return sweep_all_exit_code(result.tuples_failed)

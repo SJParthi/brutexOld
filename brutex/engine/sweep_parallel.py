@@ -1097,7 +1097,11 @@ class ParallelGridDriver:
         on_progress
             Optional PARENT-side hook receiving the fresh
             :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` after the
-            ``start`` tick, every apply-loop advance, and each terminal
+            ``start`` tick, every NON-SKIP apply-loop advance (a contiguous run
+            of parent-synchronous resume/cache/quarantined-prior skips is
+            BATCHED into one cumulative publish per drain — fix round 4, the
+            sequential resume batch's parallel twin; a resumed prefix never
+            storms one fsync'd bridge write per skipped tuple), and each terminal
             (``finish`` / ``cancelled`` / ``fail``) — the sequential
             ``run_supervised_grid`` seam's parallel twin (the CLI wires
             :func:`~brutex.engine.sweep_supervisor.publish_progress` here, so the
@@ -1569,17 +1573,36 @@ class ParallelGridDriver:
         Returns ``True`` if at least one outcome was applied (advancing progress
         for the stall clock). This is the single point where ALL ordered state is
         mutated, in canonical enumeration order.
+
+        PUBLISH BATCHING (fix round 4 — the resume/cache-skip storm): a parent-
+        synchronous SKIP apply (resume / cache / quarantined_prior — no worker
+        involved, applied in a tight loop) defers its bridge publish; after the
+        drain, a trailing run of deferred skips is flushed as ONE publish of the
+        cumulative snapshot. A resumed/cached prefix therefore costs O(1)
+        fsync'd bridge writes per drain — the parallel twin of the sequential
+        arm's explicit single-publish resume batch — instead of one per skipped
+        tuple. Non-skip applies (done / no_bars / failed / pool_broken) still
+        publish immediately, and their cumulative snapshot subsumes any earlier
+        deferred skips in the same drain.
         """
         applied = False
+        publish_deferred = False
         while self._heap and self._heap[0].index == self._next_apply:
             outcome = heapq.heappop(self._heap)
-            self._apply(outcome, acc)
+            publish_deferred = not self._apply(outcome, acc)
             self._next_apply += 1
             applied = True
+        if publish_deferred:
+            self._publish_progress()
         return applied
 
-    def _apply(self, outcome: _Outcome, acc: _Accumulator) -> None:
+    def _apply(self, outcome: _Outcome, acc: _Accumulator) -> bool:
         """Apply ONE enumeration slot's ordered state (audit + checkpoint + cache).
+
+        Returns ``True`` iff the apply PUBLISHED its progress snapshot; a
+        parent-synchronous skip (resume / cache / quarantined_prior) ticks
+        progress but DEFERS the publish to :meth:`_apply_ready_prefix`'s
+        end-of-drain flush (fix round 4 — see its docstring).
 
         Mirrors, branch-for-branch, the body of the sequential
         ``run_supervised_grid`` loop — but the CHECKPOINT advance is guarded by a
@@ -1595,25 +1618,25 @@ class ParallelGridDriver:
 
         if outcome.kind == "resume":
             acc.skipped_resume += 1
-            self._advance(current=label, survived=False, skipped=True)
+            self._advance(current=label, survived=False, skipped=True, publish=False)
             self._guards.audit.append(
                 action=SUPERVISOR_ACTION_TUPLE_RESUME,
                 subject=self._subject,
                 payload={"index": index, "tuple": label},
             )
-            return
+            return False
 
         if outcome.kind == "cache":
             acc.skipped_cache += 1
             if not acc.had_failure:
                 self._guards.checkpoint.record(index)
-            self._advance(current=label, survived=False, skipped=True)
+            self._advance(current=label, survived=False, skipped=True, publish=False)
             self._guards.audit.append(
                 action=SUPERVISOR_ACTION_TUPLE_CACHE,
                 subject=self._subject,
                 payload={"index": index, "tuple": label},
             )
-            return
+            return False
 
         if outcome.kind == "quarantined_prior":
             # A tuple a PRIOR run's broken pool quarantined (the durable sidecar).
@@ -1626,7 +1649,7 @@ class ParallelGridDriver:
             # next resume re-dispatches the tuple (nothing else marks it done).
             acc.tuples_quarantined_prior += 1
             acc.had_failure = True
-            self._advance(current=label, survived=False, skipped=True)
+            self._advance(current=label, survived=False, skipped=True, publish=False)
             self._guards.audit.append(
                 action=SUPERVISOR_ACTION_TUPLE_QUARANTINED_PRIOR,
                 subject=self._subject,
@@ -1643,7 +1666,7 @@ class ParallelGridDriver:
                 tuple=label,
                 sidecar=str(quarantine_sidecar_path(self._root)),
             )
-            return
+            return False
 
         if outcome.kind == "pool_broken":
             # A worker OOM/crash poisoned the pool while this tuple was in flight.
@@ -1675,7 +1698,7 @@ class ParallelGridDriver:
                 tuple=label,
                 reason=outcome.failed_error,
             )
-            return
+            return True
 
         # A worker outcome — replay its buffered ingest-audit records into the
         # real chain FIRST (in enumeration order), then apply the supervisor line
@@ -1698,7 +1721,7 @@ class ParallelGridDriver:
                 tuple=label,
                 error=outcome.failed_error,
             )
-            return
+            return True
 
         if outcome.kind == "no_bars":
             acc.tuples_skipped_no_bars += 1
@@ -1710,7 +1733,7 @@ class ParallelGridDriver:
                 subject=self._subject,
                 payload={"index": index, "tuple": label},
             )
-            return
+            return True
 
         # The remaining branch is a successful ("done") tuple. By construction of
         # ``_result_to_outcome`` a "done" outcome ALWAYS carries a summary (that is
@@ -1753,6 +1776,7 @@ class ParallelGridDriver:
                 "store_content_hash": summary.store_content_hash,
             },
         )
+        return True
 
     def _quarantine_broken_pool(
         self,
@@ -1896,10 +1920,18 @@ class ParallelGridDriver:
                 action=record.action, subject=record.subject, payload=record.payload
             )
 
-    def _advance(self, *, current: str, survived: bool, skipped: bool) -> None:
-        """Tick progress once + stream the fresh snapshot (parent-only mutation)."""
+    def _advance(
+        self, *, current: str, survived: bool, skipped: bool, publish: bool = True
+    ) -> None:
+        """Tick progress once + stream the fresh snapshot (parent-only mutation).
+
+        ``publish=False`` (fix round 4) ticks the in-memory counters ONLY — the
+        parent-synchronous skip branches defer their fsync'd bridge write to
+        :meth:`_apply_ready_prefix`'s end-of-drain flush (see its docstring).
+        """
         self._guards.progress.advance(current=current, survived=survived, skipped=skipped)
-        self._publish_progress()
+        if publish:
+            self._publish_progress()
 
     def _publish_progress(self) -> None:
         """Stream the current progress snapshot to ``on_progress`` (no-op when unwired)."""
@@ -2052,8 +2084,9 @@ def run_parallel_grid(
     :func:`~brutex.engine.sweep_supervisor.publish_progress` so the
     cross-process ``/api/v1/sweep-progress`` file bridge (and with it the
     dashboard's Stop button) is live on the PRODUCTION parallel path (fired on
-    start / every apply / cancelled / finish / fail; ``None`` = no publish,
-    byte-identical).
+    start / every non-skip apply — a contiguous resume/cache/quarantined-prior
+    skip run batches into ONE publish per drain, fix round 4 — / cancelled /
+    finish / fail; ``None`` = no publish, byte-identical).
 
     Raises
     ------

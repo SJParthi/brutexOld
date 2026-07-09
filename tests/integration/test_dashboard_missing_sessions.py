@@ -190,6 +190,20 @@ class TestMissingSessionsTemplate:
         drill_js = html.split("Missing-session gap drill")[-1]
         assert "innerHTML" not in drill_js.split("</script>")[0]
 
+    def test_drill_load_carries_the_inflight_guard(self, store: InstrumentStore) -> None:
+        """The Enter-key path shares the click path's in-flight gate (fix round 4).
+
+        Fails-before (honest substring-presence pin — the repo's no-headless-JS
+        envelope): the keydown handler called ``loadMissing()`` unconditionally
+        while ``loadMissing`` only DISABLED the button, so a second Enter
+        mid-load forked a concurrent fetch whose late response repainted the
+        panel with the OLD filter's rows (last-writer-wins). ``loadMissing``
+        now returns immediately while a load is in flight.
+        """
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        html = client.get("/coverage/spot").text
+        assert "if (drillBtn.disabled) return;" in html
+
 
 class TestMissingSessionsMemoisation:
     """The route's 'memoised per write-generation' claim gets TEETH (review fold).

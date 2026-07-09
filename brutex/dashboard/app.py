@@ -1666,8 +1666,11 @@ def build_app(
     # own scan) — HONEST: it is NOT shared with the /coverage SPOT `_summary_cache` entry
     # (whose rows carry no session dates), so an operator using both surfaces pays TWO
     # full O(bars) spot scans per write-generation, one each. Memoised here per
-    # write-generation so a repeat drill within one generation is an O(1) handoff and a
-    # pull re-derives it; the resident cost is the per-dataset distinct-date set.
+    # write-generation — HONEST scope (fix round 4, Golden Rule #10): only the O(bars)
+    # SCAN rows are memoised; a repeat drill re-uses them in O(1) but re-pays the
+    # O(datasets × sessions) set-difference + payload build per request (the filters +
+    # range override vary per request, so the built payload is deliberately not cached).
+    # A pull re-derives the scan; the resident cost is the per-dataset distinct-date set.
     _missing_sessions_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache()
     _mapping_integrity_cache = MoversSnapshotCache()
@@ -4623,7 +4626,13 @@ def build_app(
         standalone metadata pull (``/universe/pull-expiries-contracts``) has NO
         cancel seam in its spine, so it starts ``cancellable=False`` and this
         route returns an honest ``{"cancelling": false}`` for it — never a
-        fabricated true the run could not observe. HONEST latency (Golden Rule
+        fabricated true the run could not observe. A refusal additionally
+        carries the ADDITIVE ``reason`` key (fix round 4 — the wire previously
+        conflated "idle" with "running-but-uncancellable", so the UI rendered
+        "No running pull to cancel" above a visibly-running metadata pull):
+        ``"idle"`` / ``"wrong_kind"`` / ``"uncancellable"`` — the label seam
+        ``universe.html`` renders distinctly; a successful ack omits it.
+        HONEST latency (Golden Rule
         #10): cooperative — WITHIN a fetch phase the stop lands at the window
         boundary: the in-flight window's fetch completes, the async
         pipeline's already-queued tail writes DRAIN (each bounded by the 90 s
@@ -4645,8 +4654,11 @@ def build_app(
         green; the durable ledger makes the next pull resume exactly the
         unsettled remainder.
         """
-        cancelling = _pull_job.request_cancel(expected_kind=JOB_KIND_PULL)
-        return JSONResponse({"cancelling": bool(cancelling)})
+        cancelling, reason = _pull_job.request_cancel_verdict(expected_kind=JOB_KIND_PULL)
+        payload: dict[str, object] = {"cancelling": bool(cancelling)}
+        if reason is not None:
+            payload["reason"] = reason
+        return JSONResponse(payload)
 
     @app.post("/api/v1/sweep/cancel")
     async def api_sweep_cancel() -> JSONResponse:
@@ -4681,8 +4693,18 @@ def build_app(
         running-check → sidecar-write sequence here can ack a JUST-SETTLED
         sweep with ``{"cancelling": true}`` (the orphan sidecar is then
         harmlessly cleared by the next launch). Remedy for both: press Stop
-        again once the run is visibly underway — the sidecar is probed at
-        EVERY tuple boundary, so a re-press always lands.
+        again once the run is visibly underway — DURING THE GRID the sidecar
+        is probed at EVERY tuple boundary, so a re-press always lands there.
+        POST-GRID TAIL scope (fix round 4 — Golden Rule #10): after the grid
+        completes, ``cmd_sweep_all`` probes the sidecar BETWEEN each remaining
+        pass (before options-sim, before the cascade, before results-depth) —
+        a Stop landing in the tail skips every later pass (the grid results
+        are already durable; re-run to rebuild the skipped passes) — but a
+        pass ALREADY RUNNING is never interrupted, and a request arriving
+        after the LAST probe is unobservable: the run completes normally and
+        clears the orphan sidecar at exit. A sidecar WRITE failure (ENOSPC /
+        read-only / wedged lake) is an honest ``{"cancelling": false,
+        "error": …}`` refusal, never a 500.
         """
         from brutex.dashboard.launch_button import read_launch_state, state_liveness
         from brutex.engine.sweep_cancel import request_cancel as request_sweep_cancel
@@ -4695,11 +4717,36 @@ def build_app(
         lake = lake_root.parent
         root = default_results_root(lake)
 
+        def _request(target_root: Path, *, source: str, target: str) -> dict[str, object]:
+            """Write the cancel sidecar; degrade a filesystem failure HONESTLY.
+
+            Fix round 4: ``request_cancel`` mkdirs the root + writes via the
+            guard-free ``atomic_write_simple`` (DEC-ATOMIC-WRITE-CONSOLIDATE-001
+            — raw ``OSError`` propagates), so an ENOSPC / read-only / wedged
+            lake previously 500'd the route at precisely the moment an operator
+            pressed Stop. One WARN + an actionable ``{"cancelling": false,
+            "error": …}`` refusal instead (the pull twin is lock-only and
+            cannot fail this way).
+            """
+            try:
+                request_sweep_cancel(target_root, source=source)
+            except OSError as exc:
+                _LOG.warning(
+                    "sweep_cancel.request_write_failed",
+                    root=str(target_root),
+                    source=source,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return {
+                    "cancelling": False,
+                    "error": f"cancel sidecar write failed: {type(exc).__name__}",
+                }
+            return {"cancelling": True, "target": target}
+
         def _cancel() -> dict[str, object]:
             """Resolve the running-sweep target + write the sidecar (threadpool)."""
             if _pull_job.running_job_kind == JOB_KIND_SWEEP:
-                request_sweep_cancel(root, source="route")
-                return {"cancelling": True, "target": "in-process"}
+                return _request(root, source="route", target="in-process")
             detached = read_launch_state(lake)
             if detached is not None and state_liveness(detached) == "running":
                 # Write the sidecar at the root the DETACHED run actually
@@ -4708,11 +4755,11 @@ def build_app(
                 # <lake>/sweeps; NOT the default root, which that run's
                 # cmd_sweep_all(out_root=…) would never stat (review fold —
                 # the fabricated-success class).
-                request_sweep_cancel(
+                return _request(
                     _detached_sweep_cancel_root(detached, lake, default=root),
                     source="route-detached",
+                    target="detached",
                 )
-                return {"cancelling": True, "target": "detached"}
             # THIRD arm (review fold — the false-refusal class): a DEFAULT-root
             # terminal `brutex sweep-all` (no in-process job, no launch state)
             # is visible ONLY through the progress FILE bridge — exactly the
@@ -4726,8 +4773,7 @@ def build_app(
             # own decayed view.
             bridge = read_progress(sweep_progress_file(root))
             if bridge.get("running") and not progress_bridge_stale(bridge):
-                request_sweep_cancel(root, source="route-bridge")
-                return {"cancelling": True, "target": "bridge"}
+                return _request(root, source="route-bridge", target="bridge")
             return {"cancelling": False}
 
         return JSONResponse(await run_in_threadpool(_cancel))

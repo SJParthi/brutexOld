@@ -1485,33 +1485,54 @@ class BackgroundPullJob:
     def request_cancel(self, *, expected_kind: str | None = None) -> bool:
         """Request a COOPERATIVE cancel of the RUNNING job — O(1), thread-safe.
 
+        The bool-only convenience wrapper over :meth:`request_cancel_verdict`
+        (every pre-existing caller/test keeps its exact contract); see that
+        method for the full semantics + the refusal-reason vocabulary.
+        """
+        cancelling, _reason = self.request_cancel_verdict(expected_kind=expected_kind)
+        return cancelling
+
+    def request_cancel_verdict(
+        self, *, expected_kind: str | None = None
+    ) -> tuple[bool, str | None]:
+        """Request a COOPERATIVE cancel; return ``(cancelling, refusal_reason)``.
+
         DEC-JOB-COOPERATIVE-CANCEL-001. Sets the CURRENT run's per-run cancel
         token so the work's ``should_stop`` probe (:meth:`cancel_requested`,
         captured by the route work closures and threaded to the pull spines'
         WINDOW boundary) reads ``True`` from the next boundary on. Returns
-        ``True`` iff a run was live to cancel; an idle job is a ``False``
-        no-op — a between-runs request can never pre-poison a future run (the
-        fresh-Event-per-start identity gate).
+        ``(True, None)`` iff a run was live to cancel; an idle job is a
+        ``(False, "idle")`` no-op — a between-runs request can never pre-poison
+        a future run (the fresh-Event-per-start identity gate).
+
+        The REASON (fix round 4 — the wire previously conflated "idle" with
+        "running-but-uncancellable", so the UI rendered "No running pull to
+        cancel" directly above a visibly-running metadata pull) is a stable
+        refusal vocabulary: ``"idle"`` (no run in flight), ``"wrong_kind"``
+        (a run of another kind holds the single-flight job), and
+        ``"uncancellable"`` (the RUNNING surface has no cancel seam — the
+        standalone metadata pull); ``None`` on success. Server-side behaviour
+        is byte-identical — this only NAMES the already-distinguished branch.
 
         *expected_kind* (review fold — the ``clear_meter(expected=)``
         DEC-RATE-METER-LIFECYCLE-001 precedent) makes the kind gate a
         COMPARE-AND-SET under the ONE lock hold: a non-``None`` value refuses
-        (``False``) unless the RUNNING job's kind matches, so a route can never
-        land its cancel on a job that transitioned kinds between a separate
-        kind read and the cancel (the check-then-act race the old two-lock
-        route sequence carried). A run started ``cancellable=False`` (a
-        no-cancel-seam surface — the standalone metadata pull) is ALSO refused
-        honestly: its work never observes the token, so setting it would
-        fabricate a ``cancelling: true``. HONEST latency (Golden Rule
+        (``"wrong_kind"``) unless the RUNNING job's kind matches, so a route
+        can never land its cancel on a job that transitioned kinds between a
+        separate kind read and the cancel (the check-then-act race the old
+        two-lock route sequence carried). A run started ``cancellable=False``
+        (a no-cancel-seam surface — the standalone metadata pull) is ALSO
+        refused honestly: its work never observes the token, so setting it
+        would fabricate a ``cancelling: true``. HONEST latency (Golden Rule
         #10): cooperative — the current window's fetch + durable write always
         complete first; a wedged worker ignores it (the WEDGED escalation
         stays that class's honest terminal).
         """
         with self._lock:
             if not self._running:
-                return False
+                return (False, "idle")
             if expected_kind is not None and self._job_kind != expected_kind:
-                return False
+                return (False, "wrong_kind")
             run_pull_id = self._pull_id
             job_kind = self._job_kind
             if not self._cancellable:
@@ -1526,14 +1547,14 @@ class BackgroundPullJob:
                 job_kind=job_kind,
                 note="the running surface has no cancel seam — refused honestly",
             )
-            return False
+            return (False, "uncancellable")
         _LOG.warning(
             "pull_job.cancel_requested",
             pull_id=run_pull_id,
             job_kind=job_kind,
             note="cooperative — the job stops at its next safe boundary",
         )
-        return True
+        return (True, None)
 
     def cancel_requested(self) -> bool:
         """``True`` iff a run is LIVE and the CURRENT run's cancel token is set — O(1).

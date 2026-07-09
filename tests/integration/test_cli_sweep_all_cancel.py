@@ -218,3 +218,81 @@ def test_parallel_run_publishes_the_progress_bridge(
     assert parsed["state"] == "done"
     assert parsed["running"] is False
     assert isinstance(parsed["wall_time"], float)
+
+
+def test_post_grid_cancel_skips_the_remaining_tail_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A Stop landing AFTER the grid is observed at the next post-grid boundary.
+
+    Fix round 4 (fails-before): the post-grid tail (options-sim → cascade →
+    results-depth) previously ran to completion regardless of the sidecar —
+    the route kept acking ``{"cancelling": true}`` while the run was blind for
+    the whole span. The sidecar is planted DURING stage3 (the real pass runs
+    first), so the boundary probe BEFORE options-sim fires: exit 7, the
+    consumed sidecar cleared, and the cascade pass (poisoned) never runs.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+    from brutex.engine import cascade_wire, stage3_wire
+
+    real_stage3 = stage3_wire.run_stage3_pass
+
+    def _stage3_then_cancel(*args: Any, **kwargs: Any) -> Any:
+        report = real_stage3(*args, **kwargs)
+        # The operator's Stop lands while the grid tail settles — AFTER the
+        # last tuple-boundary probe, BEFORE the options-sim boundary probe.
+        request_cancel(results_root, source="test-operator-post-grid")
+        return report
+
+    monkeypatch.setattr(stage3_wire, "run_stage3_pass", _stage3_then_cancel)
+
+    def _never_cascade(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a tail-cancelled sweep must SKIP the cascade pass")
+
+    monkeypatch.setattr(cascade_wire, "build_stage2_cascade_specs", _never_cascade)
+
+    rc = _sweep_all(lake_root, catalog_path, results_root)
+
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_SWEEP_CANCELLED == 7
+    assert "CANCELLED at operator request" in out
+    assert "grid results" in out and "already durable" in out
+    # The consumed request is cleared — a resume is never re-cancelled by it.
+    assert not cancel_sidecar_path(results_root).exists()
+    # The grid itself completed normally (the cancel hit only the tail).
+    assert "sweep-all done" in out
+
+
+def test_cancel_after_last_tail_probe_clears_orphan_sidecar_at_run_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A cancel arriving AFTER the last probe is unobservable — cleared at run end.
+
+    Fix round 4 (fails-before): the orphan sidecar previously survived until
+    the NEXT launch's stale-sidecar guard, where a fresh run reported clearing
+    "a STALE cancel request" that was really a late one. The sidecar is planted
+    inside the results-depth pass (the last post-grid pass, after the final
+    between-pass probe); the run completes normally (exit 0), clears the orphan
+    loudly, and the sidecar cannot cancel a future run.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+    def _depth_plants_cancel(**kwargs: Any) -> None:
+        # The Stop lands mid-results-depth — after the LAST between-pass probe.
+        request_cancel(results_root, source="test-operator-too-late")
+
+    monkeypatch.setattr(cli, "_run_results_depth_adapter", _depth_plants_cancel)
+
+    rc = _sweep_all(lake_root, catalog_path, results_root)
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "sweep-all done" in out
+    assert "arrived after the LAST" in out and "orphan sidecar was cleared" in out
+    assert not cancel_sidecar_path(results_root).exists()
+    assert "CANCELLED at operator request" not in out

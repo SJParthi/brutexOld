@@ -80,19 +80,22 @@ def _force_running(monkeypatch: pytest.MonkeyPatch, *, kind: str, cancelled: boo
     """Make every BackgroundPullJob report a live run of *kind*.
 
     The cancel routes read ``_pull_job.running_job_kind`` + call
-    ``_pull_job.request_cancel(expected_kind=…)`` / ``.cancel_requested()``; the
-    app owns the job internally, so the state is simulated at the class level.
-    The ``request_cancel`` stub HONOURS the kind gate exactly like the real
-    compare-and-set (review fold — the gate now lives INSIDE ``request_cancel``,
-    so a stub blind to ``expected_kind`` would mask the kind-gating behaviour;
-    the real gate's own unit tests live in ``test_pull_jobs.py``).
+    ``_pull_job.request_cancel_verdict(expected_kind=…)`` / ``.cancel_requested()``;
+    the app owns the job internally, so the state is simulated at the class level.
+    The ``request_cancel_verdict`` stub HONOURS the kind gate exactly like the
+    real compare-and-set (review fold — the gate lives INSIDE the method, so a
+    stub blind to ``expected_kind`` would mask the kind-gating behaviour; the
+    real gate's own unit tests live in ``test_pull_jobs.py``) and echoes the
+    real refusal-reason vocabulary (fix round 4).
     """
     monkeypatch.setattr(BackgroundPullJob, "running_job_kind", property(lambda _self: kind))
 
-    def _fake_request_cancel(_self: Any, *, expected_kind: str | None = None) -> bool:
-        return expected_kind is None or expected_kind == kind
+    def _fake_verdict(_self: Any, *, expected_kind: str | None = None) -> tuple[bool, str | None]:
+        if expected_kind is None or expected_kind == kind:
+            return (True, None)
+        return (False, "wrong_kind")
 
-    monkeypatch.setattr(BackgroundPullJob, "request_cancel", _fake_request_cancel)
+    monkeypatch.setattr(BackgroundPullJob, "request_cancel_verdict", _fake_verdict)
     monkeypatch.setattr(BackgroundPullJob, "cancel_requested", lambda _self: cancelled)
 
 
@@ -136,12 +139,14 @@ def test_pull_progress_carries_job_kind(
 
 
 def test_pull_cancel_idle_is_false_noop(client: TestClient) -> None:
+    """Idle refusal carries the additive ``reason: idle`` (fix round 4)."""
     resp = client.post("/api/v1/pull/cancel")
     assert resp.status_code == 200
-    assert resp.json() == {"cancelling": False}
+    assert resp.json() == {"cancelling": False, "reason": "idle"}
 
 
 def test_pull_cancel_running_pull_job(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful ack carries NO reason key (additive on refusals only)."""
     _force_running(monkeypatch, kind=JOB_KIND_PULL)
     resp = client.post("/api/v1/pull/cancel")
     assert resp.status_code == 200
@@ -155,7 +160,7 @@ def test_pull_cancel_ignores_a_running_sweep(
     _force_running(monkeypatch, kind=JOB_KIND_SWEEP)
     resp = client.post("/api/v1/pull/cancel")
     assert resp.status_code == 200
-    assert resp.json() == {"cancelling": False}
+    assert resp.json() == {"cancelling": False, "reason": "wrong_kind"}
 
 
 # ── POST /api/v1/sweep/cancel ─────────────────────────────────────────────────
@@ -389,6 +394,45 @@ def test_sweep_cancel_stale_bridge_is_honest_false(
     assert resp.json() == {"cancelling": False}
 
 
+def test_sweep_cancel_sidecar_write_failure_is_honest_false_not_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sidecar-write filesystem error → honest refusal, NEVER an HTTP 500.
+
+    Fix round 4 (fails-before): ``request_cancel`` mkdirs + writes via the
+    guard-free ``atomic_write_simple`` (raw ``OSError`` propagates), so an
+    ENOSPC / read-only / wedged lake 500'd the route at precisely the moment
+    an operator pressed Stop. The route now answers ``{"cancelling": false,
+    "error": …}`` naming the failure class.
+    """
+    _force_running(monkeypatch, kind=JOB_KIND_SWEEP)
+
+    def _raising(_root: Path, *, source: str) -> Path:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("brutex.engine.sweep_cancel.request_cancel", _raising)
+    resp = client.post("/api/v1/sweep/cancel")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cancelling"] is False
+    assert body["error"] == "cancel sidecar write failed: OSError"
+
+
+def test_universe_template_renders_distinct_uncancellable_label(client: TestClient) -> None:
+    """The Stop handler renders the DISTINCT no-stop-seam refusal label.
+
+    Fix round 4 (honest substring-presence pin — the repo's no-headless-JS
+    envelope): the wire's additive ``reason`` key separates "idle" from
+    "running-but-uncancellable"; the page must carry BOTH labels + the
+    reason gate so a visibly-running metadata pull no longer reads
+    "No running pull to cancel".
+    """
+    html = client.get("/universe").text
+    assert "j.reason === 'uncancellable'" in html
+    assert "This pull surface has no stop seam" in html
+    assert "No running pull to cancel" in html  # the idle/other-refusal label stays
+
+
 def test_universe_template_carries_the_on_load_pull_attach(client: TestClient) -> None:
     """The /universe page probes pull-progress ON LOAD and gates on the pull kind.
 
@@ -525,7 +569,11 @@ def test_metadata_pull_cancel_is_an_honest_false(
     try:
         cancel = client.post("/api/v1/pull/cancel")
         assert cancel.status_code == 200
-        assert cancel.json() == {"cancelling": False}  # honest — the run cannot observe it
+        # Honest refusal — the run cannot observe it — with the DISTINCT
+        # "uncancellable" reason (fix round 4: the wire previously conflated
+        # this with idle, so the UI read "No running pull to cancel" above a
+        # visibly-running metadata pull).
+        assert cancel.json() == {"cancelling": False, "reason": "uncancellable"}
         snap = client.get("/api/v1/universe/pull-progress").json()
         assert snap["cancelling"] is False  # the token was never set
     finally:

@@ -2389,8 +2389,14 @@ class TestParallelCooperativeCancel:
                 should_stop=lambda: bool(calls.append(1) is None and len(calls) >= 2),
             )
         assert first.cancelled is True
+        # The cancel landed MID-grid (fix round 4 — the old `tuples_run <= total`
+        # was vacuously true, so a future dispatch-bound change could silently
+        # degenerate this into a control-vs-control comparison): some tuples ran
+        # BEFORE the stop, and at least one was left for the resume. Verified
+        # valid today — 4 tuples, workers=2 → pool_size=1, max_inflight=2, the
+        # probe fires on outer iteration 2 with 2/4 run.
+        assert 0 < first.tuples_run < total
         # The contiguous clean prefix: every drained tuple was checkpointed.
-        assert first.tuples_run <= total
         # Resume with fresh objects over the SAME durable files (a process restart).
         with (
             AuditWriter.open(a / "ingest.jsonl", resume=True) as ing2,
@@ -2532,6 +2538,65 @@ class TestParallelOnProgress:
         assert snaps[0].state == "running"
         assert snaps[-1].state == "error"
         assert snaps[-1].running is False
+
+    def test_cache_skip_prefix_batches_publishes(self, tmp_path: Path) -> None:
+        """A resumed/cached prefix publishes O(1) per drain, NOT once per skipped tuple.
+
+        Fix round 4 (fails-before): `_advance` → `_publish_progress` fired one
+        fsync'd bridge write PER parent-synchronous skip apply, so a
+        resume/cache-skip storm over a big grid wrote the bridge file once per
+        skipped tuple in a tight loop — contradicting the sequential arm's
+        explicit single-publish resume batch. A fully-cached second run must now
+        publish start + at most a couple of end-of-drain flushes + finish (with
+        per-tuple publishes this run emits total + 2 = 6 snapshots), and the
+        LAST pre-terminal snapshot still carries the FULL cumulative skip count
+        (no tick is lost — only the write cadence is batched).
+        """
+        grid = _grid()  # 4 tuples
+        total = count_sweep_tuples(grid)
+        # First run populates the cache + results (no hook needed).
+        _run_parallel(tmp_path / "first", grid, workers=3)
+        # Second run against the SHARED cache dir: every tuple cache-skips.
+        snaps: list[Any] = []
+        with (
+            AuditWriter.open(tmp_path / "i2.jsonl") as ing,
+            SweepAuditWriter.open(tmp_path / "s2.jsonl") as sup,
+            SweepCache.open(tmp_path / "first" / "cache", bloom_capacity=10_000) as cache,
+        ):
+            ckpt = SweepCheckpointStore(
+                path=tmp_path / "ck2.json",
+                sweep_id=grid_identity(grid),
+                total_combos=total,
+            )
+            guards = SweepGuards(
+                audit=sup,
+                progress=SweepProgress(),
+                checkpoint=ckpt,
+                cache=cache,
+                watchdog=SweepWatchdog(),
+            )
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out2",
+                ingest_audit=ing,
+                guards=guards,
+                workers=3,
+                on_progress=snaps.append,
+            )
+        assert summary.skipped_cache == total
+        # THE TEETH: strictly fewer publishes than one-per-skipped-tuple (the
+        # pre-fix cadence was exactly total + 2), and O(1) per drain — with
+        # workers=3 (pool_size=2, heap_cap=4) today's driver drains the whole
+        # 4-tuple skip prefix in one pass: start + ONE flush + finish.
+        assert len(snaps) < total + 2
+        assert len(snaps) <= 4
+        assert snaps[0].state == "running"
+        assert snaps[0].skipped == 0  # the start tick
+        # Nothing is lost: the batched flush carries the cumulative skip count.
+        assert snaps[-2].skipped == total
+        assert snaps[-1].state == "done"
+        assert snaps[-1].skipped == total
 
     def test_default_none_publishes_nothing(self, tmp_path: Path) -> None:
         """``on_progress=None`` (every pre-existing caller) — byte-identical no-op."""

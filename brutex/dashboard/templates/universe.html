@@ -1686,7 +1686,12 @@ function setBulkDisabled(on) {
       const r = await fetch('/api/v1/pull/cancel', { method: 'POST' });
       const j = await r.json();
       if (!j.cancelling) {
-        if (lbl) lbl.textContent = 'No running pull to cancel';
+        /* Distinct refusal labels (fix round 4): the wire's additive `reason`
+           separates "idle" from "running-but-uncancellable" — previously a
+           visibly-running metadata pull read "No running pull to cancel". */
+        if (lbl) lbl.textContent = (j.reason === 'uncancellable')
+          ? 'This pull surface has no stop seam — it runs to completion'
+          : 'No running pull to cancel';
         stopBtn.disabled = false;
       }
     } catch (e) {

@@ -511,6 +511,11 @@ function renderMissing(body) {
 }
 
 async function loadMissing() {
+  /* In-flight guard (fix round 4): the Enter-key handler previously bypassed
+     the button-disable gate, so a second Enter mid-load forked a concurrent
+     fetch whose LATE response could repaint the panel with the OLD filter's
+     rows (last-writer-wins). One load at a time — click and Enter share it. */
+  if (drillBtn.disabled) return;
   drillBtn.disabled = true;
   drillMsg("scanning the lake for gaps…");
   let url = "/api/v1/coverage/missing-sessions";
