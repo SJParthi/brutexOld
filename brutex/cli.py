@@ -2081,6 +2081,14 @@ def cmd_lake_audit_unique(
     )
 
     resolved = _resolve_lake_root(lake_root)
+    # OPS-2 (DEC-AUDIT-CENSUS-HONESTY-001): refuse a nonexistent lake root the
+    # SAME way the sibling read commands do (`catalog reconcile`,
+    # `enrich-greeks`) — a typo'd / dead-mount path previously scanned 0 files
+    # and reported "CLEAN — 0 findings over 0 files" rc=0 forever (a silent
+    # green over a lake that simply is not there). Raised OUTSIDE the try below
+    # so the CliUserError → rc=1 net fires (the try maps every exception to the
+    # rc=2 internal-error arm).
+    _require_lake_dir(resolved, command="lake audit-unique")
     try:
         report = scan_lake_invariants(
             resolved,
@@ -2121,8 +2129,19 @@ def cmd_lake_audit_unique(
                 f"{row.segment:<9}{row.files:>7}{row.clean:>7}{row.dup_files:>6}"
                 f"{foreign:>9}{overlap:>9}{drift:>12}"
             )
+        # OPS-1 (DEC-AUDIT-CENSUS-HONESTY-001): surface UNREADABLE/skipped files
+        # — a skip means the census could NOT read a file, so "0 findings" would
+        # be a silent green over corruption. An engine-index skip reads UNREADABLE
+        # (a distinct verdict, never a fake CLEAN).
+        print(
+            f"skipped (unreadable): {census.files_skipped}"
+            f"  (engine-index: {census.engine_files_skipped})"
+        )
         label, _, rest = census.engine_detail.partition(": ")
-        verdict = "CLEAN" if census.engine_clean else "POISONED"
+        if not census.engine_clean:
+            verdict = "UNREADABLE" if census.engine_files_skipped else "POISONED"
+        else:
+            verdict = "CLEAN"
         print(f"engine indexes ({label.replace('/', ' / ')}): {verdict} — {rest}")
         last_heal = payload["last_heal_utc"] or "never"
         print(
@@ -2130,7 +2149,11 @@ def cmd_lake_audit_unique(
             f"quarantined_files_total={payload['quarantined_files_total']}  "
             f"last_heal={last_heal}"
         )
-    return EXIT_OK if census.findings_total == 0 else EXIT_USER_ERROR
+    # NON-green (rc=1) on ANY finding OR ANY skipped file: a skipped file leaves
+    # the census INCOMPLETE, so it can never honestly certify a clean rc=0. A
+    # genuinely clean lake with zero skips is still rc=0.
+    clean = census.findings_total == 0 and census.files_skipped == 0
+    return EXIT_OK if clean else EXIT_USER_ERROR
 
 
 def cmd_reopen_skipped(
