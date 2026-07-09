@@ -225,6 +225,23 @@ class ResultsStoreSchemaError(ResultsStoreError):
     """
 
 
+class ResultsStoreGateConflictError(ResultsStoreError):
+    """A run-identity conflict whose ONLY differing field(s) are nullable gate metric(s).
+
+    The C5 defense-in-depth signature (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001):
+    a conflict whose sole differing field(s) are the nullable gate-derived
+    metric(s) (:data:`_NULLABLE_METRIC_FIELDS` — ``deflated_sharpe``) is the
+    fingerprint of a gate-config (overfit / Stage-3) re-run into the SAME store
+    address, NOT upstream non-determinism: the mask ``run_id`` deliberately omits
+    the gate config (locked — zero-diff on ``sweep_run`` / ``combo``), so an
+    all-nullable-metric-only diff is a CONFIG change. Distinct from a generic
+    corruption conflict so the grid driver skips + counts the ONE tuple instead
+    of aborting the whole grid. With the store address now encoding the
+    gate + selection identity (:func:`~brutex.engine.sweep_orchestrator._tuple_digest`)
+    this is a belt-and-braces guard, never the primary defence.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ResultRow:
     """One combo's result, keyed by its BLAKE3 run-identity.
@@ -485,6 +502,22 @@ class ResultsStore:
                 if getattr(existing, f.name) != getattr(row, f.name)
             )
             _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
+            if differing and set(differing) <= set(_NULLABLE_METRIC_FIELDS):
+                # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): the ONLY diff is
+                # a nullable gate-derived metric — the fingerprint of a
+                # gate-config (overfit / Stage-3) re-run into the same store
+                # address, not upstream non-determinism. Raise the typed subclass
+                # so the driver skips + counts this ONE tuple, never a global
+                # grid abort. Covers None-vs-float (gate on/off) AND float-vs-float
+                # (two overfit configs).
+                raise ResultsStoreGateConflictError(
+                    f"run-identity conflict for {row.run_id}: the ONLY differing field(s) "
+                    f"({', '.join(differing)}) are gate-derived DSR metric(s) — a gate-config "
+                    f"change (overfit / Stage-3) re-ran into the same store address. The store "
+                    f"address now encodes the gate+selection identity "
+                    f"(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001); re-run with a fresh results "
+                    f"root or the matching config. Refusing to overwrite (Golden Rule #4)."
+                )
             raise ResultsStoreError(
                 f"run-identity conflict for {row.run_id}: a different result is already "
                 f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
@@ -819,5 +852,6 @@ __all__ = [
     "ResultRow",
     "ResultsStore",
     "ResultsStoreError",
+    "ResultsStoreGateConflictError",
     "ResultsStoreSchemaError",
 ]

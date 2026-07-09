@@ -4004,7 +4004,17 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/sweep-unkillable-core`
+- **Active feature branch:** `claude/dedup-c1-tuple-digest-identity`
+  (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001, MIGRATION.md #1622 — the residual
+  C1/C2 stale-serve fix: fold the ACTIVE gate config + non-default SELECTION
+  knobs (`top_k`/`min_hits`/`max_combos`) into the per-tuple store ADDRESS
+  (`_tuple_digest`) via a NEW COMMON `sweep_identity.py` leaf + a supervisor
+  re-export shim, DEFAULT-ELIDED so an ungated default-selection sweep's digest
+  is byte-stable (`5b020e892247deac`); the #1330 `grid_identity`/`tuple_cache_key`
+  pins + the #1531 golden pair + the 400-case vocab golden pass UNMODIFIED; C5
+  defense-in-depth `ResultsStoreGateConflictError` tuple-scoped skip; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/sweep-unkillable-core`
   (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1594 — the UNKILLABLE sweep
   run core, Phase 2 of the one-click sweep program; see §1 Active branch for
   the full blurb)

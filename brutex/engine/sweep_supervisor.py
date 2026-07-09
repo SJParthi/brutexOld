@@ -97,6 +97,9 @@ import structlog
 
 from brutex.engine.sweep_cache import SweepCache, combo_digest
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
+from brutex.engine.sweep_identity import (
+    _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
+)
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_orchestrator import (
     StoreQuarantine,
@@ -287,46 +290,6 @@ class SupervisedGridSummary:
     persisted: int
     tuples_failed: int
     tuples_quarantined_prior: int = 0
-
-
-def _gate_config_fragment(grid: SweepGridConfig) -> dict[str, Any] | None:
-    """Return the canonical GATE-config identity fragment, or ``None`` at defaults.
-
-    Coordinator Ruling 3 (DEC-SWEEP-UNKILLABLE-CORE-001): the overfit gate +
-    the Stage-3 refinement knobs change what a persisted tuple's rows MEAN
-    (gated-institutional vs light-research), so they belong in BOTH the run
-    identity (:func:`grid_identity`) and the per-tuple cache key
-    (:func:`tuple_cache_key`) — otherwise a gated re-run over a light-run
-    results tree resumes the same checkpoint and cache-skips the ungated
-    tuples, serving ungated rows as institutional winners.
-
-    A SANCTIONED re-key that stays BYTE-STABLE at defaults (Golden Rule #4):
-    the fragment is emitted ONLY when a gate is actually active — overfit set
-    (``overfit is not None``) and/or the Stage-3 pass enabled
-    (``stage3_enable``). A disabled gate's knobs are INERT (no pass runs, no
-    row changes), so an ungated grid contributes NOTHING and hashes exactly as
-    it did before this axis existed (the frozen ``grid_identity`` /
-    ``tuple_cache_key`` goldens are unmoved — every golden grid is at gate
-    defaults). All legs flattened to JSON-native scalars.
-    """
-    fragment: dict[str, Any] = {}
-    overfit = grid.overfit
-    if overfit is not None:
-        fragment["overfit"] = [
-            overfit.dsr_min,
-            overfit.weight,
-            overfit.default_skew,
-            overfit.default_excess_kurtosis,
-        ]
-    if grid.stage3_enable:
-        # The Stage-3 knobs matter to the result ONLY when the pass runs; a
-        # disabled pass leaves them inert, so they never re-key a light grid.
-        fragment["stage3"] = [
-            grid.stage3_top_k,
-            grid.stage3_max_fevals,
-            grid.stage3_max_restarts,
-        ]
-    return fragment or None
 
 
 def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
