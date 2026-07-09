@@ -37,8 +37,8 @@ import pytest
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
-import brutex.data.lake_heal as lake_heal_module
-import brutex.data.window_ledger_store as ledger_store_module
+from brutex.data import lake_heal as lake_heal_module
+from brutex.data import window_ledger_store as ledger_store_module
 from brutex.data.lake_heal import heal_after_pull
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter

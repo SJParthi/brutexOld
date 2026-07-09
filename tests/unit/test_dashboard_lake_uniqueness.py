@@ -628,16 +628,13 @@ class TestExtremePermutations:
         """A 0-file lake lands an honest zero census — never a crash/blank."""
         lake_root = tmp_path / "lake"
         lake_root.mkdir()
-        s = InstrumentStore.open(lake_root / "instruments.duckdb")
-        try:
+        with InstrumentStore.open(lake_root / "instruments.duckdb") as s:
             client = _make_client(s, SummaryCache())
             payload = client.get("/api/v1/universe/lake-uniqueness").json()
             assert payload["present"] is True
             assert payload["findings_total"] == 0
             assert payload["files_scanned"] == 0
             assert payload["scan_progress"]["files_scanned"] == 0
-        finally:
-            s.close()
 
     def test_corrupt_file_mid_scan_rides_the_scanner_skip_semantics(
         self, store: InstrumentStore

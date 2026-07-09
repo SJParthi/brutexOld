@@ -28,8 +28,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-import brutex.dashboard.lake_census_holder as lake_census_holder_module
 import pytest
+from brutex.dashboard import lake_census_holder as lake_census_holder_module
 from brutex.dashboard.lake_census_holder import (
     CENSUS_THREAD_NAME,
     FIRST_SCAN_BOUND_CEILING_S,
