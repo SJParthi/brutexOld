@@ -108,6 +108,13 @@ _LOG = structlog.get_logger(__name__)
 PHASE_SPOT = "spot"
 PHASE_METADATA = "metadata"
 PHASE_HISTORICAL = "historical"
+#: The DEFERRED-before-any-vendor-phase marker (DEC-GROWW-MARKET-HOURS-GUARD-001):
+#: the whole pipeline was skipped because the clock is inside the NSE market-hours
+#: window ``[08:45, 15:35)`` IST — no vendor call was issued (spot / metadata /
+#: historical all ``None``), keeping the shared Groww account free for TickVault's
+#: live feed. The non-vendor prebuild / movers stages are inapplicable (there was no
+#: pull to derive from) and also do not run.
+PHASE_MARKET_HOURS = "market_hours"
 #: The OPTIONAL gated movers phase: warm the movers snapshots ONLY after the
 #: prebuild SUCCEEDED over the clean symbol set (``PrebuildOutcome.ok`` —
 #: DEC-PREBUILD-CLEANSET-001 dropped the ``fetch_clean`` arm of the
@@ -628,6 +635,15 @@ def _metadata_stop_note(report: MetadataPullReport) -> str:
     )
 
 
+def _market_hours_stop_note() -> str:
+    """Build the honest stop-note for a market-hours deferral (no vendor phase ran)."""
+    return (
+        "deferred — inside NSE market-hours window (08:45-15:35 IST); no vendor pull "
+        "issued (spot / metadata / historical skipped to keep the shared Groww account "
+        "free for the live feed); resume on the next out-of-hours run"
+    )
+
+
 def _movers_note_clause(
     segment_movers_warmed: Mapping[str, int],
     segment_movers_failed: Mapping[str, int] | None = None,
@@ -890,6 +906,7 @@ def run_full_pipeline(
     warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
     strict_gate: bool = False,
+    market_closed: Callable[[], bool] | None = None,
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
 
@@ -1011,6 +1028,23 @@ def run_full_pipeline(
     PipelinePullReport
         The combined, auditable outcome of every phase that ran.
     """
+    # Market-hours belt (DEC-GROWW-MARKET-HOURS-GUARD-001): if the clock is inside the
+    # NSE market-hours window ``[08:45, 15:35)`` IST, skip the ENTIRE vendor chain
+    # (spot / metadata / historical) so a pipeline pull that reached this call (e.g. a
+    # pull already dispatched as the market opened) never issues a vendor call that
+    # would compete with TickVault's live feed for the shared Groww account. The
+    # non-vendor prebuild / movers stages are inapplicable here (there is no pull to
+    # derive from) and also do not run. The mid-run per-window ``MarketHoursHalt`` is
+    # the belt for a pull already in flight; this is the belt for one about to start.
+    if market_closed is not None and market_closed():
+        _LOG.warning("pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS)
+        return PipelinePullReport(
+            spot=None,
+            metadata=None,
+            historical=None,
+            stopped_after=PHASE_MARKET_HOURS,
+            note=_market_hours_stop_note(),
+        )
     spot = run_spot()
     if not spot_phase_ok(spot):
         quarantined, quarantined_count = derive_quarantined_symbols(spot, None)

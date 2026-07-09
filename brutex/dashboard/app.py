@@ -59,6 +59,7 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
+from brutex.calendars.market_hours import guard_active_default
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.paths import resolve_lake_root
@@ -2722,6 +2723,9 @@ def build_app(
                 until_clean=True,
                 on_ledger_sync=_ledger_sync,
                 floor_store=instrument_store,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
+                # into the NSE market-hours window (the shared-account belt).
+                market_closed=guard_active_default,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -3496,6 +3500,9 @@ def build_app(
                     until_clean=True,
                     on_ledger_sync=_ledger_sync,
                     floor_store=instrument_store,
+                    # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull
+                    # crosses into the NSE market-hours window (shared-account belt).
+                    market_closed=guard_active_default,
                 )
 
             def _run_metadata() -> MetadataPullReport:
@@ -3988,6 +3995,10 @@ def build_app(
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                         strict_gate=strict_gate,
+                        # DEC-GROWW-MARKET-HOURS-GUARD-001: if this pipeline pull
+                        # reaches the sequencer inside the NSE market-hours window,
+                        # skip the whole vendor chain (spot/metadata/historical).
+                        market_closed=guard_active_default,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -4284,6 +4295,9 @@ def build_app(
                 auto_retry=True,
                 until_clean=until_clean,
                 floor_store=instrument_store,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
+                # into the NSE market-hours window (the shared-account belt).
+                market_closed=guard_active_default,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report

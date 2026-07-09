@@ -18,7 +18,40 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
+_Last updated: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1624 —
+the NSE market-hours pull guard: NO Groww VENDOR pulls between 08:45 (inclusive)
+and 15:35 (exclusive) IST on a trading day; an in-flight nightly pull STOPS
+gracefully at 08:45 and start/resume is REFUSED until 15:35, keeping the SHARED
+Groww account free for TickVault's live feed (the shared TOTP token + 500/min
+governor, §2 Rule 6). NEW pure leaf `brutex/calendars/market_hours.py` —
+`BLOCK_START=08:45`/`BLOCK_END=15:35`, the clockless predicate `pull_allowed_now`,
+`pull_allowed_default` (binding `now_ist()` + the NON-raising `is_trading_day()`;
+an out-of-holiday-coverage WEEKDAY reads as a trading day → BLOCKS = the FAIL-SAFE
+posture protecting the shared account; a weekend → ALLOWED), the fail-LOUD env
+kill switch `BRUTEX_MARKET_HOURS_GUARD` (default ENABLED), `guard_active_default`,
+and a `now`-injectable `MarketHoursGuard`. NEW `MarketHoursHalt(BruteXError)` in
+`data/errors.py` added to BOTH ingest spines' `_GLOBAL_STOP_ERRORS` +
+`pull_jobs.is_pull_halt` (propagates past per-symbol/contract quarantine, fires the
+CRITICAL Telegram `emit_pull_halt_alert`). START GATES: `BackgroundPullJob.start`
+refuses a `JOB_KIND_PULL` in-window (Greeks-backfill/sweep EXEMPT), `cmd_fetch`
+defers a LIVE pull with a clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN: a
+`market_closed` predicate threaded to the PER-WINDOW seam of both spines raises
+`MarketHoursHalt` (the durable window ledger leaves PLANNED/FAILED windows
+RESUMABLE — no new checkpoint); `run_until_clean` gains a `market_closed` hook →
+NEW `stop_market_hours` verdict; `pull_all_spot`/`pull_contract_candles` catch it
+mid-round + belt-break later steps + the minute phase (loud
+`pull.step.halted reason="market_hours"`); `run_full_pipeline` skips the whole
+vendor chain with `stopped_after="market_hours"`. Production entrypoints inject
+`guard_active_default` (dashboard routes + the nightly headless binding — the
+MOTIVATING 01:30 case covered); a dry-run / un-wired caller passes `None`
+(byte-identical). NOT edited: `_start_auto_resume_on_boot`/`cmd_dashboard` (auto-
+resume covered transitively by the start-gates; conflict-free with PR #1343).
+HONEST: DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only (no fetch/rate/pool/
+governor change); `market_hours.py` + `data/errors.py` 100% line+branch, touched
+modules covered by the whole-package `--cov=brutex` gate; ruff/ruff-format clean,
+`mypy --strict` clean, pyright at the pre-change baseline).
+Earlier: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
 dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
@@ -1687,7 +1720,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
+- **Active branch:** `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1624** —
+  the NSE market-hours pull guard: NO Groww VENDOR pulls between 08:45 (inclusive) and 15:35 (exclusive) IST on a
+  trading day; an in-flight nightly pull STOPS gracefully at 08:45 and start/resume is REFUSED until 15:35, keeping
+  the SHARED Groww account free for TickVault's live feed. NEW pure leaf `brutex/calendars/market_hours.py`
+  (`BLOCK_START=08:45`/`BLOCK_END=15:35`; the clockless `pull_allowed_now`; `pull_allowed_default` binding `now_ist()`
+  + the NON-raising `is_trading_day()` — out-of-coverage weekday BLOCKS = fail-safe, weekend ALLOWED; the fail-LOUD
+  env kill switch `BRUTEX_MARKET_HOURS_GUARD` default ENABLED; `guard_active_default`; a `now`-injectable
+  `MarketHoursGuard`) + NEW `MarketHoursHalt(BruteXError)` in `data/errors.py` (in BOTH spines' `_GLOBAL_STOP_ERRORS`
+  + `pull_jobs.is_pull_halt` → fires the CRITICAL Telegram pull-halt alert). START GATES: `BackgroundPullJob.start`
+  refuses a `JOB_KIND_PULL` in-window (Greeks-backfill/sweep EXEMPT); `cmd_fetch` defers a LIVE pull with a clean
+  EXIT_OK (dry-run/inspect EXEMPT). MID-RUN: a `market_closed` predicate threaded to the PER-WINDOW seam of both
+  spines raises `MarketHoursHalt` (durable ledger leaves PLANNED/FAILED windows RESUMABLE); `run_until_clean` gains a
+  `market_closed` hook → `stop_market_hours`; `pull_all_spot`/`pull_contract_candles` catch it mid-round + belt-break
+  later steps + the minute phase; `run_full_pipeline` skips the vendor chain with `stopped_after="market_hours"`.
+  Production wiring injects `guard_active_default` (dashboard routes + the nightly headless binding — the MOTIVATING
+  01:30 case covered); a dry-run / un-wired caller passes `None` (byte-identical). NOT edited:
+  `_start_auto_resume_on_boot`/`cmd_dashboard` (auto-resume covered transitively; conflict-free with PR #1343).
+  HONEST: DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up); out-of-coverage default is
+  BLOCK-in-window (fail-safe). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only, no fetch/rate/pool/
+  governor change; `market_hours.py` + `data/errors.py` 100% line+branch; ruff/ruff-format clean, `mypy --strict`
+  clean, pyright at the pre-change baseline).
+  Earlier: `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
   O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
@@ -4087,9 +4141,14 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
+- **Active feature branch:** `claude/groww-market-hours-guard`
+  (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1624 — the NSE
+  market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
+  days, keeping the shared account free for TickVault's live feed; matches
+  §1's Active branch line)
+  Earlier: `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
-  PER-FILE lake STATS manifest; matches §1's Active branch line)
+  PER-FILE lake STATS manifest)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the

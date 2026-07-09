@@ -111,6 +111,11 @@ class HeadlessPipeline:
     strict_gate: bool
     targets: int  # count, for the report/log line
     close: Callable[[], None]  # closes the InstrumentStore
+    #: Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the live-clock
+    #: predicate threaded into ``run_full_pipeline`` so a headless pull that reaches
+    #: the sequencer inside the NSE market-hours window skips the whole vendor chain.
+    #: ``None`` (a dry-run build, or a directly-constructed test double) never gates.
+    market_closed: Callable[[], bool] | None = None
 
 
 def build_headless_pipeline(
@@ -141,6 +146,7 @@ def build_headless_pipeline(
         at build — the pre-chain refusal), or junk ISO dates.
     """
     from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
+    from brutex.calendars.market_hours import guard_active_default
     from brutex.dashboard.composite_pull import pull_historical_for_underlyings
     from brutex.dashboard.fno_cascade import build_fno_cascade
     from brutex.dashboard.metadata_pull import pull_expiries_contracts
@@ -194,6 +200,13 @@ def build_headless_pipeline(
     registry_path = lake_root / "registry.duckdb"
     rate = SessionRateController() if session_rate is None else session_rate
 
+    # Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the nightly 01:30 IST
+    # headless pull is the MOTIVATING case — it must STOP gracefully at 08:45 if it runs
+    # long. Bound to the live-clock ``guard_active_default`` for a REAL pull; a dry-run
+    # threads ``None`` (no vendor calls to gate, and the pipeline gate below never fires
+    # on a synthetic run), so nightly dry-run tests are byte-identical.
+    _market_closed = None if dry_run else guard_active_default
+
     # F&O expiry scope with the LIVE-edge normalization the dashboard applies
     # (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): a default-shaped bound is lifted to
     # None so live/unexpired contracts are never scoped out.
@@ -220,6 +233,7 @@ def build_headless_pipeline(
             auto_retry=True,
             until_clean=True,
             floor_store=store,
+            market_closed=_market_closed,
         )
 
     def _run_metadata() -> MetadataPullReport:
@@ -309,6 +323,7 @@ def build_headless_pipeline(
         strict_gate=strict_gate,
         targets=len(targets),
         close=store.close,
+        market_closed=_market_closed,
     )
 
 
@@ -322,6 +337,7 @@ def execute_headless_pipeline(hp: HeadlessPipeline) -> PipelinePullReport:
         run_historical=hp.run_historical,
         run_prebuild=hp.run_prebuild,
         strict_gate=hp.strict_gate,
+        market_closed=hp.market_closed,
     )
 
 

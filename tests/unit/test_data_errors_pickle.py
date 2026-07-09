@@ -31,6 +31,7 @@ from brutex.data.errors import (
     DataLakeError,
     GreeksEnrichPoolBroken,
     LakeWriteHalt,
+    MarketHoursHalt,
     PartitionError,
     PartitionLockTimeout,
     ResampleInputError,
@@ -39,6 +40,7 @@ from brutex.data.errors import (
     WriterError,
     parquet_read_skip_errors,
 )
+from brutex.models import BruteXError
 
 
 def _roundtrip(exc: BaseException) -> BaseException:
@@ -139,6 +141,43 @@ class TestConstructorArgReduce:
         assert isinstance(twice, LakeWriteHalt)
         assert str(twice) == "lake write halted: out_of_memory"
         assert twice.reason == "out_of_memory"
+
+
+class TestMarketHoursHalt:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 — the pull-control market-hours stop."""
+
+    def test_default_reason_and_message(self) -> None:
+        exc = MarketHoursHalt()
+        assert exc.reason == "market_hours"
+        assert str(exc) == "pull halted: market_hours"
+
+    def test_explicit_reason(self) -> None:
+        exc = MarketHoursHalt("market_hours")
+        assert exc.reason == "market_hours"
+
+    def test_roundtrip_not_doubled(self) -> None:
+        """Same reduce discipline as LakeWriteHalt — exactly one prefix."""
+        copy = _roundtrip(MarketHoursHalt())
+        assert type(copy) is MarketHoursHalt
+        assert str(copy) == "pull halted: market_hours"
+        assert copy.reason == "market_hours"
+        assert copy.args == MarketHoursHalt().args
+
+    def test_double_roundtrip_stable(self) -> None:
+        twice = _roundtrip(_roundtrip(MarketHoursHalt()))
+        assert isinstance(twice, MarketHoursHalt)
+        assert str(twice) == "pull halted: market_hours"
+
+    def test_is_a_brutex_error_not_a_data_lake_error(self) -> None:
+        """A pull-CONTROL stop — a BruteXError (for global-stop membership) but
+        deliberately NOT a DataLakeError (it is not a lake-write failure)."""
+        exc = MarketHoursHalt()
+        assert isinstance(exc, BruteXError)
+        assert not isinstance(exc, DataLakeError)
+
+    def test_not_a_parquet_skip_error(self) -> None:
+        """A market-hours halt must never be swallowed as an unreadable-file skip."""
+        assert not isinstance(MarketHoursHalt(), parquet_read_skip_errors())
 
 
 class TestMessageOnlyClasses:

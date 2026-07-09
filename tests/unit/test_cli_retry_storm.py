@@ -182,6 +182,82 @@ def test_cmd_fetch_universe_is_retired(tmp_path: Path, capsys: pytest.CaptureFix
     )
 
 
+def test_cmd_fetch_deferred_inside_market_hours(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001: a LIVE fetch inside the window defers, EXIT_OK.
+
+    A clean (non-error) exit so the legacy auto-resume subprocess exits cleanly —
+    the deferral is a legitimate no-op, not a failure; the pull runs next out-of-hours.
+    """
+    monkeypatch.setattr("brutex.calendars.market_hours.guard_active_default", lambda: True)
+    rc = cli.cmd_fetch(
+        tmp_path,
+        None,
+        None,
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert out == (
+        "[brutex] fetch deferred — inside NSE market-hours window "
+        "(08:45-15:35 IST); pulls run outside market hours only\n"
+    )
+
+
+def test_cmd_fetch_proceeds_outside_market_hours(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard inactive (outside window / disabled) → the gate is passed; the pull proceeds.
+
+    Proven by threading through to the downstream interval-validation refusal (no
+    deferral message, EXIT_USER_ERROR from ``--interval 5minute``).
+    """
+    monkeypatch.setattr("brutex.calendars.market_hours.guard_active_default", lambda: False)
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "5minute",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_USER_ERROR
+    captured = capsys.readouterr()
+    assert "deferred" not in captured.out
+    assert "not fetched on Groww" in captured.err
+
+
+def test_cmd_fetch_dry_run_not_gated_even_when_guard_active(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--dry-run`` makes no vendor calls → the market-hours gate is EXEMPT."""
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    monkeypatch.setattr("brutex.calendars.market_hours.guard_active_default", lambda: True)
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=True,
+        inspect=False,
+        rows_per_chunk=2,
+    )
+    assert rc == cli.EXIT_OK
+    captured = capsys.readouterr()
+    assert "deferred" not in captured.out  # never gated
+    assert "SYNTHETIC DRY-RUN" in captured.err  # the dry-run pull actually ran
+
+
 def test_cmd_fetch_instruments_only_loads_master(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

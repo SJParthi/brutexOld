@@ -19,6 +19,7 @@ from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_pull import (
     MAX_QUARANTINED_NAMES,
+    PHASE_MARKET_HOURS,
     PHASE_METADATA,
     PHASE_PREBUILD,
     PHASE_SPOT,
@@ -360,6 +361,51 @@ class _PrebuildSpy:
         self.called = True
         self.exclude_symbols = exclude_symbols
         return self.value
+
+
+def test_pipeline_defers_whole_chain_inside_market_hours() -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001: an active guard skips the ENTIRE vendor chain."""
+    spot = _Spy(_spot())
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+    prebuild = _PrebuildSpy(_outcome())
+
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        run_prebuild=prebuild,
+        market_closed=lambda: True,
+    )
+
+    assert report.stopped_after == PHASE_MARKET_HOURS
+    assert report.spot is None
+    assert report.metadata is None
+    assert report.historical is None
+    assert report.ok is False
+    # NO phase ran — not even spot; and the non-vendor prebuild is skipped too.
+    assert spot.called is False
+    assert meta.called is False
+    assert hist.called is False
+    assert prebuild.called is False
+    assert "market-hours" in report.note.lower()
+
+
+def test_pipeline_market_closed_false_runs_normally() -> None:
+    """market_closed returning False (guard inactive) → the pipeline runs as before."""
+    spot = _Spy(_spot())
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        market_closed=lambda: False,
+    )
+
+    assert report.stopped_after is None
+    assert spot.called is True
 
 
 def test_pipeline_stops_after_spot_failure() -> None:

@@ -4680,6 +4680,22 @@ def cmd_fetch(
     )
 
     resolved = _resolve_lake_root(lake_root)
+    # Market-hours START gate (DEC-GROWW-MARKET-HOURS-GUARD-001): a LIVE vendor pull is
+    # DEFERRED inside the NSE market-hours window ``[08:45, 15:35)`` IST on a trading
+    # day so a nightly/auto-resume `brutex fetch` never competes with TickVault's live
+    # feed for the shared Groww account. ``--dry-run`` / ``--inspect`` make NO vendor
+    # calls (synthetic adapter / NullBarSink) and are EXEMPT. A clean EXIT_OK (not an
+    # error) keeps the legacy auto-resume subprocess exiting cleanly — the deferral is
+    # a legitimate no-op, not a failure; the pull runs on the next out-of-hours attempt.
+    if not dry_run and not inspect:
+        from brutex.calendars.market_hours import guard_active_default
+
+        if guard_active_default():
+            print(
+                "[brutex] fetch deferred — inside NSE market-hours window "
+                "(08:45-15:35 IST); pulls run outside market hours only"
+            )
+            return EXIT_OK
     try:
         intervals = _resolve_fetch_intervals(interval)
         # Fail-loud env gate for the post-pull Greeks stage
