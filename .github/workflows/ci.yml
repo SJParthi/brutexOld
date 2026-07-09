@@ -276,7 +276,19 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
-    timeout-minutes: 75
+    # 75 -> 90 (2026-07-09, PR #1358 run 29013027048 job 86101054358): the
+    # job was cancelled AT the 75:00 wall (started 11:08:25Z, canceled
+    # 12:23:38Z) 2 minutes INTO the touched-module discovery gate
+    # (coverage_gate_discovery.py) with EVERY executed step green — the
+    # whole-package suite + every static per-module gate all at 100.00%
+    # (zero real failures). main at the same merge-base (run 29006415351
+    # job 86078945476) measured 70.2m green, so the budget headroom was
+    # already <5m before this PR's own touched-module discovery work
+    # (5 movers-family modules, 717 covering tests) even started. 90 gives
+    # evidenced ~12% headroom over the ~80m extrapolated wall; wall-clock
+    # budget only — no gate is weakened. Continues the 15->25->40->60->75
+    # ratchet.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
