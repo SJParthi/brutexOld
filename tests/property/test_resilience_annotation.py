@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Final
 
 import pytest
 from brutex.engine.resilience_streaks import (
@@ -115,6 +116,91 @@ def test_ranking_order_is_identical_with_and_without_resilience() -> None:
     bare = _pool()
     annotated = [replace(c, resilience=_record(i)) for i, c in enumerate(bare)]  # type: ignore[arg-type]
     assert _order(bare) == _order(annotated)
+
+
+def _entries(candidates: list[object]) -> list[dict[str, object]]:
+    """Build the top100 and return its ordered entry dicts (the full wire bytes)."""
+    twins = group_twins(
+        [
+            TwinCandidate(
+                run_id=c.row.run_id,  # type: ignore[attr-defined]
+                mask_bits=c.row.mask_bits,  # type: ignore[attr-defined]
+                fingerprint=c.agg.fingerprint,  # type: ignore[attr-defined]
+                entry_ts_us=frozenset({100 * (i + 1)}),
+            )
+            for i, c in enumerate(candidates)
+        ]
+    )
+    artifact = build_top100(
+        candidates,  # type: ignore[arg-type]
+        run_id=_RUN,
+        preset="min_dd_first",
+        families=twins,
+        counts=PoolCounts(stores=1, excluded_no_aggs=0, zero_trade_excluded=0, parity_excluded=0),
+        data_snapshot_hashes=("s",),
+        baselines={},
+    )
+    return list(artifact.entries)
+
+
+def _strip_resilience(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Drop the ONE ``resilience`` key from every entry (leave all else verbatim)."""
+    return [{k: v for k, v in e.items() if k != RESILIENCE_ANNOTATION_KEY} for e in entries]
+
+
+#: A SMALL drawdown/composite pool so ``sampled_from`` forces TIES on the
+#: ``min_dd_first`` sort key (equal max_drawdown_pct) AND on the composite
+#: tiebreak — the exact case a leaked annotation could perturb (the MINOR-1
+#: single-distinct-drawdown test could not probe).
+_DD_POOL: Final = (4.0, 9.0, 22.0)
+_COMP_POOL: Final = (1.25, 2.5)
+
+
+@given(
+    specs=st.lists(
+        st.tuples(st.sampled_from(_DD_POOL), st.sampled_from(_COMP_POOL)),
+        min_size=2,
+        max_size=8,
+    )
+)
+def test_rank_independence_under_ties(specs: list[tuple[float, float]]) -> None:
+    """Ties on the sort key + composite: annotate-all is BIT-IDENTICAL to bare.
+
+    Candidates share drawdown/composite values so the ``min_dd_first`` sort must
+    fall through to the run_id tiebreak — the exact spot a leaked ``resilience``
+    read would reorder. Annotating EVERY candidate with a real folded block and
+    stripping the key back off must reproduce the bare build's ORDER and every
+    other entry byte, and must never mutate an input row.
+    """
+    bare = [
+        make_candidate(
+            i + 1,
+            fingerprint=fingerprint_seed(i + 1),
+            row_overrides={"max_drawdown_pct": dd},
+            agg_overrides={"composite_score": comp},
+        )
+        for i, (dd, comp) in enumerate(specs)
+    ]
+    rows_before = [c.row for c in bare]  # frozen ResultRow snapshots
+    annotated = [replace(c, resilience=_record(i)) for i, c in enumerate(bare)]  # type: ignore[arg-type]
+
+    bare_entries = _entries(list(bare))  # type: ignore[arg-type]
+    annotated_entries = _entries(list(annotated))  # type: ignore[arg-type]
+
+    # ORDER identical (the run_id tiebreak is deterministic, annotation-blind).
+    assert [e["run_id"] for e in bare_entries] == [e["run_id"] for e in annotated_entries]
+    # And every NON-resilience byte identical: a real block never perturbs the
+    # ranking OR any other projected field vs the NULL block the bare build gets.
+    assert _strip_resilience(bare_entries) == _strip_resilience(annotated_entries)
+    # The annotated build carries the REAL folded blocks (not the NULL fallback)
+    # — proving the identity holds despite genuinely-different resilience content.
+    assert any(e[RESILIENCE_ANNOTATION_KEY]["stats_live"] for e in annotated_entries)  # type: ignore[index]
+    # Input rows unmutated (annotation is additive, never touches the source row).
+    assert [c.row for c in bare] == rows_before
+
+    # Double-annotation is still refused on a genuine entry payload.
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        project_resilience_annotation(annotated_entries[0], _record(0))
 
 
 def test_no_resilience_column_is_a_ranking_or_preset_input() -> None:
