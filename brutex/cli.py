@@ -6517,17 +6517,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     }
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
-    # Apriori-aware max_combos pre-flight (DEC-SWEEP-APRIORI-TUPLE-001): when the
-    # Apriori generator is enabled the deterministic MAX_MASK_BARS breaker is the
-    # guardrail, so the raw C(n,k) max_combos pre-flight is auto-raised to ADMIT
-    # every requested k (otherwise a full-vocab k>=4 grid is refused before Apriori
-    # ever runs). The non-Apriori path returns the requested value unchanged, so
-    # setting it explicitly == the field default and the grid is byte-identical.
+    # Apriori-aware max_combos pre-flight (DEC-SWEEP-APRIORI-TUPLE-001): the Apriori
+    # bypass replaces ONLY the DEFAULT max_combos guard value — with the flag ON the
+    # deterministic MAX_MASK_BARS breaker is the real guardrail, so the raw C(n,k)
+    # pre-flight is auto-raised to ADMIT every requested k (otherwise a full-vocab
+    # k>=4 grid is refused before Apriori ever runs). An EXPLICIT operator
+    # --max-combos always WINS (never auto-raised); the non-Apriori path returns the
+    # requested value unchanged, so setting the default explicitly == the field
+    # default and the grid is byte-identical. `--max-combos` argparse default is None
+    # → None means "not passed" (the built-in default, not explicit).
     grid_kwargs["max_combos"] = effective_max_combos(
         apriori_enabled=apriori_enabled(),
         k_values=k_list,
         n_unique=len(set(condition_bits)),
         requested_max_combos=max_combos if max_combos is not None else DEFAULT_MAX_COMBOS,
+        requested_is_explicit=max_combos is not None,
     )
     if overfit_gate:
         grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)

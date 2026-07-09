@@ -169,15 +169,18 @@ the persisted store bytes.
 
 The sweep's up-front pre-flight refuses any ``k`` whose raw ``C(n_unique, k)``
 mask count exceeds ``max_combos``. That is correct for the brute-force path but
-would REFUSE a full-vocab ``k >= 4`` grid (``C(60, 4) = 487_635 > 100_000``)
-BEFORE the Apriori generator ever runs — even though, with the flag ON, the
-deterministic ``MAX_MASK_BARS`` breaker is the real guardrail on emitted work,
-not raw ``C(n, k)``. :func:`effective_max_combos` therefore AUTO-RAISES the
-effective ``max_combos`` to admit every requested ``k`` when Apriori is enabled
-(emitting one ``sweep.apriori.max_combos_raised`` event), and returns the value
-UNCHANGED when it is not — the brute-force path's pre-flight is byte-identical
-(the guard LOGIC is never touched; this helper only ever FEEDS the guards a
-value).
+with the DEFAULT cap would REFUSE a full-vocab ``k >= 4`` grid
+(``C(60, 4) = 487_635 > 100_000``) BEFORE the Apriori generator ever runs — even
+though, with the flag ON, the deterministic ``MAX_MASK_BARS`` breaker is the real
+guardrail on emitted work, not raw ``C(n, k)``. :func:`effective_max_combos`
+therefore replaces **only the DEFAULT** ``max_combos`` guard value: with Apriori
+enabled AND the value the built-in default it AUTO-RAISES to admit every
+requested ``k`` (emitting one ``sweep.apriori.max_combos_raised`` event). An
+EXPLICIT operator-set ``--max-combos`` always WINS (returned unchanged, never
+raised — even if the guard then refuses a too-large ``k``), and with Apriori
+disabled the value is likewise UNCHANGED — the brute-force path's pre-flight is
+byte-identical (the guard LOGIC is never touched; this helper only ever FEEDS the
+guards a value).
 """
 
 from __future__ import annotations
@@ -281,27 +284,36 @@ def effective_max_combos(
     k_values: Sequence[int],
     n_unique: int,
     requested_max_combos: int,
+    requested_is_explicit: bool,
 ) -> int:
     """Resolve the ``max_combos`` pre-flight cap, Apriori-AWARE (guardrail semantics).
 
     DEC-SWEEP-APRIORI-TUPLE-001 guardrail: the sweep refuses up-front any ``k``
     whose raw ``C(n_unique, k)`` mask count exceeds ``max_combos`` (the guards in
     ``SweepGridConfig.__post_init__`` + ``run_persisted_sweep``). That raw-count
-    pre-flight is correct for the brute-force path, but it would REFUSE a
-    full-vocab ``k >= 4`` grid (``C(60, 4) = 487_635 > 100_000``) BEFORE the
-    Apriori generator ever runs — even though, with Apriori ON, the deterministic
-    ``MAX_MASK_BARS`` breaker (:func:`resolve_max_mask_bars`) is the real
-    guardrail on emitted work, not raw ``C(n, k)``.
+    pre-flight is correct for the brute-force path, but with the DEFAULT cap it
+    would REFUSE a full-vocab ``k >= 4`` grid (``C(60, 4) = 487_635 > 100_000``)
+    BEFORE the Apriori generator ever runs — even though, with Apriori ON, the
+    deterministic ``MAX_MASK_BARS`` breaker (:func:`resolve_max_mask_bars`) is the
+    real guardrail on emitted work, not raw ``C(n, k)``.
 
-    So when *apriori_enabled* is ``True`` this AUTO-RAISES the effective
-    ``max_combos`` to ``max(requested, max_k C(n_unique, k))`` — admitting every
-    requested ``k`` while the breaker bounds the actual candidate·bar work. When
-    *apriori_enabled* is ``False`` the value is returned **unchanged**, so the
-    brute-force path's ``max_combos`` pre-flight is byte-identical (the guard
-    logic itself is never touched — this only ever FEEDS the guards a value). A
-    raise emits ONE counts-only ``sweep.apriori.max_combos_raised`` structlog
-    (gated on the flag); an already-sufficient *requested_max_combos* logs
-    nothing.
+    So the Apriori bypass replaces **only the DEFAULT** ``max_combos`` guard
+    value — an EXPLICIT operator-set ``--max-combos`` always WINS and is NEVER
+    auto-raised (even when that means the guard later refuses a too-large ``k``:
+    the operator's explicit limit is honored). The three cases:
+
+    * *apriori_enabled* ``False`` → *requested_max_combos* returned **unchanged**
+      (the brute-force pre-flight is byte-identical — the guard logic is never
+      touched; this only ever FEEDS the guards a value).
+    * *apriori_enabled* ``True`` AND *requested_is_explicit* ``True`` (operator
+      passed ``--max-combos``) → *requested_max_combos* returned **unchanged**
+      (OPERATOR WINS), no log.
+    * *apriori_enabled* ``True`` AND *requested_is_explicit* ``False`` (the value
+      is the built-in DEFAULT) → AUTO-RAISED to
+      ``max(requested, max_k C(n_unique, k))`` so every requested ``k`` is
+      admitted while the breaker bounds the actual candidate·bar work; a raise
+      emits ONE counts-only ``sweep.apriori.max_combos_raised`` structlog (an
+      already-sufficient default logs nothing).
 
     Parameters
     ----------
@@ -313,7 +325,12 @@ def effective_max_combos(
     n_unique
         The number of UNIQUE condition bits (``len(set(condition_bits))``).
     requested_max_combos
-        The operator-requested (or default) ``max_combos`` cap.
+        The operator-requested cap, or the resolved built-in default when the
+        operator did not pass one.
+    requested_is_explicit
+        ``True`` iff the operator explicitly passed ``--max-combos`` (so it must
+        WIN); ``False`` iff *requested_max_combos* is the built-in DEFAULT (the
+        only value the Apriori bypass may raise).
 
     Returns
     -------
@@ -322,8 +339,12 @@ def effective_max_combos(
     """
     if not apriori_enabled:
         return requested_max_combos
-    # The largest raw C(n, k) any requested k enumerates — the value the pre-flight
-    # guards must ADMIT so Apriori's breaker (not raw C(n,k)) becomes the guardrail.
+    if requested_is_explicit:
+        # OPERATOR WINS: an explicit --max-combos is honored verbatim, never
+        # auto-raised — even if the guard then refuses a too-large k.
+        return requested_max_combos
+    # DEFAULT cap only: raise to the largest raw C(n, k) any requested k enumerates
+    # so Apriori's breaker (not raw C(n,k)) becomes the guardrail.
     needed = max((count_combos(k, n_unique) for k in k_values), default=0)
     effective = max(requested_max_combos, needed)
     if effective > requested_max_combos:

@@ -1160,8 +1160,9 @@ def test_driver_reports_breaker_trip_as_tuple_failed(
 
 
 def test_effective_max_combos_returns_requested_when_apriori_off() -> None:
-    # Apriori OFF → the value is returned UNCHANGED (the brute-force pre-flight is
-    # byte-identical) even for a k whose C(n, k) dwarfs the request.
+    # (a) Apriori OFF → the value is returned UNCHANGED (the brute-force pre-flight
+    # is byte-identical) even for a k whose C(n, k) dwarfs the request, and even
+    # when it is the built-in DEFAULT (requested_is_explicit is irrelevant when off).
     from structlog.testing import capture_logs
 
     with capture_logs() as logs:
@@ -1170,15 +1171,16 @@ def test_effective_max_combos_returns_requested_when_apriori_off() -> None:
             k_values=[1, 2, 3, 4],
             n_unique=60,
             requested_max_combos=100_000,
+            requested_is_explicit=False,
         )
     assert out == 100_000
     assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
 
 
-def test_effective_max_combos_raises_to_admit_k4_when_on() -> None:
-    # Apriori ON with a k=4 over the default 100k cap → the effective value is
-    # RAISED to at least C(60, 4) so the guards ADMIT every requested k, and ONE
-    # counts-only structlog fires.
+def test_effective_max_combos_raises_default_to_admit_k4_when_on() -> None:
+    # (b) Apriori ON + the value is the DEFAULT (requested_is_explicit=False) + a
+    # k=4 over 100k → the effective value is RAISED to at least C(60, 4) so the
+    # guards ADMIT every requested k, and ONE counts-only structlog fires.
     from structlog.testing import capture_logs
 
     with capture_logs() as logs:
@@ -1187,6 +1189,7 @@ def test_effective_max_combos_raises_to_admit_k4_when_on() -> None:
             k_values=[1, 2, 3, 4],
             n_unique=60,
             requested_max_combos=100_000,
+            requested_is_explicit=False,
         )
     assert out == max(100_000, count_combos(4, 60))
     assert out >= count_combos(4, 60)  # C(60,4) = 487_635 > 100_000
@@ -1197,33 +1200,87 @@ def test_effective_max_combos_raises_to_admit_k4_when_on() -> None:
     assert raised[0]["reason"] == "apriori_breaker_guardrail"
 
 
-def test_effective_max_combos_no_raise_when_already_sufficient() -> None:
-    # Apriori ON but the request already admits every k → returned unchanged, NO log.
+def test_effective_max_combos_explicit_low_operator_wins_no_raise() -> None:
+    # (c) Apriori ON + an EXPLICIT operator value (requested_is_explicit=True) that
+    # is deliberately LOW → returned UNCHANGED (OPERATOR WINS), NO log — even though
+    # a requested k needs more than the explicit limit. The downstream guard then
+    # HONORS the operator's explicit refusal.
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+    from brutex.strategies.types import Side
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=True,
+            k_values=[1, 2, 3, 4],
+            n_unique=60,
+            requested_max_combos=100,  # explicit LOW cap
+            requested_is_explicit=True,
+        )
+    assert out == 100  # operator's explicit value honored verbatim, never raised
+    assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
+
+    # And the guard REFUSES a k needing > 100 masks (C(60, 2) = 1770 > 100).
+    with pytest.raises(ValueError, match="max_combos"):
+        SweepGridConfig(
+            instruments=["NIFTY"],
+            timeframes=[Timeframe("1minute", 1)],
+            directions=[Side.BUY],
+            k_values=[2],
+            condition_bits=list(range(60)),
+            stop_losses=[80],
+            take_profits=[50],
+            proximities=[None],
+            mode="A",
+            data_snapshot_hash="snap",
+            indicator_version="iv",
+            code_commit_sha="cc",
+            min_hits=0,
+            max_combos=out,
+        )
+
+
+def test_effective_max_combos_explicit_high_operator_value_unchanged() -> None:
+    # (d) Apriori ON + an EXPLICIT HIGH operator value → returned unchanged, NO log
+    # (already admits every k — but it wins because it is explicit, not because it
+    # is large: the explicit branch returns BEFORE any max() computation).
     from structlog.testing import capture_logs
 
     big = count_combos(4, 60) + 1
     with capture_logs() as logs:
         out = effective_max_combos(
-            apriori_enabled=True, k_values=[1, 2, 3, 4], n_unique=60, requested_max_combos=big
+            apriori_enabled=True,
+            k_values=[1, 2, 3, 4],
+            n_unique=60,
+            requested_max_combos=big,
+            requested_is_explicit=True,
         )
     assert out == big
     assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
 
 
-def test_effective_max_combos_empty_k_values() -> None:
-    # No requested k → nothing to admit → requested unchanged (the max(..., default=0) arm).
-    assert (
-        effective_max_combos(
-            apriori_enabled=True, k_values=[], n_unique=60, requested_max_combos=123
+def test_effective_max_combos_default_already_sufficient_no_raise() -> None:
+    # Apriori ON + DEFAULT value that already admits every k (empty k_values → the
+    # max(..., default=0) arm; effective == requested) → returned unchanged, NO log.
+    # This covers the on+default branch where `effective > requested` is False.
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=True,
+            k_values=[],
+            n_unique=60,
+            requested_max_combos=123,
+            requested_is_explicit=False,
         )
-        == 123
-    )
+    assert out == 123
+    assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
 
 
 def test_effective_max_combos_grid_guard_interaction() -> None:
-    # The load-bearing interaction: the guards' LOGIC is byte-unchanged — we only
-    # FEED them a higher value. With n_unique = 60, C(60, 4) = 487_635 > the default
-    # 100k, so the raw pre-flight REFUSES k=4 unless the Apriori-aware value admits it.
+    # (e) The load-bearing interaction: the guards' LOGIC is byte-unchanged — we only
+    # FEED them a value. With n_unique = 60, C(60, 4) = 487_635 > the default 100k,
+    # so the raw pre-flight REFUSES k=4 unless the Apriori-aware DEFAULT value admits it.
     from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
     from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
     from brutex.strategies.types import Side
@@ -1256,23 +1313,25 @@ def test_effective_max_combos_grid_guard_interaction() -> None:
     with pytest.raises(ValueError, match="max_combos"):
         _grid(DEFAULT_MAX_COMBOS)
 
-    # Non-Apriori path: effective == requested, so the guard STILL refuses k=4.
+    # Non-Apriori path: DEFAULT returned unchanged, so the guard STILL refuses k=4.
     off_effective = effective_max_combos(
         apriori_enabled=False,
         k_values=k_values,
         n_unique=n_unique,
         requested_max_combos=DEFAULT_MAX_COMBOS,
+        requested_is_explicit=False,
     )
     assert off_effective == DEFAULT_MAX_COMBOS
     with pytest.raises(ValueError, match="max_combos"):
         _grid(off_effective)
 
-    # Apriori ON: the effective value admits every k → the grid CONSTRUCTS cleanly.
+    # Apriori ON + DEFAULT: the effective value admits every k → the grid CONSTRUCTS.
     on_effective = effective_max_combos(
         apriori_enabled=True,
         k_values=k_values,
         n_unique=n_unique,
         requested_max_combos=DEFAULT_MAX_COMBOS,
+        requested_is_explicit=False,
     )
     assert on_effective >= count_combos(4, n_unique)
     grid = _grid(on_effective)  # must NOT raise
