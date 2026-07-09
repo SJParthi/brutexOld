@@ -160,6 +160,7 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
     pending_asset_payload,
 )
+from brutex.dashboard.movers_underlying_class import build_underlying_kind_map
 from brutex.dashboard.movers_warm import (
     MoversWarmResult,
     futures_warm_grid,
@@ -1629,6 +1630,17 @@ def build_app(
     # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
     # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
     _options_strikes_cache = MoversSnapshotCache()
+    # The Futures/Options underlying-CLASS kind map cache (DEC-MOVERS-UNDERLYING-CLASS-001):
+    # the `{underlying → index|stock}` map built from the STORED instrument master
+    # (`build_underlying_kind_map`, an O(underlyings) read) stamps each F&O candidate's
+    # `underlying_kind` for the RANK-time `All | Indices | Stocks` filter. The map is
+    # invariant between master loads, so it is memoised behind the SAME write generation
+    # as the caches above (a pull/load bumps it → rebuild; otherwise an F&O movers poll is
+    # an O(1) handoff). Built on the threadpool worker (it reads `store.connection`). SPOT
+    # needs no map (its class comes from the lake segment). REUSES the COMMON cache.
+    _movers_kind_cache = MoversSnapshotCache()
+    # The single cache key for the per-generation underlying-kind map.
+    movers_kind_key = "movers_underlying_kinds"
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -5346,6 +5358,7 @@ def build_app(
         track: str | None = Query(default=None),
         exchange: str | None = Query(default=None),
         min_volume: int = Query(default=0, ge=0),
+        underlying_class: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
@@ -5400,6 +5413,13 @@ def build_app(
             whole-day bar). A malformed value is a 400.
         top_n
             Ranking depth for each category (1..500; default 100 — DEC-MOVERS-COMPLETENESS-001).
+        underlying_class
+            ``All`` / ``Indices`` / ``Stocks`` underlying-class filter
+            (DEC-MOVERS-UNDERLYING-CLASS-001) applied at RANK time on all three
+            tabs; blank / unknown ⇒ ``all`` (byte-identical default — no filtering).
+            SPOT class comes from the lake segment; FUTURES/OPTIONS from the stored
+            instrument-master ``is_index`` kind map. An unclassifiable underlying is
+            in ``all`` but excluded from both ``Indices`` and ``Stocks`` (counted).
 
         **Honest envelope (Golden Rule #10):** the snapshot is only as good as the
         ingested lake — an empty lake (or a store with no lake root) returns an
@@ -5463,6 +5483,7 @@ def build_app(
                             top_n=top_n,
                             skipped=0,
                             min_volume=min_volume,
+                            underlying_class=underlying_class,
                         )
                     )
                 if asset == "options":
@@ -5475,6 +5496,7 @@ def build_app(
                             top_n=top_n,
                             skipped=0,
                             min_volume=min_volume,
+                            underlying_class=underlying_class,
                         )
                     )
                 return JSONResponse(
@@ -5486,6 +5508,7 @@ def build_app(
                         top_n=top_n,
                         skipped=0,
                         min_volume=min_volume,
+                        underlying_class=underlying_class,
                     )
                 )
             lake_root = store_path.parent
@@ -5590,6 +5613,18 @@ def build_app(
                         cache=_options_strikes_cache,
                         generation=generation,
                     )
+                    # The stored-master index-vs-stock kind map for the RANK-time
+                    # `All | Indices | Stocks` filter (DEC-MOVERS-UNDERLYING-CLASS-001) —
+                    # memoised per write generation (O(1) on a repeat poll). NOT in
+                    # candidate_key: the class filters the shared cached set at rank
+                    # time, so one set serves all three classes.
+                    underlying_kinds = _movers_kind_cache.get_or_compute(
+                        movers_kind_key,
+                        generation=generation,
+                        compute=lambda: build_underlying_kind_map(
+                            store.list_index_equity_instruments()
+                        ),
+                    )
                     key = candidate_key(
                         asset="options",
                         exchange=exch,
@@ -5613,6 +5648,7 @@ def build_app(
                             datasets=movers_datasets,
                             calendar_expiries=calendar_expiries,
                             registry_chain_for=registry_chain_for,
+                            underlying_kinds=underlying_kinds,
                         ),
                     )
                     return build_options_payload(
@@ -5628,6 +5664,7 @@ def build_app(
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
                         pcr=opt_cands.pcr,
                         latest_time=latest_time,
+                        underlying_class=underlying_class,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -5636,6 +5673,16 @@ def build_app(
                     # cache + rank independently (never a stale Near row served for
                     # a Far request) — DEC-MOVERS-FUTURES-TIER-001.
                     fut_tier = normalize_futures_tier(expiry)
+                    # The stored-master kind map for the RANK-time class filter
+                    # (DEC-MOVERS-UNDERLYING-CLASS-001) — memoised per generation,
+                    # NOT in candidate_key (shared set, rank-time filter).
+                    underlying_kinds = _movers_kind_cache.get_or_compute(
+                        movers_kind_key,
+                        generation=generation,
+                        compute=lambda: build_underlying_kind_map(
+                            store.list_index_equity_instruments()
+                        ),
+                    )
                     key = candidate_key(
                         asset="futures",
                         exchange=exch,
@@ -5655,6 +5702,7 @@ def build_app(
                             exchange=exch,
                             datasets=movers_datasets,
                             expiry_tier=fut_tier,
+                            underlying_kinds=underlying_kinds,
                         ),
                     )
                     return build_futures_payload(
@@ -5667,6 +5715,7 @@ def build_app(
                         expiry_tier=fut_cands.expiry_tier,
                         min_volume=min_volume,
                         latest_time=latest_time,
+                        underlying_class=underlying_class,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -5707,6 +5756,7 @@ def build_app(
                     stored_reads=spot_cands.stored_reads,
                     resampled_reads=spot_cands.resampled_reads,
                     latest_time=latest_time,
+                    underlying_class=underlying_class,
                 )
 
             payload = await run_in_threadpool(_resolve)

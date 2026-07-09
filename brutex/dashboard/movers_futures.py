@@ -85,6 +85,14 @@ from brutex.dashboard.movers_snapshot import (
     value_meets_volume_floor,
     warn_prev_baseline_noncontiguous,
 )
+from brutex.dashboard.movers_underlying_class import (
+    KIND_UNKNOWN,
+    class_echo,
+    class_note_suffix,
+    filter_by_underlying_class,
+    fno_kind_from_underlying,
+    normalize_underlying_class,
+)
 from brutex.data.fno_symbol import expiry_year_in_window
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -409,6 +417,12 @@ class FuturesMover:
         The INDEPENDENT OI twin — a null-OI 1-day bar makes the OI baseline
         fall to the minute fallback on a possibly DIFFERENT day than the close
         baseline, so the two flags never share a verdict.
+    underlying_kind
+        The resolved index-vs-stock class of this future's underlying
+        (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
+        looked up in the stored-master kind map. Additive + defaulted (``unknown``);
+        consumed ONLY by the rank-time ``All | Indices | Stocks`` filter, never
+        emitted in a row, so the default payload is byte-identical.
     """
 
     underlying: str
@@ -428,6 +442,7 @@ class FuturesMover:
     prev_close_contiguous: bool | None = None
     oi_baseline_session: str | None = None
     oi_baseline_contiguous: bool | None = None
+    underlying_kind: str = KIND_UNKNOWN
 
     @property
     def name(self) -> str:
@@ -669,6 +684,7 @@ def build_futures_payload(
     expiry_tier: str = _DEFAULT_TIER,
     min_volume: int | None = None,
     latest_time: str | None = None,
+    underlying_class: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
 
@@ -694,6 +710,12 @@ def build_futures_payload(
         The OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001) applied at RANK
         time to the ``volume`` ranking only; ``None`` / ``0`` ⇒ the byte-identical
         no-floor default.
+    underlying_class
+        The ``All | Indices | Stocks`` filter (DEC-MOVERS-UNDERLYING-CLASS-001)
+        applied at RANK time over the SAME candidate set; ``None`` / blank / unknown
+        ⇒ ``all`` (byte-identical — no filtering, no added payload key). A non-``all``
+        class drops non-matching + unclassified rows and echoes the active class +
+        the ``excluded_unclassified`` count.
     latest_time
         The ADDITIVE display-only echo of the resolved latest intraday minute
         (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — shown as
@@ -712,33 +734,42 @@ def build_futures_payload(
         ``instrument_count`` / ``skipped_count`` / ``note``.
     """
     floor = normalize_min_volume(min_volume)
+    # DEC-MOVERS-UNDERLYING-CLASS-001: RANK-time `All | Indices | Stocks` filter over
+    # the SAME cached candidate set — never a re-scan (the DEC-MOVERS-MIN-VOLUME-001
+    # template). `all` (the default) is byte-identical.
+    wanted_class = normalize_underlying_class(underlying_class)
+    ranked_movers, excluded_unclassified = filter_by_underlying_class(movers, wanted_class)
     ranked: dict[str, list[dict[str, Any]]] = {
         category: [
             _futures_row(m)
             for m in (
-                rank_volume(movers, top_n, min_volume=floor)
+                rank_volume(ranked_movers, top_n, min_volume=floor)
                 if category == "volume"
-                else rank_fn(movers, top_n)
+                else rank_fn(ranked_movers, top_n)
             )
         ]
         for category, rank_fn in _FUTURES_CATEGORIES.items()
     }
-    instrument_count = len(movers) + skipped
-    if instrument_count == 0:
+    class_note = class_note_suffix(wanted_class, excluded_unclassified)
+    instrument_count = len(ranked_movers) + skipped
+    lake_population = len(movers) + skipped
+    if lake_population == 0:
         note = (
             "No futures in the lake yet — pull the F&O futures first on the Coverage "
-            "page, then refresh. (Reference-only lake view, CLAUDE.md §3.)"
+            "page, then refresh. (Reference-only lake view, CLAUDE.md §3.)" + class_note
         )
     elif not any(ranked.values()):
         note = (
             f"{instrument_count} future(s) in the lake, but none had a bar at "
             f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
+            + class_note
         )
     else:
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the future's previous close, premium is vs the spot."
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
+            + class_note
         )
     return {
         "interval": interval,
@@ -751,6 +782,7 @@ def build_futures_payload(
         "skipped_count": skipped,
         "latest_time": latest_time,
         "note": note,
+        **class_echo(wanted_class, excluded_unclassified),
         **ranked,
     }
 
@@ -1085,6 +1117,7 @@ def compute_futures_candidates(
     names: Mapping[str, str] | None = None,
     datasets: list[dict[str, str]] | None = None,
     expiry_tier: str = _DEFAULT_TIER,
+    underlying_kinds: dict[str, str] | None = None,
 ) -> FuturesCandidates:
     """Scan the lake → the :class:`FuturesCandidates` for one snapshot coordinate.
 
@@ -1111,6 +1144,14 @@ def compute_futures_candidates(
         unknown value falls back to ``near``). It is part of the candidate cache
         key, so Near / Next / Far each cache + rank independently (never a stale
         Near row served for a Far request).
+    underlying_kinds
+        The stored-master ``{underlying → kind}`` map
+        (:func:`~brutex.dashboard.movers_underlying_class.build_underlying_kind_map`,
+        DEC-MOVERS-UNDERLYING-CLASS-001) used to stamp each future's
+        ``underlying_kind`` for the RANK-time ``All | Indices | Stocks`` filter.
+        ``None`` (a direct/test caller) leaves every kind ``unknown`` — inert for
+        the default ``all`` class. NOT part of the cache key (the class filters the
+        shared set at rank time, so one cached set serves all three classes).
 
     Returns
     -------
@@ -1208,6 +1249,12 @@ def compute_futures_candidates(
             prev_close_contiguous=close_contig,
             oi_baseline_session=oi_iso,
             oi_baseline_contiguous=oi_contig,
+            # DEC-MOVERS-UNDERLYING-CLASS-001: resolve the index-vs-stock class from
+            # the stored-master kind map keyed by the PARSED underlying token (the
+            # same primary_fno_underlying form the map is built with), attached once
+            # so the rank-time filter never re-reads the master. Absent map / unknown
+            # underlying → KIND_UNKNOWN (honest, Golden Rule #1).
+            underlying_kind=fno_kind_from_underlying(underlying, underlying_kinds),
         )
         if close_iso is not None and close_contig is False:
             warn_prev_baseline_noncontiguous(

@@ -18,7 +18,31 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
+_Last updated: 2026-07-09 (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1631 —
+the `/movers` page gains an `All | Indices | Stocks` underlying-class filter on
+all THREE tabs (Spot / Futures / Options), mirroring DEC-MOVERS-MIN-VOLUME-001
+(#1034) EXACTLY: ONE COMMON `brutex/dashboard/movers_underlying_class.py`
+(`normalize_underlying_class` blank/unknown → `all`; `candidate_passes_class`
+predicate; `filter_by_underlying_class`; EMIT-ON-non-default note/echo helpers)
+applied at RANK time in `build_*_payload` over the SAME cached candidate set —
+never a re-scan. Classification is viewer-reads-storage-only: SPOT from the lake
+segment (`INDEX`→index / `CASH`→stock, the stored `is_index` reflection);
+FUTURES/OPTIONS from a `{underlying → kind}` map REUSING the six-step pull
+order's `primary_fno_underlying` + `is_index` classification (#1527, never
+re-minted). Unresolvable → `unknown`: in `All`, EXCLUDED from Indices AND
+Stocks, and COUNTED (`excluded_unclassified` echo + note suffix). Each candidate
+gains a DEFAULTED additive `underlying_kind` field (never row-emitted), so the
+default `All` payload is BYTE-IDENTICAL (pinned all three tabs). DELIBERATE
+DEVIATION (ledgered honestly): the class is a RANK-time filter over the SHARED
+cached set, so — unlike the #917 expiry tier — it is NOT in `candidate_key`
+(threading it would triple-cache an identical set); cache-independence is proven
+by a route test (Indices vs Stocks over one coordinate → different rows,
+`movers_cache.size()==1`). DISPLAY-zone read-only — ENGINE UNCHANGED
+(NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change;
+`movers_underlying_class.py` + `movers_snapshot.py` + `movers_futures.py` +
+`movers_options.py` ALL 100% line+branch; ruff/ruff-format clean, `mypy
+--strict`/pyright clean incl. `app.py`.)
+Earlier: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
 the sweep CLI log-volume guard: `brutex sweep`/`sweep-all`/`sweep-daemon` now
 configure the ONE COMMON structlog seam
 (`observability/logging.configure_logging` — the seam `cmd_dashboard` already
@@ -1646,7 +1670,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
+- **Active branch:** `claude/movers-underlying-class` (**DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1631** —
+  the `/movers` page gains an `All | Indices | Stocks` underlying-class filter on all THREE tabs
+  (Spot / Futures / Options), mirroring DEC-MOVERS-MIN-VOLUME-001 (#1034) EXACTLY: ONE COMMON
+  `brutex/dashboard/movers_underlying_class.py` (`normalize_underlying_class` blank/unknown → `all`;
+  `candidate_passes_class`; `filter_by_underlying_class`; EMIT-ON-non-default note/echo helpers) applied at
+  RANK time in `build_*_payload` over the SAME cached candidate set — never a re-scan. Classification is
+  viewer-reads-storage-only: SPOT from the lake segment (`INDEX`→index / `CASH`→stock, the stored `is_index`
+  reflection); FUTURES/OPTIONS from a `{underlying → kind}` map REUSING the six-step pull order's
+  `primary_fno_underlying` + `is_index` classification (#1527, never re-minted). Unresolvable → `unknown`: in
+  `All`, EXCLUDED from Indices AND Stocks, and COUNTED. Each candidate gains a DEFAULTED additive
+  `underlying_kind` field (never row-emitted), so the default `All` payload is BYTE-IDENTICAL (pinned all
+  three tabs). DELIBERATE DEVIATION (ledgered): the class is a RANK-time filter over the SHARED cached set,
+  so — unlike the #917 expiry tier — it is NOT in `candidate_key`; cache-independence is proven by a route
+  test (Indices vs Stocks over one coordinate → different rows, `movers_cache.size()==1`). DISPLAY-zone
+  read-only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX); touched modules 100% line+branch; ruff/ruff-format
+  clean, `mypy --strict`/pyright clean incl. `app.py`).
+  Earlier: `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
   the sweep CLI log-volume guard: ONE `main()`-dispatch guard configures the COMMON
   `observability/logging.configure_logging` seam at INFO by default for
   `sweep`/`sweep-all`/`sweep-daemon`, with the fail-loud `BRUTEX_LOG_LEVEL` override
@@ -3911,7 +3951,15 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/sweep-log-level-guard`
+- **Active feature branch:** `claude/movers-underlying-class`
+  (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1631 — the `/movers` page gains
+  an `All | Indices | Stocks` underlying-class filter on all THREE tabs, a
+  rank-time filter over the SHARED cached candidate set (the #1034 min_volume
+  template); SPOT class from the lake segment, FUTURES/OPTIONS from the six-step
+  pull order's `primary_fno_underlying` + `is_index` map (#1527, reused); default
+  `All` byte-identical; DISPLAY zone only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
   `main()` sweep dispatch AND inside every spawn worker
