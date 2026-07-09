@@ -19,11 +19,13 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-09 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
-DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1632–#1633 —
+DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1633–#1634 —
+renumbered from #1632–#1633 after main took #1632
+(DEC-DASHBOARD-VISUAL-OVERHAUL-001, PR #1354) —
 the strategy-detail honesty pack on `claude/oneclick-instrument-display`
 (built on PR #1352's head; the PR opens after #1352 lands),
 viewer-reads-storage ONLY (every rendered value verified against
-`top100_artifact.py`): (#1632) the winner's `instrument` reaches every
+`top100_artifact.py`): (#1633) the winner's `instrument` reaches every
 one-click surface — ONE pure `bxInstrumentText` builder feeds the operator
 rank-1 card (`r1_instrument`), the combos Inst cell (the hardcoded "—" +
 FALSE "not a top100 row field" comment KILLED; `fInst` options repointed to
@@ -31,7 +33,7 @@ the ENGINE tokens), the /strategy identity strip (`stInstr`), and /screener
 (config-driven `instrument` column + a direction-style exact-match filter
 whose options are harvested ONLY from rows carrying the key); the
 metric-key-map audit concern was VERIFIED already covered by #1631 with
-zero residue — no duplicate work. (#1633) the gross relabel — the signal-only
+zero residue — no duplicate work. (#1634) the gross relabel — the signal-only
 P&L reads "Gross signal P&L" + the persistent "signal-only — costs modeled
 in the options-translation track" chip on the /strategy card AND the operator
 hero (killed-token-pinned); the SHIPPED results-depth aggregates render in
@@ -1779,9 +1781,11 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/oneclick-instrument-display` (**DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
-  DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1632–#1633** — the strategy-detail honesty pack,
+  DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1633–#1634** — renumbered from #1632–#1633 at the
+  2026-07-09 main-fold after main took #1632 (DEC-DASHBOARD-VISUAL-OVERHAUL-001, PR #1354) — the
+  strategy-detail honesty pack,
   viewer-reads-storage only, built on PR #1352's `claude/oneclick-top100-object-root` head 31a7cf0a (ONE PR, opens
-  after #1352 lands). #1633 (the umbrella): the gross relabel — every signal-only P&L label on the /strategy story
+  after #1352 lands). #1634 (the umbrella): the gross relabel — every signal-only P&L label on the /strategy story
   card + the operator hero/kpi/Returns/verdict-narrative reads "Gross signal P&L" with the persistent
   "signal-only — costs modeled in the options-translation track" chip (killed-token pins on the bare "net P&L"
   labels; combos gross/charges/net split untouched — net == gross while costs are structurally absent, noted);
@@ -1820,7 +1824,7 @@ hostile-review pass._
   (equity route off REAL `write_tuple_sidecars` bytes — awaiting-before/ok-after + the honest null low on the
   wire; the link-contract pin), `TestEquityPage` (12) + `TestBuildEquityPayload` keep BOTH oneclick modules
   100.00% line+branch on the ci.yml-exact gates, `TestEquityRoute` route degrades (400/422 bounds), NEW
-  `tests/unit/test_dashboard_winner_detail.py` node goldens + wiring pins. #1632 (folded first): the winner's
+  `tests/unit/test_dashboard_winner_detail.py` node goldens + wiring pins. #1633 (folded first): the winner's
   `instrument` on every surface — ONE pure `bxInstrumentText` builder feeding the operator rank-1 card
   (`r1_instrument` hooks), the combos Inst cell (hardcoded "—" + the FALSE "instrument is not a top100 row field"
   comment KILLED; the dead `fInst` filter's v29-preview display names repointed to the ENGINE tokens
@@ -4268,7 +4272,9 @@ hostile-review pass._
 
 - **Active feature branch:** `claude/oneclick-instrument-display`
   (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 + DEC-ONECLICK-INSTRUMENT-DISPLAY-001,
-  MIGRATION.md #1632–#1633 — the strategy-detail honesty pack,
+  MIGRATION.md #1633–#1634, renumbered from #1632–#1633 after main took
+  #1632 (DEC-DASHBOARD-VISUAL-OVERHAUL-001, PR #1354) — the strategy-detail
+  honesty pack,
   viewer-reads-storage only: the winner's `instrument` on every one-click
   surface (ONE `bxInstrumentText` builder; combos Inst cell + `fInst`
   engine-token repoint; /screener "Inst" column + filter); the gross
