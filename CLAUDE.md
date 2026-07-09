@@ -18,7 +18,38 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
+_Last updated: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1622 —
+the `/movers` stored-read FRESHNESS GUARD: a prebuilt stored TF / `1day` day
+slice is now VERIFIED against a fresh re-derive of the raw 1-minute base
+before it is served (the CUT stored frame — the exact served bytes — judged
+via the NEW pure `movers_stored_read.stored_day_frame_is_stale`, which
+delegates to the ONE existing comparator `tf_autoderive.compare_derived_freshness`
+— the doctor + #1492-G1 sweep-gate core, ZERO diff to `tf_autoderive.py`;
+day-scoped purely by caller frame slicing per DEC-RESAMPLE-ANCHOR-002;
+`tf_minutes==1` short-circuits — the stored 1minute IS the base), and a
+provably-STALE slice (a CLI-fetch-after-prebuild lake #1145, a quarantined
+#1221 / crashed / partial prebuild, a mid-session live-edge bucket — states
+`prefer_resample` + `derive_in_progress` are structurally blind to; repro:
+3minute 21365 vs 1minute 21374; 1day 21700 vs 21750.55) falls back to the
+existing proven-TF-invariant 1-minute derive fed from the SAME in-hand frame
+(the #1538 value read HOISTED — the fallback double-read collapses 2→1;
+month-file I/O never MORE than today) — counted under the existing
+`resampled_reads` + ONE capped `movers.stored_stale_fallback` WARN (the #1539
+warner pattern, separate per-build budget; ZERO new payload keys). The 1day
+branch serves the CANONICAL `resample_1m_to_daily` re-derive on drift
+(value-plane compare, timestamp-exempt stamping convention; `date.max`
+saturates to abstain); a missing 1-minute base ABSTAINS to today's stored
+bytes (the G1 no-verdict doctrine — never a guess, never a dropped symbol).
+HONEST: on the intraday stored-hit path the guard's compare costs ≈ the
+fallback resample it guards against — the stored-first CPU saving largely
+evaporates (retained for the abstain envelope + provenance + the 1minute
+short-circuit); NO speedup claimed; fresh-lake payloads BYTE-IDENTICAL
+(spy-pinned, zero events); five stale-serve test pins consciously
+flipped/re-seeded (ledgered F1-F5). READ-ONLY dashboard — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+`movers_snapshot.py` + `movers_stored_read.py` 100% line+branch;
+ruff/ruff-format/`mypy --strict`/pyright clean.)
+Earlier: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
 the P4 merge-integration rebind of the one-click display adapter onto the
 SHIPPED #1275 results-depth artifacts: the ONE discovery seam
 (`oneclick_artifacts.runs_root`) repoints `<results_root>/runs/` → the
@@ -1618,7 +1649,22 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
+- **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1622** — the
+  `/movers` stored-read FRESHNESS GUARD: every prebuilt stored TF / `1day` day slice is verified against a fresh
+  re-derive of the raw 1-minute base before it is served (the NEW pure `stored_day_frame_is_stale` delegating to the
+  ONE existing `compare_derived_freshness` — `tf_autoderive.py` ZERO diff, the #1492-G1 sweep gate non-regressed by an
+  empty diff; the 1day branch value-plane-compares against the canonical `resample_1m_to_daily`), and a provably-STALE
+  slice — the reproduced CLI-fetch-after-prebuild / quarantined / crashed / partial / live-edge prebuild states that
+  `prefer_resample` + `derive_in_progress` are blind to (repro: 3minute 21365 vs 1minute 21374; 1day 21700 vs
+  21750.55) — falls back to the proven-TF-invariant 1-minute derive fed from the SAME hoisted #1538 base frame
+  (fallback double-read collapses 2→1; I/O never MORE than today), counted under the existing `resampled_reads` + ONE
+  capped `movers.stored_stale_fallback` WARN — ZERO new payload keys; a missing 1-minute base ABSTAINS to the stored
+  bytes (never a guess, never a dropped symbol); fresh-lake payloads BYTE-IDENTICAL (spy-pinned, zero events); five
+  stale-serve test pins consciously flipped/re-seeded (F1-F5, ledgered). HONEST: the guard's compare ≈ the fallback
+  resample it prevents on the stored-hit path — no speedup claimed. READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `movers_snapshot.py` + `movers_stored_read.py` 100%
+  line+branch; ruff/ruff-format/`mypy --strict` (403 files)/pyright clean.)
+  Earlier: `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
   P4 merge-integration rebind, built ON TOP of PR #1280's `claude/operator-page-real-rebuild` head (the eventual PR
   targets main only after #1280 merges): the one-click discovery seam repoints `<results_root>/runs/` → the Ruling-4
   `sweep_runs/` SIBLING root (mirror-pinned to `trade_store.sweep_run_dir`; NO legacy `runs/` fallback — the fixture
@@ -3870,7 +3916,13 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/oneclick-sweep-runs-rebind`
+- **Active feature branch:** `claude/movers-stored-freshness-guard`
+  (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1622 — the `/movers`
+  stored-read freshness guard: a stale prebuilt TF / `1day` day slice is
+  detected against the raw 1-minute base and falls back to the 1-minute
+  derive, warned + counted; READ-ONLY dashboard; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/oneclick-sweep-runs-rebind`
   (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 — the P4
   merge-integration rebind: oneclick discovery repointed to the Ruling-4
   `sweep_runs/` sibling root + the production `TradeStoreReader` over the
