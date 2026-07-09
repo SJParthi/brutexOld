@@ -1250,6 +1250,19 @@ def register_launch_routes(
     from fastapi.concurrency import run_in_threadpool
     from fastapi.responses import HTMLResponse, JSONResponse
 
+    # Hoist ``JSONResponse`` into module globals (the app.py `_make_ws_handler`
+    # hoist idiom — DEC-OPENAPI-ANNOTATIONS-RESOLVE-001): the two API closures'
+    # stringified ``-> JSONResponse`` return annotations
+    # (``from __future__ import annotations``) resolve against THIS module's
+    # ``endpoint.__globals__``, where the function-local import above is
+    # invisible — without the hoist ``app.openapi()`` raises
+    # ``PydanticUserError`` even after app.py's own hoist, 500ing
+    # ``/openapi.json`` for the whole dashboard. ``HTMLResponse`` is only a
+    # runtime value (``response_class=``), never an annotation, so it is
+    # deliberately NOT hoisted. The lazy-import contract stands: this module
+    # still imports without fastapi installed.
+    globals()["JSONResponse"] = JSONResponse
+
     async def launch_page() -> str:
         """GET /launch — the INTERIM Run-Sweep launch page."""
         return _load_launch_template()
