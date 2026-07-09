@@ -161,8 +161,8 @@ def _plan(lake: Path, results: Path, tmp_path: Path, **overrides: Any) -> Nightl
 
 
 @contextmanager
-def _noop_keep_awake(reason: str) -> Generator[None]:
-    yield
+def _noop_keep_awake(reason: str) -> Generator[bool]:
+    yield False
 
 
 def _seams(
@@ -1010,9 +1010,9 @@ def test_keep_awake_wraps_the_whole_chain(monkeypatch: pytest.MonkeyPatch, tmp_p
     marks: list[str] = []
 
     @contextmanager
-    def recording_keep_awake(reason: str) -> Generator[None]:
+    def recording_keep_awake(reason: str) -> Generator[bool]:
         marks.append(f"enter:{reason}")
-        yield
+        yield False
         marks.append("exit")
 
     def marking_sweep(**kwargs: Any) -> int:

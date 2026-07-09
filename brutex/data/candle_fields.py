@@ -250,13 +250,6 @@ def assemble_candle(
         if oi_raw < 0:
             negative_count_clamped = True
         oi = max(0, oi_raw)
-    if is_absent(volume):
-        volume_value = 0
-    else:
-        volume_raw = to_int(volume, "volume")
-        if volume_raw < 0:
-            negative_count_clamped = True
-        volume_value = max(0, volume_raw)
     open_price = to_price(open_, "open")
     high_price = to_price(high, "high")
     low_price = to_price(low, "low")
@@ -279,10 +272,25 @@ def assemble_candle(
     # below is byte-identical whether or not a hook is present.
     if on_clamp is not None and (clamped_high != high_price or clamped_low != low_price):
         on_clamp()
+    # ``parse_timestamp`` then ``volume`` — this ORDER is deliberate: it is the
+    # exact original left-to-right evaluation of the ``CandleBar(...)`` call
+    # (timestamp first arg, volume a later arg), so a bar malformed in MULTIPLE
+    # fields surfaces the SAME first parse-error identity as before the negative
+    # -clamp observability was added (Golden Rule #10 — "parse behavior
+    # unchanged" stays literally true; only the negative-count DETECTION was
+    # added, never the error precedence).
+    timestamp = parse_timestamp(ts_raw)
+    if is_absent(volume):
+        volume_value = 0
+    else:
+        volume_raw = to_int(volume, "volume")
+        if volume_raw < 0:
+            negative_count_clamped = True
+        volume_value = max(0, volume_raw)
     if on_negative_count_clamp is not None and negative_count_clamped:
         on_negative_count_clamp()
     return CandleBar(
-        timestamp=parse_timestamp(ts_raw),
+        timestamp=timestamp,
         open=open_price,
         high=clamped_high,
         low=clamped_low,
