@@ -67,6 +67,17 @@ _LOG = structlog.get_logger("brutex.dashboard.lake_census")
 #: consume a shared threadpool token).
 CENSUS_THREAD_NAME: Final[str] = "brutex-lake-census"
 
+#: Floor for the scan-STALLED detection bound (seconds): an in-flight scan is
+#: honestly flagged ``scan_stalled`` once its runtime exceeds ``max(2 × the
+#: last landed scan's duration, this floor)`` — generous by design (the
+#: production scan legitimately runs ~26 min on a 2.14M-file lake, and the
+#: dynamic 2× term scales the bound once a real duration is known).
+#: DETECTION, not termination (the #999 stance): the daemon thread is never
+#: killed, the last-known verdict keeps serving, and the WARN fires once per
+#: scan episode. NOT an env knob — the non-blocking behaviour is DEFAULT-ON
+#: with zero configuration; the constructor parameter is a test seam only.
+SCAN_STALE_FLOOR_S: Final[float] = 1800.0
+
 #: The census scan callable: receives the holder's per-file progress callback
 #: (threaded into ``scan_lake_invariants(per_file_pause=...)`` — the existing
 #: L3 throttle seam, which fires per file INCLUDING skips) and returns the
@@ -114,6 +125,11 @@ class LakeCensusHolder:
     ttl_floor_s / max_floor_s
         The #920 adaptive-floor parameters (base + cap), byte-identical
         semantics to the superseded ``SummaryCache`` wiring.
+    scan_stale_after_s
+        Explicit scan-STALLED detection bound (seconds); ``None`` (production)
+        derives ``max(2 × the last landed scan's duration,
+        :data:`SCAN_STALE_FLOOR_S`)`` per snapshot. A test seam, never an env
+        knob — the non-blocking route is DEFAULT-ON with zero configuration.
     """
 
     def __init__(
@@ -127,6 +143,7 @@ class LakeCensusHolder:
         spawn: Callable[[Callable[[], None]], None] | None = None,
         ttl_floor_s: float = DEFAULT_TTL_FLOOR_S,
         max_floor_s: float = MAX_ADAPTIVE_FLOOR_S,
+        scan_stale_after_s: float | None = None,
     ) -> None:
         self._scan = scan
         self._generation = generation
@@ -136,6 +153,7 @@ class LakeCensusHolder:
         self._spawn = spawn if spawn is not None else _default_spawn
         self._ttl_floor_s = ttl_floor_s
         self._max_floor_s = max_floor_s
+        self._scan_stale_after_s = scan_stale_after_s
         self._lock = threading.Lock()
         #: Single-flight over the whole check-then-maybe-scan thread body.
         self._in_flight = False
@@ -157,6 +175,12 @@ class LakeCensusHolder:
         self._files_scanned = 0
         self._estimate: int | None = None
         self._started_utc: str | None = None
+        #: Monotonic clock stamp at the in-flight scan's start (the STALLED
+        #: detection baseline; ``None`` = no scan ever started).
+        self._scan_started_clock: float | None = None
+        #: Once-per-episode throttle for the ``lake_census.scan_stalled`` WARN
+        #: (reset at every new scan start).
+        self._stall_warned = False
         #: Completion wall-clock of the last LANDED scan (the verdict's age).
         self._as_of_utc: str | None = None
         #: Last scan error (``"Type: msg"``), cleared by the next clean scan.
@@ -170,13 +194,24 @@ class LakeCensusHolder:
         """The O(1) route payload: last-known verdict + honest scan state.
 
         A landed verdict's keys are byte-compatible with the pre-fix payload
-        (``census_to_dict`` shape) with FOUR additive keys stamped on top:
+        (``census_to_dict`` shape) with FIVE additive keys stamped on top:
         ``scan_in_progress`` / ``scan_error`` / ``as_of_utc`` /
         ``scan_progress`` (``files_scanned`` + ``files_total_estimate`` +
-        ``started_utc``). Before the first scan lands the payload is the NEW
-        honest warming arm — ``{"present": true}`` plus the same four keys and
-        NO verdict fields (a verdict is never fabricated, Golden Rule #1).
+        ``started_utc``) / ``scan_stalled``. Before the first scan lands the
+        payload is the NEW honest warming arm — ``{"present": true}`` plus the
+        same five keys and NO verdict fields (a verdict is never fabricated,
+        Golden Rule #1).
+
+        LOUD STALENESS (never a silent forever-warming): an in-flight scan
+        older than ``max(2 × the last landed scan's duration,
+        SCAN_STALE_FLOOR_S)`` reads ``scan_stalled: true`` + ONE
+        ``lake_census.scan_stalled`` WARN per episode — DETECTION not
+        termination (the #999 stance: the daemon thread cannot be killed;
+        the last-known verdict keeps serving). A backwards clock (skew:
+        now < scan start) can never false-flag — negative elapsed is below
+        every bound. Completion / error clears the flag.
         """
+        stall_warn: dict[str, Any] | None = None
         with self._lock:
             base: dict[str, Any] = (
                 dict(self._payload) if self._payload is not None else {"present": True}
@@ -185,6 +220,26 @@ class LakeCensusHolder:
             # the scan (nothing to serve → needs_scan unconditionally), so it
             # honestly reads in-progress even before the scan body is entered.
             base["scan_in_progress"] = self._scanning or (self._in_flight and self._payload is None)
+            stalled = False
+            if self._scanning:
+                started_clock = self._scan_started_clock
+                # ``_scanning`` is only ever set together with the start stamp
+                # (same lock block in ``_run_scan``) — the ternary is a
+                # type-narrowing belt, not a live branch.
+                baseline = started_clock if started_clock is not None else self._clock()
+                elapsed = self._clock() - baseline
+                bound = self._stale_bound_locked()
+                if elapsed > bound:
+                    stalled = True
+                    if not self._stall_warned:
+                        self._stall_warned = True
+                        stall_warn = {
+                            "elapsed_s": elapsed,
+                            "bound_s": bound,
+                            "started_utc": self._started_utc,
+                            "files_scanned": self._files_scanned,
+                        }
+            base["scan_stalled"] = stalled
             base["scan_error"] = self._error
             base["as_of_utc"] = self._as_of_utc
             base["scan_progress"] = {
@@ -192,7 +247,21 @@ class LakeCensusHolder:
                 "files_total_estimate": self._estimate,
                 "started_utc": self._started_utc,
             }
-            return base
+        if stall_warn is not None:
+            # Logged OUTSIDE the lock (the module's no-I/O-under-lock rule).
+            _LOG.warning("lake_census.scan_stalled", **stall_warn)
+        return base
+
+    def _stale_bound_locked(self) -> float:
+        """The scan-STALLED bound (seconds) — caller holds the lock, O(1).
+
+        The explicit constructor bound when given (test seam); else the
+        dynamic ``max(2 × last landed duration, SCAN_STALE_FLOOR_S)`` —
+        generous, and self-scaling once a real scan duration is known.
+        """
+        if self._scan_stale_after_s is not None:
+            return self._scan_stale_after_s
+        return max(2.0 * self._compute_duration, SCAN_STALE_FLOOR_S)
 
     @property
     def scans_completed(self) -> int:
@@ -271,12 +340,14 @@ class LakeCensusHolder:
             except Exception as exc:  # pylint: disable=broad-except — estimate is best-effort
                 _LOG.warning("lake_census.estimate_failed", error=str(exc))
                 estimate = None
+        started = self._clock()
         with self._lock:
             self._scanning = True
             self._files_scanned = 0
             self._estimate = estimate
             self._started_utc = self._now_utc()
-        started = self._clock()
+            self._scan_started_clock = started
+            self._stall_warned = False  # a new scan opens a new stall episode
         try:
             payload = self._scan(self._count_file)
         except Exception as exc:  # pylint: disable=broad-except — an erroring scan must not kill polls
@@ -311,6 +382,7 @@ class LakeCensusHolder:
 
 __all__ = [
     "CENSUS_THREAD_NAME",
+    "SCAN_STALE_FLOOR_S",
     "CensusScan",
     "LakeCensusHolder",
 ]

@@ -130,7 +130,7 @@ def _poison_engine_partition(lake_root: Path) -> None:
             "open_interest": pa.array([None, None], type=pa.int64()),
         }
     )
-    pq.write_table(table, dest)
+    pq.write_table(table, dest)  # type: ignore[no-untyped-call, unused-ignore]
 
 
 class TestHealScanBeats:
@@ -208,7 +208,7 @@ class TestForensicReplay:
         register_progress_beat(wd.beat)
         wd.beat()  # the last fetched-window heartbeat before the drain stages
 
-        real_scan = lake_heal_module.scan_lake_invariants
+        from brutex.data.lake_invariants import scan_lake_invariants as real_scan
 
         def _slow_scan(lake: Path, **kwargs: Any) -> Any:
             inner = kwargs.get("per_file_pause")
@@ -258,7 +258,7 @@ class TestForensicReplay:
         register_progress_beat(wd.beat)
         wd.beat()  # the last fetched-window heartbeat before the drain save
 
-        real_write = ledger_store_module.atomic_write_via
+        from brutex.data.atomic_io import atomic_write_via as real_write
 
         def _slow_write(path: Path, writer: Callable[[Path], None]) -> None:
             box.advance(650.0)  # the save body outlasts the 600 s stall timeout
@@ -276,3 +276,46 @@ class TestForensicReplay:
         register_progress_beat(beat)
         save_window_ledger(WindowLedger(), tmp_path)
         assert len(beats) == 2
+
+
+class TestKeyedChannelRouting:
+    """The heal/save beats ride the run's KEYED channel (DEC-PULL-BEAT-PERRUN-001)."""
+
+    def test_heal_and_save_beats_arrive_on_the_run_keyed_channel(self, tmp_path: Path) -> None:
+        """The ambient-pull-id routing pin — the production `pull_jobs` pattern.
+
+        `BackgroundPullJob._run` registers the run's beat KEYED on its own
+        pull id inside `pull_id_scope` (pull_jobs.py — DEC-PULL-BEAT-PERRUN-001
+        #1537), and the L2 heal + drain save run ON that worker thread, so
+        their `emit_progress_beat` calls resolve the ambient id and route to
+        the RUN's keyed channel — never the LEGACY fallback. The legacy-channel
+        CANARY below must stay silent: a future refactor that moves the
+        heal/save off the pull-worker thread (dropping the ambient id) would
+        route its beats outward to the canary (or drop them on a keyed-only
+        registry), starving the keyed watchdog — and FAIL this test.
+        """
+        from brutex.observability.correlation import pull_id_scope
+
+        lake_root = tmp_path / "lake"
+        lake_root.mkdir()
+        _write_engine_bar(lake_root)
+        keyed_beats, keyed_beat = _counting_beat()
+        legacy_beats, legacy_beat = _counting_beat()
+        register_progress_beat(keyed_beat, pull_id="abc123")
+        register_progress_beat(legacy_beat)  # the LEGACY canary — must stay silent
+        with pull_id_scope("abc123"):
+            report = heal_after_pull(
+                lake_root=lake_root,
+                targets=[("NSE", "INDEX", "NIFTY")],
+                start=date(2025, 9, 1),
+                end=date(2025, 9, 2),
+                scope="test",
+            )
+            save_window_ledger(WindowLedger(), tmp_path)
+        assert report.findings == 0
+        # Heal: 1 target + 1 scanned file; save: entry + completion — ALL on
+        # the run's keyed channel via the worker's ambient pull id.
+        assert len(keyed_beats) == 4
+        # An exact keyed hit NEVER falls back outward to the legacy channel
+        # (the anti-masking invariant): the canary saw ZERO beats.
+        assert legacy_beats == []

@@ -26,9 +26,11 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+import brutex.dashboard.lake_census_holder as lake_census_holder_module
 import pytest
 from brutex.dashboard.lake_census_holder import (
     CENSUS_THREAD_NAME,
+    SCAN_STALE_FLOOR_S,
     LakeCensusHolder,
     _default_spawn,
     _utc_now_iso,
@@ -112,6 +114,7 @@ class TestSnapshotWarmingArm:
         assert snap == {
             "present": True,
             "scan_in_progress": False,
+            "scan_stalled": False,
             "scan_error": None,
             "as_of_utc": None,
             "scan_progress": {
@@ -460,3 +463,217 @@ def test_scan_in_progress_reflects_scanning_only_with_a_payload(
         holder.maybe_refresh()  # first-ever: in-flight with no payload
         assert holder.snapshot()["scan_in_progress"] is True
         bodies.pop()()
+
+
+class _RecordingLog:
+    """A `_LOG` stand-in recording warning events (the once-per-episode oracle)."""
+
+    def __init__(self) -> None:
+        self.warnings: list[tuple[str, dict[str, Any]]] = []
+
+    def warning(self, event: str, **kw: Any) -> None:
+        self.warnings.append((event, kw))
+
+
+class TestScanStalledVerdict:
+    """ADD-3 loud staleness: a never-finishing scan is flagged, never silent."""
+
+    def test_fresh_scan_not_stalled_then_past_bound_stalls_with_one_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """not-stalled → stalled + ONE WARN per episode → completion clears."""
+        rec = _RecordingLog()
+        monkeypatch.setattr(lake_census_holder_module, "_LOG", rec)
+        clock = _FakeClock()
+        seen: list[bool] = []
+        holder_ref: list[LakeCensusHolder] = []
+
+        class _StallingScan(_CountingScan):
+            def __call__(self, per_file_pause: Callable[[], None]) -> dict[str, Any]:
+                self.calls += 1
+                seen.append(holder_ref[0].snapshot()["scan_stalled"])  # fresh → False
+                clock.advance(101.0)  # the in-flight scan outlives the bound
+                seen.append(holder_ref[0].snapshot()["scan_stalled"])  # → True + WARN
+                seen.append(holder_ref[0].snapshot()["scan_stalled"])  # still True, NO 2nd WARN
+                return {"present": True, "findings_total": 0}
+
+        scan = _StallingScan()
+        holder = LakeCensusHolder(
+            scan=scan,
+            generation=lambda: 0,
+            clock=clock,
+            spawn=_sync_spawn,
+            scan_stale_after_s=100.0,
+        )
+        holder_ref.append(holder)
+        assert holder.maybe_refresh() is True
+        assert seen == [False, True, True]
+        stall_warns = [w for w in rec.warnings if w[0] == "lake_census.scan_stalled"]
+        assert len(stall_warns) == 1  # once per episode, never a warn storm
+        assert stall_warns[0][1]["files_scanned"] == 0
+        # Completion CLEARS the flag — the landed verdict serves normally.
+        done = holder.snapshot()
+        assert done["scan_stalled"] is False
+        assert done["findings_total"] == 0
+
+    def test_dynamic_bound_floor_arm_first_ever_scan(self) -> None:
+        """No explicit bound + no prior duration → the 30-min floor governs."""
+        clock = _FakeClock()
+        seen: list[bool] = []
+        holder_ref: list[LakeCensusHolder] = []
+
+        class _FloorScan(_CountingScan):
+            def __call__(self, per_file_pause: Callable[[], None]) -> dict[str, Any]:
+                self.calls += 1
+                clock.advance(SCAN_STALE_FLOOR_S)  # exactly AT the bound — not stalled
+                seen.append(holder_ref[0].snapshot()["scan_stalled"])
+                clock.advance(1.0)  # strictly past → stalled
+                seen.append(holder_ref[0].snapshot()["scan_stalled"])
+                return {"present": True, "findings_total": 0}
+
+        holder = _holder(_FloorScan(), clock=clock)
+        holder_ref.append(holder)
+        assert holder.maybe_refresh() is True
+        assert seen == [False, True]
+
+    def test_dynamic_bound_scales_to_twice_the_last_scan_duration(self) -> None:
+        """A landed slow scan WIDENS the bound to 2x its own duration."""
+        gen = {"n": 0}
+        clock = _FakeClock()
+        seen: list[bool] = []
+        holder_ref: list[LakeCensusHolder] = []
+        durations = iter([2000.0])  # first scan "takes" 2000 s; second probes the bound
+
+        class _TwoPhaseScan(_CountingScan):
+            def __call__(self, per_file_pause: Callable[[], None]) -> dict[str, Any]:
+                self.calls += 1
+                if self.calls == 1:
+                    clock.advance(next(durations))
+                else:
+                    # bound = max(2 x 2000, floor 1800) = 4000: at 3999 not
+                    # stalled, past it stalled.
+                    clock.advance(3999.0)
+                    seen.append(holder_ref[0].snapshot()["scan_stalled"])
+                    clock.advance(2.0)
+                    seen.append(holder_ref[0].snapshot()["scan_stalled"])
+                return {"present": True, "findings_total": 0}
+
+        holder = _holder(_TwoPhaseScan(), generation=lambda: gen["n"], clock=clock)
+        holder_ref.append(holder)
+        assert holder.maybe_refresh() is True
+        gen["n"] += 1
+        clock.advance(121.0)  # past the (capped) adaptive TTL floor
+        assert holder.maybe_refresh() is True
+        assert seen == [False, True]
+
+    def test_backwards_clock_skew_never_false_stalls(self) -> None:
+        """now < scan start (skew) → negative elapsed → NEVER stalled."""
+        clock = _FakeClock()
+        seen: list[bool] = []
+        holder_ref: list[LakeCensusHolder] = []
+
+        class _SkewScan(_CountingScan):
+            def __call__(self, per_file_pause: Callable[[], None]) -> dict[str, Any]:
+                self.calls += 1
+                clock.advance(-50.0)  # the injected clock jumps BACKWARDS
+                seen.append(holder_ref[0].snapshot()["scan_stalled"])
+                return {"present": True, "findings_total": 0}
+
+        holder = LakeCensusHolder(
+            scan=_SkewScan(),
+            generation=lambda: 0,
+            clock=clock,
+            spawn=_sync_spawn,
+            scan_stale_after_s=10.0,
+        )
+        holder_ref.append(holder)
+        clock.advance(100.0)  # a non-zero start baseline so the rewind is real skew
+        assert holder.maybe_refresh() is True
+        assert seen == [False]
+
+    def test_each_scan_opens_a_fresh_warn_episode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rec = _RecordingLog()
+        monkeypatch.setattr(lake_census_holder_module, "_LOG", rec)
+        gen = {"n": 0}
+        clock = _FakeClock()
+        holder_ref: list[LakeCensusHolder] = []
+
+        class _AlwaysStalling(_CountingScan):
+            def __call__(self, per_file_pause: Callable[[], None]) -> dict[str, Any]:
+                self.calls += 1
+                clock.advance(11.0)
+                assert holder_ref[0].snapshot()["scan_stalled"] is True
+                return {"present": True, "findings_total": 0}
+
+        holder = LakeCensusHolder(
+            scan=_AlwaysStalling(),
+            generation=lambda: gen["n"],
+            clock=clock,
+            spawn=_sync_spawn,
+            scan_stale_after_s=10.0,
+        )
+        holder_ref.append(holder)
+        assert holder.maybe_refresh() is True
+        gen["n"] += 1
+        clock.advance(121.0)
+        assert holder.maybe_refresh() is True
+        stall_warns = [w for w in rec.warnings if w[0] == "lake_census.scan_stalled"]
+        assert len(stall_warns) == 2  # one WARN per scan episode
+
+
+class TestExtremePermutations:
+    """ADD-4 permutation arms not already pinned by the suites above."""
+
+    def test_restart_mid_scan_shape_warming_serves_sentinel_estimate(self) -> None:
+        """A fresh process (no payload) mid-first-scan: honest warming + the
+        L3-sentinel denominator — never a fabricated verdict."""
+        probes: list[dict[str, Any]] = []
+        holder_ref: list[LakeCensusHolder] = []
+
+        class _MidScanProbe(_CountingScan):
+            def __call__(self, per_file_pause: Callable[[], None]) -> dict[str, Any]:
+                self.calls += 1
+                per_file_pause()
+                probes.append(holder_ref[0].snapshot())
+                return {"present": True, "findings_total": 0}
+
+        holder = _holder(_MidScanProbe(), estimate=lambda: 2_140_000, clock=_FakeClock())
+        holder_ref.append(holder)
+        assert holder.maybe_refresh() is True
+        (mid,) = probes
+        assert mid["scan_in_progress"] is True
+        assert "findings_total" not in mid  # never fabricated mid-first-scan
+        assert mid["scan_progress"]["files_total_estimate"] == 2_140_000
+        assert mid["scan_progress"]["files_scanned"] == 1
+
+    def test_disk_vanish_mid_scan_oserror_serves_last_known_and_rearms(self) -> None:
+        """An OSError (volume vanished) mid-scan lands the error arm: WARN +
+        last-known verdict keeps serving + the next poll re-arms."""
+        gen = {"n": 0}
+        clock = _FakeClock()
+        flip = {"vanish": False}
+
+        class _VanishingScan(_CountingScan):
+            def __call__(self, per_file_pause: Callable[[], None]) -> dict[str, Any]:
+                self.calls += 1
+                if flip["vanish"]:
+                    raise OSError("[Errno 5] Input/output error: lake volume vanished")
+                return {"present": True, "findings_total": 0, "files_scanned": 7}
+
+        scan = _VanishingScan()
+        holder = _holder(scan, generation=lambda: gen["n"], clock=clock)
+        holder.maybe_refresh()
+        flip["vanish"] = True
+        gen["n"] += 1
+        clock.advance(3.0)
+        holder.maybe_refresh()
+        snap = holder.snapshot()
+        assert snap["files_scanned"] == 7  # last-known verdict still serves
+        assert snap["scan_error"] is not None and "vanished" in snap["scan_error"]
+        assert snap["scan_stalled"] is False and snap["scan_in_progress"] is False
+        # The next poll past the base floor re-arms (the volume may be back).
+        flip["vanish"] = False
+        clock.advance(3.0)
+        assert holder.maybe_refresh() is True
+        assert scan.calls == 3
+        assert holder.snapshot()["scan_error"] is None

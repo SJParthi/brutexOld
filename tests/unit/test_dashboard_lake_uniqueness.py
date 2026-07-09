@@ -447,5 +447,69 @@ class TestUniverseChipMarkers:
         assert "census scanning…" in body
         assert "(rescanning…" in body
         assert "census scan failed" in body
+        assert "census scan stalled" in body  # the ADD-3 loud-staleness arm
         assert "scan_in_progress" in body
+        assert "scan_stalled" in body
         assert text.count("setInterval(loadLakeUniqueness") == 1
+
+
+class TestExtremePermutations:
+    """ADD-4 permutation arms at the ROUTE level (holder arms live in the
+    holder suite; single-flight/crash/estimate arms are pinned there)."""
+
+    def test_empty_lake_zero_files_serves_a_zero_verdict(self, tmp_path: Path) -> None:
+        """A 0-file lake lands an honest zero census — never a crash/blank."""
+        lake_root = tmp_path / "lake"
+        lake_root.mkdir()
+        s = InstrumentStore.open(lake_root / "instruments.duckdb")
+        try:
+            client = _make_client(s, SummaryCache())
+            payload = client.get("/api/v1/universe/lake-uniqueness").json()
+            assert payload["present"] is True
+            assert payload["findings_total"] == 0
+            assert payload["files_scanned"] == 0
+            assert payload["scan_progress"]["files_scanned"] == 0
+        finally:
+            s.close()
+
+    def test_corrupt_file_mid_scan_rides_the_scanner_skip_semantics(
+        self, store: InstrumentStore
+    ) -> None:
+        """A garbage Parquet is SKIPPED (the scanner's existing
+        `parquet_read_skip_errors` discipline) — the census still lands."""
+        lake_root = store.path.parent
+        junk = lake_root / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2025" / "10.parquet"
+        junk.parent.mkdir(parents=True, exist_ok=True)
+        junk.write_bytes(b"this is not a parquet file")
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["present"] is True
+        assert payload["files_scanned"] == 1  # the clean bar file; junk skipped
+        assert payload["findings_total"] == 0
+        # Progress ticked for the skipped file too (per_file_pause fires on
+        # skips — the scanner's documented seam contract).
+        assert payload["scan_progress"]["files_scanned"] == 2
+
+    def test_scan_crash_route_keeps_serving_the_last_verdict(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising rescan (disk vanished) never blanks the route: the
+        last-known verdict serves with `scan_error` stamped, 200 always."""
+        clock = _FakeClock()
+        cache = SummaryCache(clock=clock)
+        client = _make_client(store, cache, census_clock=clock)
+        first = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert first["findings_total"] == 0 and first["scan_error"] is None
+
+        def _vanished(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("[Errno 5] Input/output error: lake volume vanished")
+
+        monkeypatch.setattr(app_module, "scan_lake_invariants", _vanished)
+        cache.mark_dirty()
+        clock.advance(3.0)
+        resp = client.get("/api/v1/universe/lake-uniqueness")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["findings_total"] == 0  # last-known verdict still serves
+        assert payload["scan_error"] is not None and "vanished" in payload["scan_error"]
+        assert payload["scan_stalled"] is False

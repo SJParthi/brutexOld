@@ -5241,7 +5241,10 @@ def build_app(
         ``/universe`` chip's data source. READ-ONLY (never heals). The route is
         **O(1) and never blocks**: it returns the holder's LAST-KNOWN verdict
         merged with the additive ``scan_in_progress`` / ``scan_progress`` /
-        ``as_of_utc`` / ``scan_error`` keys, after arming (at most) ONE
+        ``as_of_utc`` / ``scan_error`` / ``scan_stalled`` keys (the last =
+        the LOUD staleness verdict — an in-flight scan past
+        ``max(2 x last duration, 30 min)`` is flagged + WARNed once per
+        episode; detection, never termination), after arming (at most) ONE
         single-flight background freshness check on the DEDICATED census daemon
         thread — no ``run_in_threadpool`` (a 26-minute production scan + the
         stacked 15 s pollers previously starved the shared AnyIO limiter and

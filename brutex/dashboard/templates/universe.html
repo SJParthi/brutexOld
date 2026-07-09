@@ -1212,10 +1212,22 @@ async function loadLakeUniqueness() {
     if (!panel || !m.present) return;
     panel.style.display = "block";
     const hasVerdict = (typeof m.findings_total === "number");
+    const p = m.scan_progress || {};
+    const startedAgo = (function () {
+      /* "started X ago" from the server's started_utc — approximate (client
+         clock vs server wall clock); NaN/absent degrades to omission. */
+      const t = Date.parse(p.started_utc || "");
+      if (!isFinite(t)) return "";
+      const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+      return " — started " + mins + " min ago";
+    })();
     if (!hasVerdict) {
       /* The honest no-verdict-yet arm — never a fabricated CLEAN/poisoned. */
-      const p = m.scan_progress || {};
-      if (m.scan_in_progress) {
+      if (m.scan_stalled) {
+        verdict.textContent = " ⚠️ census scan stalled" + startedAgo;
+        verdict.style.color = "#f87171";
+        detail.textContent = " · " + (p.files_scanned || 0) + " files scanned so far";
+      } else if (m.scan_in_progress) {
         const est = (p.files_total_estimate == null) ? "?" : String(p.files_total_estimate);
         verdict.textContent = " ⏳ census scanning… " + (p.files_scanned || 0) +
           " / ~" + est + " files";
@@ -1238,8 +1250,9 @@ async function loadLakeUniqueness() {
       verdict.textContent = " ❌ " + m.findings_total + " poisoned · engine indexes POISONED";
       verdict.style.color = "#f87171";
     }
-    if (m.scan_in_progress) {
-      const p = m.scan_progress || {};
+    if (m.scan_stalled) {
+      verdict.textContent += " ⚠️ (census scan stalled" + startedAgo + ")";
+    } else if (m.scan_in_progress) {
       verdict.textContent += " (rescanning… " + (p.files_scanned || 0) + " files)";
     }
     const segs = (m.segments || []).map(s => s.segment + " " + s.clean + "/" + s.files)
