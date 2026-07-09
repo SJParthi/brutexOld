@@ -1717,7 +1717,10 @@ async function refreshWindowsLine() {
   if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   if (!pullStarted) return;
   try {
-    const r = await fetch('/api/v1/coverage/windows');
+    /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this line reads ONLY .counts —
+       ?limit=0 keeps the identical counts payload while dropping the
+       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
+    const r = await fetch('/api/v1/coverage/windows?limit=0');
     if (!r.ok) return;
     const counts = (await r.json()).counts || {};
     const grand = {noData: 0, resolved: 0, pending: 0, failed: 0, total: 0};

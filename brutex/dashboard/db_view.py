@@ -5748,105 +5748,122 @@ def _build_window_payload_duckdb(
         # freshly-planned pull and carry no per-row info beyond their count).
         matched = sum(v for b in buckets for s, v in counts[b].items() if s != "PLANNED")
 
-    def _page_rows() -> list[dict[str, Any]]:
-        """Run the ONE page query + row projection — byte-identical to the
-        pre-cache inline body (pinned by
-        ``test_page_cache_fresh_compute_byte_identical``); cached per stamp
-        below so a repeat poll skips the O(total rows + delta footers) fold."""
-        where: list[str] = []
-        where_params: list[Any] = []
-        if market == "options":
-            where.append("market = ?")
-            where_params.append(_OPTION_WINDOW_MARKET)
-        elif market == "futures":
-            where.append("market = ?")
-            where_params.append(_FUTURE_WINDOW_MARKET)
-        elif market == "spot":
-            where.append("market NOT IN (?, ?)")
-            where_params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
-        elif market is not None:
-            where.append("1 = 0")  # unrecognized market → no rows (legacy parity)
-        if wanted_status == _UNKNOWN_WINDOW_STATUS:
-            where.append("1 = 0")  # unknown status → no rows (legacy parity, ONE key)
-        elif wanted_status:
-            where.append("status = ?")
-            where_params.append(wanted_status)
-        else:
-            where.append("status != ?")
-            where_params.append("PLANNED")
-        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-        order_sql = (
-            f" ORDER BY {_window_severity_order_sql()}, "
-            '"security_id", "interval", "window_start", "window_end"'
-        )
-        # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
-        # a superseded row version can never resurrect through a filter); the
-        # source params bind FIRST (the subquery precedes them in the SQL text).
-        params: list[Any] = [*source.params, *where_params, limit, offset]
-        cursor = conn.execute(
-            f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
-            params,
-        )
-        out_columns = [str(col[0]) for col in (cursor.description or [])]
-        page: list[dict[str, Any]] = []
-        for raw in cursor.fetchall():
-            # DuckDB returns native Python values (str for the string columns, int for the
-            # int64 ones, None for a null) — pass them straight to the shared `_window_row`
-            # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
-            # projection shape, CLAUDE.md §11 COMMON; `_decode_option_window`/`format_ist_clock`
-            # already str()/None-handle each field). This page always carries
-            # empty_streak/in_pull_fetches: a legacy pre-R1 BASE that lacks them was already
-            # deferred to the pyarrow derive path by the base-only probe, and a base-LESS
-            # delta-only scan reads files `append_ledger_delta` writes with the full
-            # 14-column schema (writer-pinned) — so read them directly.
-            cell = dict(zip(out_columns, raw, strict=True))
-            record = SimpleNamespace(
-                market=cell["market"],
-                security_id=cell["security_id"],
-                interval=cell["interval"],
-                window_start=cell["window_start"],
-                window_end=cell["window_end"],
-                status=cell["status"],
-                bars=cell["bars"],
-                attempts=cell["attempts"],
-                last_error=cell["last_error"],
-                last_attempt_at=cell["last_attempt_at"],
-                empty_streak=int(cell["empty_streak"]),
-                in_pull_fetches=int(cell["in_pull_fetches"]),
-            )
-            page.append(
-                _window_row(
-                    record, first_seen_at=cell.get("first_seen_at"), symbol_for_id=symbol_for_id
-                )
-            )
-        return page
+    rows: list[dict[str, Any]] = []
+    # Counts-only mode (DEC-WINDOWS-COUNTS-ONLY-001, ``limit=0``): the consumers
+    # that render ONLY counts/meta (coverage.html's windows KPI card +
+    # universe.html's all-segments line) SKIP the row-page query entirely — not
+    # even a ``LIMIT 0`` plan against the (mid-pull delta-folded) scan source —
+    # and (pack-train fold) the page memo below (DEC-WINDOWS-MIDPULL-FLOOR-001)
+    # is neither read nor key-minted at ``limit=0``. ``matched`` above is
+    # already derived from the stamp-cached counts, so the counts-only payload
+    # costs ZERO row-page work; ``capped`` below stays the honest
+    # ``matched > limit`` (matching rows exist, none shipped).
+    if limit > 0:
 
-    if page_cache is None:
-        rows = _page_rows()
-    else:
-        # The page-row cache (DEC-WINDOWS-MIDPULL-FLOOR-001): the row-page query
-        # re-ran the WHOLE O(total rows + delta footers) fold on EVERY poll even
-        # within one stamp (only the counts were cached — measured 33 ms @ 50
-        # pending deltas → 158 ms @ 400 per warm poll, 2026-07-09). Memoise the
-        # projected rows per (stamp, filters, page, symbol-map content) on the
-        # injected DEDICATED page instance (the SAME MoversSnapshotCache class —
-        # no new cache class, CLAUDE.md §11 — but its OWN small-capacity
-        # instance, `make_window_payload_caches`: a page entry holds up to
-        # min(limit, WINDOW_ROWS_CAP) row-dicts, so sharing the 256-cap counts
-        # instance risked GB-scale retention AND page-key churn evicting the
-        # tiny counts entries — round-2 MEDIUM fold): a repeat poll within one
-        # stamp is an O(1) handoff; a fresh stamp recomputes ONCE per page
-        # coordinate; the small LRU bounds retained pages. The filter/page
-        # segment rides one tuple `repr` (unambiguous — a client-supplied
-        # `market`/`status` string can never forge a key collision through a
-        # bare `|` join; unknown statuses are already collapsed onto the ONE
-        # sentinel above); the symbol-map token keeps a master reload from
-        # serving stale display names.
-        page_key = (
-            f"window-page|{ledger_glob}|"
-            f"{(market, wanted_status, limit, offset, _window_symbol_map_token(symbol_for_id))!r}"
-        )
-        rows = page_cache.get_or_compute(page_key, generation=stamp_generation, compute=_page_rows)
+        def _page_rows() -> list[dict[str, Any]]:
+            """Run the ONE page query + row projection — byte-identical to the
+            pre-cache inline body (pinned by
+            ``test_page_cache_fresh_compute_byte_identical``); cached per stamp
+            below so a repeat poll skips the O(total rows + delta footers) fold."""
+            where: list[str] = []
+            where_params: list[Any] = []
+            if market == "options":
+                where.append("market = ?")
+                where_params.append(_OPTION_WINDOW_MARKET)
+            elif market == "futures":
+                where.append("market = ?")
+                where_params.append(_FUTURE_WINDOW_MARKET)
+            elif market == "spot":
+                where.append("market NOT IN (?, ?)")
+                where_params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
+            elif market is not None:
+                where.append("1 = 0")  # unrecognized market → no rows (legacy parity)
+            if wanted_status == _UNKNOWN_WINDOW_STATUS:
+                where.append("1 = 0")  # unknown status → no rows (legacy parity, ONE key)
+            elif wanted_status:
+                where.append("status = ?")
+                where_params.append(wanted_status)
+            else:
+                where.append("status != ?")
+                where_params.append("PLANNED")
+            where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+            order_sql = (
+                f" ORDER BY {_window_severity_order_sql()}, "
+                '"security_id", "interval", "window_start", "window_end"'
+            )
+            # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
+            # a superseded row version can never resurrect through a filter); the
+            # source params bind FIRST (the subquery precedes them in the SQL text).
+            params: list[Any] = [*source.params, *where_params, limit, offset]
+            cursor = conn.execute(
+                f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
+                params,
+            )
+            out_columns = [str(col[0]) for col in (cursor.description or [])]
+            page: list[dict[str, Any]] = []
+            for raw in cursor.fetchall():
+                # DuckDB returns native Python values (str for the string columns, int for the
+                # int64 ones, None for a null) — pass them straight to the shared `_window_row`
+                # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
+                # projection shape, CLAUDE.md §11 COMMON; `_decode_option_window`/`format_ist_clock`
+                # already str()/None-handle each field). This page always carries
+                # empty_streak/in_pull_fetches: a legacy pre-R1 BASE that lacks them was already
+                # deferred to the pyarrow derive path by the base-only probe, and a base-LESS
+                # delta-only scan reads files `append_ledger_delta` writes with the full
+                # 14-column schema (writer-pinned) — so read them directly.
+                cell = dict(zip(out_columns, raw, strict=True))
+                record = SimpleNamespace(
+                    market=cell["market"],
+                    security_id=cell["security_id"],
+                    interval=cell["interval"],
+                    window_start=cell["window_start"],
+                    window_end=cell["window_end"],
+                    status=cell["status"],
+                    bars=cell["bars"],
+                    attempts=cell["attempts"],
+                    last_error=cell["last_error"],
+                    last_attempt_at=cell["last_attempt_at"],
+                    empty_streak=int(cell["empty_streak"]),
+                    in_pull_fetches=int(cell["in_pull_fetches"]),
+                )
+                page.append(
+                    _window_row(
+                        record, first_seen_at=cell.get("first_seen_at"), symbol_for_id=symbol_for_id
+                    )
+                )
+            return page
+
+        if page_cache is None:
+            rows = _page_rows()
+        else:
+            # The page-row cache (DEC-WINDOWS-MIDPULL-FLOOR-001): the row-page query
+            # re-ran the WHOLE O(total rows + delta footers) fold on EVERY poll even
+            # within one stamp (only the counts were cached — measured 33 ms @ 50
+            # pending deltas → 158 ms @ 400 per warm poll, 2026-07-09). Memoise the
+            # projected rows per (stamp, filters, page, symbol-map content) on the
+            # injected DEDICATED page instance (the SAME MoversSnapshotCache class —
+            # no new cache class, CLAUDE.md §11 — but its OWN small-capacity
+            # instance, `make_window_payload_caches`: a page entry holds up to
+            # min(limit, WINDOW_ROWS_CAP) row-dicts, so sharing the 256-cap counts
+            # instance risked GB-scale retention AND page-key churn evicting the
+            # tiny counts entries — round-2 MEDIUM fold): a repeat poll within one
+            # stamp is an O(1) handoff; a fresh stamp recomputes ONCE per page
+            # coordinate; the small LRU bounds retained pages. The filter/page
+            # segment rides one tuple `repr` (unambiguous — a client-supplied
+            # `market`/`status` string can never forge a key collision through a
+            # bare `|` join; unknown statuses are already collapsed onto the ONE
+            # sentinel above); the symbol-map token keeps a master reload from
+            # serving stale display names. Counts-only calls (``limit=0``,
+            # DEC-WINDOWS-COUNTS-ONLY-001) never reach this branch — no page-cache
+            # read and no key mint (the pack-train fold nests the memo inside the
+            # ``limit > 0`` guard).
+            page_key = (
+                f"window-page|{ledger_glob}|"
+                f"{(market, wanted_status, limit, offset, _window_symbol_map_token(symbol_for_id))!r}"
+            )
+            rows = page_cache.get_or_compute(
+                page_key, generation=stamp_generation, compute=_page_rows
+            )
     payload: dict[str, Any] = {
         "source": "ledger",
         "count": total,
@@ -5952,7 +5969,13 @@ def build_window_payload(
         Exact status row filter (``"FAILED"`` …). ``"PLANNED"`` is the ONLY way
         PLANNED rows enter the row list.
     limit
-        Row-list cap (clamped to ``[1, WINDOW_ROWS_CAP]``).
+        Row-list cap (clamped to ``[1, WINDOW_ROWS_CAP]``). ``0`` = COUNTS-ONLY
+        (DEC-WINDOWS-COUNTS-ONLY-001): the payload ships the identical
+        ``counts``/``count``/``matched``/``empty_threshold`` meta with
+        ``windows=[]`` and ``returned=0``, and the fast path SKIPS the row-page
+        query entirely — the cheap mode for consumers that render only the
+        stamp-cached counts (coverage.html's KPI card, universe.html's
+        all-segments line).
     retry_sleep
         Injectable sleeper for the torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001;
         deterministic tests). ``None`` → the real aliased :func:`time.sleep`. A
@@ -5974,7 +5997,11 @@ def build_window_payload(
     """
     from brutex.data.window_ledger_store import ledger_path
 
-    limit = max(1, min(int(limit), WINDOW_ROWS_CAP))
+    # ``limit=0`` = COUNTS-ONLY (DEC-WINDOWS-COUNTS-ONLY-001): counts + meta with
+    # ``windows=[]`` — every other value keeps the historical ``[1, WINDOW_ROWS_CAP]``
+    # clamp byte-identically (a negative direct-caller limit still clamps UP to 1;
+    # the route already refuses negatives via ``ge=0``).
+    limit = 0 if int(limit) == 0 else max(1, min(int(limit), WINDOW_ROWS_CAP))
     ledger_file = ledger_path(lake_root)
     ledger_deltas = _ledger_delta_files(ledger_file)
     # FAST PATH (DEC-COVERAGE-WINDOWS-O1-001): with a DuckDB *conn* injected and a
