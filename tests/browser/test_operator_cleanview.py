@@ -298,6 +298,62 @@ def test_hero_red_on_failing_pull(new_page: NewPageFactory, tmp_path: Path) -> N
     expect(page.locator("#hbPull .hb-big")).to_have_text("pull running — every call is failing")
 
 
+# ── hero row 2: a feed outage over a last-known-ACTIVE pull degrades ────────
+
+
+def test_hero_degrades_active_pull_row_on_feed_outage(
+    new_page: NewPageFactory, tmp_path: Path
+) -> None:
+    """Review round 3: unknown is never green — during a feed outage the pull
+    fan-out previously fired only on the poller's SUCCESS path, so S.pull
+    froze at 'flowing' and the hero kept a green "Data pull in progress" on
+    stale state indefinitely (while the diagnostics badge went red on the
+    same screen). After >=2 consecutive failed polls (the heartbeat's own
+    threshold) the hero degrades to the warn "unreachable — reconnecting"
+    treatment; one good poll recovers the honest active row."""
+    session = new_page(build_operator_app(tmp_path), stub_widgets=False, expect_console_clean=False)
+    page = session.page
+    mode = {"value": "flowing"}
+
+    def serve_rate(route: Route) -> None:
+        if mode["value"] == "fail":
+            route.fulfill(status=503, content_type="application/json", body="{}")
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"flow_state": mode["value"]}),
+            )
+
+    page.route("**/api/v1/pull/rate", serve_rate)
+    page.route("**/api/v1/universe/pull-progress", _fulfill_json({"running": False}))
+    page.route("**/api/v1/liveproof", _fulfill_json({"preflight": None, "probes": None}))
+    freeze_page_clock(page)
+    session.goto("/")
+    hero = page.locator("#bxHeroLine")
+    expect(hero).to_have_text("Data pull in progress")
+    expect(hero).to_have_class("hero-ok")
+    # Kill the feed: the FIRST failed poll keeps the last-known active row
+    # (a blip is not an outage) …
+    mode["value"] = "fail"
+    with page.expect_response("**/api/v1/pull/rate"):
+        page.clock.fast_forward(_HEARTBEAT_PULL_MS)
+    expect(hero).to_have_text("Data pull in progress")
+    # … the SECOND degrades — never a green active claim on stale state.
+    with page.expect_response("**/api/v1/pull/rate"):
+        page.clock.fast_forward(_HEARTBEAT_PULL_MS)
+    expect(hero).to_have_text("Data pull status unreachable — reconnecting")
+    expect(hero).to_have_class("hero-warn")
+    expect(page.locator("#bxHeroSub")).to_have_text("retrying automatically")
+    _screenshot(page, "hero-pull-outage-degrade.png")
+    # Recovery: one good poll restores the honest active row (no latch).
+    mode["value"] = "flowing"
+    with page.expect_response("**/api/v1/pull/rate"):
+        page.clock.fast_forward(_HEARTBEAT_PULL_MS)
+    expect(hero).to_have_text("Data pull in progress")
+    expect(hero).to_have_class("hero-ok")
+
+
 # ── acceptance #3: STALE red is reserved for an outage DURING an active pull ──
 
 

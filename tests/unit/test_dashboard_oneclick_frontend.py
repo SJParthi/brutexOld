@@ -289,6 +289,29 @@ class TestCopyCatalogWiring:
         assert '"winner list unreadable — count unknown"' in js
         assert "fillRankOneCard(payload.rows || [], payload.status);" in js
 
+    def test_winner_note_is_a_storage_claim_never_a_run_outcome(self) -> None:
+        """Review round 3: payload.row_count is len(rows) of the CAPPED,
+        family-collapsed top-100 artifact (representatives truncated at
+        TOP100_LIMIT=100), structurally NOT the survivor count — "N
+        strategies survived" fabricated a run-outcome claim from a payload
+        number (a >100-survivor sweep read "100 strategies survived" beside
+        the hero's real survivor figure). The note is a plural-correct
+        STORAGE claim; the damaged-PARTIAL arm — where the count is only the
+        readable prefix — says "readable" instead of "stored"."""
+        js = _js(_ONECLICK)
+        assert "strategies survived" not in js
+        assert '(payload.row_count === 1 ? " winning strategy" : " winning strategies")' in js
+        assert '? nWinners + " readable"' in js
+        assert ': nWinners + " stored"' in js
+
+    def test_trades_note_pluralizes_the_one_trade_case(self) -> None:
+        """Review round 3 copy edit: "Showing 1 trades" read ungrammatically
+        on a realistic 1-trade page (both the known-total and total-unknown
+        arms)."""
+        js = _js(_ONECLICK)
+        assert '(shown === 1 ? " trade" : " trades") + " (total unknown)"' in js
+        assert '(payload.total === 1 ? " trade" : " trades")' in js
+
     def test_awaiting_banner_uses_the_server_detail_for_a_selected_run(self) -> None:
         """Review round 1: a SELECTED run in the awaiting state renders the
         server detail via the catalog ("Run record not written yet." — the

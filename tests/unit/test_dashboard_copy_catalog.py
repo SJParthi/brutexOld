@@ -317,6 +317,17 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
         "Counts not available yet.",
         "neutral",
     ),
+    (
+        # Review round 3: the ONE deterministic CascadeWireError for a lake
+        # never swept via sweep-all (cascade_wire.load_manifest) — the raw
+        # string rendered an absolute filesystem path + a backticked CLI
+        # command in #cascade-msg, one click deep on the operator page.
+        "no cascade manifest at /tmp/lake/sweeps/cascade/manifest.json — run "
+        "`brutex sweep-all` first (the sweep writes the manifest its winners "
+        "are cascaded from)",
+        "No completed sweep to verify yet — run a sweep first (the Run Sweep button above).",
+        "neutral",
+    ),
 )
 
 
@@ -620,3 +631,82 @@ class TestOperatorPageVisibleTextClean:
         hero = re.search(r'<section[^>]*id="bxStatusHero".*?</section>', html, re.S)
         assert hero is not None
         assert "₹" not in hero.group(0)
+
+    def test_sweep_progress_hidden_attribute_actually_hides(self) -> None:
+        """Review round 3: the same author-``display:flex``-beats-UA-[hidden]
+        defect class fixed for ``.oc-awaiting`` in round 1, on its sibling —
+        without the override the idle template-default zeros row ("0/0
+        tested · 0 survivors") renders inside System details before any
+        sweep ever ran, colliding with the empty-≠-zero doctrine."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert ".sweep-progress[hidden] { display: none; }" in html
+
+    def test_diag_badge_counts_attention_never_a_feed_diagnosis(self) -> None:
+        """Review round 3: ALERT-tier ≠ feed outage — a sweep ERROR, a
+        FAILING pull and FAILING health checks all set 'bad' over a HEALTHY
+        feed, so "N feed(s) failing" was a factually wrong diagnosis that
+        pointed the operator at connectivity. The badge counts what needs
+        attention; the cause lives in the slots (and the hero row 3)."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "' feed' + (failing > 1 ? 's' : '') + ' failing'" not in html
+        assert "(failing > 1 ? ' need attention' : ' needs attention')" in html
+
+    def test_hero_degrades_active_rows_on_a_feed_outage(self) -> None:
+        """Review round 3: unknown is never green — a feed outage over a
+        last-known-ACTIVE state must not re-paint stale numbers green
+        indefinitely. Both active rows degrade to the warn "unreachable —
+        reconnecting" treatment at the heartbeat's own >=2-fail threshold,
+        and the pull feed gains the outage fan-out its success path already
+        had (S.pull previously froze at 'flowing' through an outage)."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "if (S.sweepFeedFails >= 2) {" in html
+        assert "'Sweep status unreachable — reconnecting'" in html
+        assert "if (S.pullFeedFails >= 2) {" in html
+        assert "'Data pull status unreachable — reconnecting'" in html
+        # The fan-out exists, is exported, and both pollPull error arms fire it.
+        assert "window.__bxHeroPullErr = window.BXHero.pullErr;" in html
+        assert html.count("window.__bxHeroPullErr && window.__bxHeroPullErr();") == 2
+        # A successful poll resets both counters (the degrade never latches).
+        assert "S.sweepFeedFails = 0;" in html
+        assert "S.pullFeedFails = 0;" in html
+
+    def test_cascade_error_sink_routes_known_refusals_through_the_catalog(self) -> None:
+        """Review round 3: the known no-manifest CascadeWireError rendered an
+        absolute server path + a backticked CLI command in #cascade-msg. The
+        sink now classifies via BXCopy — a KNOWN refusal renders the catalog
+        text (no "failed" prefix: nothing failed, there is nothing to verify
+        yet) with the verbatim string in title="server: …"; an UNKNOWN error
+        keeps the verbatim pass-through under the honest prefix (Law 2)."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "if (window.BXCopy && BXCopy.lookup(rawErr).matched) {" in html
+        assert "BXCopy.apply(cascadeMsg, rawErr, {});" in html
+        assert "BXCopy.apply(cascadeMsg, rawErr, { prefix: 'Verification failed: ' });" in html
+        assert "cascadeMsg.textContent = 'Verification failed: ' + rawErr;" in html
+
+    def test_fabricated_live_trade_marquee_is_gone(self) -> None:
+        """Review round 3: the hardcoded v24.4 "LIVE" ticker marquee —
+        invented trades, percentages and TP/SL verdicts pulsing above this
+        pass's "nothing is ever invented" banner — is deleted (it survived
+        the DEC-OPERATOR-PAGE-REAL-001 sweep because the guard pin keyed on
+        ₹-digits). Track 1 has no live surface that could feed it
+        (DEC-LIVE-REMOVE-001)."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert 'id="liveTickerTrack"' not in html
+        assert "TP hit" not in html
+        assert "SL hit" not in html
+        assert '<div class="hook-banner">' not in html
+
+    def test_run_outcome_copy_pluralizes_the_one_survivor_case(self) -> None:
+        """Review round 3 copy edits: a 1-survivor run is a realistic outcome
+        and its headline lines must read grammatically ("1 winning
+        strategy", "1 winner", "1 strategy passed"); a finished sweep's
+        heartbeat reads "done · 100%", never the doubled "done · 100% done"."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "(sp.state === 'done' ? '' : ' done')" in html
+        assert "(nWin === 1 ? ' winner' : ' winners')" in html
+        assert "((p.survivors || 0) === 1 ? ' winner' : ' winners')" in html
+        assert "((p.survivors || 0) === 1 ? ' winning strategy.' : ' winning strategies.')" in html
+        assert "(sp.survivors === 1 ? ' winner so far' : ' winners so far')" in html
+        assert "(S.doneSurvivors === 1 ? ' strategy passed' : ' strategies passed')" in html
+        # Idle-capitalization outlier: heartbeat idle cards read lowercase.
+        assert "'Not yet run'" not in html

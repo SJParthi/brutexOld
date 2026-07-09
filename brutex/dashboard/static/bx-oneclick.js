@@ -594,7 +594,18 @@ function bxFunnelProvenance(source, runId) {
               note.textContent = "winner count unknown — the stored list couldn't be read";
               note.removeAttribute("title");
             } else {
-              note.textContent = String(payload.row_count) + " strategies survived";
+              // A STORAGE claim, never a run-outcome claim: row_count is the
+              // length of the capped, family-collapsed top-100 artifact
+              // (representatives truncated at 100), structurally NOT the
+              // survivor count — "survived" fabricated a run outcome (review
+              // round 3; the sweep-progress hero owns the real survivor
+              // number). On the PARTIAL arm the count is only the READABLE
+              // prefix of a damaged list, so it says exactly that.
+              var nWinners = String(payload.row_count) +
+                (payload.row_count === 1 ? " winning strategy" : " winning strategies");
+              note.textContent = payload.status === "partial"
+                ? nWinners + " readable"
+                : nWinners + " stored";
               note.removeAttribute("title"); // no server string backs this direct write
             }
             if (payload.status === "partial") {
@@ -769,10 +780,12 @@ function bxFunnelProvenance(source, runId) {
           if (note) {
             var shown = (payload.rows || []).length;
             if (payload.total === null || payload.total === undefined) {
-              note.textContent = "Showing " + String(shown) + " trades (total unknown)";
+              note.textContent = "Showing " + String(shown) +
+                (shown === 1 ? " trade" : " trades") + " (total unknown)";
             } else {
               note.textContent =
-                "Showing " + String(shown) + " of " + String(payload.total) + " trades";
+                "Showing " + String(shown) + " of " + String(payload.total) +
+                (payload.total === 1 ? " trade" : " trades");
             }
             note.removeAttribute("title"); // no server string backs this direct write
             if (payload.status === "partial") {

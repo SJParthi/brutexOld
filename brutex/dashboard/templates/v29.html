@@ -235,57 +235,9 @@
   }
   .shake-on-reveal { animation: cameraShake 0.5s ease-in-out 0.6s 1; }
 
-  /* v24.4 — First-frame HOOK banner (TOP) — the viral stopper */
-  .hook-banner {
-    position: relative;
-    margin: 0;
-    padding: 14px 24px;
-    background: linear-gradient(90deg,
-      rgba(255,176,122,0.18) 0%,
-      rgba(91,141,239,0.22) 50%,
-      rgba(255,200,87,0.18) 100%);
-    background-size: 250% 100%;
-    border-bottom: 1px solid rgba(91,141,239,0.3);
-    overflow: hidden;
-    animation: gradientShift 5s ease-in-out infinite;
-  }
-  .hook-banner .scroll-track {
-    display: flex;
-    gap: 32px;
-    white-space: nowrap;
-    animation: tickerScroll 30s linear infinite;
-    font-family: "SF Mono", ui-monospace, Menlo, monospace;
-    font-size: 13px;
-    font-weight: 700;
-  }
-  @keyframes tickerScroll {
-    0% { transform: translateX(0); }
-    100% { transform: translateX(-50%); }
-  }
-  .hook-banner .tick { display: inline-flex; align-items: center; gap: 6px; }
-  .hook-banner .tick.up { color: var(--green-bright); }
-  .hook-banner .tick.down { color: var(--red); }
-  .hook-banner .tick .sym { color: var(--muted); font-weight: 600; }
-  .hook-banner .live-dot {
-    width: 8px; height: 8px;
-    background: var(--green-bright);
-    border-radius: 50%;
-    box-shadow: 0 0 10px var(--green-bright);
-    animation: pulse 1.5s ease-in-out infinite;
-    flex-shrink: 0;
-  }
-  .hook-banner .live-tag {
-    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
-    z-index: 5;
-    background: var(--bg);
-    padding: 5px 10px;
-    border-radius: 5px;
-    border: 1px solid var(--green);
-    color: var(--green-bright);
-    font-size: 11px; font-weight: 900; letter-spacing: 0.1em;
-    display: inline-flex; align-items: center; gap: 6px;
-    box-shadow: 0 0 16px rgba(255,200,87,0.4);
-  }
+  /* The v24.4 .hook-banner CSS was DELETED with its fabricated "LIVE"
+     ticker marquee (review round 3 — see the comment at the old element
+     site inside <body>). */
 
   /* v24.5 — Glow ring on hero rank-pill (cumulative attention magnet) */
   .rank-pill { position: relative; }
@@ -1865,6 +1817,12 @@
     gap: 16px;
     flex-wrap: wrap;
   }
+  /* The author-origin display:flex above beats the UA [hidden]{display:none}
+     rule — the same defect class fixed for .oc-awaiting in round 1: without
+     this override the idle template-default zeros row ("0/0 tested ·
+     0 survivors") renders inside System details before any sweep ever ran
+     (review round 3). */
+  .sweep-progress[hidden] { display: none; }
   .sweep-status-dot {
     width: 10px; height: 10px;
     border-radius: 50%;
@@ -2284,29 +2242,15 @@
 </head>
 <body class="operator-mode">
 
-<!-- v24.4: First-frame HOOK — live ticker banner (the viral stopper) -->
-<div class="hook-banner">
-  <span class="live-tag"><span class="live-dot"></span>LIVE</span>
-  <div class="scroll-track" id="liveTickerTrack">
-    <span class="tick up">+1.34% <span class="sym">NIFTY · 09:35→11:48 · TP hit</span></span>
-    <span class="tick up">+0.81% <span class="sym">BANKNIFTY · 09:42→15:20 · forced 15:20</span></span>
-    <span class="tick down">−0.61% <span class="sym">NIFTY SHORT · 09:38→10:24 · SL hit</span></span>
-    <span class="tick up">+1.39% <span class="sym">SENSEX · 09:36→13:11 · TP hit</span></span>
-    <span class="tick down">−0.59% <span class="sym">NIFTY · 09:34→09:51 · SL hit</span></span>
-    <span class="tick up">+2.12% <span class="sym">BANKNIFTY · 09:31→12:04 · TP hit</span></span>
-    <span class="tick up">+0.94% <span class="sym">SENSEX · 09:38→11:22 · TP hit</span></span>
-    <span class="tick up">+1.71% <span class="sym">NIFTY · 09:33→14:11 · TP hit</span></span>
-    <!-- duplicated for seamless ticker loop -->
-    <span class="tick up">+1.34% <span class="sym">NIFTY · 09:35→11:48 · TP hit</span></span>
-    <span class="tick up">+0.81% <span class="sym">BANKNIFTY · 09:42→15:20 · forced 15:20</span></span>
-    <span class="tick down">−0.61% <span class="sym">NIFTY SHORT · 09:38→10:24 · SL hit</span></span>
-    <span class="tick up">+1.39% <span class="sym">SENSEX · 09:36→13:11 · TP hit</span></span>
-    <span class="tick down">−0.59% <span class="sym">NIFTY · 09:34→09:51 · SL hit</span></span>
-    <span class="tick up">+2.12% <span class="sym">BANKNIFTY · 09:31→12:04 · TP hit</span></span>
-    <span class="tick up">+0.94% <span class="sym">SENSEX · 09:38→11:22 · TP hit</span></span>
-    <span class="tick up">+1.71% <span class="sym">NIFTY · 09:33→14:11 · TP hit</span></span>
-  </div>
-</div>
+<!-- The v24.4 "LIVE" ticker marquee that stood here was DELETED (review
+     round 3): its scrolling trades (invented percentages, entry/exit times
+     and take-profit/stop-loss verdicts) were HARDCODED mockup fabrications —
+     a fake live-trade feed directly above copy asserting "nothing is ever
+     invented". It survived the DEC-OPERATOR-PAGE-REAL-001 mechanical sweep
+     only because the guard pin keyed on ₹-digits (these carried
+     percentages). Track 1 has no live trading surface (the LIVE feed was
+     removed in full — DEC-LIVE-REMOVE-001); nothing real can feed a
+     marquee here. -->
 
 <!-- v24.2: particle burst container -->
 <div class="particle-burst" id="particleBurst"></div>
@@ -3580,7 +3524,11 @@
       const tones = [slotTone.pull, slotTone.sweep, slotTone.proof];
       const failing = tones.filter((t) => t === 'bad').length;
       if (failing > 0) {
-        badge.textContent = '· ' + failing + ' feed' + (failing > 1 ? 's' : '') + ' failing';
+        // ALERT-tier ≠ feed outage: 'bad' also covers a sweep ERROR, a
+        // FAILING pull and FAILING health checks reached over a HEALTHY
+        // feed — "feed failing" misdiagnosed those (review round 3). The
+        // badge counts what needs attention; the cause lives in the slots.
+        badge.textContent = '· ' + failing + (failing > 1 ? ' need attention' : ' needs attention');
         badge.className = 'oc-diag-badge oc-diag-bad';
       } else if (tones.indexOf('warn') !== -1) {
         badge.textContent = '· degraded';
@@ -3636,9 +3584,12 @@
       if (!sp || sp.state === 'idle') { setSlot('sweep', 'idle', 'no sweep running', 'start one from the Run panel above'); return; }
       const pct = (sp.percent === null || sp.percent === undefined) ? '0' : String(sp.percent);
       const rate = (typeof sp.combos_per_sec === 'number') ? sp.combos_per_sec : 0;
-      const main = String(sp.state) + ' · ' + pct + '% done';
+      // A finished sweep reads "done · 100%" — never the doubled
+      // "done · 100% done" (review round 3 copy edit).
+      const main = String(sp.state) + ' · ' + pct + '%' + (sp.state === 'done' ? '' : ' done');
+      const nWin = (typeof sp.survivors === 'number') ? sp.survivors : 0;
       const note = String(sp.evaluated ?? 0) + ' of ' + String(sp.enumerated ?? 0) + ' tested · ' +
-        fmtRps(rate) + '/s · ' + String(sp.survivors ?? 0) + ' winners';
+        fmtRps(rate) + '/s · ' + String(nWin) + (nWin === 1 ? ' winner' : ' winners');
       // state machine: idle → running → done | error (engine/sweep_progress.py)
       setSlot('sweep', sp.state === 'error' ? 'bad' : 'ok', main, note);
     };
@@ -3657,7 +3608,14 @@
       if (document.hidden) return;
       try {
         const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/pull/rate', 10000) : fetch('/api/v1/pull/rate'));
-        if (!r.ok) { slotFeedError('pull', pullWasActive(), 'pull status unreachable — retrying', 'pull status reconnecting…'); return; }
+        if (!r.ok) {
+          slotFeedError('pull', pullWasActive(), 'pull status unreachable — retrying', 'pull status reconnecting…');
+          // Status-hero outage fan-out (review round 3) — ⚠ flagged for
+          // sibling-merge coordination; one appended line, nothing else in
+          // this poller changed (presentation only, no cadence/guard edit).
+          window.__bxHeroPullErr && window.__bxHeroPullErr();
+          return;
+        }
         const d = await r.json();
         const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
         slotFails.pull = 0;
@@ -3687,6 +3645,9 @@
         }
       } catch (e) {
         slotFeedError('pull', pullWasActive(), 'pull status unreachable — retrying', 'pull status reconnecting…');
+        // Status-hero outage fan-out (review round 3) — ⚠ flagged for
+        // sibling-merge coordination; one appended line, presentation only.
+        window.__bxHeroPullErr && window.__bxHeroPullErr();
       }
     }
 
@@ -3711,7 +3672,7 @@
         const pre = verdictTone(d && d.preflight);
         const prb = verdictTone(d && d.probes);
         if (pre === null && prb === null) {
-          setSlot('proof', 'idle', 'Not yet run', 'system checks run automatically around the first data pull');
+          setSlot('proof', 'idle', 'not yet run', 'system checks run automatically around the first data pull');
           return;
         }
         const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
@@ -3761,7 +3722,8 @@
       sweepMsg.textContent =
         'Sweep running — ' + pct.toFixed(1) + '% · ' + (p.evaluated || 0).toLocaleString() +
         ' of ' + (p.enumerated || 0).toLocaleString() + ' tested · ' +
-        (p.survivors || 0) + ' winners so far · ' + rate + '/s';
+        (p.survivors || 0) + ((p.survivors || 0) === 1 ? ' winner' : ' winners') +
+        ' so far · ' + rate + '/s';
       // A recovered poll clears the previous blip's raw-error title — a
       // stale attribution on a healthy message is worse than none (the
       // round-1 stale-title law, applied to this inline sink in round 2).
@@ -3781,7 +3743,8 @@
             sweepMsg.textContent = 'Sweep failed — see System details below.';
           } else {
             sweepMsg.textContent = '✅ Sweep finished — ' + (p.survivors || 0) +
-              ' winning strategies. The results above update automatically.';
+              ((p.survivors || 0) === 1 ? ' winning strategy.' : ' winning strategies.') +
+              ' The results above update automatically.';
           }
         }
       } catch (e) {
@@ -3856,7 +3819,21 @@
               'Verification finished — ' + j.survivors + ' of ' + j.candidates +
               ' candidates survived (run ' + j.sweep_id.slice(0, 8) + ')';
           } else {
-            cascadeMsg.textContent = 'Verification failed: ' + (j.error || ('error ' + r.status));
+            // A KNOWN server refusal (e.g. "no completed sweep yet") renders
+            // via the plain-English catalog WITHOUT the "failed" prefix —
+            // nothing failed, there is nothing to verify; the verbatim
+            // server string survives in title="server: …". UNKNOWN errors
+            // keep the verbatim pass-through under the honest prefix (Law 2;
+            // review round 3 — the raw no-manifest error printed an absolute
+            // filesystem path + a backticked CLI command).
+            const rawErr = j.error || ('error ' + r.status);
+            if (window.BXCopy && BXCopy.lookup(rawErr).matched) {
+              BXCopy.apply(cascadeMsg, rawErr, {});
+            } else if (window.BXCopy) {
+              BXCopy.apply(cascadeMsg, rawErr, { prefix: 'Verification failed: ' });
+            } else {
+              cascadeMsg.textContent = 'Verification failed: ' + rawErr;
+            }
           }
         } catch (e) {
           cascadeMsg.textContent = "Couldn't reach the server — try again.";
@@ -3880,7 +3857,7 @@
       const io = new IntersectionObserver((entries) => {
         entries.forEach((en) => en.target.classList.toggle('bx-anim-off', !en.isIntersecting));
       }, { rootMargin: '80px' });
-      ['.hook-banner', '.verdict', '.equity-wrap'].forEach((sel) => {
+      ['.verdict', '.equity-wrap'].forEach((sel) => {
         const n = document.querySelector(sel);
         if (n) io.observe(n);
       });
@@ -3910,7 +3887,14 @@
       suspect: false,
       suspectRunId: null, // the run the suspect flag came from (selected run)
       latestRunId: null,  // the runs feed's latest_run_id (review round 2)
-      feedOut: false      // sweep feed outage (idle suffix only — never red)
+      feedOut: false,     // sweep feed outage (idle suffix only — never red)
+      // Consecutive feed-poll failures (review round 3): an ACTIVE green
+      // claim fed by no live signal is the fake-alive-illusion class —
+      // after >=2 consecutive fails (the heartbeat's own threshold) the
+      // active rows degrade to the warn "reconnecting" treatment instead
+      // of re-painting stale numbers green through an outage.
+      sweepFeedFails: 0,
+      pullFeedFails: 0
     };
     // Hero-local helpers (the template's fmtEta is IIFE-scoped — do NOT
     // reach into sibling IIFEs).
@@ -3938,10 +3922,21 @@
       // 1 · a running sweep wins everything.
       if (sp && sp.state === 'running') {
         const pct = (sp.percent === null || sp.percent === undefined) ? '0' : String(sp.percent);
+        // Feed outage while the last-known state was ACTIVE: unknown is
+        // never green (review round 3) — the numbers below are STALE, so
+        // the row degrades to the warn "reconnecting" treatment at the
+        // same >=2-fail threshold the heartbeat escalates on.
+        if (S.sweepFeedFails >= 2) {
+          line.textContent = 'Sweep status unreachable — reconnecting';
+          sub.textContent = 'last known: ' + pct + '% done · retrying automatically';
+          tone('warn');
+          return;
+        }
         const eta = fmtHeroEta(sp.eta_seconds);
         line.textContent = 'Sweep running — ' + pct + '%' + (eta ? ' · ' + eta : '');
         sub.textContent = heroNum(sp.evaluated) + ' of ' + heroNum(sp.enumerated) +
-          ' tested · ' + heroNum(sp.survivors) + ' winners so far';
+          ' tested · ' + heroNum(sp.survivors) +
+          (sp.survivors === 1 ? ' winner so far' : ' winners so far');
         tone('ok');
         return;
       }
@@ -3952,6 +3947,15 @@
       //     while the ≥2-tick hysteresis decides the red escalation below).
       if (S.pull === 'flowing' || S.pull === 'local' ||
           (S.pull === 'stalled' && S.pullStalledTicks < 2)) {
+        // Feed outage over a last-known-ACTIVE pull: the state is STALE —
+        // never a green "in progress" claim through an outage (review
+        // round 3; same >=2-fail threshold as the heartbeat).
+        if (S.pullFeedFails >= 2) {
+          line.textContent = 'Data pull status unreachable — reconnecting';
+          sub.textContent = 'retrying automatically';
+          tone('warn');
+          return;
+        }
         line.textContent = 'Data pull in progress';
         if (S.pull === 'local') {
           sub.textContent = 'processing pulled data locally — no vendor calls right now';
@@ -3998,7 +4002,8 @@
       }
       // 5 · a sweep finished during this session.
       if (S.doneThisSession) {
-        line.textContent = 'Sweep finished — ' + heroNum(S.doneSurvivors) + ' strategies passed';
+        line.textContent = 'Sweep finished — ' + heroNum(S.doneSurvivors) +
+          (S.doneSurvivors === 1 ? ' strategy passed' : ' strategies passed');
         sub.textContent = 'results updated below';
         tone('ok');
         return;
@@ -4013,6 +4018,7 @@
       sweep: function (sp) {
         S.sweep = sp || null;
         S.feedOut = false;
+        S.sweepFeedFails = 0;
         if (sp && sp.state === 'running') S.sawRunning = true;
         if (sp && sp.state === 'done' && S.sawRunning) {
           S.doneThisSession = true;
@@ -4020,11 +4026,24 @@
         }
         render();
       },
-      sweepErr: function () { S.feedOut = true; render(); },
+      sweepErr: function () {
+        S.feedOut = true;
+        S.sweepFeedFails += 1;
+        render();
+      },
       pull: function (d) {
         const st = (d && typeof d.flow_state === 'string') ? d.flow_state : 'absent';
         S.pull = st;
+        S.pullFeedFails = 0;
         S.pullStalledTicks = st === 'stalled' ? S.pullStalledTicks + 1 : 0;
+        render();
+      },
+      // The pull feed's outage twin of sweepErr (review round 3): the pull
+      // fan-out previously fired only on the poller's SUCCESS path, so
+      // S.pull froze at its last-known ACTIVE value through an outage and
+      // row 2 kept a green "Data pull in progress" on stale state.
+      pullErr: function () {
+        S.pullFeedFails += 1;
         render();
       },
       proof: function (d) {
@@ -4046,6 +4065,7 @@
     };
     // The pull/proof fan-out entry points (guarded at the call sites).
     window.__bxHeroPull = window.BXHero.pull;
+    window.__bxHeroPullErr = window.BXHero.pullErr;
     window.__bxHeroProof = window.BXHero.proof;
     // Decorator-wrap the existing sweep hooks at install — zero edits inside
     // pollSweepProgress; the heartbeat IIFE above already installed its own.

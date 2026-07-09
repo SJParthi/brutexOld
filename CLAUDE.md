@@ -43,7 +43,9 @@ chain "provisional" caveat inline in every chain verdict; None lots/costs
 "—"); anti-jargon is MECHANICAL (node-executed catalog golden + a
 comment-stripped visible-text scan = 0 hits) + a NEW opt-in browser evidence
 module. Named follow-up DEC-SCREENER-STRATEGY-CLEANVIEW-001 (the
-screener/strategy deep copy clean). DISPLAY zone only — ENGINE UNCHANGED
+screener/strategy deep copy clean). The per-round record lives ONLY in the
+§1 Active-branch blurb + MIGRATION.md #1631 — this header does not narrate
+review rounds. DISPLAY zone only — ENGINE UNCHANGED
 (NIFTY/BANKNIFTY/SENSEX); bx-poll.js/bx-liveproof.js/bx-ui.js untouched;
 sibling poll hygiene/cadence/guards untouched.)
 Earlier: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
@@ -1736,7 +1738,24 @@ hostile-review pass._
   lots/costs render "—"); anti-jargon MECHANICAL (node-executed catalog golden, 63 tests + a comment-stripped v29
   visible-text scan = 0 hits) + NEW opt-in browser evidence module (hero states, idle-no-red vs active-red,
   screenshots + timing). Named follow-up DEC-SCREENER-STRATEGY-CLEANVIEW-001 — the screener/strategy DEEP copy
-  clean (they gain only the bx-copy tag + the shared ticker line here). DISPLAY zone only — ENGINE UNCHANGED
+  clean (they gain only the bx-copy tag + the shared ticker line here). ROUND 3 folded
+  (refuter-majority-confirmed): the winner-list note reverted to a plural-correct STORAGE claim ("N winning
+  strateg(y|ies) stored" / "… readable" on the damaged-PARTIAL arm — never "survived": the top-100 artifact is
+  capped + family-collapsed, structurally NOT the survivor count; the sweep hero owns that number); the status
+  hero DEGRADES a last-known-ACTIVE row to the warn "unreachable — reconnecting" treatment after ≥2 consecutive
+  feed-poll failures (green never rides stale state through an outage — NEW `pullErr` fan-out mirrors the round-2
+  appended success-path line; same ≥2 threshold as the heartbeat); the KNOWN cascade no-manifest refusal renders
+  via the catalog ("No completed sweep to verify yet — …", the raw absolute path + backticked CLI command demoted
+  to `title="server: …"`; unknown cascade errors still pass through verbatim under the honest prefix);
+  `#bxDiagBadge` reads "N need(s) attention" (ALERT tier ≠ feed outage — a sweep error / failing pull / failing
+  checks over a HEALTHY feed were misdiagnosed as "feed(s) failing"); the `.sweep-progress[hidden]` display
+  override (the `.oc-awaiting` round-1 author-display-beats-[hidden] defect class swept to its sibling — no more
+  idle template-default zeros row inside System details); count-plural + "done · 100% done" + idle-capitalization
+  copy edits; and the FABRICATED hardcoded "LIVE" trade marquee DELETED (invented trades/percentages/TP-SL
+  verdicts directly above the "nothing is ever invented" banner — it survived #1561's mechanical sweep because
+  the guard pin keyed on ₹-digits). The branch also merged up to origin/main (#1614/#1630 + poll-hygiene),
+  restoring the literal truth of the "`git diff origin/main -- 'brutex/*.py'` EMPTY" claim and resolving the
+  CLAUDE.md header/§1/§3 conflicts. DISPLAY zone only — ENGINE UNCHANGED
   (NIFTY/BANKNIFTY/SENSEX); `bx-poll.js`/`bx-liveproof.js`/`bx-ui.js` untouched; sibling poll
   hygiene/cadence/guards untouched; node --check + ruff clean; dashboard family 1991 tests green.)
   Earlier: `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the

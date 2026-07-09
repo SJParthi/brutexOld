@@ -268,6 +268,16 @@ var BX_COPY_RULES = [
     re: /^awaiting trades — no results-depth sidecars/,
     text: "Waiting for this run's trade detail.",
     tier: "neutral"
+  },
+  {
+    /* The ONE deterministic CascadeWireError for a lake never swept via
+       sweep-all — the most likely outcome of pressing the Advanced
+       "Re-verify latest run" button on a fresh lake. The raw string renders
+       an absolute filesystem path + a backticked CLI command (review
+       round 3); unknown cascade errors still pass through VERBATIM. */
+    re: /^no cascade manifest at .+ — run `brutex sweep-all` first/,
+    text: "No completed sweep to verify yet — run a sweep first (the Run Sweep button above).",
+    tier: "neutral"
   }
 ];
 
