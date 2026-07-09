@@ -577,8 +577,10 @@ function bxFunnelProvenance(source, runId) {
       tr.appendChild(td(String(r.exit_reason), null));
       tr.appendChild(td(pnl === null ? "—" : paisaText(pnl), pnl !== null && pnl < 0 ? "neg" : "pos"));
       tr.appendChild(td(r.costs_paisa === undefined ? "—" : paisaText(r.costs_paisa), "dim"));
-      tr.appendChild(td(metricText(r.mae), null));
-      tr.appendChild(td(metricText(r.mfe), null));
+      // Additive #1275 honesty flag: mae/mfe carry their granularity ("1m"|"tf").
+      var gran = typeof r.mae_granularity === "string" ? " (" + r.mae_granularity + ")" : "";
+      tr.appendChild(td(metricText(r.mae) + gran, null));
+      tr.appendChild(td(metricText(r.mfe) + gran, null));
       // R31 honest NULL: a missing VIX renders "null — not stamped", never 0.
       tr.appendChild(td(r.vix_entry === null || r.vix_entry === undefined ? "null" : metricText(r.vix_entry), null));
       tr.appendChild(td(r.vix_exit === null || r.vix_exit === undefined ? "null" : metricText(r.vix_exit), null));

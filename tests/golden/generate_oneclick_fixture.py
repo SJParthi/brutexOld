@@ -4,8 +4,12 @@ Regenerate with::
 
     python tests/golden/generate_oneclick_fixture.py
 
-Writes ``tests/fixtures/oneclick/runs/**`` — CONTRACT-shaped fixtures for the
-P4 display build (sweep-parallel-integration-contracts): the P2 run manifest,
+Writes ``tests/fixtures/oneclick/sweep_runs/**`` — CONTRACT-shaped fixtures
+for the P4 display build (sweep-parallel-integration-contracts; the tree
+migrated ``runs/`` → ``sweep_runs/`` under gap-register Ruling 4 /
+DEC-ONECLICK-SWEEP-RUNS-REBIND-001 — the fixture root is a pseudo LAKE root,
+so runs live at the same ``sweep_runs/`` sibling the production writers
+use): the P2 run manifest,
 the P3 top-100 leaderboard, the P2 flight-recorder events JSONL (hash-chained
 via the SAME :func:`brutex.dashboard.oneclick_artifacts.chain_hash` seam the
 verifier uses, so the golden proves generator↔verifier SELF-consistency ONLY —
@@ -323,7 +327,7 @@ def _write_events(path: Path, records: list[dict[str, Any]], *, half_written_tai
 
 def generate(root: Path = FIXTURE_ROOT) -> None:
     """Write the whole corpus under *root* (deterministic — safe to re-run)."""
-    runs = root / "runs"
+    runs = root / "sweep_runs"
     main = runs / RUN_ID
     _write_json(main / "manifest.json", build_manifest())
     top100 = build_top100_rows()

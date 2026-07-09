@@ -32,7 +32,12 @@ from tests.golden.generate_oneclick_fixture import NULL_VIX_RANK, RUN_ID, TIE_RA
 _STATIC = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static"
 _SCREENER_JS = _STATIC / "bx-screener.js"
 _TOP100_FIXTURE = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "oneclick" / "runs" / RUN_ID / "top100.json"
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "oneclick"
+    / "sweep_runs"
+    / RUN_ID
+    / "top100.json"
 )
 
 _NODE = shutil.which("node")

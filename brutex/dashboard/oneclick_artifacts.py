@@ -7,20 +7,35 @@ drift the shapes without updating the contracts memory.
 
 Contract surfaces consumed here (read-only, never written):
 
-* ``<results_root>/runs/<run_id>/manifest.json`` — the P2 run manifest
+* ``<sweep_runs root>/<run_id>/manifest.json`` — the P2 run manifest
   ``{run_id, selection, estimate, actual, per_stage_timings, per_door_kills,
   dedup_skips, tripwires[], suspect}``.
-* ``<results_root>/runs/<run_id>/top100.json`` — the P3 ordered leaderboard
+* ``<sweep_runs root>/<run_id>/top100.json`` — the P3 ordered leaderboard
   rows ``{rank, mask_hex, conditions[], tf, direction, arm, metrics{},
-  regime{}, vix_band{}, family_id}``.
-* ``<results_root>/runs/<run_id>/events.jsonl`` — the P2 flight-recorder JSONL
+  regime{}, vix_band{}, family_id}`` plus the SHIPPED additive keys
+  (``run_id``, ``equity_ref``, …) the production trades reader keys on.
+* ``<sweep_runs root>/<run_id>/events.jsonl`` — the P2 flight-recorder JSONL
   (record shape ``{ts_utc, run_id, kind, payload}`` + hash-chaining). The
-  PATH is an ASSUMPTION registered with the contracts memory (§0.4) and lives
-  in ONE constant (:data:`EVENTS_FILENAME`); the chain ALGORITHM is likewise
-  ASSUMED behind the :func:`chain_hash` seam until P2 merges.
-* ``<results_root>/runs/<run_id>/trades/rank-%04d.json`` — the INTERIM
-  fixture-only trades layout (§0.3); production trades stay ``awaiting`` until
-  the ResultsStore paged API lands (merge-integration rebind).
+  FILENAME is an ASSUMPTION registered with the contracts memory (§0.4) and
+  lives in ONE constant (:data:`EVENTS_FILENAME`); the chain ALGORITHM is
+  likewise ASSUMED behind the :func:`chain_hash` seam until P2 merges.
+* ``<sweep_runs root>/<run_id>/results-depth/<instrument>/<tf>/<stem>.*`` —
+  the SHIPPED P3 results-depth sidecar trio + stamp (#1275), paged via
+  :class:`TradeStoreReader` → :func:`brutex.engine.trade_store.read_trade_page`
+  (the merge-integration trades rebind, DEC-ONECLICK-SWEEP-RUNS-REBIND-001).
+* ``<sweep_runs root>/<run_id>/trades/rank-%04d.json`` — the INTERIM
+  FIXTURE-ONLY trades layout (§0.3), served only under the fail-loud
+  :data:`FIXTURE_ROOT_ENV` override.
+
+The ``<sweep_runs root>`` above is the gap-register Ruling-4 (2026-07-08)
+location: ``<results_root parent>/sweep_runs/`` — a SIBLING of the sweeps
+results tree, derived by :func:`runs_root` consistently with the ONE engine
+path-builder seam :func:`brutex.engine.trade_store.sweep_run_dir`
+(mirror-PINNED). The earlier ``<results_root>/runs/`` layout of the original
+DEC-OPERATOR-PAGE-REAL-001 contract is SUPERSEDED — there is deliberately NO
+legacy ``runs/`` fallback probe (a dual root could silently serve stale
+artifacts); the committed fixture corpus migrated to the new layout in the
+same change.
 
 Honesty laws (Golden Rule #1/#10): a missing artifact is ``awaiting``, a
 broken one is ``corrupt``/``partial`` with the defect NAMED — never a 500,
@@ -46,17 +61,26 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 
 import structlog
 
+from brutex.engine.trade_store import (
+    RESULTS_DEPTH_DIRNAME,
+    SWEEP_RUNS_DIRNAME,
+    SidecarPaths,
+    TradeStoreError,
+    read_trade_page,
+)
+
 _LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "AWAITING_DETAIL",
     "EVENTS_FILENAME",
     "FIXTURE_ROOT_ENV",
+    "FIXTURE_SWEEPS_DIRNAME",
     "MANIFEST_FILENAME",
     "MANIFEST_REQUIRED_KEYS",
     "PREFLIGHT_FILENAME",
     "PREFLIGHT_REQUIRED_KEYS",
-    "RUNS_DIRNAME",
+    "SWEEP_RUNS_DIRNAME",
     "TOP100_FILENAME",
     "TOP100_ROW_REQUIRED_KEYS",
     "TRADES_DIRNAME",
@@ -69,12 +93,14 @@ __all__ = [
     "OneclickConfigError",
     "RunInfo",
     "Top100Result",
+    "TradeStoreReader",
     "TradesReader",
     "TradesResult",
     "artifact_revision",
     "canonical_record_bytes",
     "chain_hash",
     "discover_runs",
+    "fixture_results_root",
     "is_safe_run_id",
     "load_manifest",
     "load_preflight_fixture",
@@ -84,6 +110,7 @@ __all__ = [
     "resolve_fixture_root",
     "runs_revision",
     "runs_root",
+    "sidecar_paths_from_ref",
     "tail_events",
     "trades_path",
     "verify_events_chain",
@@ -94,8 +121,10 @@ __all__ = [
 #: defect (rows kept up to it / keys missing); ``ok`` = the full contract shape.
 ArtifactStatus = Literal["ok", "awaiting", "corrupt", "partial"]
 
-#: The runs directory under ``<results_root>`` (the contract's ``runs/`` tree).
-RUNS_DIRNAME: Final[str] = "runs"
+#: The pseudo sweeps-results directory INSIDE a fixture tree — see
+#: :func:`fixture_results_root` (keeps the Ruling-4 parent-sibling math
+#: self-contained under the fixture root; the dir itself need not exist).
+FIXTURE_SWEEPS_DIRNAME: Final[str] = "sweeps"
 
 #: The P2 run-manifest artifact filename (contract-pinned).
 MANIFEST_FILENAME: Final[str] = "manifest.json"
@@ -116,7 +145,8 @@ PREFLIGHT_FILENAME: Final[str] = "preflight.json"
 TRADES_DIRNAME: Final[str] = "trades"
 
 #: The fail-loud fixture-root env switch: unset → production behaviour
-#: (:class:`AwaitingTradesReader` + the lake-derived results root); set to an
+#: (:class:`TradeStoreReader` over the lake-derived results root, or the
+#: honest :class:`AwaitingTradesReader` when no lake is wired); set to an
 #: existing directory → that tree serves the artifacts (LOUD badge, fixture
 #: reader active); set to junk → :class:`OneclickConfigError` (route → 400).
 FIXTURE_ROOT_ENV: Final[str] = "BRUTEX_ONECLICK_FIXTURE_ROOT"
@@ -333,29 +363,68 @@ class EventsPage:
 
 
 def runs_root(results_root: Path) -> Path:
-    """Return ``<results_root>/runs`` — the contract's per-run artifact tree.
+    """Return the run-artifact tree root — ``<results_root parent>/sweep_runs``.
+
+    THE one discovery seam (DEC-ONECLICK-SWEEP-RUNS-REBIND-001): the Ruling-4
+    (2026-07-08) ``sweep_runs/`` SIBLING root beside the sweeps results tree,
+    exactly where the SHIPPED #1275 writers land run artifacts —
+    ``runs_root(root) / run_id`` is mirror-PINNED byte-equal to
+    :func:`brutex.engine.trade_store.sweep_run_dir(root, run_id)` (the engine
+    builder raises on an empty run_id, so this listing-level twin re-derives
+    the law from the SAME imported :data:`SWEEP_RUNS_DIRNAME` constant rather
+    than probing with a dummy id). SUPERSEDES the original
+    ``<results_root>/runs/`` layout; deliberately NO legacy ``runs/`` fallback
+    probe — a dual root could silently serve stale artifacts (fixtures
+    migrated instead).
 
     Parameters
     ----------
     results_root
         The sweep results root (``<lake>/sweeps`` in production, or the
-        fixture root override).
+        fixture tree's pseudo root from :func:`fixture_results_root`).
 
     Returns
     -------
     Path
-        The runs directory (may not exist yet — callers degrade to awaiting).
+        The ``sweep_runs`` directory (may not exist yet — callers degrade to
+        awaiting).
     """
-    return results_root / RUNS_DIRNAME
+    return results_root.parent / SWEEP_RUNS_DIRNAME
+
+
+def fixture_results_root(fixture_root: Path) -> Path:
+    """Return the pseudo sweeps root INSIDE a fixture tree (self-containment law).
+
+    :func:`runs_root` derives the run tree from the results root's PARENT
+    (Ruling 4), so a raw fixture directory passed as a results root would
+    escape its own tree. The fixture override therefore treats
+    ``<fixture_root>`` as a pseudo LAKE root: this pseudo
+    ``<fixture_root>/sweeps`` results root (the dir need not exist) puts the
+    derived run tree at ``<fixture_root>/sweep_runs/`` — always inside the
+    fixture tree, mirroring the production lake layout exactly.
+
+    Parameters
+    ----------
+    fixture_root
+        The resolved :data:`FIXTURE_ROOT_ENV` directory.
+
+    Returns
+    -------
+    Path
+        ``<fixture_root>/sweeps`` — pass THIS wherever a results root is
+        expected.
+    """
+    return fixture_root / FIXTURE_SWEEPS_DIRNAME
 
 
 def trades_path(results_root: Path, run_id: str, rank: int) -> Path:
-    """Return the INTERIM fixture trades page path ``runs/<run_id>/trades/rank-%04d.json``.
+    """Return the INTERIM fixture trades page path ``sweep_runs/<run_id>/trades/rank-%04d.json``.
 
     Parameters
     ----------
     results_root
-        The fixture root (this layout exists ONLY under the fixture tree).
+        The fixture tree's pseudo results root (:func:`fixture_results_root`
+        — this layout exists ONLY under the fixture tree).
     run_id
         The run directory name.
     rank
@@ -409,7 +478,7 @@ def artifact_revision(path: Path) -> str | None:
 
 
 def runs_revision(results_root: Path) -> str | None:
-    """Return the stat token of the ``runs/`` directory itself.
+    """Return the stat token of the ``sweep_runs/`` directory itself.
 
     Honest envelope (Golden Rule #10): a directory mtime moves when a run dir
     is ADDED/REMOVED — an in-place rewrite of a file INSIDE an existing run
@@ -425,7 +494,8 @@ def runs_revision(results_root: Path) -> str | None:
     Returns
     -------
     str or None
-        The ``"mtime_ns:size"`` token of ``<results_root>/runs``, or ``None``.
+        The ``"mtime_ns:size"`` token of the Ruling-4
+        ``<results_root parent>/sweep_runs`` tree, or ``None``.
     """
     return artifact_revision(runs_root(results_root))
 
@@ -444,7 +514,7 @@ def probe_run_dir(run_dir: Path) -> RunInfo | None:
     Parameters
     ----------
     run_dir
-        The ``runs/<run_id>`` directory.
+        The ``sweep_runs/<run_id>`` directory.
 
     Returns
     -------
@@ -483,7 +553,7 @@ def _probe_run_dir_known(run_dir: Path, dir_mtime_ns: int) -> RunInfo:
 
 
 def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]:
-    """Discover run directories under ``<results_root>/runs``, newest first.
+    """Discover run directories under the Ruling-4 ``sweep_runs/`` tree, newest first.
 
     O(run dirs) — one ``scandir`` plus per-dir stat/manifest probes; an
     unreadable entry is SKIPPED with one ``oneclick.run_skipped`` WARN, never
@@ -554,7 +624,7 @@ def load_manifest(run_dir: Path) -> ManifestResult:
     Parameters
     ----------
     run_dir
-        The ``runs/<run_id>`` directory.
+        The ``sweep_runs/<run_id>`` directory.
 
     Returns
     -------
@@ -606,7 +676,7 @@ def load_top100(run_dir: Path) -> Top100Result:
     Parameters
     ----------
     run_dir
-        The ``runs/<run_id>`` directory.
+        The ``sweep_runs/<run_id>`` directory.
 
     Returns
     -------
@@ -666,7 +736,7 @@ def load_preflight_fixture(run_dir: Path) -> ManifestResult:
     Parameters
     ----------
     run_dir
-        The ``runs/<run_id>`` directory.
+        The ``sweep_runs/<run_id>`` directory.
 
     Returns
     -------
@@ -726,7 +796,7 @@ def tail_events(
     Parameters
     ----------
     run_dir
-        The ``runs/<run_id>`` directory.
+        The ``sweep_runs/<run_id>`` directory.
     offset
         Byte offset to resume from; negative ⇒ tail-anchored; past-EOF ⇒
         empty page with the cursor reset to EOF (named in ``detail``).
@@ -875,7 +945,7 @@ def verify_events_chain(
     Parameters
     ----------
     run_dir
-        The ``runs/<run_id>`` directory.
+        The ``sweep_runs/<run_id>`` directory.
     max_records
         Optional bound — verification stops (verdict ``True`` so far) after
         this many records.
@@ -1009,10 +1079,12 @@ class TradesReader(Protocol):
 
 
 class AwaitingTradesReader:
-    """PRODUCTION DEFAULT: always ``status='awaiting'``, ``source='none'``.
+    """No-lake FALLBACK: always ``status='awaiting'``, ``source='none'``.
 
-    Trades land at merge-integration via the ResultsStore paged API — until
-    then production NEVER fabricates trade rows (Golden Rule #1).
+    Since DEC-ONECLICK-SWEEP-RUNS-REBIND-001 the PRODUCTION default is
+    :class:`TradeStoreReader` (the shipped #1275 results-depth sidecars);
+    this reader serves only the no-lake-root-wired configuration — it NEVER
+    fabricates trade rows (Golden Rule #1).
     """
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -1033,7 +1105,7 @@ class AwaitingTradesReader:
             rows=(),
             total=None,
             source="none",
-            detail="trades land at merge-integration (ResultsStore paged API)",
+            detail=f"{AWAITING_DETAIL} — no lake root wired for trades",
         )
 
 
@@ -1068,7 +1140,9 @@ class FixtureTradesReader:
         Parameters
         ----------
         fixture_root
-            The tree holding ``runs/<run_id>/trades/rank-%04d.json`` pages.
+            The tree holding ``sweep_runs/<run_id>/trades/rank-%04d.json``
+            pages (paths derived via :func:`fixture_results_root`, so the
+            reader never leaves the fixture tree).
         """
         self._root = fixture_root
         self._lock = threading.Lock()
@@ -1098,7 +1172,7 @@ class FixtureTradesReader:
             return TradesResult(
                 "awaiting", (), None, "none", "invalid run_id/rank — nothing to read"
             )
-        path = trades_path(self._root, run_id, rank)
+        path = trades_path(fixture_results_root(self._root), run_id, rank)
         revision = artifact_revision(path)
         if revision is None:
             return TradesResult(
@@ -1165,3 +1239,206 @@ class FixtureTradesReader:
                 )
             rows.append(row)
         return _ParsedTrades("ok", tuple(rows), total, "")
+
+
+# ── Production trades reader (the merge-integration rebind — #1275 sidecars) ─
+
+
+#: A ``tuple_ref`` is exactly ``<instrument>/<tf>/<store_stem>`` — three parts
+#: (the ``top100_artifact.tuple_ref`` law, mirror-pinned).
+_TUPLE_REF_PARTS: Final[int] = 3
+
+
+def sidecar_paths_from_ref(run_dir: Path, tuple_ref: str) -> SidecarPaths | None:
+    """Build the results-depth sidecar trio + stamp paths for one ``equity_ref.tuple``.
+
+    *tuple_ref* is the top100 entry's ``<instrument>/<tf>/<store_stem>``
+    (``top100_artifact``'s ``tuple_ref`` law). The filename suffixes mirror
+    :func:`brutex.engine.trade_store.sidecar_paths_for` — that engine builder
+    maps a STORE path under the sweeps root (which the display zone does not
+    hold), so this display-side twin is mirror-PINNED byte-equal against it by
+    a unit test rather than delegated (engine edit forbidden in this zone).
+
+    Parameters
+    ----------
+    run_dir
+        The ``sweep_runs/<run_id>`` directory.
+    tuple_ref
+        The artifact-supplied tuple reference (UNTRUSTED data).
+
+    Returns
+    -------
+    SidecarPaths or None
+        ``None`` when the ref is not exactly three safe path segments — a
+        hostile/malformed artifact value never reaches the filesystem.
+    """
+    parts = tuple_ref.split("/")
+    if len(parts) != _TUPLE_REF_PARTS or not all(is_safe_run_id(part) for part in parts):
+        return None
+    instrument, tf, stem = parts
+    base = run_dir / RESULTS_DEPTH_DIRNAME / instrument / tf
+    return SidecarPaths(
+        trades=base / f"{stem}.trades.parquet",
+        aggs=base / f"{stem}.aggs.parquet",
+        equity=base / f"{stem}.equity.parquet",
+        stamp=base / f"{stem}.stamp.json",
+    )
+
+
+class TradeStoreReader:
+    """PRODUCTION trades reader over the SHIPPED #1275 results-depth sidecars.
+
+    The merge-integration trades rebind (DEC-ONECLICK-SWEEP-RUNS-REBIND-001)
+    — the DEFAULT whenever a lake root is wired and no fixture override is
+    active. Resolution per ``(run_id, rank)``:
+
+    1. the run's ``top100.json`` (memoised once per stat-token revision) maps
+       *rank* → the entry's SHIPPED additive keys — ``run_id`` (the
+       finalist's 64-hex store row key) + ``equity_ref.tuple``
+       (``<instrument>/<tf>/<store_stem>``); a pre-#1275 artifact without
+       them degrades to honest awaiting, never a guess;
+    2. the sidecar trio at ``results-depth/<tuple_ref>.*`` pages via
+       :func:`brutex.engine.trade_store.read_trade_page` — an absent stamp is
+       honest ``awaiting``; stamp/page damage is a NAMED ``corrupt`` (never a
+       500, never fabricated rows).
+
+    ``limit`` beyond :data:`brutex.engine.trade_store.PAGE_LIMIT_MAX` is
+    clamped INSIDE ``read_trade_page`` (the db_view clamp law) and the clamp
+    is named in ``detail``. ``lots``/``costs_paisa`` pass through as honest
+    ``None`` (NULL-by-design until P5 — Ruling 18); the additive
+    ``trade_seq``/``path_1m_status``/``mae_granularity`` keys pass through
+    verbatim. ``MemoryError`` re-raises raw (house law).
+
+    Attributes
+    ----------
+    parse_count
+        Deterministic spy seam: incremented on every REAL top100 parse (the
+        no-reparse tests read it — no timing needed).
+    """
+
+    def __init__(self, results_root: Path) -> None:
+        """Bind the reader to *results_root* (the sweeps tree — NOT the run tree).
+
+        Parameters
+        ----------
+        results_root
+            The sweep results root; runs resolve via :func:`runs_root`.
+        """
+        self._results_root = results_root
+        self._lock = threading.Lock()
+        self._top100_memo: tuple[str, str, Top100Result] | None = None
+        self.parse_count: int = 0
+
+    def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
+        """Return one page of REAL trade rows for (*run_id*, *rank*).
+
+        Parameters
+        ----------
+        run_id
+            The sweep run directory name (unsafe ids degrade to awaiting —
+            the route 400s them first; this is the defensive belt).
+        rank
+            The 1-based leaderboard rank.
+        offset, limit
+            Page window (clamped inside ``read_trade_page`` — offset ≥ 0,
+            limit to ``[1, PAGE_LIMIT_MAX]``).
+
+        Returns
+        -------
+        TradesResult
+            ``source='results_store'`` whenever the sidecars were consulted;
+            absent artifacts → honest awaiting (``total=None``, never 0).
+        """
+        if not is_safe_run_id(run_id) or rank < 1:
+            return TradesResult(
+                "awaiting", (), None, "none", "invalid run_id/rank — nothing to read"
+            )
+        run_dir = runs_root(self._results_root) / run_id
+        top100 = self._top100_cached(run_dir)
+        if top100.status in ("awaiting", "corrupt"):
+            return TradesResult(top100.status, (), None, "none", top100.detail)
+        entry = next(
+            (row for row in top100.rows if row.get("rank") == rank),
+            None,
+        )
+        if entry is None:
+            return TradesResult(
+                "awaiting",
+                (),
+                None,
+                "none",
+                f"{AWAITING_DETAIL} — no leaderboard entry at rank {rank}",
+            )
+        combo_run_id = entry.get("run_id")
+        equity_ref = entry.get("equity_ref")
+        tuple_ref = equity_ref.get("tuple") if isinstance(equity_ref, dict) else None
+        if not isinstance(combo_run_id, str) or not combo_run_id or not isinstance(tuple_ref, str):
+            return TradesResult(
+                "awaiting",
+                (),
+                None,
+                "none",
+                f"{AWAITING_DETAIL} — top100 entry carries no results-depth reference "
+                "(pre-#1275 artifact)",
+            )
+        paths = sidecar_paths_from_ref(run_dir, tuple_ref)
+        if paths is None:
+            return TradesResult(
+                "corrupt",
+                (),
+                None,
+                "none",
+                f"top100 entry tuple ref {tuple_ref!r} is not three safe path segments",
+            )
+        if artifact_revision(paths.stamp) is None:
+            return TradesResult(
+                "awaiting",
+                (),
+                None,
+                "none",
+                f"{AWAITING_DETAIL} — results-depth sidecars absent for {tuple_ref}",
+            )
+        try:
+            page = read_trade_page(paths, run_id=combo_run_id, offset=offset, limit=limit)
+        except TradeStoreError as exc:
+            _LOG.warning(
+                "oneclick.artifact_corrupt",
+                artifact="results_depth_trades",
+                path=str(paths.stamp),
+                error_type=type(exc).__name__,
+            )
+            return TradesResult(
+                "corrupt", (), None, "results_store", f"results-depth read failed: {exc}"
+            )
+        detail = ""
+        if limit != page.limit:
+            detail = f"limit clamped to {page.limit} (trade_store page law)"
+        return TradesResult(
+            status="ok",
+            rows=tuple(dict(row) for row in page.rows),
+            total=page.total,
+            source="results_store",
+            detail=detail,
+        )
+
+    def _top100_cached(self, run_dir: Path) -> Top100Result:
+        """Serve the single-entry ``(path, revision)`` top100 memo, parsing on a miss.
+
+        A ``None`` revision (absent/unstattable) computes fresh and caches
+        NOTHING (the ``lake_revision`` doctrine — no stale illusion).
+        """
+        path = run_dir / TOP100_FILENAME
+        revision = artifact_revision(path)
+        if revision is None:
+            self.parse_count += 1
+            return load_top100(run_dir)
+        key = str(path)
+        with self._lock:
+            memo = self._top100_memo
+        if memo is not None and memo[0] == key and memo[1] == revision:
+            return memo[2]
+        self.parse_count += 1
+        parsed = load_top100(run_dir)
+        with self._lock:
+            self._top100_memo = (key, revision, parsed)
+        return parsed
