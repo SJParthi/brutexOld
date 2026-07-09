@@ -55,8 +55,14 @@ _FIXTURE_RUNS = _REPO / "tests" / "fixtures" / "oneclick" / "sweep_runs"
 _RUN_ID = "r-20260707-fixt01"
 _HOSTILE_RUN_ID = "r-hostile01"
 
-#: The exact awaiting-banner wording (BX_AWAITING_TEXT twin — C-NIT-3).
-_AWAITING = "awaiting real run artifact"
+#: The v29 awaiting-banner wording head (BX_AWAITING_TEXT twin — C-NIT-3;
+#: plain-English since DEC-OPERATOR-PAGE-CLEANVIEW-001).
+_AWAITING_V29 = "No completed run yet"
+
+#: The screener/strategy pages still carry the artifact-vocabulary phrase at
+#: non-ticker sites — their deep clean is the NAMED follow-up
+#: DEC-SCREENER-STRATEGY-CLEANVIEW-001, not silent scope expansion.
+_AWAITING_SCREENER = "awaiting real run artifact"
 
 
 def _template(name: str) -> str:
@@ -126,9 +132,9 @@ class TestPagesServe:
             assert f'id="{control}"' in html, control
         assert 'id="swConditions"' in html
         assert "disabled" in html.split('id="swConditions"')[1][:120]
-        assert "condition-subset — not wired yet, lands at merge-integration" in html
-        # The preflight/estimator strip is HONEST about not being wired (P1).
-        assert "estimator not wired yet — lands at merge-integration (P1)" in html
+        assert "Condition filter — not available yet" in html
+        # The preflight/estimator strip is HONEST about not being available.
+        assert "Time estimate: not available yet" in html
         # R3: the button never pulls — stated on the page.
         assert "this button NEVER pulls" in html or "NEVER pulls" in html
 
@@ -230,7 +236,7 @@ class TestOneclickSections:
     def test_awaiting_banner_present_with_the_shared_wording(self) -> None:
         html = _template("v29.html")
         assert 'id="ocAwaiting"' in html
-        assert _AWAITING in html
+        assert _AWAITING_V29 in html
 
     def test_new_sections_present(self) -> None:
         html = _template("v29.html")
@@ -297,17 +303,31 @@ class TestOneclickSections:
             "/static/bx-ui.js",
             "/static/bx-poll.js",
             "/static/bx-explain.js",
+            "/static/bx-copy.js",
             "/static/bx-chart.js",
             "/static/bx-oneclick.js",
         ]
         positions = [html.index(src) for src in order]
         assert positions == sorted(positions), "one-click JS load order drifted"
 
+    @pytest.mark.parametrize("name", ["screener.html", "strategy.html"])
+    def test_copy_catalog_loads_before_the_widget_layer(self, name: str) -> None:
+        """bx-copy.js loads on every bx-oneclick page, before the widget layer
+        (DEC-OPERATOR-PAGE-CLEANVIEW-001 load-order law)."""
+        html = _template(name)
+        assert "/static/bx-copy.js" in html
+        assert html.index("/static/bx-explain.js") < html.index("/static/bx-copy.js")
+        assert html.index("/static/bx-copy.js") < html.index("/static/bx-oneclick.js")
+
     def test_verify_panel_states_the_honest_truth_table(self) -> None:
         html = _template("v29.html")
         assert "VERIFY ME" in html
-        assert "not_wired" in html
-        assert "O(file)" in html  # the chain replay cost is stated on the button
+        # The not_wired verify state survives as the CSS-vocabulary class the
+        # chip renderer keys on the RAW payload token (D1 R5 — explicit
+        # intent, not incidental prose survival).
+        assert "oc-verify-not_wired" in html
+        # The chain replay cost stays stated on the button — in plain English.
+        assert "reads the whole event log — runs only when you click" in html
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +373,7 @@ class TestScreenerPage:
     def test_ticker_strip_and_awaiting_state(self) -> None:
         html = _template("screener.html")
         assert 'id="bxTickerStrip"' in html
-        assert _AWAITING in html
+        assert _AWAITING_SCREENER in html
 
 
 class TestStrategyPage:

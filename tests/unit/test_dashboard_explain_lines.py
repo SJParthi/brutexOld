@@ -40,10 +40,11 @@ _TRADES_FIXTURE = (
 )
 
 #: The awaiting-banner wording (C-NIT-3) — ONE constant in bx-explain.js;
-#: this Python pin + the JS constant must stay byte-identical.
+#: this Python pin + the JS constant + the v29 template default must stay
+#: byte-identical (plain-English since DEC-OPERATOR-PAGE-CLEANVIEW-001).
 _EXPECTED_AWAITING_TEXT = (
-    "awaiting real run artifact — run a sweep from the Run controls; "
-    "this page never shows invented numbers"
+    "No completed run yet — press Run Sweep below. Every number on this "
+    "page comes from a real run — nothing is ever invented."
 )
 
 _NODE = shutil.which("node")
@@ -194,6 +195,6 @@ class TestModeText:
         assert out == "closed above yesterday high"
 
     def test_beginner_mode_without_a_plain_string_appends_the_honest_p3_note(self) -> None:
-        """Never an invented sentence — the note names where the phrasing lands."""
+        """Never an invented sentence — the note admits the plain phrasing is absent."""
         out = _node_call('E.modeText("beginner", "PDH_CROSS_UP", null)')
-        assert out == "PDH_CROSS_UP (plain-English phrasing lands with the P3 phrase table)"
+        assert out == "PDH_CROSS_UP (plain-English version not written yet)"

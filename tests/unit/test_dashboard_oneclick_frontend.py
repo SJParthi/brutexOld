@@ -31,10 +31,13 @@ _POLL = _STATIC / "bx-poll.js"
 _CHART = _STATIC / "bx-chart.js"
 _SCREENER = _STATIC / "bx-screener.js"
 _EXPLAIN = _STATIC / "bx-explain.js"
+_COPY = _STATIC / "bx-copy.js"
 _ONECLICK = _STATIC / "bx-oneclick.js"
 
-_ALL_FIVE = (_POLL, _CHART, _SCREENER, _EXPLAIN, _ONECLICK)
-_IDS = ("bx-poll", "bx-chart", "bx-screener", "bx-explain", "bx-oneclick")
+#: The file-conventions suite covers all six one-click JS files (bx-copy.js
+#: joined with DEC-OPERATOR-PAGE-CLEANVIEW-001).
+_ALL_FIVE = (_POLL, _CHART, _SCREENER, _EXPLAIN, _COPY, _ONECLICK)
+_IDS = ("bx-poll", "bx-chart", "bx-screener", "bx-explain", "bx-copy", "bx-oneclick")
 
 
 def _js(path: Path) -> str:
@@ -164,8 +167,8 @@ class TestOneclickWidgetLayer:
 
     def test_funnel_provenance_labels(self) -> None:
         js = _js(_ONECLICK)
-        assert '"live run " + String(runId)' in js
-        assert '"completed run " + String(runId) + " · manifest"' in js
+        assert '"live sweep " + String(runId)' in js
+        assert '"completed run " + String(runId)' in js
 
     def test_oneshot_fetch_failures_route_through_errorcard_with_retry(self) -> None:
         """F-M4: rejection AND non-ok AND malformed body -> errorCard, never blank."""
@@ -203,6 +206,60 @@ class TestOneclickWidgetLayer:
         """C-NIT-3: the wording lives in bx-explain.js BX_AWAITING_TEXT only."""
         js = _js(_ONECLICK)
         assert "window.BXExplain.AWAITING_TEXT" in js
+
+    def test_ring_label_and_poll_constants_unchanged_by_cleanview(self) -> None:
+        """DEC-OPERATOR-PAGE-CLEANVIEW-001 byte-preservation: the honest ring
+        cap label + the shared poll constants are display contracts the
+        clean-view pass must NOT touch."""
+        js = _js(_ONECLICK)
+        assert (
+            "var BX_TIMELINE_RING_LABEL =\n"
+            '  "showing last 5,000 events — older events via “load earlier”";'
+        ) in js
+        assert "var BX_TIMELINE_RING_CAP = 5000;" in js
+        poll = _js(_POLL)
+        assert "BACKOFF_BASE_MS: 3000" in poll
+        assert "BACKOFF_MAX_MS: 30000" in poll
+
+
+class TestCopyCatalogWiring:
+    """bx-copy.js presence + the sinks that consume it (source pins; the
+    catalog's BEHAVIOR is node-golden-tested in
+    test_dashboard_copy_catalog.py — DEC-OPERATOR-PAGE-CLEANVIEW-001)."""
+
+    def test_copy_catalog_exports_the_api(self) -> None:
+        js = _js(_COPY)
+        assert "function bxCopyLookup(raw)" in js
+        assert "function bxCopyApply(el, raw, opts)" in js
+        assert "function bxCopyToken(kind, raw)" in js
+        assert "window.BXCopy = BXCopy;" in js
+
+    def test_oneclick_sinks_consume_the_catalog(self) -> None:
+        """Pill/verify/source tokens + detail sinks route through BXCopy; the
+        CSS class stays keyed on the RAW payload token (Law 2 + caller rule 1)."""
+        js = _js(_ONECLICK)
+        assert 'window.BXCopy.token("pill", rawState)' in js
+        assert 'window.BXCopy.token("verify", rawVerify)' in js
+        assert 'window.BXCopy.token("source", rawSource)' in js
+        assert 'window.BXCopy.token("granularity", r.mae_granularity)' in js
+        assert js.count('{ fallback: "waiting for run data" }') >= 2  # :533/:661 sinks
+        # RAW-token CSS keying survives the display remap:
+        assert '"oc-pill oc-pill-" + rawState.replace(/[^a-z]/g, "-")' in js
+        assert '"oc-verify-state oc-verify-" + rawVerify' in js
+
+    def test_remap_keeps_the_verbatim_server_string_in_the_title(self) -> None:
+        """Law 2: every remapped string keeps 'server: <verbatim>' reachable."""
+        copy_js = _js(_COPY)
+        assert 'el.title = "server: " + s;' in copy_js
+        oneclick = _js(_ONECLICK)
+        assert '"server state: " + rawState' in oneclick
+        assert '"server: " + rawVerify' in oneclick
+        assert '"server: " + rawSource' in oneclick
+
+    def test_chain_derived_from_surfaces_verbatim_tooltip_only(self) -> None:
+        """J15: the chain link's derived_from is surfaced VERBATIM (tooltip)."""
+        js = _js(_ONECLICK)
+        assert 'chip.title = String(link.derived_from || "");' in js
 
 
 class TestChartAndExplainSourcePins:

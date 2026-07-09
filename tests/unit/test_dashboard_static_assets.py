@@ -41,13 +41,15 @@ def test_component_carries_the_drill_picker() -> None:
 
 # ── One-click frontend cores (DEC-OPERATOR-PAGE-REAL-001) ───────────────────
 
-#: The five stage-2/3 JS files: poll core · chart math · screener math ·
-#: explain lines · the operator widget layer.
+#: The six one-click JS files: poll core · chart math · screener math ·
+#: explain lines · the plain-English copy catalog
+#: (DEC-OPERATOR-PAGE-CLEANVIEW-001) · the operator widget layer.
 _ONECLICK_JS = (
     "bx-poll.js",
     "bx-chart.js",
     "bx-screener.js",
     "bx-explain.js",
+    "bx-copy.js",
     "bx-oneclick.js",
 )
 
