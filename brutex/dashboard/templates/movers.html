@@ -474,10 +474,15 @@ function renderRows() {
        dataset coordinate verbatim (spot) / the contract groww_symbol (F&O) —
        self-describing via data-segment, never state.asset. esc()'d inside
        double-quoted attributes: the SAME sanctioned innerHTML+esc path every
-       cell already rides (DEC-DASHBOARD-XSS-HARDENING-001). */
+       cell already rides (DEC-DASHBOARD-XSS-HARDENING-001). A11y (review
+       MINOR-1 fold): deliberately NO link-role override — the tr keeps its
+       NATIVE `row` role so table semantics survive for screen readers;
+       keyboard reachability rides tabindex=0 + the Enter twin, and the
+       esc()'d aria-label names the destination. */
     const link = row.symbol
       ? ' data-symbol="' + esc(row.symbol) + '" data-exchange="' + esc(row.exchange || "") + '"'
-        + ' data-segment="' + esc(row.segment || "") + '" role="link" tabindex="0"'
+        + ' data-segment="' + esc(row.segment || "") + '" tabindex="0"'
+        + ' aria-label="open ' + esc(row.symbol) + ' in the database candle viewer"'
       : "";
     return "<tr" + link + ">" + cols.map(([,field,type],i) => {
     let v = row[field]; if (v===undefined||v===null) v = "—";
@@ -746,6 +751,11 @@ function moversDbUrl(tr) {
   return "/db?" + p.toString();
 }
 function onRowClick(e) {
+  /* Text-selection guard (review MINOR-2 fold): a click that ENDS a text
+     selection (select/copy a cell value) must not be swallowed into a
+     navigation — a live selection anywhere on the page means the operator
+     was selecting, not clicking through. */
+  if (!window.getSelection().isCollapsed) return;
   const tr = e.target.closest("tr[data-symbol]");
   if (!tr) return;
   window.location.href = moversDbUrl(tr);

@@ -5,7 +5,9 @@ Guards **DEC-MOVERS-DRILL-DOWN-001** — the audit's finding #27 (HIGH): the
 stamp and no click path, so every movers row was an INERT dead end. The fix
 stamps ``data-symbol``/``data-exchange``/``data-segment`` (esc()'d, gated on a
 real payload ``symbol`` so the offline SAMPLE preview rows and the empty-state
-row stay inert) plus ``role="link"``/``tabindex="0"``, and adds ONE delegated
+row stay inert) plus ``tabindex="0"`` + an esc()'d ``aria-label`` (NO
+``role="link"`` — the tr keeps its native ``row`` role for table semantics,
+review MINOR-1 fold), and adds ONE delegated
 ``#rows`` click + Enter listener pair building the ``/db`` deep link via
 ``URLSearchParams`` — carrying the RESOLVED snapshot day (``lastPayload.date``)
 so a blank "latest day" input still links to the actual day shown.
@@ -44,10 +46,30 @@ def test_link_rows_gated_on_payload_symbol() -> None:
 
 
 def test_linked_rows_carry_a11y_affordance() -> None:
-    """role=link + tabindex=0 ride the same gated stamp; cursor:pointer is scoped."""
+    """tabindex=0 + esc()'d aria-label ride the same gated stamp; NO role override.
+
+    Review MINOR-1 fold: ``role="link"`` is deliberately ABSENT — it would
+    strip the tr's native ``row`` role and break table semantics for screen
+    readers; keyboard reachability rides tabindex + the Enter twin instead,
+    and the aria-label (esc()'d, the sanctioned attribute path) names the
+    destination.
+    """
     html = _render_movers_html()
-    assert 'role="link" tabindex="0"' in html
+    assert '" tabindex="0"' in html
+    assert "aria-label=\"open ' + esc(row.symbol) + ' in the database candle viewer\"" in html
+    assert 'role="link"' not in html
     assert "tbody tr[data-symbol] { cursor:pointer; }" in html
+
+
+def test_row_click_honors_live_text_selection() -> None:
+    """A click ending a text selection is NOT swallowed into a navigation.
+
+    Review MINOR-2 fold: the delegated click handler bails when a live
+    (non-collapsed) selection exists, so the operator can still select/copy
+    cell text off a linked row.
+    """
+    html = _render_movers_html()
+    assert "if (!window.getSelection().isCollapsed) return;" in html
 
 
 def test_delegated_rows_listener_not_per_row_onclick() -> None:
