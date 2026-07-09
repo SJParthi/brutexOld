@@ -18,10 +18,11 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1632 —
-renumbered #1623→#1631→#1632 after main took #1623 for
-DEC-DASHBOARD-POLL-HYGIENE-001 and then #1631 for
-DEC-ONECLICK-TOP100-OBJECT-ROOT-001;
+_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1633 —
+renumbered #1623→#1631→#1632→#1633 after main took #1623 for
+DEC-DASHBOARD-POLL-HYGIENE-001, then #1631 for
+DEC-ONECLICK-TOP100-OBJECT-ROOT-001, then #1632 for
+DEC-DASHBOARD-VISUAL-OVERHAUL-001;
 the /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named
 follow-up CLOSED: the minute-basis PREV. CLOSE anchored on the symbol's OWN
 1-day series with ZERO real-calendar check (its docstring called a real NSE
@@ -36,7 +37,7 @@ dataset triple (capped 20/build + one suppressed summary) carrying a
 machine `hole_shape` + shape-matched detail (the hostile-review
 fold — the original one-line "re-pull" advice was WRONG remediation in two
 reproduced shapes; since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment
-fold, MIGRATION.md #1633, the split is FOUR-WAY): muhurat_session_bar (the
+fold, MIGRATION.md #1634, the split is FOUR-WAY): muhurat_session_bar (the
 calendar-confirmed Diwali boundary — a HEALTHY lake, "no action needed",
 cross-referencing the #1616 engine anchor law + /movers' prev_close_muhurat
 display stamp) / extra_nonsession_bar (a non-Muhurat unexpected non-session
@@ -44,7 +45,7 @@ bar — honestly suspicious, inspect it) / prebuild_lag (the 1day series lags
 the minute series — run the pipeline prebuild; diagnostic only, the guard
 never anchors on minute presence) / missing_session (the genuine hole —
 re-pull kept verbatim); the found<expected arms are two-way on the daily
-basis (no minute series read). The same #1633 fold ends the annual /movers
+basis (no minute series read). The same #1634 fold ends the annual /movers
 false-hole flag: a day-after-Diwali Muhurat baseline now reads
 contiguous-True + EMIT-ON-TRUE `prev_close_muhurat`/`oi_baseline_muhurat`
 + " †" + ONE INFO per build (never " *"/WARN), and /db gains the static
@@ -1031,7 +1032,7 @@ per (symbol, kind)), and marked " *" on the screen — while the SERVED VALUE is
 untouched in every branch: NEW COMMON `calendars/nse.previous_trading_session`
 (strict back-walk, coverage-floor ABSTAIN — never a guessed session; Muhurat =
 NON-session documented limit [SUPERSEDED for the movers VERDICT layer by
-DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1633: the walk still
+DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1634: the walk still
 treats Muhurat a NON-session, but a found-after-expected Muhurat baseline now
 reads contiguous-True + `prev_close_muhurat`/`oi_baseline_muhurat` — a healthy
 lake, never a false hole]), enriched resolvers `resolve_prev_close`/
@@ -1042,7 +1043,7 @@ the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
 HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
 the missing session does; `preopen_report._previous_trading_day` was NOT
 refactored there (named follow-up DEC-PREOPEN-PREVDAY-COMMON-001 — since
-CLOSED by MIGRATION.md #1632). READ-ONLY dashboard — ENGINE
+CLOSED by MIGRATION.md #1633). READ-ONLY dashboard — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
 MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
@@ -1792,9 +1793,10 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1632** — renumbered
-  #1623→#1631→#1632 after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335) and then #1631 for
-  DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (PR #1352), both at 2026-07-09 merge-reconciles; the
+- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1633** — renumbered
+  #1623→#1631→#1632→#1633 after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335), then #1631 for
+  DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (PR #1352), then #1632 for DEC-DASHBOARD-VISUAL-OVERHAUL-001 (PR #1354),
+  all at 2026-07-09 merge-reconciles; the
   /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named follow-up consolidation: the minute-basis
   PREV. CLOSE guard (`_minute_prev_close_contiguous`) anchored on `trading_dates[idx-1]` — the symbol's OWN 1-day
   series — with ZERO real-NSE-calendar check (its docstring claimed a session absent from BOTH series is "a genuine
@@ -1812,7 +1814,7 @@ hostile-review pass._
   hostile-review fold widened the bare-symbol key that silenced a dual-listed symbol's second exchange — cap
   20/build, ONE `preopen.prev_close_noncontiguous_suppressed` summary) carrying a machine `hole_shape`
   + shape-matched detail (the review fold on the original unconditional "re-pull" advice, WRONG in two reproduced
-  shapes; FOUR-WAY since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment fold, MIGRATION.md #1633):
+  shapes; FOUR-WAY since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment fold, MIGRATION.md #1634):
   muhurat_session_bar (the calendar-confirmed Diwali boundary — a HEALTHY lake, "no action needed", cross-referencing
   the #1616 engine anchor law + /movers' prev_close_muhurat display stamp) / extra_nonsession_bar (a non-Muhurat
   unexpected non-session bar — honestly suspicious, inspect it; the old "e.g. a Diwali Muhurat session" guess is
@@ -1820,7 +1822,7 @@ hostile-review pass._
   run the pipeline prebuild; DIAGNOSTIC only, the guard never anchors on minute presence — a partial-day close
   would be a fabrication) / missing_session (genuine hole — re-pull kept verbatim); the daily basis carries no
   minute evidence, so only its found<expected diagnostic degrades; the golden generator now REFUSES to overwrite existing
-  fixtures without BRUTEX_REGEN_PREOPEN_GOLDEN=1 (the pre-fix capture stays the oracle). THE SAME #1633 AMENDMENT
+  fixtures without BRUTEX_REGEN_PREOPEN_GOLDEN=1 (the pre-fix capture stays the oracle). THE SAME #1634 AMENDMENT
   FOLD (DEC-PREVSESSION-MUHURAT-COHERENCE-001, this branch, the recorded TWO-LAW design — engine anchor law #1616
   vs display baseline law): /movers stops false-flagging the day-after-Diwali boundary as a lake hole — a
   found-after-expected Muhurat baseline reads contiguous-True + the EMIT-ON-TRUE `prev_close_muhurat`/
@@ -2552,7 +2554,7 @@ hostile-review pass._
   (strict `is_trading_day_checked` back-walk over weekends/holidays, Budget weekend sessions honoured, coverage-floor
   ABSTAIN with one `calendar.previous_session_coverage_exhausted` warning — never a guessed session; Muhurat day =
   documented NON-session limit [the WALK's stance stands, but the VERDICT layer's false-hole reading of a
-  day-after-Diwali Muhurat baseline is SUPERSEDED by DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1633 —
+  day-after-Diwali Muhurat baseline is SUPERSEDED by DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1634 —
   contiguous-True + the EMIT-ON-TRUE `prev_close_muhurat`/`oi_baseline_muhurat` stamp + " †", never " *"/WARN];
   NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
   `movers_snapshot.resolve_prev_close` → `PrevDayBaseline(value, found_date)` + `movers_futures.resolve_prev_oi` →
@@ -2566,7 +2568,7 @@ hostile-review pass._
   " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
   makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
   session does; no bar is ever fabricated); `preopen_report._previous_trading_day` was deliberately NOT refactored
-  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since CLOSED by MIGRATION.md #1632 (the thin-delegator
+  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since CLOSED by MIGRATION.md #1633 (the thin-delegator
   consolidation). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
   line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
@@ -4287,15 +4289,16 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/preopen-prevday-common`
-  (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1632 — renumbered #1623→#1631→#1632
-  after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 and then #1631 for
-  DEC-ONECLICK-TOP100-OBJECT-ROOT-001; the /reports preopen
+  (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1633 — renumbered #1623→#1631→#1632→#1633
+  after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001, then #1631 for
+  DEC-ONECLICK-TOP100-OBJECT-ROOT-001, then #1632 for DEC-DASHBOARD-VISUAL-OVERHAUL-001;
+  the /reports preopen
   minute-basis calendar-contiguity fix (a real-session lake hole no longer
   fabricates a %CHNG — correct-or-absent) + the #1539-named follow-up CLOSED:
   `_previous_trading_day` delegates to the COMMON
   `nse.previous_trading_session`, which gains the remove-only `observed`
   overlay kwarg; PLUS the same-branch amendment fold
-  DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1633 — the two-law
+  DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1634 — the two-law
   day-after-Diwali coherence ruling: /movers stops false-flagging a healthy
   Muhurat-boundary lake as a lake hole (contiguous-True + EMIT-ON-TRUE
   `prev_close_muhurat`/`oi_baseline_muhurat` + " †" + one INFO, never
