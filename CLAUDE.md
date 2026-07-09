@@ -28,8 +28,16 @@ fabricated pct_chng=+10.0 for 2024-01-04 across the missing Wednesday
 now the exact structural mirror of the daily guard — the checked calendar is
 the prior-session AUTHORITY, refusal = honest row ABSENCE ("correct-or-absent,
 never wrong"; never a fabricated %CHNG, never a 500), surfaced as ONE
-`preopen.prev_close_noncontiguous` WARN per symbol (capped 20/build + one
-suppressed summary). CONSOLIDATION: `nse.previous_trading_session` gains the
+`preopen.prev_close_noncontiguous` WARN per (exchange, segment, symbol)
+dataset triple (capped 20/build + one suppressed summary) carrying a
+THREE-WAY machine `hole_shape` + shape-matched detail (the hostile-review
+fold — the original one-line "re-pull" advice was WRONG remediation in two
+reproduced shapes): extra_nonsession_bar (a Muhurat extra 1-day bar after
+the prior session — NO re-pull advice) / prebuild_lag (the 1day series lags
+the minute series — run the pipeline prebuild; diagnostic only, the guard
+never anchors on minute presence) / missing_session (the genuine hole —
+re-pull kept verbatim); the daily basis reads no minute series so its
+diagnostic is honestly two-way. CONSOLIDATION: `nse.previous_trading_session` gains the
 REMOVE-ONLY kw-only `observed` overlay kwarg (default frozenset() —
 every existing caller byte-identical, parity-pinned) and
 `preopen_report._previous_trading_day` becomes a THIN delegator over it
@@ -37,7 +45,9 @@ every existing caller byte-identical, parity-pinned) and
 span; the module-local `calendar.coverage_exhausted` event RETIRED for the
 COMMON `calendar.previous_session_coverage_exhausted` — a sanctioned,
 consumer-free rename). SANCTIONED: hole rows disappear from minute-basis
-exports (remediation = re-pull the missing session); coverage-abstain +
+exports (remediation now shape-matched — re-pull ONLY for a genuine
+missing_session, the pipeline prebuild for a 1day-lag, none for a Muhurat
+extra bar); coverage-abstain +
 Muhurat-bar / unflagged-drift anchors now SKIP on the minute basis too
 (parity with daily; an overlay-flagged day is recovered). HONEST: the
 pure-minute no-1day fallback arm stays deliberately calendar-blind (a chosen,
@@ -1663,8 +1673,15 @@ hostile-review pass._
   Ellipsis-sentinel `expected_session` seam + the `on_hole(expected, nearest_lake_session)` observability seam;
   `build_preopen_rows` threads the observed overlay into BOTH bases through ONE function-local O(unique days)
   prior-session memo (spy-pinned one-walk-per-day; NOT an O(1)-total claim) and surfaces holes as
-  `preopen.prev_close_noncontiguous` WARNs (per-symbol dedup, cap 20/build, ONE
-  `preopen.prev_close_noncontiguous_suppressed` summary). CONSOLIDATION (the #1535/#1539-named follow-up CLOSED):
+  `preopen.prev_close_noncontiguous` WARNs (deduped per (exchange, segment, symbol) dataset triple — the
+  hostile-review fold widened the bare-symbol key that silenced a dual-listed symbol's second exchange — cap
+  20/build, ONE `preopen.prev_close_noncontiguous_suppressed` summary) carrying a THREE-WAY machine `hole_shape`
+  + shape-matched detail (the review fold on the original unconditional "re-pull" advice, WRONG in two reproduced
+  shapes): extra_nonsession_bar (Muhurat extra 1-day bar — no re-pull advice) / prebuild_lag (1day lags minute —
+  run the pipeline prebuild; DIAGNOSTIC only, the guard never anchors on minute presence — a partial-day close
+  would be a fabrication) / missing_session (genuine hole — re-pull kept verbatim); the daily basis carries no
+  minute evidence, so its diagnostic is honestly two-way; the golden generator now REFUSES to overwrite existing
+  fixtures without BRUTEX_REGEN_PREOPEN_GOLDEN=1 (the pre-fix capture stays the oracle). CONSOLIDATION (the #1535/#1539-named follow-up CLOSED):
   `nse.previous_trading_session` gains kw-only `observed: AbstractSet[date] = frozenset()` — REMOVE-ONLY
   (`is_trading_day_checked(probe) and probe not in observed`; plain data, no overlay-loader import into nse.py, no
   cycle; default-empty parity pinned unit + hypothesis so every existing caller is byte-identical) — and
@@ -1673,17 +1690,19 @@ hostile-review pass._
   × observed sets; the module-local `calendar.coverage_exhausted` event RETIRED for the COMMON
   `calendar.previous_session_coverage_exhausted` — a sanctioned, grep-verified consumer-free observability rename,
   its one test pin reconciled). SANCTIONED (each pinned): minute-basis hole rows DISAPPEAR from exports (remediation
-  re-pull); coverage-abstain + Muhurat-bar / unflagged-drift anchor days now SKIP on the minute basis (parity with
+  shape-matched: re-pull / prebuild / none); coverage-abstain + Muhurat-bar / unflagged-drift anchor days now SKIP on
+  the minute basis (parity with
   daily; an overlay-flagged day is recovered — the dedicated spurious-skip pin). HONEST: the pure-minute no-1day
   fallback arm stays deliberately calendar-blind (a CHOSEN, pinned, ledgered limit). EVIDENCE: the finder's repro
   KILLED on the fixed tree ("row SKIPPED (no fabrication) … VERDICT: NOT CONFIRMED"); PRE-fix-captured goldens
   (contiguous weekend + Holi-2024-cluster + Budget-Saturday fixture, day+minute .xlsx + .zip) byte-equal post-fix;
   the `!=`→`==` expected-check mutant proven dead on BOTH guards; the fixture audit of test_preopen_report.py +
   test_surface_trial_reports.py found ZERO non-real-session dates. READ-ONLY dashboard — ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `preopen_report.py` (307/90) + `calendars/nse.py`
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `preopen_report.py` (307/90 pre-fold; 323/98
+  post-REVIEW-ROUND-1) + `calendars/nse.py`
   (204/52) BOTH 100.00% line+branch on their static gates; ruff/ruff-format clean; `mypy --strict` clean (403 files);
   pyright 0 errors at the pre-change baseline, +2 test-file `reportPrivateUsage` warnings — the house private-import
-  test pattern.)
+  test pattern — plus 2 more for the round-1 `_hole_shape`/`_hole_detail` private-helper imports.)
   Earlier: `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
   P4 merge-integration rebind, built ON TOP of PR #1280's `claude/operator-page-real-rebuild` head (the eventual PR
   targets main only after #1280 merges): the one-click discovery seam repoints `<results_root>/runs/` → the Ruling-4
