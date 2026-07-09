@@ -276,7 +276,19 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
-    timeout-minutes: 75
+    # 75 -> 95 (2026-07-09, PR #1369 run 29051387891): the suite re-crossed
+    # the 75m wall — the pull_request job on ad4d9663 was cancelled at 75:17
+    # MID the auto-discovery per-module coverage gate with EVERY executed
+    # step green (whole-package pytest+coverage SUCCESS at 100.00%, every
+    # completed per-module gate 100.00%, zero failing tests), while the
+    # sibling green run on 283c2316 (run 29045280302, identical code — the
+    # head commit is a docs-only ledger renumber) measured 74:56 wall, four
+    # seconds under the budget: pure wall-time growth (the PR's new
+    # coverage_missing/sweep_cancel modules + their scoped per-module
+    # gates), pass/fail decided by runner contention. 95 gives evidenced
+    # ~27% headroom over the observed ~75m wall; wall-clock budget only —
+    # no gate is weakened. Continues the 15->25->40->60->75 ratchet.
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v7
         with:
