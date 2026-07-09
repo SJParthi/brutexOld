@@ -6,9 +6,12 @@
 * :class:`SweepCheckpoint` every ``__post_init__`` validation branch + derived
   ``next_index`` / ``is_complete`` / ``completed_count`` + ``to_dict`` /
   ``from_dict`` (missing field, bad version, malformed field, valid);
-* :class:`SweepCheckpointStore` constructor guards, ``load`` (no file, OSError,
-  malformed JSON, sweep-id mismatch, matching resume), ``record`` (negative,
-  out-of-range, stale no-op, advance), ``save`` (success, OSError wrap);
+* :class:`SweepCheckpointStore` constructor guards, ``load`` (no file, stat /
+  read OSError, oversized file refused pre-read, malformed JSON incl. a
+  RecursionError nesting bomb, non-object payload, sweep-id mismatch,
+  same-id total_combos mismatch refused, matching resume), ``record``
+  (negative, out-of-range, stale no-op, advance), ``save`` (success, OSError
+  wrap incl. the parent-mkdir failure);
 * the atomic-write OSError cleanup path;
 * a hypothesis property that a monotone record sequence persists the running
   maximum and survives a reopen, and a real crash-resume round-trip.
@@ -115,6 +118,49 @@ def test_from_dict_malformed_field_raises() -> None:
         SweepCheckpoint.from_dict(d)
 
 
+@pytest.mark.parametrize("field", ["total_combos", "last_completed_index"])
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")], ids=["inf", "-inf"])
+def test_from_dict_infinite_int_field_raises_domain_error(field: str, value: float) -> None:
+    """An infinite float in an int field maps to SweepCheckpointError.
+
+    Refuter-confirmed (fix round 6): stdlib ``json.loads`` parses ``1e999``
+    and the bare ``Infinity``/``-Infinity`` literals to ``float('inf')``, and
+    ``int(float('inf'))`` raises ``OverflowError`` — which subclasses
+    ``ArithmeticError``, NOT ``ValueError``/``TypeError`` — so it escaped the
+    coercion catch RAW, past every consumer's narrow
+    ``except SweepCheckpointError`` (the greeks-backfill runner's documented
+    graceful fresh start, the sweep's own resume path), wedging every wet run
+    behind one corrupt/planted checkpoint file until manual deletion —
+    falsifying the load contract's "every corruption class maps to
+    SweepCheckpointError". Inconsistently, ``NaN`` in the same field mapped
+    gracefully (``int(nan)`` raises ``ValueError``).
+    """
+    d = {
+        "version": CHECKPOINT_VERSION,
+        "sweep_id": "s",
+        "total_combos": 10,
+        "last_completed_index": 0,
+        "updated_at": 1.0,
+        field: value,
+    }
+    with pytest.raises(SweepCheckpointError, match="Malformed checkpoint field"):
+        SweepCheckpoint.from_dict(d)
+
+
+@pytest.mark.parametrize("payload", [[], None, "hello", 42, True])
+def test_from_dict_non_object_payload_raises(payload: object) -> None:
+    """A valid-JSON NON-OBJECT payload is the caller-catchable domain error.
+
+    Refuter-confirmed defect: ``required - set(data.keys())`` raised
+    ``AttributeError`` on a list/None/str/int/bool payload, which escaped every
+    consumer's ``except SweepCheckpointError`` (the greeks-backfill runner's
+    documented graceful fresh start, the sweep-daemon's checkpoint view) and
+    wedged the run behind one hand-edited/planted checkpoint file.
+    """
+    with pytest.raises(SweepCheckpointError, match="must be a JSON object"):
+        SweepCheckpoint.from_dict(payload)
+
+
 # ── SweepCheckpointStore construction ───────────────────────────────────────
 
 
@@ -161,6 +207,38 @@ def test_load_malformed_json_raises(tmp_path: Path) -> None:
         _store(tmp_path).load()
 
 
+@pytest.mark.parametrize("payload", ["[]", "null", '"hello"', "42", "true"])
+def test_load_non_object_json_raises_domain_error(tmp_path: Path, payload: str) -> None:
+    """load() on valid-JSON-non-object corruption raises SweepCheckpointError, never
+    the AttributeError that escaped every caller's narrow catch (refuter repro)."""
+    p = tmp_path / "ckpt.json"
+    p.write_text(payload, encoding="utf-8")
+    with pytest.raises(SweepCheckpointError, match="must be a JSON object"):
+        _store(tmp_path).load()
+
+
+@pytest.mark.parametrize("literal", ["1e999", "Infinity", "-Infinity"])
+def test_load_infinite_total_raises_domain_error_not_overflow(tmp_path: Path, literal: str) -> None:
+    """load() on an Infinity/1e999 int field is the caller-catchable domain error.
+
+    Refuter repro (fix round 6): ``json.loads`` accepts all three literals as
+    ``float('inf')`` and ``int(inf)`` raised a RAW ``OverflowError`` out of
+    ``from_dict``'s ``(TypeError, ValueError)`` catch — escaping
+    ``run_greeks_backfill``'s ``except SweepCheckpointError`` (the documented
+    graceful fresh start) and crashing every wet run until the operator
+    deleted ``<lake>/.greeks_backfill/checkpoint.json`` (the file is unlinked
+    only on clean completion, so the wedge was persistent).
+    """
+    p = tmp_path / "ckpt.json"
+    p.write_text(
+        '{"version": 1, "sweep_id": "sweep-1", "total_combos": ' + literal + ", "
+        '"last_completed_index": 0, "updated_at": 1.0}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SweepCheckpointError, match="Malformed checkpoint field"):
+        _store(tmp_path).load()
+
+
 def test_load_different_sweep_id_ignored(tmp_path: Path) -> None:
     _store(tmp_path, sweep_id="other").record(4)
     # A store for a different sweep must not adopt the foreign checkpoint.
@@ -176,6 +254,63 @@ def test_load_matching_resumes(tmp_path: Path) -> None:
     assert cp is not None
     assert cp.last_completed_index == 6
     assert s2.next_index == 7
+
+
+def test_load_deeply_nested_json_raises_domain_error(tmp_path: Path) -> None:
+    """A recursion-bomb payload (200k nested arrays) maps to SweepCheckpointError.
+
+    Refuter repro (fix round 2): ``json.loads`` raises ``RecursionError`` —
+    neither ``JSONDecodeError`` nor ``SweepCheckpointError`` — so it escaped
+    every consumer's narrow catch and crashed EVERY wet run until the operator
+    deleted the file.
+    """
+    depth = 200_000
+    p = tmp_path / "ckpt.json"
+    p.write_text("[" * depth + "]" * depth, encoding="utf-8")
+    with pytest.raises(SweepCheckpointError, match="Malformed checkpoint JSON"):
+        _store(tmp_path).load()
+
+
+def test_load_oversized_file_refused_before_read(tmp_path: Path) -> None:
+    """A file beyond MAX_CHECKPOINT_BYTES is refused BEFORE the read (no MemoryError)."""
+    p = tmp_path / "ckpt.json"
+    p.write_text(" " * (ckpt.MAX_CHECKPOINT_BYTES + 1), encoding="utf-8")
+    with pytest.raises(SweepCheckpointError, match="sanity cap"):
+        _store(tmp_path).load()
+
+
+def test_load_stat_oserror_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stat failure on an existing file maps to the domain error (never raw OSError)."""
+    s = _store(tmp_path)
+    s.record(0)  # create the file
+    real_stat = Path.stat
+
+    def _boom(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if kwargs:
+            # exists()'s internal ``stat(follow_symlinks=True)`` probe passes
+            # through — only the size-cap stat (positional, no kwargs) booms.
+            return real_stat(self, *args, **kwargs)
+        raise OSError("eio")
+
+    monkeypatch.setattr(Path, "stat", _boom)
+    with pytest.raises(SweepCheckpointError, match="Failed to stat checkpoint"):
+        s.load()
+
+
+def test_load_same_id_total_combos_mismatch_raises(tmp_path: Path) -> None:
+    """A SAME-sweep_id checkpoint with a foreign total is refused, never adopted.
+
+    Refuter repro (fix round 2): a tampered same-id checkpoint with an
+    inflated ``total_combos``/``last_completed_index`` (internally consistent,
+    so ``from_dict`` passes) used to adopt ``next_index`` past the store's
+    real total — the run silently zero-batched "complete" and DELETED the
+    checkpoint.
+    """
+    _store(tmp_path, total_combos=10_000).record(9_999)  # the tampered/inflated file
+    s = _store(tmp_path, total_combos=10)
+    with pytest.raises(SweepCheckpointError, match="corrupt/tampered"):
+        s.load()
+    assert s.next_index == 0  # nothing adopted — a fresh start remains correct
 
 
 # ── record ──────────────────────────────────────────────────────────────────
@@ -200,6 +335,33 @@ def test_record_advances_and_is_monotonic(tmp_path: Path) -> None:
     assert s.last_completed_index == 2
 
 
+def test_discard_adoption_unadopts_in_memory_only(tmp_path: Path) -> None:
+    """``discard_adoption`` resets to "nothing completed" WITHOUT touching disk.
+
+    DEC-GREEKS-BULK-REENRICH-001 fix round 10: the backfill runner un-adopts a
+    loaded checkpoint when an out-of-band overlay-write freshness signal says
+    the on-disk resume point is stale; the caller owns the file's fate, and
+    the monotonic advance restarts from ``-1`` so the first advancing record
+    atomically overwrites whatever is on disk.
+    """
+    _store(tmp_path).record(4)
+    s = _store(tmp_path)
+    assert s.load() is not None
+    assert s.next_index == 5
+    on_disk = (tmp_path / "ckpt.json").read_bytes()
+    s.discard_adoption()
+    assert s.next_index == 0
+    assert s.last_completed_index == -1
+    assert (tmp_path / "ckpt.json").read_bytes() == on_disk  # in-memory only
+    # The monotonic advance restarts: index 0 records again (it would have
+    # been a stale no-op against the adopted mark) and overwrites the file.
+    assert s.record(0) is True
+    reread = _store(tmp_path)
+    loaded = reread.load()
+    assert loaded is not None
+    assert loaded.last_completed_index == 0
+
+
 # ── save ────────────────────────────────────────────────────────────────────
 
 
@@ -221,6 +383,21 @@ def test_save_explicit_checkpoint(tmp_path: Path) -> None:
     )
     s.save(cp)
     assert SweepCheckpoint.from_dict(__import__("json").loads(s.path.read_text())) == cp
+
+
+def test_save_mkdir_failure_wrapped_as_domain_error(tmp_path: Path) -> None:
+    """A stray non-directory file at the checkpoint dir maps to SweepCheckpointError.
+
+    Refuter repro (fix round 2): ``save()`` ran the parent ``mkdir`` OUTSIDE
+    its OSError → SweepCheckpointError mapping, so a stray FILE at the sidecar
+    dir raised a raw ``FileExistsError`` past every consumer's documented
+    advisory ``except SweepCheckpointError`` and aborted the whole run.
+    """
+    stray = tmp_path / "sidecar"
+    stray.write_text("not a directory", encoding="utf-8")
+    s = _store(tmp_path, path=stray / "ckpt.json")
+    with pytest.raises(SweepCheckpointError, match="Failed to write checkpoint"):
+        s.record(0)
 
 
 # ── atomic-write cleanup ────────────────────────────────────────────────────
