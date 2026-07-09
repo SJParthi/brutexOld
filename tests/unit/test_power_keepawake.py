@@ -73,13 +73,17 @@ def test_darwin_spawns_caffeinate_watching_our_pid_and_releases() -> None:
         spawned.append(argv)
         return proc
 
-    with capture_logs() as logs, keep_awake("unit pull", spawn=_spawn, platform="darwin"):
+    with (
+        capture_logs() as logs,
+        keep_awake("unit pull", spawn=_spawn, platform="darwin") as engaged,
+    ):
+        assert engaged is True  # darwin + spawned ⇒ the assertion is REALLY held
         assert spawned == [[CAFFEINATE_BINARY, "-i", "-s", "-w", str(os.getpid())]]
     assert proc.calls == ["terminate", f"wait({TERMINATE_TIMEOUT_S})"]
     assert _events(logs) == ["power.keepawake.engaged", "power.keepawake.released"]
-    engaged = next(e for e in logs if e["event"] == "power.keepawake.engaged")
-    assert engaged["reason"] == "unit pull"
-    assert engaged["pid"] == 4242
+    engaged_event = next(e for e in logs if e["event"] == "power.keepawake.engaged")
+    assert engaged_event["reason"] == "unit pull"
+    assert engaged_event["pid"] == 4242
 
 
 def test_darwin_release_runs_even_when_the_body_raises() -> None:
@@ -132,8 +136,9 @@ def test_non_darwin_is_a_logged_noop() -> None:
     def _spawn(_argv: list[str]) -> _FakeProc:  # pragma: no cover — must NOT be called
         raise AssertionError("spawn must not be called off darwin")
 
-    with capture_logs() as logs, keep_awake("linux", spawn=_spawn, platform="linux"):
+    with capture_logs() as logs, keep_awake("linux", spawn=_spawn, platform="linux") as engaged:
         ran = True
+        assert engaged is False  # honest: NO assertion held off darwin
     assert ran
     assert _events(logs) == ["power.keepawake.unavailable"]
     (event,) = [e for e in logs if e["event"] == "power.keepawake.unavailable"]
@@ -147,8 +152,12 @@ def test_missing_caffeinate_binary_is_a_logged_noop() -> None:
         raise FileNotFoundError("caffeinate: not found")
 
     ran = False
-    with capture_logs() as logs, keep_awake("no-binary", spawn=_spawn, platform="darwin"):
+    with (
+        capture_logs() as logs,
+        keep_awake("no-binary", spawn=_spawn, platform="darwin") as engaged,
+    ):
         ran = True
+        assert engaged is False  # honest: darwin but no caffeinate ⇒ NOT held
     assert ran
     assert _events(logs) == ["power.keepawake.unavailable"]
     (event,) = [e for e in logs if e["event"] == "power.keepawake.unavailable"]

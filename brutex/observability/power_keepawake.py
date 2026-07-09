@@ -21,6 +21,11 @@ CLI ``brutex fetch`` pass):
   logs ONE ``power.keepawake.unavailable`` note and no-ops; the guard can
   NEVER raise into (or mask the outcome of) the pull it protects.
 
+The manager YIELDS ``True`` iff the assertion is actually ENGAGED (darwin +
+caffeinate spawned) and ``False`` on every graceful unavailable no-op path, so
+a caller printing operator-facing claims can tell the truth about whether the
+host is really held awake (Golden Rule #10 — the serve banner reads it).
+
 Honest envelope (Golden Rule #10): this holds the HOST awake — it does not and
 cannot keep an external SSD from its own power management, nor survive a lid
 close with ``caffeinate -i`` alone (``-s`` covers AC-powered sleep; on battery
@@ -156,8 +161,17 @@ def keep_awake(
     *,
     spawn: Callable[[list[str]], KeepAwakeProcess] | None = None,
     platform: str | None = None,
-) -> Generator[None]:
+) -> Generator[bool]:
     """Hold the macOS host awake for the enclosed block — best-effort, never raises.
+
+    Yields
+    ------
+    bool
+        ``True`` iff the power assertion is actually ENGAGED (darwin AND
+        caffeinate spawned); ``False`` on the graceful unavailable no-op paths
+        (non-darwin host, or the spawn failed). Callers that print
+        operator-facing claims MUST reflect this — never state "holds the host
+        awake" over a ``False`` (Golden Rule #10).
 
     Parameters
     ----------
@@ -204,7 +218,7 @@ def keep_awake(
                 note="caffeinate -i -s -w <pid> holds the host awake until released",
             )
     try:
-        yield
+        yield proc is not None
     finally:
         if proc is not None:
             _release(proc, reason=reason)

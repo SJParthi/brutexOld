@@ -3557,13 +3557,32 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         if heartbeat is not None:
             serve_stack.callback(heartbeat.stop)
         if serve_keep_awake_enabled():
-            serve_stack.enter_context(keep_awake("brutex serve"))
-            _log.info(
-                "server.keepawake.serve_enabled",
-                env="BRUTEX_SERVE_KEEP_AWAKE",
-                note="host held awake for the serve lifetime",
-            )
-            print("[brutex] serve keep-awake ENABLED — this process holds the host awake.")
+            # keep_awake yields True iff the assertion is actually ENGAGED
+            # (darwin + caffeinate spawned); on a non-macOS host / spawn
+            # failure it degrades to a logged no-op — the banner must not
+            # claim "holds the host awake" there (Golden Rule #10).
+            engaged = serve_stack.enter_context(keep_awake("brutex serve"))
+            if engaged:
+                _log.info(
+                    "server.keepawake.serve_enabled",
+                    env="BRUTEX_SERVE_KEEP_AWAKE",
+                    note="host held awake for the serve lifetime",
+                )
+                print("[brutex] serve keep-awake ENABLED — this process holds the host awake.")
+            else:
+                _log.warning(
+                    "server.keepawake.serve_unavailable",
+                    env="BRUTEX_SERVE_KEEP_AWAKE",
+                    note=(
+                        "keep-awake requested but UNAVAILABLE on this host "
+                        "(non-macOS, or caffeinate failed) — the host MAY sleep"
+                    ),
+                )
+                print(
+                    "[brutex] serve keep-awake requested, but keep-awake is UNAVAILABLE on "
+                    "this host (non-macOS, or caffeinate failed) — the process does NOT "
+                    "hold the host awake."
+                )
         else:
             _log.info(
                 "server.keepawake.serve_disabled",
