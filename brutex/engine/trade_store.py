@@ -268,6 +268,18 @@ class TupleSidecarStamp:
     in the trades file — the O(1) page-total + positional-slice key (both maps
     are additive vs the design's B4 field list, recorded in the WP1 notes).
     ``produced_at_utc`` is the ONLY non-deterministic field (B4 law).
+
+    ``reference_fingerprint`` (additive, DEC-DEPTH-STAMP-REFDATA-001,
+    MIGRATION.md #1637) is a per-INSTRUMENT sha256 over the reference inputs the
+    depth pass folds into the sidecars — the VIX series content + the
+    instrument's 1-minute/1-day reference bars + the WP3 provider-presence
+    flags — so a reference-data change (e.g. a VIX feed pulled AFTER the first
+    stamp) forces a rebuild instead of the store-bytes-only skip. It defaults to
+    ``None`` (an OLD stamp written before this field), which can NEVER equal a
+    hex digest, so an old stamp is treated as NOT current and re-derived ONCE —
+    never a fabricated match. NO ``TRADES_SCHEMA_VERSION`` bump: the exact-match
+    version gate in :func:`load_stamp` must still accept old stamps at parse
+    time, and the additive default handles the one-time re-derive.
     """
 
     schema_version: int
@@ -280,6 +292,7 @@ class TupleSidecarStamp:
     content_sizes: dict[str, int]
     trade_spans: dict[str, tuple[int, int]]
     produced_at_utc: str
+    reference_fingerprint: str | None = None
 
 
 class TradeRowWire(TypedDict):
@@ -402,6 +415,7 @@ def write_tuple_sidecars(
     aggs: Sequence[Mapping[str, object]],
     *,
     store_content_hash: str,
+    reference_fingerprint: str | None = None,
 ) -> TupleSidecarStamp:
     """Write the deterministic sidecar trio + stamp for one tuple's captures.
 
@@ -425,15 +439,24 @@ def write_tuple_sidecars(
     store_content_hash
         The SOURCE ResultsStore flush ``content_hash`` (64-char sha256 hex) —
         the stamp's idempotence key.
+    reference_fingerprint
+        Optional per-instrument reference-data fingerprint (64-char sha256 hex)
+        recorded on the stamp so the run-end pass re-derives when the reference
+        inputs (VIX / 1m / 1day / provider presence) change
+        (DEC-DEPTH-STAMP-REFDATA-001, MIGRATION.md #1637). ``None`` (the
+        default) records no fingerprint — a stamp that predates the field.
 
     Raises
     ------
     TradeStoreError
-        On a malformed store hash, duplicate ``run_id``, a mis-keyed or
-        mis-typed agg record, or a missing ``polars``. Raw ``OSError`` from
-        the atomic writes propagates unchanged (the engine sidecar contract).
+        On a malformed store hash, a malformed ``reference_fingerprint``,
+        duplicate ``run_id``, a mis-keyed or mis-typed agg record, or a missing
+        ``polars``. Raw ``OSError`` from the atomic writes propagates unchanged
+        (the engine sidecar contract).
     """
     _validate_sha256(store_content_hash, label="store_content_hash")
+    if reference_fingerprint is not None:
+        _validate_sha256(reference_fingerprint, label="reference_fingerprint")
     ordered = sorted(captures, key=lambda cap: cap.run_id)
     seen: set[str] = set()
     for cap in ordered:
@@ -490,6 +513,7 @@ def write_tuple_sidecars(
         },
         trade_spans=trade_spans,
         produced_at_utc=datetime.now(tz=UTC).isoformat(),
+        reference_fingerprint=reference_fingerprint,
     )
     payload = {
         "schema_version": stamp.schema_version,
@@ -503,6 +527,11 @@ def write_tuple_sidecars(
         "trade_spans": {run_id: list(span) for run_id, span in stamp.trade_spans.items()},
         "produced_at_utc": stamp.produced_at_utc,
     }
+    # DEC-DEPTH-STAMP-REFDATA-001 (#1637): emit the key ONLY when present, so a
+    # None-fingerprint stamp is byte-identical to a pre-feature stamp (the
+    # additive-column back-compat law — an old reader sees the same bytes).
+    if stamp.reference_fingerprint is not None:
+        payload["reference_fingerprint"] = stamp.reference_fingerprint
     rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
     atomic_write_simple(paths.stamp, lambda tmp: tmp.write_text(rendered, encoding="utf-8"))
     _LOG.info(
@@ -654,6 +683,13 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
     if not isinstance(produced, str):
         _invalid("bad_produced_at_utc")
         return None
+    # DEC-DEPTH-STAMP-REFDATA-001 (#1637): tolerant additive parse — absent key
+    # (a pre-feature stamp) reads None; a PRESENT value must be canonical sha256
+    # hex (a poisoned non-hex value is a damaged stamp → rebuild, never adopted).
+    reference_fingerprint = payload.get("reference_fingerprint")
+    if reference_fingerprint is not None and not _is_sha256(reference_fingerprint):
+        _invalid("bad_reference_fingerprint")
+        return None
     for key, path in (
         ("trades", paths.trades),
         ("aggs", paths.aggs),
@@ -687,6 +723,7 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
         content_sizes={key: sizes[key] for key in _SIDECAR_KEYS},
         trade_spans=spans,
         produced_at_utc=produced,
+        reference_fingerprint=reference_fingerprint,
     )
 
 

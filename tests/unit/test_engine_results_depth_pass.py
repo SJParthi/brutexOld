@@ -408,7 +408,16 @@ class TestExclusionsAndParity:
         paths = sidecar_paths_for(store_path, out_root, run_id=grid_identity(grid))
         stamp = load_stamp(paths)
         assert stamp is not None
-        write_tuple_sidecars(paths, [], [], store_content_hash=stamp.store_content_hash)
+        # DEC-DEPTH-STAMP-REFDATA-001 (#1637): carry the SAME reference_fingerprint
+        # the pass wrote so the re-stamped trio stays CURRENT (both the store bytes
+        # AND the reference fingerprint must match, else the tuple re-derives).
+        write_tuple_sidecars(
+            paths,
+            [],
+            [],
+            store_content_hash=stamp.store_content_hash,
+            reference_fingerprint=stamp.reference_fingerprint,
+        )
         report = _run_pass(out_root, grid)
         assert report.tuples_skipped_current == 1
         assert report.excluded_no_aggs == 5
@@ -651,3 +660,232 @@ class TestCompositesFor:
         aggs = _load_agg_records(_tuple_paths(out_root, grid))
         assert all(isinstance(agg, ComboAggregate) for agg in aggs)
         assert all(agg.parity_ok for agg in aggs)
+
+
+class TestMissingStoreLoud:
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): a missing finalist store is
+    counted + capped-INFO'd + (when beyond the sweep's own skip/fail count)
+    WARNed loud, with an actionable path sample. The out_root fixture swept the
+    ONE-arm _grid(); running the pass over the TWO-arm grid leaves the tp=None
+    tuple with no store on disk — exactly one missing store."""
+
+    def _two_arm_grid(self) -> SweepGridConfig:
+        return _grid(take_profits=[50, None])
+
+    def test_missing_store_unexplained_warns(self, out_root: Path) -> None:
+        with capture_logs() as logs:
+            report = _run_pass(out_root, self._two_arm_grid(), expected_missing=0)
+        assert report.tuples_missing_store == 1
+        warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
+        assert len(warns) == 1
+        assert warns[0]["unexplained"] == 1
+        assert warns[0]["expected"] == 0
+        # The per-store INFO fired (capped) + the sample carries the absent path.
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store"]
+        assert len(infos) == 1
+        assert report.missing_store_sample and report.missing_store_sample[0].endswith(".parquet")
+
+    def test_explained_missing_is_info_only_no_warn(self, out_root: Path) -> None:
+        with capture_logs() as logs:
+            report = _run_pass(out_root, self._two_arm_grid(), expected_missing=1)
+        assert report.tuples_missing_store == 1
+        assert not [
+            log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
+        ]
+        # The per-store INFO still fires (observability), just not the WARN.
+        assert [log for log in logs if log["event"] == "results_depth.missing_store"]
+
+    def test_default_none_treats_every_missing_as_unexplained(self, out_root: Path) -> None:
+        with capture_logs() as logs:
+            report = _run_pass(out_root, self._two_arm_grid())  # expected_missing default None
+        assert report.tuples_missing_store == 1
+        warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
+        assert len(warns) == 1
+        assert warns[0]["expected"] is None
+
+    def test_zero_missing_emits_no_missing_events(self, out_root: Path) -> None:
+        with capture_logs() as logs:
+            report = _run_pass(out_root, _grid())
+        assert report.tuples_missing_store == 0
+        assert report.missing_store_sample == ()
+        assert not [
+            log
+            for log in logs
+            if log["event"]
+            in ("results_depth.missing_store", "results_depth.missing_store_unexplained")
+        ]
+
+    def test_missing_store_info_capped_and_sampled(self) -> None:
+        from brutex.engine.results_depth_pass import (
+            _MISSING_STORE_LOG_CAP,
+            _MISSING_STORE_SAMPLE_CAP,
+            _note_missing_store,
+        )
+
+        tallies = _Tallies()
+        with capture_logs() as logs:
+            for i in range(_MISSING_STORE_LOG_CAP + 5):
+                _note_missing_store(Path(f"/lake/{i}.parquet"), tallies)
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store"]
+        assert len(infos) == _MISSING_STORE_LOG_CAP  # INFO capped
+        assert tallies.tuples_missing_store == _MISSING_STORE_LOG_CAP + 5  # count uncapped
+        assert len(tallies.missing_store_sample) == _MISSING_STORE_SAMPLE_CAP  # sample capped
+
+
+class TestBarsSha256:
+    """DEC-DEPTH-STAMP-REFDATA-001 (#1637): the full-content reference-bar digest."""
+
+    def test_identical_streams_match(self) -> None:
+        from brutex.engine.results_depth_pass import _bars_sha256
+
+        assert _bars_sha256(_BARS) == _bars_sha256(list(_BARS))
+
+    def test_absent_series_folds_a_stable_token(self) -> None:
+        from brutex.engine.results_depth_pass import _bars_sha256
+
+        assert _bars_sha256(()) == _bars_sha256([])
+        assert _bars_sha256(()) != _bars_sha256(_BARS)
+
+    def test_interior_change_moves_the_digest(self) -> None:
+        """A single interior bar mutation (SAME count/endpoints) moves the digest —
+        the property that kills a sampled count+endpoints fingerprint mutant."""
+        from dataclasses import replace
+
+        from brutex.engine.results_depth_pass import _bars_sha256
+
+        mid = len(_BARS) // 2
+        mutated = list(_BARS)
+        mutated[mid] = replace(mutated[mid], close=mutated[mid].close + Decimal("0.01"))
+        assert _bars_sha256(mutated) != _bars_sha256(_BARS)
+        # endpoints unchanged, count unchanged — only an interior bar moved.
+        assert mutated[0] == _BARS[0]
+        assert mutated[-1] == _BARS[-1]
+        assert len(mutated) == len(_BARS)
+
+    def test_open_interest_is_covered(self) -> None:
+        from dataclasses import replace
+
+        from brutex.engine.results_depth_pass import _bars_sha256
+
+        with_oi = [replace(_BARS[0], open_interest=42)]
+        without_oi = [replace(_BARS[0], open_interest=None)]
+        assert _bars_sha256(with_oi) != _bars_sha256(without_oi)
+
+
+class TestReferenceFingerprintRedo:
+    """DEC-DEPTH-STAMP-REFDATA-001 (#1637): a reference-data change forces a redo;
+    unchanged refs + store still skip; an old field-less stamp re-derives once."""
+
+    def test_reference_change_forces_redo(self, out_root: Path) -> None:
+        # VECTOR 8b: pass 1 with NO VIX stamps the tuple; pass 2 with REAL VIX,
+        # store bytes UNCHANGED, must re-derive (not skip) and stamp VIX.
+        first = _run_pass(out_root, _grid(), vix=False)
+        assert first.tuples_processed == 1
+        with capture_logs() as logs:
+            second = _run_pass(out_root, _grid(), vix=True)
+        assert second.tuples_skipped_current == 0
+        assert second.tuples_processed == 1
+        redo = [log for log in logs if log["event"] == "results_depth.tuple_redo_reference_changed"]
+        assert len(redo) == 1
+        # The re-derived trades now carry real VIX stamps (not the pass-1 NULLs).
+        import polars as pl
+
+        trades = pl.read_parquet(_tuple_paths(out_root, _grid()).trades)
+        assert trades.get_column("vix_entry").drop_nulls().len() > 0
+
+    def test_unchanged_refs_and_store_still_skip(self, out_root: Path) -> None:
+        _run_pass(out_root, _grid(), vix=True)
+        paths = _tuple_paths(out_root, _grid())
+        before = {p: p.read_bytes() for p in (paths.trades, paths.aggs, paths.equity)}
+        report = _run_pass(out_root, _grid(), vix=True)
+        assert report.tuples_skipped_current == 1
+        assert report.tuples_processed == 0
+        # The sidecar trio is byte-identical — a skip rewrites nothing (O(1) resume).
+        for p, data in before.items():
+            assert p.read_bytes() == data
+
+    def test_old_field_absent_stamp_re_derives_once(self, out_root: Path) -> None:
+        import json
+
+        _run_pass(out_root, _grid(), vix=True)
+        stamp_path = _tuple_paths(out_root, _grid()).stamp
+        payload = json.loads(stamp_path.read_text(encoding="utf-8"))
+        assert "reference_fingerprint" in payload  # a fresh stamp carries the field
+        # Simulate a PRE-feature stamp: strip the key entirely.
+        del payload["reference_fingerprint"]
+        stamp_path.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
+        stamp = load_stamp(_tuple_paths(out_root, _grid()))
+        assert stamp is not None
+        assert stamp.reference_fingerprint is None  # tolerant parse
+        report = _run_pass(out_root, _grid(), vix=True)
+        assert report.tuples_processed == 1  # re-derived, never a fabricated match
+        # The rewritten stamp now carries the field.
+        assert load_stamp(_tuple_paths(out_root, _grid())).reference_fingerprint is not None  # type: ignore[union-attr]
+
+    def test_provider_flag_flip_forces_redo(self, out_root: Path) -> None:
+        _run_pass(out_root, _grid(), vix=True)
+        # Flip the reasons provider None → wired: sidecar CONTENT changes, so the
+        # fingerprint moves and the tuple re-derives.
+        report = run_results_depth_pass(
+            out_root=out_root,
+            grid=_grid(),
+            bars_for=lambda _i, _tf: _BARS,
+            minute_bars_for=lambda _i: _BARS,
+            daily_bars_for=None,
+            vix_bars=_BARS,
+            reason_provider=lambda _c: {"reason": "x"},
+        )
+        assert report.tuples_processed == 1
+
+    def test_minute_bars_change_re_derives_only_that_instrument(self, tmp_path: Path) -> None:
+        """Granularity pin: a per-instrument fingerprint means a one-instrument
+        minute-bars change re-derives ONLY that instrument's tuples."""
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        out_root = tmp_path / "sweeps"
+        out_root.mkdir()
+        _run_sweep(out_root, grid, _BARS)
+
+        def _run(minute_for: object) -> ResultsDepthReport:
+            return run_results_depth_pass(
+                out_root=out_root,
+                grid=grid,
+                bars_for=lambda _i, _tf: _BARS,
+                minute_bars_for=minute_for,  # type: ignore[arg-type]
+                daily_bars_for=None,
+                vix_bars=None,
+            )
+
+        first = _run(lambda _i: _BARS)
+        assert first.tuples_processed == 2  # both instruments stamped
+        # Change ONLY NIFTY's minute bars (drop the last bar) → only NIFTY moves.
+        nifty_bars = list(_BARS[:-1])
+
+        def _minute(instrument: str) -> Sequence[CandleBar]:
+            return nifty_bars if instrument == "NIFTY" else _BARS
+
+        with capture_logs() as logs:
+            second = _run(_minute)
+        assert second.tuples_processed == 1  # exactly one instrument re-derived
+        assert second.tuples_skipped_current == 1
+        redo = [log for log in logs if log["event"] == "results_depth.tuple_redo_reference_changed"]
+        assert len(redo) == 1
+        assert "NIFTY" in redo[0]["store"]
+        assert "BANKNIFTY" not in redo[0]["store"]
+
+    def test_two_identical_passes_are_deterministic(self, out_root: Path) -> None:
+        """The determinism golden: two identical passes → byte-identical trio +
+        equal fingerprint (produced_at_utc stays the ONE non-deterministic field)."""
+        _run_pass(out_root, _grid(), vix=True)
+        paths = _tuple_paths(out_root, _grid())
+        fp1 = load_stamp(paths).reference_fingerprint  # type: ignore[union-attr]
+        trio1 = {p: p.read_bytes() for p in (paths.trades, paths.aggs, paths.equity)}
+        # A second pass skips (current), so a fresh REBUILD is forced to compare
+        # bytes: strip the stamp so the trio is re-derived from scratch.
+        paths.stamp.unlink()
+        _run_pass(out_root, _grid(), vix=True)
+        fp2 = load_stamp(paths).reference_fingerprint  # type: ignore[union-attr]
+        assert fp1 == fp2
+        for p, data in trio1.items():
+            assert p.read_bytes() == data

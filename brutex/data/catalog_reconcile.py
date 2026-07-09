@@ -70,6 +70,19 @@ class ReconcileResult:
         valid partition path, held zero rows, or were UNREADABLE (corrupt /
         version-incompatible Parquet — logged ``catalog.reconcile.parquet_skip``
         and skipped instead of crashing the whole reconcile, GAP #9).
+    unreadable
+        Absolute paths of the CORRUPT / version-incompatible Parquet partition
+        files skipped by the GAP-#9 ``except parquet_read_skip_errors()`` arm
+        ONLY (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1635) — the
+        distinct corrupt-class subset of ``skipped``. A benign
+        ``PartitionError`` (unparseable path) or a zero-row partition is data
+        ABSENCE, not data LOSS, and is counted in ``skipped`` but NEVER here
+        (the false-refuse guard). Populated so the ``brutex sweep-all`` launch
+        can REFUSE loudly on a corrupt month — an INTERIOR hole invisible in
+        the swept output that silently poisons the PDH/PDL/pivot/Fib anchors
+        (bits 6-29+48-51) while ``data_snapshot_hash`` stamps the holed series
+        as canonical (Golden Rule #4). Defaulted ``()`` so every existing
+        three-/four-field construction stays compatible.
     findings
         Lake invariant findings detected by the free L1 piggyback
         (DEC-LAKE-HEAL-001, ``check_invariants=True``): intra-file duplicate
@@ -86,6 +99,7 @@ class ReconcileResult:
     bars_total: int
     skipped: int
     findings: tuple[LakeFinding, ...] = ()
+    unreadable: tuple[str, ...] = ()
 
 
 def _partition_files(
@@ -176,6 +190,7 @@ def reconcile_catalog_from_lake(
     bars_total = 0
     skipped = 0
     findings: list[LakeFinding] = []
+    unreadable: list[str] = []
     symbol_dirs: dict[tuple[str, str], set[str]] = {}
     for path in files:
         try:
@@ -203,8 +218,16 @@ def reconcile_catalog_from_lake(
             last_ts = timestamps.max()
             raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         except parquet_read_skip_errors() as exc:
+            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): a CORRUPT /
+            # version-incompatible partition file is an INTERIOR data hole, not a
+            # benign absence — record its absolute path DISTINCTLY so the sweep
+            # launch can REFUSE loudly (a silent skip poisons the PDH/PDL/pivot/Fib
+            # anchors + hashes the holed series as canonical, Golden Rule #4). The
+            # ``PartitionError`` (unparseable path) + zero-row skips above stay
+            # benign ``skipped`` counts and never reach here (the false-refuse guard).
             _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
             skipped += 1
+            unreadable.append(str(path))
             continue
         if check_invariants:
             # DEC-LAKE-HEAL-001 L1: classification rides the timestamp column this
@@ -254,6 +277,7 @@ def reconcile_catalog_from_lake(
         bars_total=bars_total,
         skipped=skipped,
         findings=tuple(findings),
+        unreadable=tuple(unreadable),
     )
 
 

@@ -182,3 +182,51 @@ class TestDefaultRunnerArm:
         assert payload["entries"] == []
         assert payload["source"]["reasons_wired"] is True
         assert payload["source"]["margin_roi_wired"] is True
+
+
+class TestMissingStoreThreading:
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): the adapter threads the sweep's
+    own legitimately-storeless count into the pass + mirrors the UNEXPLAINED
+    excess onto stderr, while the fence (``return True``) is byte-preserved."""
+
+    def test_expected_missing_is_threaded_to_the_pass(self, tmp_path: Path) -> None:
+        captured: dict[str, Any] = {}
+
+        def _runner(**kwargs: Any) -> ResultsDepthReport:
+            captured.update(kwargs)
+            return _report()
+
+        _call(tmp_path, _runner, expected_missing=3)
+        assert captured["expected_missing"] == 3
+
+    def test_unexplained_missing_warns_on_stderr_with_sample(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        report = _report(
+            tuples_missing_store=5,
+            missing_store_sample=("/lake/a.parquet", "/lake/b.parquet"),
+        )
+        ok = _call(tmp_path, lambda **_kwargs: report, expected_missing=2)
+        assert ok is True  # the fence's "NEVER fails the sweep" contract holds
+        err = capsys.readouterr().err
+        assert "3 finalist store(s) missing beyond the sweep's own skip/fail count" in err
+        assert "missing=5" in err
+        assert "expected=2" in err
+        assert "/lake/a.parquet" in err
+
+    def test_explained_missing_is_silent(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        report = _report(tuples_missing_store=2, missing_store_sample=("/lake/a.parquet",))
+        ok = _call(tmp_path, lambda **_kwargs: report, expected_missing=2)
+        assert ok is True
+        assert "finalist store(s) missing" not in capsys.readouterr().err
+
+    def test_unexplained_without_sample_has_no_path_suffix(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        report = _report(tuples_missing_store=1, missing_store_sample=())
+        _call(tmp_path, lambda **_kwargs: report, expected_missing=0)
+        err = capsys.readouterr().err.rstrip()
+        assert "1 finalist store(s) missing" in err
+        assert err.endswith("rebuild")  # no ": <sample>" suffix when the sample is empty

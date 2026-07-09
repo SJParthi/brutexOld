@@ -6397,9 +6397,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # the per-combo hot loop (Golden Rule #10).
         from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
+        corrupt_partitions: list[str] = []
         for symbol in symbol_list:
             for interval in interval_list:
-                reconcile_catalog_from_lake(
+                reconcile_result = reconcile_catalog_from_lake(
                     lake_root=resolved_lake,
                     catalog=cat,
                     exchange=exchange,
@@ -6407,6 +6408,39 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     symbol=symbol,
                     interval=interval,
                 )
+                corrupt_partitions.extend(reconcile_result.unreadable)
+        # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): a CORRUPT / version-
+        # incompatible Parquet partition the reconcile SKIPPED is an INTERIOR data
+        # hole invisible in the swept output — Stage-1A rolls _prev_day_ohlc from
+        # whatever bar precedes the next session, so day N's "prev day" silently
+        # becomes day N-k, poisoning the PDH/PDL/pivot/Fib anchors (bits 6-29+48-51)
+        # while data_snapshot_hash stamps the holed series as canonical (Golden
+        # Rule #4). REFUSE the launch loudly — this is the freshness-gate class
+        # (Correctness > everything), NOT the --allow-missing-slices class (which
+        # opts into visibly-ABSENT whole pairs). No escape flag: absent != corrupt.
+        if corrupt_partitions:
+            corrupt_sorted = sorted(corrupt_partitions)
+            shown = corrupt_sorted[:10]
+            extra = len(corrupt_sorted) - len(shown)
+            more = f" (+{extra} more)" if extra > 0 else ""
+            print(
+                f"[brutex] REFUSED: {len(corrupt_sorted)} unreadable (corrupt) partition "
+                "file(s) skipped by the catalog reconcile — the sweep would run on "
+                "silently-holed data (PDH/PDL/pivot/Fib anchors poisoned across the hole, "
+                "bits 6-29+48-51, and the run identity would hash the partial series as "
+                f"canonical, Golden Rule #4): {', '.join(shown)}{more}. Remedy: "
+                "quarantine/heal (brutex lake audit-unique) or re-pull the named months, "
+                "then re-run.",
+                file=sys.stderr,
+            )
+            import structlog
+
+            structlog.get_logger("brutex.cli").error(
+                "sweep_launch.corrupt_partitions_refused",
+                lake=str(resolved_lake),
+                files=corrupt_sorted,
+            )
+            return EXIT_USER_ERROR
         for symbol in symbol_list:
             for interval in interval_list:
                 feed = ReplayFeed(
@@ -6887,6 +6921,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval="1minute",
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
+                # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): the sweep's OWN count
+                # of legitimately-storeless tuples (no-bars / failed / quarantined)
+                # — anything missing beyond this is UNEXPLAINED and WARNed loud.
+                expected_missing=(
+                    result.tuples_skipped_no_bars
+                    + result.tuples_failed
+                    + result.tuples_quarantined_prior
+                ),
             )
         else:
             print(
@@ -8655,6 +8697,7 @@ def _run_results_depth_adapter(
     daily_bars_for: Callable[[str], Sequence[Any] | None],
     vix_bars: Sequence[Any] | None,
     margin_entry_date: date,
+    expected_missing: int | None = None,
     pass_runner: Callable[..., Any] | None = None,
 ) -> bool:
     """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
@@ -8671,6 +8714,14 @@ def _run_results_depth_adapter(
     ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` always re-raise
     raw (global stops are never swallowed). Returns ``True`` iff the pass
     completed and its report printed.
+
+    ``expected_missing`` is the sweep's own legitimately-storeless tuple count
+    (``tuples_skipped_no_bars + tuples_failed + tuples_quarantined_prior``),
+    threaded into the pass so a missing-store count BEYOND it raises one
+    ``results_depth.missing_store_unexplained`` WARN + one mirrored stderr line
+    (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1636). The return value
+    STAYS ``True`` in the unexplained case — the fenced "NEVER fails the sweep"
+    contract is byte-preserved; it is observability, not an exit change.
 
     ``pass_runner`` is an injection seam for tests; ``None`` runs the real
     :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
@@ -8708,6 +8759,7 @@ def _run_results_depth_adapter(
             vix_bars=vix_bars,
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
+            expected_missing=expected_missing,
         )
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -8734,6 +8786,21 @@ def _run_results_depth_adapter(
         f"top100={'written' if report.top100_written else 'FAILED'} "
         f"entries={report.top100_entries}"
     )
+    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): mirror the pass's unexplained
+    # missing-store WARN onto stderr so a cron tail sees it; the sweep's exit
+    # path is UNCHANGED (return stays True — observability, not a failure).
+    unexplained_missing = report.tuples_missing_store - (expected_missing or 0)
+    if unexplained_missing > 0:
+        sample = ", ".join(report.missing_store_sample)
+        sample_suffix = f": {sample}" if sample else ""
+        print(
+            f"[brutex] WARNING: results-depth — {unexplained_missing} finalist "
+            "store(s) missing beyond the sweep's own skip/fail count "
+            f"(missing={report.tuples_missing_store}, expected={expected_missing}) — "
+            "partial store deletion or a foreign grid identity; re-run "
+            f"'brutex sweep-all' with the same selection to rebuild{sample_suffix}",
+            file=sys.stderr,
+        )
     return True
 
 

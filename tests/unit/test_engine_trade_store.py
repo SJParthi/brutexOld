@@ -261,6 +261,61 @@ class TestWriteAndStamp:
         ):
             assert stamp.content_hashes[key] == hashlib.sha256(path.read_bytes()).hexdigest()
 
+    def test_reference_fingerprint_defaults_absent(self, written: SidecarPaths) -> None:
+        """DEC-DEPTH-STAMP-REFDATA-001 (#1637): a stamp written with no
+        fingerprint reads ``None`` AND omits the JSON key entirely, so it is
+        byte-identical to a pre-feature stamp (the additive back-compat law)."""
+        import json
+
+        stamp = load_stamp(written)
+        assert stamp is not None
+        assert stamp.reference_fingerprint is None
+        payload = json.loads(written.stamp.read_text(encoding="utf-8"))
+        assert "reference_fingerprint" not in payload
+
+    def test_reference_fingerprint_round_trips(self, paths: SidecarPaths) -> None:
+        import json
+
+        fp = "ab" * 32
+        write_tuple_sidecars(
+            paths,
+            _captures(),
+            [_agg_record(_RUN_A), _agg_record(_RUN_Z, n_trades=0, zero_trades=True)],
+            store_content_hash=_STORE_HASH,
+            reference_fingerprint=fp,
+        )
+        stamp = load_stamp(paths)
+        assert stamp is not None
+        assert stamp.reference_fingerprint == fp
+        payload = json.loads(paths.stamp.read_text(encoding="utf-8"))
+        assert payload["reference_fingerprint"] == fp
+
+    def test_rejects_malformed_reference_fingerprint(self, paths: SidecarPaths) -> None:
+        with pytest.raises(TradeStoreError, match="reference_fingerprint"):
+            write_tuple_sidecars(
+                paths, [], [], store_content_hash=_STORE_HASH, reference_fingerprint="nope"
+            )
+
+    def test_load_rejects_poisoned_reference_fingerprint(self, written: SidecarPaths) -> None:
+        """A PRESENT-but-non-hex fingerprint is a damaged stamp → rebuild
+        (``None``), never adopted."""
+        import json
+
+        from structlog.testing import capture_logs
+
+        payload = json.loads(written.stamp.read_text(encoding="utf-8"))
+        payload["reference_fingerprint"] = "not-a-sha256"
+        written.stamp.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
+        with capture_logs() as logs:
+            assert load_stamp(written) is None
+        assert any(
+            log.get("reason") == "bad_reference_fingerprint"
+            for log in logs
+            if log["event"] == "trade_store.stamp_invalid"
+        )
+
     def test_write_twice_byte_identical(self, paths: SidecarPaths) -> None:
         aggs = [_agg_record(_RUN_A), _agg_record(_RUN_Z, n_trades=0, zero_trades=True)]
         write_tuple_sidecars(paths, _captures(), aggs, store_content_hash=_STORE_HASH)

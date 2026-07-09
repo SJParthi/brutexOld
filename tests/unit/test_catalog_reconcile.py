@@ -250,7 +250,15 @@ class TestReconcile:
         with _open(tmp_path) as cat, capture_logs() as logs:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
             # The good partition reconciled; the corrupt one was skipped (not a crash).
-            assert result == ReconcileResult(partitions_reconciled=1, bars_total=4, skipped=1)
+            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): the corrupt file's
+            # absolute path is also recorded DISTINCTLY on ``unreadable`` (the
+            # sweep-launch refusal signal), while ``skipped`` still counts it.
+            assert result == ReconcileResult(
+                partitions_reconciled=1,
+                bars_total=4,
+                skipped=1,
+                unreadable=(str(corrupt),),
+            )
             parts = cat.list_partitions(
                 exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute"
             )
@@ -258,6 +266,40 @@ class TestReconcile:
         skips = [e for e in logs if e["event"] == "catalog.reconcile.parquet_skip"]
         assert len(skips) == 1
         assert "BANKNIFTY" in skips[0]["path"]
+
+    def test_unreadable_is_populated_only_by_the_corrupt_arm(self, tmp_path: Path) -> None:
+        """DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): the three skip classes
+        disambiguate — a CORRUPT/unreadable partition lands on ``unreadable``, while
+        a benign unparseable-path skip AND a benign zero-row skip do NOT (data
+        ABSENCE is never data LOSS — the false-refuse guard). A clean partition
+        alongside them still reconciles; ``unreadable`` names ONLY the corrupt file.
+        """
+        _write_partition(tmp_path, symbol="NIFTY", n=3)  # a GOOD partition
+        # (a) benign: an unparseable partition PATH (invalid exchange segment).
+        unparseable = (
+            tmp_path / "bars" / "ZZ" / "INDEX" / "NIFTY" / "1minute" / "2021" / "01.parquet"
+        )
+        unparseable.parent.mkdir(parents=True)
+        pl.DataFrame({"timestamp": pl.Series([], dtype=pl.Datetime("us", "UTC"))}).write_parquet(
+            unparseable
+        )
+        # (b) benign: a zero-row (empty) partition.
+        empty = tmp_path / "bars" / "NSE" / "INDEX" / "SENSEXX" / "1minute" / "2021" / "01.parquet"
+        empty.parent.mkdir(parents=True)
+        pl.DataFrame({"timestamp": pl.Series([], dtype=pl.Datetime("us", "UTC"))}).write_parquet(
+            empty
+        )
+        # (c) CORRUPT: garbage bytes → the only ``unreadable`` entry.
+        corrupt = (
+            tmp_path / "bars" / "NSE" / "INDEX" / "BANKNIFTY" / "1minute" / "2021" / "01.parquet"
+        )
+        corrupt.parent.mkdir(parents=True)
+        corrupt.write_bytes(b"not a parquet file at all")
+        with _open(tmp_path) as cat:
+            result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+        assert result.partitions_reconciled == 1
+        assert result.skipped == 3  # unparseable + zero-row + corrupt
+        assert result.unreadable == (str(corrupt),)  # ONLY the corrupt file
 
     def test_reconciled_partition_is_get_bars_readable(self, tmp_path: Path) -> None:
         # The whole point: after reconcile, get_bars (the sweep read path) returns bars.
