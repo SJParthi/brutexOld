@@ -1697,3 +1697,90 @@ def test_fresh_cancel_token_per_start_never_leaks() -> None:
     assert job.start(work, total=1) is True
     assert job.start(work, total=1) is True
     assert seen == [False, False]
+
+
+def test_cancel_requested_is_running_gated_after_settle() -> None:
+    """An idle snapshot after a cancelled run reads False — never a stale cancelling:true.
+
+    Review fold (DEC-JOB-COOPERATIVE-CANCEL-001): ``cancel_requested`` gates on
+    ``_running`` under the SAME lock, so the pull-progress wire stops reporting
+    ``cancelling: true`` once the cancelled run settles (the work closures only
+    probe while the run is live, so window-boundary semantics are unchanged).
+    """
+    job = _job()
+
+    def work(on_progress: ProgressHook) -> None:
+        assert job.request_cancel() is True
+        assert job.cancel_requested() is True  # live run → the token is visible
+
+    assert job.start(work, total=1) is True
+    assert job.running is False
+    # The (stale) Event object is still set, but the idle gate hides it honestly.
+    assert job.cancel_requested() is False
+
+
+def test_request_cancel_expected_kind_is_compare_and_set() -> None:
+    """The kind gate is atomic INSIDE request_cancel — a mismatch refuses, sets nothing.
+
+    Review fold (DEC-JOB-COOPERATIVE-CANCEL-001, the ``clear_meter(expected=)``
+    precedent): the route passes ``expected_kind`` so the kind check and the
+    token set happen under ONE lock hold — a run transition between a separate
+    kind read and the cancel can never land the request on the wrong run.
+    """
+    job = _job()
+    observed: dict[str, bool] = {}
+
+    def work(on_progress: ProgressHook) -> None:
+        observed["wrong_kind"] = job.request_cancel(expected_kind=pull_jobs.JOB_KIND_PULL)
+        observed["token_after_wrong"] = job.cancel_requested()
+        observed["right_kind"] = job.request_cancel(expected_kind=pull_jobs.JOB_KIND_SWEEP)
+        observed["token_after_right"] = job.cancel_requested()
+
+    assert job.start(work, total=1, job_kind=pull_jobs.JOB_KIND_SWEEP) is True
+    assert observed == {
+        "wrong_kind": False,
+        "token_after_wrong": False,
+        "right_kind": True,
+        "token_after_right": True,
+    }
+
+
+def test_uncancellable_run_refuses_honestly() -> None:
+    """A ``cancellable=False`` run (no cancel seam in its spine) refuses — never a fake true.
+
+    Review fold (DEC-JOB-COOPERATIVE-CANCEL-001): the standalone metadata pull's
+    spine threads no ``should_stop``, so its route starts ``cancellable=False``
+    and ``request_cancel`` returns ``False`` WITHOUT setting the token — the
+    cancel route reports an honest ``{"cancelling": false}`` instead of a
+    fabricated success the run could never observe.
+    """
+    job = _job()
+    observed: dict[str, bool] = {}
+
+    def work(on_progress: ProgressHook) -> None:
+        observed["req"] = job.request_cancel()
+        observed["token"] = job.cancel_requested()
+
+    assert job.start(work, total=1, cancellable=False) is True
+    assert observed == {"req": False, "token": False}
+    # The NEXT run defaults cancellable=True again (per-run flag, never sticky).
+    seen: dict[str, bool] = {}
+
+    def work2(on_progress: ProgressHook) -> None:
+        seen["req"] = job.request_cancel()
+
+    assert job.start(work2, total=1) is True
+    assert seen == {"req": True}
+
+
+def test_is_pull_halt_excludes_pull_cancelled() -> None:
+    """The DELIBERATE ``PullCancelled`` carve-out is pinned (DEC-JOB-COOPERATIVE-CANCEL-001).
+
+    ``PullCancelled`` IS in both ingest spines' ``_GLOBAL_STOP_ERRORS`` (it halts
+    every remaining window) but must NEVER read as a pull halt here — an
+    operator's cooperative cancel must not fire the CRITICAL Telegram pull-halt
+    alert. A future "restore the mirror" refactor fails THIS test loudly.
+    """
+    from brutex.adapters.ingest_common import PullCancelled
+
+    assert pull_jobs.is_pull_halt(PullCancelled("operator cancel")) is False

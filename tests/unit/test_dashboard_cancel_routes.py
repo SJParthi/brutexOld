@@ -12,6 +12,8 @@ extra (FastAPI) or duckdb is absent.
 from __future__ import annotations
 
 import importlib
+import threading
+import time
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
@@ -78,11 +80,19 @@ def _force_running(monkeypatch: pytest.MonkeyPatch, *, kind: str, cancelled: boo
     """Make every BackgroundPullJob report a live run of *kind*.
 
     The cancel routes read ``_pull_job.running_job_kind`` + call
-    ``_pull_job.request_cancel()`` / ``.cancel_requested()``; the app owns the
-    job internally, so the state is simulated at the class level.
+    ``_pull_job.request_cancel(expected_kind=…)`` / ``.cancel_requested()``; the
+    app owns the job internally, so the state is simulated at the class level.
+    The ``request_cancel`` stub HONOURS the kind gate exactly like the real
+    compare-and-set (review fold — the gate now lives INSIDE ``request_cancel``,
+    so a stub blind to ``expected_kind`` would mask the kind-gating behaviour;
+    the real gate's own unit tests live in ``test_pull_jobs.py``).
     """
     monkeypatch.setattr(BackgroundPullJob, "running_job_kind", property(lambda _self: kind))
-    monkeypatch.setattr(BackgroundPullJob, "request_cancel", lambda _self: True)
+
+    def _fake_request_cancel(_self: Any, *, expected_kind: str | None = None) -> bool:
+        return expected_kind is None or expected_kind == kind
+
+    monkeypatch.setattr(BackgroundPullJob, "request_cancel", _fake_request_cancel)
     monkeypatch.setattr(BackgroundPullJob, "cancel_requested", lambda _self: cancelled)
 
 
@@ -144,8 +154,15 @@ def test_sweep_cancel_in_process(client: TestClient, monkeypatch: pytest.MonkeyP
     assert written["source"] == "route"
 
 
-def test_sweep_cancel_detached_running(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No in-process sweep, but a DETACHED launch-page sweep is live → target detached."""
+def test_sweep_cancel_detached_running(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No in-process sweep, but a DETACHED launch-page sweep is live → target detached.
+
+    A LEGACY launch state with NO recorded ``results_root`` falls back to the
+    DEFAULT ``<lake>/sweeps`` root (the pre-fix behaviour, kept only as the
+    no-better-information fallback).
+    """
     # The job is idle (no monkeypatch of running_job_kind → real None).
     monkeypatch.setattr(
         "brutex.dashboard.launch_button.read_launch_state", lambda _lake: {"pid": 4242}
@@ -154,12 +171,90 @@ def test_sweep_cancel_detached_running(client: TestClient, monkeypatch: pytest.M
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         "brutex.engine.sweep_cancel.request_cancel",
-        lambda root, *, source: captured.update(source=source) or root,
+        lambda root, *, source: captured.update(root=root, source=source) or root,
     )
     resp = client.post("/api/v1/sweep/cancel")
     assert resp.status_code == 200
     assert resp.json() == {"cancelling": True, "target": "detached"}
     assert captured["source"] == "route-detached"
+    lake = store.path.parent  # type: ignore[union-attr]
+    assert captured["root"] == lake / "sweeps"
+
+
+def test_sweep_cancel_detached_writes_sidecar_at_the_recorded_launch_root(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidecar lands at the LAUNCH STATE's results_root — the root the run PROBES.
+
+    Review fold (fails-before): the launch page spawns ``brutex sweep-all
+    --results-root <lake>/sweeps/launch-<stamp>-<card>`` and ``cmd_sweep_all``
+    stats ``<out_root>/.sweep_cancel.json`` — so a sidecar written at the
+    default ``<lake>/sweeps`` was NEVER observed by the detached run (a
+    fabricated ``{"cancelling": true}``). The route must target the recorded
+    root exactly where ``cmd_sweep_all(out_root=that root)`` probes.
+    """
+    lake = store.path.parent  # type: ignore[union-attr]
+    launch_root = lake / "sweeps" / "launch-20260709-120000-fast"
+    monkeypatch.setattr(
+        "brutex.dashboard.launch_button.read_launch_state",
+        lambda _lake: {"pid": 4242, "results_root": str(launch_root)},
+    )
+    monkeypatch.setattr("brutex.dashboard.launch_button.state_liveness", lambda _state: "running")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "brutex.engine.sweep_cancel.request_cancel",
+        lambda root, *, source: captured.update(root=root, source=source) or root,
+    )
+    resp = client.post("/api/v1/sweep/cancel")
+    assert resp.status_code == 200
+    assert resp.json() == {"cancelling": True, "target": "detached"}
+    assert captured["root"] == launch_root  # NOT the default <lake>/sweeps
+
+
+def test_sweep_cancel_detached_hostile_root_falls_back_to_default(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launch-state results_root ESCAPING <lake>/sweeps is refused → default root.
+
+    The route never writes a sidecar outside the lake's sweeps tree off a
+    hostile / relocated state file — confinement, then the default fallback.
+    """
+    monkeypatch.setattr(
+        "brutex.dashboard.launch_button.read_launch_state",
+        lambda _lake: {"pid": 4242, "results_root": "/tmp/evil-elsewhere"},
+    )
+    monkeypatch.setattr("brutex.dashboard.launch_button.state_liveness", lambda _state: "running")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "brutex.engine.sweep_cancel.request_cancel",
+        lambda root, *, source: captured.update(root=root, source=source) or root,
+    )
+    resp = client.post("/api/v1/sweep/cancel")
+    assert resp.status_code == 200
+    assert resp.json() == {"cancelling": True, "target": "detached"}
+    lake = store.path.parent  # type: ignore[union-attr]
+    assert captured["root"] == lake / "sweeps"
+
+
+def test_detached_sweep_cancel_root_helper_branches(tmp_path: Path) -> None:
+    """The pure helper's confinement branches (non-string · blank · confined · escape)."""
+    lake = tmp_path / "lake"
+    default = lake / "sweeps"
+    helper = app_module._detached_sweep_cancel_root
+    # Non-string / absent / blank → default.
+    assert helper({}, lake, default=default) == default
+    assert helper({"results_root": 42}, lake, default=default) == default
+    assert helper({"results_root": "   "}, lake, default=default) == default
+    # Confined under <lake>/sweeps (the exact sweeps root AND a launch subdir) → kept.
+    launch = default / "launch-20260709-x"
+    assert helper({"results_root": str(launch)}, lake, default=default) == launch
+    assert helper({"results_root": str(default)}, lake, default=default) == default
+    # Escapes (a sibling dir, a traversal) → default, never an out-of-tree write.
+    assert helper({"results_root": str(tmp_path / "evil")}, lake, default=default) == default
+    assert (
+        helper({"results_root": str(default / ".." / ".." / "evil")}, lake, default=default)
+        == default
+    )
 
 
 def test_sweep_cancel_nothing_running(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,3 +272,123 @@ def test_sweep_cancel_no_lake_configured() -> None:
         resp = c.post("/api/v1/sweep/cancel")
     assert resp.status_code == 400
     assert "no lake configured" in resp.json()["detail"]
+
+
+# ── the pull work closures thread the cancel probe (review fold) ──────────────
+#
+# The cancel route can only be honest if the RUNNING spine actually observes
+# the token: each surface's work closure must pass the job's bound
+# ``cancel_requested`` as ``should_stop``. Before the fix, only the
+# /pull-pipeline closures were wired — cancelling a pull-all / retry-failed /
+# composite / direct-selection run returned {"cancelling": true} while the
+# spine ran to completion (fabricated success).
+
+
+class _FakeVerdict:
+    """Minimal verdict payload for the spot report's banner slot."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"status": "clean"}
+
+
+class _FakeSpotReport:
+    """Stub spot pull report — only ``.verdict`` is read on the job thread."""
+
+    @property
+    def verdict(self) -> _FakeVerdict:
+        return _FakeVerdict()
+
+
+def _drain_job(client: TestClient, *, timeout: float = 10.0) -> None:
+    """Poll /pull-progress until the single-flight background job settles."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snap = client.get("/api/v1/universe/pull-progress").json()
+        assert isinstance(snap, dict)
+        if snap["state"] in {"done", "error"}:
+            return
+        time.sleep(0.01)
+    raise AssertionError("background job did not settle within the timeout")
+
+
+def _assert_job_cancel_probe(probe: Any) -> None:
+    """The captured ``should_stop`` is the job's bound running-gated probe."""
+    assert callable(probe)
+    assert getattr(probe, "__name__", "") == "cancel_requested"
+    # Idle after settle → the running gate reads an honest False.
+    assert probe() is False
+
+
+def test_pull_all_spot_receives_the_cancel_probe(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /universe/pull-all threads should_stop into pull_all_spot (fails-before)."""
+    captured: dict[str, Any] = {}
+
+    def _fake_pull_all_spot(instruments: list[Any], **kwargs: Any) -> _FakeSpotReport:
+        captured["should_stop"] = kwargs["should_stop"]
+        return _FakeSpotReport()
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_pull_all_spot)
+    resp = client.post("/api/v1/universe/pull-all", params={"symbols": "NIFTY", "dry_run": "true"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    _drain_job(client)
+    _assert_job_cancel_probe(captured["should_stop"])
+
+
+def test_retry_failed_receives_the_cancel_probe(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /universe/retry-failed threads should_stop into pull_all_spot (fails-before)."""
+    captured: dict[str, Any] = {}
+
+    def _fake_pull_all_spot(instruments: list[Any], **kwargs: Any) -> _FakeSpotReport:
+        captured["should_stop"] = kwargs["should_stop"]
+        return _FakeSpotReport()
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_pull_all_spot)
+    resp = client.post(
+        "/api/v1/universe/retry-failed", params={"symbols": "NIFTY", "dry_run": "true"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    _drain_job(client)
+    _assert_job_cancel_probe(captured["should_stop"])
+
+
+def test_metadata_pull_cancel_is_an_honest_false(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A RUNNING metadata pull refuses the cancel — its spine has NO cancel seam.
+
+    Fails-before: the route read kind==PULL and returned {"cancelling": true}
+    while ``pull_expiries_contracts`` (no ``should_stop`` param) ran to full
+    completion — a fabricated success. The metadata surface now starts
+    ``cancellable=False`` so the route answers honestly.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _fake_metadata(instruments: list[Any], **kwargs: Any) -> Any:
+        entered.set()
+        assert release.wait(10.0), "test orchestration: release never fired"
+        return SimpleNamespace(to_dict=lambda: {"ok": True})
+
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    resp = client.post(
+        "/api/v1/universe/pull-expiries-contracts",
+        params={"symbols": "NIFTY", "dry_run": "true"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert entered.wait(10.0), "the metadata work never started"
+    try:
+        cancel = client.post("/api/v1/pull/cancel")
+        assert cancel.status_code == 200
+        assert cancel.json() == {"cancelling": False}  # honest — the run cannot observe it
+        snap = client.get("/api/v1/universe/pull-progress").json()
+        assert snap["cancelling"] is False  # the token was never set
+    finally:
+        release.set()
+    _drain_job(client)

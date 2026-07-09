@@ -102,7 +102,8 @@ def request_cancel(root: Path, *, source: str) -> Path:
 def cancel_requested(root: Path) -> bool:
     """``True`` iff a cancel-request sidecar is present under *root* — ONE ``os.stat``.
 
-    The O(1)-per-tuple hot probe (bench-pinned): presence is the signal, the
+    The O(1)-per-tuple hot probe (one syscall by construction — no bench pin is
+    claimed): presence is the signal, the
     body is NEVER read here — a malformed sidecar still cancels (fail-safe
     toward a graceful stop; see the module docstring). Any probe ``OSError``
     other than absence (a permission defect, a hostile inode) reads ``True``

@@ -19,6 +19,7 @@ from brutex.calendars import (
     trading_days_between,
 )
 from brutex.dashboard.coverage_missing import (
+    ABSTAIN_BAD_RANGE_OVERRIDE,
     ABSTAIN_NO_RANGE,
     ABSTAIN_NO_SESSIONS,
     ABSTAIN_NO_STORED_DATES,
@@ -344,3 +345,141 @@ class TestBuildMissingSessionsPayload:
         )
         assert payload["range_start"] == "2024-01-01"
         assert payload["range_end"] == "2024-01-31"
+
+
+class TestExplicitRangeOverride:
+    """Review fold: a typo'd EXPLICIT override abstains — never a silent stored-span
+    fall-back that fakes an interior-only audit (bad_range_override, per row)."""
+
+    def test_junk_range_start_with_valid_stored_bound_abstains(self) -> None:
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            frozenset({date(2024, 1, 2)}),
+            range_start="2020-13-01",  # month 13 — the operator's typo
+        )
+        assert result.abstained
+        assert result.abstain_reason == ABSTAIN_BAD_RANGE_OVERRIDE
+        # The RAW junk is echoed so the operator sees exactly what was refused.
+        assert result.range_start == "2020-13-01"
+        assert result.expected_count is None and result.missing_dates == ()
+
+    def test_junk_range_end_with_valid_stored_bound_abstains(self) -> None:
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            frozenset({date(2024, 1, 2)}),
+            range_end="not-a-date",
+        )
+        assert result.abstained
+        assert result.abstain_reason == ABSTAIN_BAD_RANGE_OVERRIDE
+        assert result.range_end == "not-a-date"
+
+    def test_blank_override_is_not_provided(self) -> None:
+        # A UI form's empty ?range_start= is "no override", never a refused typo.
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            frozenset({date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)}),
+            range_start="  ",
+            range_end="",
+        )
+        assert not result.abstained
+        assert result.range_start == "2024-01-02"  # the stored span applied
+
+    def test_valid_override_still_wins_over_stored(self) -> None:
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            frozenset({date(2024, 1, 2)}),
+            range_start="2024-01-01",
+            range_end="2024-01-03",
+        )
+        assert not result.abstained
+        assert result.range_start == "2024-01-01"
+        assert result.range_end == "2024-01-03"
+
+    def test_payload_rows_carry_bad_override_abstain(self) -> None:
+        rows = [
+            _row("NIFTY", "1minute", "2024-01-22", "2024-01-26", frozenset()),
+        ]
+        payload = build_missing_sessions_payload(rows, range_start="2020-13-01")
+        assert payload["rows"][0]["abstained"] is True
+        assert payload["rows"][0]["abstain_reason"] == ABSTAIN_BAD_RANGE_OVERRIDE
+        assert payload["total_missing"] == 0  # abstained rows never fabricate a count
+
+
+class TestExpectedSessionsMemo:
+    """Review fold: ONE payload build pays the expected-session calendar walk once per
+    DISTINCT (start, end, exchange) range — not once per dataset."""
+
+    def test_identical_ranges_walk_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import brutex.dashboard.coverage_missing as cm
+
+        calls: list[tuple[date, date, str | None]] = []
+        real = trading_days_between
+
+        def _spy(start: date, end: date, *, exchange: str | None = None) -> list[date]:
+            calls.append((start, end, exchange))
+            return real(start, end, exchange=exchange)
+
+        monkeypatch.setattr(cm, "trading_days_between", _spy)
+        stored = frozenset({date(2024, 1, 2)})
+        rows = [
+            _row("NIFTY", "1minute", "2024-01-02", "2024-01-05", stored),
+            _row("BANKNIFTY", "1minute", "2024-01-02", "2024-01-05", stored),
+            _row("RELIANCE", "1minute", "2024-01-02", "2024-01-05", stored),
+        ]
+        payload = build_missing_sessions_payload(rows)
+        assert payload["datasets"] == 3
+        # Three same-range NSE datasets → exactly ONE day-walk.
+        assert calls == [(date(2024, 1, 2), date(2024, 1, 5), "NSE")]
+
+    def test_distinct_ranges_each_walk(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import brutex.dashboard.coverage_missing as cm
+
+        calls: list[tuple[date, date, str | None]] = []
+        real = trading_days_between
+
+        def _spy(start: date, end: date, *, exchange: str | None = None) -> list[date]:
+            calls.append((start, end, exchange))
+            return real(start, end, exchange=exchange)
+
+        monkeypatch.setattr(cm, "trading_days_between", _spy)
+        stored = frozenset({date(2024, 1, 2)})
+        rows = [
+            _row("NIFTY", "1minute", "2024-01-02", "2024-01-05", stored),
+            _row("BANKNIFTY", "1minute", "2024-01-02", "2024-01-10", stored),
+        ]
+        build_missing_sessions_payload(rows)
+        assert len(calls) == 2
+
+    def test_direct_call_without_cache_recomputes(self) -> None:
+        # The default (every direct caller) stays cache-less — byte-identical result.
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            frozenset({date(2024, 1, 2)}),
+            expected_cache=None,
+        )
+        assert result.expected_count == 4

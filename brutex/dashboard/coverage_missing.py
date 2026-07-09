@@ -21,12 +21,22 @@ set, and special weekend sessions), and returns per (symbol, interval):
 
 **Honest envelope (Golden Rule #1 / #10):** the ``session_dates`` the caller supplies come
 from ONE ``COUNT(DISTINCT ist_date)``/``array_agg`` columnar aggregate — that read is
-**O(bars)** (the SAME scan ``/coverage`` already runs; folded, no extra pass). This module's
-own set-difference is **O(sessions)** — NOT O(bars), NOT O(1). Muhurat evening sessions fall
+**O(bars)**: a SEPARATE session-dates-enriched execution of the same scan SHAPE
+``/coverage`` runs (the ``array_agg`` rides one pass WITHIN the drill's own scan; the
+drill's route memoises it per write-generation, so it is ONE ADDITIONAL O(bars) pass on
+the first drill use per generation — deliberately NOT shared with the ``/coverage`` SPOT
+cache entry, whose rows carry no session dates). This module's
+own set-difference is **O(sessions)** — NOT O(bars), NOT O(1); the expected-session
+calendar walk is memoisable per (start, end, exchange) via the *expected_cache* seam so
+an unfiltered ~750-dataset payload pays the day-walk once per distinct range, not per
+dataset. Muhurat evening sessions fall
 on Diwali HOLIDAYS (``is_trading_day`` is False for them), so they are never *expected* and a
 stored Muhurat bar is simply surplus (never flagged missing) — the honest handling of the §7
 "muhurat" case. The audit ABSTAINS (never guesses — Golden Rule #1) when it has no honest
-basis: no stored dates, either bound missing/unparseable, a reversed span, a degenerate
+basis: no stored dates, an EXPLICIT range override that does not parse (per row,
+``bad_range_override`` — an operator's typo'd bound never silently falls back to the
+stored span and fakes an interior-only audit), either stored bound missing/unparseable
+with no override, a reversed span, a degenerate
 zero-session range, OR a bound outside the published holiday coverage
 (:data:`~brutex.calendars.HOLIDAY_COVERAGE_FIRST_YEAR` /
 :data:`~brutex.calendars.HOLIDAY_COVERAGE_LAST_YEAR` — an out-of-coverage weekday's
@@ -69,6 +79,7 @@ ABSTAIN_NO_STORED_DATES: Final[str] = "no_stored_dates"
 ABSTAIN_NO_RANGE: Final[str] = "no_covered_range"
 ABSTAIN_OUT_OF_COVERAGE: Final[str] = "out_of_holiday_coverage"
 ABSTAIN_NO_SESSIONS: Final[str] = "no_trading_sessions"
+ABSTAIN_BAD_RANGE_OVERRIDE: Final[str] = "bad_range_override"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +155,7 @@ def compute_missing_sessions(
     *,
     range_start: str | None = None,
     range_end: str | None = None,
+    expected_cache: dict[tuple[date, date, str | None], tuple[date, ...]] | None = None,
 ) -> MissingSessions:
     """Expected NSE/BSE sessions over the audited range MINUS the stored dates.
 
@@ -161,8 +173,18 @@ def compute_missing_sessions(
     range_start, range_end
         Optional explicit ISO ``YYYY-MM-DD`` audit-range override — e.g. the operator
         checking the covered span against the 2020 pull floor rather than the interior of
-        what is stored. When omitted the range is ``[first_date, last_date]`` (interior
-        gaps of what the lake HAS). A given bound wins over the stored one.
+        what is stored. When omitted (``None`` / blank) the range is
+        ``[first_date, last_date]`` (interior gaps of what the lake HAS). A given
+        parseable bound wins over the stored one; a given UNPARSEABLE bound ABSTAINS
+        (:data:`ABSTAIN_BAD_RANGE_OVERRIDE`) — an operator's typo'd override never
+        silently falls back to the stored span and fakes an interior-only audit
+        (Golden Rule #1).
+    expected_cache
+        Optional mutable memo keyed ``(start, end, calendar_exchange)`` →
+        the expected-session tuple. The payload builder passes ONE dict per payload
+        so identical ranges (the common unfiltered ~750-dataset case) pay the
+        O(span-days) ``is_trading_day`` walk once per distinct range, not per
+        dataset. ``None`` (the default — every direct caller) recomputes.
 
     Returns
     -------
@@ -172,8 +194,26 @@ def compute_missing_sessions(
     if session_dates is None:
         return _abstain(exchange, segment, symbol, interval, None, None, ABSTAIN_NO_STORED_DATES)
 
-    start = _parse_iso_date(range_start) or _parse_iso_date(first_date)
-    end = _parse_iso_date(range_end) or _parse_iso_date(last_date)
+    start_override = _normalized_override(range_start)
+    end_override = _normalized_override(range_end)
+    # An EXPLICIT override that does not parse is a per-row abstain, never a silent
+    # fall-back to the stored bound (the interior-only-audit illusion): the raw junk
+    # is echoed back on the verdict so the operator sees exactly what was refused.
+    if (start_override is not None and _parse_iso_date(start_override) is None) or (
+        end_override is not None and _parse_iso_date(end_override) is None
+    ):
+        return _abstain(
+            exchange,
+            segment,
+            symbol,
+            interval,
+            start_override,
+            end_override,
+            ABSTAIN_BAD_RANGE_OVERRIDE,
+        )
+
+    start = _parse_iso_date(start_override) or _parse_iso_date(first_date)
+    end = _parse_iso_date(end_override) or _parse_iso_date(last_date)
     start_iso = start.isoformat() if start is not None else None
     end_iso = end.isoformat() if end is not None else None
     if start is None or end is None or end < start:
@@ -183,7 +223,7 @@ def compute_missing_sessions(
             exchange, segment, symbol, interval, start_iso, end_iso, ABSTAIN_OUT_OF_COVERAGE
         )
 
-    expected = trading_days_between(start, end, exchange=_calendar_exchange(exchange))
+    expected = _expected_sessions(start, end, _calendar_exchange(exchange), expected_cache)
     if not expected:
         return _abstain(
             exchange, segment, symbol, interval, start_iso, end_iso, ABSTAIN_NO_SESSIONS
@@ -211,6 +251,43 @@ def compute_missing_sessions(
         abstained=False,
         abstain_reason=None,
     )
+
+
+def _normalized_override(value: str | None) -> str | None:
+    """Treat a blank/whitespace-only explicit range override as NOT PROVIDED.
+
+    A UI form submitting ``?range_start=`` sends an empty string, which is
+    "no override", not a typo'd one — only a NON-blank unparseable value trips
+    the :data:`ABSTAIN_BAD_RANGE_OVERRIDE` refusal.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def _expected_sessions(
+    start: date,
+    end: date,
+    calendar_exchange: str | None,
+    cache: dict[tuple[date, date, str | None], tuple[date, ...]] | None,
+) -> tuple[date, ...]:
+    """The expected trading sessions for ``[start, end]`` — memoised when *cache* is given.
+
+    :func:`trading_days_between` is a day-by-day ``is_trading_day`` walk, so an
+    unfiltered payload over ~750 datasets sharing (near-)identical ranges would pay
+    ~O(datasets × span-days) without the memo. ONE dict per payload build (never a
+    module global — no cross-request growth) collapses that to one walk per DISTINCT
+    ``(start, end, calendar_exchange)`` key.
+    """
+    if cache is None:
+        return tuple(trading_days_between(start, end, exchange=calendar_exchange))
+    key = (start, end, calendar_exchange)
+    hit = cache.get(key)
+    if hit is None:
+        hit = tuple(trading_days_between(start, end, exchange=calendar_exchange))
+        cache[key] = hit
+    return hit
 
 
 def _abstain(
@@ -271,8 +348,12 @@ def build_missing_sessions_payload(
     The payload is well-shaped even for an empty ``rows`` (a lake with no spot datasets, or
     no filesystem-backed store) — the route NEVER 500s. ``datasets`` counts the audited
     datasets; ``total_missing`` sums the non-abstained missing counts (a quick "how many
-    sessions to re-pull" headline).
+    sessions to re-pull" headline). ONE per-payload ``expected_cache`` dict memoises the
+    expected-session calendar walk per distinct ``(start, end, exchange)`` range, so the
+    common unfiltered many-datasets-one-range case pays the O(span-days) walk once — not
+    once per dataset.
     """
+    expected_cache: dict[tuple[date, date, str | None], tuple[date, ...]] = {}
     entries: list[MissingSessions] = []
     for row in rows:
         row_interval = str(row.get("interval", ""))
@@ -298,6 +379,7 @@ def build_missing_sessions_payload(
                 raw_dates if raw_dates is None else frozenset(raw_dates),
                 range_start=range_start,
                 range_end=range_end,
+                expected_cache=expected_cache,
             )
         )
     entries.sort(key=lambda e: (e.symbol, e.exchange, e.interval))

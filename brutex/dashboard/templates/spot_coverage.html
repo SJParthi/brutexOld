@@ -215,7 +215,7 @@
   <div class="drillwrap" id="drillwrap">
     <div class="drillhead">
       <strong>Missing-session gap list</strong>
-      <span class="drillsub">Exact NSE/BSE trading sessions with no stored 1-minute bar — re-pull these dates before a sweep. Honest envelope: one cached O(bars) scan + an O(sessions) diff; muhurat/holidays/weekends are never expected. Interior gaps of the covered span; add ?from/?to to audit a wider range.</span>
+      <span class="drillsub">Exact NSE/BSE trading sessions with no stored 1-minute bar — re-pull these dates before a sweep. Honest envelope: one cached O(bars) scan + an O(sessions) diff; muhurat/holidays/weekends are never expected. Interior gaps of the covered span; this panel sends only the symbol filter — a wider range (e.g. the 2020 pull floor) is audited via range_start/range_end (ISO YYYY-MM-DD) on /api/v1/coverage/missing-sessions directly.</span>
       <input type="text" id="drillsym" placeholder="symbol filter (e.g. NIFTY)" aria-label="symbol filter" />
       <button type="button" id="drillbtn">Load gap list</button>
     </div>

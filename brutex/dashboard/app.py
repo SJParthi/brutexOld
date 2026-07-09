@@ -1648,9 +1648,13 @@ def build_app(
     # SAME generic memo `_db_datasets_cache` / `_candle_count_cache` use; no new class).
     _coverage_cache = MoversSnapshotCache()
     # The /coverage/missing-sessions drill cache (DEC-COVERAGE-MISSING-SESSIONS-001): the
-    # session_dates-enriched spot scan (ONE array_agg(DISTINCT ist_date) folded into the
-    # existing coverage aggregate — O(bars), no extra pass) is memoised per write-generation
-    # so a repeat drill within one generation is an O(1) handoff and a pull re-derives it.
+    # session_dates-enriched spot scan is a SEPARATE execution of the same scan SHAPE
+    # /coverage runs (the array_agg(DISTINCT ist_date) rides one pass WITHIN the drill's
+    # own scan) — HONEST: it is NOT shared with the /coverage SPOT `_summary_cache` entry
+    # (whose rows carry no session dates), so an operator using both surfaces pays TWO
+    # full O(bars) spot scans per write-generation, one each. Memoised here per
+    # write-generation so a repeat drill within one generation is an O(1) handoff and a
+    # pull re-derives it; the resident cost is the per-dataset distinct-date set.
     _missing_sessions_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache()
     _mapping_integrity_cache = MoversSnapshotCache()
@@ -2732,6 +2736,10 @@ def build_app(
                 until_clean=True,
                 on_ledger_sync=_ledger_sync,
                 floor_store=instrument_store,
+                # Cooperative cancel at the spot WINDOW boundary
+                # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this surface was
+                # un-wired, so the cancel route fabricated success for it).
+                should_stop=_pull_job.cancel_requested,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -2938,7 +2946,13 @@ def build_app(
         # NOT by the per-pair 4-arg hook — so it fills 0→100% instead of freezing
         # (DEC-METADATA-LIVE-PROGRESS-001). The initial total is the instrument count, a
         # placeholder the first cell-settle resync re-scales to cells (then cells+jobs).
-        started = _pull_job.start(_work, total=len(instruments), detail=detail, ledger_synced=True)
+        # cancellable=False (DEC-JOB-COOPERATIVE-CANCEL-001 review fold): the
+        # metadata spine (pull_expiries_contracts) has NO should_stop seam, so a
+        # cancel token would never be observed — /api/v1/pull/cancel refuses
+        # HONESTLY for this surface instead of fabricating {"cancelling": true}.
+        started = _pull_job.start(
+            _work, total=len(instruments), detail=detail, ledger_synced=True, cancellable=False
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3056,6 +3070,11 @@ def build_app(
                     form_preference=PersistentSymbolFormPreference(
                         None if dry_run else instrument_store
                     ),
+                    # Cooperative cancel at the F&O (contract, interval) window
+                    # boundary (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this
+                    # surface was un-wired, so the cancel route fabricated
+                    # success for it).
+                    should_stop=_pull_job.cancel_requested,
                 )
             return report.to_dict()
 
@@ -3260,6 +3279,11 @@ def build_app(
                     form_preference=PersistentSymbolFormPreference(
                         None if dry_run else instrument_store
                     ),
+                    # Cooperative cancel at the F&O (contract, interval) window
+                    # boundary (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this
+                    # surface was un-wired, so the cancel route fabricated
+                    # success for it).
+                    should_stop=_pull_job.cancel_requested,
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
@@ -4308,6 +4332,10 @@ def build_app(
                 auto_retry=True,
                 until_clean=until_clean,
                 floor_store=instrument_store,
+                # Cooperative cancel at the spot WINDOW boundary
+                # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: retry-failed was
+                # un-wired, so the cancel route fabricated success for it).
+                should_stop=_pull_job.cancel_requested,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -4569,14 +4597,22 @@ def build_app(
         Run buttons). Kind-gated: cancels ONLY a running PULL-kind job — a
         running SWEEP is never cancelled through this route (use
         ``/api/v1/sweep/cancel``), and an idle job is a ``{"cancelling": false}``
-        no-op. HONEST latency (Golden Rule #10): cooperative — the in-flight
+        no-op. The kind gate is a COMPARE-AND-SET inside
+        ``request_cancel(expected_kind=…)`` — ONE lock hold, so a run
+        transition between a separate kind read and the cancel can never land
+        the request on the wrong run (review fold). HONEST scope: the
+        standalone metadata pull (``/universe/pull-expiries-contracts``) has NO
+        cancel seam in its spine, so it starts ``cancellable=False`` and this
+        route returns an honest ``{"cancelling": false}`` for it — never a
+        fabricated true the run could not observe. HONEST latency (Golden Rule
+        #10): cooperative — the in-flight
         window's fetch + durable write + ledger record always complete first
         (≤ one fetch + the 90 s write deadline), then the job settles via the
         NORMAL path as an honest amber partial ("(cancelled)" stop) — never a
         red ✕, never a fabricated green; the durable ledger makes the next pull
         resume exactly the unsettled remainder.
         """
-        cancelling = _pull_job.running_job_kind == JOB_KIND_PULL and _pull_job.request_cancel()
+        cancelling = _pull_job.request_cancel(expected_kind=JOB_KIND_PULL)
         return JSONResponse({"cancelling": bool(cancelling)})
 
     @app.post("/api/v1/sweep/cancel")
@@ -4615,7 +4651,16 @@ def build_app(
                 return {"cancelling": True, "target": "in-process"}
             detached = read_launch_state(lake)
             if detached is not None and state_liveness(detached) == "running":
-                request_sweep_cancel(root, source="route-detached")
+                # Write the sidecar at the root the DETACHED run actually
+                # probes — the launch state's recorded results_root
+                # (<lake>/sweeps/launch-<stamp>-<card>), confined under
+                # <lake>/sweeps; NOT the default root, which that run's
+                # cmd_sweep_all(out_root=…) would never stat (review fold —
+                # the fabricated-success class).
+                request_sweep_cancel(
+                    _detached_sweep_cancel_root(detached, lake, default=root),
+                    source="route-detached",
+                )
                 return {"cancelling": True, "target": "detached"}
             return {"cancelling": False}
 
@@ -4846,12 +4891,19 @@ def build_app(
         ``[first_date, last_date]`` interior-gap range (e.g. to audit against the 2020 pull
         floor). READ-ONLY — no pull logic.
 
-        **Honest envelope (Golden Rule #10):** the distinct stored dates come from ONE
-        ``array_agg(DISTINCT ist_date)`` folded into the SAME per-session coverage scan
-        (O(bars), cached per write-generation — no extra pass); the set-difference per
-        dataset is O(sessions), NOT O(1). Muhurat evening sessions fall on holidays, so
+        **Honest envelope (Golden Rule #10):** the distinct stored dates come from a
+        SEPARATE ``session_dates``-enriched execution of the same scan SHAPE
+        ``/coverage`` runs (the ``array_agg(DISTINCT ist_date)`` rides one pass WITHIN
+        the drill's own scan) — ONE additional O(bars) pass per write-generation on the
+        first drill use, cached in the drill's own memo, deliberately NOT shared with
+        the ``/coverage`` SPOT cache (whose rows carry no session dates); the
+        set-difference per dataset is O(sessions), NOT O(1), with the expected-session
+        calendar walk memoised per distinct range within one payload build. Muhurat
+        evening sessions fall on holidays, so
         they are never *expected* and never flagged missing. The audit ABSTAINS (an honest
-        ``abstain_reason``, never a fabricated "0 gaps") on an unparseable/out-of-coverage
+        ``abstain_reason``, never a fabricated "0 gaps") on an unparseable EXPLICIT
+        range override (``bad_range_override`` — never a silent fall-back to the stored
+        span), an out-of-coverage
         range or missing stored dates. No filesystem-backed store → a well-shaped empty
         payload, never a 500.
         """
@@ -7709,6 +7761,40 @@ def _metadata_progress_sync(
     fail a test, not pass CI green) instead of being pragma-hidden.
     """
     job.sync_from_ledger(completed=completed, total=total, bars=None, failed=0, current=current)
+
+
+def _detached_sweep_cancel_root(state: Mapping[str, Any], lake: Path, *, default: Path) -> Path:
+    """Resolve the results root a DETACHED launch-page sweep actually PROBES.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001 review fold: the launch page spawns
+    ``brutex sweep-all --results-root <lake>/sweeps/launch-<stamp>-<card>``
+    (:func:`brutex.dashboard.launch_button.launch` records that path in the
+    launch state), and ``cmd_sweep_all`` builds its cancel probe over ITS OWN
+    ``out_root`` — so a sidecar written at the DEFAULT ``<lake>/sweeps`` root
+    would never be observed by the detached run (a fabricated
+    ``{"cancelling": true}``). This helper returns the state's recorded
+    ``results_root`` iff it is a string path CONFINED under ``<lake>/sweeps``
+    (a hostile / relocated / non-string value falls back to *default* — the
+    route never writes a sidecar outside the lake's sweeps tree), else
+    *default* (a legacy state with no recorded root).
+    """
+    raw = state.get("results_root")
+    if not isinstance(raw, str) or not raw.strip():
+        return default
+    candidate = Path(raw)
+    sweeps = (lake / "sweeps").resolve(strict=False)
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError:  # pragma: no cover — pathological path resolution only
+        return default
+    if resolved == sweeps or sweeps in resolved.parents:
+        return candidate
+    _LOG.warning(
+        "sweep_cancel.detached_root_rejected",
+        recorded_root=raw,
+        note="launch-state results_root escapes <lake>/sweeps — using the default root",
+    )
+    return default
 
 
 def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | None] | None:
