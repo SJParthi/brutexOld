@@ -1,1 +1,21 @@
-[]
+{
+ "baselines": {},
+ "entries": [],
+ "preset": "min_dd_first",
+ "run_id": "r-empty01",
+ "schema_version": 1,
+ "source": {
+  "data_snapshot_hashes": [
+   "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  ],
+  "excluded_no_aggs": 0,
+  "families_collapsed": 0,
+  "gate_passers": 0,
+  "margin_roi_wired": false,
+  "parity_excluded": 0,
+  "pool": 0,
+  "reasons_wired": false,
+  "stores": 3,
+  "zero_trade_excluded": 0
+ }
+}
