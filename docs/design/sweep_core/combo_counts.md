@@ -45,7 +45,21 @@ open_questions.md Q1):
 count for Bailey-LdP purposes is the conflict-free/backtested population,
 13–19% smaller — both given above.)
 
-## 3. Wall-clock table (8 workers, ideal scaling — see caveats §4)
+> **SUPERSEDED FOR PROJECTIONS (Verifier A round-1 fold, 2026-07-09).** The §3
+> wall-clock table below (and the §5 sanity-check built on it) rests on a
+> per-KEPT × per-ENUMERATED unit conflation: the "~0.58 ms/combo" constant is
+> a per-KEPT-MASK residual (SPEC §5) multiplied here by ENUMERATED-mask
+> populations — arithmetically impossible under DESIGN_FINAL §9's own per-kept
+> cap. Every projection row (the "today" day/hour anchors and the
+> @50/@30/@10 µs columns) is **WITHDRAWN**; projections are SUPERSEDED by
+> DESIGN_FINAL §9's two-term tables + the §9.1 BINDING two-term cost law
+> (`cost(mask) = c0 + ≈6.2 ns/mask·bar + ≈4.1 µs/trade`, pinned config; ratio
+> band only). This file's §3 is scheduled for the DESIGN §9-mandated bottom-up
+> REBUILD from measured s/f_zero/f_trade after the on-branch sub-grid run. The
+> COMBINATORIAL counts themselves (§1 conflict-free table, §2 tuple
+> multipliers) STAND — only the wall-clock projections are withdrawn.
+
+## 3. Wall-clock table (8 workers, ideal scaling — see caveats §4) — WITHDRAWN (see banner above)
 
 wall = combos × per-combo-cost ÷ 8. "Today" row uses the coordinator-relayed
 ~0.58 ms/combo [AUDIT-RELAYED; my sandbox re-derivation measured 0.16–0.40
@@ -103,7 +117,13 @@ Formulae: e.g. k≤6/B @30 µs = 7.062e9 × 30e-6 / 8 = 26,483 s ≈ 7.4 h.
 5. Sandbox→M4-Pro translation is unverified until the bench-m4pro lane runs
    (§8 CLAUDE.md; DEC-BENCH-ABS-BASELINE-001).
 
-## 5. Sanity-check vs the coordinator's targets
+## 5. Sanity-check vs the coordinator's targets — WITHDRAWN (rests on the §3 conflation; see the §3 banner)
+
+> This section cross-checks the coordinator-relayed targets against the §3
+> table's arithmetic, so it inherits the same per-KEPT × per-ENUMERATED unit
+> conflation and is SUPERSEDED for projections by DESIGN_FINAL §9/§9.1
+> (Verifier A round-1). Retained verbatim as the historical record of what the
+> relayed targets were consistent with UNDER the withdrawn arithmetic.
 
 Relayed targets: "k≤6: 4–14 d → ~0.5–2.5 d; k≤5 → ~1–8 h" at 10–50 µs/combo.
 - Today k≤6: scenario B gives 5.9 d, C gives 17.8 d — the 4–14 d band brackets

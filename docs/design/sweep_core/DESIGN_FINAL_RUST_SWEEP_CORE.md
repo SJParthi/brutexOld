@@ -1047,6 +1047,18 @@ proof); `math.fsum`
 a per-expression review-checklist item and a CI grep pin (any new
 `builtins.sum`/`fsum` in the fold layer fails review).
 
+**CPython-version pin on the row-6 port (Verifier A round-1 fold):** the
+Neumaier port is frozen against CPython **3.12's** `builtins.sum()` source
+(the repo pins Python ≥3.12); if a later CPython minor (3.13+) changes
+`sum()`'s float summation, the PYTHON oracle moves while the Rust port stays
+frozen — the burn-in/belt compare would then mismatch and SILENTLY AUTOREVERT
+the kernel for every process (perf-only failure mode: bytes stay correct via
+the oracle, the core arm just quietly dies). The shipping wrapper therefore
+carries a `sys.version_info` ceiling guard (engagement refused/warned on an
+unvalidated CPython minor) OR a documented loud-degrade note on the
+autorevert event naming sum-algorithm drift as a first-check cause; the
+Slice-4 flip ADR must present whichever shipped (§6 Slice-4 obligation (d)).
+
 **Why mechanically provable:** the Rust float outputs are 9 columns, each a
 sequential fold of correctly-rounded primitives over inputs that are
 themselves exact integer conversions. "Identical operand sequence ⇒
@@ -2103,6 +2115,18 @@ this design.
   PR-1 baseline capture. The refusal-fallback clause is superseded by
   the grant but retained as history: had sign-off been refused, the
   fallback scope was Slice 1 alone + a re-scoped Slice 2 decision round.
+  **Slice-0 work item (Verifier A round-1 fold): fix the
+  `brutex/strategies/combo.py:66-68` stale signed-zero DOCSTRING** — the
+  module docstring's item 3 still claims "Signed zero is split (`0.0` ->
+  `"0.0"`, `-0.0` -> `"-0.0"`) — the SAFE dedup direction", but the CODE
+  at `combo.py:325-331` normalizes `-0.0 → +0.0` BEFORE repr (`value =
+  value + 0.0`, "the results_store / trial_stats precedent") — verified
+  against origin/main 95955a71: the docstring describes the opposite of
+  the shipped behavior, and Verifier B's frozen corpus (d) pins the CODE
+  as authoritative ("combo.py docstring :66-68 stale, code :325-331
+  wins"). Docstring-only edit, zero behavior change — riding Slice 0
+  because that is the one granted compute-zone-adjacent Python-only
+  commit before any Rust lands.
 - **Slice 1 — Rust enumeration+prefilter (integer-only), default-OFF
   `BRUTEX_SWEEP_RUST_ENUM`.** `enumerate_prefilter` + CNS unranking +
   `sweep_core.py` seam + work-bounded enum burn-in + the round-4
@@ -2215,6 +2239,39 @@ this design.
   the spec production sizing; round-6: a measured 20–50%-scale belt
   fraction on the operator's grid shape BLOCKS the flip absent an
   explicit accepted-cost statement in the ADR).
+  **Slice-4 flip-ADR obligations — consolidated (Verifier A round-1
+  fold, 2026-07-09; (a)/(c) restate obligations already scattered above
+  as one checklist, (b)/(d) are NEW):**
+  (a) the **MEASURED belt fraction at the operator sizing
+  (`--top=1000`)** with the disclosed risk stated in the ADR verbatim:
+  default-ON can be a NET **~1.3–1.6× wall-clock REGRESSION** on
+  engaged mid/high-TF shapes (§5 residual (vii) — the stall guard is a
+  liveness bound, not a net-win bound); the flip requires the
+  measurement OR an explicit accepted-cost statement — never neither;
+  (b) an **M4-Pro memory-bandwidth analysis for the in-kernel rayon
+  lever** before that lever (or any topology reshaping licensed by its
+  ratios) informs a flip decision: the ≈3.0–3.77× ratios were measured
+  on shared 4-vCPU x86 sandboxes (fit_results_pinned.json), and M4-Pro
+  memory-subsystem contention (unified-memory bandwidth shared with the
+  8-worker pool, P/E-core asymmetry) is UNANALYZED — the ratios must
+  not be assumed portable to the §8 box without either the analysis or
+  a bench-m4pro measurement;
+  (c) the **belt-exempt residual classes re-affirmed CARRIED VERBATIM**
+  — the ADR restates the §5 NINE-fold residual list above word-for-word
+  (never a summary, never "everything persisted is verified");
+  (d) the **Neumaier/CPython-sum port carries a `sys.version_info`
+  ceiling guard or a loud-degrade note** in the shipping wrapper: the §4
+  row-6 port is token-for-token against CPython **3.12's**
+  `builtins.sum()` float fast path (gh-100425), and a future CPython
+  (3.13+) change to `sum()`'s summation algorithm would make the Python
+  oracle bit-diverge from the frozen Rust port — the burn-in/belt would
+  then SILENTLY AUTOREVERT the kernel process-wide (perf-only: results
+  stay correct via the oracle, but the core arm dies quietly on every
+  process). The flip ADR must show either the version ceiling guard
+  (refuse/warn engagement on an unvalidated CPython minor) or the
+  documented loud-degrade path (the autorevert ERROR event names the
+  suspected sum-algorithm drift as a checkable cause). Mirrored in the
+  §4 summation-algorithm law note.
 - **Named non-goals recorded for the queue (§10), not built:** hit-list
   intersection prefilter (the honest 1m-TF lever), streaming kept-mask
   iterator, Rust ranking, finalist projection from the core (Q6), Slice-3
@@ -2736,7 +2793,7 @@ this design.
 
 | # | Risk | Mitigation |
 |---|---|---|
-| R1 | **compute.py zone/coordination** — the fold/combine decomposition sits outside our declared zone | Slice 0 lands ALONE first, tiny + pure-parameterisation, its own revertable commit with goldens+mutmut byte-neutrality proof; coordinator sign-off **GRANTED for the Slice-0 compute.py zone (2026-07-09, §11 ruling (b) — the originally-bundled sign-off request SPLIT: the Q7 rust/-zone ruling, gap #18, is STILL PENDING per §11)**; the file is in NO other phase's zone (verified); *[HISTORY — superseded by the grant, retained per the final-lock fix round]* the pre-grant refusal fallback was Slice 1 only + a Slice-2 re-scope round |
+| R1 | **compute.py zone/coordination** — the fold/combine decomposition sits outside our declared zone | Slice 0 lands ALONE first, tiny + pure-parameterisation, its own revertable commit with goldens+mutmut byte-neutrality proof; coordinator sign-off **GRANTED for the Slice-0 compute.py zone (2026-07-09, §11 ruling (b) — the originally-bundled sign-off request SPLIT: the Q7 rust/-zone ruling, gap #18, is now ALSO CLOSED — coordinator ruling 2026-07-08, re-confirmed 2026-07-09; the sweep-core rust/ edit zone = the NEW sweep_core module under rust/fno-math + the four trade_sim.rs pub(crate) visibility promotions, trading-core fenced OFF — see the §11 ruling (a) block for the verbatim ruling)**; the file is in NO other phase's zone (verified); *[HISTORY — superseded by the grant, retained per the final-lock fix round]* the pre-grant refusal fallback was Slice 1 only + a Slice-2 re-scope round |
 | R2 | **Float divergence in the ported folds** (Welford order, Neumaier downside sum, percentile lerp, −0.0 accumulation) | ONLY 9 f64 columns exist; summation-algorithm law (§4 — builtin-sum ports as Neumaier, the round-1 catch) + token-for-token port + per-expression review checklist; CPython-generated exact-value consts incl. compensation vectors; ≥10⁶-case differential harness — now with an EXECUTABLE lane (§7.10: seeded generator suite, 10⁴/PR + full-sweep on-branch gate + weekly); 64-mask dual-oracle burn-in with the MECHANISED-pure arm (flag-served rows in-window, round-2); PERMANENT finalist belt (every persisted finalist VALUE oracle-checked forever — batch arm: the served object; bounded arm: the rebuild PLUS the round-4 serve reconciliation, so stream-vs-rebuild serve nondeterminism on a finalist's rank-bearing columns is caught deterministically) + flag-inclusive sampled population spot-check (candidate-finalists compared too, round-4); twin-run gate before any flip |
 | R3 | **Sort-stability / signed-zero tie divergence** in p95/p5 | stable `sort_by` == stable `sorted` (never sort_unstable); −0.0 ties preserve input order in both; adversarial −0.0 property; NaN structurally excluded + `python_required` belt |
 | R4 | **Panic/SIGABRT** (`panic="abort"`) from unvalidated input, overflow, alloc | boundary validation in pure Result cores; i128 accumulators + envelope flags (no unchecked hot-loop arithmetic); the crate's existing no-unwrap/no-expect deny lints PLUS (round-4) a MODULE-scoped `#![deny(clippy::indexing_slicing)]` mandated on `sweep_core.rs` — the crate has NO indexing lint today (`lib.rs:30-35` denies unwrap/expect/print/dbg/unsafe only) and a crate-wide flip is NOT retrofit-able (trade_sim.rs has 17 direct-index sites, metrics.rs 3, both consumed UNCHANGED), so out-of-bounds indexing in the new index-heavy surfaces (CNS unranking, columnar emit) is mechanized-lint-netted at module scope (`get()`/checked accessors in all new code; a CI grep pin asserts the deny attribute is PRESENT in sweep_core.rs), review-convention + fuzz remaining the net for the pre-existing kernels; fuzz; chunk-capped allocations; whole-chunk precondition pre-detect in the Python wrapper; #1291 quarantine + #1295 breaker + the runbook kill-switch lever |
@@ -3012,6 +3069,19 @@ Sources: `sweep-parallel-integration-contracts.md` +
 (oracle side), `rust_trade_sim.py` (export seam), NEW
 `brutex/engine/sweep_core.py`, `rust/fno-math/src/{sweep_core.rs,
 metrics.rs seam,lib.rs}` + `python/fno_math/__init__.pyi`, tests.
+**PLUS (Verifier A round-1 fold): the `trade_sim.rs` VISIBILITY
+promotion** — `simulate_one_core`, `MaskWord`, `SweepColumns`, and
+`build_columns` are today MODULE-PRIVATE (Verifier A live-verified at
+`rust/fno-math/src/trade_sim.rs:544` (`trait MaskWord`), `:566`
+(`struct SweepColumns`), `:584` (`fn build_columns`), `:644`
+(`fn simulate_one_core`); re-verified line-exact against origin/main
+95955a71, 2026-07-09 — all four carry no `pub`), so the sibling
+`sweep_core` module cannot consume them as §6 Slice 2 requires; all
+four gain `pub(crate)` — a VISIBILITY-ONLY edit (zero body/signature
+change, TickVault-safe: fno-math is not the shared crate and the
+symbols stay crate-internal), mutation-neutral (visibility keywords
+are not a cargo-mutants mutation surface; the existing trade_sim
+mutant census is unchanged).
 `sweep_stream.py` gets EXACTLY ONE authorized Slice-2 edit (round-5 —
 this supersedes the previous "NOT needed in Slices 0–2" clause, which
 contradicted the §5 serve-reconciliation mandate): the additive
@@ -3029,12 +3099,29 @@ Ruling 5; our path ends at the existing `store.append(row)`/`flush()`);
 dashboard (P4), preflight/estimator (P1), nightly CLI (P6). Missing
 integration point ⇒ a thin clearly-marked adapter in OUR zone.
 
-**Coordinator rulings (grounding Q7 graft, bundled as one sign-off
-request):** (a) `rust/` is assigned to NO phase
-(gap #18) — this track claims `rust/fno-math` (sweep_core.rs + lib.rs +
-.pyi), trading-core explicitly fenced OFF, and #18's exit_reason
-kernel-record rider sequenced strictly AFTER this conversion — STILL
-PENDING; (b) the Slice-0 `metrics/compute.py` decomposition —
+**Coordinator rulings (grounding Q7 graft, originally bundled as one
+sign-off request, since SPLIT):** (a) the `rust/` zone (gap #18) —
+**CLOSED**. Ruling recorded verbatim:
+
+> "Gap #18 → CLOSED (coordinator ruling 2026-07-08, re-confirmed
+> 2026-07-09): the sweep-core session's rust/ edit zone = the NEW
+> sweep_core module under rust/fno-math PLUS the four pub(crate)
+> visibility promotions in trade_sim.rs. rust/trading-core stays
+> UNTOUCHED — the shared 52/60-vocab bit-identity contract with
+> TickVault is inviolable; any trading-core edit requires a separate
+> coordinator ruling + golden bit-identity re-verification. Slice-0
+> (pure-Python compute.py decomposition) separately granted and
+> unaffected."
+
+Scope note: the 'NEW sweep_core module under rust/fno-math' grant
+encompasses the module-integration edits the §11 zone list already
+enumerates — sweep_core.rs, the metrics.rs seam, lib.rs module
+registration, and python/fno_math/__init__.pyi stub additions — all
+within the fno-math crate; trading-core remains fenced OFF; #18's
+exit_reason kernel-record rider stays sequenced strictly AFTER this
+conversion.
+
+(b) the Slice-0 `metrics/compute.py` decomposition —
 **GRANTED (2026-07-09)** under three conditions carried into the Slice-0
 PR: behavior-identical + standalone commit + a pre-push diff-check vs PR
 #1295's branch (§6 Slice 0); sequencing rider: the twin-baseline capture
@@ -3078,7 +3165,7 @@ the required interaction meanwhile):**
 | #11 (MAJOR, P2) determinism re-run backend | **Helps** | our twin-run harness IS the scratch-root-recount shape; the OFF-arm spine stays fully alive behind the kill switch forever |
 | #12 (MAJOR, P2+P3) reason-returning gate twin | Orthogonal | gates stay Python at the SAME site; the phase-next gate-feed precondition recorded (§10) |
 | #16 (MINOR) snapshot re-key | Orthogonal | snapshot hashing untouched |
-| #18 rust/ zone unowned | **Action item** | the Q7 ruling above |
+| #18 rust/ zone unowned | **CLOSED** (coordinator ruling 2026-07-08, re-confirmed 2026-07-09) | the §11 ruling (a) block above (verbatim ruling + scope note): zone = the NEW sweep_core module under rust/fno-math + the four trade_sim.rs pub(crate) promotions; trading-core fenced OFF; the exit_reason kernel-record rider sequenced strictly AFTER this conversion |
 | #1/#2/#5/#6/#7/#13/#22 | Orthogonal | no file overlap; #1's top=1000 interacts with finalist projection + belt cost (both honest-noted, Q6 named) |
 
 **#1295/#1291 composition (verified from fetched diffs):** neither touches
@@ -4544,8 +4631,10 @@ register (13 items, coordinator severity-gate ruling 2026-07-09);
 
 Verification round remains OPEN: this lock is pending one verification
 pass re-checking the folded text against the sources; no implementation
-begins before that pass and the two pending rulings (F7/F8, gap-#18 (a))
-where their gates apply.
+begins before that pass and the pending rulings where their gates apply —
+gap-#18 (a) is since **CLOSED** (coordinator ruling 2026-07-08,
+re-confirmed 2026-07-09; §11 ruling (a) verbatim block), so **F7/F8 remain
+the only pending rulings**.
 
 ---
 
@@ -4627,7 +4716,10 @@ required before implementation. Register (FL-1..FL-12):
    still presented the pre-grant refusal fallback as live and implied the
    Q7 ruling was recorded with the Slice-0 grant. → R1 cell now carries the
    split explicitly: Slice-0 zone GRANTED 2026-07-09 (§11 ruling (b)); the
-   Q7 rust/-zone ruling (gap #18) STILL PENDING; the refusal-fallback
+   Q7 rust/-zone ruling (gap #18) STILL PENDING [since CLOSED — coordinator
+   ruling 2026-07-08, re-confirmed 2026-07-09; §11 ruling (a) verbatim
+   block; the R1 cell and both lock-round closing lines updated by the
+   checkpoint-1-pack-v2 fold]; the refusal-fallback
    clause marked [HISTORY — superseded by the grant].
 10. **FL-10 (MINOR — 7 file:line cites drifted at origin/main e8c708bd; the
     docs were authored at 665181f3, 13 commits behind):** re-anchored —
@@ -4665,8 +4757,10 @@ wording); this register supersedes them wherever they disagree.
 
 Verification round REMAINS OPEN (clean streak reset to 0 by FL-3/FL-4):
 one further pass re-checks THIS fix round against the sources; no
-implementation begins before that pass and the two pending rulings
-(F7/F8, gap-#18 (a)) where their gates apply.
+implementation begins before that pass and the pending rulings where
+their gates apply — gap-#18 (a) is since **CLOSED** (coordinator ruling
+2026-07-08, re-confirmed 2026-07-09; §11 ruling (a) verbatim block), so
+**F7/F8 remain the only pending rulings**.
 
 ## Pre-commit polish — resolution log (2026-07-09, pre-audit pass)
 

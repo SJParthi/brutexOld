@@ -1,0 +1,1 @@
+Raw measurement artifacts behind perf_RECONCILIATION.md / fit_results_pinned.json (grids + the scripts that produced them) — container caveat: the RATIOS are trustworthy, the ABSOLUTE timings are shared-vCPU sandbox numbers, NOT M4-Pro.

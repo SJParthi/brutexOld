@@ -15,12 +15,45 @@ no `brutex/` or `rust/` code is included.
 | `SPEC_RUST_SWEEP_CORE.md` | The conversion spec (scope, FFI surface, identity contract) |
 | `DESIGN_FINAL_RUST_SWEEP_CORE.md` | The synthesized final design (4 hostile-review rounds folded; §9/§9.1 hold the binding perf law) |
 | `baseline.md` | Measured sandbox baseline (per-mask / per-kept / per-enumerated cost decomposition) |
-| `combo_counts.md` | Grid combinatorics (its §3 wall-clock arithmetic is WITHDRAWN pending the on-branch rebuild — see DESIGN §9) |
-| `external_findings_verifier_b.md` | Verifier B's external findings (counterparty-relayed anchors labelled as such) |
+| `combo_counts.md` | Grid combinatorics (its §3 wall-clock table + §5 sanity-check are WITHDRAWN/SUPERSEDED for projections — banner in-file; the §1/§2 combinatorial counts stand) |
+| `external_findings_verifier_b.md` | Verifier B's external findings (counterparty-relayed anchors labelled as such; the day-count claims under its "BINDING" header are WITHDRAWN — banner in-file) |
 | `perf_RECONCILIATION.md` | The walk-rate discrepancy reconciliation (two-term fit; from `perf_reconcile/RECONCILIATION.md`) |
 | `fit_results_pinned.json` | Pinned-config fit results backing the reconciliation |
-| `reads/` | Codebase read notes (dedup, identity, parallel, rust, spine, tests) |
+| `perf_reconcile_raw/` | Raw measurement artifacts behind the reconciliation (grids + scripts; container caveat in its README) |
+| `reads/` | Codebase read notes (dedup, identity, parallel, rust, spine, tests; `reads/rust.md` §6's sibling-crate note is SUPERSEDED — the locked design is an in-crate module, banner in-file) |
 | `candidates/` | The three design candidates the final design was synthesized from (correctness / perfmax / riskmin) |
+
+## Withdrawal / supersession register (which figures, in which files)
+
+Binding perf numbers live in EXACTLY two places: **DESIGN_FINAL §9/§9.1**
+(the two-term cost law + the ratio band) and **`fit_results_pinned.json`**
+(the pinned-config fit cells). Everything below is withdrawn or superseded
+(Verifier A round-1 fold, 2026-07-09):
+
+- `combo_counts.md` §3 wall-clock table + §5 sanity-check — WITHDRAWN
+  (per-KEPT × per-ENUMERATED unit conflation; the "~0.58 ms/combo" anchor
+  and every day/hour cell derived from it). The §1/§2 combinatorial counts
+  stand.
+- `external_findings_verifier_b.md` day-count claims — "k≤6 ≈5.9d →
+  ~2–3.5d" (despite sitting under that file's "BINDING" header) and
+  "k≤6 ÷1.7–2.2 ≈ ~2–8 M4-days" — WITHDRAWN; ratio band only is binding.
+  Its "measured ~3.0–3.97×" rayon attribution is corrected in-file: own
+  committed data tops 3.77×; the ~3.97× endpoint is COUNTERPARTY-RELAYED.
+- `baseline.md` ≈1.26–1.28 ns/mask·bar "walk floor" — UNPINNED (free rayon)
+  AND count-only; qualified at every quote site, banned from campaign math
+  (DESIGN §9.1).
+- The "~14.0–14.5 ms @604k dense" S2 anchor — COUNTERPARTY-RELAYED,
+  illustrative only; the S2 gate's binding form is the RATIO vs the
+  same-fixture measured kernel sum (DESIGN §9.1 final-lock definition).
+- `reads/rust.md` §6 sibling-crate (`rust/sweep-core`) placement note —
+  SUPERSEDED by the locked in-crate design (DESIGN §1.1: a NEW `sweep_core`
+  module inside `rust/fno-math`).
+
+## PR ↔ MIGRATION crosswalk (stub)
+
+| PR | Branch | Content | MIGRATION.md |
+|---|---|---|---|
+| #1381 | `claude/rust-sweep-core` | Checkpoint-1 design/audit artifact pack (THIS directory; documentation-only) | Ledger entries PENDING — assigned by the implementation slices (Slice 0..4 land with their own DEC ids + MIGRATION.md entries; none exist yet) |
 
 ## Headline honesty (binding — see DESIGN §9.1)
 

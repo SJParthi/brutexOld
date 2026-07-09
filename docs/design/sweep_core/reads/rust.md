@@ -149,6 +149,18 @@ Length guards run FIRST (mismatch would otherwise OOB-index → SIGABRT); every 
 
 ## 6. Where a NEW sibling crate (rust/sweep-core) slots with least disturbance
 
+> **SUPERSEDED (Verifier A round-1 fold, 2026-07-09).** This section explored
+> the SIBLING-CRATE option; the LOCKED design is the IN-CRATE placement — a
+> NEW `sweep_core` module inside `rust/fno-math`
+> (`rust/fno-math/src/sweep_core.rs` + the metrics.rs seam + lib.rs module
+> registration + `python/fno_math/__init__.pyi` stub additions; DESIGN_FINAL
+> §1.1, gap-#18 coordinator ruling in DESIGN_FINAL §11). No `rust/sweep-core`
+> crate, no new wheel, no facade/_KERNEL_MODULES/ci.yml/mutation.yml crate
+> additions. Retained verbatim below as the option analysis; items 1–10 do NOT
+> apply as written (the conventions they catalogue — SIGABRT discipline,
+> digest, handshake idioms — remain accurate reference material, and §7's
+> gotchas remain fully binding).
+
 1. **Crate**: new independent root `rust/sweep-core` (there is NO cargo workspace — each crate is its own root with its own Cargo.lock; least disturbance = keep that pattern). Copy the conventions verbatim: edition 2024, `rust-version = "1.93.1"` (must equal ci.yml `RUST_VERSION`), `crate-type = ["cdylib","rlib"]`, the exact release profile (`panic="abort"`, `overflow-checks=true`, lto thin, cgu 1), `publish = false`, lib.rs lint header (`deny(unsafe_code)`, deny unwrap/expect/print in non-test).
 2. **trading-core dependency**: `trading-core = { path = "../trading-core" }` with DEFAULT features (pure core — pulls only `jaeckel`; keeps TickVault-parity semantics). Do NOT enable trading-core's `python` feature from sweep-core (two pyo3 extension modules must each own their own `#[pymodule]`; consuming the pure Rust API is the clean cut). trading-core itself is UNTOUCHED (DEC-SHARED-CORE-001 — bit-identical for TickVault; 400-case golden frozen).
 3. **pyo3**: `pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }` (unconditional, fno-math style, or feature-gated `python` trading-core style — the latter needed only if some native consumer will link the rlib).
