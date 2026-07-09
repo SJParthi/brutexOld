@@ -37,6 +37,7 @@ def _report(**overrides: Any) -> ResultsDepthReport:
         "tuples_skipped_current": 2,
         "tuples_missing_store": 0,
         "tuples_errored": 0,
+        "resilience_backfilled": 0,
         "combos_captured": 7,
         "combos_parity_failed": 0,
         "combos_zero_trades": 1,

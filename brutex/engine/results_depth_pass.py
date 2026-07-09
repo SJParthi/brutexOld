@@ -205,9 +205,11 @@ class ResultsDepthReport:
     """The pass's honest counters (design A.10 + additive resume/pool fields).
 
     ``tuples_processed`` counts FRESH sidecar builds; ``tuples_skipped_current``
-    the idempotent-resume skips (stamp matches the current store bytes);
-    ``tuples_missing_store`` grid tuples with no store on disk (not swept /
-    quarantined); ``tuples_errored`` per-tuple fence trips. Capture counters
+    the idempotent-resume skips (both the trio AND the resilience sidecar match
+    the current store bytes); ``resilience_backfilled`` the adoption-backfill
+    tuples (trio current but the resilience sidecar re-folded from disk — no
+    re-sim); ``tuples_missing_store`` grid tuples with no store on disk (not
+    swept / quarantined); ``tuples_errored`` per-tuple fence trips. Capture counters
     (``combos_*`` / ``vix_missing_trades``) cover FRESH builds only — a
     skipped tuple's captures were counted by the run that built them. Pool
     counters (``pool`` / ``gate_passers`` / ``excluded_*`` / ``parity_excluded``
@@ -218,6 +220,7 @@ class ResultsDepthReport:
     tuples_skipped_current: int
     tuples_missing_store: int
     tuples_errored: int
+    resilience_backfilled: int
     combos_captured: int
     combos_parity_failed: int
     combos_zero_trades: int
@@ -439,9 +442,7 @@ def _build_tuple_sidecars(
     write_resilience_sidecar(paths, resiliences, store_content_hash=store_hash)
 
 
-def _backfill_resilience(
-    paths: SidecarPaths, *, store_hash: str, start_equity_paisa: int
-) -> int:
+def _backfill_resilience(paths: SidecarPaths, *, store_hash: str, start_equity_paisa: int) -> int:
     """Adoption backfill — fold the resilience sidecar from the CURRENT trio.
 
     For a lake that already ran the depth pass BEFORE this feature (the trio is
@@ -673,11 +674,12 @@ def run_results_depth_pass(
             res_stamp = load_resilience_stamp(paths)
             res_current = res_stamp is not None and res_stamp.store_content_hash == store_hash
             if trio_current and res_current:
+                assert stamp is not None  # noqa: S101 - trio_current ⇒ stamp present
                 tallies.tuples_skipped_current += 1
                 _LOG.info(
                     "results_depth.tuple_skipped_current",
                     store=str(store_path),
-                    run_ids=stamp.run_ids if stamp is not None else 0,
+                    run_ids=stamp.run_ids,
                 )
             elif trio_current:
                 # ADOPTION BACKFILL: the trio is current but the resilience
@@ -798,6 +800,7 @@ def run_results_depth_pass(
         tuples_skipped_current=tallies.tuples_skipped_current,
         tuples_missing_store=tallies.tuples_missing_store,
         tuples_errored=tallies.tuples_errored,
+        resilience_backfilled=tallies.resilience_backfilled,
         combos_captured=tallies.combos_captured,
         combos_parity_failed=tallies.combos_parity_failed,
         combos_zero_trades=tallies.combos_zero_trades,

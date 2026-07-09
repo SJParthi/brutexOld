@@ -367,16 +367,23 @@ def _nearest_rank_from_hist(hist: Mapping[int, int], pct: int) -> int:
 
 
 class _TradeLike(Protocol):
-    """The minimal per-trade view the fold reads (live capture OR read-back row)."""
+    """The minimal per-trade view the fold reads (live capture OR read-back row).
+
+    Read-only properties (not bare attributes) so a FROZEN ``CapturedTrade`` /
+    ``_ReadTrade`` satisfies the structural protocol under ``mypy --strict``.
+    """
 
     @property
-    def pnl_paisa(self) -> int: ...
+    def pnl_paisa(self) -> int:
+        raise NotImplementedError  # pragma: no cover - Protocol stub, never executed
 
     @property
-    def entry_ts(self) -> datetime: ...
+    def entry_ts(self) -> datetime:  # tz-aware UTC
+        raise NotImplementedError  # pragma: no cover - Protocol stub, never executed
 
     @property
-    def exit_ts(self) -> datetime: ...
+    def exit_ts(self) -> datetime:
+        raise NotImplementedError  # pragma: no cover - Protocol stub, never executed
 
 
 @dataclass(slots=True)
@@ -522,6 +529,10 @@ def fold_resilience(
         worst_pnl = worst_len = worst_start_us = worst_end_us = None
         worst_pct = None
 
+    worst_month: str | None
+    worst_week: str | None
+    worst_month_count: int | None
+    worst_week_count: int | None
     if month_losses:
         losses_by_month_json = _dumps(month_losses)
         worst_month, worst_month_count = _worst_bucket(month_losses)
@@ -615,8 +626,8 @@ def write_resilience_sidecar(
     columns: dict[str, list[object]] = {name: [] for name, _ in RESILIENCE_COLUMNS}
     for record in ordered:
         wire = record.to_record()
-        for name in columns:
-            columns[name].append(wire[name])
+        for name, column in columns.items():
+            column.append(wire[name])
 
     parquet_bytes = _render_resilience_bytes(columns)
     paths.resilience.parent.mkdir(parents=True, exist_ok=True)
@@ -666,9 +677,7 @@ def load_resilience_stamp(
     """
 
     def _invalid(reason: str) -> None:
-        _LOG.warning(
-            "resilience.stamp_invalid", stamp=str(paths.resilience_stamp), reason=reason
-        )
+        _LOG.warning("resilience.stamp_invalid", stamp=str(paths.resilience_stamp), reason=reason)
 
     try:
         raw = paths.resilience_stamp.read_bytes()
@@ -780,12 +789,12 @@ def read_captured_trades(trades_path: Path) -> dict[str, list[_TradeLike]]:
     by_run: dict[str, list[tuple[int, _TradeLike]]] = {}
     for row in _read_records(trades_path):
         run_id = str(row["run_id"])
-        trade = _ReadTrade(
-            pnl_paisa=int(row["pnl_paisa"]),
-            entry_ts=_EPOCH_UTC + timedelta(microseconds=int(row["entry_ts_us"])),
-            exit_ts=_EPOCH_UTC + timedelta(microseconds=int(row["exit_ts_us"])),
+        trade: _TradeLike = _ReadTrade(
+            pnl_paisa=_req_int(row["pnl_paisa"]),
+            entry_ts=_EPOCH_UTC + timedelta(microseconds=_req_int(row["entry_ts_us"])),
+            exit_ts=_EPOCH_UTC + timedelta(microseconds=_req_int(row["exit_ts_us"])),
         )
-        by_run.setdefault(run_id, []).append((int(row["trade_seq"]), trade))
+        by_run.setdefault(run_id, []).append((_req_int(row["trade_seq"]), trade))
     return {
         run_id: [trade for _seq, trade in sorted(rows, key=lambda item: item[0])]
         for run_id, rows in by_run.items()
