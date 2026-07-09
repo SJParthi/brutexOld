@@ -3341,7 +3341,23 @@ def build_app(
                 _select_bulk_targets("index") + _select_bulk_targets("stock")
             )
 
-        selected, underlying_kinds = await _run_lake(_resolve_direct_selection)
+        try:
+            selected, underlying_kinds = await _run_lake(_resolve_direct_selection)
+        except RegistryError as exc:
+            # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 review fold: offloading this
+            # resolution WIDENED the concurrency window on ``RegistryStore.open``
+            # — open is write-on-open (schema DDL + an ``INSERT OR REPLACE INTO
+            # schema_meta`` stamp), so two simultaneous launch clicks that both
+            # reach the open can now race a DuckDB Transaction/Constraint
+            # exception → ``RegistryError`` (a BruteXError, NOT a ValueError),
+            # which pre-offload the on-loop serialization made unreachable.
+            # An honest 503 "busy — retry" instead of a misleading 500 (the
+            # registry read routes' RegistryError-degrade precedent; the click
+            # is retryable — nothing was launched, nothing was corrupted).
+            raise HTTPException(
+                status_code=503,
+                detail=f"registry busy — retry (concurrent open on registry.duckdb): {exc}",
+            ) from exc
         if not selected:
             raise HTTPException(
                 status_code=400,

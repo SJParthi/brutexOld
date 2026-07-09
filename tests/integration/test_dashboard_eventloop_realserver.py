@@ -246,24 +246,48 @@ def test_sweep_progress_stalled_read_keeps_loop_free_and_is_bounded(
         return {"state": "running", "running": True, "enumerated": 999}
 
     monkeypatch.setattr("brutex.engine.sweep_supervisor.read_progress", _stalled_read)
+
+    # TRULY CONCURRENT pair (review fold): the sweep-progress request AND an
+    # /api/v1/state poll are BOTH in flight during the first wedged OWNER
+    # window. This is the discriminating shape — the 0.5 s deadline alone
+    # would bound a SEQUENTIAL sweep-progress probe even if the view ran ON
+    # the loop; only the run_in_threadpool offload keeps a concurrent request
+    # fast while the owner is inside its deadline wait.
+    timings: dict[str, Any] = {}
+
+    def _timed_get(name: str, path: str) -> None:
+        start = time.perf_counter()
+        try:
+            status, body = _get(server.port, path, timeout=_STALL_S + 2.0)
+            timings[name] = (status, time.perf_counter() - start, body)
+        except Exception as exc:  # pragma: no cover - only on a hung/failed offload
+            timings[name] = ("error", repr(exc), b"")
+
+    progress_thread = threading.Thread(
+        target=_timed_get, args=("progress", "/api/v1/sweep-progress"), daemon=True
+    )
+    state_thread = threading.Thread(target=_timed_get, args=("state", "/api/v1/state"), daemon=True)
     try:
+        progress_thread.start()
+        assert entered.wait(timeout=_STALL_S + 2.0), "the stalled read was never entered"
+        # The owner is now INSIDE its deadline window on the wedged read —
+        # fire the concurrent poll while both are in flight.
+        state_thread.start()
+        progress_thread.join(timeout=_STALL_S + 4.0)
+        state_thread.join(timeout=_STALL_S + 4.0)
+        assert not progress_thread.is_alive() and not state_thread.is_alive()
         # (b) the route itself is BOUNDED while the read is wedged: the owner
         # waits at most the 0.5 s refresh deadline, then serves the honest
         # cold fall-through (idle — nothing memoised yet), never the stall.
-        start = time.perf_counter()
-        status, body = _get(server.port, "/api/v1/sweep-progress", timeout=_STALL_S + 2.0)
-        blocked_elapsed = time.perf_counter() - start
+        status, blocked_elapsed, body = timings["progress"]
         assert status == 200
-        assert entered.wait(timeout=1.0), "the stalled read was never entered"
         assert blocked_elapsed < _POLL_BUDGET_S, (
             f"/api/v1/sweep-progress took {blocked_elapsed * 1000:.0f}ms on a wedged "
             "read — the deadline-guarded cache bound is broken (regression)."
         )
         assert b'"idle"' in body  # honest cold-wedge fall-through, never fabricated
-        # (a) a concurrent poll stays fast while the abandoned daemon is wedged.
-        start = time.perf_counter()
-        status, _ = _get(server.port, "/api/v1/state", timeout=_STALL_S + 2.0)
-        elapsed = time.perf_counter() - start
+        # (a) the CONCURRENT poll stayed fast while the owner window was open.
+        status, elapsed, _ = timings["state"]
         assert status == 200
         assert elapsed < _POLL_BUDGET_S, (
             f"/api/v1/state took {elapsed * 1000:.0f}ms while the sweep-progress read "
@@ -272,6 +296,8 @@ def test_sweep_progress_stalled_read_keeps_loop_free_and_is_bounded(
         )
     finally:
         release.set()
+        progress_thread.join(timeout=10.0)
+        state_thread.join(timeout=10.0)
     # Recovery: the daemon's late return self-heals the memo; the next polls
     # (past the 1 s TTL) serve the REAL file payload, provenance-stamped.
     deadline = time.time() + 10.0
@@ -285,7 +311,11 @@ def test_sweep_progress_stalled_read_keeps_loop_free_and_is_bounded(
             break
         time.sleep(0.2)
     assert healed is not None, "the memo never self-healed after the volume recovered"
-    assert healed["progress_source"] in ("live", "cached")
+    # "unverified" is admitted too (review fold): the healed payload can be
+    # served from the memo in the microsecond window where the late daemon has
+    # committed but a fresh owner refresh is still in flight — stamped
+    # honestly, not a failure.
+    assert healed["progress_source"] in ("live", "cached", "unverified")
 
 
 # ── DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 — the pull-LAUNCH routes' resolver reads ──
