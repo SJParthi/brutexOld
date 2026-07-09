@@ -276,7 +276,23 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
-    timeout-minutes: 75
+    # 75 -> 90 (2026-07-09, PR #1286 run 29016020067): the job was killed at
+    # 61:05 of execution ("The operation was canceled." mid step 10, EVERY
+    # executed gate green at 100.00% — pytest+coverage 48:57 SUCCESS, smoke +
+    # red-team SUCCESS, strict per-module loop passing until the kill) — this
+    # time NOT this job's own wall (started 12:01:54Z, 75-min wall 13:16:54Z,
+    # cancelled 13:02:59Z) and NOT a coverage failure: the SAME ~13:02-13:04Z
+    # window ALSO cancelled main run 29018009343's "Typos + codespell" just
+    # 5m23s into its 15-min budget — a job-scoped runner-infra cancellation,
+    # outside our control. The RAISE addresses the real headroom collapse a
+    # clean re-run faces: the SAME PR's green run 29005724534 measured 69:18
+    # execution (92% of the 75-min wall — pytest+coverage 48:44 + strict
+    # per-module gate 17:46) and main's green run 29018009343 measured 66:43;
+    # the suite legitimately grew past #1230's measured ~60:00 (the
+    # #1594/#1614/#1616/#1630 merges' new suites). 90 gives evidenced ~30%
+    # headroom over the measured 69:18; wall-clock budget only — no gate is
+    # weakened. Continues the 15->25->40->60->75 ratchet.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
