@@ -395,7 +395,9 @@ class TestCompareDailyFreshness:
         # Midnight IST (18:30 UTC prior day) → the 09:15-IST session open (03:45 UTC).
         shifted = df_1day.with_columns(pl.col("ts_utc") + timedelta(hours=9, minutes=15))
         assert compare_daily_freshness(df_1m, shifted, before=_D3) == "stale"
-        from brutex.dashboard.movers_snapshot import _daily_stored_is_stale
+        from brutex.dashboard.movers_snapshot import (
+            _daily_stored_is_stale,  # pyright: ignore[reportPrivateUsage]  — whitebox divergence pin
+        )
         from brutex.data.spot_daily_resample import frame_to_candle_bars, resample_1m_to_daily
 
         stored_bars = frame_to_candle_bars(shifted, absent_open_interest=None)
@@ -530,14 +532,22 @@ class TestLakeDailyFreshnessVerdicts:
         ``before=_D3`` (D2 complete → the stored table is provably behind)."""
         sink = _seed_lake_1m_days(tmp_path, (_D1, _D2))
         _write_daily_derived(tmp_path, sink, before=_D2)
-        common = {
-            "exchange": "NSE",
-            "segment": "INDEX",
-            "symbols": ["NIFTY"],
-            "intervals": ["1day"],
-        }
-        fresh = tf_autoderive.lake_derived_freshness_verdicts(tmp_path, daily_before=_D2, **common)
-        stale = tf_autoderive.lake_derived_freshness_verdicts(tmp_path, daily_before=_D3, **common)
+        fresh = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D2,
+        )
+        stale = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D3,
+        )
         assert fresh == {("NIFTY", "1day"): "fresh"}
         assert stale == {("NIFTY", "1day"): "stale"}
 
@@ -623,20 +633,27 @@ class TestLakeDailyFreshnessVerdicts:
             interval="1day",
             bars=[*resample_1m_to_daily(df_1m, before=_D3), vendor_d2],
         )
-        common = {
-            "exchange": "NSE",
-            "segment": "INDEX",
-            "symbols": ["NIFTY"],
-            "intervals": ["1day"],
-            "daily_before": _D3,
-        }
-        first = tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common)
+        first = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D3,
+        )
         assert first == {("NIFTY", "1day"): "fresh"}
         # The prebuild remedy (a latest-wins MERGE that never deletes) leaves the
         # vendor row in place — the verdict must remain consistent, never a
         # refusal loop.
         _write_daily_derived(tmp_path, sink, before=_D3)
-        again = tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common)
+        again = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D3,
+        )
         assert again == {("NIFTY", "1day"): "fresh"}
         assert preflight_derived_freshness(again).ok
 
@@ -670,19 +687,22 @@ class TestLakeDailyFreshnessVerdicts:
             dense_symbol=True,
         )
         monkeypatch.setattr(tf_autoderive, "_now_ist", lambda: post_close)
-        common = {
-            "exchange": "NSE",
-            "segment": "INDEX",
-            "symbols": ["NIFTY"],
-            "intervals": ["1day"],
-        }
-        assert tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common) == {
-            ("NIFTY", "1day"): "fresh"
-        }
+        assert tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+        ) == {("NIFTY", "1day"): "fresh"}
         # The same lake under the pure clock law (an injected _D3 cutoff — the
         # pre-fix gate behavior) is stale: the grounded mirror is load-bearing.
         clock_only = tf_autoderive.lake_derived_freshness_verdicts(
-            tmp_path, daily_before=_D3, **common
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D3,
         )
         assert clock_only == {("NIFTY", "1day"): "stale"}
 
@@ -704,15 +724,13 @@ class TestLakeDailyFreshnessVerdicts:
         )
         monkeypatch.setattr(tf_autoderive, "_now_ist", lambda: post_close)
         monkeypatch.setenv("BRUTEX_DAILY_CUTOFF_GROUNDED", "0")
-        common = {
-            "exchange": "NSE",
-            "segment": "INDEX",
-            "symbols": ["NIFTY"],
-            "intervals": ["1day"],
-        }
-        assert tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common) == {
-            ("NIFTY", "1day"): "stale"
-        }
+        assert tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+        ) == {("NIFTY", "1day"): "stale"}
         materialize_lake_timeframes(
             lake_root=tmp_path,
             exchange="NSE",
@@ -724,9 +742,13 @@ class TestLakeDailyFreshnessVerdicts:
             daily_cutoff_now=post_close,
             dense_symbol=True,
         )
-        assert tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common) == {
-            ("NIFTY", "1day"): "fresh"
-        }
+        assert tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+        ) == {("NIFTY", "1day"): "fresh"}
 
     def test_grounded_mirror_never_excuses_value_drift(self, tmp_path, monkeypatch) -> None:
         """Fail-closed teeth on the production grounded path: a VALUE drift on a
@@ -829,12 +851,20 @@ class TestLakeDailyFreshnessVerdicts:
         sink = _seed_lake_1m_days(tmp_path, (_D1,))
         _write_derived(tmp_path, sink)  # fresh 5minute
         _write_daily_derived(tmp_path, sink, before=_D2)
-        common = {"exchange": "NSE", "segment": "INDEX", "symbols": ["NIFTY"]}
         only = tf_autoderive.lake_derived_freshness_verdicts(
-            tmp_path, intervals=["5minute"], **common
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["5minute"],
         )
         mixed = tf_autoderive.lake_derived_freshness_verdicts(
-            tmp_path, intervals=["5minute", "1day"], daily_before=_D2, **common
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["5minute", "1day"],
+            daily_before=_D2,
         )
         assert only == {("NIFTY", "5minute"): "fresh"}
         assert {k: v for k, v in mixed.items() if k[1] != "1day"} == only

@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1623 —
+_Last updated: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1631 —
 the `/movers` stored-read FRESHNESS GUARD: a prebuilt stored TF / `1day` day
 slice is now VERIFIED against a fresh re-derive of the raw 1-minute base
 before it is served (the CUT stored frame — the exact served bytes — judged
@@ -1683,7 +1683,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1623** — the
+- **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1631** — the
   `/movers` stored-read FRESHNESS GUARD: every prebuilt stored TF / `1day` day slice is verified against a fresh
   re-derive of the raw 1-minute base before it is served (the NEW pure `stored_day_frame_is_stale` delegating to the
   ONE existing `compare_derived_freshness`; the 1day branch value-plane-compares against the canonical
@@ -3973,7 +3973,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/movers-stored-freshness-guard`
-  (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1623 — the `/movers`
+  (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1631 — the `/movers`
   stored-read freshness guard: a stale prebuilt TF / `1day` day slice is
   detected against the raw 1-minute base and falls back to the 1-minute
   derive, warned + counted — reachability audited to exactly the CLI
