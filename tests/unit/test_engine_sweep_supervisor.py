@@ -57,11 +57,14 @@ from brutex.engine.sweep_progress import (
 from brutex.engine.sweep_run import ComboDedup, SweepComboError
 from brutex.engine.sweep_supervisor import (
     DEFAULT_WORKER_NAME,
+    PROGRESS_WALL_TIME_KEY,
+    SWEEP_PROGRESS_MAX_AGE_S,
     SupervisedGridSummary,
     SweepGuards,
     _drive_watchdog,
     grid_identity,
     idle_progress,
+    progress_bridge_stale,
     publish_progress,
     read_progress,
     run_supervised_grid,
@@ -1223,6 +1226,76 @@ class TestProgressBridge:
         first = idle_progress()
         first["state"] = "mutated"
         assert idle_progress()["state"] == "idle"
+
+    def test_publish_stamps_wall_time(self, tmp_path: Path) -> None:
+        """The bridge file carries the wall-clock stamp the staleness decay keys on.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 review fold (fails-before): the file had NO
+        freshness signal, so a SIGKILLed writer's frozen ``running=True`` claim was
+        indistinguishable from a live run forever.
+        """
+        progress = SweepProgress()
+        progress.start(enumerated=10)
+        path = tmp_path / "progress.json"
+        publish_progress(path, progress.snapshot(), wall_time=lambda: 1234.5)
+        out = read_progress(path)
+        assert out[PROGRESS_WALL_TIME_KEY] == 1234.5
+        # Default clock: a real wall stamp lands too.
+        publish_progress(path, progress.snapshot())
+        assert isinstance(read_progress(path)[PROGRESS_WALL_TIME_KEY], float)
+
+
+class TestProgressBridgeStale:
+    """``progress_bridge_stale`` — the #1593 dead-evidence decay gate."""
+
+    def _running(self, **extra: object) -> dict[str, object]:
+        return {"state": "running", "running": True, **extra}
+
+    def test_fresh_running_is_not_stale(self) -> None:
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 1000.0})
+        assert progress_bridge_stale(parsed, now=lambda: 1010.0) is False
+
+    def test_running_past_max_age_is_stale(self) -> None:
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 1000.0})
+        now = 1000.0 + SWEEP_PROGRESS_MAX_AGE_S + 1.0
+        assert progress_bridge_stale(parsed, now=lambda: now) is True
+
+    def test_running_exactly_at_max_age_is_not_stale(self) -> None:
+        """Boundary law: strictly-greater-than decays (the #1534 strict-`>` posture)."""
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 1000.0})
+        now = 1000.0 + SWEEP_PROGRESS_MAX_AGE_S
+        assert progress_bridge_stale(parsed, now=lambda: now) is False
+
+    def test_non_running_never_stale(self) -> None:
+        for state in ("done", "cancelled", "error", "idle"):
+            parsed = {
+                "state": state,
+                "running": False,
+                PROGRESS_WALL_TIME_KEY: 0.0,  # ancient — still never decays
+            }
+            assert progress_bridge_stale(parsed, now=lambda: 1e12) is False
+
+    def test_missing_stamp_on_running_is_stale(self) -> None:
+        assert progress_bridge_stale(self._running()) is True
+
+    def test_junk_stamp_on_running_is_stale(self) -> None:
+        for junk in ("soon", None, True, [1.0]):
+            assert progress_bridge_stale(self._running(**{PROGRESS_WALL_TIME_KEY: junk})) is True
+
+    def test_non_finite_age_is_stale(self) -> None:
+        for stamp in (float("nan"), float("-inf")):
+            parsed = self._running(**{PROGRESS_WALL_TIME_KEY: stamp})
+            assert progress_bridge_stale(parsed, now=lambda: 1000.0) is True
+
+    def test_future_stamp_reads_fresh(self) -> None:
+        """Clock skew into the future biases fresh (age < 0 — the honest bias)."""
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 2000.0})
+        assert progress_bridge_stale(parsed, now=lambda: 1000.0) is False
+
+    def test_custom_max_age(self) -> None:
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 1000.0})
+        assert progress_bridge_stale(parsed, now=lambda: 1002.0, max_age_s=1.0) is True
+        assert progress_bridge_stale(parsed, now=lambda: 1002.0, max_age_s=5.0) is False
 
 
 # ────── dataclasses ──────

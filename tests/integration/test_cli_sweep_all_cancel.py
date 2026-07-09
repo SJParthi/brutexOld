@@ -186,3 +186,35 @@ def test_mid_run_cancel_exits_7_consumes_sidecar_and_skips_post_grid(
     assert not cancel_sidecar_path(results_root).exists()
     # The clean summary line never printed (the cancel returned before it).
     assert "sweep-all done" not in out
+
+
+def test_parallel_run_publishes_the_progress_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The PARALLEL arm feeds the /api/v1/sweep-progress file bridge (review fold).
+
+    Fails-before: ``cmd_sweep_all`` wired ``on_progress=_on_progress`` (→
+    ``publish_progress``) on the SEQUENTIAL arm only; ``run_parallel_grid`` took
+    no hook, so the flagship multi-day parallel sweep never wrote
+    ``<results_root>/progress/sweep-progress.json`` — the dashboard's Stop
+    button (keyed on the bridge's ``running``) never showed. A real 2-worker
+    spawn run must now land the bridge file with the honest ``done`` terminal
+    AND the ``wall_time`` staleness stamp (the SIGKILL phantom decay's key).
+    """
+    import json
+
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "2")  # explicit env → parallel, verbatim
+
+    rc = _sweep_all(lake_root, catalog_path, results_root)
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "parallel mode" in out  # the PARALLEL arm actually ran
+    bridge = results_root / "progress" / "sweep-progress.json"
+    assert bridge.exists(), "the parallel arm must publish the progress bridge"
+    parsed = json.loads(bridge.read_text(encoding="utf-8"))
+    assert parsed["state"] == "done"
+    assert parsed["running"] is False
+    assert isinstance(parsed["wall_time"], float)

@@ -6725,6 +6725,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     guards=guards,
                     workers=workers,
                     should_stop=_should_stop,
+                    # Feed the cross-process /api/v1/sweep-progress file bridge
+                    # on the PRODUCTION parallel path too (start/apply/
+                    # cancelled/finish/fail ticks) — previously only the
+                    # sequential arm published, so the dashboard never saw a
+                    # parallel sweep as running and the Stop button stayed
+                    # hidden on the flagship multi-day surface
+                    # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold).
+                    on_progress=_on_progress,
                 )
             else:
                 result = run_supervised_grid(

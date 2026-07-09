@@ -112,6 +112,26 @@ def test_pull_progress_cancelling_true_when_token_set(
     assert snap["cancelling"] is True
 
 
+def test_pull_progress_carries_job_kind(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ADDITIVE ``job_kind`` key (review fold — the on-load Stop-button attach).
+
+    ``null`` when idle; the running kind otherwise — the /universe page-load
+    attach gates on ``job_kind === 'pull'`` so a running dashboard SWEEP on the
+    shared single-flight job never fabricates a pull watch.
+    """
+    assert client.get("/api/v1/universe/pull-progress").json()["job_kind"] is None
+    monkeypatch.setattr(
+        BackgroundPullJob, "running_job_kind", property(lambda _self: JOB_KIND_PULL)
+    )
+    assert client.get("/api/v1/universe/pull-progress").json()["job_kind"] == "pull"
+    monkeypatch.setattr(
+        BackgroundPullJob, "running_job_kind", property(lambda _self: JOB_KIND_SWEEP)
+    )
+    assert client.get("/api/v1/universe/pull-progress").json()["job_kind"] == "sweep"
+
+
 # ── POST /api/v1/pull/cancel ──────────────────────────────────────────────────
 
 
@@ -141,7 +161,9 @@ def test_pull_cancel_ignores_a_running_sweep(
 # ── POST /api/v1/sweep/cancel ─────────────────────────────────────────────────
 
 
-def test_sweep_cancel_in_process(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sweep_cancel_in_process(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _force_running(monkeypatch, kind=JOB_KIND_SWEEP)
     written: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -152,6 +174,13 @@ def test_sweep_cancel_in_process(client: TestClient, monkeypatch: pytest.MonkeyP
     assert resp.status_code == 200
     assert resp.json() == {"cancelling": True, "target": "in-process"}
     assert written["source"] == "route"
+    # The sidecar ROOT law (review fold — the detached-arm twin of the
+    # fabricated-ack class): the dashboard's in-process sweep runs
+    # cmd_sweep_all(out_root=default_results_root(lake)) and probes
+    # <lake>/sweeps/.sweep_cancel.json at every tuple boundary, so the route
+    # MUST write there — a repointed root would ack a cancel the run never sees.
+    lake = store.path.parent  # type: ignore[union-attr]
+    assert written["root"] == lake / "sweeps"
 
 
 def test_sweep_cancel_detached_running(
@@ -292,6 +321,87 @@ def test_sweep_cancel_nothing_running(client: TestClient, monkeypatch: pytest.Mo
     resp = client.post("/api/v1/sweep/cancel")
     assert resp.status_code == 200
     assert resp.json() == {"cancelling": False}
+
+
+def _publish_running_bridge(lake: Path, *, wall_time: float | None = None) -> None:
+    """Publish a RUNNING progress snapshot at the DEFAULT-root bridge file."""
+    from brutex.dashboard.sweep_runner import default_results_root, sweep_progress_file
+    from brutex.engine.sweep_progress import SweepProgress
+    from brutex.engine.sweep_supervisor import publish_progress
+
+    progress = SweepProgress()
+    progress.start(enumerated=10, detail="cli sweep")
+    kwargs: dict[str, Any] = {}
+    if wall_time is not None:
+        kwargs["wall_time"] = lambda: wall_time
+    publish_progress(sweep_progress_file(default_results_root(lake)), progress.snapshot(), **kwargs)
+
+
+def test_sweep_cancel_bridge_visible_cli_sweep(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FRESH running default-root bridge (a terminal CLI sweep) IS cancellable.
+
+    Review fold (fails-before — the false-refusal class): a sequential
+    default-root ``brutex sweep-all`` is visible ONLY through the progress file
+    bridge — exactly what the dashboard Stop button keys on — yet the route
+    resolved neither an in-process job nor a launch state and answered
+    "No running sweep to cancel." while a sidecar at the default root WOULD
+    cancel that run (``cmd_sweep_all`` probes it at every tuple boundary).
+    """
+    monkeypatch.setattr("brutex.dashboard.launch_button.read_launch_state", lambda _lake: None)
+    lake = store.path.parent  # type: ignore[union-attr]
+    _publish_running_bridge(lake)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "brutex.engine.sweep_cancel.request_cancel",
+        lambda root, *, source: captured.update(root=root, source=source) or root,
+    )
+    resp = client.post("/api/v1/sweep/cancel")
+    assert resp.status_code == 200
+    assert resp.json() == {"cancelling": True, "target": "bridge"}
+    assert captured["root"] == lake / "sweeps"  # the root the CLI run probes
+    assert captured["source"] == "route-bridge"
+
+
+def test_sweep_cancel_stale_bridge_is_honest_false(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A STALE running bridge (SIGKILLed writer) is dead evidence → no fabricated ack.
+
+    Mirrors the Stop button's own decayed view: past ``SWEEP_PROGRESS_MAX_AGE_S``
+    the frozen ``running=True`` file is ≡ absent, so the route answers an honest
+    ``{"cancelling": false}`` and writes NO sidecar (a stray request must never
+    pre-poison the next launch).
+    """
+    from brutex.engine.sweep_supervisor import SWEEP_PROGRESS_MAX_AGE_S
+
+    monkeypatch.setattr("brutex.dashboard.launch_button.read_launch_state", lambda _lake: None)
+    lake = store.path.parent  # type: ignore[union-attr]
+    _publish_running_bridge(lake, wall_time=time.time() - SWEEP_PROGRESS_MAX_AGE_S - 60.0)
+
+    def _never(_root: Path, *, source: str) -> Path:
+        raise AssertionError("a stale bridge must never write a cancel sidecar")
+
+    monkeypatch.setattr("brutex.engine.sweep_cancel.request_cancel", _never)
+    resp = client.post("/api/v1/sweep/cancel")
+    assert resp.status_code == 200
+    assert resp.json() == {"cancelling": False}
+
+
+def test_universe_template_carries_the_on_load_pull_attach(client: TestClient) -> None:
+    """The /universe page probes pull-progress ON LOAD and gates on the pull kind.
+
+    Review fold (honest substring-presence pin — the repo's no-headless-JS
+    envelope): a freshly-opened page during a multi-hour pull previously had NO
+    Stop control until a Run re-click (setBulkDisabled fired only from
+    startAndPoll).
+    """
+    html = client.get("/universe").text
+    assert "pullAttachIfRunning" in html
+    assert "s.job_kind !== 'pull'" in html  # the sweep-on-shared-job gate
+    # The scoped honesty wording (review fold — the cancel-blind spans).
+    assert "metadata phase is honored only at the next phase boundary" in html.lower()
 
 
 def test_sweep_cancel_no_lake_configured() -> None:

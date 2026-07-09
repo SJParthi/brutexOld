@@ -795,15 +795,28 @@ class DashboardState:
 
         A missing / malformed progress file falls through to (2)/(3) — never an
         error (delegated to :func:`brutex.engine.sweep_supervisor.read_progress`,
-        which returns the idle view on any read/parse failure).
+        which returns the idle view on any read/parse failure). A file whose
+        ``running=True`` claim is STALE — its ``wall_time`` stamp older than
+        :data:`~brutex.engine.sweep_supervisor.SWEEP_PROGRESS_MAX_AGE_S` (or
+        missing) — is DEAD EVIDENCE ≡ absent (the #1593 rate-bridge posture):
+        a SIGKILLed/power-lost ``brutex sweep-all`` can never leave a phantom
+        "running" view (+ Stop button) on the dashboard forever
+        (DEC-JOB-COOPERATIVE-CANCEL-001 review fold). Terminal files
+        (done/cancelled/error) never decay — a finished sweep's record stands.
         """
-        from brutex.engine.sweep_supervisor import idle_progress, read_progress
+        from brutex.engine.sweep_supervisor import (
+            idle_progress,
+            progress_bridge_stale,
+            read_progress,
+        )
 
         with self._lock:
             path = self.sweep_progress_path
             in_process = self.sweep_progress
         if path is not None and path.exists():
-            return read_progress(path)
+            parsed = read_progress(path)
+            if not progress_bridge_stale(parsed):
+                return parsed
         if in_process is not None:
             return dict(in_process)
         return idle_progress()
@@ -4587,6 +4600,12 @@ def build_app(
         # "cancelling — finishing current window…" until the job settles. Every
         # pre-existing snapshot key is unchanged.
         snap["cancelling"] = _pull_job.cancel_requested()
+        # ADDITIVE job kind (review fold — the on-load Stop-button attach):
+        # "pull"/"sweep" while the shared single-flight job runs, null when
+        # idle, so a freshly-loaded /universe attaches its watch (and shows the
+        # Stop button) ONLY to a PULL-kind run — a running dashboard SWEEP on
+        # the same job never fabricates a pull watch.
+        snap["job_kind"] = _pull_job.running_job_kind
         return JSONResponse(snap)
 
     @app.post("/api/v1/pull/cancel")
@@ -4605,13 +4624,23 @@ def build_app(
         cancel seam in its spine, so it starts ``cancellable=False`` and this
         route returns an honest ``{"cancelling": false}`` for it — never a
         fabricated true the run could not observe. HONEST latency (Golden Rule
-        #10): cooperative — the in-flight window's fetch completes, the async
+        #10): cooperative — WITHIN a fetch phase the stop lands at the window
+        boundary: the in-flight window's fetch completes, the async
         pipeline's already-queued tail writes DRAIN (each bounded by the 90 s
         write deadline), and the ledger persists first; the F&O post-pull tail
         (the O(pulled-scope) L2 heal + the FULL Greeks-enrichment pass) is
         WITHHELD on cancel (combined-PR fix round 2 — the note reads "withheld
         (cancelled) — re-attempted next pull"; the next pull heals + re-enriches,
-        nothing is lost). Then the job settles via the NORMAL path as an honest
+        nothing is lost). CANCEL-BLIND SPANS (review fold — the pipeline probes
+        only BETWEEN phases): a Stop acked mid-METADATA (~750 underlyings ×
+        ``get_expiries``+``get_contracts`` at the paced vendor rate — minutes)
+        is observed only once that WHOLE phase settles (its spine has no
+        interior probe), and a Stop arriving after the PREBUILD stage launches
+        is NOT observed by the prebuild at all (the pipeline's last probe runs
+        before it starts, so the prebuild + movers warm run to completion and
+        the pipeline settles un-attributed). Threading per-underlying /
+        per-symbol probes into those two spans is a NAMED follow-up, not
+        claimed. Then the job settles via the NORMAL path as an honest
         amber partial ("(cancelled)" stop) — never a red ✕, never a fabricated
         green; the durable ledger makes the next pull resume exactly the
         unsettled remainder.
@@ -4626,9 +4655,16 @@ def build_app(
         DEC-JOB-COOPERATIVE-CANCEL-001 (the Stop button beside 🚀 Run Sweep).
         Writes the DURABLE cancel sidecar ``<results_root>/.sweep_cancel.json``
         the engine probes at the tuple boundary — ONE mechanism covering the
-        dashboard's in-process sweep (``target: "in-process"``) AND a DETACHED
-        launch-page / CLI sweep whose live pid the launch state names
-        (``target: "detached"``). Nothing running ⇒ ``{"cancelling": false}``
+        dashboard's in-process sweep (``target: "in-process"``), a DETACHED
+        launch-page sweep whose live pid the launch state names
+        (``target: "detached"``), AND a terminal-launched DEFAULT-root
+        ``brutex sweep-all`` visible only through the FRESH running progress
+        file bridge (``target: "bridge"`` — the sidecar lands at the default
+        ``<lake>/sweeps`` root that run probes; review fold — previously this
+        case was a false "nothing to cancel" refusal while the Stop button,
+        keyed on the same bridge, was showing). Nothing running — including a
+        STALE running bridge claim (a SIGKILLed writer's frozen file, decayed
+        per ``SWEEP_PROGRESS_MAX_AGE_S``) ⇒ ``{"cancelling": false}``
         and NO sidecar is written (a stray request must never pre-poison the
         next launch — which also clears stale sidecars itself). HONEST latency
         (Golden Rule #10): cooperative — the in-flight tuple (sequential) / the
@@ -4650,6 +4686,7 @@ def build_app(
         """
         from brutex.dashboard.launch_button import read_launch_state, state_liveness
         from brutex.engine.sweep_cancel import request_cancel as request_sweep_cancel
+        from brutex.engine.sweep_supervisor import progress_bridge_stale, read_progress
 
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -4676,6 +4713,21 @@ def build_app(
                     source="route-detached",
                 )
                 return {"cancelling": True, "target": "detached"}
+            # THIRD arm (review fold — the false-refusal class): a DEFAULT-root
+            # terminal `brutex sweep-all` (no in-process job, no launch state)
+            # is visible ONLY through the progress FILE bridge — exactly the
+            # source the Stop button keys on — so refusing here contradicted
+            # the button ("No running sweep to cancel." while a sidecar at the
+            # default root WOULD cancel that run). A FRESH running bridge file
+            # at the default root ⇒ write the sidecar there (the run's
+            # cmd_sweep_all probes <default root>/.sweep_cancel.json at every
+            # tuple boundary). A STALE running claim (SIGKILLed writer) is dead
+            # evidence — honest {"cancelling": false}, mirroring the button's
+            # own decayed view.
+            bridge = read_progress(sweep_progress_file(root))
+            if bridge.get("running") and not progress_bridge_stale(bridge):
+                request_sweep_cancel(root, source="route-bridge")
+                return {"cancelling": True, "target": "bridge"}
             return {"cancelling": False}
 
         return JSONResponse(await run_in_threadpool(_cancel))

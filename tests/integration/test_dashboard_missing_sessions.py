@@ -189,3 +189,52 @@ class TestMissingSessionsTemplate:
         # textContent-only rendering — the drill JS must not use innerHTML.
         drill_js = html.split("Missing-session gap drill")[-1]
         assert "innerHTML" not in drill_js.split("</script>")[0]
+
+
+class TestMissingSessionsMemoisation:
+    """The route's 'memoised per write-generation' claim gets TEETH (review fold).
+
+    Fails-open-before: the cache wiring was correct by inspection only — a
+    dropped cache/generation key would have silently turned every drill click
+    into a fresh O(datasets x bars) lake scan with the whole suite green. The
+    #867/#896 'runs ONCE across loads' precedent, applied to the drill.
+    """
+
+    def test_scan_runs_once_per_generation_and_recomputes_on_bump(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import app as app_module
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        _write_nifty(tmp_path, [date(2024, 1, 2), date(2024, 1, 4)])
+
+        calls = {"n": 0}
+        real = app_module.summarize_spot_datasets
+
+        def _counting(*args: object, **kwargs: object) -> object:
+            calls["n"] += 1
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(app_module, "summarize_spot_datasets", _counting)
+
+        cache = SummaryCache()
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store, summary_cache=cache)
+        )
+        baseline = calls["n"]  # any startup-time scans are not the drill's
+
+        first = client.get("/api/v1/coverage/missing-sessions")
+        assert first.status_code == 200
+        assert first.json()["rows"], "the drill must serve real rows"
+        second = client.get("/api/v1/coverage/missing-sessions?symbol=NIFTY")
+        assert second.status_code == 200
+        # TWO drill requests within ONE generation → exactly ONE enriched scan
+        # (the filters re-project the cached rows, never re-scan the lake).
+        assert calls["n"] == baseline + 1
+
+        # A pull bumps the write generation → the next drill RECOMPUTES (never
+        # a stale gap list over the freshly-pulled sessions — Golden Rule #1).
+        cache.mark_dirty()
+        third = client.get("/api/v1/coverage/missing-sessions")
+        assert third.status_code == 200
+        assert calls["n"] == baseline + 2

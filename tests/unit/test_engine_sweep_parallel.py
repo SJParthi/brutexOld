@@ -2438,3 +2438,114 @@ class TestParallelCooperativeCancel:
 
         # THE BYTES: cancelled+resumed tree == uninterrupted tree, file for file.
         assert _tree(a / "out") == _tree(b / "out")
+
+
+class TestParallelOnProgress:
+    """The ``on_progress`` seam — the sequential seam's parallel twin.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001 review fold (fails-before): ``run_parallel_grid``
+    took NO progress hook, so ``cmd_sweep_all``'s parallel arm never published the
+    ``/api/v1/sweep-progress`` file bridge — the dashboard's Stop button (keyed on
+    the bridge's ``running``) never showed on the flagship multi-day parallel
+    sweep. These tests pin the FULL tick set: start (running, BEFORE any tuple
+    completes) · every apply · the done / cancelled / error terminals.
+    """
+
+    def test_streams_start_applies_and_finish(self, tmp_path: Path) -> None:
+        grid = _grid()  # 1 instrument × 1 tf × 2 dirs × 2 k = 4 tuples
+        snaps: list[Any] = []
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                on_progress=snaps.append,
+            )
+        assert summary.cancelled is False
+        total = count_sweep_tuples(grid)
+        # START tick + one apply per tuple + the finish terminal.
+        assert len(snaps) == total + 2
+        first = snaps[0]
+        assert first.state == "running"
+        assert first.running is True
+        assert first.enumerated == total
+        assert first.evaluated == 0  # the start tick lands BEFORE any tuple applies
+        for snap in snaps[1:-1]:
+            assert snap.state == "running"
+        last = snaps[-1]
+        assert last.state == "done"
+        assert last.running is False
+        assert last.evaluated == total
+
+    def test_streams_cancelled_terminal(self, tmp_path: Path) -> None:
+        grid = _grid()
+        snaps: list[Any] = []
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                should_stop=lambda: True,  # cancel at the FIRST dispatch gate
+                on_progress=snaps.append,
+            )
+        assert summary.cancelled is True
+        assert snaps, "the start tick must publish even on an immediate cancel"
+        assert snaps[0].state == "running"
+        assert snaps[-1].state == "cancelled"
+        assert snaps[-1].running is False
+
+    def test_streams_error_terminal_on_abort(self, tmp_path: Path) -> None:
+        grid = _grid()
+        snaps: list[Any] = []
+
+        def _raising_bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
+            raise RuntimeError("simulated parent-side bars_for failure")
+
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+            pytest.raises(RuntimeError, match="simulated parent-side bars_for failure"),
+        ):
+            mod.run_parallel_grid(
+                grid,
+                bars_for=_raising_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                on_progress=snaps.append,
+            )
+        # The bridge receives the honest ERROR terminal — never a frozen
+        # last-running tick (the phantom-live class the staleness decay bounds).
+        assert snaps[0].state == "running"
+        assert snaps[-1].state == "error"
+        assert snaps[-1].running is False
+
+    def test_default_none_publishes_nothing(self, tmp_path: Path) -> None:
+        """``on_progress=None`` (every pre-existing caller) — byte-identical no-op."""
+        grid = _grid()
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+            )
+        assert summary.cancelled is False

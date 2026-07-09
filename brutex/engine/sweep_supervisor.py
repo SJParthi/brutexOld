@@ -85,8 +85,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import threading
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -951,7 +953,33 @@ def run_supervised_grid(
     )
 
 
-def publish_progress(path: Path, snapshot: SweepProgressSnapshot) -> None:
+#: Maximum age (seconds) a bridge file's ``running=True`` claim stays credible
+#: without a fresh publish — the sweep twin of DEC-RATE-METER-LIFECYCLE-001's
+#: ``BRIDGE_MAX_AGE_S``. A SIGKILLed / power-lost ``brutex sweep-all`` leaves the
+#: last-published file frozen at ``running=True`` FOREVER (no process remains to
+#: publish a terminal), which showed the dashboard a phantom live sweep + Stop
+#: button indefinitely. JUSTIFICATION for 6 h (Golden Rule #10 — an honest
+#: trade-off, not a proof): the writer publishes per TUPLE, and a legitimately
+#: heavy k=5 tuple can run for HOURS with no tick (the #1608 stall arithmetic:
+#: ``C(60,5) × N_bars / 2.5e8 mask·bars/s`` ≈ 3 h on the deepest 1-minute
+#: history), so a #1593-style 15-minute bound would false-decay a LIVE run
+#: mid-tuple; 6 h sits above that envelope while bounding the phantom to hours
+#: instead of forever. DISCLOSED residual: a >6 h single tuple decays the view
+#: to idle until its next tick (the run itself is untouched); a stale-running
+#: file is treated as DEAD EVIDENCE ≡ absent by the reader, never rewritten.
+SWEEP_PROGRESS_MAX_AGE_S: Final[float] = 6 * 3600.0
+
+#: The additive wall-clock stamp key ``publish_progress`` folds into the bridge
+#: file (NOT a ``SweepProgressSnapshot`` field — the snapshot stays pure).
+PROGRESS_WALL_TIME_KEY: Final[str] = "wall_time"
+
+
+def publish_progress(
+    path: Path,
+    snapshot: SweepProgressSnapshot,
+    *,
+    wall_time: Callable[[], float] = time.time,
+) -> None:
     """Atomically write *snapshot* to *path* as JSON — the dashboard file bridge.
 
     The cross-process seam: a CLI-launched ``brutex sweep-all`` wires this as its
@@ -959,7 +987,10 @@ def publish_progress(path: Path, snapshot: SweepProgressSnapshot) -> None:
     at ``/api/v1/sweep-progress`` by reading *path*. The write is atomic
     (tempfile → ``os.replace``, via the proven
     :func:`brutex.engine.sweep_checkpoint._atomic_write`) so the reader never sees
-    a half-written file.
+    a half-written file. The payload additionally carries the
+    :data:`PROGRESS_WALL_TIME_KEY` wall-clock stamp so the reader can decay a
+    dead writer's frozen ``running=True`` claim (see
+    :func:`progress_bridge_stale` / :data:`SWEEP_PROGRESS_MAX_AGE_S`).
 
     Parameters
     ----------
@@ -967,12 +998,44 @@ def publish_progress(path: Path, snapshot: SweepProgressSnapshot) -> None:
         Destination JSON file (parents created).
     snapshot
         The progress snapshot to publish.
+    wall_time
+        Injected wall clock (tests pin the stamp deterministically).
     """
     from brutex.engine.sweep_checkpoint import _atomic_write
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(snapshot.to_dict(), sort_keys=True).encode("utf-8")
+    payload = snapshot.to_dict()
+    payload[PROGRESS_WALL_TIME_KEY] = float(wall_time())
+    content = json.dumps(payload, sort_keys=True).encode("utf-8")
     _atomic_write(path, content)
+
+
+def progress_bridge_stale(
+    parsed: Mapping[str, Any],
+    *,
+    now: Callable[[], float] = time.time,
+    max_age_s: float = SWEEP_PROGRESS_MAX_AGE_S,
+) -> bool:
+    """``True`` iff *parsed* claims ``running`` on DEAD evidence — the decay gate.
+
+    The #1593 rate-bridge posture applied to the sweep bridge: a ``running=True``
+    file whose :data:`PROGRESS_WALL_TIME_KEY` stamp is older than *max_age_s* —
+    or missing / non-finite (a pre-stamp leftover or junk) — is dead evidence
+    ≡ absent, so the dashboard falls through to its in-process push / idle view
+    instead of showing a phantom live sweep forever after a SIGKILL/power loss.
+    A NON-running file (done / cancelled / error terminals, idle) is NEVER
+    stale — a finished sweep's terminal is a legitimate historical record.
+    Clock skew into the future reads fresh (age clamps at 0, the honest bias).
+    """
+    if not parsed.get("running"):
+        return False
+    stamp = parsed.get(PROGRESS_WALL_TIME_KEY)
+    if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+        return True  # missing / junk stamp on a running claim = dead evidence
+    age = float(now()) - float(stamp)
+    if not math.isfinite(age):
+        return True  # NaN / infinite stamp — dead evidence, never trusted
+    return age > max_age_s
 
 
 def read_progress(path: Path) -> dict[str, Any]:
@@ -1007,6 +1070,7 @@ def idle_progress() -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_WORKER_NAME",
+    "PROGRESS_WALL_TIME_KEY",
     "SUPERVISOR_ACTION_ABORT",
     "SUPERVISOR_ACTION_CANCELLED",
     "SUPERVISOR_ACTION_COMPLETE",
@@ -1016,10 +1080,12 @@ __all__ = [
     "SUPERVISOR_ACTION_TUPLE_FAILED",
     "SUPERVISOR_ACTION_TUPLE_NO_BARS",
     "SUPERVISOR_ACTION_TUPLE_RESUME",
+    "SWEEP_PROGRESS_MAX_AGE_S",
     "SupervisedGridSummary",
     "SweepGuards",
     "grid_identity",
     "idle_progress",
+    "progress_bridge_stale",
     "publish_progress",
     "read_progress",
     "run_supervised_grid",

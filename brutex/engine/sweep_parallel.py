@@ -199,6 +199,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.sweep_progress import SweepProgressSnapshot
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
 
@@ -1030,6 +1031,7 @@ class ParallelGridDriver:
         "_monotonic",
         "_n_unique",
         "_next_apply",
+        "_on_progress",
         "_quarantined",
         "_root",
         "_should_stop",
@@ -1052,6 +1054,7 @@ class ParallelGridDriver:
         stall_min_mask_bars_per_sec: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         should_stop: Callable[[], bool] | None = None,
+        on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -1091,6 +1094,19 @@ class ParallelGridDriver:
             Optional cooperative-cancel probe (DEC-JOB-COOPERATIVE-CANCEL-001),
             consulted PARENT-side at the dispatch gate — it never crosses the
             process boundary (nothing new is pickled). See :func:`run_parallel_grid`.
+        on_progress
+            Optional PARENT-side hook receiving the fresh
+            :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` after the
+            ``start`` tick, every apply-loop advance, and each terminal
+            (``finish`` / ``cancelled`` / ``fail``) — the sequential
+            ``run_supervised_grid`` seam's parallel twin (the CLI wires
+            :func:`~brutex.engine.sweep_supervisor.publish_progress` here, so the
+            cross-process ``/api/v1/sweep-progress`` file bridge is fed on the
+            PRODUCTION parallel path too — DEC-JOB-COOPERATIVE-CANCEL-001 review
+            fold; previously only the sequential arm published, so the dashboard's
+            Stop button never showed on a parallel sweep). ``None`` (every
+            pre-existing caller) is byte-identical. Never crosses the process
+            boundary (parent-only, like the progress mutation itself).
 
         Raises
         ------
@@ -1141,6 +1157,9 @@ class ParallelGridDriver:
         #: of the normal completion.
         self._should_stop = should_stop
         self._cancelled = False
+        #: Parent-side progress-stream hook (``None`` = no publish) — fired by
+        #: :meth:`_publish_progress` after every progress mutation.
+        self._on_progress = on_progress
         #: Labels a PRIOR run's broken pool quarantined (loaded from the durable
         #: sidecar in :meth:`run`) — gated FIRST in :meth:`_gate_or_dispatch` so a
         #: resume classifies them VISIBLY as ``quarantined_prior``, regardless of
@@ -1165,6 +1184,11 @@ class ParallelGridDriver:
         resume_from = self._guards.checkpoint.next_index
 
         self._guards.progress.start(enumerated=total, detail=self._subject)
+        # Publish the START tick (running=True) IMMEDIATELY — a heavy first
+        # tuple legitimately runs many minutes (the #1608 arithmetic), and the
+        # dashboard's Stop button keys on the bridge file's `running`, so the
+        # button must show before the first tuple completes.
+        self._publish_progress()
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_START,
             subject=self._subject,
@@ -1218,6 +1242,11 @@ class ParallelGridDriver:
             with contextlib.suppress(Exception):
                 self._guards.progress.fail(detail)
             with contextlib.suppress(Exception):
+                # Stream the honest ERROR terminal to the bridge — otherwise the
+                # progress file freezes at the last running tick and the
+                # dashboard shows a phantom live sweep until the staleness decay.
+                self._publish_progress()
+            with contextlib.suppress(Exception):
                 self._guards.audit.append(
                     action=SUPERVISOR_ACTION_ABORT,
                     subject=self._subject,
@@ -1243,6 +1272,7 @@ class ParallelGridDriver:
                 payload=cancel_payload,
             )
             self._guards.progress.cancelled(detail=f"cancelled at tuple {self._next_apply}/{total}")
+            self._publish_progress()
             _LOG.warning("sweep_parallel.cancelled", subject=self._subject, **cancel_payload)
             return SupervisedGridSummary(
                 sweep_id=sweep_id,
@@ -1291,6 +1321,7 @@ class ParallelGridDriver:
                 f"{quarantine_note}"
             )
         )
+        self._publish_progress()
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_COMPLETE, subject=self._subject, payload=payload
         )
@@ -1866,8 +1897,14 @@ class ParallelGridDriver:
             )
 
     def _advance(self, *, current: str, survived: bool, skipped: bool) -> None:
-        """Tick progress once (the parent-only progress mutation)."""
+        """Tick progress once + stream the fresh snapshot (parent-only mutation)."""
         self._guards.progress.advance(current=current, survived=survived, skipped=skipped)
+        self._publish_progress()
+
+    def _publish_progress(self) -> None:
+        """Stream the current progress snapshot to ``on_progress`` (no-op when unwired)."""
+        if self._on_progress is not None:
+            self._on_progress(self._guards.progress.snapshot())
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1979,6 +2016,7 @@ def run_parallel_grid(
     stall_min_mask_bars_per_sec: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -2009,6 +2047,14 @@ def run_parallel_grid(
     tuples, still bounded by the stall watchdog (a wedged worker raises
     :class:`SweepStallError`, never a silent hang).
 
+    ``on_progress`` is the sequential seam's parallel twin — the PARENT-side
+    snapshot stream ``cmd_sweep_all`` wires to
+    :func:`~brutex.engine.sweep_supervisor.publish_progress` so the
+    cross-process ``/api/v1/sweep-progress`` file bridge (and with it the
+    dashboard's Stop button) is live on the PRODUCTION parallel path (fired on
+    start / every apply / cancelled / finish / fail; ``None`` = no publish,
+    byte-identical).
+
     Raises
     ------
     SweepParallelUsageError
@@ -2028,6 +2074,7 @@ def run_parallel_grid(
         stall_min_mask_bars_per_sec=stall_min_mask_bars_per_sec,
         monotonic=monotonic,
         should_stop=should_stop,
+        on_progress=on_progress,
     )
     return driver.run()
 
