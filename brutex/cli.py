@@ -5179,6 +5179,12 @@ def cmd_fetch(
         # so PLANNED/FAILED windows stay resumable), the post-drain tail is skipped, and
         # cmd_fetch exits cleanly (never a crash-retry for the legacy auto-resume).
         market_halted = False
+        # Bound on EVERY path so the market-hours halt branch (which sets
+        # ``market_halted`` and returns EXIT_OK below WITHOUT assigning a real
+        # ``result``) leaves the post-``with`` reconcile provably bound — that tail
+        # is only reached when ``market_halted`` is False, i.e. ``result`` WAS
+        # assigned in the try body (mirrors the ``until_outcome = None`` prelatch).
+        result: Any = None
         # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
         # whole fetch (including every until-clean round + the drain/persist
         # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
