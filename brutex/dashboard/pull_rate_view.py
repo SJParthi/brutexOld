@@ -110,6 +110,16 @@ STALE_AFTER_S: Final[float] = 12.0
 #: (Golden Rule #10) — operator-revisable in this one Final; the literal is test-pinned.
 BRIDGE_MAX_AGE_S: Final[float] = 900.0
 
+#: How far a CLI-bridge ``wall_time`` may sit AHEAD of the reader's wall clock and still
+#: be trusted as fresh (seconds). The bridge is published by a possibly SEPARATE process
+#: — potentially on another host under DEC-ACCOUNT-LEASE-CROSSHOST-001 — so a few seconds
+#: of unsynchronised-NTP clock skew is ordinary and must NOT flip a live pull to idle.
+#: Beyond it a ``wall_time`` in the future is DEAD EVIDENCE (a ms-scaled epoch, a corrupt
+#: stamp, or a badly-skewed clock), exactly like a non-finite one — see
+#: :func:`bridge_age_seconds`. A POLICY heuristic (Golden Rule #10), operator-revisable in
+#: this one Final; the literal is test-pinned.
+BRIDGE_FUTURE_SKEW_TOLERANCE_S: Final[float] = 60.0
+
 #: Achieved-r/s floor at/below which an ACTIVELY-ticking pull reads STALLED. Reuses the
 #: pull-health monitor's :data:`~brutex.observability.pull_health.STALLED_RPS_FLOOR`
 #: (0.5 r/s) so the widget's red light and the monitor's ``pull.stalled`` Telegram alert
@@ -504,6 +514,61 @@ def build_pull_rate_view(
     )
 
 
+def bridge_age_seconds(
+    now_wall: float,
+    wall_time: float,
+    *,
+    future_skew_s: float = BRIDGE_FUTURE_SKEW_TOLERANCE_S,
+) -> tuple[float, bool]:
+    """Derive a bridge snapshot's honest age (seconds) + a DEAD-EVIDENCE verdict.
+
+    DEC-RATE-METER-LIFECYCLE-001 audit-C3, hardened. The route computed the bridge
+    age as ``max(0.0, now_wall - wall_time)``, which SILENTLY CLAMPED a non-finite or
+    materially-future ``wall_time`` to a maximally-fresh ``0.0`` — permanently, since
+    that clamp can never grow past :data:`BRIDGE_MAX_AGE_S`, so the
+    :func:`build_pull_rate_view_merged` ``math.isfinite`` dead-evidence guard could
+    never act on it and a SIGKILLed CLI's stuck ``pull_active=True`` bridge with a
+    ``+inf`` / ``NaN`` / future ``wall_time`` fabricated a permanent live "flowing"
+    reading. This is the ONE chokepoint that turns a ``wall_time`` into the age the
+    merged projection consumes, so the finiteness + future law lives here (Golden
+    Rule #1 / #11 COMMON).
+
+    Rules, in order:
+
+    * A non-finite ``wall_time`` (``+inf`` / ``-inf`` / ``NaN``) or a non-finite
+      ``now_wall`` → age ``inf``, DEAD (the ``isfinite`` guard rejects it → the bridge
+      is treated as ABSENT, panel-only projection).
+    * A ``wall_time`` MORE than ``future_skew_s`` in the future → age ``inf``, DEAD
+      (a ms-scaled epoch / corrupt stamp / badly-skewed clock).
+    * A ``wall_time`` within ``future_skew_s`` ahead (ordinary cross-host NTP skew) →
+      age ``0.0``, LIVE (tolerated — the same value the old ``max(0.0, …)`` produced).
+    * A past ``wall_time`` → the real positive age, LIVE (byte-identical to the old
+      ``max(0.0, now_wall - wall_time)`` on the fresh path).
+
+    Parameters
+    ----------
+    now_wall
+        The reader's wall clock (``time.time()``).
+    wall_time
+        The bridge snapshot's embedded publish wall clock.
+    future_skew_s
+        The tolerated future skew (default :data:`BRIDGE_FUTURE_SKEW_TOLERANCE_S`).
+
+    Returns
+    -------
+    tuple[float, bool]
+        ``(age_seconds, dead_evidence)``. On ``dead_evidence`` the age is ``inf`` so
+        the merged guard treats the bridge as absent; the caller additionally labels
+        the served ``bridge_source`` ``unverified`` and WARNs once.
+    """
+    if not math.isfinite(wall_time) or not math.isfinite(now_wall):
+        return math.inf, True
+    delta = now_wall - wall_time
+    if delta < -future_skew_s:
+        return math.inf, True
+    return (delta if delta > 0.0 else 0.0), False
+
+
 def build_pull_rate_view_merged(
     *,
     panel_effective_rps: float,
@@ -681,6 +746,7 @@ def build_pull_rate_view_merged(
 
 
 __all__ = [
+    "BRIDGE_FUTURE_SKEW_TOLERANCE_S",
     "BRIDGE_MAX_AGE_S",
     "CEILING_PER_MIN_LIMIT",
     "CEILING_RPS_LIMIT",
@@ -694,6 +760,7 @@ __all__ = [
     "STALE_AFTER_S",
     "STALL_RPS_FLOOR",
     "PullRateView",
+    "bridge_age_seconds",
     "build_pull_rate_view",
     "build_pull_rate_view_merged",
 ]

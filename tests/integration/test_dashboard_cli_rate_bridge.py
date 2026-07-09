@@ -654,3 +654,74 @@ class TestDegradePaths:
         assert body["bridge_source"] == "unwired"
         assert body["bridge_probe_age_s"] is None
         assert body["flow_state"] == "idle"
+
+
+class TestDeadWallTimeEvidence:
+    """VIEW-1 (DEC-RATE-METER-LIFECYCLE-001 audit-C3, hardened): a CLI bridge whose
+    ``wall_time`` is non-finite (+inf/NaN) or MATERIALLY in the future can no longer be
+    clamped to a maximally-fresh ``0.0`` and fabricate a permanent "flowing". Such a
+    bridge is DEAD EVIDENCE — idle, ``bridge_source == 'unverified'``, WARNed once — while
+    ordinary few-seconds clock skew stays trusted."""
+
+    def _publish_raw(self, lake_root: Path, wall_time_token: str) -> None:
+        """Write the bridge file directly with a literal ``wall_time`` JSON token."""
+        rate_bridge_path(lake_root).parent.mkdir(parents=True, exist_ok=True)
+        body = (
+            '{"schema": 3, "effective_rps": 3.3, "current_rps": 8.0, "recent_minute": 200, '
+            '"recent_429": 0, "ceiling_per_min": 500, "recent_1s": 3, "recent_600s": 1800, '
+            '"recent_3600s": 9000, "wall_time": ' + wall_time_token + ", "
+            '"monotonic": 12345.0, "pull_active": true}'
+        )
+        rate_bridge_path(lake_root).write_text(body)
+
+    def test_positive_infinity_wall_time_is_dead_idle_unverified(self, tmp_path: Path) -> None:
+        self._publish_raw(tmp_path, "1e999")  # json parses 1e999 -> Infinity
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c:
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "idle"
+        assert body["req_per_sec_achieved"] == 0.0
+        assert body["bridge_source"] == "unverified"
+        assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS
+
+    def test_nan_wall_time_is_dead_idle_unverified(self, tmp_path: Path) -> None:
+        self._publish_raw(tmp_path, "NaN")  # json.loads parses NaN by default
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c:
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "idle"
+        assert body["req_per_sec_achieved"] == 0.0
+        assert body["bridge_source"] == "unverified"
+
+    def test_materially_future_wall_time_is_dead_idle_unverified(self, tmp_path: Path) -> None:
+        publish_rate_snapshot(
+            tmp_path,
+            effective_rps=3.3,
+            current_rps=8.0,
+            recent_minute=200,
+            recent_429=0,
+            ceiling_per_min=500,
+            wall_time=time.time() + 10_000_000.0,  # 10^7 s in the future
+            monotonic=time.monotonic(),
+        )
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c:
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "idle"
+        assert body["req_per_sec_achieved"] == 0.0
+        assert body["bridge_source"] == "unverified"
+
+    def test_tiny_future_skew_is_tolerated_flowing(self, tmp_path: Path) -> None:
+        """A few seconds of ordinary cross-host NTP skew stays trusted (live/flowing)."""
+        publish_rate_snapshot(
+            tmp_path,
+            effective_rps=3.3,
+            current_rps=8.0,
+            recent_minute=200,
+            recent_429=0,
+            ceiling_per_min=500,
+            wall_time=time.time() + 3.0,  # within BRIDGE_FUTURE_SKEW_TOLERANCE_S
+            monotonic=time.monotonic(),
+        )
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c:
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "flowing"
+        assert body["req_per_sec_achieved"] == 3.3
+        assert body["bridge_source"] == "live"

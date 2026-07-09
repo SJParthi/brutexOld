@@ -218,6 +218,7 @@ from brutex.dashboard.pull_jobs import (
     ProgressHook,
 )
 from brutex.dashboard.rate_bridge_cache import (
+    BRIDGE_SOURCE_UNVERIFIED,
     BRIDGE_SOURCE_UNWIRED,
     BridgeReadResult,
     RateBridgeCache,
@@ -1778,7 +1779,10 @@ def build_app(
         {``live``, ``cached``, ``unverified``, ``unwired``} + ``bridge_probe_age_s`` —
         stamped by the ONE :func:`~brutex.dashboard.rate_bridge_cache.stamp_bridge_freshness`.
         """
-        from brutex.dashboard.pull_rate_view import build_pull_rate_view_merged
+        from brutex.dashboard.pull_rate_view import (
+            bridge_age_seconds,
+            build_pull_rate_view_merged,
+        )
 
         now_monotonic = time.monotonic()
         with state._lock:  # pyright: ignore[reportPrivateUsage]
@@ -1822,7 +1826,32 @@ def build_app(
             bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
         snapshot = bridge_result.snapshot
         if snapshot is not None:
-            bridge_age = max(0.0, time.time() - snapshot.wall_time)
+            # DEC-RATE-METER-LIFECYCLE-001 audit-C3, hardened: a non-finite or
+            # materially-FUTURE ``wall_time`` is DEAD EVIDENCE. The old
+            # ``max(0.0, now - wall_time)`` CLAMPED such a stamp to a maximally-fresh
+            # ``0.0`` FOREVER (it can never grow past ``BRIDGE_MAX_AGE_S``), so the
+            # ``build_pull_rate_view_merged`` ``isfinite`` dead-evidence guard never
+            # acted and a SIGKILLed CLI's stuck ``pull_active=True`` +inf/NaN/future
+            # bridge fabricated a permanent "flowing". ``bridge_age_seconds`` yields an
+            # ``inf`` age (⇒ the merged guard treats the bridge as ABSENT ⇒ idle) for
+            # that class while tolerating a few seconds of ordinary cross-host clock
+            # skew; a fresh (past) ``wall_time`` is byte-identical to the old clamp.
+            bridge_age, bridge_dead_evidence = bridge_age_seconds(time.time(), snapshot.wall_time)
+            if bridge_dead_evidence:
+                # Label the served provenance ``unverified`` (never a trusted "live")
+                # and WARN once so a corrupt/skewed publisher is visible, not silent.
+                bridge_result = BridgeReadResult(
+                    snapshot, BRIDGE_SOURCE_UNVERIFIED, bridge_result.probe_age_s
+                )
+                _LOG.warning(
+                    "pull_rate.bridge_dead_wall_time",
+                    wall_time=snapshot.wall_time,
+                    detail=(
+                        "CLI rate-bridge wall_time is non-finite or materially in the "
+                        "future — DEAD EVIDENCE, treated as absent (idle), never a "
+                        "fabricated 'flowing'"
+                    ),
+                )
             bridge_effective_rps = snapshot.effective_rps
             bridge_current_rps = snapshot.current_rps
             bridge_recent_minute = snapshot.recent_minute

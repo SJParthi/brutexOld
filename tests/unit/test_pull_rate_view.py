@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 
 from brutex.dashboard.pull_rate_view import (
+    BRIDGE_FUTURE_SKEW_TOLERANCE_S,
     BRIDGE_MAX_AGE_S,
     CEILING_PER_MIN_LIMIT,
     CEILING_RPS_LIMIT,
@@ -24,6 +25,7 @@ from brutex.dashboard.pull_rate_view import (
     STALE_AFTER_S,
     STALL_RPS_FLOOR,
     PullRateView,
+    bridge_age_seconds,
     build_pull_rate_view,
     build_pull_rate_view_merged,
 )
@@ -1324,3 +1326,52 @@ class TestBridgeMaxAge:
         )
         assert merged.flow_state == FLOW_STALLED
         assert merged.stalled is True
+
+
+class TestBridgeAgeSeconds:
+    """`bridge_age_seconds` — the ONE chokepoint that turns a bridge ``wall_time`` into
+    an honest age + DEAD-EVIDENCE verdict (DEC-RATE-METER-LIFECYCLE-001 audit-C3,
+    hardened): a non-finite or materially-future ``wall_time`` can no longer be
+    CLAMPED to a maximally-fresh ``0.0`` and fabricate a permanent "flowing"."""
+
+    def test_past_wall_time_is_the_real_positive_age_live(self) -> None:
+        age, dead = bridge_age_seconds(1000.0, 940.0)
+        assert age == 60.0
+        assert dead is False
+
+    def test_exact_now_is_zero_age_live(self) -> None:
+        age, dead = bridge_age_seconds(1000.0, 1000.0)
+        assert age == 0.0
+        assert dead is False
+
+    def test_tiny_future_skew_within_tolerance_clamps_to_zero_live(self) -> None:
+        # Ordinary cross-host NTP skew (a few seconds ahead) is tolerated as fresh —
+        # byte-identical to the old ``max(0.0, now - wall_time)`` clamp.
+        age, dead = bridge_age_seconds(1000.0, 1000.0 + BRIDGE_FUTURE_SKEW_TOLERANCE_S)
+        assert age == 0.0
+        assert dead is False
+
+    def test_materially_future_wall_time_is_dead_inf(self) -> None:
+        age, dead = bridge_age_seconds(1000.0, 1000.0 + BRIDGE_FUTURE_SKEW_TOLERANCE_S + 1.0)
+        assert age == math.inf
+        assert dead is True
+
+    def test_positive_infinity_wall_time_is_dead(self) -> None:
+        age, dead = bridge_age_seconds(1000.0, math.inf)
+        assert age == math.inf
+        assert dead is True
+
+    def test_negative_infinity_wall_time_is_dead(self) -> None:
+        age, dead = bridge_age_seconds(1000.0, -math.inf)
+        assert age == math.inf
+        assert dead is True
+
+    def test_nan_wall_time_is_dead(self) -> None:
+        age, dead = bridge_age_seconds(1000.0, math.nan)
+        assert age == math.inf
+        assert dead is True
+
+    def test_non_finite_now_wall_is_dead(self) -> None:
+        age, dead = bridge_age_seconds(math.inf, 1000.0)
+        assert age == math.inf
+        assert dead is True
