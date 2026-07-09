@@ -7312,6 +7312,12 @@ def build_app(
                     # count cache + generation; absent registry ⇒ the lake-observed
                     # step with its honest "observed" low-confidence label.
                     registry_path=registry_path_for(store_path),
+                    # Manifest-first paging (DEC-LAKE-STATS-MANIFEST-001): the
+                    # production route opts into the per-file stats manifest —
+                    # served only after full per-request revalidation, ANY
+                    # failure ⇒ the byte-identical legacy scan; kill switch
+                    # BRUTEX_LAKE_STATS_MANIFEST=off forces legacy.
+                    use_stats_manifest=True,
                 )
             )
         except ValueError as exc:
@@ -7449,6 +7455,9 @@ def build_app(
                     offset=offset,
                     count_cache=_candle_count_cache,
                     generation=_summary_cache.generation,
+                    # Manifest-first paging (DEC-LAKE-STATS-MANIFEST-001) — the
+                    # expired-options twin of the /db/candles opt-in above.
+                    use_stats_manifest=True,
                 )
             )
         except ValueError as exc:

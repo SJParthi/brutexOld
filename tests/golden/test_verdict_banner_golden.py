@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 
-from brutex.adapters.ingest_common import classify_pull
+from brutex.adapters.ingest_common import classify_pull, credentials_refusal_verdict
 from brutex.dashboard.verdict_banner import banner_for
 
 
@@ -61,6 +61,37 @@ _GOLDEN = {
         '{"action": "No action needed.", "colour": "green", "css_class": "verdict--green", '
         '"headline": "\\u2705 Pull complete.", '
         '"kind": "clean", "pending_windows": 0, "show_retry_button": false}'
+    ),
+    # 2026-07-08 regression golden: `mass_empty_halt` was emittable by
+    # classify_pull but MISSING from `_KIND_STYLE`, so banner_for raised on a
+    # real halted pull (the pull-verdict route 500'd). Frozen red + retry.
+    "mass_empty_halt": (
+        '{"action": "Mass-empty halt: 40/40 empty (12 consecutive). The vendor answered a '
+        "mass of windows with clean-but-EMPTY responses \\u2014 either a soft-throttle serving "
+        "empty 200s [R2], mis-addressed requests [R3], or a genuine pre-listing gap; the code "
+        "cannot tell which, so NOTHING more was settled as SKIPPED and every un-settled window "
+        "stays retryable. Wait out a possible throttle, verify the symbol addressing, then "
+        "re-pull; if windows were settled before the halt, `brutex reopen-skipped` re-opens "
+        "them for re-verification (`--limit N` bounds the re-open to a sample). Re-opened "
+        "(REOPENED) windows are deliberate re-checks the breaker never counts, so reopen + "
+        "re-pull cannot re-trip endlessly; if a genuine no-data universe keeps tripping, the "
+        "thresholds are env-tunable (BRUTEX_EMPTY_BREAKER_*) and BRUTEX_EMPTY_BREAKER=off is "
+        'the explicit kill switch.", '
+        '"colour": "red", "css_class": "verdict--red", '
+        '"headline": "\\ud83d\\udea8 Pull HALTED \\u2014 mass empty-response circuit breaker '
+        'tripped (suspected vendor soft-throttle or mis-addressing).", '
+        '"kind": "mass_empty_halt", "pending_windows": 9, "show_retry_button": true}'
+    ),
+    # The PRE-pull credentials refusal (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001),
+    # built by its one real producer `credentials_refusal_verdict`.
+    "credentials_missing": (
+        '{"action": "Groww credentials did not resolve: missing SSM parameter. (Synthetic '
+        "data runs ONLY on an explicit dry-run request \\u2014 a real pull NEVER silently "
+        'degrades to synthetic.)", '
+        '"colour": "red", "css_class": "verdict--red", '
+        '"headline": "\\ud83d\\udd12 Pull REFUSED \\u2014 Groww credentials unavailable '
+        '(nothing was fetched, nothing was written).", '
+        '"kind": "credentials_missing", "pending_windows": 0, "show_retry_button": true}'
     ),
 }
 
@@ -115,6 +146,29 @@ def test_known_gap_only_golden() -> None:
             completed=0,
         )
         == _GOLDEN["known_gap_only"]
+    )
+
+
+def test_mass_empty_halt_golden() -> None:
+    assert (
+        _banner_json(
+            auth_aborted=False,
+            still_failed_windows=9,
+            failed_pairs=0,
+            no_data=0,
+            completed=10,
+            mass_empty_cause="Mass-empty halt: 40/40 empty (12 consecutive).",
+        )
+        == _GOLDEN["mass_empty_halt"]
+    )
+
+
+def test_credentials_missing_golden() -> None:
+    verdict = credentials_refusal_verdict(
+        "Groww credentials did not resolve: missing SSM parameter."
+    ).to_dict()
+    assert (
+        json.dumps(banner_for(verdict).to_dict(), sort_keys=True) == _GOLDEN["credentials_missing"]
     )
 
 
