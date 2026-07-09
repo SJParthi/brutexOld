@@ -439,6 +439,91 @@ def test_minimal_repro_cell_raises_at_every_stride(monkeypatch: pytest.MonkeyPat
             )
 
 
+# ────────────────────────── shard-trip-invariance ──────────────────────────
+# THE k=1 anti-regression pin for DEC-SWEEP-APRIORI-TUPLE-001: the breaker trip
+# DECISION at EVERY level (k=1 AND k>=2) is a pure function of the WHOLE RAW
+# pre-shard per-level ``|C_j|`` and is INDEPENDENT of the ``root_mod`` shard —
+# every ``(w, big_w)`` shard of a cell reaches the IDENTICAL trip verdict
+# (Golden Rule #7, Python<->Rust failure-set bit-identity). This test FAILS on
+# the pre-fix k==1 branch, which checked the SHARD-OWNED singleton count
+# ``len(owned)`` instead of the whole ``|C_1|``, so a k=1 cell tripped only on
+# the shards that happened to own an over-budget singleton.
+
+#: ``(label, bar_bits, condition_bits, k, min_hits, n_bars, max_mask_bars)`` — a
+#: fuzz of tripping cells spanning k=1 AND k>=2. The k=1 repro
+#: ``k1_singlebit_over`` (condition_bits=[10], k=1, min_hits=5, n_bars=8,
+#: max_mask_bars=5) has whole ``|C_1| = 1`` -> ``1 x 8 = 8 > 5`` so it MUST trip
+#: for EVERY shard; on the pre-fix ``len(owned)`` check it tripped only where
+#: ``10 % big_w == w`` (shard-DEPENDENT). The k>=2 cells (already whole-|C_k|
+#: correct before this fix) are the "k>=2 was already right" span.
+_SHARD_TRIP_CELLS: list[tuple[str, list[int], list[int], int, int, int, int]] = [
+    ("k1_singlebit_over", [1 << 10], [10], 1, 5, 8, 5),  # THE named k=1 repro
+    ("k1_multibit_over", [1 << i for i in range(6)], list(range(6)), 1, 0, 8, 5),
+    ("k2_dense_final", [0b11111111] * 20, [0, 2, 4, 6, 7], 2, 0, 20, 1),
+    ("k3_singlebit_raw", [1 << i for i in range(12)], list(range(12)), 3, 1, 12, 600),
+]
+
+
+def _cell_raises_shard(
+    cell: tuple[str, list[int], list[int], int, int, int, int], root_mod: tuple[int, int]
+) -> bool:
+    _label, bar_bits, bits, k, min_hits, n_bars, cap = cell
+    try:
+        generate_apriori_candidates(
+            bar_bits,
+            condition_bits=bits,
+            k=k,
+            min_hits=min_hits,
+            n_bars=n_bars,
+            max_mask_bars=cap,
+            root_mod=root_mod,
+        )
+        return False
+    except SweepAprioriBudgetError:
+        return True
+
+
+def test_breaker_trip_is_shard_invariant() -> None:
+    # For every fuzz cell the trip decision MUST be IDENTICAL across every
+    # root_mod shard (w, big_w) for big_w in {1, 2, 3, 4} and all w in
+    # 0..big_w-1 — spanning k=1 AND k>=2. FAILS on the pre-fix k==1 branch
+    # (len(owned)), where the k1_singlebit_over cell trips only on the shards
+    # that own bit 10.
+    for cell in _SHARD_TRIP_CELLS:
+        verdicts = {
+            (w, big_w): _cell_raises_shard(cell, (w, big_w))
+            for big_w in (1, 2, 3, 4)
+            for w in range(big_w)
+        }
+        assert len(set(verdicts.values())) == 1, (
+            f"cell {cell[0]}: trip decision is shard-DEPENDENT — "
+            f"tripped {sorted(s for s, v in verdicts.items() if v)} but not "
+            f"{sorted(s for s, v in verdicts.items() if not v)}"
+        )
+    # …and every fuzz cell is a genuine RAISER (not a vacuous never-trip set that
+    # would make the invariance trivially true) — checked on the whole cell.
+    for cell in _SHARD_TRIP_CELLS:
+        assert _cell_raises_shard(cell, (0, 1)), f"{cell[0]} expected to trip"
+
+
+def test_k1_over_budget_trips_for_every_shard() -> None:
+    # Explicit named repro: whole |C_1| = 1 singleton, 1 x 8 = 8 > 5, so the
+    # breaker trips for EVERY shard regardless of which shard owns bit 10. On the
+    # pre-fix len(owned) check only shards where 10 % big_w == w tripped.
+    for big_w in (1, 2, 3, 4):
+        for w in range(big_w):
+            with pytest.raises(SweepAprioriBudgetError):
+                generate_apriori_candidates(
+                    [1 << 10],
+                    condition_bits=[10],
+                    k=1,
+                    min_hits=5,
+                    n_bars=8,
+                    max_mask_bars=5,
+                    root_mod=(w, big_w),
+                )
+
+
 # ────────────────────────── mutation hardening ──────────────────────────
 # Deterministic boundary pins that KILL the mutmut survivors on the hit-filter
 # `>=` boundaries, the breaker's strict `>`, and the incremental-check stride

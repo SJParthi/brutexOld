@@ -85,8 +85,9 @@ candidate list is complete — the singleton set at ``k == 1``, the raw join out
 WHOLE raw ``|C_k|`` at the final level BEFORE any ``root_mod`` shard filtering. The
 breaker thus guards the candidate ENUMERATION cost (the ``|C_j|`` masks that must
 be hit-counted), NOT the post-hit-filter frequent frontier ``|F_j|`` (a smaller,
-different quantity). Because the final check is on the whole pre-shard ``|C_k|``,
-the trip is also SHARD-INVARIANT — every ``root_mod`` shard of a cell trips
+different quantity). Because EVERY level's check — the ``k == 1`` singleton set
+and the final ``|C_k|`` alike — is on the whole pre-shard ``|C_j|``, the trip is
+also SHARD-INVARIANT at every level: every ``root_mod`` shard of a cell trips
 identically on the whole-cell budget.
 
 The incremental :data:`_BUDGET_CHECK_STRIDE` check is a pure DECISION-PRESERVING
@@ -377,8 +378,8 @@ def _join_and_prune(
     (proven in the module's parity contract + a dedicated property test).
 
     *on_count* is called with the running candidate count every
-    :data:`_BUDGET_CHECK_STRIDE` appends so the wall-clock breaker can trip
-    BEFORE a giant list is materialised.
+    :data:`_BUDGET_CHECK_STRIDE` appends so the deterministic incremental
+    (mask·bar) breaker can trip before a giant candidate list is materialised.
 
     Returns the pruned candidates as lex-sorted ascending position tuples.
     """
@@ -588,9 +589,9 @@ def generate_apriori_candidates(
     #    ``strict`` flag could never fire and a ``strict=False`` mutant was
     #    genuinely equivalent). ──
     if k == 1:
-        owned = [1 << bit for bit in singleton_bits if bit % big_w == w]
-        _budget_check(len(owned))
-        return owned
+        # AUTHORITATIVE on the WHOLE raw |C_1| (pre-shard) — stride + shard invariant.
+        _budget_check(len(singleton_bits))
+        return [1 << bit for bit in singleton_bits if bit % big_w == w]
 
     # ── k >= 2: build the frequent singleton frontier F_1 ──
     singleton_masks = [1 << bit for bit in singleton_bits]
