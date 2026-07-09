@@ -161,13 +161,21 @@ class UniverseSnapshotCache:
     every later poll of the same revision is an O(1) hit.
 
     Concurrency (mirrors
-    :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache`): all bookkeeping
+    :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` /
+    :meth:`~brutex.dashboard.summary_cache.SummaryCache._plan`): all bookkeeping
     is serialised by one :class:`threading.Lock`; the bounded base reads and the
     classification run OUTSIDE the lock so a slow read never blocks a concurrent
-    hit. Two concurrent cold misses each recompute independently and the last store
-    wins — the reads are a deterministic function of the revision (idempotent,
-    Golden Rule #7), so the duplicate work is harmless. A ``compute`` that raises
-    (e.g. a bad ``kind``) propagates cleanly and nothing is stored.
+    hit. Cold misses are SINGLE-FLIGHTED per revision
+    (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002): exactly ONE reader computes a given
+    revision's three base reads while every concurrent cold reader WAITS on its
+    event and then serves the published snapshot, so N simultaneous cold pollers
+    pay ONE scan instead of N (the ``summary``/``instruments`` reads run on a
+    threadpool worker, so a stalled lake volume can pin a worker but never the
+    event loop). The reads are a deterministic function of the revision
+    (idempotent, Golden Rule #7). A ``compute`` that raises (e.g. a broken store)
+    releases the single-flight event and propagates cleanly — nothing is stored
+    and no waiter is left hanging; a bad ``kind`` (a pure post-``_current``
+    classifier error) likewise propagates and nothing is cached.
 
     Returns are READ-ONLY: :meth:`summary` / :meth:`instruments` hand back the LIVE
     memoised dict / list (no defensive copy — mirrors ``MoversSnapshotCache`` /
@@ -179,6 +187,13 @@ class UniverseSnapshotCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._snapshot: _Snapshot | None = None
+        #: In-flight base-read events keyed by the revision being computed
+        #: (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002 single-flight). The FIRST cold
+        #: miss for a revision registers its event + computes the three base
+        #: reads; concurrent cold misses for the SAME revision wait on it, then
+        #: serve the published snapshot, so N cold pollers pay ONE scan. The
+        #: entry is popped by the leader on both the success and the failure path.
+        self._refreshing: dict[tuple[int, str], threading.Event] = {}
 
     def size(self) -> int:
         """``1`` if a revision is currently resident, else ``0`` — O(1)."""
@@ -198,30 +213,70 @@ class UniverseSnapshotCache:
     def _current(self, store: Any) -> _Snapshot:
         """Return the snapshot for the store's current revision, rebuilding on a miss.
 
-        The three base reads run OUTSIDE the lock; the resident snapshot is then
-        swapped in under the lock (last-write-wins on a concurrent miss).
+        The cheap revision token is probed once (outside the lock); on a miss the
+        three base reads run OUTSIDE the lock behind a per-revision single-flight
+        (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002): exactly ONE cold reader computes a
+        given revision while concurrent cold readers WAIT on its event and then
+        serve the published snapshot, so N simultaneous cold pollers pay ONE scan
+        instead of N (mirrors :meth:`SummaryCache._plan`'s cold single-flight). A
+        ``compute`` that raises (e.g. a broken store) releases the event and
+        propagates cleanly — nothing is stored and no waiter is left hanging.
         """
         revision = self._revision(store)
-        with self._lock:
-            snap = self._snapshot
-            if snap is not None and snap.revision == revision:
-                return snap
-        # Miss (no snapshot, or the master moved): rebuild the base reads. These
-        # are the three lean projections — never the option/future legs.
-        rebuilt = _Snapshot(
-            revision=revision,
-            eligible=store.fno_eligible_underlyings(),
-            candidates=store.list_index_equity_instruments(),
-            reference=store.reference_only_security_ids(),
-        )
-        with self._lock:
-            # Re-check under the lock: only adopt `rebuilt` if no concurrent miss
-            # already installed THIS revision (keep its memoised payloads then).
-            snap = self._snapshot
-            if snap is not None and snap.revision == revision:
-                return snap
-            self._snapshot = rebuilt
-            return rebuilt
+        while True:
+            with self._lock:
+                snap = self._snapshot
+                if snap is not None and snap.revision == revision:
+                    # Hit — also the wake path for a follower once the leader
+                    # published THIS revision. An O(1) dict handoff.
+                    return snap
+                event = self._refreshing.get(revision)
+                if event is None:
+                    # We are the cold leader for this revision: register the event
+                    # (so concurrent readers wait) and compute below.
+                    event = threading.Event()
+                    self._refreshing[revision] = event
+                    leader = True
+                else:
+                    leader = False
+            if not leader:
+                # Cold follower: another reader is already computing THIS revision.
+                # Wait for it, then re-loop to serve its published snapshot (the hit
+                # branch above); a mid-flight revision change re-elects a leader.
+                event.wait()
+                continue
+            # Cold leader: rebuild the three lean base reads OUTSIDE the lock (never
+            # the option/future legs), publish under the lock, and ALWAYS release the
+            # single-flight event so waiters wake — on success (they then serve the
+            # fresh snapshot) or on failure (they retry).
+            published = False
+            try:
+                rebuilt = _Snapshot(
+                    revision=revision,
+                    eligible=store.fno_eligible_underlyings(),
+                    candidates=store.list_index_equity_instruments(),
+                    reference=store.reference_only_security_ids(),
+                )
+                with self._lock:
+                    # Re-check under the lock: only adopt `rebuilt` if no concurrent
+                    # miss already installed THIS revision (keep its memoised payloads
+                    # then — belt-and-suspenders beside the single-flight).
+                    snap = self._snapshot
+                    if snap is not None and snap.revision == revision:
+                        self._refreshing.pop(revision, None)
+                        published = True
+                        return snap
+                    self._snapshot = rebuilt
+                    self._refreshing.pop(revision, None)
+                published = True
+                return rebuilt
+            finally:
+                if not published:
+                    # The compute raised — drop the registration so a waiter (or the
+                    # next caller) can retry this revision instead of hanging.
+                    with self._lock:
+                        self._refreshing.pop(revision, None)
+                event.set()
 
     def summary(self, store: Any) -> dict[str, int]:
         """Return ``/api/v1/universe/summary``'s payload, cached per revision.
