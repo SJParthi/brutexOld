@@ -51,6 +51,8 @@ from brutex.metrics.types import ClosedTrade, EquityCurve
 __all__ = [
     "Moments",
     "ResultMetrics",
+    "TradeFolds",
+    "combine_metrics_from_folds",
     "compute_metrics",
     "compute_metrics_from_scalars",
     "percentile",
@@ -566,27 +568,70 @@ def compute_metrics_from_scalars(
     )
 
 
-def _compute_metrics_impl(
-    trades: Sequence[ClosedTrade],
-    total_bars: int,
-    benchmark_return_pct: float,
-    *,
-    start_equity_paisa: int,
-    span_years: float,
-    drawdown: tuple[int, float, int, float],
-) -> ResultMetrics:
-    """Shared metric body behind :func:`compute_metrics` / the scalar entry.
+@dataclass(frozen=True, slots=True)
+class TradeFolds:
+    """Per-trade FOLD outputs of the metric body (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001).
 
-    The verbatim pre-#1186 :func:`compute_metrics` body with the three
-    ``equity`` reads replaced by the already-extracted scalars and the
-    :func:`_drawdown_stats` call replaced by the supplied ``drawdown``
-    tuple — a pure parameterisation, no behaviour change (the golden +
-    equality tests pin it). Callers validate their own boundary; this
-    body assumes ``total_bars >= 1`` and a valid scalar set.
+    The single-pass / per-trade accumulations of
+    :func:`_compute_metrics_impl`, extracted verbatim into ONE value object
+    so the metric body reads ``combine(fold(trades))`` — the Slice-0
+    fold/combine parameterisation of the Rust sweep-core conversion
+    (design pack ``docs/design/sweep_core/`` on branch
+    ``claude/rust-sweep-core``). Behaviour-identical: every field is the
+    exact intermediate the pre-decomposition body computed inline, in the
+    same operation order (the byte-parity golden suite pins it).
+
+    Field groups mirror the design's fold units:
+
+    * **Integer trade aggregates** (exact int arithmetic) —
+      ``n_trades`` / ``net_pnl_paisa`` / ``gross_profit_paisa`` /
+      ``gross_loss_abs_paisa`` / ``winners`` / ``losers`` /
+      ``sum_mfe_paisa`` / ``sum_mae_paisa`` / ``sum_holding_bars`` /
+      ``max_holding_bars`` / ``largest_loss_paisa`` (most-negative pnl,
+      stored signed) plus the streak folds ``max_consecutive_losses`` /
+      ``max_consecutive_wins`` (:func:`_consecutive_runs`).
+    * **Welford/Pébay moments** over the per-trade return series —
+      ``moments`` (:func:`_accumulate_moments` output, untouched).
+    * **Downside Σr²** — ``downside_sum_sq``, the raw
+      ``sum(r * r for r in downside)`` term of the Sortino denominator
+      (the ``sqrt(Σ/n)`` finish stays combine-side; ``builtins.sum`` over
+      an empty downside yields the int ``0``, kept as-is — ``0 / n``
+      reproduces the original ``0.0`` bit-for-bit).
+    * **Percentile folds** — ``p95`` / ``p5`` of the sorted return series
+      (:func:`percentile`, NumPy ``"linear"`` convention).
     """
-    if not trades:
-        return _empty_metrics(drawdown)
 
+    n_trades: int
+    net_pnl_paisa: int
+    gross_profit_paisa: int
+    gross_loss_abs_paisa: int  # accumulated as a non-negative magnitude
+    winners: int
+    losers: int
+    sum_mfe_paisa: int
+    sum_mae_paisa: int
+    sum_holding_bars: int
+    max_holding_bars: int
+    largest_loss_paisa: int  # most-negative pnl, stored signed
+    max_consecutive_losses: int
+    max_consecutive_wins: int
+    moments: Moments
+    downside_sum_sq: float
+    p95: float
+    p5: float
+
+
+def _fold_trades(trades: Sequence[ClosedTrade], start_equity_paisa: int) -> TradeFolds:
+    """Run the per-trade FOLD pass and return its :class:`TradeFolds`.
+
+    The verbatim per-trade accumulations of the pre-decomposition
+    :func:`_compute_metrics_impl` body — the single-pass integer
+    aggregates, the streak folds, the per-trade return series with its
+    Welford/Pébay moments, the downside Σr² term, and the p95/p5
+    percentile folds. No numeric change, no reordering of any summation
+    (the byte-parity golden suite pins it). Callers guarantee ``trades``
+    is non-empty (the zero-trade row is :func:`_empty_metrics`, the
+    caller's arm) and ``start_equity_paisa > 0``.
+    """
     # ── Per-trade aggregates (single pass) ───────────────────────────
     net_pnl = 0
     gross_profit = 0
@@ -598,8 +643,8 @@ def _compute_metrics_impl(
     sum_holding = 0
     # pragma justification (DEC-MUTATION-GATE-COMPUTE-001): every trade has
     # holding_bars >= 1 (ClosedTrade validation) and trades is non-empty on
-    # this path (the zero-trade row returned above), so the running max is
-    # >= 1 regardless of an initial 0 or 1 — the initialiser is unobservable.
+    # this path (the zero-trade row is the caller's arm), so the running max
+    # is >= 1 regardless of an initial 0 or 1 — the initialiser is unobservable.
     max_holding = 0  # pragma: no mutate
     largest_loss = 0  # most-negative pnl, stored signed
     for trade in trades:
@@ -617,6 +662,84 @@ def _compute_metrics_impl(
             largest_loss = min(largest_loss, trade.pnl_paisa)
 
     n_trades = len(trades)
+    max_losses, max_wins = _consecutive_runs(trades)
+
+    # Return series for the moment-based ratios = per-trade returns as a
+    # fraction of starting capital. Zero risk-free rate (DEC-METRICS-001).
+    returns = [t.pnl_paisa / start_equity_paisa for t in trades]
+    moments = _accumulate_moments(returns)
+    # Downside Σr² for the Sortino denominator (spec line 541 "downside-only
+    # volatility"): the RMS finish (÷ n, sqrt) stays combine-side.
+    # pragma justification (DEC-MUTATION-GATE-COMPUTE-001): the strict "<"
+    # boundary is unobservable — an r == 0.0 admitted by a "<=" flip would
+    # contribute r * r == 0.0 to the sum. The filter threshold's REAL
+    # mutants (0.0 -> 1.0 would admit positive returns) stay pinned by
+    # test_sortino_known_value's exact-value assertion.
+    downside = [r for r in returns if r < 0.0]  # pragma: no mutate
+    downside_sum_sq = sum(r * r for r in downside)
+    # tail_ratio inputs = p95 / p5 (spec line 576) of the per-trade returns.
+    sorted_returns = sorted(returns)
+    p95 = _percentile(sorted_returns, 95.0)
+    p5 = _percentile(sorted_returns, 5.0)
+
+    return TradeFolds(
+        n_trades=n_trades,
+        net_pnl_paisa=net_pnl,
+        gross_profit_paisa=gross_profit,
+        gross_loss_abs_paisa=gross_loss_abs,
+        winners=winners,
+        losers=losers,
+        sum_mfe_paisa=sum_mfe,
+        sum_mae_paisa=sum_mae,
+        sum_holding_bars=sum_holding,
+        max_holding_bars=max_holding,
+        largest_loss_paisa=largest_loss,
+        max_consecutive_losses=max_losses,
+        max_consecutive_wins=max_wins,
+        moments=moments,
+        downside_sum_sq=downside_sum_sq,
+        p95=p95,
+        p5=p5,
+    )
+
+
+def combine_metrics_from_folds(
+    folds: TradeFolds,
+    *,
+    total_bars: int,
+    benchmark_return_pct: float,
+    start_equity_paisa: int,
+    span_years: float,
+    drawdown: tuple[int, float, int, float],
+) -> ResultMetrics:
+    """COMBINE a :class:`TradeFolds` into the :class:`ResultMetrics` row.
+
+    The verbatim scalar tail of the pre-decomposition
+    :func:`_compute_metrics_impl` body — every expression below is
+    token-for-token the original, reading the fold intermediates from
+    ``folds`` instead of inline locals (the byte-parity golden suite pins
+    bit-identity; DEC-SWEEP-COMPUTE-FOLD-DECOMP-001). Requires
+    ``folds.n_trades >= 1`` — the zero-trade row is
+    :func:`_empty_metrics`, the caller's own arm (mirroring the sweep
+    core's ``zero_trade`` arm in the design) — plus the same scalar
+    validity contract as :func:`_compute_metrics_impl` (``total_bars >=
+    1``, ``start_equity_paisa > 0``, finite positive ``span_years``).
+
+    Spec citations live on the inline comments; conventions where the
+    spec is silent are recorded in DEC-METRICS-001 (MIGRATION.md #305).
+    """
+    n_trades = folds.n_trades
+    net_pnl = folds.net_pnl_paisa
+    gross_profit = folds.gross_profit_paisa
+    gross_loss_abs = folds.gross_loss_abs_paisa
+    winners = folds.winners
+    losers = folds.losers
+    sum_mfe = folds.sum_mfe_paisa
+    sum_mae = folds.sum_mae_paisa
+    sum_holding = folds.sum_holding_bars
+    max_holding = folds.max_holding_bars
+    largest_loss = folds.largest_loss_paisa
+    moments = folds.moments
 
     # ── Return metrics (spec lines 532-537) ──────────────────────────
     # total_return_pct: net P&L as a percentage of the starting capital.
@@ -653,7 +776,8 @@ def _compute_metrics_impl(
 
     # ── Drawdown (spec lines 547-555) ────────────────────────────────
     max_dd_paisa, max_dd_pct, max_dd_bars, ulcer = drawdown
-    max_losses, max_wins = _consecutive_runs(trades)
+    max_losses = folds.max_consecutive_losses
+    max_wins = folds.max_consecutive_wins
     # recovery_factor = net profit / MDD (spec line 551). None if MDD == 0.
     recovery_factor = _safe_ratio(float(net_pnl), float(max_dd_paisa))
 
@@ -680,10 +804,8 @@ def _compute_metrics_impl(
     time_in_market_pct = min(100.0, 100.0 * sum_holding / total_bars)
 
     # ── Risk-adjusted return (spec lines 539-545) ────────────────────
-    # Return series for the moment-based ratios = per-trade returns as a
-    # fraction of starting capital. Zero risk-free rate (DEC-METRICS-001).
-    returns = [t.pnl_paisa / start_equity_paisa for t in trades]
-    moments = _accumulate_moments(returns)
+    # The per-trade return series' moments come from the fold pass
+    # (`TradeFolds.moments` — zero risk-free rate, DEC-METRICS-001).
     std_dev = moments.std_dev
     # Sharpe = mean(return) / std(return), no annualisation multiplier
     # (DEC-METRICS-001: per-trade-return ratio; spec lists cagr_pct
@@ -691,16 +813,11 @@ def _compute_metrics_impl(
     sharpe = None if std_dev is None or std_dev == 0.0 else moments.mean / std_dev
     # Sortino = mean(return) / downside-deviation, where downside
     # deviation is the RMS of negative returns about a zero target
-    # (spec line 541 "downside-only volatility").
-    # pragma justification (DEC-MUTATION-GATE-COMPUTE-001): the strict "<"
-    # boundary is unobservable — an r == 0.0 admitted by a "<=" flip would
-    # contribute r * r == 0.0 to the sum. The filter threshold's REAL
-    # mutants (0.0 -> 1.0 would admit positive returns) stay pinned by
-    # test_sortino_known_value's exact-value assertion. The RMS arithmetic
-    # below stays mutable; n_trades >= 1 here (zero-trade rows returned
-    # above), so no division guard is needed.
-    downside = [r for r in returns if r < 0.0]  # pragma: no mutate
-    downside_dev = math.sqrt(sum(r * r for r in downside) / n_trades)
+    # (spec line 541 "downside-only volatility"); the Σr² term is the
+    # fold's `downside_sum_sq`. The RMS arithmetic stays mutable;
+    # n_trades >= 1 here (zero-trade rows are the caller's arm), so no
+    # division guard is needed.
+    downside_dev = math.sqrt(folds.downside_sum_sq / n_trades)
     sortino = None if downside_dev == 0.0 else moments.mean / downside_dev
     # calmar = CAGR / MaxDD (spec line 542). MaxDD as a percentage.
     calmar = _safe_ratio(cagr_pct, max_dd_pct)
@@ -724,11 +841,9 @@ def _compute_metrics_impl(
     omega = _safe_ratio(float(gross_profit), float(gross_loss_abs))
 
     # ── Distribution robustness (spec lines 575-579) ─────────────────
-    # tail_ratio = p95 / |p5| (spec line 576) of the per-trade return series.
-    sorted_returns = sorted(returns)
-    p95 = _percentile(sorted_returns, 95.0)
-    p5 = _percentile(sorted_returns, 5.0)
-    tail_ratio = _safe_ratio(p95, abs(p5))
+    # tail_ratio = p95 / |p5| (spec line 576) of the per-trade return
+    # series — both percentiles are fold outputs.
+    tail_ratio = _safe_ratio(folds.p95, abs(folds.p5))
     skewness = _skewness(moments)
     kurtosis = _excess_kurtosis(moments)
 
@@ -770,6 +885,42 @@ def _compute_metrics_impl(
         skewness=skewness,
         kurtosis=kurtosis,
         returns_std_dev=std_dev,
+    )
+
+
+def _compute_metrics_impl(
+    trades: Sequence[ClosedTrade],
+    total_bars: int,
+    benchmark_return_pct: float,
+    *,
+    start_equity_paisa: int,
+    span_years: float,
+    drawdown: tuple[int, float, int, float],
+) -> ResultMetrics:
+    """Shared metric body behind :func:`compute_metrics` / the scalar entry.
+
+    The verbatim pre-#1186 :func:`compute_metrics` body with the three
+    ``equity`` reads replaced by the already-extracted scalars and the
+    :func:`_drawdown_stats` call replaced by the supplied ``drawdown``
+    tuple — since DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 (Slice 0 of the Rust
+    sweep-core conversion) expressed as the pure composition
+    ``combine_metrics_from_folds(_fold_trades(...))`` over the SAME
+    expressions, still a pure parameterisation with no behaviour change
+    (the golden + byte-parity suites pin it). Callers validate their own
+    boundary; this body assumes ``total_bars >= 1`` and a valid scalar
+    set. The zero-trade row stays this composition root's own arm
+    (:func:`_empty_metrics`), mirroring the sweep core's ``zero_trade``
+    arm — :func:`combine_metrics_from_folds` requires ``n_trades >= 1``.
+    """
+    if not trades:
+        return _empty_metrics(drawdown)
+    return combine_metrics_from_folds(
+        _fold_trades(trades, start_equity_paisa),
+        total_bars=total_bars,
+        benchmark_return_pct=benchmark_return_pct,
+        start_equity_paisa=start_equity_paisa,
+        span_years=span_years,
+        drawdown=drawdown,
     )
 
 
