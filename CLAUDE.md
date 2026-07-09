@@ -18,8 +18,11 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1631 —
-renumbered from #1623 after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001;
+_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1649a —
+renumbered #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took
+#1623 for DEC-DASHBOARD-POLL-HYGIENE-001, then #1631/#1632 for
+DEC-ONECLICK-TOP100-OBJECT-ROOT-001 + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the
+613a/613b both-suffixed pair convention keeps the companion entries adjacent);
 the /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named
 follow-up CLOSED: the minute-basis PREV. CLOSE anchored on the symbol's OWN
 1-day series with ZERO real-calendar check (its docstring called a real NSE
@@ -34,7 +37,7 @@ dataset triple (capped 20/build + one suppressed summary) carrying a
 machine `hole_shape` + shape-matched detail (the hostile-review
 fold — the original one-line "re-pull" advice was WRONG remediation in two
 reproduced shapes; since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment
-fold, MIGRATION.md #1632, the split is FOUR-WAY): muhurat_session_bar (the
+fold, MIGRATION.md #1649b, the split is FOUR-WAY): muhurat_session_bar (the
 calendar-confirmed Diwali boundary — a HEALTHY lake, "no action needed",
 cross-referencing the #1616 engine anchor law + /movers' prev_close_muhurat
 display stamp) / extra_nonsession_bar (a non-Muhurat unexpected non-session
@@ -42,7 +45,7 @@ bar — honestly suspicious, inspect it) / prebuild_lag (the 1day series lags
 the minute series — run the pipeline prebuild; diagnostic only, the guard
 never anchors on minute presence) / missing_session (the genuine hole —
 re-pull kept verbatim); the found<expected arms are two-way on the daily
-basis (no minute series read). The same #1632 fold ends the annual /movers
+basis (no minute series read). The same #1649b fold ends the annual /movers
 false-hole flag: a day-after-Diwali Muhurat baseline now reads
 contiguous-True + EMIT-ON-TRUE `prev_close_muhurat`/`oi_baseline_muhurat`
 + " †" + ONE INFO per build (never " *"/WARN), and /db gains the static
@@ -67,6 +70,55 @@ the `!=`→`==` mutant proven dead on both guards. READ-ONLY dashboard — ENGIN
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
 preopen_report.py + calendars/nse.py 100% line+branch; ruff/ruff-format clean,
 `mypy --strict` clean, pyright 0 errors at the pre-change baseline).
+Earlier: 2026-07-09 (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 —
+the one-click `top100.json` READER-ADOPTS-WRITER fix for the 3/3
+refuter-confirmed BLOCKER: the SHIPPED engine writer
+(`top100_artifact.write_top100`, default-ON in `cmd_sweep_all`) emits an
+OBJECT root `{schema_version, run_id, preset, source, baselines, entries}`
+while the display reader (`oneclick_artifacts.load_top100`) demanded a bare
+ARRAY — every REAL sweep read "corrupt · 0 strategies" on /operator ·
+/screener · /strategy while CI stayed green on hand-written bare-array
+fixtures (the fixture-only blindspot). The reader now parses the writer's
+object root (unknown FUTURE schema_version → NAMED corrupt, never a crash;
+the retired pre-#1621 bare-array form → NAMED corrupt — deliberately NO dual
+shape), adds per-row SUB-KEY shape validation (named partial degrades), and
+applies the ONE additive reader-boundary metric map `TOP100_METRIC_KEY_MAP`
+(`max_drawdown_paisa`→`max_dd_paisa` · `sharpe_ratio`→`sharpe` ·
+`deflated_sharpe`→`dsr` · `total_trades`→`trades`; the writer-absent
+`cpcv_pass_pct` stays ABSENT → honest "—", never a fabricated 0 — the
+screener-band-filter drops-every-row blast radius node-pinned); `preset` is
+surfaced for the pages' sort-basis labels. Fixture corpus REGENERATED from
+the writer shape (object root + engine metric names; SHAs refreshed
+deliberately); NEW writer→reader golden drives the ACTUAL `build_top100` →
+`write_top100` → `load_top100` → routes chain. Fold [11]: visible sort-basis
+labels on /results AND the one-click surfaces (labels only, neither sort
+changed; the preset tie-break divergence itself is RULED design-sanctioned —
+inert axes wire-disclosed per #1617 Ruling 10, the /results UI sends no
+`?preset=`, negative-pinned). Folds [W2-4]/[W2-5]: Ruling-18
+`costs_paisa:null` no longer folds into the non-integer bucket (equity +
+R44 arithmetic count null costs at ₹0 with the honest "gross of those
+costs" caveat — 3 real rows previously read an EMPTY curve / "0 trades");
+the /screener count line's numerator is the RENDERED count, naming the
+render cap. Coordinator ruling folded: the /operator v24.4 "LIVE"
+hook-banner ticker (16 hardcoded fabricated trade ticks) is DELETED
+outright — the honest `#bxTickerStrip` (real runs payload) is the one
+ticker kept, killed-token-pinned. Fold [12]: `runs_revision` folds per-run
+manifest stat tokens so an in-place `suspect` rewrite moves the cached
+runs-listing key (O(run dirs) stats per poll, stated). Wave-3 fold: [W3-R1]
+the /strategy candle chart was DEAD (mapper read `idx.ts`; the real
+/api/v1/db/candles column is `timestamp`) — fixed via the ONE route-shape
+mapper `bxCandleRowsFromDbPayload` + TZ-safe `bxParseTsIst` (naive API
+strings pinned to +05:30 IST; arrow placement node-proven TZ-invariant under
+TZ=America/New_York) with a REAL-route integration golden; [W3-R4] a
+null-VIX writer band no longer renders "between null–null" on any of the
+three band sites — ONE shared builder pair reads the honest "VIX band not
+stamped for this run" / partial-bound copy; [W3-R3] the /strategy arm
+"[object Object]" repro is VERIFIED dead (covered by the f1d271d4 reader
+bridge; route-level proof added). DISPLAY zone only —
+ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), engine writer byte-untouched;
+both oneclick modules 100% line+branch standalone; ruff/ruff-format/`mypy
+--strict`/pyright clean. Any per-round record lives ONLY in the §1 Active-branch blurb
++ the MIGRATION.md entry — this header carries pointers, never round narration.)
 Earlier: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
@@ -980,7 +1032,7 @@ per (symbol, kind)), and marked " *" on the screen — while the SERVED VALUE is
 untouched in every branch: NEW COMMON `calendars/nse.previous_trading_session`
 (strict back-walk, coverage-floor ABSTAIN — never a guessed session; Muhurat =
 NON-session documented limit [SUPERSEDED for the movers VERDICT layer by
-DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1632: the walk still
+DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1649b: the walk still
 treats Muhurat a NON-session, but a found-after-expected Muhurat baseline now
 reads contiguous-True + `prev_close_muhurat`/`oi_baseline_muhurat` — a healthy
 lake, never a false hole]), enriched resolvers `resolve_prev_close`/
@@ -991,7 +1043,7 @@ the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
 HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
 the missing session does; `preopen_report._previous_trading_day` was NOT
 refactored there (named follow-up DEC-PREOPEN-PREVDAY-COMMON-001 — since
-CLOSED by MIGRATION.md #1631). READ-ONLY dashboard — ENGINE
+CLOSED by MIGRATION.md #1649a). READ-ONLY dashboard — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
 MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
@@ -1741,8 +1793,11 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1631** — renumbered
-  from #1623 after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335) at the 2026-07-09 merge-reconcile; the
+- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1649a** — renumbered
+  #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335),
+  then #1631/#1632 for DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (PR #1352) + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the coordinator
+  slot is #1649, and the 613a/613b both-suffixed pair convention — a bare number may not coexist with suffixed forms —
+  keeps this entry + its same-branch amendment adjacent as #1649a/#1649b); the
   /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named follow-up consolidation: the minute-basis
   PREV. CLOSE guard (`_minute_prev_close_contiguous`) anchored on `trading_dates[idx-1]` — the symbol's OWN 1-day
   series — with ZERO real-NSE-calendar check (its docstring claimed a session absent from BOTH series is "a genuine
@@ -1760,7 +1815,7 @@ hostile-review pass._
   hostile-review fold widened the bare-symbol key that silenced a dual-listed symbol's second exchange — cap
   20/build, ONE `preopen.prev_close_noncontiguous_suppressed` summary) carrying a machine `hole_shape`
   + shape-matched detail (the review fold on the original unconditional "re-pull" advice, WRONG in two reproduced
-  shapes; FOUR-WAY since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment fold, MIGRATION.md #1632):
+  shapes; FOUR-WAY since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment fold, MIGRATION.md #1649b):
   muhurat_session_bar (the calendar-confirmed Diwali boundary — a HEALTHY lake, "no action needed", cross-referencing
   the #1616 engine anchor law + /movers' prev_close_muhurat display stamp) / extra_nonsession_bar (a non-Muhurat
   unexpected non-session bar — honestly suspicious, inspect it; the old "e.g. a Diwali Muhurat session" guess is
@@ -1768,7 +1823,7 @@ hostile-review pass._
   run the pipeline prebuild; DIAGNOSTIC only, the guard never anchors on minute presence — a partial-day close
   would be a fabrication) / missing_session (genuine hole — re-pull kept verbatim); the daily basis carries no
   minute evidence, so only its found<expected diagnostic degrades; the golden generator now REFUSES to overwrite existing
-  fixtures without BRUTEX_REGEN_PREOPEN_GOLDEN=1 (the pre-fix capture stays the oracle). THE SAME #1632 AMENDMENT
+  fixtures without BRUTEX_REGEN_PREOPEN_GOLDEN=1 (the pre-fix capture stays the oracle). THE SAME #1649b AMENDMENT
   FOLD (DEC-PREVSESSION-MUHURAT-COHERENCE-001, this branch, the recorded TWO-LAW design — engine anchor law #1616
   vs display baseline law): /movers stops false-flagging the day-after-Diwali boundary as a lake hole — a
   found-after-expected Muhurat baseline reads contiguous-True + the EMIT-ON-TRUE `prev_close_muhurat`/
@@ -1799,6 +1854,37 @@ hostile-review pass._
   (204/52) BOTH 100.00% line+branch on their static gates; ruff/ruff-format clean; `mypy --strict` clean (403 files);
   pyright 0 errors at the pre-change baseline, +2 test-file `reportPrivateUsage` warnings — the house private-import
   test pattern — plus 2 more for the round-1 `_hole_shape`/`_hole_detail` private-helper imports.)
+  Earlier: `claude/oneclick-top100-object-root` (**DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631** —
+  the one-click `top100.json` READER-ADOPTS-WRITER blocker fix: the display reader
+  (`oneclick_artifacts.load_top100`) now parses the SHIPPED engine writer's OBJECT root
+  (`{schema_version, run_id, preset, source, baselines, entries}` — `write_top100`, default-ON in
+  `cmd_sweep_all`) instead of demanding a bare ARRAY, so a REAL sweep no longer reads
+  "corrupt · 0 strategies" on /operator · /screener · /strategy (the fixture-only blindspot — CI was
+  green on hand-written bare arrays no production writer ever emitted). Unknown future schema_version /
+  missing entries / the retired bare-array form → NAMED corrupt (never a crash, never a dual shape);
+  per-row SUB-KEY shape validation with named partial degrades; the ONE additive metric-key map
+  `TOP100_METRIC_KEY_MAP` (`max_drawdown_paisa`→`max_dd_paisa`, `sharpe_ratio`→`sharpe`,
+  `deflated_sharpe`→`dsr`, `total_trades`→`trades`; absent `cpcv_pass_pct` stays absent → honest "—",
+  never a fabricated 0); fixtures REGENERATED from the writer shape; NEW writer→reader golden
+  (engine `build_top100`→`write_top100` → display `load_top100` → routes). Folds: [11] visible
+  sort-basis labels on /results + the one-click surfaces (labels only — the preset tie-break
+  divergence is RULED design-sanctioned per #1617 Ruling 10, `?preset=` UI exposure negative-pinned);
+  [W2-4] — Ruling-18 null costs count at ₹0 with the honest gross-curve caveat instead of excluding
+  every real trade; [W2-5] — the /screener count line names the render cap; the fabricated v24.4
+  "LIVE" hook-banner ticker is DELETED by coordinator ruling (the honest #bxTickerStrip stays); [12] —
+  `runs_revision` folds per-run manifest stat tokens (an in-place `suspect` rewrite moves the cached
+  runs-listing key). Wave-3 fold: [W3-R1] the /strategy candle chart was DEAD ON ARRIVAL — the inline
+  mapper indexed `idx.ts` while the real /api/v1/db/candles column is `timestamp`; ONE route-shape mapper
+  `bx-chart.js::bxCandleRowsFromDbPayload` + the TZ-safe `bxParseTsIst`/`bxIstDateOfEpoch` (naive API
+  strings = IST wall-clock pinned to +05:30 — never browser-local Date parsing; offset-carrying trade
+  timestamps pass through) prove candle mapping AND arrow placement TZ-invariant via node goldens under
+  TZ=America/New_York + the NEW real-route integration golden (test_strategy_chart_route_shape.py);
+  [W3-R4] the null-VIX writer band (`{lo:null, hi:null}`) rendered "works when VIX between null–null" —
+  ONE shared builder pair (`bxVixBandText`/`bxVixBandCellText` on BXOneclick) now reads the honest
+  "VIX band not stamped for this run" (partial bands name the missing bound) across the operator card,
+  /strategy story card and /screener band column; [W3-R3] the finder's /strategy arm "[object Object]"
+  repro predates f1d271d4 — VERIFIED dead at this head (the reader-boundary bridge feeds every consumer;
+  route-level wire proof + template pin added, no second arm source exists.)
   Earlier: `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
@@ -2469,7 +2555,7 @@ hostile-review pass._
   (strict `is_trading_day_checked` back-walk over weekends/holidays, Budget weekend sessions honoured, coverage-floor
   ABSTAIN with one `calendar.previous_session_coverage_exhausted` warning — never a guessed session; Muhurat day =
   documented NON-session limit [the WALK's stance stands, but the VERDICT layer's false-hole reading of a
-  day-after-Diwali Muhurat baseline is SUPERSEDED by DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1632 —
+  day-after-Diwali Muhurat baseline is SUPERSEDED by DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1649b —
   contiguous-True + the EMIT-ON-TRUE `prev_close_muhurat`/`oi_baseline_muhurat` stamp + " †", never " *"/WARN];
   NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
   `movers_snapshot.resolve_prev_close` → `PrevDayBaseline(value, found_date)` + `movers_futures.resolve_prev_oi` →
@@ -2483,7 +2569,7 @@ hostile-review pass._
   " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
   makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
   session does; no bar is ever fabricated); `preopen_report._previous_trading_day` was deliberately NOT refactored
-  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since CLOSED by MIGRATION.md #1631 (the thin-delegator
+  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since CLOSED by MIGRATION.md #1649a (the thin-delegator
   consolidation). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
   line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
@@ -4204,14 +4290,17 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/preopen-prevday-common`
-  (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1631 — renumbered from #1623
-  after main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001; the /reports preopen
+  (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1649a — renumbered
+  #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623
+  for DEC-DASHBOARD-POLL-HYGIENE-001, then #1631/#1632 for
+  DEC-ONECLICK-TOP100-OBJECT-ROOT-001 + DEC-DASHBOARD-VISUAL-OVERHAUL-001;
+  both-suffixed pair per the 613a/613b precedent); the /reports preopen
   minute-basis calendar-contiguity fix (a real-session lake hole no longer
   fabricates a %CHNG — correct-or-absent) + the #1539-named follow-up CLOSED:
   `_previous_trading_day` delegates to the COMMON
   `nse.previous_trading_session`, which gains the remove-only `observed`
   overlay kwarg; PLUS the same-branch amendment fold
-  DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1632 — the two-law
+  DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1649b — the two-law
   day-after-Diwali coherence ruling: /movers stops false-flagging a healthy
   Muhurat-boundary lake as a lake hole (contiguous-True + EMIT-ON-TRUE
   `prev_close_muhurat`/`oi_baseline_muhurat` + " †" + one INFO, never
@@ -4219,9 +4308,20 @@ hostile-review pass._
   `extra_nonsession_bar` reworded honestly suspicious), /db gains the static
   %CHNG anchor footnote; READ-ONLY dashboard; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/oneclick-top100-object-root`
+  (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 — the one-click
+  `top100.json` reader-adopts-writer blocker fix: object root + the ONE
+  reader-boundary metric-key map + writer→reader golden + fixture corpus
+  regenerated from the writer shape; folds [11] sort-basis labels,
+  [W2-4] null-cost gross-equity honesty, [W2-5] screener render-cap count,
+  [12] runs-listing manifest-token cache key, [W3-R1] the /strategy candle
+  chart timestamp-key + TZ-safe arrow placement, [W3-R4] honest null
+  VIX-band copy on all three band sites ([W3-R3] arm repro verified dead);
+  DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  see §1 Active branch for the full blurb)
   Earlier: `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
-  PER-FILE lake STATS manifest; matches §1's Earlier chain entry)
+  PER-FILE lake STATS manifest; see §1 for the full blurb)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
