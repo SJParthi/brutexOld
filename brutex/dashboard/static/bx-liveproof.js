@@ -61,6 +61,9 @@
 
   var ENDPOINT = "/api/v1/liveproof";
   var POLL_MS = 5000;
+  // Bounded-fetch deadline (DEC-WINDOWS-COUNTS-ONLY-001 M15 — the sibling
+  // bx-rate-monitor.js fetchJson discipline): armed through the BODY read.
+  var FETCH_TIMEOUT_MS = 10000;
   // Auto-collapse the pill to the compact dot badge this long after a verdict
   // is first shown (DEC-UNIVERSE-UI-POLISH-002 — never occlude page content).
   var AUTO_MIN_MS = 8000;
@@ -535,6 +538,34 @@
     scheduleMinimize(pill, verdictSignature(data));
   }
 
+  // Poll-fetch discipline (DEC-WINDOWS-COUNTS-ONLY-001 M15 — mirrors the
+  // sibling bx-rate-monitor.js fetchJson): before this, poll() issued a BARE
+  // fetch with no timeout and no in-flight guard, so a hung server accumulated
+  // unbounded pending requests onto the browser's ~6-per-origin connection
+  // pool, queueing every other poller on the page. Now: at most ONE request in
+  // flight; the AbortController deadline stays ARMED through the BODY read
+  // (cleared only after r.json() settles — a headers-then-stalled-body
+  // response aborts too); and a monotonic seq token discards a stale response
+  // so it can never paint over a fresher one. The widget contract is intact:
+  // best-effort, never throws, a failed/aborted poll leaves the last render in
+  // place. HONEST envelope (Golden Rule #10): on an ancient browser without
+  // AbortController the deadline arm is inert (same as the sibling widget) —
+  // the in-flight release then waits on the browser's own fetch failure.
+  var pollSeq = 0;      // request issue counter (stale responses discarded)
+  var pollInFlight = false;
+  function fetchJson(url) {
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var killer = ctrl ? setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS) : null;
+    var opts = { headers: { Accept: "application/json" } };
+    if (ctrl) { opts.signal = ctrl.signal; }
+    return fetch(url, opts).then(function (r) {
+      return r.ok ? r.json() : null;   // killer still armed: a stalled BODY aborts too
+    }).then(function (data) {
+      if (killer) { clearTimeout(killer); }
+      return data;
+    }).catch(function (err) { if (killer) { clearTimeout(killer); } throw err; });
+  }
+
   function poll() {
     // Hidden-tab pause (DEC-LEDGER-DELTA-O-PAGE-001, the v29.html pattern): a
     // background tab fires ZERO fetches; the visibilitychange listener below
@@ -542,16 +573,19 @@
     // a returning operator (Golden Rule #1). Pure scheduling — render
     // semantics unchanged; the interval keeps ticking (hidden ticks are free).
     if (document.hidden) return;
-    fetch(ENDPOINT, { headers: { Accept: "application/json" } })
-      .then(function (r) {
-        return r.ok ? r.json() : null;
-      })
+    if (pollInFlight) return;   // one-in-flight guard (M15) — never stack requests
+    pollInFlight = true;
+    var seq = ++pollSeq;
+    fetchJson(ENDPOINT)
       .then(function (data) {
+        pollInFlight = false;
+        if (seq !== pollSeq) return;   // stale straggler — never repaint over a fresher poll
         if (data) {
           render(data);
         }
       })
       .catch(function () {
+        pollInFlight = false;
         /* best-effort — leave the last render in place on a transient error. */
       });
   }
