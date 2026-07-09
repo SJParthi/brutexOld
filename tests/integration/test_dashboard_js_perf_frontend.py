@@ -367,12 +367,12 @@ _BASELINE_INNERHTML_SINKS: dict[str, int] = {
 # target (tbody instead of the whole grid). Explicitly allowed by the
 # DEC-DASHBOARD-JS-PERF-001 security invariant; pinned verbatim in
 # test_db_ships_the_in_place_tbody_patch above.
-# fetch_windows.html carries the SAME sanctioned pattern since
-# DEC-WINDOWS-COUNTS-ONLY-001: `tbody.innerHTML = windowsRowsHtml(rows);` — the
-# SAME already-esc()'d row-string builder the pre-existing full rebuild writes,
-# against the narrower tbody target (pinned verbatim in
+# fetch_windows.html adopted the SAME in-place tbody-patch mechanism
+# (DEC-WINDOWS-COUNTS-ONLY-001) but via the Batch A createElement/textContent
+# row builder (`windowsRowEl` + `replaceChildren`), so it needs NO extra
+# innerHTML sink — its baseline stays the ratcheted 0 (pinned in
 # test_fetch_windows_ships_the_in_place_tbody_patch below).
-_SANCTIONED_EXTRA_SINKS: dict[str, int] = {"db.html": 1, "fetch_windows.html": 1}
+_SANCTIONED_EXTRA_SINKS: dict[str, int] = {"db.html": 1}
 
 
 @pytest.mark.parametrize("name", sorted(_BASELINE_INNERHTML_SINKS))
@@ -439,17 +439,19 @@ def test_fetch_windows_requests_a_sane_page() -> None:
 def test_fetch_windows_ships_the_in_place_tbody_patch() -> None:
     """fetch_windows.html swaps ONLY the tbody on a changed payload (db.html idiom).
 
-    The ONE sanctioned extra innerHTML sink: the SAME esc()'d row-string builder
-    the full rebuild writes (``windowsRowsHtml``), against the narrower tbody
-    target — the table shell / sticky header / scroll position survive a poll.
+    Batch A (DEC-DASHBOARD-VISUAL-OVERHAUL-001) rebuilt this page's rows via
+    createElement/textContent, so the DEC-WINDOWS-COUNTS-ONLY-001 in-place
+    patch rides the SAME element row builder (``windowsRowEl``) through
+    ``replaceChildren`` against the narrower tbody target — the table shell /
+    sticky header / scroll position survive a poll, with ZERO innerHTML sinks.
     Source-pinned, not browser-executed.
     """
     html = _template("fetch_windows.html")
-    assert "function windowsRowsHtml(rows)" in html
+    assert "function windowsRowEl(r)" in html
     assert 'panel.querySelector("table > tbody")' in html
-    assert "tbody.innerHTML = windowsRowsHtml(rows);" in html
-    # The full-rebuild path writes the SAME builder strings.
-    assert '"</tr></thead><tbody>" + windowsRowsHtml(rows) + "</tbody></table>"' in html
-    # esc() discipline intact on every payload value in the row builder.
-    assert "esc(r.symbol)" in html
-    assert 'esc(r.last_error || "")' in html
+    assert "existing.replaceChildren(...rows.map(windowsRowEl));" in html
+    # The full-rebuild path appends the SAME builder elements.
+    assert "rows.forEach(r => tbody.appendChild(windowsRowEl(r)));" in html
+    # textContent discipline intact on every payload value in the row builder.
+    assert "asText(r.symbol)" in html
+    assert 'asText(r.last_error || "")' in html
