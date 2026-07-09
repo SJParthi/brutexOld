@@ -228,6 +228,24 @@ class TestScreenRows:
         ]
         out = screen_rows(rows, cols, bad_tick_enabled=False)
         assert [r[4] for r in out] == [1.0, 5.0]  # 5× kept, insane dropped
+        # The served-vs-dropped asymmetry, live (the reviewer-2 reproducer shape):
+        # the SAME premium sequence under default-ON drops the 5× as a bad tick.
+        default_on = screen_rows(rows[:2], cols, bad_tick_enabled=True)
+        assert [r[4] for r in default_on] == [1.0]  # ×4 arm drops the 5.00 bar
+
+    def test_none_timestamp_row_served_raw_never_raises(self) -> None:
+        # DEC-DB-CORRUPT-SKIP-001 never-500 posture: a schema-drifted page with a
+        # None timestamp cell (union_by_name null-fill) must NOT raise — the junk
+        # row is served RAW while the datetime rows around it are still screened.
+        cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
+        rows = [
+            (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None),
+            (None, 999.0, 1002.0, 998.0, 1001.0, 10, None),  # junk ts → served raw
+            (_OPEN_UTC + timedelta(minutes=2), 9999.0, 10002.0, 9998.0, 10000.0, 10, None),
+        ]
+        out = screen_rows(rows, cols)
+        # The ×10 spike (a datetime row) is screened out; the None-ts row survives.
+        assert [r[4] for r in out] == [1000.0, 1001.0]
 
     def test_seed_catches_left_edge_spike(self) -> None:
         # A page whose FIRST row is itself a spike vs a same-session predecessor:

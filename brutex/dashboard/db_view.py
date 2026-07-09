@@ -2254,20 +2254,43 @@ def query_candles(
     # Spot/futures candles keep the FULL screen (insane + ×4 bad-tick), seeded with
     # the last KEPT in-session bar before the page's earliest row so the cross-row
     # bad-tick screen is correct at the page's left edge (`_bad_tick_seed_bar`; the
-    # deep-cluster residual is documented there). Clean pages return the same object
-    # (no-op → byte-identical). HONEST envelope: the seed read is one bounded
-    # (~row-group) DuckDB query per page (eager, even on clean data — O(page)
-    # preserved); and `total` above is the DATASET-wide DISTINCT-timestamp count, so
-    # on a CORRUPT partition it OVER-counts by the number of screened-out rows (the
-    # served page shows fewer rows than `total`/`limit` imply) — a bounded honesty
-    # gap on corrupt data only, never a fabricated bar.
+    # deep-cluster residual is documented there). CONTRACT-TYPE-AWARE on the F&O
+    # segment: this route ALSO serves CE/PE contract partitions (via the FNO
+    # cascade), and option PREMIA legitimately move ≥4×/minute on leverage — so a
+    # decoded CE/PE symbol screens INSANE-ONLY (`bad_tick_enabled=False`, no seed —
+    # the cross-row arm is off), matching /movers-options + the /db expired-options
+    # tab exactly (the same scope rule as `_read_future_session(bad_tick=)`); FUT
+    # and unparseable F&O symbols keep the full default-ON screen. Clean pages
+    # return the same object (byte-identical; the screen is an O(page-rows)
+    # Python pass — honest cost, not zero work). HONEST envelope: the seed read
+    # is ONE additional DuckDB query per non-option page over the partition
+    # glob — an O(files) Parquet-metadata scan (a constant-factor addition to
+    # the per-click query count; the LIMIT-k row read itself is tiny), eager
+    # even on clean data; and `total` above is the DATASET-wide
+    # DISTINCT-timestamp count, so on a CORRUPT partition it OVER-counts by the
+    # number of screened-out rows (the served page shows fewer rows than
+    # `total`/`limit` imply) — a bounded honesty gap on corrupt data only, never a
+    # fabricated bar.
+    is_option_contract = False
+    if is_fno:
+        parts = parse_fno_symbol(symbol)
+        is_option_contract = parts is not None and parts.option_type is not None
     raw_rows = screen_rows(
         raw_rows,
         out_columns,
         source=skip_source,
-        seed_bar=_bad_tick_seed_bar(
-            conn, base, raw_rows=raw_rows, out_columns=out_columns, skip_source=skip_source
+        # Options: no seed (the cross-row bad-tick arm is off, a seed is unused
+        # work); spot/FUT/unparseable: the bounded seeded default. `None` (not
+        # True) on the default arm preserves the BRUTEX_BAD_TICK_SCREEN
+        # kill-switch read — the engine-parity contract.
+        seed_bar=(
+            None
+            if is_option_contract
+            else _bad_tick_seed_bar(
+                conn, base, raw_rows=raw_rows, out_columns=out_columns, skip_source=skip_source
+            )
         ),
+        bad_tick_enabled=False if is_option_contract else None,
     )
     # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix,
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
@@ -2645,8 +2668,9 @@ def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> 
 
 
 #: How many same-session predecessor bars the ``/db`` bad-tick seed reads + screens
-#: to resolve the page's left edge (DEC-DASHBOARD-READ-SCREEN-001). Bounded so the
-#: seed read stays ~one row-group; a spike cluster deeper than this is the honest
+#: to resolve the page's left edge (DEC-DASHBOARD-READ-SCREEN-001). Bounds the ROW
+#: read to k (the glob's O(files) metadata scan is the honest per-click cost — see
+#: `_bad_tick_seed_bar`); a spike cluster deeper than this is the honest
 #: documented residual (the whole-day /movers reader is always correct).
 _BAD_TICK_SEED_WINDOW: Final[int] = 8
 
@@ -2672,7 +2696,9 @@ def _bad_tick_seed_bar(
     a spike sitting immediately before the page (the single-spike / short-cluster
     left-edge case; screening only the raw immediate predecessor would wrongly
     baseline the page's first good row against that spike). The window read is
-    ``ORDER BY DESC LIMIT k`` (~one row-group, O(1) in partition depth). Returns
+    ``ORDER BY DESC LIMIT k`` over the partition glob — HONEST cost: the k-row
+    read is tiny, but the glob itself is an O(files) Parquet-metadata scan (a
+    constant-factor addition per click, NOT O(1) in partition depth). Returns
     ``None`` when the page lacks OHLC/``timestamp`` columns, is empty, has no
     same-session predecessor (a page that starts at 09:15), or the whole window
     screens out. HONEST residual: a spike cluster DEEPER than the window, or a

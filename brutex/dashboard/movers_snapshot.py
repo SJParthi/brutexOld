@@ -756,7 +756,8 @@ def _read_cut_1m_frame(
     # Screen bad-tick + insane bars through the ONE COMMON engine-parity screen
     # (DEC-DASHBOARD-READ-SCREEN-001): a scaled fat-finger spike the engine drops
     # must not be SERVED here (it fabricated the Top-Value turnover + the %-move
-    # and poisoned the movers cache). Clean frames pass through unchanged (no-op).
+    # and poisoned the movers cache). Clean frames return the SAME object; the
+    # screen itself is an O(rows) Python pass per read (honest cost, not free).
     # The frame is ascending-sorted + as-of-cut, so the causal screen is exact.
     day_df = screen_frame(day_df, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
@@ -968,7 +969,8 @@ def _read_intraday_bars(
             # the prebuild's make_lake_read_1m applies price_sanity but NOT the
             # bad-tick screen, so a scaled spike can derive into a stored 5m/etc
             # bucket unscreened — screen the stored read so it agrees with the
-            # 1m-resample path (and /db). Clean partitions pass through unchanged.
+            # 1m-resample path (and /db). Clean partitions return the SAME
+            # object; the screen is an O(rows) Python pass per read.
             res = screen_frame(
                 res, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/{interval}"
             )
@@ -1044,7 +1046,8 @@ def _read_daily_bars(
     # Screen the stored 1day bar(s) (DEC-DASHBOARD-READ-SCREEN-001): each daily
     # bar is its own session (first-of-session exempt), so only the insane
     # (positivity/ordering) arm can fire here — a corrupt derived 1day bar is
-    # dropped, never served raw. Clean partitions pass through unchanged.
+    # dropped, never served raw. Clean partitions return the SAME object; the
+    # screen is an O(rows) Python pass per read (honest cost, not free).
     screened = screen_frame(
         sel.rename({"timestamp": "ts_utc"}),
         ts_col="ts_utc",

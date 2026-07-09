@@ -46,14 +46,20 @@ Disposition (mirrors the engine, with ONE sanctioned divergence):
   holds for that bar), and (c) the good remainder still renders. This is the ONE
   documented, sanctioned divergence from the engine's blast radius.
 
-Clean-data no-op (the ship gate): on a lake with no insane + no bad-tick bars
-every row classifies KEEP, so both wrappers return the input UNCHANGED (they
-only ever DROP — never edit / reorder / re-type), and every existing
-``/movers`` + ``/db`` golden passes byte-identical.
+Clean-data byte-identity (the ship gate): on a lake with no insane + no
+bad-tick bars every row classifies KEEP, so both wrappers return the SAME input
+object (they only ever DROP — never edit / reorder / re-type), and every
+existing ``/movers`` + ``/db`` golden passes byte-identical. HONEST COST: the
+screen itself is an O(rows) Python pass per read (column materialisation +
+per-row classify) even on clean data — same-object OUTPUT, not zero WORK
+(bench-pinned linear; the polars-vectorized / Rust rewrite that would earn a
+flat claim — the engine's vectorized ``price_violation_expr`` is the template —
+is a named follow-up, not claimed).
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -61,7 +67,7 @@ from brutex.data.bad_tick import BadTickScreen, bad_tick_screen_enabled
 from brutex.data.price_sanity import price_row_insane
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from datetime import date, datetime
+    from datetime import date
 
     import polars as pl
 
@@ -180,7 +186,8 @@ def screen_frame(
     their current (ascending session) order and DROPS the non-KEEP rows,
     preserving row order + dtypes (never edits / reorders / re-types). On a clean
     frame every row is KEEP, so the SAME object is returned (byte-identical, the
-    steady-state spy-pin). An empty frame is returned unchanged.
+    steady-state spy-pin) — but the screen pass itself is O(rows) Python work per
+    call (honest cost, bench-pinned linear). An empty frame is returned unchanged.
 
     Parameters
     ----------
@@ -244,6 +251,21 @@ def screen_rows(
     predecessor was ITSELF a dropped spike) is not reproduced by a page-local
     screen — the ``/movers`` reader (whole-day) is always correct; this is the
     only ``/movers`` ↔ ``/db`` divergence, documented in the DEC blurb.
+
+    .. warning::
+       *bad_tick_enabled*'s ``None`` default reads the ``BRUTEX_BAD_TICK_SCREEN``
+       kill switch — the SPOT/FUTURES (engine-parity) posture. A caller serving
+       OPTION contracts MUST pass ``bad_tick_enabled=False`` explicitly (premia
+       legitimately move ≥4×/minute — the ×4 threshold is index-calibrated); the
+       recommended contract is KIND-DERIVED at the call site (decode the symbol,
+       e.g. ``parse_fno_symbol(...).option_type is not None``), never
+       remembered-per-caller — see the two ``db_view`` call sites.
+
+    Resilience (the DEC-DB-CORRUPT-SKIP-001 never-500 posture): a row whose
+    ``timestamp`` cell is NOT a datetime (a schema-drifted parquet's
+    ``union_by_name`` null-fill) is served RAW — excluded from screening entirely
+    (never sorted, never classified, never dropped) — matching the seed helper's
+    ``isinstance`` guard; the datetime rows around it are still screened.
     """
     if not rows:
         return rows
@@ -260,7 +282,10 @@ def screen_rows(
         s_ts, s_o, s_h, s_l, s_c = seed_bar
         # Advance the baseline from the predecessor; its verdict is not served.
         screen.classify(ist_date=session_date_from_ts(s_ts), o=s_o, h=s_h, l=s_l, c=s_c)
-    order = sorted(range(len(rows)), key=lambda i: rows[i][ts_idx])
+    # Screen ONLY the rows carrying a real datetime timestamp (see the docstring
+    # resilience note) — a None/junk ts cell is served raw, never a TypeError.
+    screenable = [i for i in range(len(rows)) if isinstance(rows[i][ts_idx], datetime)]
+    order = sorted(screenable, key=lambda i: rows[i][ts_idx])
     dropped: set[int] = set()
     for i in order:
         row = rows[i]

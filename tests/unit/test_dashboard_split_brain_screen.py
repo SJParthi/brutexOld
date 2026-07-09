@@ -492,3 +492,82 @@ class TestOptionsScope:
         out = query_option_candles(conn, tmp_path, series=_OPT_SERIES, limit=50)
         assert 5.0 in _closes_from_page(out)  # the 5× premium bar is KEPT, not dropped
         assert sorted(_closes_from_page(out)) == [1.0, 1.0, 5.0]
+
+
+# ── /db F&O candles tab (query_candles segment="FNO") — the THIRD options path ─
+
+
+def _db_fno_page(conn: object, lake: Path, symbol: str) -> list[float]:
+    from brutex.dashboard.db_view import query_candles
+
+    out = query_candles(
+        conn,
+        lake,
+        exchange="NSE",
+        segment="FNO",
+        symbol=symbol,
+        interval="1minute",
+        limit=50,
+    )
+    return _closes_from_page(out)
+
+
+class TestDbFnoCandlesOptionsScope:
+    """The /db "F&O candles" tab (query_candles segment=FNO) — contract-type-aware."""
+
+    def test_ce_contract_keeps_legit_4x_premium(self, conn: object, tmp_path: Path) -> None:
+        """A CE contract page screens INSANE-ONLY: the 5× premium jump is KEPT."""
+        sym = "NSE-NIFTY-28Mar24-17500-CE"
+        _fno_premium(tmp_path, sym)
+        assert sorted(_db_fno_page(conn, tmp_path, sym)) == [1.0, 1.0, 5.0]
+
+    def test_pe_contract_keeps_legit_4x_premium(self, conn: object, tmp_path: Path) -> None:
+        sym = "NSE-NIFTY-28Mar24-17500-PE"
+        _fno_premium(tmp_path, sym)
+        assert sorted(_db_fno_page(conn, tmp_path, sym)) == [1.0, 1.0, 5.0]
+
+    def test_fut_contract_still_drops_x10_spike(self, conn: object, tmp_path: Path) -> None:
+        """A FUT contract page keeps the FULL screen: the ×10 spike is DROPPED."""
+        sym = "NSE-NIFTY-28Mar24-FUT"
+        _write_fno(tmp_path, _SPIKE_CLOSES, symbol=sym)
+        assert sorted(_db_fno_page(conn, tmp_path, sym)) == [1000.0, 1001.0, 1002.0, 1003.0]
+
+    def test_ce_contract_drops_insane_bar(self, conn: object, tmp_path: Path) -> None:
+        """The unconditional insane arm still fires on the FNO/CE path."""
+        sym = "NSE-NIFTY-28Mar24-17500-CE"
+        _write_raw_insane(tmp_path, symbol=sym, segment="FNO")
+        assert sorted(_db_fno_page(conn, tmp_path, sym)) == [1000.0, 1002.0]
+
+    def test_three_way_options_agreement(self, conn: object, tmp_path: Path) -> None:
+        """SAME option bar sequence → query_candles(FNO/CE) == query_option_candles
+        == the movers options read (the same kept set) — no options split-brain."""
+        from brutex.dashboard.db_view import query_option_candles
+        from brutex.dashboard.movers_futures import _read_future_session
+
+        # 1) /db F&O candles tab (lake FNO partition).
+        sym = "NSE-NIFTY-28Mar24-17500-CE"
+        _fno_premium(tmp_path, sym)
+        fno_page = sorted(_db_fno_page(conn, tmp_path, sym))
+        # 2) /db expired-options tab (option series lake) — same premium closes.
+        OptionParquetWriter(lake_root=tmp_path).write(
+            partition_key=_OPT_PK,
+            coordinate=_opt_coord(),
+            bars=[_obar_premium(i, c) for i, c in enumerate(_PREMIUM_CLOSES)],
+        )
+        opt_page = sorted(
+            _closes_from_page(query_option_candles(conn, tmp_path, series=_OPT_SERIES, limit=50))
+        )
+        # 3) /movers options read (bad_tick=False) — all 3 premium bars kept.
+        read = _read_future_session(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=sym,
+            day=_DAY,
+            cutoff_min=None,
+            bad_tick=False,
+        )
+        assert read is not None
+        expected = sorted(float(Decimal(c)) for c in _PREMIUM_CLOSES)
+        assert fno_page == opt_page == expected  # identical kept set on all three
+        assert str(read[0]) == "1.00"  # movers LTP = last kept bar (all 3 kept)

@@ -858,8 +858,9 @@ def _read_future_session(
     # premia and would drop legit option bars — and the engine never screens
     # options (REFERENCE_ONLY), so there is no parity to honor. The insane arm is
     # universal (a null/≤0/high<low bar is never legitimate on any instrument).
-    # The frame is ascending-sorted + as-of-cut; clean frames pass through
-    # unchanged (no-op).
+    # The frame is ascending-sorted + as-of-cut; clean frames return the SAME
+    # object — but the screen itself is an O(rows) Python pass per read (honest
+    # cost, not free).
     day_df = screen_frame(
         day_df,
         ts_col="timestamp",
