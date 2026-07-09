@@ -165,8 +165,14 @@ MAX_ADAPTIVE_FLOOR_CAP_S: Final[float] = 600.0
 #: last-known entry to serve — DEC-CACHE-SERVE-LAST-KNOWN-001). Strictly
 #: negative: :func:`revision_generation` yields non-negative 64-bit ints and
 #: every production caller passes ``generation >= 0``, so a recovered probe's
-#: first REAL generation can never equal it — the first post-outage read
-#: always recomputes fresh (never a lingering outage seed served as clean).
+#: first REAL generation can never MATCH it as clean. HONEST QUALIFIER
+#: (review fold): on a NO-floor cache (the oneclick instance) that makes the
+#: first post-outage read recompute fresh ABSOLUTELY; on an
+#: ``adaptive_floor`` cache the first post-recovery poll while a pull is
+#: genuinely running may still FLOOR-SERVE the seed within its bounded,
+#: LOGGED window (``movers_cache.stale_served`` with ``entry_generation=-1``
+#: — the same envelope every floored serve accepts), after which the
+#: generation mismatch recomputes; the seed is never served as CLEAN.
 OUTAGE_GENERATION: Final[int] = -1
 
 #: The candidate-key field separator. ``|`` cannot appear in any of the keyed
@@ -436,6 +442,16 @@ class MoversSnapshotCache:
         latch is a bounded ordered set (``capacity``) — a pathological
         prefix flood evicts the oldest latched prefix (its next serve
         re-WARNs: louder, never silent — Golden Rule #1).
+
+        Known edge (review fold, documented not mechanised): recovery is
+        observed only by the next successful :meth:`get_or_compute` for the
+        prefix — an artifact DELETED during the outage window routes its
+        post-recovery polls down the ABSENT fresh-uncached arm (which never
+        calls :meth:`get_or_compute`), so this cache-level latch stays armed
+        for that prefix until the artifact returns (the recovery INFO fires
+        then; ``oneclick_artifacts``' module-level probe latch recovers
+        immediately regardless). Bias: at worst one extra WARN later, never
+        a missed one.
         """
         if prefix in self._outage_latched:
             self._outage_latched.move_to_end(prefix)

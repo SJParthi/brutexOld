@@ -5283,29 +5283,40 @@ def _ledger_delta_files(ledger_file: Path) -> tuple[Path, ...]:
     """
     directory = ledger_file.parent / _LEDGER_DELTAS_DIRNAME
     try:
-        return tuple(sorted(directory.glob("*.parquet"), key=lambda f: f.name))
+        files = tuple(sorted(directory.glob("*.parquet"), key=lambda f: f.name))
     except OSError as exc:
-        _note_ledger_stat_outcome(degraded=True, path=directory, error=str(exc))
+        _note_ledger_stat_outcome(source="deltas", degraded=True, path=directory, error=str(exc))
         return ()
+    _note_ledger_stat_outcome(source="deltas", degraded=False, path=directory)
+    return files
 
 
 #: One-per-outage-flip latch for the ledger stat-degrade WARN
 #: (DEC-WINDOWS-STAT-GUARD-LATCH-001): the ledger surfaces poll every ~4 s,
 #: so an unlatched WARN per stat attempt would storm the log for the whole
-#: outage. Plain module bool — a rare race costs at most one duplicate log
-#: line, never a wrong verdict.
-_LEDGER_STAT_DEGRADED: bool = False
+#: outage. Keyed PER STAT SOURCE (``"base"`` = the ledger-file stat,
+#: ``"deltas"`` = the deltas-dir listing — the two independent probes ONE
+#: ``_ledger_cache_stamp`` poll runs back-to-back): the prior shared bool let
+#: a persistently-faulty deltas dir beside a HEALTHY base flip the latch on
+#: EVERY poll (the healthy base reset it, the deltas fault re-armed it) — a
+#: WARN+INFO pair per poll, exactly the storm the latch exists to prevent
+#: (review fold on DEC-CACHE-SERVE-LAST-KNOWN-001's batch). Each source now
+#: flips independently. Plain module dict — a rare race costs at most one
+#: duplicate log line, never a wrong verdict.
+_LEDGER_STAT_DEGRADED: dict[str, bool] = {}
 
 
-def _note_ledger_stat_outcome(*, degraded: bool, path: Path, error: str | None = None) -> None:
-    """Flip the stat-outage latch, logging ONCE per flip (never per poll)."""
-    global _LEDGER_STAT_DEGRADED  # noqa: PLW0603 — the documented outage latch
-    if degraded and not _LEDGER_STAT_DEGRADED:
-        _LEDGER_STAT_DEGRADED = True
-        _LOG.warning("db.ledger_stat_degraded", path=path.as_posix(), error=error)
-    elif not degraded and _LEDGER_STAT_DEGRADED:
-        _LEDGER_STAT_DEGRADED = False
-        _LOG.info("db.ledger_stat_recovered", path=path.as_posix())
+def _note_ledger_stat_outcome(
+    *, source: str, degraded: bool, path: Path, error: str | None = None
+) -> None:
+    """Flip *source*'s stat-outage latch, logging ONCE per flip (never per poll)."""
+    prior = _LEDGER_STAT_DEGRADED.get(source, False)
+    if degraded and not prior:
+        _LEDGER_STAT_DEGRADED[source] = True
+        _LOG.warning("db.ledger_stat_degraded", source=source, path=path.as_posix(), error=error)
+    elif not degraded and prior:
+        _LEDGER_STAT_DEGRADED[source] = False
+        _LOG.info("db.ledger_stat_recovered", source=source, path=path.as_posix())
 
 
 def _ledger_base_stat(ledger_file: Path) -> tuple[int, bool | None]:
@@ -5327,12 +5338,12 @@ def _ledger_base_stat(ledger_file: Path) -> tuple[int, bool | None]:
     try:
         st = ledger_file.stat()
     except (FileNotFoundError, NotADirectoryError):
-        _note_ledger_stat_outcome(degraded=False, path=ledger_file)
+        _note_ledger_stat_outcome(source="base", degraded=False, path=ledger_file)
         return (0, False)
     except OSError as exc:
-        _note_ledger_stat_outcome(degraded=True, path=ledger_file, error=str(exc))
+        _note_ledger_stat_outcome(source="base", degraded=True, path=ledger_file, error=str(exc))
         return (0, None)
-    _note_ledger_stat_outcome(degraded=False, path=ledger_file)
+    _note_ledger_stat_outcome(source="base", degraded=False, path=ledger_file)
     return (st.st_mtime_ns, True)
 
 

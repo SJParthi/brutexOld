@@ -86,10 +86,11 @@ class _GlobRaisesPath(PosixPath):
 def _fresh_caches() -> Any:
     db_view._reset_ledger_read_cache()
     db_view._reset_readable_subset_cache()
-    # Reset the outage latch so per-test flip assertions are deterministic.
-    db_view._LEDGER_STAT_DEGRADED = False
+    # Reset the per-source outage latches so per-test flip assertions are
+    # deterministic (review fold: dict keyed by stat source, not one bool).
+    db_view._LEDGER_STAT_DEGRADED.clear()
     yield
-    db_view._LEDGER_STAT_DEGRADED = False
+    db_view._LEDGER_STAT_DEGRADED.clear()
 
 
 def _seed_ledger(lake_root: Path) -> None:
@@ -144,6 +145,48 @@ class TestLedgerBaseStat:
         with capture_logs() as logs:
             assert db_view._ledger_delta_files(ledger) == ()
         assert [e for e in logs if e["event"] == "db.ledger_stat_degraded"]
+
+    def test_split_fault_deltas_bad_base_healthy_warns_once_not_per_poll(
+        self, tmp_path: Path
+    ) -> None:
+        # Review fold (per-source latch): a persistently-faulty deltas listing
+        # beside a HEALTHY base previously flipped the SHARED latch on every
+        # poll — the healthy base stat reset it (INFO), the deltas fault
+        # re-armed it (WARN) — a WARN+INFO storm across the whole outage.
+        # FAILS-BEFORE: 3 polls → 3 WARNs + recovery INFOs. Now the two
+        # sources latch independently: exactly ONE deltas WARN, ZERO recovery
+        # INFOs (the base was never degraded), across N polls.
+        wdir = tmp_path / "window_ledger"
+        wdir.mkdir(parents=True)
+        base = wdir / "ledger.parquet"
+        base.write_bytes(b"x")  # a real, healthy base — its stat succeeds
+        ledger = _GlobRaisesPath(base)  # the deltas-dir glob raises EIO per poll
+        with capture_logs() as logs:
+            for _ in range(3):
+                mtime, names = db_view._ledger_cache_stamp(ledger)
+                assert mtime == base.stat().st_mtime_ns  # base stays healthy
+                assert names == ()  # deltas degrade to empty per poll
+        warns = [e for e in logs if e["event"] == "db.ledger_stat_degraded"]
+        infos = [e for e in logs if e["event"] == "db.ledger_stat_recovered"]
+        assert len(warns) == 1  # ONE flip for the deltas source — never a storm
+        assert warns[0]["source"] == "deltas"
+        assert infos == []  # the healthy base never "recovers" the deltas fault
+
+    def test_deltas_recovery_logs_once_and_rearms(self, tmp_path: Path) -> None:
+        # The per-source split gives the deltas source its OWN recovery edge
+        # (previously it recovered only via the base's shared reset).
+        wdir = tmp_path / "window_ledger"
+        wdir.mkdir(parents=True)
+        base = wdir / "ledger.parquet"
+        base.write_bytes(b"x")
+        with capture_logs() as logs:
+            assert db_view._ledger_cache_stamp(_GlobRaisesPath(base))[1] == ()
+            db_view._ledger_cache_stamp(base)  # healthy listing → recovery
+            assert db_view._ledger_cache_stamp(_GlobRaisesPath(base))[1] == ()  # re-arms
+        warns = [e for e in logs if e["event"] == "db.ledger_stat_degraded"]
+        infos = [e for e in logs if e["event"] == "db.ledger_stat_recovered"]
+        assert [w["source"] for w in warns] == ["deltas", "deltas"]
+        assert [i["source"] for i in infos] == ["deltas"]
 
 
 class TestWindowLedgerRowsGuard:

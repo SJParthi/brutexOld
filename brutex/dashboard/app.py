@@ -1874,12 +1874,22 @@ def build_app(
         must never leak into the entry another (post-recovery) poll serves.
         """
         out = dict(payload)
-        out["revision_probe"] = (
+        out["revision_probe"] = _probe_outage_marker(served_last_known=served_last_known)
+        return out
+
+    def _probe_outage_marker(*, served_last_known: bool) -> str:
+        """The ONE `revision_probe` degrade-marker string (JSON field + CSV row).
+
+        Split out of :func:`_probe_outage_payload` (review fold) so the
+        mapping-integrity CSV download can carry the SAME in-band staleness
+        wording as the JSON routes — one marker vocabulary, never two that
+        drift.
+        """
+        return (
             "outage — serving last-known"
             if served_last_known
             else "outage — computed fresh (seeded as last-known)"
         )
-        return out
 
     def _store_outage_response(**extra: Any) -> JSONResponse:
         """The honest 503 degrade for a COLD store outage (nothing last-known).
@@ -5453,7 +5463,8 @@ def build_app(
         DEC-CACHE-SERVE-LAST-KNOWN-001: returns ``(report, probe_outage,
         served_last_known)`` — a store fault from the composite probe serves the
         last-known report (the JSON route stamps the ``revision_probe`` marker on
-        the serialized dict; the CSV download serves the report unlabelled — the
+        the serialized dict; the CSV download prepends the in-band
+        ``# revision_probe: …`` marker row — the review fold — and the
         server-side WARN latch still fires); a COLD outage raises the typed
         :class:`UniverseStoreOutageError` both routes map to the honest 503.
         """
@@ -5504,22 +5515,29 @@ def build_app(
         :func:`brutex.dashboard.mapping_integrity_csv.mapping_integrity_to_csv` (a three-section
         human report; every cell formula-injection-safe via the shared
         :class:`~brutex.dashboard._csv_utils.FormulaSafeWriter`). READ-ONLY, no pull; no store
-        wired → 503. A store OUTAGE (DEC-CACHE-SERVE-LAST-KNOWN-001) serves the
-        last-known report UNLABELLED (a CSV has no additive-marker surface — the
-        server-side WARN latch still names the outage); a COLD outage returns a
-        plain-text 503, never a raw 500.
+        wired → 503. A store OUTAGE (DEC-CACHE-SERVE-LAST-KNOWN-001 + the review
+        fold) serves the last-known report LABELLED IN-BAND: one informational
+        ``# revision_probe: …`` row is prepended (the CSV twin of the JSON
+        routes' additive marker — same :func:`_probe_outage_marker` wording,
+        rendered through the same ``FormulaSafeWriter``), so an Excel reader
+        sees the staleness signal, not just the server-side WARN latch; a
+        healthy serve is byte-identical (no marker row — regression-pinned).
+        A COLD outage returns a plain-text 503, never a raw 500.
         """
         _require_store()
         try:
-            report, _probe_outage, _served = await _run_lake(_build_mapping_integrity_report_cached)
+            report, probe_outage, served = await _run_lake(_build_mapping_integrity_report_cached)
         except UniverseStoreOutageError:
             return Response(
                 content="instrument store unavailable — retry shortly",
                 media_type="text/plain; charset=utf-8",
                 status_code=503,
             )
+        marker: str | None = None
+        if probe_outage:
+            marker = _probe_outage_marker(served_last_known=served) + " (store unreachable)"
         return Response(
-            content=mapping_integrity_to_csv(report),
+            content=mapping_integrity_to_csv(report, revision_probe=marker),
             media_type="text/csv; charset=utf-8",
             headers={
                 "Content-Disposition": 'attachment; filename="mapping_integrity.csv"',

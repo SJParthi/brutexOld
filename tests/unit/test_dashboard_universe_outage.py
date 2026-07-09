@@ -244,6 +244,8 @@ def test_nav_trio_warm_then_outage_serves_labelled_200(wedgeable: Any) -> None:
     warm_csv = client.get("/api/v1/universe/mapping-integrity.csv")
     assert [r.status_code for r in (warm_cov, warm_comp, warm_map, warm_csv)] == [200] * 4
     assert "revision_probe" not in warm_map.json()
+    # Regression pin (review fold): a HEALTHY CSV carries NO marker row — byte-stable.
+    assert "# revision_probe" not in warm_csv.text
     store.wedge_probe = True
     store.wedge_base = True
     with capture_logs() as logs:
@@ -258,9 +260,11 @@ def test_nav_trio_warm_then_outage_serves_labelled_200(wedgeable: Any) -> None:
     assert mapping.status_code == 200
     assert mapping.json()["revision_probe"] == "outage — serving last-known"
     assert mapping.json()["is_green"] == warm_map.json()["is_green"]
-    # The CSV serves the last-known report UNLABELLED (no marker surface) — never a 500.
+    # Review fold: the CSV serves the last-known report LABELLED IN-BAND — one
+    # informational marker row prepended, the rest byte-identical to the warm file.
     assert csv.status_code == 200
-    assert csv.text == warm_csv.text
+    marker = "# revision_probe: outage — serving last-known (store unreachable)\n"
+    assert csv.text == marker + warm_csv.text
     assert len(_movers_outage_warns(logs)) >= 1  # the serve-last-known latch fired
 
 

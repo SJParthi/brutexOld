@@ -434,7 +434,7 @@ jobs:
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
-          # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1645): the
+          # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1671): the
           # rank-budget worker-divisor wiring — a dedicated per-module pin at
           # 100% line+branch over its two suites (the module also rides the
           # whole-engine glob gate above; this line keeps the divisor seam's
@@ -1551,7 +1551,7 @@ jobs:
           else
             echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
           fi
-          # DEC-WRITE-DEADLINE-ZOMBIE-SLIM-001 (MIGRATION.md #1646): strict gate
+          # DEC-WRITE-DEADLINE-ZOMBIE-SLIM-001 (MIGRATION.md #1672): strict gate
           # on the durable-write freeze guard (append_with_deadline one-shot pop
           # handoff + lock-order inversion WARN + env resolver). Injectable sink
           # fakes, so standalone-gateable with no growwapi/network. 100%
@@ -2152,7 +2152,7 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_artifacts test file not present yet — gate inactive)"
           fi
-          # DEC-CACHE-SERVE-LAST-KNOWN-001 (MIGRATION.md #1645): the COMMON
+          # DEC-CACHE-SERVE-LAST-KNOWN-001 (MIGRATION.md #1666): the COMMON
           # keyed cache (`MoversSnapshotCache`) gains the serve-last-known
           # probe-outage mode + the mru_prefix bookkeeping — the module ships
           # at 100% line+branch under its two dedicated unit suites.
