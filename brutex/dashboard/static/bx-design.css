@@ -341,3 +341,16 @@ body { padding-bottom: calc(var(--dock-h) + env(safe-area-inset-bottom, 0px)); }
   .bx-state { padding: 24px 12px; }
   .bx-wrap, .bx-wrap--wide { width: calc(100% - 2 * var(--gutter)); }
 }
+
+/* ── 15 · Empty-state treatment (DEC-OPERATOR-PAGE-CLEANVIEW-001) ─────────── */
+/* Empty ≠ zero ≠ error: an empty/awaiting region reads as a calm, centered
+   one-liner — never an alarm. Tokens only. */
+.bx-empty {
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+  text-align: center;
+  font-size: 12px;
+}
