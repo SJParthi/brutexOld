@@ -287,7 +287,18 @@ jobs:
     # ~25-30% headroom over the projection while staying an honest hang
     # guard; wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60->75 ratchet.
-    timeout-minutes: 120
+    # 120 -> 150 (2026-07-09, PR #1274 run 29004754762 job 86073591937): killed
+    # at exactly 120:13 wall (08:28:04Z -> 10:28:17Z cancel) MID the per-module
+    # coverage gates with EVERY executed test green — the log's final line
+    # before "##[error]The operation was canceled." is a green per-module
+    # "TOTAL ... 100.00%" row, and the last 5000 log lines carry ZERO
+    # FAILED/FAILURES and only 100.00% coverage TOTALs (the sibling #1275
+    # depth pack + the absorbed main waves grew the suite past the 120
+    # budget; the ~90-95m projection above no longer held). 150 gives ~25%
+    # headroom over the observed 120:13 kill point while staying an honest
+    # hang guard; wall-clock budget only — no gate is weakened. Continues
+    # the 15->25->40->60->75->120 ratchet.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
         with:
