@@ -484,8 +484,14 @@ body { padding-bottom: calc(var(--dock-h) + env(safe-area-inset-bottom, 0px)); }
 }
 
 /* ── C4 · Dense broker-table modifiers (extend .bx-table) ──────────────────── */
-/* Generic numeric helper usable outside .bx-table too (right-aligned, tabular). */
-.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-num); }
+/* Generic numeric helper usable outside .bx-table too (right-aligned, tabular).
+   NAMESPACED as .bx-num (never bare .num) so it can NEVER bleed into an existing
+   page's <div class="num"> — e.g. v29.html's four sweep-hero stat numbers, which
+   would otherwise become right-aligned + monospace, a visible regression. PR-1
+   stays purely additive: it only styles opt-in .bx-* classes. The pre-existing
+   descendant-scoped .bx-table .num rule (§7) is the table-cell face and is
+   untouched. */
+.bx-num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-num); }
 .bx-table--dense th { padding: 6px var(--cell-px); }
 .bx-table--dense td { padding: var(--row-py-dense) var(--cell-px); }
 .bx-table--zebra tbody tr:nth-child(even) { background: rgba(255, 255, 255, .018); }
@@ -519,12 +525,15 @@ body { padding-bottom: calc(var(--dock-h) + env(safe-area-inset-bottom, 0px)); }
 .bx-card--rank1 { position: relative; box-shadow: var(--glow-ok); border-color: var(--ok-bd); }
 .bx-card--rank1::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; background: var(--green); border-radius: var(--r-lg) var(--r-lg) 0 0; }
 
-/* ── C7 · Live-dot STATIC glow halos (extend .bx-live-dot) ──────────────────── */
-/* Additive: the shipped rules set the dot colour/pulse; these add the anchor halo.
-   live-down stays static (a dead surface must look dead). */
-.bx-live-dot.live-ok   { box-shadow: var(--glow-ok); }
-.bx-live-dot.live-warn { box-shadow: var(--glow-warn); }
-.bx-live-dot.live-down { box-shadow: var(--glow-bad); }
+/* ── C7 · Live-dot STATIC glow halos — OPT-IN via .bx-glow (extend .bx-live-dot) ─ */
+/* Additive AND opt-in: the shipped .bx-live-dot.live-* base rules (§10) stay
+   BYTE-IDENTICAL to origin/main, so the live dots already on the 6 shipped pages
+   are unchanged. The static glow halo applies ONLY under the NEW .bx-glow modifier
+   (a page opts a dot in per its own batch PR). live-down stays static (a dead
+   surface must look dead). */
+.bx-live-dot.bx-glow.live-ok   { box-shadow: var(--glow-ok); }
+.bx-live-dot.bx-glow.live-warn { box-shadow: var(--glow-warn); }
+.bx-live-dot.bx-glow.live-down { box-shadow: var(--glow-bad); }
 
 /* ── C8 · Staleness-pill (promotes the bx-poll / rate-monitor tickers) ─────── */
 /* An .bx-chip--sm honesty surface: escalate by COLOUR + TEXT (muted → honest gold
