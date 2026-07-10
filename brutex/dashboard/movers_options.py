@@ -110,6 +110,7 @@ from typing import Any, Final
 
 import structlog
 
+from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_futures import (
     _read_future_session,
     _underlying_spot_ltp,
@@ -123,6 +124,7 @@ from brutex.dashboard.movers_snapshot import (
     _calendar_exchange,
     _cutoff_minute,
     _NoncontiguousWarnState,
+    info_prev_baseline_muhurat,
     interval_minutes,
     make_expected_session_resolver,
     normalize_min_volume,
@@ -132,6 +134,14 @@ from brutex.dashboard.movers_snapshot import (
     resolve_prev_close,
     value_meets_volume_floor,
     warn_prev_baseline_noncontiguous,
+)
+from brutex.dashboard.movers_underlying_class import (
+    KIND_UNKNOWN,
+    class_echo,
+    class_note_suffix,
+    filter_by_underlying_class,
+    fno_kind_from_underlying,
+    normalize_underlying_class,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.moneyness import (
@@ -313,12 +323,27 @@ class OptionMover:
         Calendar-contiguity provenance of the ``pct_change`` baseline
         (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — the ISO session date the prior
         close actually came from + whether it IS the immediately-preceding NSE
-        session (``None`` = no baseline / calendar abstained). Additive +
+        session (``False`` = the baseline provably skipped a nearer REGULAR
+        session, or a stray non-session bar served it — a lake defect either
+        way; ``None`` = no baseline / calendar abstained). Additive +
         defaulted; the row projector emits the pair ONLY on ``False``.
     oi_baseline_session, oi_baseline_contiguous
         The INDEPENDENT OI twin — a null-OI 1-day bar makes the OI baseline
         fall to the minute fallback on a possibly DIFFERENT day than the close
         baseline, so the two flags never share a verdict.
+    prev_close_muhurat, oi_baseline_muhurat
+        ``True`` iff that baseline is a legitimate Diwali **Muhurat** session
+        close after the prior REGULAR session (the day-after-Diwali boundary —
+        a healthy lake, never a hole; DEC-PREVSESSION-MUHURAT-COHERENCE-001).
+        Judged INDEPENDENTLY per baseline like the contiguity pair; emitted
+        ON TRUE ONLY. The engine's day anchors deliberately skip the Muhurat
+        session instead (#1616) — the recorded two-law design.
+    underlying_kind
+        The resolved index-vs-stock class of this contract's underlying
+        (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
+        looked up in the stored-master kind map. Additive + defaulted (``unknown``);
+        consumed ONLY by the rank-time ``All | Indices | Stocks`` filter, never
+        emitted in a row, so the default payload is byte-identical.
     """
 
     underlying: str
@@ -346,6 +371,9 @@ class OptionMover:
     prev_close_contiguous: bool | None = None
     oi_baseline_session: str | None = None
     oi_baseline_contiguous: bool | None = None
+    prev_close_muhurat: bool = False
+    oi_baseline_muhurat: bool = False
+    underlying_kind: str = KIND_UNKNOWN
 
     @property
     def name(self) -> str:
@@ -619,6 +647,13 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
     if mover.oi_baseline_contiguous is False:
         row["oi_baseline_session"] = mover.oi_baseline_session
         row["oi_baseline_contiguous"] = mover.oi_baseline_contiguous
+    # EMIT-ON-TRUE-ONLY, each baseline INDEPENDENT (DEC-PREVSESSION-MUHURAT-
+    # COHERENCE-001): the baseline is the legitimate Diwali Muhurat session's
+    # close/OI — a healthy lake, never a hole; non-Muhurat rows byte-identical.
+    if mover.prev_close_muhurat:
+        row["prev_close_muhurat"] = True
+    if mover.oi_baseline_muhurat:
+        row["oi_baseline_muhurat"] = True
     return row
 
 
@@ -636,6 +671,7 @@ def build_options_payload(
     calendar_only_expiry: bool = False,
     pcr: Sequence[UnderlyingPcr] = (),
     latest_time: str | None = None,
+    underlying_class: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -668,6 +704,12 @@ def build_options_payload(
         The OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001) applied at RANK
         time to the ``volume`` ranking only; ``None`` / ``0`` ⇒ the byte-identical
         no-floor default.
+    underlying_class
+        The ``All | Indices | Stocks`` filter (DEC-MOVERS-UNDERLYING-CLASS-001)
+        applied at RANK time over the SAME candidate set; ``None`` / blank / unknown
+        ⇒ ``all`` (byte-identical — no filtering, no added payload key). A non-``all``
+        class drops non-matching + unclassified rows and echoes the active class +
+        the ``excluded_unclassified`` count.
     calendar_only_expiry
         When ``True`` (from :attr:`OptionsCandidates.calendar_only_expiry`,
         DEC-MOVERS-CALENDAR-TIERS-001) the AUTHORITATIVE vendor calendar positioned a
@@ -694,43 +736,54 @@ def build_options_payload(
         ``instrument_count`` / ``skipped_count`` / ``note`` / ``pcr``.
     """
     floor = normalize_min_volume(min_volume)
+    # DEC-MOVERS-UNDERLYING-CLASS-001: RANK-time `All | Indices | Stocks` filter over
+    # the SAME cached candidate set — never a re-scan (the DEC-MOVERS-MIN-VOLUME-001
+    # template). `all` (the default) is byte-identical.
+    wanted_class = normalize_underlying_class(underlying_class)
+    ranked_movers, excluded_unclassified = filter_by_underlying_class(movers, wanted_class)
     ranked: dict[str, list[dict[str, Any]]] = {
         category: [
             _option_row(m)
             for m in (
-                rank_volume(movers, top_n, min_volume=floor)
+                rank_volume(ranked_movers, top_n, min_volume=floor)
                 if category == "volume"
-                else rank_fn(movers, top_n)
+                else rank_fn(ranked_movers, top_n)
             )
         ]
         for category, rank_fn in _OPTIONS_CATEGORIES.items()
     }
+    class_note = class_note_suffix(wanted_class, excluded_unclassified)
     # The tier label, with the cadence track appended (``Near Monthly``) unless the
     # default ``all`` track (then just ``Near`` — the prior wording is preserved).
     track_suffix = "" if expiry_track == "all" else f" {expiry_track.capitalize()}"
     tier_label = f"{expiry_tier.capitalize()}{track_suffix}"
-    instrument_count = len(movers) + skipped
+    instrument_count = len(ranked_movers) + skipped
+    lake_population = len(movers) + skipped
     floor_note = f" Min volume ≥ {floor:,}." if floor > 0 else ""
-    if instrument_count == 0 and calendar_only_expiry:
+    # The "empty" messages key on the UNFILTERED population so a class filter that
+    # empties the ranked set never mis-reads as "no data pulled" (for `all` the two
+    # counts are equal — byte-identical default).
+    if lake_population == 0 and calendar_only_expiry:
         # HONEST NO-DATA (DEC-MOVERS-CALENDAR-TIERS-001): the vendor calendar KNOWS the
         # tier expiry but no contract candles were pulled for it — say so, never imply
         # the expiry does not exist (the tier was positioned correctly from the calendar).
         note = (
             f"The {tier_label} expiry is on the vendor calendar for {date}, but NO option "
             "contract candles have been pulled for it yet — pull the F&O options for this "
-            "expiry on the Coverage page. (Reference-only lake view, CLAUDE.md §3.)"
+            "expiry on the Coverage page. (Reference-only lake view, CLAUDE.md §3.)" + class_note
         )
-    elif instrument_count == 0:
+    elif lake_population == 0:
         note = (
             f"No {tier_label}-expiry option contracts in the lake for {date} — pull the F&O "
             "options first on the Coverage page, or pick another expiry/date. "
-            "(Reference-only lake view, CLAUDE.md §3.)"
+            "(Reference-only lake view, CLAUDE.md §3.)" + class_note
         )
     elif not any(ranked.values()):
         note = (
             f"{instrument_count} {tier_label}-expiry option contract(s) in the lake, but none "
             f"had a bar at {date} {time or '(daily)'} on {interval} — pick another time/day."
             + floor_note
+            + class_note
         )
     else:
         note = (
@@ -738,7 +791,9 @@ def build_options_payload(
             "reference-only lake view "
             "(CLAUDE.md §3); the contract's expiry nearest the selected date "
             "(Near/Next/Far) on the chosen cadence track (All/Monthly/Weekly); "
-            "% is vs the contract's previous close, OI change is vs its prior day." + floor_note
+            "% is vs the contract's previous close, OI change is vs its prior day."
+            + floor_note
+            + class_note
         )
     return {
         "interval": interval,
@@ -751,6 +806,7 @@ def build_options_payload(
         "latest_time": latest_time,
         "note": note,
         "pcr": [pcr_row_json(row) for row in pcr],
+        **class_echo(wanted_class, excluded_unclassified),
         **ranked,
     }
 
@@ -1094,6 +1150,7 @@ def compute_options_candidates(
     datasets: list[dict[str, str]] | None = None,
     calendar_expiries: Mapping[str, set[date_cls]] | None = None,
     registry_chain_for: Callable[[str, date_cls], Sequence[Decimal] | None] | None = None,
+    underlying_kinds: dict[str, str] | None = None,
 ) -> OptionsCandidates:
     """Scan the lake → the :class:`OptionsCandidates` for one snapshot coordinate.
 
@@ -1134,6 +1191,14 @@ def compute_options_candidates(
         registry↔lake underlying-naming mismatch, honest graceful degrade) —
         falls back to the screened lake ladder with the low-confidence
         ``observed`` label.
+    underlying_kinds
+        The stored-master ``{underlying → kind}`` map
+        (:func:`~brutex.dashboard.movers_underlying_class.build_underlying_kind_map`,
+        DEC-MOVERS-UNDERLYING-CLASS-001) used to stamp each contract's
+        ``underlying_kind`` for the RANK-time ``All | Indices | Stocks`` filter.
+        ``None`` (a direct/test caller) leaves every kind ``unknown`` — inert for
+        the default ``all`` class. NOT part of the cache key (the class filters the
+        shared set at rank time, so one cached set serves all three classes).
 
     Returns
     -------
@@ -1225,6 +1290,10 @@ def compute_options_candidates(
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
     expected_session_for = make_expected_session_resolver(day)
+    # The spot→F&O index alias map for the class lookup, resolved ONCE per compute
+    # call (an env parse + dict copy) and threaded into every per-candidate
+    # `fno_kind_from_underlying` — the lookup stays O(1)/candidate (review round 1).
+    class_aliases = resolve_fno_index_aliases()
     for symbol, contract_exchange, underlying, expiry, strike, opt_type in contracts:
         try:
             read = _read_future_session(
@@ -1295,12 +1364,15 @@ def compute_options_candidates(
         # Baseline calendar-contiguity provenance, close + OI judged INDEPENDENTLY
         # (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — mirrors the Futures loop). Served
         # values are untouched; each strictly-False verdict gets ONE capped WARN.
+        # A legitimate day-after-Diwali Muhurat baseline is contiguous-True +
+        # flagged per baseline with ONE per-build INFO instead (never a false
+        # WARN — DEC-PREVSESSION-MUHURAT-COHERENCE-001).
         cal_exchange = _calendar_exchange(contract_exchange)
         expected_session = expected_session_for(cal_exchange)
-        close_iso, close_contig = prev_baseline_provenance(
+        close_iso, close_contig, close_muhurat = prev_baseline_provenance(
             close_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
-        oi_iso, oi_contig = prev_baseline_provenance(
+        oi_iso, oi_contig, oi_muhurat = prev_baseline_provenance(
             oi_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         mover = replace(
@@ -1309,6 +1381,17 @@ def compute_options_candidates(
             prev_close_contiguous=close_contig,
             oi_baseline_session=oi_iso,
             oi_baseline_contiguous=oi_contig,
+            prev_close_muhurat=close_muhurat,
+            oi_baseline_muhurat=oi_muhurat,
+            # DEC-MOVERS-UNDERLYING-CLASS-001: index-vs-stock class from the
+            # stored-master kind map. The PARSED token is hyphen-preserving
+            # (parse_fno_symbol yields BAJAJ-AUTO) while the map keys the
+            # primary_fno_underlying FORM (BAJAJAUTO) — the lookup normalises the
+            # token into the map's key space via the SAME resolver + the hoisted
+            # alias map (review round 1); absent map / unrecognised → KIND_UNKNOWN.
+            underlying_kind=fno_kind_from_underlying(
+                underlying, underlying_kinds, aliases=class_aliases
+            ),
         )
         if close_iso is not None and close_contig is False:
             warn_prev_baseline_noncontiguous(
@@ -1331,6 +1414,26 @@ def compute_options_candidates(
                 snapshot_day=day,
                 found_session=oi_iso,
                 expected_session=expected_session,
+            )
+        if close_muhurat and close_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="prev_close",
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                snapshot_day=day,
+                found_session=close_iso,
+            )
+        if oi_muhurat and oi_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="oi",
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                snapshot_day=day,
+                found_session=oi_iso,
             )
         movers.append(mover)
 

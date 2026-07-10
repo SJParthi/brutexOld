@@ -83,6 +83,7 @@ from brutex.data.window_ledger import (
     WindowLedger,
     WindowLedgerRecord,
 )
+from brutex.observability.progress_beat import emit_progress_beat
 
 #: Structured logger — surfaces a corrupt/absent ledger into ``/logs``.
 _LOG = structlog.get_logger("brutex.data.window_ledger_store")
@@ -688,6 +689,16 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
     rows = ledger.dirty_rows()
     if not rows:
         return 0
+    # MID-PULL COMPACTION FOLLOW-UP (deferred by the coordinator with
+    # DEC-WINDOWS-MIDPULL-FLOOR-001, distinct from the crash-orphan compactor
+    # named above): deltas accrue HERE ~1 file per LIVE_FLUSH_MIN_INTERVAL_S
+    # (2 s) and are pruned only by the next FULL save's subsumption, so a
+    # multi-hour pull reaches thousands of pending files and every fresh-stamp
+    # reader fold pays one Parquet footer open per file (db_view's
+    # `_ledger_scan_source` envelope). The read side is floor-throttled + page-
+    # cached (MIGRATION.md #1637); bounding the FILE COUNT itself (periodic
+    # mid-pull delta consolidation under this same lock) stays the named
+    # follow-up.
     directory = deltas_dir(lake_root)
     directory.mkdir(parents=True, exist_ok=True)
     try:
@@ -783,6 +794,17 @@ def save_window_ledger(
 
     import pyarrow.parquet as pq
 
+    # Liveness beats around the whole synchronous save body
+    # (DEC-HEAL-SCAN-LIVENESS-BEATS-001): the drain-time full save is a single
+    # multi-second synchronous read-merge-write (a forensically-measured
+    # 12.96 s ``window_ledger.save_slow`` over 68,234 rows) running on the
+    # beat-watched pull worker AFTER the last fetched-window heartbeat — the
+    # entry beat marks the save alive and the completion beat (both arms of
+    # the try/except below) refreshes liveness before the next silent stage.
+    # HONEST envelope: no mid-save heartbeat thread — a save LONGER than the
+    # ~600 s stall timeout would still gap (the ``save_slow`` WARN makes it
+    # visible); ``emit_progress_beat`` is a cheap no-op with no watchdog.
+    emit_progress_beat()
     tick = clock if clock is not None else time.monotonic
     started = tick()
     directory = ledger_dir(lake_root)
@@ -883,6 +905,11 @@ def save_window_ledger(
             path=str(path),
             error=str(exc),
         )
+    # Completion beat (both the completed-save AND lock-timeout-skip arms; a
+    # RAISING save skips it — the pull is halting anyway): a multi-second save
+    # can no longer leave the watchdog's last heartbeat stranded at its entry
+    # (DEC-HEAL-SCAN-LIVENESS-BEATS-001).
+    emit_progress_beat()
 
 
 def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:

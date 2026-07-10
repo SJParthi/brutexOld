@@ -302,3 +302,60 @@ def parquet_read_skip_errors() -> tuple[type[BaseException], ...]:
     import polars as pl
 
     return (pl.exceptions.PolarsError, OSError)
+
+
+def datetime_out_of_range_errors() -> tuple[type[BaseException], ...]:
+    """Exception types raised converting a stored out-of-`datetime`-range timestamp to Python.
+
+    The ONE data-layer source of truth (CLAUDE.md §11 COMMON) for "this stored
+    ``Datetime`` column holds an i64 value no Python ``datetime`` can
+    represent" (e.g. a hand-planted ``2**62``-microsecond stamp — ~146,000
+    years AD, far past ``datetime.max``). Empirically verified against polars
+    1.42.1, the raised type depends on the column/value shape:
+
+    * tz-AWARE positive overflow — ``Series.min()``/``max()`` raise plain
+      :class:`OverflowError` (*"date value out of range"*);
+    * tz-NAIVE and/or NEGATIVE overflow — ``min()``/``max()`` raise
+      :class:`ValueError` (*"year 148108 is out of range"*);
+    * ``Series.to_list()`` — ANY of the above shapes PANICS in the Rust
+      conversion loop and surfaces as ``pyo3_runtime.PanicException``, a
+      **BaseException** subclass (exposed as
+      :class:`polars.exceptions.PanicException`), so even a bare
+      ``except Exception`` guard does NOT stop it.
+
+    CONSUMPTION LAW (Golden Rule #1 — a genuine code bug must still
+    propagate): catch this FULL set ONLY around code whose sole Python-side
+    failure mode is the stored-timestamp conversion itself — the lake
+    scanner's classification guards, the ``option_key_dtype_error`` value
+    probe, the targeted canonical-sibling reads, the catalog reconcile's
+    per-file min/max — where a ``ValueError`` cannot plausibly be anything
+    else. BROAD guards spanning arbitrary code (the healer's per-finding
+    isolation set, the L3 boot blanket) use the narrower
+    :func:`datetime_out_of_range_escape_errors` instead, which deliberately
+    EXCLUDES ``ValueError``. NARROW on purpose — deliberately NOT folded into
+    :func:`parquet_read_skip_errors` ("the FILE is unreadable", consumed by
+    dashboard read paths with different bug surfaces). ``polars`` is imported
+    inside the call (the same lazy-import stance as
+    :func:`parquet_read_skip_errors`).
+    """
+    import polars as pl
+
+    return (OverflowError, ValueError, pl.exceptions.PanicException)
+
+
+def datetime_out_of_range_escape_errors() -> tuple[type[BaseException], ...]:
+    """The :func:`datetime_out_of_range_errors` members safe for BROAD guards.
+
+    ``(OverflowError, PanicException)`` — the two conversion-fault types that
+    ESCAPE the lake healer's per-finding isolation set and (for the panic, a
+    BaseException) even a blanket ``except Exception`` boot guard.
+    ``ValueError`` is deliberately EXCLUDED here: around a whole heal batch or
+    sweep body it is the classic genuine-code-bug class and must keep
+    propagating (Golden Rule #1) — the probe/classifier sites that CAN safely
+    catch it use the full set. Consumed by ``lake_heal``'s
+    ``_PER_FINDING_HEAL_ERRORS`` and ``StartupSweeper.run_sync``'s blanket
+    guard (the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 round-18 fold).
+    """
+    import polars as pl
+
+    return (OverflowError, pl.exceptions.PanicException)
