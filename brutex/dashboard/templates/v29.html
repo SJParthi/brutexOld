@@ -3350,21 +3350,21 @@
     }
   })();
 
-  // Poll backoff (DEC-DASHBOARD-POLL-HYGIENE-002 — the MAJOR-12 follow-up
+  // Poll hygiene (DEC-DASHBOARD-POLL-HYGIENE-002 — the MAJOR-12 follow-up
   // re-homed from /reports; MIGRATION.md #1623's dropped-as-superseded note):
-  // failure-counting delay for the two sweep pollers below. Delegates to the
-  // COMMON bx-poll.js core (a deferred script — loaded before any poll tick
-  // can fire); the inline fallback mirrors its quick-retry → 3 s→30 s capped
-  // doubling so a load-order surprise never crashes a poller. NEVER a
-  // give-up: the delay is finite and the interval keeps ticking — backoff is
-  // skip-N-ticks (a nextAllowedTs gate at the top of each poller), the
-  // DEC-PULL-UI-STALENESS-001 posture.
-  function bxSweepPollBackoffMs(failures) {
-    if (window.BXPoll) return window.BXPoll.backoffDelayMs(failures);
-    if (!(failures > 0)) return 0;
-    if (failures <= 2) return 600;
-    return Math.min(3000 * Math.pow(2, Math.min(failures - 3, 4)), 30000);
-  }
+  // the two sweep pollers below ride the COMMON bx-poll.js core directly —
+  // BXPoll.fetchJson (the abort timer stays ARMED through the BODY read, so
+  // a headers-then-stalled-body response throws instead of hanging r.json()
+  // forever; a non-ok status THROWS) + BXPoll.backoffDelayMs (quick retries
+  // then 3 s→30 s capped doubling). bx-poll.js is a deferred script, so it
+  // is guaranteed defined before any poll tick or click callback can fire —
+  // no inline copy of the backoff law exists here (Golden Rule #11). NEVER
+  // a give-up: the delay is finite and the interval keeps ticking — backoff
+  // is skip-N-ticks (a nextAllowedTs gate at the top of each poller), the
+  // DEC-PULL-UI-STALENESS-001 posture. Each poller also carries a
+  // generation guard (the gbPollGen precedent) so a visibilitychange
+  // catch-up or a slower-than-cadence response never repaints stale
+  // progress out of order.
 
   // Live sweep-progress poller (DEC-SWEEP-WIRE-GA-001) — fetches the dedicated
   // /api/v1/sweep-progress route every 2s and fills every [data-sweep="<field>"]
@@ -3392,26 +3392,23 @@
     let lastSweepPayload = '';
     // Backoff state (DEC-DASHBOARD-POLL-HYGIENE-002): counted failures gate
     // the next tick via nextAllowedTs — skip-N-ticks on the fixed interval,
-    // never a give-up, never a re-armed timer.
+    // never a give-up, never a re-armed timer. The generation counter drops
+    // a superseded in-flight response (never an out-of-order repaint).
     let sweepProgressFailures = 0;
     let sweepProgressNextTs = 0;
+    let sweepProgressGen = 0;
     async function pollSweepProgress() {
       // Hidden-tab pause — see pollState; visibilitychange refreshes on return.
       if (document.hidden) return;
       if (Date.now() < sweepProgressNextTs) return;  // backoff: skip this tick
+      const gen = ++sweepProgressGen;  // stale-response guard (gbPollGen precedent)
       try {
-        const res = await fetch('/api/v1/sweep-progress');
-        if (!res.ok) {
-          // Heartbeat hook (DEC-DASHBOARD-UX-ANIMATE-001): surface the honest
-          // "unreachable — retrying" state; the panel itself keeps its
-          // silent-retry contract. A non-ok poll is a COUNTED failure and
-          // never settles state (DEC-DASHBOARD-POLL-HYGIENE-002).
-          if (window.__bxHbSweepErr) window.__bxHbSweepErr(res.status);
-          sweepProgressFailures += 1;
-          sweepProgressNextTs = Date.now() + bxSweepPollBackoffMs(sweepProgressFailures);
-          return;  // server hiccup; a later tick retries
-        }
-        const sp = await res.json();
+        // Bounded through the BODY read via the COMMON core; a non-ok status
+        // THROWS — every failure mode funnels into the counted catch below
+        // and never settles state (DEC-DASHBOARD-POLL-HYGIENE-002).
+        const sp = await window.BXPoll.fetchJson(
+          '/api/v1/sweep-progress', window.BXPoll.DEFAULTS.FETCH_TIMEOUT_MS);
+        if (gen !== sweepProgressGen) return;  // superseded by a newer poll
         sweepProgressFailures = 0; sweepProgressNextTs = 0;  // recovered
         // Heartbeat hook: the hero's sweep slot rides THIS fetch — zero extra
         // sockets. Fires before the idle-return so "idle" renders honestly.
@@ -3433,11 +3430,15 @@
           el.textContent = (v === null || v === undefined) ? '' : String(v);
         });
       } catch (e) {
+        if (gen !== sweepProgressGen) return;  // superseded — do not count/paint
+        // Heartbeat hook (DEC-DASHBOARD-UX-ANIMATE-001): surface the honest
+        // "unreachable — retrying" state; the panel keeps its silent-retry
+        // contract. Counted failure — non-ok status, rejection, abort and
+        // malformed body alike; a later tick retries after the capped
+        // backoff (DEC-DASHBOARD-POLL-HYGIENE-002).
         if (window.__bxHbSweepErr) window.__bxHbSweepErr(e);
-        // Counted failure — rejection AND malformed body alike; a later tick
-        // retries after the capped backoff (DEC-DASHBOARD-POLL-HYGIENE-002).
         sweepProgressFailures += 1;
-        sweepProgressNextTs = Date.now() + bxSweepPollBackoffMs(sweepProgressFailures);
+        sweepProgressNextTs = Date.now() + window.BXPoll.backoffDelayMs(sweepProgressFailures);
       }
     }
     if (window.location.protocol !== 'file:') {
@@ -3614,18 +3615,24 @@
     // Poll hygiene (DEC-DASHBOARD-POLL-HYGIENE-002 — the MAJOR-12 follow-up
     // re-homed here from /reports by DEC-OPERATOR-PAGE-REAL-001): hidden-tab
     // guard + counted-failure capped backoff (skip-N-ticks on the fixed
-    // 1.2 s interval — NEVER a give-up; a non-ok/malformed poll never
-    // settles the terminal ✅ state) + the visibilitychange catch-up below.
+    // 1.2 s interval — NEVER a give-up; the fetch rides the COMMON
+    // BXPoll.fetchJson, bounded through the BODY read, so a
+    // headers-then-stalled-body response aborts+counts instead of hanging
+    // the poll with the Run button disabled forever; a non-ok/malformed
+    // poll THROWS — counted, never rendered, never settles the terminal ✅
+    // state) + a generation guard + the visibilitychange catch-up below.
     let runSweepFailures = 0;
     let runSweepNextTs = 0;
+    let runSweepGen = 0;
     async function pollRunSweep() {
       // Hidden-tab pause — see pollState; visibilitychange refreshes on return.
       if (document.hidden) return;
       if (Date.now() < runSweepNextTs) return;  // backoff: skip this tick
+      const gen = ++runSweepGen;  // stale-response guard (gbPollGen precedent)
       try {
-        const r = await fetch('/api/v1/sweep-progress');
-        if (!r.ok) throw new Error('HTTP ' + r.status);  // counted, never settles
-        const p = await r.json();
+        const p = await window.BXPoll.fetchJson(
+          '/api/v1/sweep-progress', window.BXPoll.DEFAULTS.FETCH_TIMEOUT_MS);
+        if (gen !== runSweepGen) return;  // superseded by a newer poll
         runSweepFailures = 0; runSweepNextTs = 0;  // recovered
         renderSweep(p);
         if (!p.running && p.state !== 'idle') {
@@ -3634,9 +3641,10 @@
             ' survivor(s). The report above refreshes from the new run artifacts.';
         }
       } catch (e) {
+        if (gen !== runSweepGen) return;  // superseded — do not count/paint
         // Counted failure — the poll keeps running (capped backoff, no stop).
         runSweepFailures += 1;
-        runSweepNextTs = Date.now() + bxSweepPollBackoffMs(runSweepFailures);
+        runSweepNextTs = Date.now() + window.BXPoll.backoffDelayMs(runSweepFailures);
         sweepMsg.textContent = 'Could not read sweep progress (retrying): ' + e;
       }
     }

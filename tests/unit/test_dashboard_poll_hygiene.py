@@ -197,8 +197,11 @@ def test_movers_gated_retry_pauses_while_hidden() -> None:
 # page (v29.html), so the original reports.html hardening is re-applied there —
 # hidden-tab guard + counted-failure capped backoff (skip-N-ticks on the fixed
 # setInterval, NEVER a give-up) + a visibilitychange catch-up scoped to an
-# ARMED poll. pollSweepProgress (guard + catch-up pre-existing) gains the same
-# backoff. HONEST envelope: SOURCE-STRING pins, not a browser-executed test.
+# ARMED poll, with BOTH pollers riding the COMMON BXPoll.fetchJson (bounded
+# through the BODY read; non-ok THROWS) + BXPoll.backoffDelayMs and a
+# per-poller generation guard. pollSweepProgress (guard + catch-up
+# pre-existing) gains the same backoff. HONEST envelope: SOURCE-STRING pins,
+# not a browser-executed test.
 
 
 def test_v29_run_sweep_poller_is_hidden_guarded() -> None:
@@ -207,7 +210,7 @@ def test_v29_run_sweep_poller_is_hidden_guarded() -> None:
     assert js.count("async function pollRunSweep() {") == 1
     body = js.index("async function pollRunSweep() {")
     guard_pos = js.index(_HIDDEN_GUARD, body)
-    fetch_pos = js.index("fetch('/api/v1/sweep-progress')", body)
+    fetch_pos = js.index("window.BXPoll.fetchJson(", body)
     assert guard_pos < fetch_pos, (
         "v29.html: pollRunSweep's document.hidden guard must precede its fetch"
     )
@@ -215,28 +218,68 @@ def test_v29_run_sweep_poller_is_hidden_guarded() -> None:
     assert "sweepPoll = setInterval(pollRunSweep, 1200);" in js
 
 
+def test_v29_sweep_pollers_ride_the_common_bounded_fetch() -> None:
+    """BOTH sweep pollers fetch via ``BXPoll.fetchJson`` — bounded through the
+    BODY read (abort armed across ``r.json()``; non-ok THROWS), so a
+    headers-then-stalled-body response counts as a failure instead of hanging
+    the poll forever with the Run button disabled. No bare ``fetch()`` of the
+    sweep-progress endpoint remains, and no inline copy of the backoff law
+    exists (the COMMON core is guaranteed loaded — bx-poll.js is deferred, so
+    it is defined before any tick/click callback fires).
+    """
+    js = _tpl("v29.html")
+    call = (
+        "window.BXPoll.fetchJson(\n"
+        "          '/api/v1/sweep-progress', window.BXPoll.DEFAULTS.FETCH_TIMEOUT_MS)"
+    )
+    assert js.count(call) == 2, (
+        "v29.html: both sweep pollers must ride the COMMON bounded fetchJson"
+    )
+    assert "fetch('/api/v1/sweep-progress')" not in js, (
+        "v29.html: no bare unbounded fetch of /api/v1/sweep-progress may remain"
+    )
+    assert "bxSweepPollBackoffMs" not in js, (
+        "v29.html: the inline backoff fallback is dead code — COMMON core only"
+    )
+
+
 def test_v29_run_sweep_poller_has_counted_failure_backoff() -> None:
     """Failures count into a nextAllowedTs skip-tick gate — never a give-up.
 
-    A non-ok response is a COUNTED failure (thrown, never rendered), the gate
-    is checked at the top of the poller, and the delay rides the ONE shared
-    ``bxSweepPollBackoffMs`` helper (delegating to the COMMON bx-poll.js core
-    when loaded). No clearInterval lives in the failure path — the terminal
-    clearInterval is the sweep-finished arm only.
+    Every failure mode (non-ok status, rejection, abort, malformed body)
+    funnels through fetchJson's throw into ONE counted catch; the gate is
+    checked at the top of the poller and the delay rides the COMMON
+    ``BXPoll.backoffDelayMs`` (quick retries then 3 s→30 s capped doubling).
+    No clearInterval lives in the failure path — the terminal clearInterval
+    is the sweep-finished arm only.
     """
     js = _tpl("v29.html")
     assert "let runSweepFailures = 0;" in js
     assert "let runSweepNextTs = 0;" in js
     assert "if (Date.now() < runSweepNextTs) return;" in js
-    assert "if (!r.ok) throw new Error('HTTP ' + r.status);" in js
-    assert "runSweepNextTs = Date.now() + bxSweepPollBackoffMs(runSweepFailures);" in js
+    assert "runSweepNextTs = Date.now() + window.BXPoll.backoffDelayMs(runSweepFailures);" in js
     assert "runSweepFailures = 0; runSweepNextTs = 0;" in js
     assert "'Could not read sweep progress (retrying): '" in js
-    # The shared helper: COMMON-core delegation + the capped inline fallback.
-    assert "function bxSweepPollBackoffMs(failures) {" in js
-    assert "if (window.BXPoll) return window.BXPoll.backoffDelayMs(failures);" in js
-    assert "30000" in js[js.index("function bxSweepPollBackoffMs") :][:600], (
-        "v29.html: the inline fallback must cap at 30 s (never a give-up)"
+
+
+def test_v29_sweep_pollers_carry_generation_guards() -> None:
+    """Per-poller generation counters drop superseded in-flight responses.
+
+    The visibilitychange catch-up (and any slower-than-cadence response) can
+    overlap a scheduled tick; the gen guard (the gbPollGen / BXPoll pollSeq
+    precedent) ensures a stale late response neither repaints out of order
+    nor mis-counts a failure — checked before render AND in the catch.
+    """
+    js = _tpl("v29.html")
+    assert "let runSweepGen = 0;" in js
+    assert "const gen = ++runSweepGen;" in js
+    assert js.count("if (gen !== runSweepGen) return;") == 2, (
+        "v29.html: pollRunSweep must gen-guard both the success and catch arms"
+    )
+    assert "let sweepProgressGen = 0;" in js
+    assert "const gen = ++sweepProgressGen;" in js
+    assert js.count("if (gen !== sweepProgressGen) return;") == 2, (
+        "v29.html: pollSweepProgress must gen-guard both the success and catch arms"
     )
 
 
@@ -254,19 +297,22 @@ def test_v29_run_sweep_visibilitychange_catch_up_is_armed_scoped() -> None:
 def test_v29_sweep_progress_poller_gains_the_same_backoff() -> None:
     """pollSweepProgress (guard + catch-up pre-existing) adds the backoff gate.
 
-    Both failure modes count (non-ok status AND rejection/malformed body), the
-    heartbeat error hook still fires first, and the existing catch-up now also
-    clears the backoff gate so a tab return always reads fresh.
+    Every failure mode funnels through fetchJson's throw into ONE counted
+    catch (the heartbeat error hook still fires there), and the existing
+    catch-up now also clears the backoff gate so a tab return always reads
+    fresh.
     """
     js = _tpl("v29.html")
     assert "let sweepProgressFailures = 0;" in js
     assert "let sweepProgressNextTs = 0;" in js
     assert "if (Date.now() < sweepProgressNextTs) return;" in js
     assert (
-        js.count("sweepProgressNextTs = Date.now() + bxSweepPollBackoffMs(sweepProgressFailures);")
-        == 2
-    ), "v29.html: both pollSweepProgress failure modes must count into the backoff"
+        "sweepProgressNextTs = Date.now() + window.BXPoll.backoffDelayMs(sweepProgressFailures);"
+        in js
+    ), "v29.html: the pollSweepProgress counted catch must set the backoff gate"
     assert "sweepProgressFailures = 0; sweepProgressNextTs = 0;" in js
+    # The heartbeat error hook still fires inside the ONE counted catch.
+    assert "if (window.__bxHbSweepErr) window.__bxHbSweepErr(e);" in js
     # The 2 s cadence + the (gate-clearing) catch-up survive.
     assert "setInterval(pollSweepProgress, 2000);" in js
     assert "{ sweepProgressNextTs = 0; pollSweepProgress(); }" in js
