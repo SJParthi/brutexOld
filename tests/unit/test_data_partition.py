@@ -13,7 +13,7 @@ from brutex.data import (
     parse_partition_path,
     partition_for_timestamp,
 )
-from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.partition import SPOT_PROBE_SEGMENTS, option_partition_stem
 
 # ────────────────────────────────────────────────────────────────────────
 # build_partition_path
@@ -288,6 +288,28 @@ class TestPartitionForTimestamp:
         ts = datetime(2024, 1, 1, 0, 0)  # naive
         with pytest.raises(PartitionError, match="tz-aware"):
             partition_for_timestamp(ts)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# option_partition_stem
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestOptionPartitionStem:
+    """The ONE options-tree month-stem source (§11 COMMON, review round-15 NIT).
+
+    Byte-exact zero-padding pins — a drift here would desynchronise the option
+    writer's destination, the scanner's canonical-stem check + sibling path,
+    and the healer's reassignment destination all at once.
+    """
+
+    def test_zero_padded_canonical_form(self) -> None:
+        assert option_partition_stem(2024, 6) == "2024-06"
+        assert option_partition_stem(2024, 12) == "2024-12"
+
+    def test_min_and_max_datetime_years_pad(self) -> None:
+        assert option_partition_stem(1, 1) == "0001-01"  # datetime.MINYEAR pads to 4
+        assert option_partition_stem(9999, 12) == "9999-12"  # datetime.MAXYEAR
 
 
 # ────────────────────────────────────────────────────────────────────────
