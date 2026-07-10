@@ -338,27 +338,52 @@ def _daily_prev_close_contiguous(
 
 
 def _minute_prev_close_contiguous(
-    minute_last: dict[date, Decimal], trading_dates: list[date], day: date
+    minute_last: dict[date, Decimal],
+    trading_dates: list[date],
+    day: date,
+    *,
+    observed: AbstractSet[date] = frozenset(),
 ) -> Decimal | None:
     """Minute-basis PREV. CLOSE that REFUSES to anchor across a data hole.
 
     The "previous close" for *day* is the **immediately preceding trading
-    session's** last 1-minute close. The authoritative trading-session list is
-    the symbol's own **1-day** series (*trading_dates*, sorted) — one bar per
-    session, far more robust than the minute feed and able to tell a genuine
-    holiday gap (absent from BOTH series) apart from a *missing 1-minute window*
-    (present in the 1-day series, absent from the minute feed). The expected
-    prior session is the latest 1-day date strictly before *day*; the anchor is
-    valid ONLY when that exact session also has 1-minute data in *minute_last*.
+    session's** last 1-minute close. The authoritative prior session is derived
+    from the shared **NSE trading calendar** (:func:`_previous_trading_day`) —
+    the SAME resolver the daily basis uses (:func:`_daily_prev_close_contiguous`)
+    — and the anchor is valid ONLY when the symbol's own 1-day series
+    (*trading_dates*, sorted) confirms that exact session AND the session also
+    has 1-minute data in *minute_last*.
 
-    When the prior session's minute window is MISSING from the lake this returns
-    ``None`` so the caller SKIPS the row rather than silently anchoring on a
-    stale far-earlier close — the fake-mover bug where a missing prior-day
-    window produced a wildly wrong %CHNG (e.g. a −7.88% on JUBLINGREA whose
-    prior 1-minute window had not been fetched), exactly the rows the Top-mover
-    category then surfaced (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001). Also ``None``
-    on the first known session (no prior 1-day date) or a zero prior close.
-    O(log N) via :func:`bisect.bisect_left` over the pre-sorted *trading_dates*.
+    Cross-checking against the calendar (not the symbol's own 1-day series as a
+    self-referential calendar) closes the stale-jump hole this used to have: when
+    a **real NSE session is absent from BOTH the 1-day and the 1-minute series**
+    (a genuine lake hole, not a holiday), ``trading_dates[idx - 1]`` silently
+    stepped over the real session onto a stale earlier session → a wrong prior
+    close → fake %CHNG. Now the latest available 1-day date strictly before *day*
+    must EQUAL the calendar's true prior session, exactly the
+    :func:`_daily_prev_close_contiguous` hole-detection (the unfinished COMMON
+    prev-session follow-up DEC-PREOPEN-PREVDAY-COMMON-001 — the resolver is now
+    shared; the observed-overlay COMMON-ization into
+    :func:`brutex.calendars.nse.previous_trading_session` stays that item's open
+    work, since the local helper additionally consults the observed-untraded
+    overlay).
+
+    Refusal ladder (each returns ``None`` so the caller SKIPS the row — the
+    locked "correct-or-absent, never wrong" contract):
+
+    * ``idx == 0`` — no 1-day date strictly before *day* (first known session).
+    * the calendar's prior session is unverifiable past the coverage floor
+      (:func:`_previous_trading_day` LOUD-abstains → ``None``), OR the latest
+      available 1-day date is NOT that exact session (a hole in BOTH series).
+    * the prior session's 1-minute window is MISSING (``minute_last`` has no
+      entry for it — the fake-mover bug where an un-fetched prior-day window
+      produced a wildly wrong %CHNG, e.g. −7.88% on JUBLINGREA;
+      DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001), OR its close is zero.
+
+    A genuine weekend/holiday gap is NOT a hole: the calendar steps over it, so a
+    contiguous series across a holiday still resolves to the real prior session.
+    O(log N) via :func:`bisect.bisect_left` over the pre-sorted *trading_dates*
+    (the calendar walk is a bounded constant).
 
     Used ONLY when a 1-day series exists for the symbol; a pure-minute symbol
     with no 1-day partition keeps the DEC-PREOPEN-MINUTE-BASIS-001 fallback (the
@@ -368,7 +393,15 @@ def _minute_prev_close_contiguous(
     idx = bisect.bisect_left(trading_dates, day)
     if idx == 0:
         return None
-    close = minute_last.get(trading_dates[idx - 1])
+    expected = _previous_trading_day(day, observed=observed)
+    # ``None`` = the calendar's coverage ran out while walking back (already
+    # WARNed loudly by the helper). A mismatch = the latest available 1-day date
+    # is NOT the calendar's true prior session (a real session missing from BOTH
+    # series): either way the anchor is honestly ABSENT and the row is skipped —
+    # never a stale far-earlier close, never a guess.
+    if expected is None or trading_dates[idx - 1] != expected:
+        return None
+    close = minute_last.get(expected)
     if close is None or close == 0:
         return None
     return close
@@ -466,7 +499,9 @@ def build_preopen_rows(
             if basis != "minute":
                 anchor = _daily_prev_close_contiguous(daily, daily_dates, day, observed=observed)
             elif daily_dates:
-                anchor = _minute_prev_close_contiguous(minute_last, daily_dates, day)
+                anchor = _minute_prev_close_contiguous(
+                    minute_last, daily_dates, day, observed=observed
+                )
             else:
                 anchor = prev_by_day.get(day)
             if anchor is None or anchor == 0:
