@@ -309,9 +309,12 @@ var BX_DB_CANDLE_REQUIRED_COLUMNS = ["timestamp", "open", "high", "low", "close"
  * the REAL route payload shape).
  *
  * @param {object} payload - the /api/v1/db/candles response body.
- * @returns {object} {rows: [...], missing: string|null} — ``missing`` names
- *   the first absent required column (the caller shows an honest note; an
- *   empty payload maps to {rows: [], missing: null}).
+ * @returns {object} {rows: [...], missing: string|null, skipped: number} —
+ *   ``missing`` names the first absent required column (the caller shows an
+ *   honest note; an empty payload maps to {rows: [], missing: null,
+ *   skipped: 0}); ``skipped`` COUNTS the unreadable rows (unparseable
+ *   timestamp OR corrupt OHLC) so the caller can say "N row(s) skipped
+ *   (unreadable)" instead of silently plotting fewer candles.
  */
 function bxCandleRowsFromDbPayload(payload) {
   var cols = (payload && payload.columns) || [];
@@ -321,28 +324,98 @@ function bxCandleRowsFromDbPayload(payload) {
   }
   for (var q = 0; q < BX_DB_CANDLE_REQUIRED_COLUMNS.length; q++) {
     if (idx[BX_DB_CANDLE_REQUIRED_COLUMNS[q]] === undefined) {
-      return { rows: [], missing: BX_DB_CANDLE_REQUIRED_COLUMNS[q] };
+      return { rows: [], missing: BX_DB_CANDLE_REQUIRED_COLUMNS[q], skipped: 0 };
     }
   }
   var out = [];
+  var skipped = 0;
   var raw = (payload && payload.rows) || [];
   for (var r = 0; r < raw.length; r++) {
     var ts = bxParseTsIst(raw[r][idx.timestamp]);
     if (ts === null) {
-      continue; // unparseable row skipped — never a NaN coordinate
+      skipped += 1; // unparseable row skipped — never a NaN coordinate
+      continue;
     }
-    out.push({
-      ts: ts,
-      open: Number(raw[r][idx.open]),
-      high: Number(raw[r][idx.high]),
-      low: Number(raw[r][idx.low]),
-      close: Number(raw[r][idx.close])
-    });
+    var open = bxBarPrice(raw[r][idx.open]);
+    var high = bxBarPrice(raw[r][idx.high]);
+    var low = bxBarPrice(raw[r][idx.low]);
+    var close = bxBarPrice(raw[r][idx.close]);
+    if (open === null || high === null || low === null || close === null) {
+      skipped += 1; // corrupt OHLC skipped — Number(null) coerces to 0, never plot it
+      continue;
+    }
+    out.push({ ts: ts, open: open, high: high, low: low, close: close });
   }
   out.sort(function (a, b) {
     return a.ts - b.ts;
   });
-  return { rows: out, missing: null };
+  return { rows: out, missing: null, skipped: skipped };
+}
+
+/**
+ * One OHLC cell as a FINITE number, or null for a corrupt value (pure).
+ *
+ * ``Number(null)`` coerces to 0 and ``Number(undefined)`` to NaN — either
+ * would plot a fabricated 0-price / NaN candle; a null/blank/non-finite
+ * value therefore SKIPS the row (the caller counts it). A numeric STRING is
+ * accepted (the pre-fix ``Number()`` behaviour for legitimate values).
+ *
+ * @param {*} value - one raw OHLC cell.
+ * @returns {number|null} the finite price or null.
+ */
+function bxBarPrice(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+    return null;
+  }
+  var n = Number(value);
+  return isFinite(n) ? n : null;
+}
+
+/**
+ * The honest skipped-rows note for the chart coords line (pure; "" when
+ * nothing was skipped — ONE constant wording so the pin cannot drift).
+ *
+ * @param {number} n - the mapper's skipped count.
+ * @returns {string} "N row(s) skipped (unreadable)" or "".
+ */
+function bxSkippedRowsNote(n) {
+  if (!(typeof n === "number") || !isFinite(n) || n <= 0) {
+    return "";
+  }
+  return String(n) + " row(s) skipped (unreadable)";
+}
+
+/**
+ * Build the chartable series from STORED minute-path equity points
+ * (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item 4C — the /api/v1/oneclick/equity
+ * rows ``{session_date, equity_close_paisa, …}``; pure). Output is the SAME
+ * ``{empty, points[], final_paisa, invalid_rows}`` shape ``bxEquitySeries``
+ * yields, so ``bxEquityPathNode`` renders either source. A non-safe-integer
+ * / non-finite ``equity_close_paisa`` point is SKIPPED and COUNTED — never a
+ * fabricated coordinate.
+ *
+ * @param {*} rows - the equity route's rows array.
+ * @returns {object} {empty, points: [{cum_paisa}], final_paisa, invalid_rows}.
+ */
+function bxMinutePathSeries(rows) {
+  var points = [];
+  var invalid = 0;
+  var list = Array.isArray(rows) ? rows : [];
+  for (var i = 0; i < list.length; i++) {
+    var v = list[i] && list[i].equity_close_paisa;
+    if (typeof v === "number" && isFinite(v) && Math.floor(v) === v &&
+        Math.abs(v) <= 9007199254740991) {
+      points.push({ cum_paisa: v });
+    } else {
+      invalid += 1;
+    }
+  }
+  return {
+    empty: points.length === 0,
+    points: points,
+    final_paisa: points.length ? points[points.length - 1].cum_paisa : 0,
+    invalid_rows: invalid
+  };
 }
 
 /** The loud out-of-window note (ONE constant so UI + tests cannot drift). */
@@ -512,9 +585,12 @@ var BXChart = {
   parseTsIst: bxParseTsIst,
   istDateOfEpoch: bxIstDateOfEpoch,
   candleRowsFromDbPayload: bxCandleRowsFromDbPayload,
+  barPrice: bxBarPrice,
+  skippedRowsNote: bxSkippedRowsNote,
   scaleLinear: bxScaleLinear,
   candleGeom: bxCandleGeom,
   equitySeries: bxEquitySeries,
+  minutePathSeries: bxMinutePathSeries,
   funnelPct: bxFunnelPct,
   nearestBarIdx: bxNearestBarIdx,
   tradeArrow: bxTradeArrow,

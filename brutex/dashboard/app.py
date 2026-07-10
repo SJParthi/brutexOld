@@ -7235,6 +7235,45 @@ def build_app(
 
         return JSONResponse(await _run_lake(_resolve))
 
+    @app.get("/api/v1/oneclick/equity")
+    async def api_oneclick_equity(
+        run_id: str | None = Query(default=None),
+        rank: int = Query(default=1, ge=1),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=5000, ge=1, le=5000),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/equity — the stored minute-path equity SERIES page.
+
+        DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (audit item 4C — the #48
+        overlap): serves the entry's ``equity_ref`` sidecar points
+        (``{session_date, equity_close_paisa, equity_intraday_low_paisa,
+        trades_closed}``) through the SAME typed reader seam + honesty
+        degrades as the trades route (pre-#1275 artifact / absent sidecars /
+        fixture / no-lake → honest awaiting; hostile tuple ref / unreadable
+        sidecar → NAMED corrupt; never a 500, never a fabricated curve).
+        HONEST O-envelope: the FIRST read per (sidecar revision, combo) is an
+        O(equity-file) run_id filter (the stamp indexes no equity spans);
+        repeat pages slice the reader's memo — O(page). One row per session,
+        so the default limit 5000 charts ~20 years in one fetch.
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Build the equity payload off the event loop via the TradesReader seam."""
+            root, fixture_root = _oneclick_roots()
+            reader = _oneclick_reader(root, fixture_root)
+            page = reader.equity_page(rid, rank, offset=offset, limit=limit)
+            return oneclick_view.build_equity_payload(
+                rid,
+                rank,
+                page,
+                offset=offset,
+                limit=limit,
+                fixture_root_active=fixture_root is not None,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
+
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(
         run_id: str | None = Query(default=None),
