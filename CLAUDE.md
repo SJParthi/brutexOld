@@ -19,11 +19,10 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-10 (DEC-ONECLICK-PERF-CLUB-001,
-MIGRATION.md #1666 — the number is PROVISIONAL, coordinator assignment
-pending (the PR-opening re-check found live main's max at #1665 so #1666
-validates today, but the in-flight reservation tail is observed at #1710
-and this wave's numbers are coordinator-assigned; the official number
-lands in a follow-up commit before the ready-flip) —
+MIGRATION.md #1711 — coordinator-ASSIGNED from the reservation map
+(next free above the #1264 reservation tail #1710; live-main max #1665
+at assignment — gaps are legal; renumbered from the interim provisional
+#1666) —
 the queued post-#1373 oneclick perf/hygiene club on
 `claude/oneclick-perf-club` (built on PR #1373's head 3c478831; the PR
 opens after #1373 lands): (F1) `/api/v1/oneclick/verify` — the ONE
@@ -45,7 +44,7 @@ half was #1373's TOP100_ROW_CAP; F2b (serialized-response caches)
 deliberately SKIPPED as optional polish per the severity correction.
 DISPLAY zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX);
 `oneclick_artifacts.py` 100% line+branch on the ci.yml-exact gate; the
-per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1666.)
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1711.)
 Earlier: 2026-07-09 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
 DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665 —
 renumbered from #1632/#1633→#1633/#1634→#1664/#1665: #1633–#1636 were
@@ -1947,12 +1946,11 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/oneclick-perf-club` (**DEC-ONECLICK-PERF-CLUB-001,
-  MIGRATION.md #1666** — the entry number is PROVISIONAL, coordinator
-  assignment pending (the PR-opening-time re-check ran post-#1373-merge:
-  live main's ledger max is #1665 so #1666 validates on the merge ref today,
-  but this wave's numbers are COORDINATOR-ASSIGNED and the in-flight
-  reservation tail is observed at #1710 — the official number lands in a
-  follow-up commit before the ready-flip; the #1664/#1665 reservation-map
+  MIGRATION.md #1711** — the entry number is coordinator-ASSIGNED from the
+  reservation map (2026-07-10 — the next free number above the #1264
+  reservation tail #1710; live-main max #1665 at assignment, live-max+1
+  spoken for by in-flight reservations — gaps are legal; renumbered from
+  the interim provisional #1666, the #1664/#1665 reservation-map
   lesson) — the queued
   post-#1373 oneclick perf/hygiene club, built on PR #1373's
   `claude/oneclick-instrument-display` head 3c478831 (the PR opens only after
@@ -5034,10 +5032,10 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/oneclick-perf-club`
-  (DEC-ONECLICK-PERF-CLUB-001, MIGRATION.md #1666 — the number is PROVISIONAL,
-  coordinator assignment pending (live main max #1665 at the PR-opening
-  re-check; reservation tail observed #1710 — the official coordinator-assigned
-  number lands before the ready-flip) — the queued post-#1373 oneclick
+  (DEC-ONECLICK-PERF-CLUB-001, MIGRATION.md #1711 — coordinator-assigned from
+  the reservation map (next free above the #1264 reservation tail #1710;
+  live-main max #1665 at assignment — gaps are legal; renumbered from the
+  interim provisional #1666) — the queued post-#1373 oneclick
   perf/hygiene club, built
   on PR #1373's head 3c478831 (the PR opens after #1373 lands): F1 the
   /api/v1/oneclick/verify revision cache (the ONE uncached oneclick route;
