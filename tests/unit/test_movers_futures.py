@@ -902,6 +902,7 @@ class TestResolvePrevOi:
         assert prev_baseline_provenance(got.found_date, date(2025, 9, 29), exchange="NSE") == (
             "2025-09-24",
             False,
+            False,
         )
 
     def test_noncontiguous_minute_arm_judged_false(self, tmp_path: Path) -> None:
@@ -920,6 +921,7 @@ class TestResolvePrevOi:
         assert got == PrevOiBaseline(value=555, found_date=date(2025, 9, 25))
         assert prev_baseline_provenance(got.found_date, date(2025, 9, 29), exchange="NSE") == (
             "2025-09-25",
+            False,
             False,
         )
 
