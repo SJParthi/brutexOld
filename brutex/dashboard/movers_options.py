@@ -132,6 +132,7 @@ from brutex.dashboard.movers_snapshot import (
     prev_baseline_provenance,
     resolve_candle_datasets,
     resolve_prev_close,
+    value_crore_str,
     value_meets_volume_floor,
     warn_prev_baseline_noncontiguous,
 )
@@ -397,6 +398,17 @@ class OptionMover:
         return f"{self.underlying} {format_contract_date(self.expiry)} {strike} {self.opt_type}"
 
     @property
+    def value_crore(self) -> str:
+        """Cumulative HLC3 turnover rendered in ₹ crore (2dp) — shares the COMMON formatter.
+
+        Mirrors :attr:`~brutex.dashboard.movers_snapshot.MoverSnapshot.value_crore`
+        and the Futures tab, so the "Top Value" ranking metric (``value_paisa``,
+        DEC-MOVERS-VWAP-VALUE-001) is VISIBLE on the Options screen's "Value (Cr)"
+        column instead of ranking by an invisible field.
+        """
+        return value_crore_str(self.value_paisa)
+
+    @property
     def ltp_inr(self) -> str:
         """The contract's LTP as a 2dp ``₹`` display string."""
         return format_inr(rupees_to_paisa(self.ltp))
@@ -619,6 +631,10 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
         "oi_chg": mover.oi_chg,
         "oi_chg_pct": str(mover.oi_chg_pct) if mover.oi_chg_pct is not None else None,
         "volume": mover.volume,
+        # The HLC3 session turnover behind the "Top Value" ranking, rendered in ₹ crore
+        # (2dp) — mirrors the spot + futures "value_cr" cell so the ranking metric is
+        # VISIBLE on-screen (DEC-MOVERS-VWAP-VALUE-001).
+        "value_cr": mover.value_crore,
         # The ONE moneyness cell the screen shows — bucket + signed depth as a single
         # string ("ITM -1" / "OTM +10" / "ATM"); DEC-FNO-MONEYNESS-001. The raw bucket
         # + signed ATM±N stay in the payload for sorting / programmatic use.

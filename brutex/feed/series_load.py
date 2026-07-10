@@ -221,12 +221,15 @@ def _reconcile(
     symbol: str,
     interval: str,
     on_reconcile: Callable[[ReconcileResult], None] | None,
+    stat_cache: bool,
 ) -> None:
     """Reconcile ONE ``(symbol, interval)`` coordinate from the lake into *cat*.
 
     The same lazy-import + call the inline mouths used
     (DEC-CATALOG-RECONCILE-WIRE-001); *on_reconcile* is the optional caller
-    hook (the cascade's L1 heal rides it — DEC-LAKE-HEAL-001).
+    hook (the cascade's L1 heal rides it — DEC-LAKE-HEAL-001); *stat_cache*
+    is the DEC-SWEEP-RECONCILE-STATCACHE-001 warm-launch fast path
+    (the launcher passes True; the heal/census callers keep False).
     """
     from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
@@ -237,6 +240,7 @@ def _reconcile(
         segment=segment,
         symbol=symbol,
         interval=interval,
+        stat_cache=stat_cache,
     )
     if on_reconcile is not None:
         on_reconcile(result)
@@ -280,6 +284,7 @@ def load_sweep_slice(
     reconcile: bool = True,
     resolution: FuturesSeriesResolution | None = None,
     on_reconcile: Callable[[ReconcileResult], None] | None = None,
+    stat_cache: bool = False,
 ) -> list[CandleBar]:
     """Load ONE sweep ``(symbol, interval)`` slice — spot verbatim, alias stitched.
 
@@ -315,6 +320,16 @@ def load_sweep_slice(
     on_reconcile
         Optional hook fired with each :class:`ReconcileResult` (the cascade's
         L1 heal seam). Only fired when *reconcile* is True.
+    stat_cache
+        DEC-SWEEP-RECONCILE-STATCACHE-001 pass-through to
+        :func:`~brutex.data.catalog_reconcile.reconcile_catalog_from_lake`: a
+        WARM (byte-unchanged) partition skips the redundant full-bytes sha256
+        on a stat-only ``(mtime_ns, size, ino)`` token match — the loaded
+        bars, hence ``data_snapshot_hash`` / run identity, are byte-identical
+        (``get_bars`` re-reads the file content). The sweep-all LAUNCHER
+        passes True (it discards findings + heals nothing); the cascade
+        replay / heal / census callers keep the default False so the L1
+        classification is never suppressed where a healer consumes it.
 
     Returns
     -------
@@ -354,6 +369,7 @@ def load_sweep_slice(
                 symbol=symbol,
                 interval=interval,
                 on_reconcile=on_reconcile,
+                stat_cache=stat_cache,
             )
         return _read_symbol(
             cat=cat,
@@ -392,6 +408,7 @@ def load_sweep_slice(
                 symbol=seg.contract_symbol,
                 interval=interval,
                 on_reconcile=on_reconcile,
+                stat_cache=stat_cache,
             )
         # Feed-bound to the segment window (UTC of IST 00:00 own_start →
         # IST 23:59:59.999999 own_end), intersected with the operator window.

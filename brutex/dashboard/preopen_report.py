@@ -65,7 +65,6 @@ from brutex.dashboard.db_view import (
     _daily_open_by_date,
     _intraday_last_close_by_date,
     _intraday_open_by_date,
-    _prev_trading_close,
     list_candle_datasets,
 )
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
@@ -363,72 +362,66 @@ def _daily_prev_close_contiguous(
 
 def _minute_prev_close_contiguous(
     minute_last: dict[date, Decimal],
-    trading_dates: list[date],
     day: date,
     *,
     observed: AbstractSet[date] = frozenset(),
     expected_session: date | None | EllipsisType = ...,
-    on_hole: Callable[[date, date], None] | None = None,
 ) -> Decimal | None:
-    """Minute-basis PREV. CLOSE that REFUSES to anchor across a data hole.
+    """Minute-basis PREV. CLOSE anchored on the checked NSE calendar ALONE.
 
-    The "previous close" for *day* is the **immediately preceding NSE trading
-    session's** last 1-minute close — and the authority on WHICH session that
-    is, is the SHARED checked NSE calendar (:func:`_previous_trading_day`),
-    exactly like the daily mirror :func:`_daily_prev_close_contiguous`
-    (DEC-PREOPEN-PREVDAY-COMMON-002). The symbol's own **1-day** series
-    (*trading_dates*, sorted) is only the LAKE's evidence of which sessions it
-    holds; it is NOT its own calendar — the pre-fix rule anchored on
-    ``trading_dates[idx − 1]`` with zero real-calendar check, so a real NSE
-    session missing from BOTH series read as "a genuine holiday" and the row
-    fabricated a %CHNG across the hole (the confirmed repro: a 2024-01-03
-    Wednesday hole printed a fabricated +10.0% for 2024-01-04, and the
-    Top-mover category would have crowned it). The anchor is now valid ONLY
-    when the nearest earlier 1-day date IS the calendar's prior session AND
-    that exact session has 1-minute data in *minute_last*:
+    The "previous close" for *day* is the **immediately preceding trading
+    session's** last 1-minute close. The authoritative prior session is derived
+    from the shared **NSE trading calendar** (:func:`_previous_trading_day`) —
+    the SAME resolver the daily basis uses (:func:`_daily_prev_close_contiguous`)
+    — and the anchor is served iff that EXACT session has 1-minute data in
+    *minute_last*. The symbol's 1-day series is NOT consulted
+    (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660 — supersedes-in-part the
+    #1620/#1621 shape AND the minute-basis arm of the richer
+    DEC-PREOPEN-PREVDAY-COMMON-002 #1649a confirmation guard folded at the
+    2026-07-10 merge-reconcile, both of which required the possibly-stale 1-day
+    series to CONFIRM the calendar's session): with the checked-calendar walk
+    threaded, the 1-day intermediary could only ADD over-refusals (a 1-day-holed
+    but 1-minute-complete lake skipped a row whose correct anchor existed in
+    ``minute_last[expected]``) and could not catch anything the
+    calendar + minute check misses. The previous-AVAILABLE fallback for a
+    symbol with no 1-day partition is likewise REMOVED — that arm bridged a
+    genuine 1-minute session hole onto a stale earlier close with NO calendar
+    check (the captured 23.81%-where-truth-is-4.00% mis-anchor class), and a
+    CLI-pulled / never-prebuilt lake put EVERY symbol on it. Because no 1-day
+    comparison remains, the #1649a ``on_hole`` seam does not exist on THIS
+    guard (the hole-WARN channel stays live on the daily mirror, which keeps
+    its 1-day evidence); the #1649a *expected_session* memo seam IS kept —
+    ``...`` computes the walk internally, a memo-holding caller passes it, so
+    the calendar back-walk runs once per unique report day.
 
-    * ``idx == 0`` (no 1-day bar strictly before *day*) → ``None`` (first
-      session).
-    * The calendar ABSTAINS (*expected_session* ``None`` — coverage exhausted,
-      already WARNed by the COMMON primitive) → ``None``, no *on_hole*.
-    * ``trading_dates[idx − 1] != expected`` (a lake hole) →
-      ``on_hole(expected, trading_dates[idx − 1])`` then ``None``: the row is
-      honestly ABSENT, never a stale-anchored number. The mismatch takes the
-      reproduced shapes :func:`_hole_shape` classifies for the WARN's
-      diagnostic — the calendar-confirmed Diwali Muhurat boundary
-      (``found > expected`` on a known Muhurat date — a HEALTHY lake,
-      DEC-PREVSESSION-MUHURAT-COHERENCE-001), an UNEXPECTED non-session 1-day
-      bar AFTER the prior session (``found > expected`` otherwise), the 1-day
-      series LAGGING the minute series (prebuild lag — the expected session
-      HAS minute bars), or the genuinely MISSING session; the refusal itself
-      is identical in every shape.
-    * The prior session's minute window is MISSING (``minute_last`` lacks the
-      expected session — the JUBLINGREA case, DEC-PREOPEN-PREVCLOSE-
-      CONTIGUITY-001) or its close is zero → ``None`` (byte-preserved skip).
+    Refusal ladder (each returns ``None`` so the caller SKIPS the row — the
+    locked "correct-or-absent, never wrong" contract):
 
-    Seams as in the daily mirror: *expected_session* ``...`` computes the walk
-    internally, a memo-holding caller passes it; *on_hole* fires ONLY on the
-    verified-hole refusal. O(log N) via :func:`bisect.bisect_left` (the
-    calendar walk is a bounded constant).
+    * the calendar's prior session is unverifiable past the coverage floor
+      (:func:`_previous_trading_day` LOUD-abstains → ``None``);
+    * the prior session's 1-minute window is MISSING (``minute_last`` has no
+      entry for it — the fake-mover bug where an un-fetched prior-day window
+      produced a wildly wrong %CHNG, e.g. −7.88% on JUBLINGREA;
+      DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001), OR its close is zero.
 
-    Used ONLY when a 1-day series exists for the symbol; a pure-minute symbol
-    with no 1-day partition keeps the DEC-PREOPEN-MINUTE-BASIS-001 fallback
-    (the previous AVAILABLE minute session, deliberately calendar-blind — a
-    chosen, ledger-recorded honest limit, not an oversight).
+    A genuine weekend/holiday gap is NOT a hole: the calendar steps over it, so
+    a contiguous series across a holiday still resolves to the real prior
+    session. The calendar walk is a bounded constant per row; the map lookup is
+    O(1). Honest limit (Golden Rule #10): a PARTIAL prior-session 1-minute
+    window (truncated intra-day) still serves its mid-session last close — real
+    data at a real checked-calendar session, but not necessarily the 15:29
+    close; intra-session completeness is not checked here (recorded in the
+    ledger entry, note-only follow-up).
     """
-    idx = bisect.bisect_left(trading_dates, day)
-    if idx == 0:
-        return None
     expected = (
         _previous_trading_day(day, observed=observed)
         if expected_session is ...
         else expected_session
     )
+    # ``None`` = the calendar's coverage ran out while walking back (already
+    # WARNed loudly by the helper): the prior session cannot be verified, so the
+    # anchor is honestly ABSENT and the row is skipped — never a guess.
     if expected is None:
-        return None
-    if trading_dates[idx - 1] != expected:
-        if on_hole is not None:
-            on_hole(expected, trading_dates[idx - 1])
         return None
     close = minute_last.get(expected)
     if close is None or close == 0:
@@ -549,9 +542,12 @@ def build_preopen_rows(
       the row instead of jumping onto a stale far-earlier close).
     * ``"minute"`` (DEC-PREOPEN-MINUTE-BASIS-001) — IEP = the **09:15:00 1-minute
       session-open OPEN** (:func:`_intraday_open_by_date`); PREV. CLOSE = the
-      **prior trading day's last 1-minute close** (:func:`_prev_trading_close`
-      over :func:`_intraday_last_close_by_date`), matching the engine's own
-      prev-close (DEC-SPOT-PREVCLOSE-1MIN-001).
+      **prior NSE-trading-session's last 1-minute close**
+      (:func:`_minute_prev_close_contiguous` over
+      :func:`_intraday_last_close_by_date` — the checked-calendar anchor,
+      DEC-STALENESS-CACHE-TRUTH-001; a missing prior-session 1-minute window
+      SKIPS the row, never a bridged stale close), matching the engine's own
+      prev-close convention (DEC-SPOT-PREVCLOSE-1MIN-001).
 
     Both columns ALWAYS come from the same basis (never mixed), so an
     adjustment-mismatched symbol (e.g. TMPV) stays precise. A day is emitted only
@@ -565,10 +561,15 @@ def build_preopen_rows(
     O(unique report days) per build (never O(rows); no globals — NOT an
     O(1)-total claim). A verified hole refusal rides the existing skip
     ``continue`` — the row is honestly ABSENT, never a fabricated %CHNG, never
-    a raise/500 — and is surfaced as ONE
+    a raise/500 — and, on the DAILY basis, is surfaced as ONE
     ``preopen.prev_close_noncontiguous`` WARN per ``(exchange, segment,
     symbol)`` dataset triple (capped at :data:`_HOLE_WARN_CAP` per build, with
     one ``preopen.prev_close_noncontiguous_suppressed`` summary past the cap).
+    DEC-STALENESS-CACHE-TRUTH-001 merge-reconcile (2026-07-10): the MINUTE
+    basis anchors on the checked calendar ALONE — it no longer reads the 1-day
+    series at all, so there is no 1-day-vs-calendar comparison to classify and
+    the hole-WARN channel fires on the daily basis only (a minute-basis
+    missing prior-session window stays the byte-preserved silent skip).
     The WARN carries a machine ``hole_shape`` + a shape-matched ``detail``
     (:func:`_hole_shape` / :func:`_hole_detail` — the hostile-review fold +
     the DEC-PREVSESSION-MUHURAT-COHERENCE-001 split): ``muhurat_session_bar``
@@ -580,11 +581,12 @@ def build_preopen_rows(
     inspect it), ``prebuild_lag`` (the 1-day series lags the minute series;
     remediation is the pipeline prebuild — the minute basis passes its
     ``minute_last`` as DIAGNOSTIC evidence only, the anchor is never taken
-    from it), or ``missing_session`` (the genuine hole; remediation stays
-    "re-pull the missing session"). The daily basis passes no minute evidence
-    (it never reads the 1-minute series), so only its ``found < expected``
-    diagnostic degrades (a daily prebuild lag reads ``missing_session``); the
-    ``found > expected`` split is identical on both bases.
+    from it — production-UNREACHABLE via this caller under the merged
+    calendar-alone minute rule, kept for the pure classifier's totality and
+    directly unit-tested), or ``missing_session`` (the genuine hole;
+    remediation stays "re-pull the missing session"). The daily basis passes
+    no minute evidence (it never reads the 1-minute series), so its
+    ``found < expected`` diagnostic reads ``missing_session``.
     """
     rows: list[PreOpenRow] = []
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
@@ -649,7 +651,6 @@ def build_preopen_rows(
             daily: dict[date, Decimal] = {}
             daily_dates: list[date] = []
             minute_last: dict[date, Decimal] = {}
-            prev_by_day: dict[date, Decimal] = {}
             if basis == "minute":
                 opens = _intraday_open_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
@@ -657,20 +658,14 @@ def build_preopen_rows(
                 minute_last = _intraday_last_close_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
                 )
-                # The 1-day series is the LAKE's session evidence; the checked NSE
-                # calendar is the authority on the prior session, so PREV. CLOSE
-                # never anchors across a data hole — a missing prior-day 1-minute
-                # window (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001) OR a real NSE
-                # session absent from BOTH series (DEC-PREOPEN-PREVDAY-COMMON-002).
-                # When a symbol has NO 1-day partition at all we keep the
-                # DEC-PREOPEN-MINUTE-BASIS-001 fallback (the previous AVAILABLE
-                # minute session) — the documented calendar-blind honest limit.
-                daily = _daily_close_by_date(
-                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-                )
-                daily_dates = sorted(daily)
-                if not daily_dates:
-                    prev_by_day = _prev_trading_close(minute_last)
+                # The minute anchor is verified by the checked NSE calendar ALONE
+                # (DEC-STALENESS-CACHE-TRUTH-001): the 1-day series is NOT read on
+                # this basis any more — as a proxy calendar it only ever ADDED
+                # over-refusals (a 1-day hole skipped a row whose correct anchor
+                # existed in the 1-minute data), and its absence put every symbol
+                # on the calendar-blind previous-AVAILABLE fallback (the bridged
+                # stale-close mis-anchor class) — both closed by the one rule in
+                # _minute_prev_close_contiguous.
             else:
                 opens = _daily_open_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
@@ -691,10 +686,11 @@ def build_preopen_rows(
             )
             continue
         # DIAGNOSTIC evidence for the hole-shape classification (never the
-        # anchor): the minute basis passes its own minute series so a
-        # prebuild-lag hole names the right remediation; the daily basis
-        # passes None (it never reads the 1-minute series) — its diagnostic
-        # is honestly two-way (see _hole_shape).
+        # anchor). Under the merged DEC-STALENESS-CACHE-TRUTH-001 rule only the
+        # DAILY guard takes the on_hole seam (the minute guard has no 1-day
+        # comparison), and the daily basis passes None (it never reads the
+        # 1-minute series) — so the fired diagnostic is honestly two-way here
+        # (see _hole_shape; the prebuild_lag arm is direct-unit-tested).
         minute_evidence: dict[date, Decimal] | None = minute_last if basis == "minute" else None
         for day in sorted(opens):
             if day < start or day > end:
@@ -720,16 +716,10 @@ def build_preopen_rows(
                     expected_session=_expected_session(day),
                     on_hole=_on_hole,
                 )
-            elif daily_dates:
-                anchor = _minute_prev_close_contiguous(
-                    minute_last,
-                    daily_dates,
-                    day,
-                    expected_session=_expected_session(day),
-                    on_hole=_on_hole,
-                )
             else:
-                anchor = prev_by_day.get(day)
+                anchor = _minute_prev_close_contiguous(
+                    minute_last, day, expected_session=_expected_session(day)
+                )
             if anchor is None or anchor == 0:
                 continue
             iep = opens[day]

@@ -24,6 +24,7 @@ this computes match the rest of the pipeline. Pure + O(n) over the series + the 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import mask_to_entry_signals
@@ -37,6 +38,9 @@ from brutex.metrics.cpcv import (
 )
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
+
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    from brutex.engine.reference_series import TradeReferenceStamper
 
 
 def combo_returns(
@@ -52,6 +56,7 @@ def combo_returns(
     prior_n: int = 3,
     roll_schedule: tuple[int, ...] | None = None,
     apply_1day_mask: bool = False,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[float]:
     """Run a combo over bars → its PER-TRADE return series.
 
@@ -71,6 +76,11 @@ def combo_returns(
         :func:`~brutex.engine.stage1a.build_bar_bits`
         (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001, review round-2 finding 2).
         Defaults (``None`` / ``False``) are the byte-identical spot path.
+    reference_stamper
+        Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) threaded to the
+        trade sim — the closed trades behind this return series carry
+        ``vix_at_entry`` / ``vix_at_exit``. REFERENCE ONLY: the returned
+        series is byte-identical with or without it.
 
     Returns
     -------
@@ -100,6 +110,7 @@ def combo_returns(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
+        reference_stamper=reference_stamper,
     )
     return [trade.pnl_paisa / start_equity_paisa for trade in trades]
 

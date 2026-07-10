@@ -114,6 +114,7 @@ from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Mapping, Sequence
+    from datetime import datetime
     from pathlib import Path
 
     import numpy as np
@@ -639,6 +640,21 @@ def _make_mc_evaluate(
             tf_minutes=tf_minutes,
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
+            # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
+            # Monte-Carlo permutation filter's trades are the DISCARDED null
+            # distribution — relocated entry signals whose per-trade Sharpe is
+            # the only output; no row, report or operator surface ever sees
+            # the trades themselves — so stamping every permutation's trades
+            # would be pure wasted work with zero observable output. The
+            # stream is EXPLICITLY unstamped via this literal (one of the
+            # ENUMERATED sanctioned literal-None seam bindings — five after
+            # the round-6 review also unstamped the sibling candidate
+            # re-simulation in build_candidate_input — AST-pinned with exact
+            # counts by tests/unit/test_vix_stamper_binding_pin.py — never a
+            # silent omission). REVERT LEVER: thread a stamper through
+            # _make_mc_evaluate and bind it here (one kwarg; the null
+            # statistic is VIX-independent either way).
+            reference_stamper=None,
         )
         rets = [t.pnl_paisa / start_equity_paisa for t in trades]
         sharpe = sharpe_of_returns(rets)
@@ -712,6 +728,23 @@ def build_candidate_input(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
+        # candidate re-simulation's trades are a DISCARDED stream — every
+        # observable output is the CandidateInput SCALARS + returns tuples
+        # built below (no trade object, and no VIX field, survives the
+        # conversion), so the report bytes are provably identical stamped vs
+        # unstamped and a per-candidate stamp would be pure wasted work. The
+        # stream is EXPLICITLY unstamped via this literal (one of the FIVE
+        # enumerated sanctioned literal-None seam bindings, AST-pinned with
+        # exact counts by tests/unit/test_vix_stamper_binding_pin.py — never
+        # a silent omission); the old reference_stamper seam through the
+        # cascade chain was DELETED with the two manual-replay
+        # vix_stamper_for_manifest builds it existed to feed (each paid a
+        # full window-bounded VIX lake read per replay/click for zero
+        # output — the same dead-build class the round-2 review removed at
+        # the options-sim sites). REVERT LEVER: add a VIX surface to
+        # CandidateInput/the cascade report FIRST, then re-thread the seam.
+        reference_stamper=None,
     )
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
@@ -1833,6 +1866,9 @@ def run_and_write_from_specs(
     (:func:`check_replay_roll_schedule`, review round-2 findings 1/4/9 —
     enforced in :func:`load_bars_for_manifest`, never a silent re-resolve
     under the frozen resets).
+    The candidate re-simulations are DISCARDED trade streams and stay
+    deliberately unstamped (DEC-VIX-STAMP-WIRE-001 round-6 — see
+    :func:`build_candidate_input`); no stamper seam exists here.
 
     Returns
     -------
@@ -1881,7 +1917,11 @@ def run_and_write_from_manifest(
     Reloads the manifest under *results_root*, re-runs :func:`run_cascade_over_specs`
     with the stored config + specs over freshly-loaded bars, and re-writes
     ``cascade/cascade-report.json``. Given an unchanged lake, the rewritten report
-    is byte-identical to the one the AUTOMATIC path wrote (the golden contract).
+    is byte-identical to the one the AUTOMATIC path wrote (the golden
+    contract). The replay builds NO India-VIX stamper (DEC-VIX-STAMP-WIRE-001
+    round-6): the candidate re-simulations are discarded streams, so the old
+    per-replay ``vix_stamper_for_manifest`` build paid a full window-bounded
+    VIX lake read for zero observable output.
 
     Returns
     -------
@@ -1966,6 +2006,19 @@ def check_replay_roll_schedule(
         )
 
 
+def _manifest_window_dt(value: str) -> datetime:
+    """Parse a manifest :class:`BarsContext` window endpoint (naive ⇒ UTC).
+
+    The ONE parse for :func:`load_bars_for_manifest`'s slice reads (CLAUDE.md
+    §2 Rule 11 COMMON; the round-6-deleted ``vix_stamper_for_manifest``
+    shared it while the manual replay still built a stamper).
+    """
+    from datetime import UTC, datetime
+
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFeed
     manifest: CascadeManifest,
     *,
@@ -2022,8 +2075,6 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
         (interior hole, empty series, …) or a per-contract empty owned
         window — the same loud-refusal law as the launch mouth.
     """
-    from datetime import UTC, datetime
-
     from brutex.calendars.nse import IST
     from brutex.data.catalog import Catalog
     from brutex.data.futures_series import FuturesSeriesResolution, resolve_futures_series
@@ -2031,10 +2082,6 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     from brutex.data.lake_read import dedup_bars
     from brutex.feed.series_load import load_sweep_slice
     from brutex.notifications.sweep_alerts import emit_lake_heal_alert
-
-    def _parse(value: str) -> datetime:
-        parsed = datetime.fromisoformat(value)
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
     ctx = manifest.bars_context
     catalog = catalog_path if catalog_path is not None else lake_root / "catalog.duckdb"
@@ -2050,8 +2097,8 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     if futures_instruments:
         resolution = resolve_futures_series(
             lake_root,
-            start=_parse(ctx.start).astimezone(IST).date(),
-            end=_parse(ctx.end).astimezone(IST).date(),
+            start=_manifest_window_dt(ctx.start).astimezone(IST).date(),
+            end=_manifest_window_dt(ctx.end).astimezone(IST).date(),
         )
         frozen_map = None if manifest.roll_schedules is None else dict(manifest.roll_schedules)
         for fut_instrument in futures_instruments:
@@ -2091,8 +2138,8 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
                 segment=ctx.segment,
                 symbol=instrument,
                 interval=tf_label,
-                start=_parse(ctx.start),
-                end=_parse(ctx.end),
+                start=_manifest_window_dt(ctx.start),
+                end=_manifest_window_dt(ctx.end),
                 resolution=resolution,
                 on_reconcile=_heal_on_reconcile,
             )

@@ -52,11 +52,11 @@ def _index(
     )
 
 
-def _equity(symbol: str, *, name: str | None = None) -> Instrument:
+def _equity(symbol: str, *, name: str | None = None, security_id: int = 2) -> Instrument:
     """Build an NSE EQ instrument fixture."""
     return Instrument(
         exch_id=Exchange.NSE,
-        security_id=2,
+        security_id=security_id,
         symbol_name=symbol,
         display_name=name,
         instrument=InstrumentType.EQ,
@@ -158,10 +158,22 @@ class TestUniverseSummary:
             _equity("WIPRO"),  # no derivative → not F&O-eligible, not counted
         ]
         summary = universe_summary(snapshot)
-        assert summary == {"index_count": 2, "stock_count": 1, "total": 3}
+        assert summary == {
+            "index_count": 2,
+            "stock_count": 1,
+            "total": 3,
+            "reference_stock_count": 0,
+            "stock_count_total": 1,
+        }
 
     def test_empty_snapshot(self) -> None:
-        assert universe_summary([]) == {"index_count": 0, "stock_count": 0, "total": 0}
+        assert universe_summary([]) == {
+            "index_count": 0,
+            "stock_count": 0,
+            "total": 0,
+            "reference_stock_count": 0,
+            "stock_count_total": 0,
+        }
 
     def test_precomputed_fno_eligible_candidates_only(self) -> None:
         # Fast path: candidates-only (IDX + EQ, no legs) + precomputed eligible
@@ -172,6 +184,79 @@ class TestUniverseSummary:
             "index_count": 2,
             "stock_count": 1,
             "total": 3,
+            "reference_stock_count": 0,
+            "stock_count_total": 1,
+        }
+
+    # ── DEC-LABEL-TRUTH-001: the additive reference/total stock split ──
+
+    def test_reference_split_additive_keys_legs_shape(self) -> None:
+        """A reference-only EQ (id-admitted, ticker NOT eligible) splits honestly.
+
+        FAILS BEFORE DEC-LABEL-TRUTH-001: ``universe_summary`` had no
+        ``reference_only_ids`` parameter and the payload carried neither
+        ``reference_stock_count`` nor ``stock_count_total``.
+        """
+        candidates = [
+            _index("NIFTY"),
+            _equity("RELIANCE", security_id=2),
+            # An admitted NTM REFERENCE_ONLY constituent: symbol_name is the long
+            # company name (never in the ticker-keyed eligible set); admitted by id.
+            _equity("Some Long Company Name", security_id=7),
+        ]
+        eligible = frozenset({(Exchange.NSE, "RELIANCE")})
+        summary = universe_summary(
+            candidates, fno_eligible=eligible, reference_only_ids=frozenset({7})
+        )
+        assert summary == {
+            "index_count": 1,
+            "stock_count": 1,  # legacy semantics — F&O ticker arm only, unchanged
+            "total": 2,  # legacy semantics — index_count + stock_count, unchanged
+            "reference_stock_count": 1,
+            "stock_count_total": 2,  # the Stocks-tab population (F&O + reference)
+        }
+
+    def test_reference_split_lean_store_shape_membership_not_classify_diff(self) -> None:
+        """The split is by REFERENCE-ID MEMBERSHIP, honest on the LEAN store too.
+
+        On the lean store the SQL-derived eligible set already carries every
+        persisted NSE EQ symbol INCLUDING the reference rows
+        (``InstrumentStore.fno_eligible_underlyings`` arm (b), default
+        ``tradable_only=False``) — so a reference row classifies "stock" by
+        TICKER even without the id arm, and a classify-with-vs-without-ids
+        DIFF would read a dishonest ``reference_stock_count == 0``. The
+        id-membership split still reports the true reference subset.
+        """
+        candidates = [
+            _index("NIFTY"),
+            _equity("RELIANCE", security_id=2),
+            _equity("Some Long Company Name", security_id=7),
+        ]
+        # The lean-store shape: BOTH equities' symbols are in the eligible set.
+        eligible = frozenset({(Exchange.NSE, "RELIANCE"), (Exchange.NSE, "Some Long Company Name")})
+        summary = universe_summary(
+            candidates, fno_eligible=eligible, reference_only_ids=frozenset({7})
+        )
+        assert summary == {
+            "index_count": 1,
+            "stock_count": 2,  # legacy value on this store shape — byte-identical
+            "total": 3,
+            "reference_stock_count": 1,  # membership split — NOT the classify diff's 0
+            "stock_count_total": 2,
+        }
+
+    def test_reference_index_id_never_counts_as_reference_stock(self) -> None:
+        """A reference-flagged INDEX (India VIX) never lands in the STOCK split."""
+        vix = _index("INDIAVIX")  # security_id=1 per the fixture builder
+        summary = universe_summary(
+            [vix], fno_eligible=frozenset(), reference_only_ids=frozenset({1})
+        )
+        assert summary == {
+            "index_count": 1,
+            "stock_count": 0,
+            "total": 1,
+            "reference_stock_count": 0,
+            "stock_count_total": 0,
         }
 
 

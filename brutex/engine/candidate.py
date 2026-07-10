@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from brutex.data.models import CandleBar
 from brutex.engine.deflate import deflate_sweep
@@ -33,6 +33,9 @@ from brutex.metrics.compute import ResultMetrics
 from brutex.metrics.deflated_sharpe import DeflatedSharpeResult
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
+
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    from brutex.engine.reference_series import TradeReferenceStamper
 
 #: Deflated-Sharpe acceptance floor — Bailey & López de Prado's institutional
 #: convention: ``DSR >= 0.95`` = ≥95% confidence the true Sharpe is positive AFTER
@@ -110,6 +113,7 @@ def validate_candidate(
     prior_n: int = 3,
     roll_schedule: tuple[int, ...] | None = None,
     apply_1day_mask: bool = False,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> CandidateVerdict:
     """Run a candidate combo through OOS + DSR + CPCV → one composed verdict.
 
@@ -131,6 +135,10 @@ def validate_candidate(
         :func:`~brutex.engine.robustness.combo_returns` (the CPCV producer) —
         so roll-stitched futures bars are never validated schedule-blind.
         Defaults (``None`` / ``False``) are the byte-identical spot path.
+    reference_stamper
+        Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) threaded to BOTH
+        re-simulations (the OOS holdout + the CPCV return series). REFERENCE
+        ONLY — the composed verdict is byte-identical with or without it.
 
     Returns
     -------
@@ -156,6 +164,7 @@ def validate_candidate(
         prior_n=prior_n,
         roll_schedule=roll_schedule,
         apply_1day_mask=apply_1day_mask,
+        reference_stamper=reference_stamper,
     )
     deflated = deflate_sweep(sweep_results).get(required_mask)
     cpcv = cpcv_robustness(
@@ -171,6 +180,7 @@ def validate_candidate(
             prior_n=prior_n,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
+            reference_stamper=reference_stamper,
         )
     )
     return CandidateVerdict(

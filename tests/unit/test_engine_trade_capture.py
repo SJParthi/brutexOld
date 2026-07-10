@@ -12,6 +12,7 @@ fresh signal after an exit re-enters, no cooldown, until the 15:20 wall).
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,7 @@ from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.minute_path import MinuteIndex, PathStatus
 from brutex.engine.reference_series import TradeReferenceStamper
+from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow
 from brutex.engine.trade_capture import (
     CapturedTrade,
@@ -231,6 +233,64 @@ class TestCaptureParityPass:
         assert third.vix_entry == Decimal("15.50")
         assert third.vix_exit is None  # no VIX bar at 15:20 — honest NULL
         assert capture.vix_missing_trades == 1
+
+    def test_result_row_trio_cross_checks_depth_capture_stamps(self) -> None:
+        """The merge-train binding cross-check (PR #1274 coordinator note 3).
+
+        DEC-VIX-STAMP-WIRE-001 ∩ DEC-SWEEP-RESULTS-DEPTH-001: for the SAME
+        combo over ONE India-VIX series, the launch side's persisted
+        ``ResultRow`` trio (``aggregate_trade_vix`` over the stamped oracle
+        trades) must agree with the depth pass's captured per-trade stamps —
+        both surfaces consume the ONE :class:`TradeReferenceStamper`, and this
+        pin makes a derivation drift between them impossible to land silently.
+        Uses the partial-miss VIX series so the ``None``-skip law is
+        cross-checked too.
+        """
+        vix_bars = [
+            _bar(9, 16, "15.25", "15.25", "15.25", "15.25"),
+            _bar(9, 17, "15.30", "15.30", "15.30", "15.30"),
+            _bar(9, 19, "15.40", "15.40", "15.40", "15.40"),
+            _bar(9, 20, "15.45", "15.45", "15.45", "15.45"),
+            _bar(15, 18, "15.50", "15.50", "15.50", "15.50"),
+        ]
+        stamper = TradeReferenceStamper.from_vix_bars(vix_bars)
+        # Launch side: the stamped oracle trades → the ResultRow trio fold.
+        signals = [bool(b & _MASK == _MASK) for b in _BAR_BITS]
+        trades = simulate_trades(
+            _BARS,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=_SL,
+            take_profit_paisa=_TP,
+            reference_stamper=stamper,
+        )
+        trio = aggregate_trade_vix(trades)
+        # Depth side: the SAME combo captured with the SAME stamper.
+        capture = capture_combo(
+            _row(),
+            bars=_BARS,
+            bar_bits=_BAR_BITS,
+            tf_minutes=1,
+            sl_paisa=_SL,
+            tp_paisa=_TP,
+            minute_index=None,
+            stamper=stamper,
+        )
+        assert capture.parity_ok is True
+        # Per-trade stamps agree pairwise (entry AND exit, None included).
+        assert [(t.vix_at_entry, t.vix_at_exit) for t in trades] == [
+            (c.vix_entry, c.vix_exit) for c in capture.trades
+        ]
+        # The persisted trio equals an INDEPENDENT fold over the capture's
+        # stamps (None-skipped, mean clamped into [min, max] like the ONE law).
+        levels = [
+            float(v) for c in capture.trades for v in (c.vix_entry, c.vix_exit) if v is not None
+        ]
+        assert levels, "teeth: the fixture must stamp at least one level"
+        low, high = min(levels), max(levels)
+        mean = min(max(math.fsum(levels) / len(levels), low), high)
+        assert trio == (mean, low, high)
 
     def test_zero_trade_combo_first_class(self) -> None:
         # A mask bit that never fires → zero trades everywhere; parity holds.

@@ -247,6 +247,13 @@ def dedup_qualify_sql(key_columns: Sequence[str] = ("timestamp",)) -> str:
     Verified against the pinned DuckDB (1.5.x supports ``QUALIFY`` +
     ``file_row_number``; the integration tests pin it against the real engine).
 
+    HONEST envelope (Golden Rule #10): the QUALIFY window is an O(total physical
+    rows) columnar hash-partition per query plus O(file-count) Parquet footer
+    opens — NOT O(page). A ``LIMIT``/``OFFSET`` appended after the ``ORDER BY``
+    bounds only the caller's Python materialisation, never the scan; this is the
+    same envelope :func:`~brutex.dashboard.db_view.query_candles` accepts
+    (DEC-DB-OPAGE-HONESTY-001).
+
     Raises
     ------
     ValueError

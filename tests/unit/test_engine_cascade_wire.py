@@ -2288,3 +2288,25 @@ class TestStage3CellRelPath:
     def test_bad_rel_path_raises(self, bad: str) -> None:
         with pytest.raises(cw.CascadeWireError, match="rel_path"):
             _stage3_cell_with(rel_path=bad)
+
+
+# ── _manifest_window_dt (per-module 100% gate; DEC-VIX-STAMP-WIRE-001) ────────
+
+
+class TestManifestWindowDt:
+    """The ONE manifest window-endpoint parse for the manual replay's slice reads.
+
+    The seam's behavioural suite also pins this in
+    ``tests/unit/test_engine_vix_stamper_wiring.py``; these mirrors keep THIS
+    module's per-file 100% gate honest on its OWN discovered covering suite
+    (``scripts/ci/coverage_gate_discovery.py`` maps ``cascade_wire.py`` to the
+    ``test_*cascade_wire*`` files only).
+    """
+
+    def test_naive_endpoint_is_utc(self) -> None:
+        parsed = cw._manifest_window_dt("2026-01-05")
+        assert parsed == datetime(2026, 1, 5, tzinfo=UTC)
+
+    def test_aware_endpoint_offset_preserved(self) -> None:
+        parsed = cw._manifest_window_dt("2026-01-05T09:15:00+05:30")
+        assert parsed.utcoffset() == timedelta(hours=5, minutes=30)
