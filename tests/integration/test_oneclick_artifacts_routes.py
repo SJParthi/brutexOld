@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog.testing
 
 pytest.importorskip("fastapi")
 
@@ -104,15 +105,65 @@ class TestRunsRoute:
         assert payload["runs"] == []
         assert payload["fixture_root_active"] is False
 
-    def test_revision_outage_computes_fresh_uncached(
+    def test_cold_probe_outage_computes_fresh_with_one_warn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """T-M4: a ``runs_revision`` None (stat outage) takes the fresh branch."""
+        """C-r2-5: an outage with NO last-known listing computes fresh — LOGGED."""
         client = _client(_lake_with_corpus(tmp_path))
-        monkeypatch.setattr(oc, "runs_revision", lambda _root: None)
-        payload = client.get("/api/v1/oneclick/runs").json()
+        monkeypatch.setattr(oc, "runs_revision_probe", lambda _root: oc.ArtifactProbe(None, True))
+        with structlog.testing.capture_logs() as logs:
+            payload = client.get("/api/v1/oneclick/runs").json()
         assert payload["status"] == "ok"
         assert {row["run_id"] for row in payload["runs"]} == ALL_RUN_IDS
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1
+        assert outages[0]["last_known"] is False
+
+    def test_probe_outage_serves_the_last_known_listing_with_one_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C-r2-5: a stat outage serves the LAST-KNOWN listing (no re-walk, one WARN)."""
+        client = _client(_lake_with_corpus(tmp_path))
+        first = client.get("/api/v1/oneclick/runs").json()  # primes the cache
+        monkeypatch.setattr(oc, "runs_revision_probe", lambda _root: oc.ArtifactProbe(None, True))
+
+        def _must_not_walk(_root: Path, *, limit: int = 50) -> Any:
+            raise AssertionError("an outage with a cached listing must never re-walk")
+
+        monkeypatch.setattr(oc, "discover_runs", _must_not_walk)
+        with structlog.testing.capture_logs() as logs:
+            second = client.get("/api/v1/oneclick/runs").json()
+            third = client.get("/api/v1/oneclick/runs").json()
+        assert second == first
+        assert third == first
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1  # once per outage, never per poll
+        assert outages[0]["last_known"] is True
+
+    def test_probe_recovery_resumes_fresh_keying(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C-r2-5: when the probe answers again, the route re-keys on the NEW revision."""
+        lake = _lake_with_corpus(tmp_path)
+        client = _client(lake)
+        real_probe = oc.runs_revision_probe
+        state = {"outage": False}
+
+        def _probe(root: Path) -> oc.ArtifactProbe:
+            if state["outage"]:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(root)
+
+        monkeypatch.setattr(oc, "runs_revision_probe", _probe)
+        first = client.get("/api/v1/oneclick/runs").json()  # primes healthy
+        state["outage"] = True
+        assert client.get("/api/v1/oneclick/runs").json() == first  # last-known serve
+        state["outage"] = False
+        (lake / "sweep_runs" / "r-fresh01").mkdir()  # a NEW run landed meanwhile
+        with structlog.testing.capture_logs() as logs:
+            recovered = client.get("/api/v1/oneclick/runs").json()
+        assert "r-fresh01" in {row["run_id"] for row in recovered["runs"]}
+        assert any(e["event"] == "oneclick.probe_recovered" for e in logs)
 
     def test_junk_fixture_env_is_400_naming_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -254,6 +305,24 @@ class TestTop100Route:
         payload = client.get(f"/api/v1/oneclick/top100?run_id={RUN_ID}").json()
         assert payload["status"] == "awaiting"
         assert payload["empty_note"] is None
+
+    def test_probe_outage_serves_the_last_known_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C-r2-5 on a representative artifact route: outage ⇒ last-known + WARN."""
+        client = _client(_lake_with_corpus(tmp_path))
+        first = client.get(f"/api/v1/oneclick/top100?run_id={RUN_ID}").json()
+        assert first["status"] == "ok"
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+
+        def _must_not_run(_run_dir: Path) -> Any:
+            raise AssertionError("an outage with a cached payload must never re-parse")
+
+        monkeypatch.setattr(oc, "load_top100", _must_not_run)
+        with structlog.testing.capture_logs() as logs:
+            second = client.get(f"/api/v1/oneclick/top100?run_id={RUN_ID}").json()
+        assert second == first
+        assert any(e["event"] == "oneclick.probe_outage" for e in logs)
 
 
 # ── /api/v1/oneclick/events ─────────────────────────────────────────────
@@ -462,6 +531,68 @@ class TestVerifyRoute:
         polled_row = {check["id"]: check for check in polled["checks"]}[2]
         assert polled_row["state"] == "pass"
         assert polled_row["records"] == 118
+
+    def test_repeat_poll_serves_the_revision_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F1 (DEC-ONECLICK-PERF-CLUB-001): after priming, a poisoned manifest
+        loader is never called — the verify payload is revision-cached like
+        the sibling routes (the pre-fix route re-parsed per poll)."""
+        client = _client(_lake_with_corpus(tmp_path))
+        first = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+
+        def _must_not_run(_run_dir: Path) -> Any:
+            raise AssertionError("a primed verify revision must not re-parse the manifest")
+
+        monkeypatch.setattr(oc, "load_manifest", _must_not_run)
+        second = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+        assert second == first
+
+    def test_chain_click_moves_the_key_then_polls_serve_the_clicked_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F1: the chain verified-state is IN the key — a click re-keys once,
+        then plain polls serve the clicked payload from the cache."""
+        client = _client(_lake_with_corpus(tmp_path))
+        client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()  # primes chain=0
+        clicked = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}&check=chain").json()
+
+        def _must_not_run(_run_dir: Path) -> Any:
+            raise AssertionError("a primed post-click revision must not re-parse")
+
+        monkeypatch.setattr(oc, "load_manifest", _must_not_run)
+        polled = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+        assert polled == clicked
+
+    def test_probe_outage_serves_the_last_known_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C-r2-5: a manifest stat outage serves the last-known verify payload
+        with ONE loud WARN — never a silent per-poll re-parse."""
+        client = _client(_lake_with_corpus(tmp_path))
+        first = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+
+        def _must_not_run(_run_dir: Path) -> Any:
+            raise AssertionError("an outage with a cached payload must never re-parse")
+
+        monkeypatch.setattr(oc, "load_manifest", _must_not_run)
+        with structlog.testing.capture_logs() as logs:
+            second = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+            third = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+        assert second == first
+        assert third == first
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1
+
+    def test_manifestless_run_computes_fresh_per_poll(self, tmp_path: Path) -> None:
+        """The ABSENT arm: a manifest-less run is honest awaiting, fresh per
+        poll (cheap — no manifest to parse), never cached under a stale key."""
+        client = _client(_lake_with_corpus(tmp_path))
+        for _ in range(2):
+            payload = client.get("/api/v1/oneclick/verify?run_id=r-empty01").json()
+            assert len(payload["checks"]) == 7
+            assert payload["funnel_reconcile"]["ok"] is None
 
     def test_tampered_chain_fails_with_the_break_line(self, tmp_path: Path) -> None:
         lake = _lake_with_corpus(tmp_path)

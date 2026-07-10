@@ -1859,12 +1859,18 @@ def build_app(
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
     # `"mtime_ns:size"` stat token folded into the KEY at a FIXED generation=0
     # (the `_sweep_leaderboard_cache` `rev=` precedent) — a repeat poll of an
-    # unchanged artifact is an O(1) hit, a token move re-parses, and a `None`
-    # token (absent / stat outage) computes fresh and caches NOTHING (never a
-    # stale serve, never a poisoned key). HONEST envelope (Golden Rule #10):
-    # the FIRST read per revision pays the O(artifact) parse; the cached hit is
-    # O(1) vs run count / artifact size. REUSES the COMMON `MoversSnapshotCache`.
+    # unchanged artifact is an O(1) hit, a token move re-parses, and an ABSENT
+    # artifact computes fresh and caches NOTHING (never a stale serve, never a
+    # poisoned key). A stat-probe OUTAGE (the artifact may still exist) serves
+    # the LAST-KNOWN payload through `_oneclick_outages` with one loud WARN per
+    # outage instead of a silent uncached O(artifact) re-parse per poll
+    # (C-r2-5, DEC-ONECLICK-PERF-CLUB-001 — the serve-last-known doctrine; the
+    # gate + chokepoint live in `oneclick_artifacts.serve_revision_cached`).
+    # HONEST envelope (Golden Rule #10): the FIRST read per revision pays the
+    # O(artifact) parse; the cached hit is O(1) vs run count / artifact size.
+    # REUSES the COMMON `MoversSnapshotCache`.
     _oneclick_cache = MoversSnapshotCache()
+    _oneclick_outages = oneclick_artifacts.OutageGate()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
@@ -6983,7 +6989,9 @@ def build_app(
         Lists the Ruling-4 ``sweep_runs/<run_id>/`` directories with per-artifact
         presence flags + the manifest's ``suspect`` verdict (``null`` until
         readable — never fabricated). Memoised per ``runs/`` dir stat token;
-        an empty/absent tree is the loud ``status:"awaiting"`` payload.
+        an empty/absent tree is the loud ``status:"awaiting"`` payload; a
+        stat OUTAGE serves the last-known listing with one loud WARN per
+        outage (C-r2-5 — never a silent per-poll re-walk).
         """
 
         def _resolve() -> dict[str, Any]:
@@ -6993,7 +7001,7 @@ def build_app(
             if root is None:
                 return oneclick_view.build_runs_payload((), fixture_root_active=fixture_active)
             results_root: Path = root
-            rev = oneclick_artifacts.runs_revision(results_root)
+            probe = oneclick_artifacts.runs_revision_probe(results_root)
 
             def _fresh() -> dict[str, Any]:
                 return oneclick_view.build_runs_payload(
@@ -7001,10 +7009,14 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
 
-            if rev is None:
-                return _fresh()
-            return _oneclick_cache.get_or_compute(
-                f"oc_runs|rev={rev}|fx={fixture_active}", generation=0, compute=_fresh
+            key = None if probe.token is None else f"oc_runs|rev={probe.token}|fx={fixture_active}"
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=f"oc_runs|fx={fixture_active}",
+                probe=probe,
+                key=key,
+                compute=_fresh,
             )
 
         return JSONResponse(await _run_lake(_resolve))
@@ -7036,7 +7048,7 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(
+            probe = oneclick_artifacts.artifact_probe(
                 run_dir / oneclick_artifacts.MANIFEST_FILENAME
             )
             # Sibling-artifact PRESENCE rides the cache KEY as two cheap stat
@@ -7070,14 +7082,21 @@ def build_app(
                 payload["chain_links"] = oneclick_view.chain_links(manifest_result, kinds)
                 return payload
 
-            if rev is None:
-                return _fresh()
             # The key folds the manifest revision AND the events revision (the
             # chain-map input) — a growing events.jsonl refreshes the links.
-            return _oneclick_cache.get_or_compute(
-                f"oc_manifest|{rid}|rev={rev}|files={int(has_top100)}{int(has_events)}"
-                f"|ev={events_rev}|fx={fixture_active}",
-                generation=0,
+            key = None
+            if probe.token is not None:
+                key = (
+                    f"oc_manifest|{rid}|rev={probe.token}"
+                    f"|files={int(has_top100)}{int(has_events)}"
+                    f"|ev={events_rev}|fx={fixture_active}"
+                )
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=f"oc_manifest|{rid}|fx={fixture_active}",
+                probe=probe,
+                key=key,
                 compute=_fresh,
             )
 
@@ -7110,7 +7129,7 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.TOP100_FILENAME)
+            probe = oneclick_artifacts.artifact_probe(run_dir / oneclick_artifacts.TOP100_FILENAME)
 
             def _fresh() -> dict[str, Any]:
                 return oneclick_view.build_top100_payload(
@@ -7119,11 +7138,15 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
 
-            if rev is None:
-                return _fresh()
-            return _oneclick_cache.get_or_compute(
-                f"oc_top100|{rid}|rev={rev}|fx={fixture_active}",
-                generation=0,
+            key = None
+            if probe.token is not None:
+                key = f"oc_top100|{rid}|rev={probe.token}|fx={fixture_active}"
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=f"oc_top100|{rid}|fx={fixture_active}",
+                probe=probe,
+                key=key,
                 compute=_fresh,
             )
 
@@ -7169,7 +7192,7 @@ def build_app(
                     window_filtered=window_filtered,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.EVENTS_FILENAME)
+            probe = oneclick_artifacts.artifact_probe(run_dir / oneclick_artifacts.EVENTS_FILENAME)
 
             def _fresh() -> dict[str, Any]:
                 page = oneclick_artifacts.tail_events(
@@ -7182,14 +7205,25 @@ def build_app(
                     window_filtered=window_filtered,
                 )
 
-            if rev is None:
-                return _fresh()
             # json-encoded key parts: kind/q are operator-typed strings that
             # may contain the `|` separator — encoding keeps keys collision-free.
-            key = "oc_events|" + json.dumps(
-                [rid, offset, limit, kind, q, rev, fixture_active], ensure_ascii=False
+            coordinate = "oc_events|" + json.dumps(
+                [rid, offset, limit, kind, q, fixture_active], ensure_ascii=False
             )
-            return _oneclick_cache.get_or_compute(key, generation=0, compute=_fresh)
+            key = None
+            if probe.token is not None:
+                key = "oc_events|" + json.dumps(
+                    [rid, offset, limit, kind, q, probe.token, fixture_active],
+                    ensure_ascii=False,
+                )
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=coordinate,
+                probe=probe,
+                key=key,
+                compute=_fresh,
+            )
 
         return JSONResponse(await _run_lake(_resolve))
 
@@ -7284,6 +7318,18 @@ def build_app(
         without it the chain row serves the LAST cached verdict, or the
         honest ``awaiting`` when this revision was never verified (the
         raising-compute peek stores nothing — T-M4 cache-keyed resolution).
+
+        F1 (DEC-ONECLICK-PERF-CLUB-001): the WHOLE payload is revision-cached
+        like the sibling routes — the key folds the manifest stat token
+        (primary probe) + the events + top100 tokens + the chain
+        verified-state, so a primed poll is four ``os.stat`` probes + a
+        cache-peek + one hit; the FIRST poll per changed revision pays the
+        O(manifest) parse + funnel reconcile + the one-row trades probe.
+        HONEST bound (Golden Rule #10): a results-depth sidecar rewrite that
+        moves NONE of the three artifact tokens does not move the key — in
+        the shipped #1617 pass the sidecars land BEFORE top100.json, so the
+        trades-wired flag refreshes with the top100 token; a manifest-less
+        run computes fresh per poll (cheap: no manifest to parse).
         """
         rid = _oneclick_require_run_id(run_id)
 
@@ -7302,11 +7348,18 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            manifest = oneclick_artifacts.load_manifest(run_dir)
-            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.EVENTS_FILENAME)
+            probe = oneclick_artifacts.artifact_probe(
+                run_dir / oneclick_artifacts.MANIFEST_FILENAME
+            )
+            events_rev = oneclick_artifacts.artifact_revision(
+                run_dir / oneclick_artifacts.EVENTS_FILENAME
+            )
+            top100_rev = oneclick_artifacts.artifact_revision(
+                run_dir / oneclick_artifacts.TOP100_FILENAME
+            )
             chain: tuple[bool, int, int | None, str] | None = None
-            if rev is not None:
-                chain_key = f"oc_chain|{rid}|rev={rev}"
+            if events_rev is not None:
+                chain_key = f"oc_chain|{rid}|rev={events_rev}"
                 if check == "chain":
                     chain = _oneclick_cache.get_or_compute(
                         chain_key,
@@ -7322,13 +7375,32 @@ def build_app(
                         )
                     except oneclick_artifacts.ChainNotVerifiedError:
                         chain = None
-            trades_probe = _oneclick_reader(root, fixture_root).page(rid, 1, offset=0, limit=1)
-            return oneclick_view.build_verify_payload(
-                rid,
-                manifest,
-                chain,
-                trades_probe.status in {"ok", "partial"},
-                fixture_root_active=fixture_active,
+
+            def _fresh() -> dict[str, Any]:
+                manifest = oneclick_artifacts.load_manifest(run_dir)
+                trades_probe = _oneclick_reader(root, fixture_root).page(rid, 1, offset=0, limit=1)
+                return oneclick_view.build_verify_payload(
+                    rid,
+                    manifest,
+                    chain,
+                    trades_probe.status in {"ok", "partial"},
+                    fixture_root_active=fixture_active,
+                )
+
+            key = None
+            if probe.token is not None:
+                key = (
+                    f"oc_verify|{rid}|rev={probe.token}|ev={events_rev}"
+                    f"|t100={top100_rev}|chain={int(chain is not None)}"
+                    f"|fx={fixture_active}"
+                )
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=f"oc_verify|{rid}|fx={fixture_active}",
+                probe=probe,
+                key=key,
+                compute=_fresh,
             )
 
         return JSONResponse(await _run_lake(_resolve))

@@ -34,7 +34,12 @@ shared-CI class, then routed):
   (8.0 — same-size artifact parsed both sides, file I/O noise);
 * B-6 manifest repeat-poll flatness vs run-history depth → :func:`ratio_ceiling`
   (8.0 — three ``os.stat`` tokens + one cache hit per poll) +
-  ``_must_not_run`` teeth.
+  ``_must_not_run`` teeth;
+* B-7 verify repeat-poll flatness vs manifest size (F1,
+  DEC-ONECLICK-PERF-CLUB-001 — the verify route was the ONE oneclick route
+  with NO revision cache) → :func:`ratio_ceiling` (8.0 — three ``os.stat``
+  tokens + a raising chain cache-peek + one cache hit per poll) +
+  ``_must_not_run`` no-recompute teeth + the C-r2-5 outage-serve teeth.
 
 Strict-tier verdict (recorded per DEC-O1-STRICT-TIER-001): under
 ``BRUTEX_M4PRO_STRICT=1`` every pin above tightens to the decreed 1.1× via
@@ -46,6 +51,7 @@ strict-tier promise is made until a real M4-Pro run records its own numbers
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -495,3 +501,134 @@ class TestManifestPollFlatVsHistory:
         payload: dict[str, Any] = cache.get_or_compute(key, generation=0, compute=_must_not_run)
         assert payload["run_id"] == _RID
         assert len(payload["chain_links"]) == 8
+
+
+def _scaled_verify_manifest(rid: str, doors: int) -> dict[str, Any]:
+    """A contract-complete manifest whose funnel/per_door_kills scale with *doors*.
+
+    Reconciles to the digit (``stage_n == stage_{n-1} − kills_n`` and
+    ``enumerated == tested + skipped``) so the verify FRESH compute pays the
+    real O(manifest) reconcile work.
+    """
+    total = doors * 10
+    funnel: list[dict[str, Any]] = [{"stage": "enumerated", "count": total}]
+    kills: list[dict[str, Any]] = []
+    remaining = total
+    for i in range(doors):
+        kills.append({"door": f"door-{i:05d}", "killed": 1})
+        remaining -= 1
+        funnel.append({"stage": f"stage-{i:05d}", "count": remaining})
+    return {
+        "run_id": rid,
+        "selection": {"symbols": ["NSE-NIFTY"], "tfs": ["5m"]},
+        "estimate": {"trials": total},
+        "actual": {
+            "enumerated": total,
+            "tested": remaining,
+            "skipped": total - remaining,
+            "funnel": funnel,
+        },
+        "per_stage_timings": {},
+        "per_door_kills": kills,
+        "dedup_skips": 0,
+        "tripwires": [],
+        "suspect": False,
+    }
+
+
+class TestVerifyPollFlatVsManifestSize:
+    """B-7 — the primed verify poll is flat vs manifest size (F1, DEC-ONECLICK-PERF-CLUB-001)."""
+
+    @staticmethod
+    def _primed_verify(root: Path, doors: int) -> tuple[MoversSnapshotCache, oca.OutageGate, Path]:
+        """Prime one verify payload under the route's composite-token key shape."""
+        run_dir = _write_run(root, _RID, events_lines=200)
+        (run_dir / oca.MANIFEST_FILENAME).write_text(
+            json.dumps(_scaled_verify_manifest(_RID, doors)), encoding="utf-8"
+        )
+        cache = MoversSnapshotCache()
+        gate = oca.OutageGate()
+
+        def _fresh() -> dict[str, Any]:
+            manifest = oca.load_manifest(run_dir)
+            return oneclick_view.build_verify_payload(
+                _RID, manifest, None, False, fixture_root_active=False
+            )
+
+        TestVerifyPollFlatVsManifestSize._poll(cache, gate, run_dir, _fresh)
+        return cache, gate, run_dir
+
+    @staticmethod
+    def _poll(
+        cache: MoversSnapshotCache,
+        gate: oca.OutageGate,
+        run_dir: Path,
+        compute: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """One verify poll exactly like the route: 3 stats + chain peek + serve."""
+        probe = oca.artifact_probe(run_dir / oca.MANIFEST_FILENAME)
+        ev_rev = oca.artifact_revision(run_dir / oca.EVENTS_FILENAME)
+        top_rev = oca.artifact_revision(run_dir / oca.TOP100_FILENAME)
+        with contextlib.suppress(oca.ChainNotVerifiedError):
+            cache.get_or_compute(
+                f"oc_chain|{_RID}|rev={ev_rev}",
+                generation=0,
+                compute=oca.raise_chain_not_verified,
+            )
+        key = f"oc_verify|{_RID}|rev={probe.token}|ev={ev_rev}|t100={top_rev}|chain=0|fx=False"
+        return oca.serve_revision_cached(
+            cache,
+            gate,
+            coordinate=f"oc_verify|{_RID}|fx=False",
+            probe=probe,
+            key=key,
+            compute=compute,
+        )
+
+    def test_verify_repeat_poll_flat_vs_manifest_size(self, tmp_path: Path) -> None:
+        """A 1000x-doors manifest does NOT slow the primed verify poll.
+
+        Measured 2026-07-10 (sandbox): 26.5 µs/poll @ 4 doors vs 25.2 µs/poll
+        @ 4000 doors → ratio 0.95× flat, while the big manifest's FRESH
+        verify compute measured 6.89 ms — the pre-F1 route paid THAT per
+        poll (no revision cache: load_manifest + reconcile_funnel per
+        request). HONEST: the FIRST poll per changed (manifest,
+        events, top100, chain-state) revision pays the O(manifest) parse +
+        funnel reconcile + the one-row trades probe — stated in the route
+        docstring, deliberately outside the timed loop; each timed poll pays
+        three ``os.stat`` tokens, one raising chain cache-peek, and one cache
+        hit. Ceiling: ``ratio_ceiling(8.0)`` (file-stat I/O noise class — the
+        B-6 precedent).
+        """
+        cache_s, gate_s, dir_s = self._primed_verify(tmp_path / "small" / "sweeps", doors=4)
+        cache_l, gate_l, dir_l = self._primed_verify(tmp_path / "big" / "sweeps", doors=4000)
+        self._poll(cache_s, gate_s, dir_s, _must_not_run)  # warm
+        self._poll(cache_l, gate_l, dir_l, _must_not_run)
+        t_small = _best_of(lambda: self._poll(cache_s, gate_s, dir_s, _must_not_run))
+        t_large = _best_of(lambda: self._poll(cache_l, gate_l, dir_l, _must_not_run))
+        ratio = t_large / t_small if t_small > 0 else 1.0
+        assert ratio < ratio_ceiling(8.0), (
+            f"verify repeat poll scaled with manifest size: {ratio:.2f}x"
+        )
+
+    def test_primed_verify_poll_never_recomputes(self, tmp_path: Path) -> None:
+        """Deterministic teeth: the primed verify key never re-runs the compute."""
+        cache, gate, run_dir = self._primed_verify(tmp_path / "root" / "sweeps", doors=4)
+        payload = self._poll(cache, gate, run_dir, _must_not_run)
+        assert payload["run_id"] == _RID
+        assert payload["funnel_reconcile"]["ok"] is True
+        assert len(payload["checks"]) == 7
+
+    def test_outage_poll_serves_last_known_without_compute(self, tmp_path: Path) -> None:
+        """Deterministic teeth (C-r2-5): an outage poll never re-parses either."""
+        cache, gate, run_dir = self._primed_verify(tmp_path / "root" / "sweeps", doors=4)
+        primed = self._poll(cache, gate, run_dir, _must_not_run)
+        served = oca.serve_revision_cached(
+            cache,
+            gate,
+            coordinate=f"oc_verify|{_RID}|fx=False",
+            probe=oca.ArtifactProbe(None, True),
+            key=None,
+            compute=_must_not_run,
+        )
+        assert served == primed

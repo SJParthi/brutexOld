@@ -61,6 +61,8 @@ import json
 import os
 import re
 import threading
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -96,18 +98,23 @@ __all__ = [
     "TOP100_ROW_REQUIRED_KEYS",
     "TOP100_SCHEMA_VERSION",
     "TRADES_DIRNAME",
+    "ArtifactProbe",
     "ArtifactStatus",
     "AwaitingTradesReader",
+    "CachedPayloadMissingError",
     "ChainNotVerifiedError",
     "EventsPage",
     "FixtureTradesReader",
     "ManifestResult",
     "OneclickConfigError",
+    "OutageGate",
+    "PayloadCache",
     "RunInfo",
     "Top100Result",
     "TradeStoreReader",
     "TradesReader",
     "TradesResult",
+    "artifact_probe",
     "artifact_revision",
     "canonical_record_bytes",
     "chain_hash",
@@ -119,9 +126,12 @@ __all__ = [
     "load_top100",
     "probe_run_dir",
     "raise_chain_not_verified",
+    "raise_no_cached_payload",
     "resolve_fixture_root",
     "runs_revision",
+    "runs_revision_probe",
     "runs_root",
+    "serve_revision_cached",
     "sidecar_paths_from_ref",
     "tail_events",
     "trades_path",
@@ -265,6 +275,263 @@ def raise_chain_not_verified() -> NoReturn:
         only wants the LAST cached chain verdict, never a fresh O(file) scan.
     """
     raise ChainNotVerifiedError("chain not verified yet for this events revision")
+
+
+# ── Revision probes + the outage-serve doctrine (DEC-ONECLICK-PERF-CLUB-001) ──
+
+
+class CachedPayloadMissingError(Exception):
+    """Peek sentinel: raised by :func:`raise_no_cached_payload` so an outage
+    serve can PEEK the last-known cached payload without ever computing (a
+    raising ``compute`` stores nothing — the MoversSnapshotCache contract;
+    the :class:`ChainNotVerifiedError` twin).
+    """
+
+
+def raise_no_cached_payload() -> NoReturn:
+    """Raise :class:`CachedPayloadMissingError` — the outage cache-peek sentinel.
+
+    Returns
+    -------
+    NoReturn
+        Always raises; used as the ``compute=`` closure when
+        :func:`serve_revision_cached` wants ONLY the last-known payload
+        during a stat-probe outage, never a fresh compute under a stale key.
+    """
+    raise CachedPayloadMissingError("no cached payload under the last-known key")
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactProbe:
+    """One artifact stat-probe verdict distinguishing ABSENT from OUTAGE.
+
+    ``token`` is the ``"mtime_ns:size"`` revision token (``None`` when
+    unavailable). ``outage`` is ``True`` iff the stat failed for a reason
+    OTHER than absence — the serve-last-known signal (C-r2-5); ``token
+    None`` + ``outage False`` means the file is genuinely ABSENT (the honest
+    AWAITING state — a stable, cheap fresh compute, never a stale serve).
+    """
+
+    token: str | None
+    outage: bool
+
+
+def artifact_probe(path: Path) -> ArtifactProbe:
+    """Stat *path* into an :class:`ArtifactProbe` (absent ≠ outage — C-r2-5).
+
+    Parameters
+    ----------
+    path
+        The artifact file (or directory) to stat.
+
+    Returns
+    -------
+    ArtifactProbe
+        ``(token, False)`` when statted; ``(None, False)`` when the path is
+        genuinely absent (``FileNotFoundError``/``NotADirectoryError``);
+        ``(None, True)`` on any OTHER ``OSError`` — a probe OUTAGE (e.g. a
+        wedged volume / permission flap), where the artifact may well still
+        exist and a per-poll re-parse would be both wasteful and silent.
+    """
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return ArtifactProbe(None, False)
+    except OSError:
+        return ArtifactProbe(None, True)
+    return ArtifactProbe(f"{st.st_mtime_ns}:{st.st_size}", False)
+
+
+#: Bound on the outage gate's per-coordinate bookkeeping (LRU-evicted past
+#: it) — the events route folds client-typed page params into its
+#: coordinate, so an unbounded dict would be a hostile-poll memory leak.
+OUTAGE_GATE_CAPACITY: Final[int] = 512
+
+
+class OutageGate:
+    """Per-coordinate serve-last-known bookkeeping for stat-probe outages.
+
+    C-r2-5 (Breaker C round 2): a stat-probe outage (``artifact_revision``
+    ``None`` while the artifact still exists) previously meant an UNCACHED
+    full O(artifact) re-parse per poll with ZERO logs. This gate remembers,
+    per logical route coordinate, the LAST cache key served healthily so an
+    outage poll can serve the last-known payload instead — and logs the
+    outage exactly ONCE (``oneclick.probe_outage`` WARN on the first outage
+    poll, ``oneclick.probe_recovered`` INFO when the probe answers again).
+
+    Thread-safe; every call is O(1) dict/OrderedDict work; both maps are
+    LRU-bounded at *capacity* (an evicted coordinate merely re-logs / falls
+    back to the honest fresh compute — bounded, disclosed).
+
+    Parameters
+    ----------
+    capacity
+        Maximum coordinates tracked per map (default
+        :data:`OUTAGE_GATE_CAPACITY`). Must be ``>= 1``.
+    """
+
+    def __init__(self, *, capacity: int = OUTAGE_GATE_CAPACITY) -> None:
+        if capacity < 1:
+            raise ValueError(f"capacity must be >= 1, got {capacity}")
+        self._capacity = capacity
+        self._lock = threading.Lock()
+        self._last_key: OrderedDict[str, str] = OrderedDict()
+        self._in_outage: OrderedDict[str, None] = OrderedDict()
+
+    def healthy(self, coordinate: str, key: str) -> None:
+        """Record *key* as *coordinate*'s last served cache key; end any outage.
+
+        Parameters
+        ----------
+        coordinate
+            The logical route coordinate (revision-independent).
+        key
+            The full revision-keyed cache key just served.
+        """
+        with self._lock:
+            self._last_key[coordinate] = key
+            self._last_key.move_to_end(coordinate)
+            while len(self._last_key) > self._capacity:
+                self._last_key.popitem(last=False)
+            recovered = coordinate in self._in_outage
+            if recovered:
+                del self._in_outage[coordinate]
+        if recovered:
+            _LOG.info("oneclick.probe_recovered", coordinate=coordinate)
+
+    def absent(self, coordinate: str) -> None:
+        """The artifact is genuinely GONE — forget the last-known key.
+
+        A deleted artifact must never be resurrected by a LATER outage
+        (Golden Rule #1 — the honest state is awaiting, not the pre-delete
+        payload); an absence verdict is also a definitive probe answer, so
+        it ends any outage.
+
+        Parameters
+        ----------
+        coordinate
+            The logical route coordinate (revision-independent).
+        """
+        with self._lock:
+            self._last_key.pop(coordinate, None)
+            recovered = coordinate in self._in_outage
+            if recovered:
+                del self._in_outage[coordinate]
+        if recovered:
+            _LOG.info("oneclick.probe_recovered", coordinate=coordinate)
+
+    def outage_key(self, coordinate: str) -> str | None:
+        """Return *coordinate*'s last-known cache key (or ``None``); WARN once.
+
+        The ``oneclick.probe_outage`` WARN fires on the FIRST outage poll of
+        each outage only (never per poll, never silent — C-r2-5); it names
+        whether a last-known payload exists to serve.
+
+        Parameters
+        ----------
+        coordinate
+            The logical route coordinate (revision-independent).
+
+        Returns
+        -------
+        str or None
+            The last healthily-served cache key, or ``None`` when the
+            coordinate was never served / was evicted / went absent.
+        """
+        with self._lock:
+            first = coordinate not in self._in_outage
+            if first:
+                self._in_outage[coordinate] = None
+                while len(self._in_outage) > self._capacity:
+                    self._in_outage.popitem(last=False)
+            key = self._last_key.get(coordinate)
+        if first:
+            _LOG.warning(
+                "oneclick.probe_outage",
+                coordinate=coordinate,
+                last_known=key is not None,
+            )
+        return key
+
+
+class PayloadCache(Protocol):
+    """The ``get_or_compute`` surface :func:`serve_revision_cached` needs.
+
+    Structurally satisfied by
+    :class:`brutex.dashboard.movers_cache.MoversSnapshotCache` (the
+    production oneclick route cache) — typed here so this module never
+    imports the dashboard cache (leaf discipline).
+    """
+
+    def get_or_compute(
+        self, key: str, *, generation: int, compute: Callable[[], dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Return the cached payload for *key*, computing on a miss."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+def serve_revision_cached(
+    cache: PayloadCache,
+    gate: OutageGate,
+    *,
+    coordinate: str,
+    probe: ArtifactProbe,
+    key: str | None,
+    compute: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """The ONE revision-gated serve chokepoint for the oneclick routes.
+
+    * probe **OUTAGE** → serve the LAST-KNOWN cached payload when one exists
+      (bounded staleness — the payload last served healthily for this
+      coordinate) with ONE ``oneclick.probe_outage`` WARN per outage; no
+      last-known (or LRU-evicted) → compute fresh UNCACHED — still logged,
+      never silent, never a raise (C-r2-5).
+    * **ABSENT** (token ``None``, no outage) → compute fresh UNCACHED (the
+      awaiting state is cheap — there is no artifact to parse) and FORGET
+      the coordinate's last-known key: a deleted artifact must never be
+      resurrected by a later outage.
+    * **HEALTHY** → the normal revision-keyed ``get_or_compute``; the served
+      key is remembered per coordinate (+ one ``oneclick.probe_recovered``
+      INFO when an outage ends) — probe recovery resumes normal keying.
+
+    Parameters
+    ----------
+    cache
+        The route payload cache (:class:`PayloadCache`).
+    gate
+        The shared :class:`OutageGate`.
+    coordinate
+        The revision-INDEPENDENT logical coordinate (route + run + page
+        params + fixture flag) keying the gate's bookkeeping.
+    probe
+        The PRIMARY artifact's :class:`ArtifactProbe` (routes that fold
+        sibling revisions into *key* still gate on their primary artifact).
+    key
+        The full revision-keyed cache key, or ``None`` when the probe found
+        no token (a non-``None`` *key* with a ``None`` token is treated as
+        absent — defensive, never a crash).
+    compute
+        The zero-arg fresh payload builder.
+
+    Returns
+    -------
+    dict
+        The payload (cached, last-known, or fresh).
+    """
+    if probe.outage:
+        last = gate.outage_key(coordinate)
+        if last is not None:
+            try:
+                return cache.get_or_compute(last, generation=0, compute=raise_no_cached_payload)
+            except CachedPayloadMissingError:
+                pass  # LRU-evicted since — fall through to the honest fresh compute
+        return compute()
+    if probe.token is None or key is None:
+        gate.absent(coordinate)
+        return compute()
+    value = cache.get_or_compute(key, generation=0, compute=compute)
+    gate.healthy(coordinate, key)
+    return value
 
 
 # ── Result types (split per artifact — the isinstance narrowing happens ONCE here) ──
@@ -565,6 +832,16 @@ def runs_revision(results_root: Path) -> str | None:
     base = artifact_revision(root)
     if base is None:
         return None
+    return _runs_digest(root, base)
+
+
+def _runs_digest(root: Path, base: str) -> str:
+    """Fold the per-run manifest stat tokens into *base* (one shared body).
+
+    The digest core shared by :func:`runs_revision` and
+    :func:`runs_revision_probe` — extracted so the outage-aware probe never
+    re-implements the token law (§11 COMMON).
+    """
     try:
         entries = list(os.scandir(root))
     except OSError:
@@ -581,6 +858,33 @@ def runs_revision(results_root: Path) -> str | None:
         token = artifact_revision(root / name / MANIFEST_FILENAME)
         digest.update(f"{name}={token}\n".encode())
     return f"{base}:m{digest.hexdigest()[:16]}"
+
+
+def runs_revision_probe(results_root: Path) -> ArtifactProbe:
+    """The outage-aware twin of :func:`runs_revision` (C-r2-5).
+
+    Probes the ``sweep_runs/`` directory itself with :func:`artifact_probe`
+    (absent ≠ outage), then folds the same per-run manifest digest as
+    :func:`runs_revision` — so the runs route can serve its last-known
+    listing through a probe outage instead of re-walking per poll.
+
+    Parameters
+    ----------
+    results_root
+        The sweep results root.
+
+    Returns
+    -------
+    ArtifactProbe
+        ``(digest token, False)`` when the tree statted; ``(None, False)``
+        when the tree is genuinely absent (the honest awaiting listing);
+        ``(None, True)`` on a stat OUTAGE.
+    """
+    root = runs_root(results_root)
+    probe = artifact_probe(root)
+    if probe.token is None:
+        return probe
+    return ArtifactProbe(_runs_digest(root, probe.token), False)
 
 
 # ── Discovery ───────────────────────────────────────────────────────────
@@ -638,9 +942,19 @@ def _probe_run_dir_known(run_dir: Path, dir_mtime_ns: int) -> RunInfo:
 def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]:
     """Discover run directories under the Ruling-4 ``sweep_runs/`` tree, newest first.
 
-    O(run dirs) — one ``scandir`` plus per-dir stat/manifest probes; an
-    unreadable entry is SKIPPED with one ``oneclick.run_skipped`` WARN, never
-    a raise (the whole listing survives one poisoned dir).
+    F4 (DEC-ONECLICK-PERF-CLUB-001): the dir STAT sweep runs first, the
+    newest-``limit`` selection happens on the (mtime_ns, name) stamps, and
+    only the SELECTED dirs pay the manifest PARSE — the pre-fix shape parsed
+    EVERY run's manifest and then truncated, so a churning history paid
+    O(all runs) parses per fresh listing. The stat sweep itself stays honest
+    O(run dirs) (and :func:`runs_revision` deliberately keeps its own
+    UNCAPPED manifest-token stat walk — the F5 ruling stands; this bounds
+    the PARSES, not the stats). Selection is identical to the pre-fix sort
+    (``(dir_mtime_ns, run_id)`` descending): ``mtime_ns`` granularity means
+    same-instant dirs tie-break on ``run_id``, exactly as before.
+
+    An unreadable entry is SKIPPED with one ``oneclick.run_skipped`` WARN,
+    never a raise (the whole listing survives one poisoned dir).
 
     Parameters
     ----------
@@ -660,7 +974,7 @@ def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]
         entries = list(os.scandir(root))
     except OSError:
         return ()
-    infos: list[RunInfo] = []
+    stamped: list[tuple[int, str]] = []
     for entry in entries:
         try:
             if not entry.is_dir():
@@ -673,9 +987,11 @@ def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]
                 error_type=type(exc).__name__,
             )
             continue
-        infos.append(_probe_run_dir_known(root / entry.name, mtime_ns))
-    infos.sort(key=lambda i: (i.dir_mtime_ns, i.run_id), reverse=True)
-    return tuple(infos[: max(0, limit)])
+        stamped.append((mtime_ns, entry.name))
+    stamped.sort(reverse=True)
+    return tuple(
+        _probe_run_dir_known(root / name, mtime_ns) for mtime_ns, name in stamped[: max(0, limit)]
+    )
 
 
 # ── Artifact loaders ────────────────────────────────────────────────────
