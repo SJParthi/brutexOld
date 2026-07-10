@@ -78,17 +78,22 @@ deterministic redo) when the PURE-INTEGER work estimate
 count; STRICT ``>`` — an exactly-at-limit cell is ALLOWED, never trips).
 
 The trip DECISION is a pure function of the SETTLED RAW per-level candidate
-counts: for EVERY level ``j in 1..k`` an AUTHORITATIVE check runs on the settled
-raw ``|C_j|`` (``|C_j| × n_bars > max_mask_bars``) the instant that level's
-candidate list is complete — the singleton set at ``k == 1``, the raw join output
-``|C_j|`` at each intermediate level ``j in 2..k-1`` BEFORE hit-filtering, and the
-WHOLE raw ``|C_k|`` at the final level BEFORE any ``root_mod`` shard filtering. The
-breaker thus guards the candidate ENUMERATION cost (the ``|C_j|`` masks that must
-be hit-counted), NOT the post-hit-filter frequent frontier ``|F_j|`` (a smaller,
-different quantity). Because EVERY level's check — the ``k == 1`` singleton set
-and the final ``|C_k|`` alike — is on the whole pre-shard ``|C_j|``, the trip is
-also SHARD-INVARIANT at every level: every ``root_mod`` shard of a cell trips
-identically on the whole-cell budget.
+counts. The Apriori circuit-breaker check |C_j|·n_bars > MAX_MASK_BARS (strict >,
+env BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS default 1_159_200_000_000,
+MODELED/UNVERIFIED-on-M4 per Golden Rule #10) is evaluated on the WHOLE RAW
+per-level candidate count at the k==1 target level, every intermediate level
+2..k−1, and the final level k; for k≥2 the level-1 singleton count |C₁| =
+n_unique ≤ 60 is DELIBERATELY NOT budget-checked (trivially bounded, provably
+non-runaway). Each AUTHORITATIVE check runs the instant that level's raw
+candidate list is complete — the singleton set when ``k == 1`` IS the target
+level, the raw join output ``|C_j|`` at each intermediate level ``j in 2..k-1``
+BEFORE hit-filtering, and the WHOLE raw ``|C_k|`` at the final level BEFORE any
+``root_mod`` shard filtering. The breaker thus guards the candidate ENUMERATION
+cost (the ``|C_j|`` masks that must be hit-counted), NOT the post-hit-filter
+frequent frontier ``|F_j|`` (a smaller, different quantity). Because every check
+is on the whole pre-shard ``|C_j|``, the trip is SHARD-INVARIANT at every checked
+level: every ``root_mod`` shard of a cell trips identically on the whole-cell
+budget.
 
 The incremental :data:`_BUDGET_CHECK_STRIDE` check is a pure DECISION-PRESERVING
 memory optimization layered ON TOP: it fires the SAME authoritative check on the
