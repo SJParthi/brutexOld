@@ -276,13 +276,21 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
-    # 75 -> 90 (2026-07-10, run 29059772135 job 86258865417): killed at
-    # 75:14 mid step 11 "Touched-module 100% coverage gate" with EVERY
-    # executed step green — the suite grew past the 75m wall after the
-    # #1296/#1360/#1323 merges landed their test growth on main. 90 keeps
-    # an honest hang guard with headroom over the observed ~75m wall;
-    # wall-clock budget only — no gate is weakened. Continues the
-    # 15->25->40->60->75 ratchet.
+    # 75 -> 90 (2026-07-09, run 29006226255): cancelled at 75m15s MID the
+    # doctor.py auto-discovery touched-module gate with EVERY executed gate
+    # green at 100.00% (whole-package + strict per-module steps SUCCESS, the
+    # cli.py + lake_invariants.py discovery gates both 100%): pure wall-time
+    # growth — main #1275 (DEC-SWEEP-RESULTS-DEPTH-001) added ~12 new
+    # per-module gates + PACK1 touches cli.py, whose discovery gate alone is
+    # 573 tests / 234s. Zero real failures; wall-clock budget only — no gate
+    # is weakened. Continues the 15->25->40->60->75 ratchet.
+    # 75 -> 90 CORROBORATED by a second independent wall kill (2026-07-10,
+    # run 29059772135 job 86258865417 on PR #1343): killed AT the 75m wall
+    # (75m14s) mid the "Touched-module 100% coverage gate" step with EVERY
+    # executed step green (pytest+coverage 50m57s SUCCESS, strict per-module
+    # gate 18m26s SUCCESS) — the suite grew past the 75m wall after the
+    # #1296/#1360/#1323 merges. Zero real failures; same remedy, 90;
+    # wall-clock budget only — no gate is weakened.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
@@ -481,10 +489,12 @@ jobs:
           # `check_wheel_freshness` stage whose dedicated suite lives in
           # `test_doctor_wheel_freshness.py`; DEC-RUST-SOURCE-DIGEST-TWIN-001
           # (MIGRATION.md #1258) added the `wheel_source_digest` stages whose
-          # dedicated suite lives in `test_doctor_wheel_source_digest.py` —
-          # the module's covering set is ALL THREE files (the first two alone
-          # read 96.78% since the digest stages landed), so the gate runs
-          # them together.
+          # dedicated suite lives in `test_doctor_wheel_source_digest.py`;
+          # DEC-AUDIT-CENSUS-HONESTY-001 (renumber on merge) added the
+          # `check_lake_uniqueness` UNREADABLE-skip FAIL arms whose tests live
+          # in `test_doctor.py`'s `TestLakeUniquenessSkipHonesty` (the stem-
+          # matched home, so the per-module discovery gate covers them too), so
+          # the covering set stays these three files run together.
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest \
               --cov=brutex.doctor \
