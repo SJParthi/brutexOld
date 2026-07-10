@@ -5860,6 +5860,19 @@ def build_app(
         day's close; volume/value are the cumulative FRESH session from 09:15.
         """
         store = _require_store()
+        # ECHO HONESTY (DEC-MOVERS-DAILY-ASOF-ECHO-HONEST-001): a non-intraday
+        # interval (``1day`` / any unknown label) has NO intraday as-of — the bar
+        # IS the day, so the VALUE already ignores ``time``
+        # (``compute_spot_candidates`` cuts whole-day via ``cutoff_min=None``,
+        # DEC-MOVERS-ASOF-LATEST-DEFAULT-001). Null the echoed ``time`` here — the
+        # ONE COMMON ``is_intraday_interval`` predicate (mirroring the ``latest_time``
+        # gate below) — so every downstream echo surface (the "As-of …" note +
+        # ``payload["time"]`` across spot/futures/options/empty/pending/gated) is
+        # truthful instead of claiming an as-of the served whole-day close never
+        # honoured. Byte-identical for value (daily already ignores it) and for a
+        # genuine intraday interval (the predicate is True → ``time`` untouched).
+        if not is_intraday_interval(interval):
+            time = None
         try:
             # Movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while
             # the one-click pull pipeline runs, answer with the honest `gated: true`
