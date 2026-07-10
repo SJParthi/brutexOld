@@ -115,11 +115,8 @@ def test_symbols_serves_the_prebuild_observation_stamp(tmp_path: Path) -> None:
     from brutex.data.lake_footprint import META_MEASURED_AT
 
     stamp = "2026-07-08T21:30:00+00:00"
-    seed = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as seed:
         seed.set_meta(META_MEASURED_AT, stamp)
-    finally:
-        seed.close()
     body = _client(tmp_path).get("/api/v1/reports/preopen/symbols").json()
     assert body["basis_derived"] is True
     assert body["derived_last_built"] == stamp
