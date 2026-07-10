@@ -13,15 +13,14 @@
 
 ## Subject
 
-```
 Claude Code Projects EAP — Round 4 feedback (BruteX), coordinator-scale fleet findings
-```
 
 ---
 
+*Copy the rendered body below (from "Hi Tim," through "Thanks, Parthi") straight into Gmail — the table pastes formatted.*
+
 ## Body (verbatim — paste as-is)
 
-```
 Hi Tim,
 
 One more from the beta — coordinator-scale platform feedback this time,
@@ -61,7 +60,6 @@ I'll keep sending findings through the extended window.
 
 Thanks,
 Parthi
-```
 
 ---
 
