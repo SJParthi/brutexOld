@@ -57,7 +57,12 @@ class _OutstandingLedger:
 
 
 def _wire_legacy_wants_to_fire(monkeypatch: pytest.MonkeyPatch) -> list[list[Any]]:
-    """Make the LEGACY arm eager (env ON + outstanding ledger) + spy every Popen.
+    """Make the LEGACY arm eager (gates ON + outstanding ledger) + spy every Popen.
+
+    ``BRUTEX_AUTO_RESUME=1`` opts INTO the master kill switch
+    (DEC-AUTO-RESUME-DEFAULT-OFF-001, default OFF); without it neither arm
+    fires regardless of the legacy sub-gate — that default-OFF neutralisation
+    is pinned separately in :class:`TestMasterGateDefaultOff`.
 
     Returns the recorded ``subprocess.Popen`` argv list — the behavioural pin
     that the auto-resume path never spawns a child again
@@ -66,6 +71,7 @@ def _wire_legacy_wants_to_fire(monkeypatch: pytest.MonkeyPatch) -> list[list[Any
     """
     import brutex.data.window_ledger_store as ledger_store
 
+    monkeypatch.setenv("BRUTEX_AUTO_RESUME", "1")
     monkeypatch.setenv("BRUTEX_AUTO_RESUME_ON_BOOT", "1")
     monkeypatch.setattr(ledger_store, "load_window_ledger", lambda _root: _OutstandingLedger())
     popen_calls: list[list[Any]] = []
@@ -286,3 +292,129 @@ class TestIntentDecisionPointAtBootSeam:
         assert _wait_for_verdict(log) == "resumed"
         assert not pipeline_fired.is_set(), "the pipeline resume must not fire without an intent"
         assert popen_calls == []
+
+
+class TestMasterGateDefaultOff:
+    """DEC-AUTO-RESUME-DEFAULT-OFF-001 — the ``BRUTEX_AUTO_RESUME`` master kill switch.
+
+    The operator's #1 pain: a leftover ``<lake>/.pull_intent.json`` silently
+    auto-launched a full-universe pull on boot with ZERO clicks. The master gate
+    (default OFF) neutralises BOTH resume arms at the earliest boot chokepoint —
+    checked BEFORE the intent wiring / any intent-file read / the daemon-thread
+    spawn — so the intent file can no longer trigger a pull unless the operator
+    explicitly opts in with ``BRUTEX_AUTO_RESUME=1``. FAILS-BEFORE / PASSES-AFTER:
+    without the gate the intent boot fires the pipeline resume (pinned by
+    :class:`TestIntentDecisionPointAtBootSeam`); with the gate default-OFF the
+    SAME boot fires nothing.
+    """
+
+    @staticmethod
+    def _clear_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Start from a hermetic env — neither the master gate nor the sub-gate set."""
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME_ON_BOOT", raising=False)
+
+    def test_default_unset_does_not_start_resume_even_with_intent_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE operator scenario: a leftover intent file + default env ⇒ NO launch.
+
+        With the master gate unset (the default), a durable ``.pull_intent.json``
+        on disk must NOT trigger a resume: ``maybe_resume_on_boot`` is never
+        invoked, no pull launches (neither the pipeline seam nor the legacy
+        in-process resume fires), and exactly one
+        ``auto_resume.disabled_by_default`` line is logged. The gate returns
+        SYNCHRONOUSLY (no daemon thread is spawned).
+        """
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        self._clear_gates(monkeypatch)
+        # A REAL leftover intent — exactly the state a died-mid-pull boot leaves.
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        # Spy the DECISION entry point — the gate must short-circuit before it.
+        decide = mock.Mock()
+        monkeypatch.setattr("brutex.orchestrator.auto_resume.maybe_resume_on_boot", decide)
+        resume_pipeline = mock.Mock()
+        resume_legacy = mock.Mock()
+        log = mock.Mock()
+
+        cli._start_auto_resume_on_boot(
+            tmp_path,
+            log,
+            intent_store=store,
+            resume_pipeline=resume_pipeline,
+            resume_legacy=resume_legacy,
+        )
+
+        decide.assert_not_called()  # the resume decision never even ran
+        resume_pipeline.assert_not_called()  # the pipeline arm did not fire
+        resume_legacy.assert_not_called()  # the legacy in-process arm did not fire
+        logged = [c.args[0] for c in log.info.call_args_list]
+        assert "auto_resume.disabled_by_default" in logged
+        assert "auto_resume.verdict" not in logged  # the daemon-thread body never ran
+
+    def test_master_enabled_runs_existing_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``BRUTEX_AUTO_RESUME=1`` opts in ⇒ the existing intent arm fires (green passthrough).
+
+        The master gate ON alone is sufficient for the intent arm (default-ON via
+        its own ``BRUTEX_PULL_INTENT_RESUME`` sub-gate) — the boot-resume path is
+        byte-identical to before the master gate existed.
+        """
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        self._clear_gates(monkeypatch)
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME", "1")
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        fired = threading.Event()
+        cli._start_auto_resume_on_boot(
+            tmp_path, mock.Mock(), intent_store=store, resume_pipeline=fired.set
+        )
+        assert fired.wait(timeout=10.0), "master gate ON ⇒ the intent resume must fire"
+
+    def test_master_explicit_zero_disables(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit ``BRUTEX_AUTO_RESUME=0`` disables just like unset (no launch)."""
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        self._clear_gates(monkeypatch)
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME", "0")
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        resume_pipeline = mock.Mock()
+        log = mock.Mock()
+        cli._start_auto_resume_on_boot(
+            tmp_path, log, intent_store=store, resume_pipeline=resume_pipeline
+        )
+        resume_pipeline.assert_not_called()
+        assert "auto_resume.disabled_by_default" in [c.args[0] for c in log.info.call_args_list]
+
+    def test_master_junk_value_disables(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A junk master value falls to the safe default-OFF (sibling-resolver parity)."""
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        self._clear_gates(monkeypatch)
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME", "maybe")
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        resume_pipeline = mock.Mock()
+        log = mock.Mock()
+        cli._start_auto_resume_on_boot(
+            tmp_path, log, intent_store=store, resume_pipeline=resume_pipeline
+        )
+        resume_pipeline.assert_not_called()
+        assert "auto_resume.disabled_by_default" in [c.args[0] for c in log.info.call_args_list]
