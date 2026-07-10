@@ -742,7 +742,7 @@ def run_results_depth_pass(
             res_stamp = load_resilience_stamp(paths)
             res_current = res_stamp is not None and res_stamp.store_content_hash == store_hash
             if trio_current and res_current:
-                assert stamp is not None  # noqa: S101 - trio_current ⇒ stamp present
+                assert stamp is not None  # noqa: S101  # nosec B101 - trio_current ⇒ stamp present (mypy narrowing)
                 tallies.tuples_skipped_current += 1
                 _LOG.info(
                     "results_depth.tuple_skipped_current",

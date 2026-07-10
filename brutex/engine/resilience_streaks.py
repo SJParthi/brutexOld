@@ -395,14 +395,17 @@ class _TradeLike(Protocol):
 
     @property
     def pnl_paisa(self) -> int:
+        """Net profit-and-loss of the trade, in signed integer paisa."""
         raise NotImplementedError  # pragma: no cover - Protocol stub, never executed
 
     @property
     def entry_ts(self) -> datetime:  # tz-aware UTC
+        """Trade entry timestamp as a timezone-aware UTC ``datetime``."""
         raise NotImplementedError  # pragma: no cover - Protocol stub, never executed
 
     @property
     def exit_ts(self) -> datetime:
+        """Trade exit timestamp as a timezone-aware UTC ``datetime``."""
         raise NotImplementedError  # pragma: no cover - Protocol stub, never executed
 
 
@@ -560,9 +563,9 @@ def fold_resilience(
         p95 = None
 
     if run.worst_len > 0:
-        assert run.worst_sum is not None  # noqa: S101 - worst_len>0 ⇒ a run was flushed
-        assert run.worst_start_ts is not None  # noqa: S101
-        assert run.worst_end_ts is not None  # noqa: S101
+        assert run.worst_sum is not None  # noqa: S101  # nosec B101 - worst_len>0 ⇒ a run was flushed (mypy narrowing)
+        assert run.worst_start_ts is not None  # noqa: S101  # nosec B101 - mypy narrowing
+        assert run.worst_end_ts is not None  # noqa: S101  # nosec B101 - mypy narrowing
         worst_pnl: int | None = run.worst_sum
         worst_len: int | None = run.worst_len
         worst_start_us: int | None = _ts_to_us(run.worst_start_ts)
@@ -1089,12 +1092,23 @@ def _us_to_iso_or_none(us: int | None) -> str | None:
 
 
 def _req_int(value: object) -> int:
+    """Coerce *value* to a required ``int``, rejecting ``bool`` and non-int.
+
+    Raises ``ResilienceError`` if *value* is ``None``, a ``bool``, or any
+    non-integer type — used when reading a NOT-NULL integer column back from
+    a sidecar row.
+    """
     if isinstance(value, bool) or not isinstance(value, int):
         raise ResilienceError(f"expected a non-null int, got {value!r}")
     return value
 
 
 def _opt_int(value: object) -> int | None:
+    """Coerce *value* to ``int | None``, rejecting ``bool`` and non-int.
+
+    ``None`` passes through; any other non-integer type raises
+    ``ResilienceError``. Used for nullable integer sidecar columns.
+    """
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -1103,6 +1117,12 @@ def _opt_int(value: object) -> int | None:
 
 
 def _opt_float(value: object) -> float | None:
+    """Coerce *value* to ``float | None``, rejecting ``bool``.
+
+    ``None`` passes through; an ``int`` or ``float`` is returned as ``float``;
+    any other type (including ``bool``) raises ``ResilienceError``. Used for
+    nullable float sidecar columns.
+    """
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -1111,6 +1131,11 @@ def _opt_float(value: object) -> float | None:
 
 
 def _opt_bool(value: object) -> bool | None:
+    """Coerce *value* to ``bool | None``.
+
+    ``None`` passes through; a genuine ``bool`` is returned as-is; any other
+    type raises ``ResilienceError``. Used for nullable boolean sidecar columns.
+    """
     if value is None:
         return None
     if not isinstance(value, bool):
@@ -1119,6 +1144,11 @@ def _opt_bool(value: object) -> bool | None:
 
 
 def _opt_str(value: object) -> str | None:
+    """Coerce *value* to ``str | None``.
+
+    ``None`` passes through; a ``str`` is returned as-is; any other type raises
+    ``ResilienceError``. Used for nullable string sidecar columns.
+    """
     if value is None:
         return None
     if not isinstance(value, str):
