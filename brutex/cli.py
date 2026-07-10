@@ -3145,7 +3145,31 @@ def _start_auto_resume_on_boot(
     can never race the account-wide single-flight ``flock``. With no intent
     (or either seam unwired) the legacy arm below runs as before — now
     in-process instead of via the deleted child.
+
+    MASTER KILL SWITCH (``BRUTEX_AUTO_RESUME``, default OFF): checked FIRST —
+    before the intent wiring, before any ``.pull_intent.json`` read, and before
+    the daemon thread is spawned — so a leftover intent file can NEVER silently
+    trigger a full-universe pull on boot. Disabled ⇒ nothing starts (neither
+    arm) and ONE ``auto_resume.disabled_by_default`` line is logged. This is a
+    DELIBERATE behaviour change by operator directive (Golden Rule #10): the
+    crash-recovery boot-resume is now OPT-IN, overriding the prior default-ON of
+    the intent arm. The two per-arm sub-gates (``BRUTEX_PULL_INTENT_RESUME`` /
+    ``BRUTEX_AUTO_RESUME_ON_BOOT``) are unchanged and still apply BENEATH this
+    master gate once it is on.
     """
+    from brutex.orchestrator.auto_resume import (
+        AUTO_RESUME_MASTER_ENV,
+        resolve_auto_resume_master,
+    )
+
+    if not resolve_auto_resume_master():
+        log.info(
+            "auto_resume.disabled_by_default",
+            env=AUTO_RESUME_MASTER_ENV,
+            hint="set BRUTEX_AUTO_RESUME=1 to enable boot-time auto-resume",
+        )
+        return
+
     import threading
 
     from brutex.data.window_ledger_store import load_window_ledger
