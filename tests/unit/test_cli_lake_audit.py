@@ -436,3 +436,134 @@ class TestCmdLakeAuditUnique:
         assert payload["healed_total"] == 7
         assert payload["last_heal_utc"] == "2026-07-03T04:11:02Z"
         assert payload["last_sweep_utc"] == "2026-07-03T05:00:00Z"
+
+
+# ── DEC-AUDIT-CENSUS-HONESTY-001 (OPS-1 + OPS-2 + MAJOR) ──────────────────────
+# Relocated from ``test_audit_census_honesty.py`` so the per-module coverage
+# DISCOVERY gate (which stem-maps ``brutex/cli.py`` → ``test_cli*`` files that
+# import ``cli``) exercises the audit-unique skip-honesty branches under its own
+# gate (hostile-review BLOCKER-2).
+
+
+def _plant_garbage(dest: Path) -> None:
+    """Non-parquet bytes → the census read raises a caught error → a skip."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"not a parquet file at all")
+
+
+def _plant_schema_drift(dest: Path) -> None:
+    """A VALID parquet MISSING the OHLC columns → the BAR_SCAN_COLUMNS read raises → skip."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime(2025, 9, 1, 4, 0, tzinfo=UTC)
+    table = pa.table({"timestamp": pa.array([ts], type=pa.timestamp("us", tz="UTC"))})
+    pq.write_table(table, dest)
+
+
+def _engine_bars_path(lake_root: Path, *, symbol: str = "NIFTY", year: str = "2025") -> Path:
+    """A ``bars/NSE/INDEX/<symbol>/1minute/<year>/09.parquet`` destination."""
+    return lake_root / "bars" / "NSE" / "INDEX" / symbol / "1minute" / year / "09.parquet"
+
+
+class TestCliAuditUniqueSkipHonesty:
+    """OPS-1: an UNREADABLE file makes the CLI non-green + names the cause."""
+
+    def test_engine_garbage_non_green_table_and_verdict(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_clean(tmp_path)  # a real readable engine file beside the corruption
+        _plant_garbage(_engine_bars_path(tmp_path, symbol="BANKNIFTY"))
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path)])
+        assert rc == cli.EXIT_USER_ERROR
+        out = capsys.readouterr().out
+        assert "skipped (unreadable): 1  (engine-index: 1)" in out
+        assert "engine indexes (NIFTY / BANKNIFTY / SENSEX): UNREADABLE — " in out
+        assert "scan INCOMPLETE: ENGINE-INDEX DATA UNREADABLE — " in out
+        assert "this rc=1 red IS your engine data" in out
+
+    def test_engine_schema_drift_non_green(self, tmp_path: Path) -> None:
+        _plant_schema_drift(_engine_bars_path(tmp_path, symbol="NIFTY"))
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path)])
+        assert rc == cli.EXIT_USER_ERROR
+
+    def test_engine_garbage_json_surfaces_skip(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BRUTEX_LAKE_HEAL", raising=False)
+        _plant_garbage(_engine_bars_path(tmp_path, symbol="NIFTY"))
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path), "--json"])
+        assert rc == cli.EXIT_USER_ERROR
+        out = capsys.readouterr().out
+        payload = json.loads(out[out.index("{") :])
+        assert payload["files_skipped"] == 1
+        assert payload["engine_files_skipped"] == 1
+        assert payload["engine_clean"] is False
+        assert payload["first_skipped_path"] is not None
+
+    def test_non_engine_skip_is_non_green_but_verdict_clean(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A reference-lake skip still leaves the census INCOMPLETE → rc=1, engine verdict CLEAN."""
+        _seed_clean(tmp_path)
+        poisoned = (
+            tmp_path / "bars" / "NSE" / "CASH" / "RELIANCE" / "1minute" / "2025" / "09.parquet"
+        )
+        _plant_garbage(poisoned)
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path)])
+        assert rc == cli.EXIT_USER_ERROR
+        out = capsys.readouterr().out
+        assert "skipped (unreadable): 1  (engine-index: 0)" in out
+        assert "engine indexes (NIFTY / BANKNIFTY / SENSEX): CLEAN — " in out
+        assert "scan INCOMPLETE: 1 reference/non-engine file(s) unreadable" in out
+        assert "(REFERENCE_ONLY / F&O)" in out
+        assert "verified CLEAN" in out and "NOT engine corruption" in out
+        assert f"first unreadable: {poisoned}" in out
+
+    def test_clean_lake_still_rc_ok_no_regression(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_clean(tmp_path)
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path)])
+        assert rc == cli.EXIT_OK
+        out = capsys.readouterr().out
+        assert "skipped (unreadable): 0  (engine-index: 0)" in out
+        assert "engine indexes (NIFTY / BANKNIFTY / SENSEX): CLEAN — " in out
+
+    def test_real_dup_still_poisoned_rc1_teeth_intact(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _poison_bars(tmp_path, symbol="NIFTY")
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path)])
+        assert rc == cli.EXIT_USER_ERROR
+        out = capsys.readouterr().out
+        assert "engine indexes (NIFTY / BANKNIFTY / SENSEX): POISONED — " in out
+
+    def test_malformed_engine_path_reads_unreadable(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """MAJOR: an engine file whose PATH fails to parse reads UNREADABLE (agrees with doctor)."""
+        _plant_garbage(_engine_bars_path(tmp_path, symbol="NIFTY", year="notayear"))
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path), "--json"])
+        assert rc == cli.EXIT_USER_ERROR
+        out = capsys.readouterr().out
+        payload = json.loads(out[out.index("{") :])
+        assert payload["engine_files_skipped"] == 1
+        assert payload["engine_clean"] is False
+
+
+class TestCliAuditUniqueMissingRoot:
+    """OPS-2: a nonexistent lake root is refused rc=1 (never a silent green over a dead mount)."""
+
+    def test_nonexistent_lake_root_refused_rc1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        missing = tmp_path / "no_such_lake"
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(missing)])
+        assert rc == cli.EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert f"lake root not found: {missing}" in err
+        assert "brutex lake audit-unique" in err
+        # The refusal is a HARD gate — the dead mount was never scanned / materialised.
+        assert not missing.exists()
