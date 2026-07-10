@@ -18,9 +18,10 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1673 —
-renumbered from #1633 at the 2026-07-10 merge-reconcile (main's in-flight renumber
-cascade holds the reservation band through #1672; #1673 is the first free slot) —
+_Last updated: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 —
+renumbered #1633 → #1673 → #1692 (#1633 → #1673 at the 2026-07-10 merge-reconcile —
+main's in-flight renumber cascade holds the reservation band through #1672 — then
+#1673 → #1692 per the coordinator reservation map, #1673 reserved for PR #1369) —
 the NSE market-hours pull guard: NO Groww VENDOR pulls between 08:45 (inclusive)
 and 15:35 (exclusive) IST on a trading day; an in-flight nightly pull STOPS
 gracefully at 08:45 and start/resume is REFUSED until 15:35, keeping the SHARED
@@ -73,7 +74,7 @@ governor change); `market_hours.py` + `data/errors.py` + `universe_phases.py` +
 `metadata_pull.py` + `pipeline_pull.py` + nightly binding 100% line+branch, the
 CLI/dashboard touched lines covered by the whole-package `--cov=brutex` gate;
 ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline; the
-per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1673 —
+per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1692 —
 this header carries the one-line summary, never the round-by-round story).
 Earlier: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a — renamed from -001 at the 2026-07-10 merge-reconcile (main's #1634/PR #1323 claimed -001 for the minute-basis calendar-cross-check ADVANCE; -002 is the COMMON-ization remainder + hole-shape observability + the #1649b Muhurat pack) —
 renumbered #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took
@@ -1930,10 +1931,11 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1673** —
-  renumbered from #1633 at the 2026-07-10 merge-reconcile: main's slot-wave/renumber cascade reserved #1633–#1649
-  (see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history) and the in-flight cascade holds the band through
-  #1672, so #1673 is the first safe number —
+- **Active branch:** `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
+  renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
+  cascade reserved #1633–#1649 — see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history — and the in-flight
+  cascade holds the band through #1672), then #1673 → #1692 per the coordinator reservation map (#1673 is reserved
+  for PR #1369) —
   the NSE market-hours pull guard: NO Groww VENDOR pulls between 08:45 (inclusive) and 15:35 (exclusive) IST on a
   trading day; an in-flight nightly pull STOPS gracefully at 08:45 and start/resume is REFUSED until 15:35, keeping
   the SHARED Groww account free for TickVault's live feed. NEW pure leaf `brutex/calendars/market_hours.py`
@@ -1975,7 +1977,7 @@ hostile-review pass._
   `setdefault`) because the real-clock START gate made every un-injected `BackgroundPullJob.start` test FAIL inside
   08:45-15:35 IST (reproduced 2026-07-10; the #1380 hermeticity philosophy applied to the clock — the guard's own tests
   inject env/clock/guards explicitly and stay armed on both arms); two stale `#1624` docstring citations corrected to
-  #1673; the fold's duplicated #1632 ledger entry deduped).
+  this entry's number (now #1692 after the coordinator-map renumber); the fold's duplicated #1632 ledger entry deduped).
   Earlier: `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a** — RENAMED from -001 at the 2026-07-10 merge-reconcile: main's #1634 (PR #1323) claimed -001 for the minute-basis calendar-cross-check ADVANCE while this branch was in flight; -002 delivers #1634's named OPEN work (the observed-overlay COMMON-ization + thin delegator) + the hole-shape WARN observability + the #1649b Muhurat coherence pack — renumbered
   #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335),
   then #1631/#1632 for DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (PR #1352) + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the coordinator
@@ -4935,7 +4937,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/groww-market-hours-guard`
-  (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1673 — renumbered from #1633, the reserved-band collision (#1633–#1672 held by main's cascade); the NSE
+  (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE
   market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
   days, keeping the shared account free for TickVault's live feed; matches
   §1's Active branch line)

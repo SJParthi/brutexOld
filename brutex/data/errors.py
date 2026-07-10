@@ -98,7 +98,7 @@ class LakeWriteHalt(DataLakeError):
 class MarketHoursHalt(BruteXError):
     """A vendor pull was HALTED because it entered the NSE market-hours window.
 
-    DEC-GROWW-MARKET-HOURS-GUARD-001 (MIGRATION.md #1673). The Groww access token is
+    DEC-GROWW-MARKET-HOURS-GUARD-001 (MIGRATION.md #1692). The Groww access token is
     SHARED with TickVault's live feed (§2 Rule 6 — one TOTP token, one 500/min
     governor). A nightly BruteX pull that runs into the trading session competes for
     that budget and 429-rejects TickVault's LIVE feed. So when the per-window guard
