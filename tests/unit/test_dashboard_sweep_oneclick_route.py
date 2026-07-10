@@ -569,3 +569,56 @@ def test_legacy_route_accepts_acknowledge_sla_overrun(
     resp = client.post("/api/v1/sweep/run", params={"acknowledge_sla_overrun": "true"})
     assert resp.status_code == 200
     assert resp.json()["started"] is True
+
+
+# ── R54 none-leg coverage on the one-click surfaces (operator ruling ─────────
+# 2026-07-08: none cells first-class RUNNABLE; the preflight payload carries
+# the stage3_enable clamp disclosure — route-level pins so a future
+# route-side re-validation cannot silently re-violate R54).
+
+
+def test_preflight_route_none_leg_carries_stage3_downgrade_clamp_r54(client: TestClient) -> None:
+    """GET preflight with ``tp=none`` must be a 200 verdict (never the
+    pre-R54 400 hard refusal) whose ``clamps`` channel — the operator
+    proceed-dialog's data source — carries the ``stage3_enable``
+    requested→applied downgrade row."""
+    resp = client.get("/api/v1/sweep/oneclick/preflight", params={"symbols": "NIFTY", "tp": "none"})
+    assert resp.status_code == 200
+    body = resp.json()
+    stage3_clamps = [c for c in body["clamps"] if c["field"] == "stage3_enable"]
+    assert len(stage3_clamps) == 1
+    assert stage3_clamps[0]["requested"] == "true"
+    assert stage3_clamps[0]["applied"] == "false"
+    assert "R54" in stage3_clamps[0]["reason"]
+
+
+def test_run_route_mixed_none_leg_launch_accepted_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/v1/sweep/oneclick/run with the mixed both-arms grid shape
+    (``sl="none,50"``) resolves + launches (preflight forced ``ok`` — the
+    hermetic empty lake would otherwise refuse on coverage, which is a
+    DATA refusal, not the leg refusal R54 outlaws)."""
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    monkeypatch.setattr(
+        app_module,
+        "oneclick_preflight_for_plan",
+        lambda plan, **kw: {
+            "sweep_run_id": plan.sweep_run_id,
+            "ok": True,
+            "refusals": [],
+            "clamps": [],
+            "estimator": {
+                "trials": 1,
+                "est_seconds_provisional": 0.1,
+                "est_bytes": 1,
+                "estimate_basis": "provisional",
+            },
+        },
+    )
+    resp = client.post("/api/v1/sweep/oneclick/run", params={"symbols": "NIFTY", "sl": "none,50"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert _wait_for_job(client)["state"] == "done"
+    assert [r.sl for r in _CAPTURED["requests"]] == ["none,50"]

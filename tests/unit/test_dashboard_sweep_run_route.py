@@ -321,3 +321,63 @@ def test_operator_page_carries_sweep_button(client: TestClient) -> None:
     assert reports.status_code == 200
     assert 'id="run-sweep"' not in reports.text
     assert 'id="run-cascade"' not in reports.text
+
+
+# ── R54 none-leg launches on the production HTTP surface (operator ruling ────
+# 2026-07-08: none cells are first-class RUNNABLE — warn/disclose, never a
+# hard refusal; pinned at the ROUTE so a future route-side re-validation
+# cannot silently re-violate R54 without failing here).
+
+
+def test_none_leg_launch_accepted_with_stage3_disclosure_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/v1/sweep/run with an explicit ``sl=none`` leg must be
+    launch-ACCEPTED (the pre-R54 behavior was a 400 hard refusal) and the
+    response payload must DISCLOSE the launch's effective Stage-3 downgrade
+    (``stage3_enable: false``) — operator-visible, never server-log-only."""
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run", params={"sl": "none"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is True
+    assert body["sl"] == "none"
+    assert body["stage3_enable"] is False
+    assert _wait_for_job(client)["state"] == "done"
+    assert _CAPTURED["request"].sl == "none"
+
+
+def test_mixed_csv_none_leg_launch_accepted_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's REAL mixed grid shape (a ``none`` cell among gridded
+    values — PR #1297's default grid string, the only single-sweep shape
+    covering BOTH SL/TP arms AND no-SL/TP arms in one run) must be
+    launch-accepted on this surface too — the R54 review round 2 BLOCKER."""
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post(
+        "/api/v1/sweep/run",
+        params={"sl": "none,5,100,200", "tp": "100,200,300"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is True
+    assert body["sl"] == "none,5,100,200"
+    assert body["stage3_enable"] is False
+    assert _wait_for_job(client)["state"] == "done"
+    assert _CAPTURED["request"].sl == "none,5,100,200"
+
+
+def test_gridded_launch_payload_reports_stage3_true_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Complement pin: the institutional (fully-gridded) default launch's
+    payload reports ``stage3_enable: true`` — the disclosure key is always
+    present, so its absence can never be mistaken for "not downgraded"."""
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    assert resp.json()["stage3_enable"] is True
+    assert _wait_for_job(client)["state"] == "done"

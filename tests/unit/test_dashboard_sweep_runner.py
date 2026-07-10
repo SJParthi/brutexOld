@@ -144,7 +144,20 @@ def test_to_dict_round_trips_every_field() -> None:
         "mode": DEFAULT_MODE,
         "top": DEFAULT_TOP,
         "acknowledge_sla_overrun": False,
+        # R54 disclosure (operator ruling 2026-07-08): the derived effective
+        # Stage-3 posture rides the request echo → the /sweep/run payload.
+        "stage3_enable": True,
     }
+
+
+def test_to_dict_discloses_the_stage3_downgrade_for_none_legs_r54() -> None:
+    """R54 review round 2, finding 5: the Stage-3 downgrade must be visible on
+    the operator-facing ``POST /api/v1/sweep/run`` response payload (which is
+    ``to_dict() + {started}``) — never a server-log-only fact."""
+    req = resolve_sweep_request(sl="none", today=_TODAY)
+    assert req.to_dict()["stage3_enable"] is False
+    mixed = resolve_sweep_request(sl="none,5,100,200", tp="100,200,300", today=_TODAY)
+    assert mixed.to_dict()["stage3_enable"] is False
 
 
 # ── validation: 400-able ValueError arms ──────────────────────────────────────
@@ -241,19 +254,227 @@ def test_out_of_engine_scope_symbol_raises_the_scope_refusal() -> None:
     assert "NIFTY/BANKNIFTY/SENSEX" in message  # the law + remedy tail
 
 
-def test_explicit_none_leg_now_refused() -> None:
-    """Round-11 adversarial-refuter finding: ``sl="none"``/``tp="none"`` used
-    to pass through cleanly (the OLD light-research default's shape) — but
-    ``build_sweep_kwargs`` now unconditionally launches every dashboard
-    sweep with ``stage3_enable=True`` (R5's institutional flip), and
-    ``SweepGridConfig.__post_init__`` REJECTS a ``None`` SL/TP leg whenever
-    ``stage3_enable=True``. Letting ``"none"`` through here meant the R4/R20
-    preflight would report ``ok: true`` for a launch that was guaranteed to
-    fail deterministically inside the background job with no
-    operator-visible reason — refuse it HERE instead, loudly, before any
-    background job starts."""
-    with pytest.raises(ValueError, match="incompatible with the institutional Stage-3"):
-        resolve_sweep_request(sl="NONE", tp="none", today=_TODAY)
+def test_explicit_none_sl_leg_is_runnable_r54() -> None:
+    """OPERATOR RULING 2026-07-08 (R54): both SL/TP arms AND no-SL/TP arms
+    must be coverable — an explicit ``sl="none"`` leg is first-class
+    RUNNABLE (warn-not-refuse), never the round-11 hard refusal.
+    ``build_sweep_kwargs`` downgrades ``stage3_enable`` to ``False`` for the
+    launch (CMA-ES cannot seed its x0 from a ``none`` leg, ADR-0007
+    condition 3; with Stage-3 off the engine accepts ``None`` legs, so the
+    launch stays provably runnable — R16 preserved)."""
+    req = resolve_sweep_request(sl="none", today=_TODAY)
+    assert req.sl == "none"
+    assert req.tp == DEFAULT_TP
+    kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"))
+    assert kwargs["sl"] == "none"
+    assert kwargs["stage3_enable"] is False
+
+
+def test_explicit_none_tp_leg_is_runnable_r54() -> None:
+    """R54 (operator ruling 2026-07-08), the TP twin — case-insensitive
+    ``tp="NONE"`` normalises + runs; Stage-3 downgraded OFF."""
+    req = resolve_sweep_request(tp="NONE", today=_TODAY)
+    assert req.tp == "none"
+    kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"))
+    assert kwargs["tp"] == "none"
+    assert kwargs["stage3_enable"] is False
+
+
+def test_both_none_legs_runnable_with_one_warn_at_build_r54() -> None:
+    """R54: the double-``none`` launch (the CLI's own ``sweep-all`` default
+    shape, and the launch_button LOCKED_SL/LOCKED_TP shape) resolves
+    runnable with ZERO warnings at request resolution and EXACTLY ONE
+    ``sweep_runner.none_leg_stage3_downgrade`` WARN — naming both legs —
+    when the launch kwargs are BUILT (R54 review round 2, finding 4: the
+    WARN must fire at launch time, so a request that resolves but is never
+    launched — e.g. the read-only preflight — logs no false "downgraded
+    OFF for this launch" claim)."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as resolve_logs:
+        req = resolve_sweep_request(sl="NONE", tp="none", today=_TODAY)
+    assert req.sl == "none"
+    assert req.tp == "none"
+    assert [e for e in resolve_logs if e["event"] == "sweep_runner.none_leg_stage3_downgrade"] == []
+    with capture_logs() as build_logs:
+        kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"))
+    warns = [e for e in build_logs if e["event"] == "sweep_runner.none_leg_stage3_downgrade"]
+    assert len(warns) == 1
+    assert warns[0]["log_level"] == "warning"
+    assert warns[0]["legs"] == ["sl", "tp"]
+    assert kwargs["stage3_enable"] is False
+
+
+def test_refused_request_emits_no_downgrade_warn_r54() -> None:
+    """R54 review round 2, finding 4: a ``none``-leg request that is
+    subsequently REFUSED (here: a bad interval) must log NO "downgraded OFF
+    for this launch" WARN — nothing launches, nothing was downgraded."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs, pytest.raises(ValueError, match="interval must be one of"):
+        resolve_sweep_request(sl="none", intervals="7tick", today=_TODAY)
+    assert [e for e in logs if e["event"] == "sweep_runner.none_leg_stage3_downgrade"] == []
+
+
+def test_gridded_legs_emit_no_downgrade_warn_and_keep_stage3_r54() -> None:
+    """R54's complement: fully-gridded legs stay on the R5 institutional
+    ``stage3_enable=True`` posture with ZERO downgrade warnings anywhere
+    (resolution AND kwargs build)."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        req = resolve_sweep_request(sl="50", tp="100", today=_TODAY)
+        kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"))
+    assert [e for e in logs if e["event"] == "sweep_runner.none_leg_stage3_downgrade"] == []
+    assert kwargs["stage3_enable"] is True
+    assert req.stage3_enable is True
+
+
+def test_mixed_csv_none_leg_is_runnable_end_to_end_r54() -> None:
+    """R54 review round 2, finding 1 (BLOCKER): the operator's REAL mixed
+    grid shape — a ``none`` VALUE among gridded values (``sl="none,5,100,200"``,
+    PR #1297's default grid string, and the only single-sweep shape covering
+    BOTH SL/TP arms AND no-SL/TP arms in one run) — must resolve runnable
+    end-to-end: through ``build_sweep_kwargs`` into a CONSTRUCTIBLE
+    ``SweepGridConfig`` whose none cell is enumerated, never dropped."""
+    from brutex.cli import _parse_paisa_list  # pyright: ignore[reportPrivateUsage]
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe, count_sweep_tuples
+    from brutex.strategies.types import Side
+
+    req = resolve_sweep_request(sl="none,5,100,200", tp="100,200,300", today=_TODAY)
+    assert req.sl == "none,5,100,200"
+    assert req.tp == "100,200,300"
+    kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"))
+    assert kwargs["sl"] == "none,5,100,200"
+    assert kwargs["stage3_enable"] is False
+    # The engine grammar (`cmd_sweep_all` → `_parse_paisa_list`) enumerates
+    # the none cell as a REAL grid cell.
+    assert _parse_paisa_list(kwargs["sl"]) == [None, 5, 100, 200]
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("5minute", 5)],
+        directions=[Side.BUY],
+        k_values=[1],
+        condition_bits=[0, 1, 2],
+        stop_losses=_parse_paisa_list(kwargs["sl"]),
+        take_profits=_parse_paisa_list(kwargs["tp"]),
+        proximities=[None],
+        mode=kwargs["mode"],
+        data_snapshot_hash="snap",
+        indicator_version="test-iv",
+        code_commit_sha="test-sha",
+        stage3_enable=kwargs["stage3_enable"],
+    )
+    # 1 instrument × 1 tf × 1 direction × 1 k × 4 sl (incl. None) × 3 tp.
+    assert count_sweep_tuples(grid) == 12
+    assert None in grid.stop_losses
+
+
+def test_mixed_csv_none_tokens_normalise_case_and_whitespace_r54() -> None:
+    """The mixed grammar mirrors the CLI ``_parse_paisa_list`` token rules:
+    ``none`` is case-insensitive and whitespace-tolerant inside the CSV."""
+    req = resolve_sweep_request(sl=" NONE , 50 ", tp="100, none", today=_TODAY)
+    assert req.sl == "none,50"
+    assert req.tp == "100,none"
+    assert req.stage3_enable is False
+
+
+def test_none_leg_with_offgrid_other_leg_is_runnable_r54() -> None:
+    """R54 review round 2, finding 2 (MAJOR): ``sl="none"`` downgrades the
+    launch's effective Stage-3 posture OFF — and with Stage-3 off the engine
+    accepts ANY positive paisa value, so an off-Mode-A-grid ``tp=1500`` on
+    the same launch is provably engine-runnable and must NOT be refused on
+    a Stage-3 justification the launch itself has disabled (the pre-fix
+    behavior WARNed "downgraded OFF for this launch" then raised an
+    off-grid refusal citing the disabled Stage-3 default — self-
+    contradictory)."""
+    from brutex.cli import _parse_paisa_list  # pyright: ignore[reportPrivateUsage]
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe, count_sweep_tuples
+    from brutex.strategies.types import Side
+
+    req = resolve_sweep_request(sl="none", tp="1500", today=_TODAY)
+    kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"))
+    assert kwargs["stage3_enable"] is False
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("5minute", 5)],
+        directions=[Side.BUY],
+        k_values=[1],
+        condition_bits=[0, 1, 2],
+        stop_losses=_parse_paisa_list(kwargs["sl"]),
+        take_profits=_parse_paisa_list(kwargs["tp"]),
+        proximities=[None],
+        mode=kwargs["mode"],
+        data_snapshot_hash="snap",
+        indicator_version="test-iv",
+        code_commit_sha="test-sha",
+        stage3_enable=kwargs["stage3_enable"],
+    )
+    assert count_sweep_tuples(grid) == 1
+
+
+def test_leg_values_mirrors_the_cli_parse_paisa_list_grammar() -> None:
+    """R54 review round 2, finding 3: ``leg_values`` is the ONE parsed-leg
+    source of truth — pinned token-for-token against the CLI's
+    ``_parse_paisa_list`` (the grammar ``cmd_sweep_all`` hands the engine)
+    so the two can never drift."""
+    from brutex.cli import _parse_paisa_list  # pyright: ignore[reportPrivateUsage]
+    from brutex.dashboard.sweep_runner import leg_has_none, leg_values
+
+    for leg in ("none", "none,5,100,200", "50,100,150", "NONE, 50", "", "none,none", " 5 "):
+        assert list(leg_values(leg)) == _parse_paisa_list(leg)
+        assert leg_has_none(leg) == (None in _parse_paisa_list(leg))
+
+
+@pytest.mark.parametrize(
+    ("sl", "tp", "expected_stage3"),
+    [
+        (None, None, True),  # institutional defaults, fully gridded
+        ("50,100,150", "100,200,300", True),
+        ("none", "100,200,300", False),
+        ("50,100,150", "none", False),
+        ("none", "none", False),
+        ("none,5,100,200", "100,200,300", False),  # PR #1297's default shape
+        ("50", "none,100", False),
+        ("none,50", "none,100", False),
+    ],
+)
+def test_stage3_enable_agrees_with_the_parsed_legs_for_every_accepted_shape(
+    sl: str | None, tp: str | None, expected_stage3: bool
+) -> None:
+    """R54 review round 2, finding 3: ``build_sweep_kwargs``' ``stage3_enable``
+    must agree with the PARSED legs (oracle: the CLI ``_parse_paisa_list``)
+    for every accepted leg string — a whole-string comparison reads a mixed
+    ``"none,50"`` leg as gridded, re-instating the round-11 deep engine
+    crash the moment the grammar widened."""
+    from brutex.cli import _parse_paisa_list  # pyright: ignore[reportPrivateUsage]
+
+    req = resolve_sweep_request(sl=sl, tp=tp, today=_TODAY)
+    kwargs = build_sweep_kwargs(req, lake_root=Path("/lake"))
+    parsed_has_none = (None in _parse_paisa_list(req.sl)) or (None in _parse_paisa_list(req.tp))
+    assert kwargs["stage3_enable"] == (not parsed_has_none) == expected_stage3
+    assert req.stage3_enable is kwargs["stage3_enable"]
+
+
+def test_oneclick_none_leg_plan_resolves_quietly_and_warns_once_per_group_kwargs_r54() -> None:
+    """R54 review round 2, findings 4+7: resolving a one-click plan (which the
+    read-only preflight GET does too) emits ZERO downgrade WARNs even when
+    every group carries a ``none`` leg; the WARNs fire only when each
+    group's engine-run kwargs are BUILT at launch — exactly one per
+    launched exchange-group engine run (2 here: NSE + BSE)."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as resolve_logs:
+        plan = resolve_oneclick_sweep_plan(sl="none", today=_TODAY, run_id_factory=lambda: "x")
+    assert [e for e in resolve_logs if e["event"] == "sweep_runner.none_leg_stage3_downgrade"] == []
+    assert len(plan.requests) == 2  # NSE (NIFTY,BANKNIFTY) + BSE (SENSEX)
+    with capture_logs() as build_logs:
+        for request in plan.requests:
+            kwargs = build_sweep_kwargs(request, lake_root=Path("/lake"))
+            assert kwargs["stage3_enable"] is False
+    warns = [e for e in build_logs if e["event"] == "sweep_runner.none_leg_stage3_downgrade"]
+    assert len(warns) == len(plan.requests) == 2
+    assert {w["exchange"] for w in warns} == {"NSE", "BSE"}
 
 
 def test_off_grid_sl_now_refused() -> None:
@@ -703,3 +924,58 @@ def test_oneclick_preflight_for_plan_single_group() -> None:
         )
     assert result["sweep_run_id"] == "one-id"
     assert set(result) == {"sweep_run_id", "ok", "refusals", "clamps", "estimator"}
+
+
+def test_oneclick_preflight_reports_a_stage3_downgrade_clamp_per_none_group_r54(
+    tmp_path: Path,
+) -> None:
+    """R54 review round 2, finding 5: the one-click preflight verdict is THE
+    operator proceed-dialog's data source — a ``none``-leg group's Stage-3
+    downgrade must ride its purpose-built requested→applied ``clamps``
+    channel (one exchange-named row per downgraded group), never a
+    server-log-only WARN. The preflight resolution itself stays silent
+    (finding 7's read-only "NEVER launches" contract)."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        plan = resolve_oneclick_sweep_plan(
+            symbols="NIFTY,SENSEX", tp="none", today=_TODAY, run_id_factory=lambda: "clamp-id"
+        )
+        result = oneclick_preflight_for_plan(
+            plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12
+        )
+    assert [e for e in logs if e["event"] == "sweep_runner.none_leg_stage3_downgrade"] == []
+    stage3_clamps = [c for c in result["clamps"] if c["field"] == "stage3_enable"]
+    assert len(stage3_clamps) == 2  # one per exchange group (BSE + NSE)
+    for clamp in stage3_clamps:
+        assert clamp["requested"] == "true"
+        assert clamp["applied"] == "false"
+        assert "R54" in clamp["reason"]
+        assert "tp" in clamp["reason"]
+    assert {c["reason"].split(":", 1)[0] for c in stage3_clamps} == {"BSE", "NSE"}
+
+
+def test_oneclick_preflight_mixed_leg_group_carries_the_stage3_clamp_r54(tmp_path: Path) -> None:
+    """The mixed-CSV shape (finding 1) rides the same clamp disclosure: a
+    ``sl="none,50"`` plan's groups each carry the ``stage3_enable`` row —
+    the gridded cells' lost CMA-ES refinement is stated in the reason."""
+    plan = resolve_oneclick_sweep_plan(
+        symbols="NIFTY", sl="none,50", today=_TODAY, run_id_factory=lambda: "mixed-clamp-id"
+    )
+    result = oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
+    stage3_clamps = [c for c in result["clamps"] if c["field"] == "stage3_enable"]
+    assert len(stage3_clamps) == 1
+    assert stage3_clamps[0]["reason"].startswith("NSE: ")
+    assert "sl" in stage3_clamps[0]["reason"]
+    assert "gridded SL/TP cells" in stage3_clamps[0]["reason"]
+
+
+def test_oneclick_preflight_gridded_plan_carries_no_stage3_clamp_r54(tmp_path: Path) -> None:
+    """Complement pin: a fully-gridded plan (the institutional default) emits
+    NO ``stage3_enable`` clamp — the disclosure fires only on a real
+    downgrade."""
+    plan = resolve_oneclick_sweep_plan(
+        symbols="NIFTY,SENSEX", today=_TODAY, run_id_factory=lambda: "grid-id"
+    )
+    result = oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
+    assert [c for c in result["clamps"] if c["field"] == "stage3_enable"] == []

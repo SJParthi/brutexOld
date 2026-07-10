@@ -25,14 +25,37 @@ refinement ON, top-1000 kept per tuple, missing slices REFUSE the whole
 launch (ruling O-a, refuse-whole) rather than silently skip. ``k`` defaults
 to ``1,2,3`` (O-f). SL/TP legs default to a 3×3 on-grid paisa grid (O-g) —
 see :data:`DEFAULT_SL`/:data:`DEFAULT_TP` for why the ``NONE`` leg (no
-stop-loss) is NOT part of the institutional default: ``stage3_enable=True``
+stop-loss) is NOT part of the institutional DEFAULT: ``stage3_enable=True``
 makes :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig` reject any
 ``None`` SL/TP value at construction time (every base-grid value must
 normalize onto the Mode-A grid so CMA-ES can seed its ``x0`` from it, ADR-0007
-condition 3) — R19's 4th arm (the ``NONE``/signal-to-signal exit) is
-therefore structurally incompatible with the institutional Stage-3 default
-today; this is an OPEN engineering question for the operator, not a silent
-drop (flagged in the PR, not swept under the rug).
+condition 3). Per the OPERATOR RULING (2026-07-08, R54 — both SL/TP arms
+AND no-SL/TP arms must be coverable) a ``none`` cell is nevertheless
+first-class RUNNABLE — as a WHOLE leg (``sl="none"``) AND as a value
+inside a mixed CSV leg (``sl="none,5,100,200"``, the only single-sweep
+shape that covers BOTH arms in one run, and the CLI
+``_parse_paisa_list`` grammar's own shape): :func:`leg_values` /
+:func:`leg_has_none` are the ONE parsed-leg source of truth, and any
+``none`` cell downgrades the launch's EFFECTIVE ``stage3_enable`` to
+``False`` (:attr:`SweepRunRequest.stage3_enable`, the CLI's own default
+posture for ``none`` legs; with Stage-3 off the engine accepts ``None``
+cells AND any positive paisa value, so the Mode-A axis check stands
+down too) — never a hard refusal, never a deep engine crash. The
+downgrade is DISCLOSED loudly on every operator surface: the request
+echo / ``POST /api/v1/sweep/run`` payload carries ``stage3_enable``
+(:meth:`SweepRunRequest.to_dict`), the one-click preflight verdict
+carries a ``stage3_enable`` :class:`~brutex.engine.sweep_oneclick_preflight.Clamp`
+row per downgraded exchange group (:func:`oneclick_preflight_for_plan`
+— the operator proceed-dialog's data source), and
+:func:`build_sweep_kwargs` emits ONE
+``sweep_runner.none_leg_stage3_downgrade`` WARN per built engine-run
+kwargs at launch time (the read-only preflight builds no kwargs and
+emits no WARN). HONEST: a mixed leg's GRIDDED cells lose Stage-3
+CMA-ES refinement for that launch too — stated in the clamp reason,
+never silent. Off-Mode-A-grid paisa values stay refused (the round-11
+deep-crash class) ONLY under the effective ``stage3_enable=True``
+posture — a ``none``-carrying launch has disabled the sole engine
+constraint that refusal protects.
 
 ## SLA-overrun acknowledge (gap-hunt BLOCKER #2, ruling 2)
 
@@ -70,11 +93,15 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+import structlog
+
 from brutex.universe import ENGINE_SWEEP_SPOT_TRIPLES
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+_LOG = structlog.get_logger(__name__)
 
 #: Default LAKE-partition index symbols (bare trading symbols, NOT the
 #: ``EXCH-SYMBOL`` groww keys) — mirrors the CLI ``--symbols`` default in
@@ -178,8 +205,31 @@ class SweepRunRequest:
     top: int
     acknowledge_sla_overrun: bool = False
 
+    @property
+    def stage3_enable(self) -> bool:
+        """The launch's EFFECTIVE Stage-3 posture, derived from the PARSED legs.
+
+        ``True`` (the R5 institutional default) iff NEITHER leg carries a
+        ``none`` cell; any ``none`` cell — a whole-``"none"`` leg or a
+        ``none`` value inside a mixed CSV leg — downgrades the launch to
+        ``False`` (operator ruling 2026-07-08, R54: CMA-ES cannot seed its
+        ``x0`` from a ``none`` cell, ADR-0007 condition 3; with Stage-3 off
+        the engine accepts ``None`` cells, so the launch stays provably
+        runnable — R16 preserved). Derived through the ONE parsed-leg
+        source (:func:`leg_has_none`) so it can NEVER drift from what
+        ``cmd_sweep_all``'s ``_parse_paisa_list`` hands the engine — never
+        an independent whole-string comparison.
+        """
+        return not (leg_has_none(self.sl) or leg_has_none(self.tp))
+
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-safe echo of the resolved request (for the route response)."""
+        """Return a JSON-safe echo of the resolved request (for the route response).
+
+        Carries the derived :attr:`stage3_enable` so a ``none``-leg launch's
+        Stage-3 downgrade is visible in the ``POST /api/v1/sweep/run``
+        response payload — an operator-facing disclosure, never a
+        server-log-only fact (R54 review round 2).
+        """
         return {
             "symbols": self.symbols,
             "intervals": self.intervals,
@@ -194,6 +244,7 @@ class SweepRunRequest:
             "mode": self.mode,
             "top": self.top,
             "acknowledge_sla_overrun": self.acknowledge_sla_overrun,
+            "stage3_enable": self.stage3_enable,
         }
 
 
@@ -293,13 +344,24 @@ def _validate_k_against_max_combos(k_tokens: Sequence[str]) -> None:
 
 
 def _normalise_leg(value: str | None, default: str, *, label: str) -> str:
-    """Validate a SL/TP leg: literal ``none`` OR a CSV of positive-paisa ints."""
+    """Validate a SL/TP leg: a CSV mixing ``none`` cells and positive-paisa ints.
+
+    Mirrors the CLI ``--sl``/``--tp`` grammar (``brutex.cli._parse_paisa_list``)
+    PER VALUE, not per whole string: each token is either the literal
+    ``none`` (any case — normalised to lowercase) or a positive paisa int —
+    so the whole-leg ``"none"``, a fully-gridded CSV, AND the mixed
+    both-arms-in-one-sweep shape (``"none,5,100,200"`` — PR #1297's default
+    grid string) all resolve (operator ruling 2026-07-08, R54; the R54
+    review round 2 found the original whole-string check hard-refused the
+    mixed shape with a self-contradictory error).
+    """
     source = value if value is not None and value.strip() else default
-    if source.strip().lower() == "none":
-        return "none"
     tokens = [tok.strip() for tok in source.split(",") if tok.strip()]
     out: list[str] = []
     for token in tokens:
+        if token.lower() == "none":
+            out.append("none")
+            continue
         try:
             parsed = int(token)
         except ValueError as exc:
@@ -312,45 +374,85 @@ def _normalise_leg(value: str | None, default: str, *, label: str) -> str:
     return ",".join(out)
 
 
-def _validate_mode_a_legs(sl: str, tp: str) -> None:
-    """Refuse an SL/TP leg the institutional Stage-3 CMA-ES grid cannot use.
+def leg_values(leg: str) -> tuple[int | None, ...]:
+    """Parse a normalised SL/TP leg CSV into engine cell values (``none`` → ``None``).
 
-    ``build_sweep_kwargs`` now unconditionally launches EVERY dashboard
-    sweep with ``stage3_enable=True`` (R5's institutional flip) —
+    The ONE parsed-leg source of truth (CLAUDE.md §2 Rule 11 COMMON) shared
+    by :attr:`SweepRunRequest.stage3_enable`, :func:`_validate_mode_a_legs`
+    and :func:`build_sweep_kwargs` — the R54 review round 2 found the
+    none-cell decision triplicated as independent whole-string ``== "none"``
+    comparisons, one grammar widening away from re-instating the round-11
+    deep engine crash. Token semantics mirror ``brutex.cli._parse_paisa_list``
+    exactly (pinned by test): ``none`` (any case) → ``None``, blank tokens
+    skipped, everything else ``int()``. Assumes an ALREADY
+    :func:`_normalise_leg`-validated string — a junk token raises the same
+    ``ValueError`` the resolver would have raised earlier, never a silent
+    drop.
+    """
+    return tuple(
+        None if tok.strip().lower() == "none" else int(tok.strip())
+        for tok in leg.split(",")
+        if tok.strip()
+    )
+
+
+def leg_has_none(leg: str) -> bool:
+    """True iff the normalised *leg* carries at least one ``none`` (no-SL/TP) cell."""
+    return any(value is None for value in leg_values(leg))
+
+
+def _validate_mode_a_legs(sl: str, tp: str) -> None:
+    """Refuse an off-Mode-A-grid leg value UNDER the effective Stage-3 posture.
+
+    History: ``build_sweep_kwargs`` launches a dashboard sweep with
+    ``stage3_enable=True`` by default (R5's institutional flip) —
     :meth:`~brutex.engine.sweep_orchestrator.SweepGridConfig.__post_init__`
-    (ADR-0007 condition 3) then rejects any ``"none"`` or off-Mode-A-grid
+    (ADR-0007 condition 3) rejects any ``None`` or off-Mode-A-grid
     SL/TP value at ENGINE construction time, deep inside the background
-    job, well after preflight/request-resolution already reported the
-    launch as runnable. A round-11 adversarial-refuter review reproduced
-    this live: ``sl="none"`` (accepted by :func:`_normalise_leg`, and the
-    OLD light-research default before this PR's flip) or any off-grid
-    paisa value passed the ENTIRE R4/R20 preflight with ``ok: true``,
-    launched, then failed deterministically inside `cmd_sweep_all` with no
-    reason ever surfaced to the dashboard — directly contradicting R16's
-    "a run that starts is provably runnable" promise. Refuse HERE, loudly,
-    before any background job ever starts (Golden Rule #10).
+    job. A round-11 adversarial-refuter review therefore refused BOTH
+    shapes here, before any background job starts (Golden Rule #10).
+
+    OPERATOR RULING (2026-07-08, R54 — both SL/TP arms AND no-SL/TP arms
+    must be coverable): a ``none`` cell — whole leg OR mixed into a CSV —
+    is first-class RUNNABLE. Any ``none`` cell downgrades the launch's
+    effective ``stage3_enable`` to ``False``
+    (:attr:`SweepRunRequest.stage3_enable`), and with Stage-3 OFF the
+    engine accepts ANY positive paisa value — so the Mode-A axis check
+    stands down for the WHOLE launch (the R54 review round 2 found the
+    unconditional check refusing a provably engine-runnable
+    ``sl="none", tp="1500"`` launch on a Stage-3 justification that very
+    launch had just disabled). Under the effective ``stage3_enable=True``
+    posture (no ``none`` cell anywhere) the off-grid refusal stays fully
+    intact — the round-11 deep-crash class stays closed. The Stage-3
+    downgrade itself is disclosed at LAUNCH time by
+    :func:`build_sweep_kwargs` (WARN) + :func:`oneclick_preflight_for_plan`
+    (clamp payload) — never here, so a request that is subsequently
+    refused (e.g. a bad interval) logs no false "downgraded for this
+    launch" claim.
 
     Parameters
     ----------
     sl, tp
         The ALREADY :func:`_normalise_leg`-validated (syntax-clean) leg
-        strings — either ``"none"`` or a CSV of positive paisa integers.
+        strings — CSVs of positive paisa integers and/or ``none`` cells.
 
     Raises
     ------
     ValueError
-        If either leg is ``"none"`` or contains a value off its locked
-        Mode-A grid.
+        If the launch's effective posture is ``stage3_enable=True`` (no
+        ``none`` cell on either leg) and any value is off its locked
+        Mode-A grid. A ``none``-carrying launch never raises here
+        (operator ruling 2026-07-08, R54).
     """
     from brutex.engine.stage3_grid import MODE_A_SL_AXIS, MODE_A_TP_AXIS, Stage3GridError
 
+    if leg_has_none(sl) or leg_has_none(tp):
+        # Effective stage3_enable=False (SweepRunRequest.stage3_enable): the
+        # engine accepts every positive paisa value with Stage-3 off, so an
+        # on-grid requirement here would refuse a runnable launch on a
+        # disabled justification (R54 review round 2, finding 2).
+        return
     for label, axis, value in (("sl", MODE_A_SL_AXIS, sl), ("tp", MODE_A_TP_AXIS, tp)):
-        if value == "none":
-            raise ValueError(
-                f"{label}='none' is incompatible with the institutional Stage-3 CMA-ES "
-                f"grid (stage3_enable=True is mandatory for every dashboard sweep launch) "
-                f"— provide on-grid {label} paisa value(s) instead"
-            )
         for token in value.split(","):
             try:
                 axis.normalize(int(token))
@@ -433,10 +535,13 @@ def resolve_sweep_request(
     ------
     ValueError
         On any unknown interval, non-BUY/SELL direction, out-of-range / non-integer
-        K, malformed SL/TP leg, an SL/TP leg that is ``"none"`` or off the
-        locked Mode-A grid (see :func:`_validate_mode_a_legs` — the
-        institutional Stage-3 default this route always launches under
-        cannot use either shape; a round-11 adversarial-refuter finding),
+        K, malformed SL/TP leg, an SL/TP leg with a value off the locked
+        Mode-A grid under the effective ``stage3_enable=True`` posture
+        (see :func:`_validate_mode_a_legs` — a round-11
+        adversarial-refuter finding; a ``none`` cell — whole leg or mixed
+        into a CSV — never raises: it downgrades the launch's effective
+        Stage-3 posture instead, disclosed at launch/preflight time,
+        operator ruling 2026-07-08, R54),
         non-positive ``top``, unparseable date,
         ``end < start``, or an out-of-engine-scope launch coordinate (the
         :func:`brutex.engine.sweep_scope.check_sweep_scope` refusal —
@@ -524,7 +629,21 @@ def build_sweep_kwargs(
     ``default_condition_bits()``), ``options_sim=False`` (signal-only —
     options are R12, parked), ``overfit_gate=True`` + ``stage3_enable=True``
     (the 5 hard gates → composite ranking → Stage-3 CMA-ES refinement chain
-    ON by default), and ``allow_missing_slices=False`` (a named gap REFUSES
+    ON by default — EXCEPT when either SL/TP leg carries a ``none`` cell
+    (whole leg or mixed CSV): per the operator ruling 2026-07-08 (R54,
+    no-SL/TP arms must be coverable) the launch's effective
+    ``stage3_enable`` is ``False`` (:attr:`SweepRunRequest.stage3_enable` —
+    the ONE parsed-leg derivation), since CMA-ES cannot seed its ``x0``
+    from a ``none`` cell — ADR-0007 condition 3 — and the engine accepts
+    ``None`` cells only with Stage-3 off; the downgrade is disclosed by
+    ONE ``sweep_runner.none_leg_stage3_downgrade`` WARN per BUILT
+    engine-run kwargs — i.e. at launch time, once per exchange-group
+    engine run; the read-only preflight builds no kwargs and WARNs never,
+    its payload carries the ``stage3_enable`` clamp row instead
+    (:func:`oneclick_preflight_for_plan`) — never silent, and never a
+    false "downgraded for this launch" log on a request that was refused
+    before launching), and
+    ``allow_missing_slices=False`` (a named gap REFUSES
     the whole launch — ruling O-a refuse-whole — never a silent partial
     sweep). ``acknowledge_sla_overrun`` threads the operator's R20
     proceed-dialog confirmation straight to ``cmd_sweep_all``'s existing
@@ -546,6 +665,34 @@ def build_sweep_kwargs(
     dict[str, Any]
         The exact kwargs to splat into ``cmd_sweep_all``.
     """
+    stage3_enable = request.stage3_enable
+    if not stage3_enable:
+        # Operator ruling 2026-07-08 (R54): a "none" SL/TP cell is first-class
+        # RUNNABLE — Stage-3 is downgraded OFF for that launch (CMA-ES x0
+        # must seed from on-grid paisa values, ADR-0007 condition 3; the
+        # engine's SweepGridConfig accepts None cells only with Stage-3 off).
+        # WARNed HERE — at kwargs-build = launch time — so a refused request
+        # never logs a false "downgraded for this launch" claim (R54 review
+        # round 2, finding 4).
+        _LOG.warning(
+            "sweep_runner.none_leg_stage3_downgrade",
+            legs=[
+                label
+                for label, leg in (("sl", request.sl), ("tp", request.tp))
+                if leg_has_none(leg)
+            ],
+            sl=request.sl,
+            tp=request.tp,
+            exchange=request.exchange,
+            detail=(
+                "SL/TP 'none' cell is first-class runnable (operator ruling "
+                "2026-07-08, R54: both SL/TP arms AND no-SL/TP arms must be "
+                "coverable); Stage-3 CMA-ES refinement is downgraded OFF for "
+                "this launch — its gridded SL/TP cells (if any) are NOT "
+                "Stage-3-refined either (the x0 must seed from on-grid paisa "
+                "values, ADR-0007 condition 3)"
+            ),
+        )
     return {
         "lake_root": lake_root,
         "catalog_path": catalog_path,
@@ -568,7 +715,13 @@ def build_sweep_kwargs(
         "data_snapshot_hash": None,
         "overfit_gate": True,
         "options_sim": False,
-        "stage3_enable": True,
+        # Operator ruling 2026-07-08 (R54): derived from the PARSED legs via
+        # the ONE SweepRunRequest.stage3_enable property (leg_has_none) —
+        # never a whole-string comparison, which a mixed "none,50" leg reads
+        # as gridded and re-instates the round-11 deep engine crash (R54
+        # review round 2, finding 3). Fully-gridded legs keep the R5
+        # institutional stage3_enable=True default.
+        "stage3_enable": stage3_enable,
         "allow_missing_slices": False,
         "acknowledge_sla_overrun": request.acknowledge_sla_overrun,
         # DEC-ENGINE-SCOPE-GUARD-001: the dashboard NEVER overrides the engine
@@ -812,6 +965,10 @@ def oneclick_preflight_for_plan(
         (always :data:`~brutex.vocabulary.bits.TOTAL_CONDITIONS`) and
         ``effective_condition_count`` (the MINIMUM across groups — the
         honest worst-case VWAP dead-bits annotation, gap-hunt #8).
+        ``clamps`` additionally carries one ``stage3_enable``
+        requested→applied row per exchange group whose SL/TP legs carry a
+        ``none`` cell (the R54 Stage-3 downgrade, disclosed on the
+        proceed-dialog's own data channel — operator ruling 2026-07-08).
     """
     from brutex.data.lake_footprint import evaluate_disk_guard
     from brutex.engine.sweep_estimator import CALIBRATED_BASIS, PROVISIONAL_BASIS
@@ -852,6 +1009,33 @@ def oneclick_preflight_for_plan(
         )
         all_refusals.extend(r.to_dict() for r in verdict.refusals)
         all_clamps.extend(c.to_dict() for c in verdict.clamps)
+        if not request.stage3_enable:
+            # R54 (operator ruling 2026-07-08) disclosure on the operator
+            # proceed-dialog's own data channel: a none-cell group's Stage-3
+            # downgrade is a requested→applied clamp row, never a
+            # server-log-only fact (R54 review round 2, finding 5). One row
+            # per downgraded exchange group, exchange-named.
+            none_legs = "+".join(
+                label
+                for label, leg in (("sl", request.sl), ("tp", request.tp))
+                if leg_has_none(leg)
+            )
+            all_clamps.append(
+                Clamp(
+                    field="stage3_enable",
+                    requested="true",
+                    applied="false",
+                    reason=(
+                        f"{request.exchange}: SL/TP 'none' cell(s) on {none_legs} — "
+                        "Stage-3 CMA-ES refinement is downgraded OFF for this "
+                        "launch, so its gridded SL/TP cells (if any) are NOT "
+                        "Stage-3-refined either (operator ruling 2026-07-08, "
+                        "R54: no-SL/TP arms are first-class runnable; the "
+                        "CMA-ES x0 must seed from on-grid paisa values, "
+                        "ADR-0007 condition 3)"
+                    ),
+                ).to_dict()
+            )
         total_trials += verdict.estimator.trials
         total_seconds += verdict.estimator.est_seconds_provisional
         total_bytes += verdict.estimator.est_bytes
@@ -921,6 +1105,8 @@ __all__ = [
     "build_sweep_kwargs",
     "default_results_root",
     "group_symbols_by_exchange",
+    "leg_has_none",
+    "leg_values",
     "oneclick_preflight_for_plan",
     "resolve_oneclick_sweep_plan",
     "resolve_sweep_request",
