@@ -468,9 +468,11 @@ class TestLoadGenerationGuard:
         the strategy panel (loadCandles · loadTrades · loadEquity then+catch
         · loadRow then+catch · loadManifestSymbol then+catch · the
         mountFromLocation runs fallback = 9) — count-locked. HONEST scope
-        (COV-N2 reword): a count pin catches a DROPPED guard and forces a
-        conscious update when an arm is added; it cannot by itself prove a
-        NEW arm carries a guard — the per-arm source pins around it do."""
+        (COV-N2 reword; fix-round-2 reword — the earlier "the per-arm source
+        pins around it do" over-claimed): the count pin catches a DROPPED
+        guard and forces a conscious update when an arm is added; proving a
+        NEW arm carries its guard takes a dedicated per-arm pin — the
+        round-1 manifest-catch arm's lives in the test below."""
         js = _js(_STRATEGY_PANEL_JS)
         guards = js.count("if (gen !== state.gen) { return; }")
         assert guards == 9, f"expected 9 gen guards, found {guards}"
@@ -478,6 +480,18 @@ class TestLoadGenerationGuard:
         assert js.count("var gen = state.gen;") >= 6
         # update() owns the ONE bump:
         assert "state.gen += 1;" in js
+
+    def test_manifest_catch_arm_carries_its_own_gen_guard(self) -> None:
+        """Fix round 2 (seccov NIT-1): the round-1 manifest CATCH arm's gen
+        guard was covered only by the aggregate count(9) — pin it
+        individually (the guard opens the arm, BEFORE the honest next())."""
+        js = _js(_STRATEGY_PANEL_JS)
+        arm = js[js.index("window.BXOneclick.getManifestOnce(state.runId, 12000)") :]
+        arm = arm[: arm.index("function bxStrategyPanelMount(")]
+        catch_arm = arm[arm.index(".catch(function () {") :]
+        guard_at = catch_arm.index("if (gen !== state.gen) { return; }")
+        next_at = catch_arm.index("next(); // honest: symbol stays null")
+        assert guard_at < next_at
 
     def test_mount_once_update_api(self) -> None:
         """Graft C.3: listeners bind once in mount(); every open/re-rank
@@ -991,6 +1005,54 @@ class TestDeepLinkRestoreLatch:
         between = handler[guard_at + len("if (!state.restorePending) {") : strip_at]
         assert "}" not in between  # the strip is INSIDE the guard block
 
+    def test_arm_a_sync_throw_releases_the_latch_through_finish_restore(self) -> None:
+        """Fix round 2 (MINOR-2/NEW-R2R3-1): a sync throw out of selectRun
+        (a dead bx-poll global) used to strand the latch TRUE forever —
+        every later run switch then kept a stale rank/run_id in the URL.
+        The release is ARM-SCOPED: arm A's fully-synchronous prefix runs in
+        a finally funneled through finishRestore (the ONE release site — the
+        count==1 pin above stands); the whole-body variant is REJECTED
+        (NEW-R2R3-2 — it would release while arm 3's latestRun is in flight
+        and re-open C-M1). EXECUTED twin: TestPortalDriveExecuted."""
+        js = _js(_PORTAL_JS)
+        restore = js[js.index("function restoreFromUrl(parsed) {") :]
+        arm_a = restore[
+            restore.index("if (parsed.runId) {") : restore.index(
+                'var select = byId("ocRunSelect");'
+            )
+        ]
+        select_at = arm_a.index("window.BXOneclick.selectRun(parsed.runId);")
+        # the reconciling reset stays innermost; the release finally wraps it:
+        reconcile_off_at = arm_a.index("state.reconciling = false;")
+        finish_at = arm_a.index("finishRestore(parsed);")
+        assert select_at < reconcile_off_at < finish_at
+        # BOTH finallys present in the arm (inner reconciling + outer release):
+        assert arm_a.count("} finally {") == 2
+
+    def test_arm_c_sync_throw_guard_is_catch_only_and_rethrows(self) -> None:
+        """Fix round 2 (MINOR-2 twin): a sync throw CONSTRUCTING arm 3's
+        chain (latestRun itself — the same dead-global class) releases the
+        latch via catch-only + rethrow — deliberately NOT a finally, which
+        would release while a HEALTHY chain is still in flight (C-M1)."""
+        js = _js(_PORTAL_JS)
+        arm_c = js[js.index("window.BXOneclick.latestRun()") :]
+        arm_c = arm_c[: arm_c.index("function init() {")]
+        assert "} catch (err) {" in arm_c
+        catch_body = arm_c[arm_c.index("} catch (err) {") :]
+        finish_at = catch_body.index("finishRestore(parsed);")
+        rethrow_at = catch_body.index("throw err;")
+        assert finish_at < rethrow_at
+
+    def test_latest_run_never_clobbers_a_latch_window_adopted_run(self) -> None:
+        """Fix round 2 (NIT-1 ≡ edges F3): arm 3's `.then` adopts
+        latest_run_id ONLY when no run was adopted during the latch window —
+        the poller-selected run wins, so the drawer/winners and the page
+        surfaces stay on ONE run (the mismatch did NOT self-heal: the runs
+        poller auto-notifies only on FIRST selection)."""
+        js = _js(_PORTAL_JS)
+        assert "if (!state.runId && runs && runs.latest_run_id) {" in js
+        assert "state.runId = String(runs.latest_run_id);" in js
+
 
 class TestDrawerHiddenState:
     """E-M1/S-N1: the drawer + backdrop ship with the `hidden` attribute
@@ -1004,18 +1066,24 @@ class TestDrawerHiddenState:
         assert 'aria-label="Strategy detail" hidden' in html
 
     def test_open_unhides_then_adds_open_on_the_next_task(self) -> None:
-        """Un-hide first; `.open` lands via a next-task one-shot (the
-        swapDrawerBody idiom — no rAF, no forced layout flush) so the
-        slide-in transition starts from a computed shut style; a close
-        inside the window keeps the drawer shut (the state.rank guard)."""
+        """Un-hide first, then ONE deliberate forced reflow per drawer open
+        (fix round 2, MINOR-1: an element not rendered at the previous
+        style-change event has no before-change style and the next-task
+        class add usually lands in the SAME frame — without the flush the
+        entrance slide pops instead of animating); `.open` lands via a
+        next-task one-shot (no rAF — T-N6); a close inside the window keeps
+        the drawer shut (the state.rank guard)."""
         js = _js(_PORTAL_JS)
         open_fn = js[js.index("function openDrawer(rank) {") :]
         open_fn = open_fn[: open_fn.index("function closeDrawer()")]
         unhide_at = open_fn.index('drawer.removeAttribute("hidden");')
         assert 'back.removeAttribute("hidden");' in open_fn
+        reflow_at = open_fn.index(
+            "void drawer.offsetWidth; // the ONE sanctioned reflow per drawer open"
+        )
         timer_at = open_fn.index("setTimeout(function () {")
         add_at = open_fn.index('drawer.classList.add("open");')
-        assert unhide_at < timer_at < add_at
+        assert unhide_at < reflow_at < timer_at < add_at
         assert "return; // closed again before the frame — stay shut" in open_fn
 
     def test_close_rehides_after_the_slide_out_with_a_reopen_guard(self) -> None:
@@ -1026,6 +1094,23 @@ class TestDrawerHiddenState:
         assert 'b.setAttribute("hidden", "");' in close_fn
         assert "return; // reopened — stays visible" in close_fn
         assert "}, 400);" in close_fn  # bounded one-shot > slide (.32s) + delay (.34s)
+
+    def test_rehide_timer_is_owned_and_cancelled(self) -> None:
+        """Fix round 2 (NIT-2): each close used to arm an independent,
+        never-cancelled re-hide — in a sub-400 ms open/close/open/close the
+        FIRST close's timer cut the LAST close's slide-out short. ONE owned
+        handle now: every open cancels a pending re-hide; a new close
+        re-arms it (only the LATEST close owns the re-hide)."""
+        js = _js(_PORTAL_JS)
+        assert "var rehideTimer = null;" in js
+        open_fn = js[js.index("function openDrawer(rank) {") :]
+        open_fn = open_fn[: open_fn.index("function closeDrawer()")]
+        assert "clearTimeout(rehideTimer);" in open_fn  # every open cancels
+        close_fn = js[js.index("function closeDrawer() {") :]
+        close_fn = close_fn[: close_fn.index("function surfPrev()")]
+        assert "clearTimeout(rehideTimer); // only the LATEST close owns the re-hide" in close_fn
+        assert "rehideTimer = setTimeout(function () {" in close_fn
+        assert "rehideTimer = null;" in close_fn  # the fired timer releases the handle
 
 
 class TestOpenChoreographyScopedUnderOpen:
@@ -1144,6 +1229,18 @@ class TestRunSwitchStopsTheOldRunChain:
         assert no_run_at < reset_at < fetch_at
 
     def test_reset_covers_story_trades_chart_and_equity(self) -> None:
+        """Fix round 2 (edges F1 + NEW-R2R1-1/-2, refuter-EXECUTED MEDIUM):
+        the reset copy is the templates' HONEST awaiting copy — never a
+        'loading…' progress claim. loadRow's terminal arms (awaiting/
+        corrupt · rank-miss · read failure), loadCandles' no-symbol/
+        no-anchor arms and a trades-fetch failure all leave these hosts
+        untouched FOREVER, so the round-1 'loading …' strings were a
+        deterministic fabricated in-progress claim on exactly the honest
+        states (Golden Rule #1). The three 'loading …' token pins are
+        re-pointed to the honest copy — equal strength (literal-token
+        presence INSIDE resetPanelDom) plus a file-wide killed-token pin.
+        EXECUTED twin: TestPanelTerminalHonestCopy drives the real module.
+        """
         st = _js(_STRATEGY_PANEL_JS)
         reset = st[st.index("function resetPanelDom() {") :]
         reset = reset[: reset.index("function bxStrategyPanelUpdate")]
@@ -1152,11 +1249,49 @@ class TestRunSwitchStopsTheOldRunChain:
             "'stWorst5'",
             "'stTrendSplit'",
             "byId('stTradesBody')",
-            "'loading trades…'",
-            "'loading chart…'",
-            "'loading equity…'",
+            # the templates' honest awaiting copy (mirror of the markup):
+            "trades appear once the run's results-depth sidecars land",
+            "'no candles loaded yet — awaiting run + stored 1-minute data'",
+            "'no trades yet — awaiting real run artifact'",
+            # NEW-R2R1-2: the five previously-omitted residue fields —
+            "byId('stChartCoords')",
+            "or the run's last session",
+            "arrow.hidden = true;",
+            "setEquityLabel('awaiting real run artifact');",
+            "'page 1'",
+            "'source: none'",
         ):
             assert token in reset, token
+        # The fake-progress class is KILLED file-wide (never re-introduced):
+        for dead in ("'loading trades…'", "'loading chart…'", "'loading equity…'"):
+            assert dead not in st, dead
+
+    def test_reset_copy_mirrors_the_template_defaults(self) -> None:
+        """The reset strings are the SAME literals both templates ship as
+        their fresh-load defaults (reset state ≡ fresh-load state) — the
+        hook-parity fence keeps the two templates aligned; this pin keeps
+        the JS copy from drifting off them."""
+        st = _js(_STRATEGY_PANEL_JS)
+        for template in ("strategy.html", "v29.html"):
+            html = (_TEMPLATES / template).read_text(encoding="utf-8")
+            for copy in (
+                "awaiting real run artifact — trades appear once the run's results-depth sidecars land",
+                "no candles loaded yet — awaiting run + stored 1-minute data",
+                "no trades yet — awaiting real run artifact",
+                "chart window resolves from the trade (?trade=N centers on that trade's entry) or the run's last session",
+                "source: none",
+                ">page 1<",
+            ):
+                assert copy in html, (template, copy)
+        for copy in (
+            "awaiting real run artifact — trades appear once the run's results-depth sidecars land",
+            "no candles loaded yet — awaiting run + stored 1-minute data",
+            "no trades yet — awaiting real run artifact",
+            "chart window resolves from the trade (?trade=N centers on that trade's entry) or the run's last session",
+            "source: none",
+            "page 1",
+        ):
+            assert copy in st, copy
 
 
 class TestActiveRowRemark:
@@ -1195,14 +1330,32 @@ class TestCombosInterceptRunCoherence:
 class TestHistoryEntryHygiene:
     """NEW-R2-3: N open/close cycles must not accumulate N identical
     rank-less history entries — a re-open from the close-created duplicate
-    entry REPLACES it; popstate (a REAL prior entry) re-arms pushing."""
+    entry REPLACES it; popstate (a REAL prior entry) re-arms pushing.
+    NEW-R2R2-2 (fix round 2): the arming is gated on the history.state
+    ORIGIN stamp — a deep-link-LANDING entry is a real navigation entry
+    (nothing beneath it duplicates it), so its reopen must PUSH or Back
+    from the reopened drawer exits the site. Both directions are ALSO
+    node-EXECUTED in TestPortalDriveExecuted."""
 
-    def test_close_arms_the_reopen_replace(self) -> None:
+    def test_close_arms_the_reopen_replace_only_over_a_portal_pushed_entry(self) -> None:
         js = _js(_PORTAL_JS)
         close_fn = js[js.index("function closeDrawer() {") :]
         close_fn = close_fn[: close_fn.index("function surfPrev()")]
         assert "state.reopenReplaces = true;" in close_fn
-        assert "if (!state.reconciling) {" in close_fn  # a reconciler close wrote nothing
+        # a reconciler close wrote nothing AND a non-portal (deep-link
+        # landing) entry never arms the replace shortcut:
+        assert (
+            "if (!state.reconciling && history.state && history.state.bxPortalPush === true) {"
+            in close_fn
+        )
+
+    def test_open_push_stamps_the_entry_and_replace_preserves_it(self) -> None:
+        """The origin stamp: the ONE pushState writes {bxPortalPush: true};
+        every replaceState re-writes the CURRENT entry's state so the stamp
+        survives close/re-rank/expand/collapse within the pushed slot."""
+        js = _js(_PORTAL_JS)
+        assert 'history.pushState({ bxPortalPush: true }, "", url);' in js
+        assert 'history.replaceState(history.state, "", url);' in js
 
     def test_popstate_disarms_it(self) -> None:
         js = _js(_PORTAL_JS)
@@ -1329,6 +1482,548 @@ class TestMotionCovenants:
         label_at = render_equity.index("setEquityLabel(bxEquityLabelText(true, false));")
         draw_at = render_equity.index("mpPath.classList.add('bxd-equity-draw');")
         assert label_at < draw_at
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 — EXECUTED node goldens (promoted from the round-2 refuter
+# harnesses that PROVED the stuck-"loading…" MEDIUM and the latch strand):
+# the REAL shipped DOM layers run under a minimal DOM stub — an executed
+# terminal-state golden is strictly stronger than a source pin. HONEST
+# scope: a DOM STUB, not a browser (no CSS/layout/event semantics claimed —
+# the #1557 envelope still applies to real-browser behavior).
+# ---------------------------------------------------------------------------
+
+#: Drives the REAL bx-strategy-panel.js DOM layer (argv: module path, case).
+#: Seeds OLD-RUN residue in every host incl. the five NEW-R2R1-2 fields,
+#: runs update() into the requested terminal/success arm and prints the
+#: final host strings.
+_PANEL_TERMINAL_DRIVE_JS = r"""
+"use strict";
+var MODULE = process.argv[2];
+var CASE = process.argv[3];
+
+function makeEl(tag) {
+  var el = {
+    tagName: String(tag || "div").toUpperCase(),
+    textContent: "",
+    children: [],
+    className: "",
+    hidden: false,
+    appendChild: function (c) { this.children.push(c); return c; },
+    removeChild: function (c) {
+      var i = this.children.indexOf(c);
+      if (i >= 0) { this.children.splice(i, 1); }
+      return c;
+    },
+    addEventListener: function () {},
+    setAttribute: function () {},
+    removeAttribute: function () {},
+    getAttribute: function () { return null; },
+    classList: { add: function () {}, remove: function () {} },
+    style: { setProperty: function () {} }
+  };
+  Object.defineProperty(el, "firstChild", {
+    get: function () { return this.children.length ? this.children[0] : null; }
+  });
+  return el;
+}
+
+var IDS = [
+  "stPrev", "stNext", "stRunId", "stRank", "stName", "stInstr", "stTf",
+  "stDir", "stArm", "stMask", "stFamily", "stNet", "stMaxDd", "stSharpe",
+  "stDsr", "stCpcv", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
+  "stExpectancy", "stRecovery", "stLossStreak", "stMae", "stMfe",
+  "stMinuteDd", "stExitMix", "stWorst5", "stTrendSplit", "stRegimeWonder",
+  "stTradesBody", "stTradesNote", "stChartHost", "stEquityHost",
+  "stChartCoords", "stChartError", "stTradesError", "stTradesSource",
+  "stPage", "stEquityLabel", "stArrowNote"
+];
+var reg = {};
+for (var i = 0; i < IDS.length; i++) { reg[IDS[i]] = makeEl("div"); }
+
+/* Seed OLD-RUN residue in EVERY host the reset must clear (NEW-R2R1-2). */
+reg.stName.textContent = "OLDRUN conditions";
+reg.stTradesNote.textContent = "OLDRUN 37 trade(s) shown of 37 · offset 0";
+var oldChart = makeEl("div");
+oldChart.textContent = "OLDRUN chart";
+reg.stChartHost.children.push(oldChart);
+var oldEq = makeEl("div");
+oldEq.textContent = "OLDRUN equity";
+reg.stEquityHost.children.push(oldEq);
+reg.stEquityLabel.textContent = "OLDRUN minute-path equity label";
+reg.stChartCoords.textContent = "OLDRUN NSE-NIFTY · 5minute · session 2024-01-02";
+reg.stArrowNote.hidden = false;
+reg.stArrowNote.textContent = "OLDRUN dropped-arrow warning";
+reg.stPage.textContent = "OLDRUN page 4";
+reg.stTradesSource.textContent = "OLDRUN source: trade_store";
+
+global.document = {
+  readyState: "complete",
+  getElementById: function (id) { return reg[id] || null; },
+  querySelector: function () { return null; },
+  querySelectorAll: function () { return []; },
+  createElement: function (tag) { return makeEl(tag); },
+  addEventListener: function () {}
+};
+
+global.window = {
+  BXPortalState: {
+    strategyHref: function () { return "/strategy?x"; },
+    parseStrategyParams: function () { return { runId: null, rank: 1, tradeIdx: null }; }
+  },
+  BXUI: {
+    clear: function (host) { host.children.length = 0; host.textContent = ""; },
+    el: function (tag, cls, text) {
+      var e = makeEl(tag);
+      e.className = cls || "";
+      e.textContent = text === undefined ? "" : text;
+      return e;
+    }
+  },
+  BXChart: {
+    parseTsIst: function () { return null; },
+    istDateOfEpoch: function () { return "2026-01-01"; },
+    candleGeom: function () { return { empty: true }; },
+    candleRowsFromDbPayload: function () { return { missing: null, skipped: 0, rows: [] }; },
+    skippedRowsNote: function () { return ""; },
+    svgEl: function (t) { return makeEl(t); },
+    candleNodes: function () { return []; },
+    tradeArrow: function () { return { dropped: true }; },
+    arrowNode: function () { return makeEl("g"); },
+    minutePathSeries: function () { return { empty: true }; },
+    equitySeries: function () { return { empty: true }; },
+    equityPathNode: function () { return null; },
+    ARROW_DROPPED_NOTE: "arrow dropped"
+  },
+  BXExplain: {
+    paisaToRupees: function (p) { return String(p); },
+    tradeArithmetic: function () { return { lines: ["arith"] }; }
+  },
+  BXPoll: {
+    fetchJson: function () {
+      // the equity sidecar route (success case only): an honest awaiting
+      return Promise.resolve({ status: "awaiting", detail: "no sidecar" });
+    }
+  },
+  BXOneclick: {
+    oneshotFetch: function (url, errHost, cb) {
+      // the trades page (success/nosymbol cases): ok with ZERO rows — the
+      // single most common real state (run stored, sidecars awaiting)
+      if (url.indexOf("/api/v1/oneclick/trades") === 0) {
+        Promise.resolve().then(function () {
+          cb({ status: "ok", source: "test", rows: [], total: 0 });
+        });
+      }
+    },
+    getManifestOnce: function () { return Promise.reject(new Error("unused")); },
+    instrumentText: function (x) { return String(x || "—"); },
+    vixBandText: function () { return "—"; },
+    avgExtremeText: function () { return "—"; },
+    minutePathDdText: function () { return "—"; },
+    exitMixText: function () { return "—"; },
+    worst5DaysText: function () { return "—"; },
+    trendSplitText: function () { return "—"; },
+    regimeWonderText: function () { return "—"; }
+  },
+  location: { search: "" }
+};
+
+require(MODULE); // the DOM layer mounts against the stubs above
+
+var getTop100;
+if (CASE === "rankmiss") {
+  getTop100 = function () {
+    return Promise.resolve({
+      status: "ok", row_count: 3,
+      rows: [{ rank: 1 }, { rank: 2 }, { rank: 3 }]
+    });
+  };
+} else if (CASE === "awaiting") {
+  getTop100 = function () {
+    return Promise.resolve({ status: "awaiting", detail: "awaiting real run artifact" });
+  };
+} else if (CASE === "reject") {
+  getTop100 = function () { return Promise.reject(new Error("fetch down")); };
+} else { // success | nosymbol — rank found; trades/equity fetches stubbed above
+  getTop100 = function () {
+    return Promise.resolve({
+      status: "ok", row_count: 1,
+      rows: [{ rank: 5, tf: "5m", direction: "long", arm: "a", mask_hex: "0x1",
+               family_id: "f", conditions: ["c1"], metrics: {}, regime: {} }]
+    });
+  };
+}
+
+var manifestSymbols = CASE === "nosymbol" ? [] : ["NSE-NIFTY"];
+var panel = global.window.BXStrategyPanel;
+panel.mount({
+  getTop100: getTop100,
+  getManifest: function () {
+    return { run_id: "r-1", manifest: { selection: { symbols: manifestSymbols } } };
+  }
+});
+panel.update({ runId: "r-1", rank: 5 });
+
+function hostText(el) {
+  var bits = [];
+  if (el.textContent) { bits.push(el.textContent); }
+  for (var j = 0; j < el.children.length; j++) { bits.push(el.children[j].textContent); }
+  return bits.join(" | ");
+}
+
+setTimeout(function () {
+  console.log(JSON.stringify({
+    caseName: CASE,
+    stName: reg.stName.textContent,
+    stTradesNote: reg.stTradesNote.textContent,
+    stChartHost: hostText(reg.stChartHost),
+    stEquityHost: hostText(reg.stEquityHost),
+    stEquityLabel: reg.stEquityLabel.textContent,
+    stChartCoords: reg.stChartCoords.textContent,
+    stPage: reg.stPage.textContent,
+    stTradesSource: reg.stTradesSource.textContent,
+    stArrowNoteHidden: reg.stArrowNote.hidden,
+    stArrowNoteText: reg.stArrowNote.textContent
+  }));
+}, 60);
+"""
+
+#: The templates' honest awaiting copy — the panel's reset targets.
+_HONEST_TRADES_NOTE = (
+    "awaiting real run artifact — trades appear once the run's results-depth sidecars land"
+)
+_HONEST_CHART_HOST = "no candles loaded yet — awaiting run + stored 1-minute data"
+_HONEST_EQUITY_HOST = "no trades yet — awaiting real run artifact"
+_HONEST_COORDS = (
+    "chart window resolves from the trade (?trade=N centers on that trade's entry)"
+    " or the run's last session"
+)
+
+
+def _run_panel_drive(tmp_path: Path, case: str) -> dict[str, Any]:
+    script = tmp_path / "drive-panel.js"
+    script.write_text(_PANEL_TERMINAL_DRIVE_JS, encoding="utf-8")
+    proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+        ["node", str(script), str(_STRATEGY_PANEL_JS), case],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    out: dict[str, Any] = json.loads(proc.stdout)
+    return out
+
+
+@pytest.mark.skipif(_NODE is None, reason="node not installed")
+class TestPanelTerminalHonestCopy:
+    """Fix round 2 (edges F1 + NEW-R2R1-1/-2 — the refuter-EXECUTED MEDIUM
+    regression): the REAL bx-strategy-panel.js, driven for real, ends every
+    loadRow terminal AND the success-path no-anchor/no-symbol chart arms
+    with the templates' HONEST awaiting copy in every host — never a
+    perpetual 'loading…' progress claim, and never the previous run's
+    residue (the harness seeds OLD-RUN residue in ALL hosts, including the
+    five previously-omitted NEW-R2R1-2 fields)."""
+
+    def _assert_honest_common(self, out: dict[str, Any]) -> None:
+        # No fabricated progress claim, no previous-run residue — anywhere:
+        blob = json.dumps(out)
+        assert "loading" not in blob, blob
+        assert "OLDRUN" not in blob, blob
+        assert out["stChartHost"] == _HONEST_CHART_HOST
+        assert out["stEquityHost"] == _HONEST_EQUITY_HOST
+        assert out["stArrowNoteHidden"] is True
+        assert out["stArrowNoteText"] == ""
+
+    @pytest.mark.parametrize(
+        ("case", "expected_name"),
+        [
+            ("rankmiss", "rank 5 is not in the stored top-100 (3 rows stored)"),
+            ("awaiting", "awaiting real run artifact"),
+            ("reject", "top-100 read failed — retry from the winners table or reload"),
+        ],
+    )
+    def test_every_loadrow_terminal_ends_on_the_honest_awaiting_copy(
+        self, tmp_path: Path, case: str, expected_name: str
+    ) -> None:
+        out = _run_panel_drive(tmp_path, case)
+        self._assert_honest_common(out)
+        assert out["stName"] == expected_name
+        assert out["stTradesNote"] == _HONEST_TRADES_NOTE
+        assert out["stEquityLabel"] == "awaiting real run artifact"
+        assert out["stChartCoords"] == _HONEST_COORDS
+        assert out["stPage"] == "page 1"
+        assert out["stTradesSource"] == "source: none"
+
+    def test_success_with_zero_trades_ends_on_the_honest_no_anchor_arm(
+        self, tmp_path: Path
+    ) -> None:
+        """The single most common real state (run stored, sidecars still
+        awaiting): the story card loads, the trades page is ok/empty, and
+        the chart host reads the honest awaiting copy beside the honest
+        no-timestamps coords line — NOT 'loading chart…' forever
+        (NEW-R2R2-1's executed repro, now the fixed assertion)."""
+        out = _run_panel_drive(tmp_path, "success")
+        blob = json.dumps(out)
+        assert "loading" not in blob, blob
+        assert "OLDRUN" not in blob, blob
+        assert out["stTradesNote"] == "0 trade(s) shown of 0 · offset 0"
+        assert out["stTradesSource"] == "source: test"
+        assert out["stChartHost"] == _HONEST_CHART_HOST
+        assert out["stChartCoords"] == (
+            "no trade timestamps yet — chart loads once trades exist (awaiting real run artifact)"
+        )
+        assert out["stEquityHost"] == _HONEST_EQUITY_HOST
+        assert (
+            out["stEquityLabel"] == "per-trade close equity (minute-path unavailable for this run)"
+        )
+        assert out["stPage"] == "page 1"
+
+    def test_no_mappable_symbol_ends_on_the_honest_unavailable_arm(self, tmp_path: Path) -> None:
+        """A manifest with no mappable symbol: loadCandles' first honest arm
+        names the miss and the chart host keeps the honest awaiting copy."""
+        out = _run_panel_drive(tmp_path, "nosymbol")
+        blob = json.dumps(out)
+        assert "loading" not in blob, blob
+        assert "OLDRUN" not in blob, blob
+        assert out["stChartHost"] == _HONEST_CHART_HOST
+        assert out["stChartCoords"] == (
+            "chart unavailable — the run selection carries no mappable symbol/timeframe yet"
+        )
+
+
+#: Drives the REAL bx-operator-portal.js state machine (argv: portal-state
+#: path, portal path, mode). Modes: latch-throw/latch-clean (the MINOR-2
+#: sync-throw strand — the rank strip must run after the latch releases),
+#: hist-deeplink/hist-push (the NEW-R2R2-2 origin-stamped history hygiene,
+#: both directions).
+_PORTAL_DRIVE_JS = r"""
+"use strict";
+var STATE_MODULE = process.argv[2];
+var PORTAL_MODULE = process.argv[3];
+var MODE = process.argv[4];
+
+function makeEl() {
+  var el = {
+    textContent: "", value: "", disabled: false, hidden: false,
+    children: [],
+    listeners: {},
+    appendChild: function (c) { this.children.push(c); return c; },
+    removeChild: function (c) {
+      var i = this.children.indexOf(c);
+      if (i >= 0) { this.children.splice(i, 1); }
+      return c;
+    },
+    addEventListener: function (type, fn) {
+      (this.listeners[type] = this.listeners[type] || []).push(fn);
+    },
+    fire: function (type, ev) {
+      var fns = (this.listeners[type] || []).slice();
+      for (var i = 0; i < fns.length; i++) { fns[i](ev || {}); }
+    },
+    setAttribute: function () {},
+    removeAttribute: function () {},
+    getAttribute: function () { return null; },
+    querySelector: function () { return null; },
+    querySelectorAll: function () { return []; },
+    classList: { add: function () {}, remove: function () {} },
+    contains: function () { return false; },
+    focus: function () {},
+    scrollIntoView: function () {},
+    offsetWidth: 0
+  };
+  Object.defineProperty(el, "firstChild", {
+    get: function () { return this.children.length ? this.children[0] : null; }
+  });
+  return el;
+}
+
+var reg = {};
+function el(id) { if (!reg[id]) { reg[id] = makeEl(); } return reg[id]; }
+
+global.document = {
+  readyState: "complete",
+  getElementById: function (id) {
+    if (id === "ocRunSelect") { return null; } // no pre-selected run
+    return el(id);
+  },
+  querySelector: function () { return null; },
+  querySelectorAll: function () { return []; },
+  createElement: function () { return makeEl(); },
+  addEventListener: function () {},
+  body: makeEl(),
+  activeElement: null,
+  contains: function () { return false; }
+};
+
+var historyLog = [];
+function recordWrite(kind, url) {
+  historyLog.push([kind, url]);
+  var q = url.indexOf("?");
+  global.window.location.search = q === -1 ? "" : url.slice(q);
+}
+global.history = {
+  state: null,
+  pushState: function (s, t, url) { this.state = s; recordWrite("push", url); },
+  replaceState: function (s, t, url) { this.state = s; recordWrite("replace", url); }
+};
+
+var capturedRunChange = null;
+var screenerDeps = null;
+global.window = {
+  location: {
+    search: MODE === "hist-push" ? "" : "?winners=1&rank=5&run_id=r-A",
+    pathname: "/",
+    hash: ""
+  },
+  addEventListener: function () {},
+  matchMedia: function () { return { matches: false }; },
+  BXScreenerPanel: {
+    mount: function (opts) { screenerDeps = opts; return { loadRows: function () {} }; }
+  },
+  BXStrategyPanel: { mount: function () {}, update: function () {} },
+  BXOneclick: {
+    onRunChange: function (cb) { capturedRunChange = cb; },
+    selectRun: function (runId) {
+      if (MODE === "latch-throw") {
+        // the sync-throw class: e.g. a dead bx-poll global inside
+        // loadRunScoped's refreshTop100
+        throw new TypeError("Cannot read properties of undefined (reading 'fetchJson')");
+      }
+      void runId;
+    },
+    latestRun: function () { return new Promise(function () {}); },
+    getTop100: function () { return Promise.resolve({ status: "ok", row_count: 30 }); }
+  }
+};
+
+require(STATE_MODULE); // sets window.BXPortalState (the REAL codec)
+
+var initError = null;
+try {
+  require(PORTAL_MODULE);
+} catch (e) {
+  initError = String(e); // a browser logs the uncaught listener error and continues
+}
+
+setTimeout(function () {
+  var initWrites = historyLog.slice();
+  historyLog.length = 0;
+  if (MODE === "latch-throw" || MODE === "latch-clean") {
+    if (capturedRunChange) { capturedRunChange("r-B"); } // the poller's run switch
+    setTimeout(function () {
+      var stripped = historyLog.filter(function (h) {
+        return h[0] === "replace" && h[1].indexOf("rank=") === -1;
+      });
+      console.log(JSON.stringify({
+        mode: MODE,
+        initError: initError,
+        initWrites: initWrites,
+        writesAfterRunSwitch: historyLog,
+        rankStripRan: stripped.length > 0
+      }));
+    }, 30);
+    return;
+  }
+  if (MODE === "hist-deeplink") {
+    el("ocDrawerClose").fire("click");   // close #1 — deep-link-ORIGIN entry
+    screenerDeps.onRowClick("7", "r-A"); // reopen #1 — must PUSH (NEW-R2R2-2)
+    el("ocDrawerClose").fire("click");   // close #2 — now a PUSHED slot
+    screenerDeps.onRowClick("8", "r-A"); // reopen #2 — must REPLACE (NEW-R2-3)
+    console.log(JSON.stringify({
+      mode: MODE,
+      initError: initError,
+      initWrites: initWrites,
+      writes: historyLog,
+      finalStamp: global.history.state
+    }));
+    return;
+  }
+  // hist-push: the push-origin direction (NEW-R2-3 preserved)
+  if (capturedRunChange) { capturedRunChange("r-A"); }
+  historyLog.length = 0;
+  el("ocWinnersToggle").fire("click");   // expand — replaceState
+  screenerDeps.onRowClick("3", "r-A");   // open — the ONE push (stamped)
+  el("ocDrawerClose").fire("click");     // close — replace + arm
+  screenerDeps.onRowClick("4", "r-A");   // reopen — must REPLACE, not push
+  console.log(JSON.stringify({
+    mode: MODE,
+    initError: initError,
+    writes: historyLog,
+    finalStamp: global.history.state
+  }));
+}, 30);
+"""
+
+
+def _run_portal_drive(tmp_path: Path, mode: str) -> dict[str, Any]:
+    script = tmp_path / "drive-portal.js"
+    script.write_text(_PORTAL_DRIVE_JS, encoding="utf-8")
+    proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+        ["node", str(script), str(_PORTAL_STATE_JS), str(_PORTAL_JS), mode],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    out: dict[str, Any] = json.loads(proc.stdout)
+    return out
+
+
+@pytest.mark.skipif(_NODE is None, reason="node not installed")
+class TestPortalDriveExecuted:
+    """Fix round 2 — the REAL bx-operator-portal.js executed under the DOM
+    stub (promoted from the round-2 refuter latch harness)."""
+
+    def test_latch_releases_on_a_sync_selectrun_throw(self, tmp_path: Path) -> None:
+        """MINOR-2/NEW-R2R3-1 killing golden: a deep link whose selectRun
+        throws synchronously (a dead bx-poll global) must NOT strand the
+        restorePending latch — the next run switch still strips the stale
+        rank/run_id from the URL. Pre-fix (executed by the refuter): ZERO
+        history writes after the run switch — the URL lied forever."""
+        out = _run_portal_drive(tmp_path, "latch-throw")
+        assert out["initError"] is not None and "TypeError" in out["initError"]
+        assert out["initWrites"] == []  # the restore itself never writes history
+        assert out["rankStripRan"] is True
+        for _kind, url in out["writesAfterRunSwitch"]:
+            assert "rank=" not in url, url
+
+    def test_latch_clean_control_still_strips_after_restore(self, tmp_path: Path) -> None:
+        out = _run_portal_drive(tmp_path, "latch-clean")
+        assert out["initError"] is None
+        assert out["initWrites"] == []
+        assert out["rankStripRan"] is True
+
+    def test_deep_link_origin_close_then_reopen_pushes_a_real_entry(self, tmp_path: Path) -> None:
+        """NEW-R2R2-2 killing golden: a restore-opened drawer never pushed,
+        so its close rewrote the page's ONE real navigation entry — the
+        reopen must PUSH (Back then closes the drawer instead of exiting
+        the site); the SECOND close/reopen cycle converges back to the
+        NEW-R2-3 replace shortcut (the slot is now portal-pushed)."""
+        out = _run_portal_drive(tmp_path, "hist-deeplink")
+        assert out["initError"] is None
+        assert out["initWrites"] == []  # the reconciling restore writes nothing
+        kinds = [w[0] for w in out["writes"]]
+        assert kinds == ["replace", "push", "replace", "replace"], out["writes"]
+        close1, reopen1, close2, reopen2 = (w[1] for w in out["writes"])
+        assert "rank=" not in close1
+        assert "rank=7" in reopen1  # the PUSHED reopen carries the new rank
+        assert "rank=" not in close2
+        assert "rank=8" in reopen2  # converged: replace within the pushed slot
+        assert out["finalStamp"] == {"bxPortalPush": True}
+
+    def test_push_origin_cycles_never_accumulate_entries(self, tmp_path: Path) -> None:
+        """The other direction (NEW-R2-3 PRESERVED): a normal row-click open
+        pushes ONCE; close/reopen cycles replace within that slot — never a
+        second push, never duplicate rank-less entries."""
+        out = _run_portal_drive(tmp_path, "hist-push")
+        assert out["initError"] is None
+        kinds = [w[0] for w in out["writes"]]
+        assert kinds == ["replace", "push", "replace", "replace"], out["writes"]
+        assert kinds.count("push") == 1
+        expand, opened, closed, reopened = (w[1] for w in out["writes"])
+        assert "winners=1" in expand and "rank=" not in expand
+        assert "rank=3" in opened
+        assert "rank=" not in closed
+        assert "rank=4" in reopened
+        assert out["finalStamp"] == {"bxPortalPush": True}
 
 
 # ---------------------------------------------------------------------------

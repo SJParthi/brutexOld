@@ -707,14 +707,41 @@ class TestRoutesEndToEnd:
         # raw-substring ban in test_dashboard_oneclick_frontend.py already
         # covers the JS files' innerHTML/outerHTML word forms; this regex is
         # the templates' (inline-script) guard + the executable-sink net.
+        # WIDENED AGAIN (fix round 2, seccov LOW-1 — the classic
+        # completeness regress: a second hostile iteration found classes
+        # outside round 1's named set; corpus re-verified 0 hits): the
+        # setHTMLUnsafe sink, DOMParser/parseFromString document
+        # construction, and the setAttribute('srcdoc'|'src', …) attribute
+        # form of the srcdoc/src sinks (the `.srcdoc=` property form was
+        # already caught; `setAttribute('href', …)` is deliberately NOT
+        # banned — the ONE bxStrategyHref builder legitimately sets
+        # component-encoded hrefs). NOTE: `el[v] = x` with a runtime
+        # v="innerHTML" stays caught for the 9 JS files by the raw-substring
+        # ban in test_dashboard_oneclick_frontend.py (the string literal
+        # itself trips it) — a residual gap only for template inline scripts
+        # and concatenated forms, stated honestly.
         sink = re.compile(
             r"\.(inner|outer)HTML\s*\+?=|\[[\"'](inner|outer)HTML[\"']\]\s*="
             r"|insertAdjacentHTML|document\.write\(|createContextualFragment"
             r"|\.srcdoc\s*=|setAttribute\(\s*[\"']on|\beval\(|new\s+Function\("
             r"|[\"']javascript:"
+            r"|setHTMLUnsafe|new\s+DOMParser|parseFromString"
+            r"|setAttribute\(\s*[\"'](srcdoc|src)[\"']"
         )
+        # Fix round 2 (seccov LOW-1): raw inline HTML `on*=` handler
+        # attributes are banned in the scanned templates' MARKUP (the
+        # <script> blocks are stripped first — JS comparisons like `a < b`
+        # must never false-positive; the JS-side `setAttribute('on…')` arm
+        # above covers dynamic handler injection). The one pre-existing
+        # benign specimen (v29's modal 'Got it' onclick) was converted to a
+        # proper addEventListener binding in the same change, so the corpus
+        # is genuinely zero-hit.
+        inline_handler = re.compile(r"<[^>]{0,300}?\son[a-z]+\s*=", re.IGNORECASE)
+        script_block = re.compile(r"<script\b.*?</script>", re.DOTALL | re.IGNORECASE)
         for name in ("screener.html", "strategy.html", "v29.html"):
-            assert sink.search(_template(name)) is None, name
+            html = _template(name)
+            assert sink.search(html) is None, name
+            assert inline_handler.search(script_block.sub("", html)) is None, name
         for js_name in (
             "bx-oneclick.js",
             "bx-poll.js",

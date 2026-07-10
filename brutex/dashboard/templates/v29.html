@@ -3181,11 +3181,18 @@
   <div class="modal">
     <h3>Screenshot instructions</h3>
     <p>PNG export needs the html2canvas library (offline?). For now use your OS screenshot tool: macOS <kbd>⌘+Shift+4</kbd> · Windows <kbd>Win+Shift+S</kbd>. For a real reel: open Reel mode → screen-record while scrolling.</p>
-    <button onclick="document.getElementById('modalBack').classList.remove('open')">Got it</button>
+    <!-- Bound via addEventListener in the tail script (fix round 2,
+         seccov LOW-1): the page carries ZERO inline on*= handlers, so the
+         widened hostile sink scan can ban the raw-HTML handler class. -->
+    <button id="modalBackOk" type="button">Got it</button>
   </div>
 </div>
 
 <script>
+  document.getElementById('modalBackOk').addEventListener('click', () => {
+    document.getElementById('modalBack').classList.remove('open');
+  });
+
   document.querySelectorAll('.tabs button').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));

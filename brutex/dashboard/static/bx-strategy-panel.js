@@ -620,8 +620,15 @@ function bxEquityLabelText(hasSeries, okEmpty) {
      target (adversarial-review fold, NEW-R3-1): the gen guard stops stale
      WRITES but not stale RESIDUE — a reopen after a run switch must never
      show the old run's rank under the new pill during the fetch window.
-     Values reset to the honest placeholder; the hosts drop to a loading
-     note (the awaiting/error strings are re-written by the loads). */
+     Values reset to the honest placeholder; every host resets to the
+     templates' HONEST awaiting copy — NEVER a "loading…" progress claim
+     (fix round 2, edges F1 + NEW-R2R1-1/-2, refuter-EXECUTED): loadRow's
+     terminal arms (awaiting/corrupt · rank-miss · read failure),
+     loadCandles' no-symbol/no-anchor arms and a trades-fetch failure all
+     deliberately leave these hosts untouched, so a progress string here
+     would read as an in-flight fetch FOREVER on exactly the honest states
+     (Golden Rule #1); the success paths overwrite them anyway. Reset state
+     ≡ the templates' fresh-load state, byte-for-byte. */
   function resetPanelDom() {
     var dashIds = [
       'stRank', 'stName', 'stInstr', 'stTf', 'stDir', 'stArm', 'stMask',
@@ -639,19 +646,42 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
     }
     var note = byId('stTradesNote');
-    if (note) { note.textContent = 'loading trades…'; }
+    if (note) {
+      note.textContent =
+        "awaiting real run artifact — trades appear once the run's results-depth sidecars land";
+    }
     if (window.BXUI) {
       var chart = byId('stChartHost');
       if (chart) {
         window.BXUI.clear(chart);
-        chart.appendChild(window.BXUI.el('div', 'note', 'loading chart…'));
+        chart.appendChild(window.BXUI.el('div', 'note',
+          'no candles loaded yet — awaiting run + stored 1-minute data'));
       }
       var equity = byId('stEquityHost');
       if (equity) {
         window.BXUI.clear(equity);
-        equity.appendChild(window.BXUI.el('div', 'note', 'loading equity…'));
+        equity.appendChild(window.BXUI.el('div', 'note',
+          'no trades yet — awaiting real run artifact'));
       }
     }
+    /* NEW-R2R1-2: the five previously-omitted residue fields — an old
+       run's coords/arrow-warning/equity-label/page/source badge must not
+       survive a terminal reopen under the new rank pill. */
+    var coords = byId('stChartCoords');
+    if (coords) {
+      coords.textContent =
+        "chart window resolves from the trade (?trade=N centers on that trade's entry) or the run's last session";
+    }
+    var arrow = byId('stArrowNote');
+    if (arrow) {
+      arrow.hidden = true;
+      arrow.textContent = '';
+    }
+    setEquityLabel('awaiting real run artifact');
+    var page = byId('stPage');
+    if (page) { page.textContent = 'page 1'; }
+    var badge = byId('stTradesSource');
+    if (badge) { badge.textContent = 'source: none'; }
   }
 
   function bxStrategyPanelUpdate(target) {

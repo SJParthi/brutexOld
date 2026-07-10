@@ -1980,8 +1980,34 @@ hostile-review pass._
   duplicate), the panels-CSS `<link>` pinned per consumer template. REFUTED items stand as-is
   (P-N5 subscribe-race structurally impossible · COV-N3 source≡wire · E-M6 the ledgered R10
   deferral); pre-existing verbatim-port NITs (per-keystroke filter render · double equity
-  render · out-of-page ?trade= label) are INHERITED, noted not fixed. HONEST: DOM wiring is
-  source-string-pinned, not executed (the #1557
+  render · out-of-page ?trade= label) are INHERITED, noted not fixed.
+  ADVERSARIAL-REVIEW FIX ROUND 2 folded (refuter-majority-confirmed; two refuter harnesses
+  PROMOTED into the suite as EXECUTED node goldens driving the REAL shipped DOM layers, each
+  proven killing against the pre-fix blob; MIGRATION.md #1714 carries the full record):
+  [MEDIUM — the round-1 fold's one regression] `resetPanelDom` writes the templates' HONEST
+  awaiting copy instead of "loading…" (loadRow's three terminals, the no-symbol/no-anchor chart
+  arms and a trades-fetch failure never repaint those hosts — the progress claim read as an
+  in-flight fetch FOREVER on exactly the honest states) + resets the five previously-omitted
+  residue fields (coords/arrow-note/equity-label/page/source badge); the entrance slide gains
+  the ONE sanctioned forced reflow per drawer open (un-hidden style committed before the
+  next-task `.open` — the skip was spec-deterministic); the `restorePending` latch release is
+  ARM-SCOPED through finishRestore (a sync selectRun/latestRun throw never strands it; the
+  whole-body try/finally variant REJECTED — it re-opens C-M1); deep-link history hygiene — the
+  reopen-replace shortcut arms only over a portal-PUSHED entry (the `history.state` origin
+  stamp), so a deep-link-origin close+reopen PUSHES and Back closes the drawer instead of
+  exiting the site (the push-origin no-duplicate direction preserved, both EXECUTED); arm-3
+  latestRun never clobbers a latch-window-adopted run (`if (!state.runId)`); the after-slide
+  re-hide is ONE owned, open-cancelled timer (no truncated slide-out under sub-400 ms cycles);
+  the sink scan widened AGAIN (setHTMLUnsafe · DOMParser/parseFromString ·
+  setAttribute('srcdoc'|'src') + a template-markup inline-`on*=` ban; v29's one benign modal
+  onclick CONVERTED to addEventListener so the corpus is zero-hit); the T-N7 manifest-catch
+  arm gains its own per-arm gen-guard pin. REFUTED, deliberately NOT "fixed": edges F2
+  (reopenReplaces across collapse/expand is correct-as-designed — the proposed clear would
+  re-create the duplicate-entry accumulation) and edges F4 (a failed restore's URL rank is the
+  honest state, self-clearing). HONEST: the codec/pure helpers AND now the panel/portal
+  terminal-state machines are EXECUTED under node (a DOM stub — no CSS/layout/browser-event
+  semantics claimed); the remaining DOM wiring stays
+  source-string-pinned (the #1557
   envelope); the drawer equity is minute-path-first with the labeled per-trade fallback while the
   operator `#ocEquityHost` stays per-trade (the #48 ruling). DISPLAY zone ONLY — ZERO Python
   changes; the two oneclick 100% line+branch gates stay green byte-untouched; ENGINE UNCHANGED —

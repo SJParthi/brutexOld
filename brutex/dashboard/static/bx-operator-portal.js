@@ -66,10 +66,19 @@
     // identical to the pre-open one — the NEXT open replaces it instead of
     // pushing, so open/close cycles never accumulate duplicate entries.
     // Cleared on popstate (there the current entry is a REAL prior one).
+    // Armed ONLY over a portal-PUSHED entry (the history.state stamp —
+    // NEW-R2R2-2, fix round 2): a deep-link-LANDING entry is a real
+    // navigation entry, and collapsing its reopen into it would leave Back
+    // exiting the site from an open drawer.
     reopenReplaces: false,
     lastFocus: null
   };
   var winnersCtl = null;
+  // NIT-2 (fix round 2): the ONE pending after-slide re-hide timer — each
+  // close used to arm an independent, never-cancelled timer, so a rapid
+  // open/close/open/close (<400 ms) let close #1's timer cut close #2's
+  // slide-out short. Every open cancels it; a new close re-arms it.
+  var rehideTimer = null;
   // NEW-R2-1 twin (adversarial-review fold): the rowCount read rides the
   // same memo'd promise as the winners table — and needs the same
   // stale-response guard, or a slow old run's row_count sets the surf
@@ -85,9 +94,15 @@
     var search = window.BXPortalState.serialize(window.location.search, patch);
     var url = window.location.pathname + search + window.location.hash;
     if (push) {
-      history.pushState(null, "", url); // drawer OPEN — the ONLY pushState
+      // The bxPortalPush stamp marks the entry as PORTAL-created —
+      // closeDrawer arms the reopen-replace shortcut only over such an
+      // entry (NEW-R2R2-2, fix round 2).
+      history.pushState({ bxPortalPush: true }, "", url); // drawer OPEN — the ONLY pushState
     } else {
-      history.replaceState(null, "", url);
+      // In-place rewrite: the entry's ORIGIN stamp survives every
+      // replaceState (close/re-rank/expand/collapse), so a later close in
+      // the same slot still knows whether the portal pushed it.
+      history.replaceState(history.state, "", url);
     }
   }
 
@@ -251,8 +266,11 @@
     }
     var cls = forward ? "bxd-swap" : "bxd-swapRev";
     body.classList.remove("bxd-swap", "bxd-swapRev");
-    // Re-add on the NEXT task so the one-shot restarts — never a forced
-    // synchronous layout flush (zero JS layout measurement).
+    // Re-add on the NEXT task so the one-shot ANIMATION restarts — no
+    // reflow needed here (animations re-fire on rule re-match, unlike
+    // transitions; the module's ONE sanctioned forced reflow lives in
+    // openDrawer's un-hide arm, where a transition needs a committed
+    // before-change style — fix round 2).
     setTimeout(function () {
       body.classList.add(cls);
       setTimeout(function () {
@@ -263,6 +281,12 @@
 
   function openDrawer(rank) {
     mountDrawerOnce();
+    if (rehideTimer !== null) {
+      // NIT-2: a pending re-hide from an earlier close is moot once we are
+      // open (and would truncate a LATER close's slide-out) — cancel it.
+      clearTimeout(rehideTimer);
+      rehideTimer = null;
+    }
     var wasOpen = state.rank !== null;
     var prevRank = state.rank;
     state.rank = rank;
@@ -290,17 +314,24 @@
       // Managed hidden state (E-M1/S-N1 adversarial-review fold): the SHUT
       // drawer + backdrop carry the `hidden` attribute (UA display:none) so
       // a panels-CSS load failure degrades to an INVISIBLE drawer — never
-      // an unstyled skeleton dumped at the document end. Un-hide first;
-      // `.open` (the slide-in + the .open-scoped section-rise/pill-glow
-      // choreography) lands on the NEXT task so the transition starts from
-      // a computed shut style — never a forced synchronous layout flush
-      // (the swapDrawerBody idiom; no rAF — T-N6). The CSS
+      // an unstyled skeleton dumped at the document end. Un-hide first,
+      // then ONE deliberate forced reflow per drawer open (fix round 2,
+      // MINOR-1): an element not rendered at the previous style-change
+      // event has no before-change style (CSS Transitions L1 §3), and the
+      // next-task `.open` add usually lands in the SAME frame — the flush
+      // commits the un-hidden, still-translated-shut style so the entrance
+      // slide reliably transitions instead of popping in. `.open` (the
+      // slide-in + the .open-scoped section-rise/pill-glow choreography)
+      // still lands on the NEXT task (no rAF — T-N6); the CSS
       // visibility:hidden discipline stays as belt-and-braces.
       if (drawer) {
         drawer.removeAttribute("hidden");
       }
       if (back) {
         back.removeAttribute("hidden");
+      }
+      if (drawer) {
+        void drawer.offsetWidth; // the ONE sanctioned reflow per drawer open
       }
       document.body.classList.add("bx-drawer-open"); // scroll lock
       setMainInert(true);
@@ -353,8 +384,13 @@
     // Re-add `hidden` only AFTER the slide-out (bounded one-shot fallback,
     // > the .32s slide + the .34s visibility delay — also covers the
     // reduced-motion no-transition arm); a reopen inside the window keeps
-    // the drawer visible (the state.rank guard re-checks at fire time).
-    setTimeout(function () {
+    // the drawer visible (openDrawer CANCELS the pending timer — NIT-2 —
+    // and the state.rank guard re-checks at fire time as belt).
+    if (rehideTimer !== null) {
+      clearTimeout(rehideTimer); // only the LATEST close owns the re-hide
+    }
+    rehideTimer = setTimeout(function () {
+      rehideTimer = null;
       if (state.rank !== null) {
         return; // reopened — stays visible
       }
@@ -381,10 +417,14 @@
     // deep-linked rank); Back still closes via the popstate reconciler
     // because drawer-open is the only pushState.
     writeUrl({ rank: null }, false);
-    if (!state.reconciling) {
+    if (!state.reconciling && history.state && history.state.bxPortalPush === true) {
       // NEW-R2-3: the current entry now duplicates the pre-open one — the
       // next open replaces it (a reconciler close wrote nothing, so the
-      // flag stays as-is there).
+      // flag stays as-is there). Armed ONLY over a portal-PUSHED entry
+      // (the history.state stamp — NEW-R2R2-2, fix round 2): a deep-link-
+      // ORIGIN close rewrote the page's ONE real navigation entry, which
+      // duplicates nothing beneath it — the reopen must PUSH so Back from
+      // the reopened drawer closes the drawer instead of exiting the site.
       state.reopenReplaces = true;
     }
   }
@@ -626,13 +666,22 @@
       // 1) the URL's run wins: select it page-wide BEFORE opening anything
       //    (the reconciling flag suppresses the run-change handler's strip).
       state.runId = parsed.runId;
-      state.reconciling = true;
       try {
-        window.BXOneclick.selectRun(parsed.runId);
+        state.reconciling = true;
+        try {
+          window.BXOneclick.selectRun(parsed.runId);
+        } finally {
+          state.reconciling = false;
+        }
       } finally {
-        state.reconciling = false;
+        // MINOR-2 (fix round 2): a sync throw out of selectRun (e.g. a
+        // dead bx-poll global) must still release the latch — funneled
+        // through finishRestore, the ONE release site. Arm-SCOPED on this
+        // fully-synchronous arm only: a whole-body finally would release
+        // while arm 3's latestRun is still in flight and re-open the exact
+        // C-M1 poller-strip race the latch closes (NEW-R2R3-2 — rejected).
+        finishRestore(parsed);
       }
-      finishRestore(parsed);
       return;
     }
     // 2) else the page's already-selected run…
@@ -646,16 +695,29 @@
     //    poller's later auto-selection of the SAME id is a no-op in
     //    onRunChanged; no runs at all ⇒ the honest awaiting states stand
     //    (the drawer shows the awaiting detail, winners the awaiting line).
-    window.BXOneclick.latestRun()
-      .then(function (runs) {
-        if (runs && runs.latest_run_id) {
-          state.runId = String(runs.latest_run_id);
-        }
-        finishRestore(parsed);
-      })
-      .catch(function () {
-        finishRestore(parsed); // honest awaiting — never a fabricated run
-      });
+    try {
+      window.BXOneclick.latestRun()
+        .then(function (runs) {
+          // NIT-1/edges-F3 (fix round 2): a run adopted DURING the latch
+          // window (the poller's latch-suppressed auto-selection) wins over
+          // this second same-endpoint read — never clobbered back, so the
+          // drawer/winners and the page surfaces stay on ONE run.
+          if (!state.runId && runs && runs.latest_run_id) {
+            state.runId = String(runs.latest_run_id);
+          }
+          finishRestore(parsed);
+        })
+        .catch(function () {
+          finishRestore(parsed); // honest awaiting — never a fabricated run
+        });
+    } catch (err) {
+      // MINOR-2 twin (fix round 2): a sync throw CONSTRUCTING the chain
+      // (latestRun itself — e.g. a dead bx-poll global) never strands the
+      // latch. Catch-only, deliberately NOT a finally: a finally here would
+      // release while a HEALTHY chain is still in flight — the C-M1 race.
+      finishRestore(parsed);
+      throw err;
+    }
   }
 
   function init() {
