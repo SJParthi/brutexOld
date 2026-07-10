@@ -2879,23 +2879,39 @@ def query_candles(
     The glob is scoped to ONE ``(symbol, interval)`` (its whole-year/month
     files only), and the page is ``LIMIT``-bounded — so a click never
     materialises more than ``limit`` rows in PYTHON regardless of how many
-    years are stored. HONEST engine-cost envelope
-    (DEC-LATENCY-HONESTY-BATCH-001, Golden Rule #10 — corrects the prior
-    "DuckDB additionally skips row-groups via min/max stats" claim, which this
-    query shape DEFEATS): the read-side dedup ``QUALIFY`` window
-    (DEC-LAKE-READ-UNIQUE-001) must rank every row of the partition before
-    ``LIMIT`` applies, and the date bounds compare a derived
-    ``(timestamp AT TIME ZONE …)::DATE`` expression that DuckDB does not prune
-    through against the raw ``timestamp`` column's row-group min/max stats —
-    so each paging click is a full-partition columnar scan ENGINE-side
-    (O(partition rows), not O(page)). That scan is flat enough to pass the
-    shared-CI < 8× depth-ratio gate (``tests/bench/test_db_candle_query_o1.py``);
-    genuine row-group pruning would need stats-compatible raw-column
-    predicates — named future work, not claimed. *start* / *end* are inclusive
-    ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC calendar date
-    (IST for the derived ``1day`` — see :func:`_date_bounds`).
-    Returns an empty
-    page (never raises) when the partition set has no Parquet files yet.
+    years are stored. *start* / *end* are inclusive ISO ``YYYY-MM-DD`` bounds
+    matched against the bar's UTC calendar date (IST for the derived ``1day``
+    — see :func:`_date_bounds`). Returns an empty page (never raises) when
+    the partition set has no Parquet files yet.
+
+    HONEST complexity (Golden Rule #10 — this is NOT O(page) in partition
+    depth; DEC-DB-OPAGE-HONESTY-001, folding the DEC-LATENCY-HONESTY-BATCH-001
+    correction of the prior "DuckDB additionally skips row-groups via min/max
+    stats" claim, which this query shape DEFEATS): the page DATA query
+    performs a FULL columnar scan of every matched partition row before it
+    slices the page. The read-side keep-FIRST dedup ``QUALIFY row_number()
+    OVER (PARTITION BY timestamp …) = 1`` window (DEC-LAKE-READ-UNIQUE-001)
+    hash-partitions the whole matched set, the ``ORDER BY "timestamp"`` sorts
+    it, and the date bounds compare a derived ``(timestamp AT TIME ZONE
+    …)::DATE`` expression that DuckDB does not prune through against the raw
+    ``timestamp`` column's row-group min/max stats — and only THEN do
+    ``LIMIT``/``OFFSET`` take the slice. So the DuckDB engine cost is
+    **O(total matched partition rows)** (plus one Parquet footer open per
+    file), NOT O(page): ``LIMIT`` bounds ONLY how many rows materialise in
+    Python — the FIRST page is not cheaper than the whole scan — and a deep
+    ``OFFSET`` is O(row-groups up to the offset) on top. The page ``total``
+    is a ``COUNT(DISTINCT timestamp)``, itself **O(rows)** on the first
+    computation per write-generation and O(1) on a cached repeat (see
+    *count_cache*). That scan is flat enough to pass the shared-CI < 8×
+    depth-ratio gate (``tests/bench/test_db_candle_query_o1.py``); genuine
+    row-group pruning would need stats-compatible raw-column predicates, and
+    a write-time page manifest (true O(page) reads) stays the named future
+    work (#867 / #1025). This mirrors the
+    :func:`brutex.data.lake_read.dedup_qualify_sql` /
+    :func:`~brutex.data.lake_read.dedup_qualify_latest_sql` honest envelope;
+    a prev/next paging click therefore RE-SCANS the partition — flat only in
+    that the count + F&O stored-life span are cached, never in the row-scan
+    term.
 
     Parameters
     ----------
@@ -2917,9 +2933,11 @@ def query_candles(
     count_cache, generation
         Optional generation-stamped cache for the page ``total``
         (DEC-DB-CANDLE-COUNT-CACHE-001) + the current write-generation it is keyed
-        by. When supplied, the O(files) Parquet-footer ``COUNT(*)`` is memoised per
-        ``(coords, start, end)`` so a prev/next paging click within one dataset is
-        an O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        by. When supplied, the ``COUNT(DISTINCT timestamp)`` total — O(rows) on the
+        first computation per write-generation, O(1) on a cached repeat — is
+        memoised per ``(coords, start, end)`` so a prev/next paging click within one
+        dataset is an O(1) hit; a pull bumps *generation* → recompute (never a stale
+        total).
         The SAME cache also memoises the F&O default-range STORED-LIFE span under
         :func:`candle_span_key` (coords-only — the span is bound/paging-invariant),
         so the applied-range chip (DEC-DB-UX-PACK-001 Feature 2) never re-runs its
@@ -3067,7 +3085,16 @@ def query_candles(
     # timestamps. The PAGE query collapses them keep-FIRST in the same single
     # scan (QUALIFY over filename + file_row_number order — deterministic), and
     # the TOTAL counts DISTINCT timestamps so it equals what the deduped pages
-    # actually serve. A clean partition is byte-identical.
+    # actually serve. A clean partition is byte-identical. HONEST complexity
+    # (DEC-DB-OPAGE-HONESTY-001, see the docstring): this QUALIFY window +
+    # ``ORDER BY`` is an O(total matched rows) columnar scan per click — the
+    # LIMIT/OFFSET below bound only the Python materialisation, NOT the scan.
+    # The QUALIFY is NOT skipped on a "clean" partition: no reliable O(1) /
+    # footer-only clean signal exists (the only detector is COUNT(*) ==
+    # COUNT(DISTINCT ts), itself an O(rows) scan), and skipping the window
+    # would be a constant-factor win, not a complexity change — so the dedup
+    # correctness guard stays on (deferred follow-up, never a correctness risk
+    # for a perf win).
     page_source = DEDUP_PARQUET_SOURCE_SQL
     qualify_sql = dedup_qualify_sql(("timestamp",))
 
@@ -3099,10 +3126,12 @@ def query_candles(
         use_stats_manifest=use_stats_manifest,
     )
 
-    # The page total is a `COUNT(*)` over `read_parquet(glob)` — DuckDB answers it
-    # from each Parquet file's FOOTER metadata, so it is O(files), NOT O(1): on a
-    # deep multi-year partition it re-reads every monthly file's footer on EVERY
-    # paging click (~8 ms at 6 years, growing as the lake deepens). The total is
+    # The page total is a `COUNT(DISTINCT timestamp)` over `read_parquet(glob)` —
+    # the deduped row count the keep-FIRST pages serve, NOT a footer `COUNT(*)`. So
+    # it is O(rows), NOT O(1): DuckDB scans the whole matched row set to count the
+    # distinct timestamps, so on a deep multi-year partition the first computation
+    # per write-generation grows with the stored rows on EVERY uncached paging
+    # click. The total is
     # invariant across paging / sort / column subsetting of the same
     # (coords, start, end), so the dashboard injects a generation-stamped cache
     # (DEC-DB-CANDLE-COUNT-CACHE-001): a prev/next click within one dataset is an
@@ -4349,8 +4378,21 @@ def query_option_candles(
     data duplication, the lake stays the single source of truth. *series* is the
     filesystem-safe segment from :func:`list_option_datasets` and is validated
     against :func:`_validate_option_segment` (NO free user text in the glob,
-    same path/SQL-injection guard as the spot reader). The page is
-    ``LIMIT``-bounded so a click never materialises more than *limit* rows.
+    same path/SQL-injection guard as the spot reader).
+
+    HONEST complexity (Golden Rule #10 — this is NOT O(page) in series depth;
+    DEC-DB-OPAGE-HONESTY-001): identical envelope to :func:`query_candles`. The
+    page DATA query performs a FULL columnar scan of every matched series row —
+    the keep-FIRST dedup ``QUALIFY row_number() OVER (PARTITION BY (side,
+    timestamp) …) = 1`` window hash-partitions the whole matched set and the
+    ``ORDER BY "timestamp"`` sorts it — BEFORE ``LIMIT``/``OFFSET`` slice the
+    page. So the engine cost is **O(total matched series rows)** (plus one
+    Parquet footer open per file); ``LIMIT`` bounds ONLY the Python
+    materialisation and a deep ``OFFSET`` is O(row-groups up to the offset) on
+    top. The page ``total`` is a ``COUNT(DISTINCT (side, timestamp))``, itself
+    **O(rows)** on the first computation per write-generation and O(1) on a
+    cached repeat (see *count_cache*). A write-time page manifest (true O(page)
+    reads) stays the named future work (#867 / #1025).
 
     Projects the 11 :data:`OPTION_CANDLE_COLUMNS` — the OHLCV+OI set PLUS the
     per-bar option stamps ``side`` / ``strike`` / ``spot`` / ``iv``. *start* /
@@ -4381,9 +4423,11 @@ def query_option_candles(
     count_cache, generation
         Optional generation-stamped cache for the page ``total``
         (DEC-LAKE-READ-O1-AUDIT-001) + the current write-generation it is keyed
-        on. When supplied, the ``COUNT(*)`` over the whole series glob is memoised
-        per ``(series, start, end)`` (paging-invariant) so a prev/next click is an
-        O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        on. When supplied, the ``COUNT(DISTINCT (side, timestamp))`` total over the
+        whole series glob — O(rows) on the first computation per write-generation,
+        O(1) on a cached repeat — is memoised per ``(series, start, end)``
+        (paging-invariant) so a prev/next click is an O(1) hit; a pull bumps
+        *generation* → recompute (never a stale total).
         The SAME cache also memoises the default-range STORED-LIFE span under
         :func:`option_candle_span_key` (series-only key), so the applied-range chip
         (DEC-DB-UX-PACK-001 Feature 2) never re-runs its MIN/MAX scan on a paging
@@ -4508,7 +4552,9 @@ def query_option_candles(
     )
 
     def _legacy_count_total() -> int:
-        """Run the O(files) deduped-total footer-scan over the whole series glob.
+        """Run the O(rows) ``COUNT(DISTINCT (side, timestamp))`` deduped-total scan
+        over the whole series glob (the deduped composite-key count the keep-FIRST
+        pages serve, NOT a footer ``COUNT(*)``; O(1) on a cached repeat).
 
         Routed through the COMMON :func:`_execute_parquet_resilient` (the series
         dir is FLAT, so its recursive ``**/*.parquet`` glob reads the identical
