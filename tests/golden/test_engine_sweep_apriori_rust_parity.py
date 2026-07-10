@@ -375,6 +375,139 @@ def test_beyond_u64_envelope_delegates_to_frozen(monkeypatch: pytest.MonkeyPatch
     assert called["n"] == 0  # kernel never invoked beyond the envelope
 
 
+def _outcome(
+    fn: Callable[..., list[int]], bar_bits: Sequence[int], **kwargs: Any
+) -> tuple[Any, ...]:
+    """Fold a call into a comparable outcome: value, or exception type + message."""
+    try:
+        return ("ok", fn(bar_bits, **kwargs))
+    except Exception as exc:  # parity oracle: ANY raise compares type + message
+        return ("raise", type(exc), str(exc))
+
+
+@pytest.mark.parametrize(
+    ("bar_bits", "kwargs"),
+    [
+        # A bar VALUE with bit 70 set over a <64-bit condition subset — the
+        # future-u128-vocabulary shape the frozen oracle handles gracefully
+        # (its >= 64-bit refusal keys on condition_bits, never bar values).
+        pytest.param(
+            [(1 << 70) | 0b11, 0b11],
+            {"condition_bits": [0, 1], "k": 1, "min_hits": 1},
+            id="bar-value-beyond-u64-k1",
+        ),
+        pytest.param(
+            [(1 << 70) | (1 << 6) | (1 << 7)] * 40,
+            {"condition_bits": [6, 7], "k": 2, "min_hits": 1},
+            id="bar-value-beyond-u64-k2",
+        ),
+        pytest.param(
+            [-5, 3], {"condition_bits": [6, 7], "k": 1, "min_hits": 0}, id="negative-bar-value"
+        ),
+        pytest.param(
+            [0b11] * 40,
+            {"condition_bits": [0, 1], "k": 2, "min_hits": 2**63},
+            id="min-hits-beyond-i64",
+        ),
+        pytest.param(
+            [(1 << 6) | (1 << 7)] * 40,
+            {"condition_bits": [6, 7], "k": 2, "min_hits": -(2**63) - 1},
+            id="min-hits-below-i64",
+        ),
+        pytest.param(
+            [0b11] * 4,
+            {"condition_bits": [0, 1], "k": 1, "min_hits": 0, "root_mod": (0, 2**70)},
+            id="root-mod-W-beyond-u64",
+        ),
+        pytest.param(
+            [0b11] * 4,
+            {"condition_bits": [0, 1], "k": 1, "min_hits": 0, "root_mod": (2**65, 2**66)},
+            id="root-mod-w-beyond-u64",
+        ),
+    ],
+)
+def test_ffi_overflow_operands_match_frozen(
+    bar_bits: Sequence[int], kwargs: dict[str, Any]
+) -> None:
+    """Round-1 fix: every FFI-overflow operand class delegates and MATCHES the oracle.
+
+    Pre-fix these raised a raw PyO3 ``OverflowError`` on the Rust arm (not a
+    ``SweepComboError`` → a whole-grid abort on the grid drivers) where the
+    frozen oracle succeeds; the seam now delegates via the ``OverflowError``
+    catch, so the outcome — value OR the oracle's own exception type+message —
+    is identical by construction and pinned here.
+    """
+    py = _outcome(generate_apriori_candidates, bar_bits, **kwargs)
+    rs = _outcome(generate_apriori_candidates_rust, bar_bits, **kwargs)
+    assert rs == py
+
+
+def test_breaker_limit_exactly_u64_max_trips_native(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-1 MAJOR fix: ``max_mask_bars == 2**64 - 1`` is INSIDE the native
+    envelope and the breaker must TRIP when the true product exceeds it.
+
+    Pre-fix the kernel's ``saturating_mul`` clamped the overflowing product to
+    ``u64::MAX`` and the strict ``>`` read false — the Rust arm RETURNED masks
+    (fail-OPEN) and emitted the level-1 census the oracle suppresses, while the
+    frozen big-int oracle raised ``SweepAprioriBudgetError``. The kernel now
+    computes the product in ``u128`` (exact), so the boundary value stays
+    NATIVE (no delegation) with the identical trip + message + no census.
+    """
+    import brutex.engine.sweep_apriori as _apriori
+    import fno_math
+
+    kernel_calls = {"n": 0}
+    real_kernel = fno_math.apriori_frontier_u64
+
+    def kernel_spy(*a, **k):  # type: ignore[no-untyped-def]
+        kernel_calls["n"] += 1
+        return real_kernel(*a, **k)
+
+    monkeypatch.setattr(fno_math, "apriori_frontier_u64", kernel_spy)
+
+    delegate_calls = {"n": 0}
+    real_gen = _apriori.generate_apriori_candidates
+
+    def gen_spy(*a, **k):  # type: ignore[no-untyped-def]
+        delegate_calls["n"] += 1
+        return real_gen(*a, **k)
+
+    monkeypatch.setattr(_apriori, "generate_apriori_candidates", gen_spy)
+
+    bar_bits = [(1 << 6) | (1 << 7)] * 4
+    kwargs: dict[str, Any] = {
+        "condition_bits": [6, 7],
+        "k": 1,
+        "min_hits": 0,
+        "n_bars": 2**63,  # 2 singletons × 2**63 = 2**64 > 2**64 - 1
+        "max_mask_bars": (1 << 64) - 1,
+        "cell_label": "boundary",
+    }
+    with pytest.raises(SweepAprioriBudgetError) as py_ei:
+        real_gen(bar_bits, **kwargs)
+
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs, pytest.raises(SweepAprioriBudgetError) as rs_ei:
+        generate_apriori_candidates_rust(bar_bits, **kwargs)
+    assert str(rs_ei.value) == str(py_ei.value)
+    # The trip precedes the census on BOTH arms (raise-before-census law) —
+    # pre-fix the Rust arm emitted a level-1 census here.
+    assert [e for e in logs if e["event"] == "sweep.apriori.census"] == []
+    assert kernel_calls["n"] == 1  # the boundary limit stays NATIVE
+    assert delegate_calls["n"] == 0  # never delegated at limit == u64::MAX
+
+    # Control: a non-tripping product at the SAME boundary limit returns
+    # native parity (2 singletons × 4 bars ≪ 2**64 - 1).
+    out_py = real_gen(bar_bits, condition_bits=[6, 7], k=1, min_hits=0, max_mask_bars=(1 << 64) - 1)
+    out_rs = generate_apriori_candidates_rust(
+        bar_bits, condition_bits=[6, 7], k=1, min_hits=0, max_mask_bars=(1 << 64) - 1
+    )
+    assert out_rs == out_py == [1 << 6, 1 << 7]
+    assert kernel_calls["n"] == 2
+    assert delegate_calls["n"] == 0
+
+
 # ───────────────────── the arm env flag ─────────────────────
 
 

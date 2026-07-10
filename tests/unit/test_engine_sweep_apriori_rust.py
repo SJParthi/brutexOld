@@ -253,6 +253,45 @@ def test_envelope_delegation_both_operands(monkeypatch: pytest.MonkeyPatch) -> N
     assert called["n"] == 0  # kernel never invoked beyond the envelope
 
 
+def test_ffi_overflow_operands_delegate_to_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``except OverflowError`` catch arm of the honest envelope (round-1 fix).
+
+    Three frozen-oracle-legal operand classes pass the eager ``limit``/``n_bars``
+    guard yet overflow at the PyO3 argument conversion — a ``bar_bits`` value
+    beyond ``u64`` (the future-u128-vocabulary shape over a <64-bit condition
+    subset), ``min_hits`` beyond ``i64``, and a ``root_mod`` modulus beyond
+    ``u64``. Each must DELEGATE to the frozen generator (reproducing its result
+    exactly), never leak a raw ``OverflowError`` (not a ``SweepComboError`` →
+    a whole-grid abort on the grid drivers).
+    """
+    calls = {"n": 0}
+    real = _apriori.generate_apriori_candidates
+
+    def spy(*a, **k):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(_apriori, "generate_apriori_candidates", spy)
+
+    # (a) a bar VALUE with bit 70 set while every condition bit is < 64 — the
+    # oracle never trips its >= 64-bit refusal (that keys on condition_bits).
+    out_a = generate_apriori_candidates_rust(
+        [(1 << 70) | 0b11, 0b11], condition_bits=[0, 1], k=1, min_hits=1
+    )
+    assert out_a == [1, 2]
+    # (b) min_hits beyond i64 — the oracle big-int compares and returns [].
+    out_b = generate_apriori_candidates_rust(
+        [0b11] * 4, condition_bits=[0, 1], k=2, min_hits=1 << 63
+    )
+    assert out_b == []
+    # (c) a root_mod modulus beyond u64 — bit 0 % W == 0 owns mask 1 only.
+    out_c = generate_apriori_candidates_rust(
+        [0b11] * 4, condition_bits=[0, 1], k=1, min_hits=0, root_mod=(0, 1 << 70)
+    )
+    assert out_c == [1]
+    assert calls["n"] == 3  # every overflow class delegated exactly once
+
+
 # ───────────────────── run_persisted_sweep composed-gate wiring ─────────────────────
 
 

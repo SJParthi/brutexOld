@@ -22,8 +22,11 @@ The Rust arm engages iff BOTH:
 
 With EITHER flag off the caller keeps its existing path byte-identically: the
 frozen Python Apriori generator (flag 1 on, flag 2 off) or the brute-force
-enumeration (flag 1 off). :func:`apriori_use_rust` is the ONE composed
-predicate the caller consults.
+enumeration (flag 1 off). The production caller
+(``sweep_run.run_persisted_sweep``) composes the two flags INLINE —
+``apriori_enabled()`` gates the Apriori path, then ``apriori_rust_enabled()``
+selects the arm; :func:`apriori_use_rust` is the semantically-equivalent
+composed predicate exposed for tests/diagnostics, NOT a production call site.
 
 ## Single-source parity discipline
 
@@ -51,12 +54,24 @@ is a Python-generator-specific surface with no Rust analogue).
 
 ## Honest u64 envelope
 
-The kernel operates on ``u64`` masks + a ``u64`` mask·bar budget. When the
-resolved ``max_mask_bars`` or ``n_bars`` exceeds ``2**64 - 1`` this seam
-transparently DELEGATES to the frozen Python generator (arbitrary-precision
-integers), so parity is exact inside the ``u64`` envelope and honestly delegated
-beyond it. The ``< 64``-bit condition guard (raised BEFORE any counting) keeps
-the 60-bit production vocabulary always inside the envelope.
+The kernel operates on ``u64`` masks + a ``u64`` mask·bar budget (the breaker
+product itself is computed kernel-side in ``u128`` — exact for any two ``u64``
+operands, so ``max_mask_bars == 2**64 - 1`` stays NATIVE with bit-exact
+Python-big-int parity). When the resolved ``max_mask_bars`` or ``n_bars``
+exceeds ``2**64 - 1`` this seam transparently DELEGATES to the frozen Python
+generator (arbitrary-precision integers) BEFORE calling the kernel; and when
+ANY OTHER FFI operand overflows its converted type — a ``bar_bits`` value
+outside ``u64`` (including a negative one), ``min_hits`` outside ``i64``, a
+``root_mod`` modulus beyond ``u64``, or a hypothetical future ``>= 64``-bit
+``CONFLICT_PAIRS`` mask — the PyO3 argument-conversion ``OverflowError`` is
+caught and the SAME delegation applies (the conversion happens before the
+kernel executes, so no partial side effect precedes it). Either way parity is
+exact inside the ``u64`` envelope and honestly delegated beyond it: the
+frozen oracle's behaviour — success OR its own typed errors — is reproduced
+verbatim, never a raw ``OverflowError`` (which is not a ``SweepComboError``
+and would abort a whole grid instead of the graceful tuple skip). The
+``< 64``-bit condition guard (raised BEFORE any counting) keeps the 60-bit
+production vocabulary always inside the envelope.
 """
 
 from __future__ import annotations
@@ -141,11 +156,18 @@ def apriori_rust_enabled() -> bool:
 def apriori_use_rust() -> bool:
     """Return ``True`` iff BOTH the Apriori path AND the native-Rust arm are on.
 
-    The ONE composed gate the caller consults: ``BRUTEX_SWEEP_APRIORI`` truthy
+    The composed gate ``BRUTEX_SWEEP_APRIORI`` truthy
     (:func:`brutex.engine.sweep_apriori.apriori_enabled`) AND
     ``BRUTEX_SWEEP_RUST_APRIORI`` truthy (:func:`apriori_rust_enabled`). Default
     OFF twice over — with either flag off the caller keeps its byte-identical
     Python (frozen-generator) or brute-force path.
+
+    HONEST (Golden Rule #10): the production caller
+    (``sweep_run.run_persisted_sweep``) composes the SAME two flags inline
+    (``apriori_enabled()`` outer gate, ``apriori_rust_enabled()`` arm select)
+    and does not call this function — it is the semantically-equivalent
+    composed predicate for tests/diagnostics (equivalence pinned by the
+    composed-gate byte-identity suite).
     """
     return _apriori.apriori_enabled() and apriori_rust_enabled()
 
@@ -184,9 +206,12 @@ def generate_apriori_candidates_rust(
 
     Parameters mirror the frozen generator exactly. Validation, the ``>= 64``-bit
     u128 refusal, the census, and the breaker error are single-sourced from the
-    frozen module. Beyond the ``u64`` envelope (``max_mask_bars`` or ``n_bars``
-    exceeding ``2**64 - 1``) this transparently delegates to the frozen Python
-    generator.
+    frozen module. Beyond the ``u64`` envelope — ``max_mask_bars`` or ``n_bars``
+    exceeding ``2**64 - 1`` (guarded eagerly), or ANY other FFI operand
+    overflowing its converted type (``bar_bits`` values outside ``u64`` incl.
+    negatives, ``min_hits`` outside ``i64``, a ``root_mod`` modulus beyond
+    ``u64``; caught at the PyO3 conversion) — this transparently delegates to
+    the frozen Python generator, reproducing the oracle's behaviour exactly.
 
     Returns
     -------
@@ -236,11 +261,9 @@ def generate_apriori_candidates_rust(
     if limit <= 0:
         raise ValueError(f"generate_apriori_candidates: max_mask_bars must be > 0, got {limit}")
 
-    # Honest envelope: the kernel takes a u64 budget + u64 n_bars. Beyond it,
-    # delegate to the frozen big-int generator (parity exact inside u64, honest
-    # delegation outside). Validation above already ran identically, so the
-    # delegated call re-validates harmlessly (idempotent, same messages).
-    if limit > _U64_MAX or resolved_n_bars > _U64_MAX:
+    def _delegate_to_frozen() -> list[int]:
+        # Validation above already ran identically, so the delegated call
+        # re-validates harmlessly (idempotent, same messages).
         return _apriori.generate_apriori_candidates(
             bar_bits,
             condition_bits=condition_bits,
@@ -253,24 +276,48 @@ def generate_apriori_candidates_rust(
             cell_label=cell_label,
         )
 
+    # Honest envelope, eager arm: the kernel takes a u64 budget + u64 n_bars.
+    # Beyond it, delegate to the frozen big-int generator (parity exact inside
+    # u64 — the kernel's breaker product is exact u128, so limit == 2**64-1
+    # stays native; honest delegation outside).
+    if limit > _U64_MAX or resolved_n_bars > _U64_MAX:
+        return _delegate_to_frozen()
+
     # Lazy import so a Python-only run (either flag off) never touches the wheel.
     import fno_math
 
-    masks, census, budget_trip = fno_math.apriori_frontier_u64(
-        list(bar_bits),
-        unique_bits,
-        k,
-        min_hits,
-        resolved_n_bars,
-        w,
-        big_w,
-        limit,
-        _conflict_pair_masks(),
-        # Read dynamically (never import-bound) so a test monkeypatch of the
-        # frozen stride is honoured — the trip DECISION is stride-invariant, but
-        # the reported running count follows the stride, matching the oracle.
-        _apriori._BUDGET_CHECK_STRIDE,  # pyright: ignore[reportPrivateUsage]
-    )
+    try:
+        masks, census, budget_trip = fno_math.apriori_frontier_u64(
+            list(bar_bits),
+            unique_bits,
+            k,
+            min_hits,
+            resolved_n_bars,
+            w,
+            big_w,
+            limit,
+            _conflict_pair_masks(),
+            # Read dynamically (never import-bound) so a test monkeypatch of the
+            # frozen stride is honoured — the trip DECISION is stride-invariant,
+            # but the reported running count follows the stride, matching the
+            # oracle. (A monkeypatched stride of 0 is a DELIBERATE asymmetry:
+            # the kernel skips the strided check — post-join authority still
+            # fires — where the frozen oracle's `% 0` raises ZeroDivisionError;
+            # production-unreachable, the stride is a Final with no env knob.)
+            _apriori._BUDGET_CHECK_STRIDE,  # pyright: ignore[reportPrivateUsage]
+        )
+    except OverflowError:
+        # Honest envelope, catch arm: PyO3 argument conversion is the ONLY
+        # OverflowError source here (the kernel itself raises nothing) — a
+        # bar_bits value outside u64 (incl. negative), min_hits outside i64,
+        # a root_mod modulus beyond u64, or a future >= 64-bit CONFLICT_PAIRS
+        # mask. Conversion happens BEFORE the kernel executes, so no partial
+        # side effect (no census) precedes this delegation; the frozen oracle's
+        # behaviour — success OR its own typed errors — is reproduced exactly,
+        # never a raw OverflowError (not a SweepComboError → would abort a
+        # whole grid). Caught rather than pre-scanned so the hot path never
+        # pays an O(n_bars) Python range pre-scan per cell.
+        return _delegate_to_frozen()
 
     # Emit the pre-trip census records via the frozen emitter (identical events).
     for level, candidates, frequent in census:

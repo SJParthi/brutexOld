@@ -51,11 +51,18 @@
 //!    shards are pairwise disjoint; hits are native superset counts
 //!    (`(bar & mask) == mask`), bit-identical to the Python `count_supermasks`
 //!    the frozen default counter uses.
-//! 5. **Honest envelope** — the trip decision uses `saturating_mul`, so a
-//!    product that would exceed `u64::MAX` saturates (still `> limit` ⇒ trips,
-//!    matching Python's big-int `> limit`); the seam guards `max_mask_bars <=
-//!    u64::MAX` and falls back to the Python oracle beyond it, so parity is
-//!    exact inside the u64 envelope and honestly delegated outside it.
+//! 5. **Honest envelope** — the trip product is computed in `u128` (exact for
+//!    any two `u64` operands — it can never overflow or saturate), so the
+//!    breaker comparison is bit-identical to Python's arbitrary-precision
+//!    `count * n_bars > limit` across the WHOLE u64 domain INCLUDING
+//!    `limit == u64::MAX` (the former `saturating_mul` clamped an overflowing
+//!    product to `u64::MAX`, and `u64::MAX > u64::MAX` is false — a fail-OPEN
+//!    parity break at that one legal limit value, fixed round 1); the seam
+//!    falls back to the Python oracle when `max_mask_bars`/`n_bars` exceed
+//!    `u64::MAX` (or any other FFI operand overflows its converted type), so
+//!    parity is exact inside the u64 envelope and honestly delegated outside.
+
+use std::collections::HashMap;
 
 /// A single Apriori-level census record for the seam to emit as one
 /// `sweep.apriori.census` structlog event: `(level, candidates, frequent)`
@@ -171,14 +178,17 @@ fn all_subsets_frequent(candidate: &[u32], frontier_masks: &[u64]) -> bool {
 
 /// The pure-integer breaker predicate — STRICT `>` on `count * n_bars`.
 ///
-/// `saturating_mul` keeps it panic-free under `overflow-checks = true` +
-/// `panic = "abort"`: a product exceeding `u64::MAX` saturates to `u64::MAX`,
-/// which is `> limit` (limit `<= u64::MAX` by the seam's envelope guard) ⇒
-/// trips, exactly as Python's arbitrary-precision `count * n_bars > limit`
-/// would for such an enormous product.
+/// The product is computed in `u128`, which is EXACT for any two `u64`
+/// operands (a u64×u64 product needs at most 128 bits — it can never
+/// overflow or saturate), so this is panic-free under
+/// `overflow-checks = true` + `panic = "abort"` AND bit-identical to
+/// Python's arbitrary-precision `count * n_bars > limit` for every `u64`
+/// limit — including `limit == u64::MAX`, where the former `saturating_mul`
+/// clamped an overflowing product to `u64::MAX` and FAILED to trip
+/// (`u64::MAX > u64::MAX` is false) while the frozen oracle trips.
 #[inline]
 fn over_budget(count: u64, n_bars: u64, limit: u64) -> bool {
-    count.saturating_mul(n_bars) > limit
+    (count as u128) * (n_bars as u128) > limit as u128
 }
 
 /// Classic Apriori join of the `(j-1)`-frontier into pruned `j`-candidates
@@ -196,9 +206,11 @@ fn over_budget(count: u64, n_bars: u64, limit: u64) -> bool {
 ///
 /// Returns `Ok(sorted_candidates)` or `Err(running_trip_count)` on a strided
 /// trip. The bucket/pair accumulation order is irrelevant to the trip count
-/// (which depends only on the running LENGTH), so it need not match Python's
-/// dict-insertion order; the final list is sorted lexicographically before
-/// return, matching Python's `candidates.sort()`.
+/// (which depends only on the running LENGTH: the reported count is the
+/// smallest multiple of `stride` whose product exceeds the budget — a pure
+/// function of the settled total, order-invariant), so it need not match
+/// Python's dict-insertion order; the final list is sorted lexicographically
+/// before return, matching Python's `candidates.sort()`.
 fn join_and_prune(
     frontier: &[Vec<u32>],
     frontier_masks: &[u64],
@@ -208,11 +220,15 @@ fn join_and_prune(
     limit: u64,
     stride: u64,
 ) -> Result<Vec<Vec<u32>>, u64> {
-    // Bucket by the shared (j-2)-prefix, preserving first-seen order (the
-    // frontier is lex-sorted, so prefixes appear in sorted order and each
-    // bucket's `lasts` are ascending — the classic F_{j-1} self-join shape).
-    let mut prefixes: Vec<Vec<u32>> = Vec::new();
-    let mut lasts_by_prefix: Vec<Vec<u32>> = Vec::new();
+    // Bucket by the shared (j-2)-prefix via a HASH map — the exact shape of
+    // the frozen Python `buckets.setdefault(tpl[:-1], []).append(tpl[-1])`
+    // dict build, O(|frontier|) amortized. (Round-1 hostile-review fix: the
+    // original `prefixes.iter().position(...)` linear scan was
+    // O(|frontier| × #distinct-prefixes) — measured SLOWER than the frozen
+    // Python oracle at a dense k=6 frontier. Bucket iteration order is
+    // irrelevant to every observable output — see the docstring — so the
+    // map's nondeterministic order is safe.)
+    let mut buckets: HashMap<Vec<u32>, Vec<u32>> = HashMap::new();
     for tpl in frontier {
         let split = tpl.len().saturating_sub(1);
         let (prefix, last) = tpl.split_at(split);
@@ -222,17 +238,11 @@ fn join_and_prune(
         let Some(&last_pos) = last.first() else {
             continue;
         };
-        match prefixes.iter().position(|p| p.as_slice() == prefix) {
-            Some(idx) => lasts_by_prefix[idx].push(last_pos),
-            None => {
-                prefixes.push(prefix.to_vec());
-                lasts_by_prefix.push(vec![last_pos]);
-            }
-        }
+        buckets.entry(prefix.to_vec()).or_default().push(last_pos);
     }
 
     let mut candidates: Vec<Vec<u32>> = Vec::new();
-    for (prefix, lasts) in prefixes.iter().zip(lasts_by_prefix.iter()) {
+    for (prefix, lasts) in &buckets {
         let m = lasts.len();
         for i in 0..m {
             for jj in (i + 1)..m {
@@ -254,6 +264,14 @@ fn join_and_prune(
                 // strided fire is a strictly-earlier raise of the identical
                 // authoritative decision (stride-invariant trip DECISION;
                 // the reported COUNT matches the Python running count).
+                // stride == 0 is a DELIBERATE asymmetry vs the frozen oracle:
+                // the kernel skips the strided check (the authoritative
+                // post-join check still fires) while Python's `% 0` raises
+                // ZeroDivisionError. `_BUDGET_CHECK_STRIDE` is a Final with
+                // no env knob — only a test monkeypatch can produce 0, so the
+                // divergence is production-unreachable and pinned
+                // (`breaker_zero_stride_falls_back_to_post_join`), not a
+                // parity bug for a future fuzzer to rediscover.
                 let running = candidates.len() as u64;
                 if stride != 0
                     && running.is_multiple_of(stride)
@@ -677,15 +695,33 @@ mod tests {
     }
 
     #[test]
-    fn over_budget_strict_and_saturating() {
+    fn over_budget_strict_exact_u128_product() {
         // STRICT >: exactly at limit does NOT trip; one over trips.
         assert!(!over_budget(2, 10, 20)); // 20 !> 20
         assert!(over_budget(2, 10, 19)); // 20 > 19
         assert!(!over_budget(0, 10, 0)); // 0 !> 0
-        // Saturating: an overflowing product saturates to u64::MAX > any u64
-        // limit below MAX.
-        assert!(over_budget(u64::MAX, 2, 10)); // saturates, trips
-        assert!(!over_budget(u64::MAX, 2, u64::MAX)); // saturate !> MAX
+        // EXACT u128 product (round-1 fix): an over-u64 product trips even at
+        // limit == u64::MAX — Python's big-int (2^64-1)·2 > 2^64-1 trips; the
+        // former saturating_mul clamped to u64::MAX and FAILED to trip there.
+        assert!(over_budget(u64::MAX, 2, 10));
+        assert!(over_budget(u64::MAX, 2, u64::MAX)); // (2^64-1)·2 > 2^64-1
+        assert!(over_budget(1 << 63, 2, u64::MAX)); // 2^64 > 2^64-1
+        assert!(!over_budget(u64::MAX, 1, u64::MAX)); // exact == limit, !>
+    }
+
+    #[test]
+    fn breaker_trips_at_limit_u64_max_with_overflowing_product() {
+        // The round-1 MAJOR repro: k==1, |C_1| = 2 singletons, n_bars = 2^63
+        // → product 2^64 > limit == u64::MAX ⇒ MUST trip (Python big-int
+        // parity). Under the former saturating_mul the product clamped to
+        // u64::MAX, the strict > read false, and the cell RAN (fail-open) —
+        // and the level-1 census was emitted where the oracle raises first.
+        let bars = vec![(1u64 << 6) | (1u64 << 7); 4];
+        let out =
+            apriori_frontier_core(&bars, &[6, 7], 1, 0, 1 << 63, 0, 1, u64::MAX, &[], PROD_STRIDE);
+        assert_eq!(out.budget_trip, Some(2)); // |C_1| = 2
+        assert!(out.masks.is_empty());
+        assert!(out.census.is_empty()); // trip precedes census
     }
 
     // ── oracle parity (survivor set + emission order) ──
