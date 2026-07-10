@@ -15,7 +15,7 @@
   --bg-2:#0b0f1a;
   --ink:#e8ecf4;
   --ink-dim:#9aa4b8;
-  --ink-faint:#5c667a;
+  --ink-faint:#79839a;
   --accent:#5b8cff;
   --accent-2:#8a5bff;
   --accent-3:#2dd4bf;
@@ -26,6 +26,8 @@
   --maxw:1080px;
 }
 *{margin:0;padding:0;box-sizing:border-box}
+.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 html{scroll-behavior:smooth}
 body{
   background:var(--bg);
@@ -337,37 +339,37 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
 
     <div class="grid c3">
       <div class="card reveal">
-        <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h13"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h13"/></svg></div>
         <div class="big">60 conditions</div>
         <h3>Market vocabulary</h3>
         <p>A structured vocabulary of 60 atomic market conditions — pivots, Fibonacci levels, VWAP position, market structure, day types — combined mechanically, not by intuition.</p>
       </div>
       <div class="card reveal d1">
-        <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg></div>
         <div class="big">~33 billion trials</div>
         <h3>Every combination searched</h3>
         <p>The full combinatorial space is enumerated — smart pruning kills ~95% of dead branches so the search stays exhaustive without being wasteful.</p>
       </div>
       <div class="card reveal d2">
-        <div class="icon"><svg viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 6-8 3 3"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-5 4 4 6-8 3 3"/></svg></div>
         <div class="big">3 indices</div>
         <h3>NIFTY · BANKNIFTY · SENSEX</h3>
         <p>India's flagship spot indices, studied at 1-minute resolution from 2020 to today, across 21 timeframes derived from one canonical minute stream.</p>
       </div>
       <div class="card reveal">
-        <div class="icon"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9z"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9z"/></svg></div>
         <div class="big">Rust core</div>
         <h3>Deterministic engine</h3>
         <p>A Rust-accelerated hot kernel with a deterministic, bit-exact evaluation path — the same inputs always produce the same results.</p>
       </div>
       <div class="card reveal d1">
-        <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg></div>
         <div class="big">21 timeframes</div>
         <h3>One minute to one day</h3>
         <p>All intraday timeframes and the daily anchor are derived deterministically from stored 1-minute bars — never mixed vendor feeds.</p>
       </div>
       <div class="card reveal d2">
-        <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="7"/><path d="M12 13V9M9 3h6"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="7"/><path d="M12 13V9M9 3h6"/></svg></div>
         <div class="big">2–4 days</div>
         <h3>Full sweep, one workstation</h3>
         <p>The entire ~33-billion-trial sweep completes in 2–4 days on a single Apple&nbsp;M4&nbsp;Pro — no cluster, no cloud bill.</p>
@@ -385,32 +387,32 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
 
     <div class="grid c3">
       <div class="card reveal">
-        <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></div>
         <h3>Deflated Sharpe + CPCV</h3>
         <p>Overfitting guards built into ranking — a strategy must beat LUCK, not just look green on a chart.</p>
       </div>
       <div class="card reveal d1">
-        <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 1 3 6.2"/><path d="M4 18v-6h6"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 1 3 6.2"/><path d="M4 18v-6h6"/></svg></div>
         <h3>Bit-for-bit reproducible</h3>
         <p>Every run is hash-keyed on its exact inputs. Re-run it next year and get identical results, byte for byte.</p>
       </div>
       <div class="card reveal d2">
-        <div class="icon"><svg viewBox="0 0 24 24"><path d="M7 8a3 3 0 1 0 0 8M17 8a3 3 0 1 1 0 8M9.5 11h5M9.5 13h5"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 8a3 3 0 1 0 0 8M17 8a3 3 0 1 1 0 8M9.5 11h5M9.5 13h5"/></svg></div>
         <h3>Hash-chained audit trail</h3>
         <p>Every material action appends to a tamper-evident, hash-chained log. Breaking the chain fails the build.</p>
       </div>
       <div class="card reveal">
-        <div class="icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 15h4"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 15h4"/></svg></div>
         <h3>Correct-or-absent data</h3>
         <p>If a bar cannot be verified, it is honestly absent — never interpolated, never fabricated, never silently wrong.</p>
       </div>
       <div class="card reveal d1">
-        <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v.01"/><path d="M12 12v4"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v.01"/><path d="M12 12v4"/></svg></div>
         <h3>Look-ahead-proof</h3>
         <p>The engine can only see the past at every bar — enforced by runtime guards and property tests, not by promise.</p>
       </div>
       <div class="card reveal d2">
-        <div class="icon"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h9"/><circle cx="18" cy="18" r="2.5"/></svg></div>
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/><circle cx="18" cy="18" r="2.5"/></svg></div>
         <h3>Honest cost labeling</h3>
         <p>Signal-only results are clearly marked signal-only. No quietly ignoring costs and calling it edge.</p>
       </div>
@@ -445,7 +447,7 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
       <table>
         <thead>
           <tr>
-            <th scope="col"></th>
+            <th scope="col"><span class="visually-hidden">Dimension</span></th>
             <th scope="col">Typical retail</th>
             <th scope="col">Algo-retail</th>
             <th scope="col">Institutional desk</th>
@@ -575,8 +577,8 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
 
   /* keep static copy intact for print */
   if (window.matchMedia) {
-    window.matchMedia("print").addEventListener &&
-    window.matchMedia("print").addEventListener("change", function(m){
+    var printMql = window.matchMedia("print");
+    printMql.addEventListener && printMql.addEventListener("change", function(m){
       if (m.matches) showAll();
     });
   }
