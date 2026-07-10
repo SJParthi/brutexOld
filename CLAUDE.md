@@ -76,6 +76,35 @@ CLI/dashboard touched lines covered by the whole-package `--cov=brutex` gate;
 ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline; the
 per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1692 —
 this header carries the one-line summary, never the round-by-round story).
+Earlier: 2026-07-10 (DEC-ONECLICK-PERF-CLUB-001,
+MIGRATION.md #1711 — coordinator-ASSIGNED from the reservation map
+(next free above the #1264 reservation tail #1710; live-main max #1665
+at assignment — gaps are legal; renumbered from the interim provisional
+#1666) —
+the queued post-#1373 oneclick perf/hygiene club on
+`claude/oneclick-perf-club` (built on PR #1373's head 3c478831; the PR
+opens after #1373 lands): (F1) `/api/v1/oneclick/verify` — the ONE
+oneclick route with no revision cache — joins the stat-token family (key
+folds manifest + events + top100 tokens + the chain verified-state; a
+primed poll is three stats + the chain cache-peek + one hit; NEW B-7
+bench pin,
+measured 0.95× flat vs a 1000× manifest); (C-r2-5) ALL FIVE cached
+oneclick routes ride the NEW `serve_revision_cached` chokepoint — a stat
+OUTAGE (now distinguished from honest ABSENCE by `artifact_probe`) serves
+the LAST-KNOWN payload with ONE `oneclick.probe_outage` WARN per outage
+per COORDINATE (a whole-volume flap warns once per touched coordinate;
+never a silent per-poll O(artifact) re-parse; recovery logs + resumes
+normal keying; `OutageGate` LRU-bounded 512); (F4) `discover_runs`
+stat-stamps + sorts FIRST and parses only the newest-limit manifests
+(identical selection; the F5 uncapped runs_revision stat walk stands);
+(A-r4) the /screener render/filter/sort surfaces are client-side BOUNDED
+via node-goldened BXScreener primitives (Show all itself capped at 1000;
+input cap 5000; every truncation NAMED on the count line) — the backend
+half was #1373's TOP100_ROW_CAP; F2b (serialized-response caches)
+deliberately SKIPPED as optional polish per the severity correction.
+DISPLAY zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX);
+`oneclick_artifacts.py` 100% line+branch on the ci.yml-exact gate; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1711.)
 Earlier: 2026-07-09 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
 DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665 —
 renumbered from #1632/#1633→#1633/#1634→#1664/#1665: #1633–#1636 were
@@ -761,6 +790,23 @@ REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
 `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
 --strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
 UNMODIFIED.)
+Earlier: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645 —
+India-VIX trade stamping wired end-to-end: `vix_at_entry`/`vix_at_exit` on
+every OBSERVABLE production trade + the persisted nullable
+`vix_mean`/`vix_min`/`vix_max` finalist trio (REFERENCE ONLY — never in the
+60-vocab, `_RANKABLE_FIELDS`, or the BLAKE3 run identity; a missing VIX bar
+stamps `None`, never fabricated); the FIVE sanctioned unstamped
+DISCARDED-stream sites are literal `reference_stamper=None`, AST-pinned with
+exact counts (the round-6 review unstamped the cascade candidate
+re-simulation — stamps provably discarded at the CandidateInput scalar
+conversion — and DELETED the two manual-replay `vix_stamper_for_manifest`
+builds that paid a full VIX lake read per replay/click for zero output);
+redo-honest trio (None→value backfill · the typed tuple-skip
+`VixTrioConflictError` · `sweep-verify --recount` stamps like the launcher and
+attributes VIX-only divergences non-corrupt via `results_store.VIX_FIELDS`,
+the ONE public trio-column source, + `dataclasses.fields()`-driven re-pair
+gates). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100%
+line+branch).
 Earlier: 2026-07-08 (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 —
 the weekly deep mutation gate is made GREEN end-to-end: both cargo-mutants
 jobs restructured onto sharded matrices (6 fno-math + 7 trading-core shards;
@@ -2023,6 +2069,77 @@ hostile-review pass._
   08:45-15:35 IST (reproduced 2026-07-10; the #1380 hermeticity philosophy applied to the clock — the guard's own tests
   inject env/clock/guards explicitly and stay armed on both arms); two stale `#1624` docstring citations corrected to
   this entry's number (now #1692 after the coordinator-map renumber); the fold's duplicated #1632 ledger entry deduped).
+  Earlier: `claude/oneclick-perf-club` (**DEC-ONECLICK-PERF-CLUB-001,
+  MIGRATION.md #1711** — the entry number is coordinator-ASSIGNED from the
+  reservation map (2026-07-10 — the next free number above the #1264
+  reservation tail #1710; live-main max #1665 at assignment, live-max+1
+  spoken for by in-flight reservations — gaps are legal; renumbered from
+  the interim provisional #1666, the #1664/#1665 reservation-map
+  lesson) — the queued
+  post-#1373 oneclick perf/hygiene club, built on PR #1373's
+  `claude/oneclick-instrument-display` head 3c478831 (the PR opens only after
+  #1373 merges; BUILD+TEST+PUSH-branch-only until then). **F1 (TOP):**
+  `GET /api/v1/oneclick/verify` was the ONE oneclick route with NO revision
+  cache — `load_manifest` + `reconcile_funnel` + the one-row trades probe ran
+  per REQUEST; the whole payload is now stat-token cached like the siblings
+  (key = manifest token [primary probe] + events + top100 tokens + the chain
+  verified-state — a `check=chain` click re-keys exactly once, then plain polls
+  serve the clicked payload; a primed poll is three `os.stat` probes + the
+  raising chain cache-peek + one hit (r2 sweep M1 — the chain state is a
+  cache-peek, never a stat); HONEST: a sidecar rewrite moving none of
+  the three tokens does not move the key — the #1617 pass lands sidecars
+  BEFORE top100.json, so the trades-wired flag refreshes with the top100
+  token; a manifest-less run computes fresh per poll, cheaply). NEW B-7 bench
+  pin (`TestVerifyPollFlatVsManifestSize`, measured 2026-07-10 sandbox:
+  26.5 µs/poll @ 4 doors vs 25.2 µs @ 4000 doors → 0.95× flat vs the 6.89 ms
+  fresh compute the pre-fix route paid per poll; `ratio_ceiling(8.0)` + the
+  `_must_not_run` no-recompute + outage-serve teeth). **C-r2-5 (same root):**
+  the stat-OUTAGE doctrine — `artifact_probe`/`ArtifactProbe` distinguish
+  honest ABSENCE (FileNotFoundError/NotADirectoryError → fresh UNCACHED, cheap,
+  last-known key FORGOTTEN so a deleted artifact is never resurrected) from a
+  probe OUTAGE (any other OSError → serve the LAST-KNOWN payload via the ONE
+  `serve_revision_cached` chokepoint + `OutageGate` [thread-safe, both maps
+  LRU-bounded at OUTAGE_GATE_CAPACITY=512 — the events coordinate folds
+  client-typed page params, so unbounded dicts would be a hostile-poll leak]
+  with ONE `oneclick.probe_outage` WARN per outage per COORDINATE (r2
+  MINOR-2 honesty — a whole-volume flap warns once per distinct coordinate
+  touching the volume, a verify poll probes 3: primary + events + top100
+  siblings; never per poll) and a
+  `oneclick.probe_recovered` INFO on recovery — the pre-fix rev-None arm was
+  an UNCACHED full O(artifact) re-parse per poll with ZERO logs, Breaker-C
+  measured ~450×); ALL FIVE cached oneclick routes (runs · manifest · top100 ·
+  events · verify) rewired through the chokepoint; the peek rides the NEW
+  `CachedPayloadMissingError`/`raise_no_cached_payload` sentinel over the NEW
+  `PayloadCache` Protocol (leaf module never imports the dashboard cache);
+  `runs_revision_probe` is the outage-aware twin of `runs_revision` over ONE
+  extracted `_runs_digest` (§11 COMMON, byte-identical). **F4:**
+  `discover_runs` stat-stamps every dir, selects the newest-limit on
+  `(mtime_ns, name)` (IDENTICAL selection/order to the pre-fix sort), and
+  parses ONLY the selected manifests — the pre-fix shape parsed EVERY run's
+  manifest then truncated (67× under churn); the stat sweep stays O(run dirs)
+  and `runs_revision`'s uncapped stat walk stands (the F5 ruling — this bounds
+  PARSES, not stats); `TestDiscoverRunsParseBound` pins 50-of-60 parses via a
+  counting spy. **A-r4 (client defense-in-depth):** the /screener "Show all"
+  render is BOUNDED (BX_SCREENER_SHOW_ALL_CAP=1000) and applyFilters/sortRows
+  are input-bounded (BX_SCREENER_INPUT_CAP=5000, applied at payload ingestion
+  via `bxInputCapRows`) through node-goldened BXScreener primitives
+  (`bxRenderCount`/`bxCapNote`/`bxInputCapNote` — every truncation NAMED on
+  the count line: "showing first N of M (render cap 1000)"); the backend half
+  was CLOSED by #1373's TOP100_ROW_CAP=100 (>100-row inputs unreachable
+  TODAY) — this guards FUTURE bypass paths against the Playwright-measured
+  10k=4.8 s / 20k=14.1 s tab freeze; the [W2-5] rendered-numerator law stands
+  (route pin repointed onto the shared primitives). **F2b SKIPPED** (optional
+  polish per the Breaker-A severity correction — the row cap was the real
+  fix; do-not-over-invest ruling, ledgered). TESTS/GATES:
+  `oneclick_artifacts.py` 100.00% line+branch on the ci.yml-EXACT standalone
+  gate (probe/gate/chokepoint covered by the unit file alone);
+  `oneclick_view.py` untouched; the oneclick battery + route
+  outage/recovery regressions green; ruff/ruff-format clean; `mypy --strict`
+  clean; pyright 0 errors on touched files; `node --check` clean. DISPLAY
+  zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX); zero new routes; the
+  verify wire shape byte-identical (caching + logging only); the only
+  payload-visible change class is the /screener count-line notes + the
+  bounded Show-all render.)
   Earlier: `claude/oneclick-instrument-display` (**DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
   DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665** — renumbered from
   #1632/#1633→#1633/#1634→#1664/#1665 across the 2026-07-09 + 2026-07-10 main-folds (main took #1632 with
@@ -3053,6 +3170,31 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
   change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
   --strict`/pyright clean; the P-06 look-ahead + suffix-independence property suites pass UNMODIFIED.)
+  Earlier: `claude/peaceful-hamilton-kyeu07` (**DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645** — the
+  dormant India-VIX trade stamping WOKEN end-to-end: the lake's `NSE/INDEX/INDIAVIX` series (1-minute ∪ derived 1-day,
+  ONE window-bounded read per launch via NEW `brutex/engine/lake_slice.py::load_lake_slice` +
+  `brutex/engine/reference_wire.py::build_vix_stamper`) stamps `vix_at_entry`/`vix_at_exit` on EVERY OBSERVABLE production trade, and
+  persisted finalist rows gain the derived nullable `vix_mean`/`vix_min`/`vix_max` trio (`aggregate_trade_vix`, the
+  ONE fsum-overflow-safe fold; results_store's PUBLIC `VIX_FIELDS` is the one cross-module column source) — VIX stays
+  REFERENCE ONLY: never in the 60-vocab, never in `_RANKABLE_FIELDS`, never in the BLAKE3 run identity; a missing VIX
+  bar stamps `None`, NEVER fabricated. The stamper seam is threaded/bound across every production trade-sim site
+  (`ResidentTradeSim.reference_stamper` + the hoisted Rust-batch post-stamp converter — kernel byte-untouched; spawn
+  pools carry a picklable stamper, sequential ≡ parallel bytes pinned); the ONLY unstamped trade streams are the FIVE
+  named DISCARDED/unobservable streams (§2 Rule 3), each an explicit literal `reference_stamper=None` enumerated by
+  the exact-count AST pin (`tests/unit/test_vix_stamper_binding_pin.py`) that also REFUSES silently-omitted kwargs +
+  positively pins the entry-point binds AND the once-per-launch builder-call counts. The trio survives redo honestly:
+  None→value backfills, a value-vs-value clash raises the typed tuple-skip `VixTrioConflictError` (the VIX lake moved,
+  NOT non-determinism — grid drivers tuple-skip, stage-3 cell-skips), and `sweep-verify --recount` stamps like the
+  launcher + attributes a VIX-only divergence as the non-corrupt `recount_vix_divergence` (moved/backfill/pre-VIX-
+  schema shapes; the sentinel/sidecar re-pair gates are `dataclasses.fields()`-driven — drift-proof, never a hand
+  list). Round-6 review fixes: the cascade candidate re-simulation's stamps were provably DISCARDED at the
+  CandidateInput scalar conversion (report bytes pinned identical either way), so the cascade chain's dead stamper
+  seam was DELETED along with the two manual-replay `vix_stamper_for_manifest` builds that paid a full window-bounded
+  VIX lake read per `brutex cascade` run / dashboard click for zero observable output (the fifth sanctioned
+  literal-None site now lives inside `build_candidate_input`; revert lever = add a VIX surface to the cascade report
+  FIRST); miss-WARNs are memoised + capped (cap+1 log lines, exact `miss_count` tally). ENGINE semantics UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 new vs the pre-change baseline).
   Earlier: `claude/jolly-tesla-miygwt` (**DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597** — the weekly deep
   mutation gate made GREEN end-to-end: both cargo-mutants jobs restructured onto sharded matrices (6 fno-math +
   7 trading-core shards; worst shard 65 min vs the 120 min job cap), trading-core WIDENED to evaluator+python+spec
@@ -4767,8 +4909,30 @@ hostile-review pass._
 3. **Scope lock.** Track 1 = Groww + spot indexes + India VIX (NIFTY 50,
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
-   every trade, but is NEVER part of brute-force pattern combinations
-   or the 52-condition vocabulary. 21 timeframes — **`1m` is the ONLY
+   every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
+   #1645 — persisted finalist rows additionally carry the derived
+   nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
+   trade streams are the FIVE named DISCARDED/unobservable streams —
+   the Stage-4 cascade candidate re-simulation (stamps would be dropped
+   at the CandidateInput scalar conversion; report bytes pinned
+   identical — the round-6 review DELETED the cascade chain's dead
+   stamper seam plus the two manual-replay `vix_stamper_for_manifest`
+   builds that paid a full VIX lake read per replay/click for zero
+   output), its Monte-Carlo permutation filter, `run_persisted_sweep`'s
+   K-of-N inner stream, the CLI options-sim replay (stamps would be
+   dropped at the SpotSignal conversion) and `brutex sweep`'s
+   text-report replay (report bytes pinned identical) — each an
+   explicit literal `reference_stamper=None` enumerated by an AST pin
+   whose exact-count laws also REFUSE a silently-omitted kwarg
+   and positively pin the entry-point binds (round-2 panel hardening);
+   the trio survives redo honestly — `None → value` backfills, a
+   value-vs-value clash raises the typed tuple-skip
+   `VixTrioConflictError` (the VIX lake moved, NOT non-determinism) and
+   `sweep-verify --recount` stamps like the launcher + attributes a
+   VIX-only divergence as the non-corrupt `recount_vix_divergence`;
+   a missing VIX bar stamps `None`, never fabricated), but is
+   NEVER part of brute-force pattern combinations or the 52-condition
+   vocabulary (nor `_RANKABLE_FIELDS`, nor the BLAKE3 run identity). 21 timeframes — **`1m` is the ONLY
    granularity fetched** and the 19 derived intraday TFs + `1d` are all
    DERIVED from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853; the
    `1d` daily anchor is resampled to midnight-IST from the stored 1-minute and
@@ -5047,6 +5211,27 @@ hostile-review pass._
   market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
   days, keeping the shared account free for TickVault's live feed; matches
   §1's Active branch line)
+  Earlier: `claude/oneclick-perf-club`
+  (DEC-ONECLICK-PERF-CLUB-001, MIGRATION.md #1711 — coordinator-assigned from
+  the reservation map (next free above the #1264 reservation tail #1710;
+  live-main max #1665 at assignment — gaps are legal; renumbered from the
+  interim provisional #1666) — the queued post-#1373 oneclick
+  perf/hygiene club, built
+  on PR #1373's head 3c478831 (the PR opens after #1373 lands): F1 the
+  /api/v1/oneclick/verify revision cache (the ONE uncached oneclick route;
+  key folds manifest + events + top100 tokens + the chain verified-state;
+  NEW B-7 bench pin measured 0.95× flat) · C-r2-5 the stat-outage
+  serve-last-known doctrine on ALL FIVE cached oneclick routes
+  (`artifact_probe` absent≠outage + `OutageGate` + the ONE
+  `serve_revision_cached` chokepoint; one WARN per outage per coordinate,
+  recovery INFO,
+  never a silent per-poll re-parse) · F4 `discover_runs` stat-sorts first and
+  parses only the newest-limit manifests (identical selection; 50-of-60
+  parse-spy pin) · A-r4 the /screener client-side bounds (Show all capped at
+  1000, input cap 5000, node-goldened cap/note math — every truncation NAMED)
+  · F2b deliberately SKIPPED as optional polish; DISPLAY zone only; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
+  blurb)
   Earlier: `claude/oneclick-instrument-display`
   (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 + DEC-ONECLICK-INSTRUMENT-DISPLAY-001,
   MIGRATION.md #1664–#1665, renumbered #1632/#1633→#1633/#1634→#1664/#1665 —
@@ -5159,6 +5344,11 @@ hostile-review pass._
   anchor at the Stage-1A roll seam + (2) a bounded bad-tick screen at the engine
   read boundary (`arrow_table_to_bars`); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
+  Earlier: `claude/peaceful-hamilton-kyeu07`
+  (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645 — India-VIX trade stamping wired
+  end-to-end: `vix_at_entry`/`vix_at_exit` on every OBSERVABLE trade + the
+  persisted nullable `vix_mean`/`vix_min`/`vix_max` finalist trio, REFERENCE
+  ONLY; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/jolly-tesla-miygwt`
   (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 — the weekly deep mutation
   gate made green end-to-end: sharded cargo-mutants matrices + zero-survivor
@@ -5425,7 +5615,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4804-4805` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4807-4808` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |

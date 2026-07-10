@@ -77,6 +77,14 @@ DB_INTERVAL: Final[str] = "1minute"
 #: The /db fixture's session day (all 15 bars 09:15–09:29 IST on this day).
 DB_DAY: Final[str] = "2025-01-02"
 
+#: The /db F&O deep-link fixture's one seeded contract (DEC-MOVERS-DRILL-DOWN-001):
+#: the groww_symbol lake key ``bars/NSE/FNO/<symbol>/1minute/…`` whose decoded
+#: coordinates (via the real ``parse_fno_symbol`` grammar the /db cascade rides)
+#: are the underlying/ISO-expiry the deep-link driver must land on.
+DB_FNO_SYMBOL: Final[str] = "NSE-NIFTY-30Jan25-24000-CE"
+DB_FNO_UNDERLYING: Final[str] = "NIFTY"
+DB_FNO_EXPIRY_ISO: Final[str] = "2025-01-30"
+
 #: Lake-LEGAL hostile instrument name (every char passes the production
 #: ``_validate_symbol`` — no ``< > " | * ? : / \\``), carrying TWO arms:
 #:
@@ -219,6 +227,42 @@ def build_db_app(tmp_path: Path) -> AppFixture:
         # EN-DASH ranges (db.html gridRangeText).
         "page1_range": "1–10 / 15",
         "page2_range": "11–15 / 15",
+    }
+    return AppFixture(app=app, ground=ground, cleanup=store.close)
+
+
+def build_db_fno_app(tmp_path: Path) -> AppFixture:
+    """/db F&O deep-link: ONE seeded FNO contract partition (DEC-MOVERS-DRILL-DOWN-001).
+
+    Written through the production :class:`ParquetBarSink` exactly as the Groww
+    option pull writes (``segment="FNO"``, the contract groww_symbol as the lake
+    key), on the SAME session day as the spot /db fixture — so the deep-link
+    driver's underlying → expiry → contract resolution runs against the REAL
+    ``/api/v1/db/fno/*`` cascade payloads derived from this partition.
+    """
+    bars = [
+        CandleBar(
+            # 09:15 IST + i minutes = 03:45 UTC + i (fixed +05:30, no DST).
+            timestamp=datetime(2025, 1, 2, 3, 45 + i, tzinfo=UTC),
+            open=Decimal("150.00") + i,
+            high=Decimal("151.00") + i,
+            low=Decimal("149.00") + i,
+            close=Decimal("150.50") + i,
+            volume=100 + i,
+            open_interest=1_000 + i,
+        )
+        for i in range(5)
+    ]
+    ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path)).append(
+        exchange="NSE", segment="FNO", symbol=DB_FNO_SYMBOL, interval="1minute", bars=bars
+    )
+    store = _open_store(tmp_path)
+    app = build_app(DashboardState(), instrument_store=store)
+    ground: dict[str, Any] = {
+        "symbol": DB_FNO_SYMBOL,
+        "underlying": DB_FNO_UNDERLYING,
+        "expiry": DB_FNO_EXPIRY_ISO,
+        "day": DB_DAY,
     }
     return AppFixture(app=app, ground=ground, cleanup=store.close)
 
