@@ -1621,6 +1621,15 @@ jobs:
           else
             echo "(brutex.data.fno_candle_lake test file not present yet — gate inactive)"
           fi
+          # DEC-DB-FNO-DISPLAY-TRUTH-001: the COMMON wheel-free packed Greeks
+          # provenance vocabulary (pack/unpack/status labels) — stdlib-only at
+          # import (greeks_enrich re-exports it; the /db viewer decodes through
+          # it). 100% line+branch standalone.
+          if compgen -G "tests/unit/test_greeks_provenance.py" > /dev/null; then
+            pytest --cov=brutex.data.greeks_provenance --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_greeks_provenance.py
+          else
+            echo "(brutex.data.greeks_provenance test file not present yet — gate inactive)"
+          fi
           # DEC-FNO-MONEYNESS-001: the shared option moneyness (ITM/ATM/OTM) + ATM±N
           # engine — pure, stdlib+Decimal only, the ONE source consumed by the movers
           # screen + the /db F&O candle viewer. 100% line+branch standalone.

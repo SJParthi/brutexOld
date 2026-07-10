@@ -164,6 +164,29 @@ def _bump_master(store: InstrumentStore) -> None:
     )
 
 
+def _bump_coverage(store: InstrumentStore) -> None:
+    """Write ONE coverage cell WITHOUT bumping the generation or the master.
+
+    Mirrors a metadata (expiries/contracts) pull — in this process or ANOTHER one
+    sharing the same ``instruments.duckdb``: ``upsert_coverage`` writes the
+    ``coverage_ledger`` table only, so :func:`coverage_revision` moves while BOTH
+    ``_summary_cache.generation`` AND :func:`master_revision` stay put
+    (DEC-STALENESS-CACHE-TRUTH-001 — the freshness hole the 4th key component closes).
+    """
+    store.upsert_coverage(
+        CoverageRecord(
+            exch_id="NSE",
+            underlying_symbol="RELIANCE",
+            year=2019,  # a year OUTSIDE _coverage_years() — a brand-new cell
+            expiries_pulled=1,
+            contracts_pulled=5,
+            status=classify_cell(1, 5, None),
+            last_run_id="run-cov-bump",
+            last_fetched_at=datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+        )
+    )
+
+
 def _make_client(store: InstrumentStore, cache: SummaryCache) -> TestClient:
     return TestClient(
         app_module.build_app(
@@ -210,6 +233,19 @@ class TestCoverageCache:
         assert client.get("/api/v1/coverage").status_code == 200
         assert calls["n"] == 3
 
+        # A coverage-ledger write (no generation bump, master untouched — a
+        # metadata pull, possibly from ANOTHER process) MISSES → one fresh build,
+        # and the new cell is actually SERVED (DEC-STALENESS-CACHE-TRUTH-001;
+        # fails before: the stale pre-write grid was re-served from cache).
+        _bump_coverage(store)
+        fresh = client.get("/api/v1/coverage")
+        assert fresh.status_code == 200
+        assert calls["n"] == 4
+        # An unchanged store yields a byte-identical key → repeat poll is a HIT
+        # (stable token — the 4th component never thrashes the cache).
+        assert client.get("/api/v1/coverage").status_code == 200
+        assert calls["n"] == 4
+
 
 # ── /api/v1/universe/completeness ───────────────────────────────────────────
 
@@ -248,6 +284,15 @@ class TestUniverseCompletenessCache:
         assert client.get("/api/v1/universe/completeness").status_code == 200
         assert calls["n"] == 3
 
+        # A coverage-ledger write alone (no generation/master move) MISSES →
+        # one fresh build (DEC-STALENESS-CACHE-TRUTH-001) — then a repeat poll
+        # on the unchanged store is a HIT again (stable token, no thrash).
+        _bump_coverage(store)
+        assert client.get("/api/v1/universe/completeness").status_code == 200
+        assert calls["n"] == 4
+        assert client.get("/api/v1/universe/completeness").status_code == 200
+        assert calls["n"] == 4
+
 
 # ── /api/v1/universe/mapping-integrity (+ shared CSV) ───────────────────────
 
@@ -282,6 +327,16 @@ class TestMappingIntegrityCache:
         _bump_master(store)
         assert client.get("/api/v1/universe/mapping-integrity").status_code == 200
         assert calls["n"] == 3
+
+        # A coverage-ledger write alone (the mapping-integrity report READS
+        # store.list_coverage(), so a stale serve here was a WRONG verdict)
+        # MISSES → one fresh reconcile (DEC-STALENESS-CACHE-TRUTH-001) — then a
+        # repeat poll on the unchanged store is a HIT again (no thrash).
+        _bump_coverage(store)
+        assert client.get("/api/v1/universe/mapping-integrity").status_code == 200
+        assert calls["n"] == 4
+        assert client.get("/api/v1/universe/mapping-integrity").status_code == 200
+        assert calls["n"] == 4
 
     def test_json_and_csv_share_one_cached_report(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
