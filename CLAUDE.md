@@ -18,7 +18,36 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
+_Last updated: 2026-07-10 (DEC-ONECLICK-PERF-CLUB-001,
+MIGRATION.md #1711 — coordinator-ASSIGNED from the reservation map
+(next free above the #1264 reservation tail #1710; live-main max #1665
+at assignment — gaps are legal; renumbered from the interim provisional
+#1666) —
+the queued post-#1373 oneclick perf/hygiene club on
+`claude/oneclick-perf-club` (built on PR #1373's head 3c478831; the PR
+opens after #1373 lands): (F1) `/api/v1/oneclick/verify` — the ONE
+oneclick route with no revision cache — joins the stat-token family (key
+folds manifest + events + top100 tokens + the chain verified-state; a
+primed poll is three stats + the chain cache-peek + one hit; NEW B-7
+bench pin,
+measured 0.95× flat vs a 1000× manifest); (C-r2-5) ALL FIVE cached
+oneclick routes ride the NEW `serve_revision_cached` chokepoint — a stat
+OUTAGE (now distinguished from honest ABSENCE by `artifact_probe`) serves
+the LAST-KNOWN payload with ONE `oneclick.probe_outage` WARN per outage
+per COORDINATE (a whole-volume flap warns once per touched coordinate;
+never a silent per-poll O(artifact) re-parse; recovery logs + resumes
+normal keying; `OutageGate` LRU-bounded 512); (F4) `discover_runs`
+stat-stamps + sorts FIRST and parses only the newest-limit manifests
+(identical selection; the F5 uncapped runs_revision stat walk stands);
+(A-r4) the /screener render/filter/sort surfaces are client-side BOUNDED
+via node-goldened BXScreener primitives (Show all itself capped at 1000;
+input cap 5000; every truncation NAMED on the count line) — the backend
+half was #1373's TOP100_ROW_CAP; F2b (serialized-response caches)
+deliberately SKIPPED as optional polish per the severity correction.
+DISPLAY zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX);
+`oneclick_artifacts.py` 100% line+branch on the ci.yml-exact gate; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1711.)
+Earlier: 2026-07-09 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
 DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665 —
 renumbered from #1632/#1633→#1633/#1634→#1664/#1665: #1633–#1636 were
 #1323's reserved block (landed on main 2026-07-10), #1664/#1665
@@ -1918,7 +1947,78 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/oneclick-instrument-display` (**DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
+- **Active branch:** `claude/oneclick-perf-club` (**DEC-ONECLICK-PERF-CLUB-001,
+  MIGRATION.md #1711** — the entry number is coordinator-ASSIGNED from the
+  reservation map (2026-07-10 — the next free number above the #1264
+  reservation tail #1710; live-main max #1665 at assignment, live-max+1
+  spoken for by in-flight reservations — gaps are legal; renumbered from
+  the interim provisional #1666, the #1664/#1665 reservation-map
+  lesson) — the queued
+  post-#1373 oneclick perf/hygiene club, built on PR #1373's
+  `claude/oneclick-instrument-display` head 3c478831 (the PR opens only after
+  #1373 merges; BUILD+TEST+PUSH-branch-only until then). **F1 (TOP):**
+  `GET /api/v1/oneclick/verify` was the ONE oneclick route with NO revision
+  cache — `load_manifest` + `reconcile_funnel` + the one-row trades probe ran
+  per REQUEST; the whole payload is now stat-token cached like the siblings
+  (key = manifest token [primary probe] + events + top100 tokens + the chain
+  verified-state — a `check=chain` click re-keys exactly once, then plain polls
+  serve the clicked payload; a primed poll is three `os.stat` probes + the
+  raising chain cache-peek + one hit (r2 sweep M1 — the chain state is a
+  cache-peek, never a stat); HONEST: a sidecar rewrite moving none of
+  the three tokens does not move the key — the #1617 pass lands sidecars
+  BEFORE top100.json, so the trades-wired flag refreshes with the top100
+  token; a manifest-less run computes fresh per poll, cheaply). NEW B-7 bench
+  pin (`TestVerifyPollFlatVsManifestSize`, measured 2026-07-10 sandbox:
+  26.5 µs/poll @ 4 doors vs 25.2 µs @ 4000 doors → 0.95× flat vs the 6.89 ms
+  fresh compute the pre-fix route paid per poll; `ratio_ceiling(8.0)` + the
+  `_must_not_run` no-recompute + outage-serve teeth). **C-r2-5 (same root):**
+  the stat-OUTAGE doctrine — `artifact_probe`/`ArtifactProbe` distinguish
+  honest ABSENCE (FileNotFoundError/NotADirectoryError → fresh UNCACHED, cheap,
+  last-known key FORGOTTEN so a deleted artifact is never resurrected) from a
+  probe OUTAGE (any other OSError → serve the LAST-KNOWN payload via the ONE
+  `serve_revision_cached` chokepoint + `OutageGate` [thread-safe, both maps
+  LRU-bounded at OUTAGE_GATE_CAPACITY=512 — the events coordinate folds
+  client-typed page params, so unbounded dicts would be a hostile-poll leak]
+  with ONE `oneclick.probe_outage` WARN per outage per COORDINATE (r2
+  MINOR-2 honesty — a whole-volume flap warns once per distinct coordinate
+  touching the volume, a verify poll probes 3: primary + events + top100
+  siblings; never per poll) and a
+  `oneclick.probe_recovered` INFO on recovery — the pre-fix rev-None arm was
+  an UNCACHED full O(artifact) re-parse per poll with ZERO logs, Breaker-C
+  measured ~450×); ALL FIVE cached oneclick routes (runs · manifest · top100 ·
+  events · verify) rewired through the chokepoint; the peek rides the NEW
+  `CachedPayloadMissingError`/`raise_no_cached_payload` sentinel over the NEW
+  `PayloadCache` Protocol (leaf module never imports the dashboard cache);
+  `runs_revision_probe` is the outage-aware twin of `runs_revision` over ONE
+  extracted `_runs_digest` (§11 COMMON, byte-identical). **F4:**
+  `discover_runs` stat-stamps every dir, selects the newest-limit on
+  `(mtime_ns, name)` (IDENTICAL selection/order to the pre-fix sort), and
+  parses ONLY the selected manifests — the pre-fix shape parsed EVERY run's
+  manifest then truncated (67× under churn); the stat sweep stays O(run dirs)
+  and `runs_revision`'s uncapped stat walk stands (the F5 ruling — this bounds
+  PARSES, not stats); `TestDiscoverRunsParseBound` pins 50-of-60 parses via a
+  counting spy. **A-r4 (client defense-in-depth):** the /screener "Show all"
+  render is BOUNDED (BX_SCREENER_SHOW_ALL_CAP=1000) and applyFilters/sortRows
+  are input-bounded (BX_SCREENER_INPUT_CAP=5000, applied at payload ingestion
+  via `bxInputCapRows`) through node-goldened BXScreener primitives
+  (`bxRenderCount`/`bxCapNote`/`bxInputCapNote` — every truncation NAMED on
+  the count line: "showing first N of M (render cap 1000)"); the backend half
+  was CLOSED by #1373's TOP100_ROW_CAP=100 (>100-row inputs unreachable
+  TODAY) — this guards FUTURE bypass paths against the Playwright-measured
+  10k=4.8 s / 20k=14.1 s tab freeze; the [W2-5] rendered-numerator law stands
+  (route pin repointed onto the shared primitives). **F2b SKIPPED** (optional
+  polish per the Breaker-A severity correction — the row cap was the real
+  fix; do-not-over-invest ruling, ledgered). TESTS/GATES:
+  `oneclick_artifacts.py` 100.00% line+branch on the ci.yml-EXACT standalone
+  gate (probe/gate/chokepoint covered by the unit file alone);
+  `oneclick_view.py` untouched; the oneclick battery + route
+  outage/recovery regressions green; ruff/ruff-format clean; `mypy --strict`
+  clean; pyright 0 errors on touched files; `node --check` clean. DISPLAY
+  zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX); zero new routes; the
+  verify wire shape byte-identical (caching + logging only); the only
+  payload-visible change class is the /screener count-line notes + the
+  bounded Show-all render.)
+  Earlier: `claude/oneclick-instrument-display` (**DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
   DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665** — renumbered from
   #1632/#1633→#1633/#1634→#1664/#1665 across the 2026-07-09 + 2026-07-10 main-folds (main took #1632 with
   DEC-DASHBOARD-VISUAL-OVERHAUL-001, PR #1354; #1633–#1636 were #1323's reserved block; #1664/#1665
@@ -4937,7 +5037,28 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/oneclick-instrument-display`
+- **Active feature branch:** `claude/oneclick-perf-club`
+  (DEC-ONECLICK-PERF-CLUB-001, MIGRATION.md #1711 — coordinator-assigned from
+  the reservation map (next free above the #1264 reservation tail #1710;
+  live-main max #1665 at assignment — gaps are legal; renumbered from the
+  interim provisional #1666) — the queued post-#1373 oneclick
+  perf/hygiene club, built
+  on PR #1373's head 3c478831 (the PR opens after #1373 lands): F1 the
+  /api/v1/oneclick/verify revision cache (the ONE uncached oneclick route;
+  key folds manifest + events + top100 tokens + the chain verified-state;
+  NEW B-7 bench pin measured 0.95× flat) · C-r2-5 the stat-outage
+  serve-last-known doctrine on ALL FIVE cached oneclick routes
+  (`artifact_probe` absent≠outage + `OutageGate` + the ONE
+  `serve_revision_cached` chokepoint; one WARN per outage per coordinate,
+  recovery INFO,
+  never a silent per-poll re-parse) · F4 `discover_runs` stat-sorts first and
+  parses only the newest-limit manifests (identical selection; 50-of-60
+  parse-spy pin) · A-r4 the /screener client-side bounds (Show all capped at
+  1000, input cap 5000, node-goldened cap/note math — every truncation NAMED)
+  · F2b deliberately SKIPPED as optional polish; DISPLAY zone only; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
+  blurb)
+  Earlier: `claude/oneclick-instrument-display`
   (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 + DEC-ONECLICK-INSTRUMENT-DISPLAY-001,
   MIGRATION.md #1664–#1665, renumbered #1632/#1633→#1633/#1634→#1664/#1665 —
   #1633–#1636 were #1323's reserved block, #1664/#1665 coordinator-assigned
