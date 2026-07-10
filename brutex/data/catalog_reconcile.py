@@ -36,7 +36,11 @@ import polars as pl
 import structlog
 
 from brutex.data.catalog import Catalog
-from brutex.data.errors import PartitionError, parquet_read_skip_errors
+from brutex.data.errors import (
+    PartitionError,
+    datetime_out_of_range_errors,
+    parquet_read_skip_errors,
+)
 from brutex.data.lake_invariants import (
     LakeFinding,
     PartitionCoords,
@@ -191,7 +195,13 @@ def reconcile_catalog_from_lake(
         # PolarsError, or an OSError fault) must NOT crash the whole reconcile — which
         # runs at the START of every sweep load + F&O window derivation. Log + skip that
         # one file (counted in `skipped`) and continue; every readable partition still
-        # reconciles. NARROW set (`parquet_read_skip_errors`): a genuine code bug still
+        # reconciles. NARROW set (`parquet_read_skip_errors` +
+        # `datetime_out_of_range_errors` — the round-18 DEC-LAKE-HEAL-OPTIONS-FOREIGN-001
+        # fold: a hand-planted Datetime column holding an out-of-`datetime`-range i64
+        # value, e.g. 2**62 µs, makes `min()`/`max()` raise OverflowError — pre-fix ONE
+        # such bars file crashed the whole reconcile, and with it every sweep load; if
+        # min/max convert, the downstream `classify_bar_keys` min/max convert too, so
+        # this ONE guard covers the L1 piggyback as well): a genuine code bug still
         # propagates (Golden Rule #1).
         try:
             timestamps = pl.read_parquet(path, columns=["timestamp"]).get_column("timestamp")
@@ -202,7 +212,7 @@ def reconcile_catalog_from_lake(
             first_ts = timestamps.min()
             last_ts = timestamps.max()
             raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        except parquet_read_skip_errors() as exc:
+        except (*parquet_read_skip_errors(), *datetime_out_of_range_errors()) as exc:
             _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
             skipped += 1
             continue

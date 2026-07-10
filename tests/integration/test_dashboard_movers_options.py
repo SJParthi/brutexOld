@@ -1752,14 +1752,20 @@ class TestOptionsPcr:
         # Design test #28 (warm parity, round-1 hostile-review fold): prime the
         # INJECTED movers cache exactly as the app's `_make_opt_job` warm job
         # does — an `options_warm_grid()` coordinate keyed by `candidate_key` +
-        # `compute_options_candidates` at `latest_movers_date` and the live
-        # generation — then poll the route at that coordinate: a PURE cache hit
-        # (compute never re-invoked) whose payload carries the warmed PCR rows.
+        # the instrument-master content token (`|m=<count>:<latest>` — the
+        # DEC-MOVERS-UNDERLYING-CLASS-001 fix round folded `master_revision`
+        # into the F&O candidate keys, warm/route parity kept) +
+        # `compute_options_candidates` (threading the warm job's
+        # `underlying_kinds`) at `latest_movers_date` and the live generation —
+        # then poll the route at that coordinate: a PURE cache hit (compute
+        # never re-invoked) whose payload carries the warmed PCR rows.
         from brutex.dashboard import app as app_module
         from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
         from brutex.dashboard.movers_snapshot import DEFAULT_INTERVAL
+        from brutex.dashboard.movers_underlying_class import build_underlying_kind_map
         from brutex.dashboard.movers_warm import latest_movers_date, options_warm_grid
         from brutex.dashboard.summary_cache import SummaryCache
+        from brutex.dashboard.universe_cache import master_revision
 
         _seed_pcr_lake(tmp_path)
         # A spot 1day partition so latest_movers_date resolves the seeded day —
@@ -1783,6 +1789,11 @@ class TestOptionsPcr:
         movers_cache = MoversSnapshotCache()
         summary_cache = SummaryCache()
         warm_date_str: str = warm_date
+        # The warm job's composite key: candidate_key + the master content token
+        # (the app's `_underlying_kinds_cached` law) — and the SAME kinds map
+        # threaded into the compute, so the warmed stamps match the route's.
+        count, latest = master_revision(store)
+        kinds = build_underlying_kind_map(store.list_index_equity_instruments())
         movers_cache.get_or_compute(
             candidate_key(
                 asset="options",
@@ -1792,7 +1803,8 @@ class TestOptionsPcr:
                 time=None,
                 expiry_tier=tier,
                 expiry_track=track,
-            ),
+            )
+            + f"|m={count}:{latest}",
             generation=summary_cache.generation,
             compute=lambda: compute_options_candidates(
                 lake_root=tmp_path,
@@ -1802,6 +1814,7 @@ class TestOptionsPcr:
                 expiry_tier=tier,
                 expiry_track=track,
                 exchange=exchange,
+                underlying_kinds=kinds,
             ),
         )
 
@@ -1985,8 +1998,22 @@ class TestOptionsPcr:
 from brutex.data.moneyness import Moneyness  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
 
-#: The FROZEN additive-key vocabulary this decision may ever add to a row.
+#: The FROZEN additive-key vocabulary this decision family may ever add to a
+#: row. DELIBERATE widening 2026-07-09 (DEC-PREVSESSION-MUHURAT-COHERENCE-001):
+#: the two EMIT-ON-TRUE-ONLY Muhurat keys join the #1539 EMIT-ON-FALSE pairs.
 _CONTIGUITY_KEYS = frozenset(
+    {
+        "prev_close_session",
+        "prev_close_contiguous",
+        "oi_baseline_session",
+        "oi_baseline_contiguous",
+        "prev_close_muhurat",
+        "oi_baseline_muhurat",
+    }
+)
+
+#: The #1539 EMIT-ON-FALSE lake-hole pairs alone (the noncontiguous-arm wire).
+_HOLE_KEYS = frozenset(
     {
         "prev_close_session",
         "prev_close_contiguous",
@@ -2101,9 +2128,55 @@ class TestOptionsContiguityGoldens:
         assert row["prev_close_contiguous"] is False
         assert row["oi_baseline_session"] == "2025-09-25"
         assert row["oi_baseline_contiguous"] is False
-        assert set(row) - _OPTION_ROW_KEYS == _CONTIGUITY_KEYS
+        assert set(row) - _OPTION_ROW_KEYS == _HOLE_KEYS
         warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
         assert sorted((e["kind"], e["symbol"]) for e in warns) == [
             ("oi", _G_CE),
             ("prev_close", _G_CE),
         ]
+
+    def test_muhurat_boundary_close_and_oi_flagged_no_warn_one_info(self, tmp_path: Path) -> None:
+        # DEC-PREVSESSION-MUHURAT-COHERENCE-001, the options OI twin: the ONLY
+        # prior 1-day bar is the 2024-11-01 Diwali Muhurat session — BOTH
+        # baselines legitimately ride it → both EMIT-ON-TRUE muhurat keys, no
+        # hole pair, ZERO noncontiguous WARNs, exactly ONE per-build INFO.
+        day = date(2024, 11, 4)
+        ce = "NSE-NIFTY-28Nov24-24000-CE"
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=ce,
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=day),
+                _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=day),
+            ],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=ce,
+            interval="1day",
+            bars=[_day_bar(day=date(2024, 11, 1), close="100", oi=1000)],
+        )
+        with capture_logs() as logs:
+            payload = run_options_snapshot(
+                lake_root=tmp_path, interval="1day", date=day.isoformat(), time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # VALUE-EQUALITY: served numbers baseline on the REAL Muhurat close/OI.
+        assert row["ltp"] == "₹164.00"
+        assert row["pct_change"] == str(
+            (Decimal("164.00") - Decimal("100.00")) / Decimal("100.00") * 100
+        )
+        assert row["oi_chg"] == 100
+        # The SANCTIONED wire delta: exactly the two muhurat keys, no hole pair.
+        assert row["prev_close_muhurat"] is True
+        assert row["oi_baseline_muhurat"] is True
+        assert set(row) & _HOLE_KEYS == set()
+        assert set(row) - _OPTION_ROW_KEYS == {"prev_close_muhurat", "oi_baseline_muhurat"}
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        infos = [e for e in logs if e["event"] == "movers.prev_baseline_muhurat"]
+        assert len(infos) == 1
+        assert infos[0]["symbol"] == ce
+        assert infos[0]["found_session"] == "2024-11-01"

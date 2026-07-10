@@ -77,18 +77,21 @@ def test_welcome_o1_card_states_two_tier_enforcement() -> None:
     assert "cache tier" in html
 
 
-def test_welcome_o1_card_discloses_strict_tier_dormancy() -> None:
-    # Round-1 review fix (DEC-O1-CLAIMS-HONESTY-001): the strict 1.1× tier is
-    # DORMANT until the operator registers the self-hosted [self-hosted,
-    # macos, m4pro] runner (bench-m4pro.yml sits queued until then), so the
-    # customer-facing card must not present it as a gate that runs today
-    # (Golden Rule #10 / Rule #13(b): never claim "gated" for a dormant
-    # tier). The dormancy qualifier + the today-gating attribution to the
-    # shared-CI tier are HARD-asserted so the overstatement can never
-    # silently return.
+def test_welcome_o1_card_states_live_strict_tier_honestly() -> None:
+    # DEC-O1-CLAIMS-HONESTY-001 round-1 originally pinned a DORMANCY
+    # disclosure here ("dormant until the operator registers it") — accurate
+    # then, REFUTED since 2026-07-07: the [self-hosted, macos, m4pro] runner
+    # is REGISTERED and bench-m4pro.yml jobs EXECUTE on push (the workflow
+    # header's "RUNNER IS LIVE" note; actions runs 28850622113 /
+    # 28888100079). DEC-LAKE-STATS-MANIFEST-001 endgame round 2 flipped the
+    # pin: the card must state the LIVE reality (never resurrect the stale
+    # dormancy claim) while KEEPING the honest today-gating attribution to
+    # the shared-CI tier (the strict tier runs only on that workflow's
+    # path-triggered pushes, not on every push).
     html = _render_welcome_html()
-    assert "dormant until the operator registers it" in html
-    assert "reserved for the self-hosted M4 Pro runner" in html
+    assert "dormant until the operator registers it" not in html
+    assert "registered and live since 2026-07-07" in html
+    assert "executes on the self-hosted M4 Pro runner" in html
     assert "gates every push today" in html
 
 

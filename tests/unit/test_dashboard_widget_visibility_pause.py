@@ -20,7 +20,16 @@ normal cadence (a hidden tick is free, ZERO fetches) so the never-gives-up
 self-recovery property survives a hidden period, the guard sits BEFORE the
 ``pollSeq`` bump (an in-flight response still renders) and BEFORE any fetch (a
 hidden period counts ZERO ``pollFailures`` — no spurious backoff while hidden).
-``bx-liveproof.js`` keeps the verbatim v29 shape (guard + ``setInterval``).
+
+Second reconcile (DEC-PULL-UI-STALENESS-001 port to ``bx-liveproof.js``,
+display-truth batch): the live-proof widget ADOPTS the same #1241 shape — the
+bounded ``fetchJson`` helper, the ``schedulePoll`` chain (success → POLL_MS,
+failure → capped backoff, never gives up), the 1 s ``renderAge`` staleness ticker,
+and the same ``if (document.hidden) { schedulePoll(POLL_MS); return; }`` guard — so
+a silent/unreachable backend can never keep a green "pass" pill reading fresh. Its
+visibilitychange catch-up stays the one-liner ``if (!document.hidden) poll();`` (a
+direct poll() whose own schedulePoll clears the pending timer). Both widgets now
+share the self-scheduling shape.
 
 HONEST envelope (Golden Rule #10): these are SOURCE-STRING pins — the repo's JS
 convention (no browser runtime in CI) — not a browser-executed behavioural test.
@@ -37,12 +46,11 @@ _STATIC = Path(brutex.dashboard.__file__).resolve().parent / "static"
 _WIDGET_FILES = ("bx-rate-monitor.js", "bx-liveproof.js")
 _LISTENER_REGISTRATION = 'document.addEventListener("visibilitychange", function () {'
 
-#: Per-widget hidden-tab guard (first statement of poll()).
+#: Per-widget hidden-tab guard (first statement of poll()). Both widgets share the
+#: #1241 self-scheduling chain: re-arm at normal cadence, then return.
 _GUARDS = {
-    # #1241 self-scheduling chain: re-arm at normal cadence, then return.
     "bx-rate-monitor.js": "if (document.hidden) { schedulePoll(POLL_MS); return; }",
-    # verbatim v29.html shape (setInterval keeps ticking; hidden ticks are free).
-    "bx-liveproof.js": "if (document.hidden) return;",
+    "bx-liveproof.js": "if (document.hidden) { schedulePoll(POLL_MS); return; }",
 }
 #: Per-widget visibilitychange catch-up opener (an immediate poll() on return).
 _CATCH_UPS = {
@@ -99,30 +107,26 @@ def test_poll_guard_is_first_statement_before_any_fetch(name: str) -> None:
 
 @pytest.mark.parametrize("name", _WIDGET_FILES)
 def test_no_fetch_outside_the_guarded_poll(name: str) -> None:
-    """Every network call in the widget sits AFTER the guard — no unguarded side-channel.
+    """Every network CALL SITE in the widget sits AFTER the guard — no side-channel.
 
-    ``bx-rate-monitor.js`` (post-#1241) routes every request through its bounded
-    ``fetchJson`` helper: the ONE raw ``fetch(`` lives inside that helper's
-    definition, and every ``fetchJson(`` CALL SITE sits after the guard inside
-    the guarded ``poll()``.
+    BOTH widgets route every request through their bounded ``fetchJson``
+    helper (``bx-rate-monitor.js`` since #1241; ``bx-liveproof.js`` via the
+    display-truth port carrying the DEC-WINDOWS-COUNTS-ONLY-001 M15
+    abort-deadline + one-in-flight discipline): the ONE raw ``fetch(`` lives
+    inside that helper's definition, and every ``fetchJson(`` CALL SITE sits
+    after the guard inside the guarded ``poll()``.
     """
     js = _widget_js(name)
     guard_pos = js.index(_GUARDS[name])
-    if name == "bx-rate-monitor.js":
-        assert js.count("fetch(") == 1, f"{name}: raw fetch( must live ONLY in fetchJson"
-        assert js.index("fetch(") > js.index("function fetchJson(url)"), (
-            f"{name}: the raw fetch( must sit inside the fetchJson helper"
-        )
-        call_sites = [
-            pos for pos in _find_all(js, "fetchJson(") if not js[:pos].endswith("function ")
-        ]
-        assert call_sites, f"{name}: no fetchJson call sites found"
-        assert all(pos > guard_pos for pos in call_sites), (
-            f"{name}: a fetchJson call appears before the document.hidden guard"
-        )
-    else:
-        first_fetch = js.index("fetch(")
-        assert guard_pos < first_fetch, f"{name}: a fetch appears before the document.hidden guard"
+    assert js.count("fetch(") == 1, f"{name}: raw fetch( must live ONLY in fetchJson"
+    assert js.index("fetch(") > js.index("function fetchJson(url)"), (
+        f"{name}: the raw fetch( must sit inside the fetchJson helper"
+    )
+    call_sites = [pos for pos in _find_all(js, "fetchJson(") if not js[:pos].endswith("function ")]
+    assert call_sites, f"{name}: no fetchJson call sites found"
+    assert all(pos > guard_pos for pos in call_sites), (
+        f"{name}: a fetchJson call appears before the document.hidden guard"
+    )
 
 
 def _find_all(js: str, needle: str) -> list[int]:
@@ -168,49 +172,37 @@ def test_exactly_one_visibilitychange_catch_up_listener(name: str) -> None:
 
 @pytest.mark.parametrize("name", _WIDGET_FILES)
 def test_interval_and_first_paint_unchanged(name: str) -> None:
-    """Scheduling shape pinned per widget; ``start()`` still paints immediately.
+    """Self-scheduling shape pinned for BOTH widgets; ``start()`` paints immediately.
 
-    ``bx-liveproof.js``: the v29 shape — exactly one ``setInterval(poll,
-    POLL_MS)`` with an immediate first ``poll()`` (the pause is a guard INSIDE
-    ``poll()``; the interval keeps ticking, hidden ticks are free).
-
-    ``bx-rate-monitor.js`` (post-#1241): NO ``setInterval(poll`` anywhere — the
-    poll is a self-scheduling ``schedulePoll`` chain (success → ``POLL_MS``,
-    failure → capped backoff) that the hidden guard re-arms at ``POLL_MS``; the
-    only interval is the 1 s ``renderAge`` staleness ticker, and ``start()``
-    fires one immediate ``poll()`` before registering the listener.
+    Post-#1241 (rate monitor) / display-truth port (live proof): NO
+    ``setInterval(poll`` anywhere — the poll is a self-scheduling ``schedulePoll``
+    chain (success → ``POLL_MS``, failure → capped backoff, never gives up) that
+    the hidden guard re-arms at ``POLL_MS``; the only interval is the 1 s
+    ``renderAge`` staleness ticker, and ``start()`` fires one immediate ``poll()``
+    before registering the visibilitychange listener.
     """
     js = _widget_js(name)
-    if name == "bx-rate-monitor.js":
-        assert "setInterval(poll" not in js, (
-            f"{name}: #1241 replaced setInterval(poll…) with the schedulePoll chain"
-        )
-        assert js.count("setInterval(renderAge, AGE_TICK_MS);") == 1, (
-            f"{name}: the 1 s staleness ticker drifted"
-        )
-        start_body = js[js.index("function start() {") :]
-        first_poll = start_body.index("poll();")
-        assert first_poll < start_body.index("setInterval(renderAge"), (
-            f"{name}: start() must fire the immediate first poll() before the age ticker"
-        )
-        assert start_body.index("setInterval(renderAge") < start_body.index(
-            _LISTENER_REGISTRATION
-        ), f"{name}: the listener registers after the age ticker (the #1241 order)"
-        # The chain re-arms on every outcome: success, failure AND hidden.
-        assert js.count("schedulePoll(POLL_MS);") == 2, (
-            f"{name}: expected the success re-arm + the hidden-tab re-arm"
-        )
-        assert "schedulePoll(backoffDelayMs(pollFailures));" in js, (
-            f"{name}: the failure backoff re-arm drifted"
-        )
-    else:
-        interval = "setInterval(poll, POLL_MS);"
-        assert js.count(interval) == 1, f"{name}: setInterval count drifted"
-        immediate = f"poll();\n    {interval}"
-        assert immediate in js, f"{name}: the immediate first-paint poll() drifted"
-        assert js.index(interval) < js.index(_LISTENER_REGISTRATION), (
-            f"{name}: the listener registers after the interval (the v29 order)"
-        )
+    assert "setInterval(poll" not in js, (
+        f"{name}: the self-scheduling schedulePoll chain replaces setInterval(poll…)"
+    )
+    assert js.count("setInterval(renderAge, AGE_TICK_MS);") == 1, (
+        f"{name}: the 1 s staleness ticker drifted"
+    )
+    start_body = js[js.index("function start() {") :]
+    first_poll = start_body.index("poll();")
+    assert first_poll < start_body.index("setInterval(renderAge"), (
+        f"{name}: start() must fire the immediate first poll() before the age ticker"
+    )
+    assert start_body.index("setInterval(renderAge") < start_body.index(_LISTENER_REGISTRATION), (
+        f"{name}: the listener registers after the age ticker (the #1241 order)"
+    )
+    # The chain re-arms on every outcome: success, failure AND hidden.
+    assert js.count("schedulePoll(POLL_MS);") == 2, (
+        f"{name}: expected the success re-arm + the hidden-tab re-arm"
+    )
+    assert "schedulePoll(backoffDelayMs(pollFailures));" in js, (
+        f"{name}: the failure backoff re-arm drifted"
+    )
 
 
 # ── T-e4: bx-ui.js untouched — no false COMMON merge ─────────────────────────
