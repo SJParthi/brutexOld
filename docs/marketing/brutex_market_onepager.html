@@ -173,6 +173,12 @@ h1 .grad{
 .card p{font-size:.86rem;color:var(--ink-dim)}
 .card .big{font-size:1.35rem;font-weight:800;letter-spacing:-.02em;color:var(--ink)}
 
+/* layered copy: plain-English lead + trader-grade sub-line */
+.card p.plain{font-size:.92rem;color:var(--ink);margin-bottom:8px}
+.card p.pro{font-size:.78rem;color:var(--ink-faint)}
+.hero p.lede-pro{color:var(--ink-faint);font-size:.95rem;max-width:640px;margin-top:12px}
+.limits .plain-lead{color:var(--ink-dim);font-size:.95rem;margin-top:4px}
+
 /* rigor cards accent */
 .rigor .card .icon{background:linear-gradient(135deg,rgba(45,212,191,.2),rgba(91,140,255,.16));
   border-color:rgba(45,212,191,.35)}
@@ -276,22 +282,23 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
   <div class="wrap">
     <div class="badge"><span class="dot"></span>Systematic research engine · Indian index markets</div>
     <h1>BruteX: <span class="grad">exhaustive brute-force backtesting</span> almost nobody in India runs.</h1>
-    <p class="lede">From 230-million-plus demat accounts down to a handful of operators searching the full combinatorial space with institutional depth — this page shows where BruteX sits, and why the rigor matters more than the search.</p>
+    <p class="lede">Backtesting means testing a trading idea against years of past market data — before risking a single rupee.</p>
+    <p class="lede-pro">From 23-crore-plus demat accounts down to a handful of operators searching the full combinatorial space with institutional depth — this page shows where BruteX sits, and why the rigor matters more than the search.</p>
 
     <div class="funnel" id="funnel">
       <div class="stat reveal">
-        <div class="num"><span class="cnt" data-target="230" data-suffix="M+">230M+</span></div>
-        <div class="lbl">demat accounts in India (23 crore+, NSDL + CDSL, June 2026)</div>
+        <div class="num"><span class="cnt" data-target="23" data-suffix=" crore+">23 crore+</span></div>
+        <div class="lbl">demat accounts in India (NSDL + CDSL, June 2026)</div>
         <div class="arrow">&#8595;</div>
       </div>
       <div class="stat reveal d1">
-        <div class="num">~<span class="cnt" data-target="46" data-suffix="M">46M</span></div>
+        <div class="num">~<span class="cnt" data-target="4.6" data-suffix=" crore">4.6 crore</span></div>
         <div class="lbl">active investors — traded at least once in the past 12 months (NSE active clients, March 2026)</div>
         <div class="arrow">&#8595;</div>
       </div>
       <div class="stat reveal d2">
-        <div class="num">~<span class="cnt" data-target="11" data-suffix="M">11M</span></div>
-        <div class="lbl">individual F&amp;O traders (SEBI study, FY22&ndash;24) — 9 in 10 lost money</div>
+        <div class="num">~<span class="cnt" data-target="1.1" data-suffix=" crore">1.1 crore</span></div>
+        <div class="lbl">individual F&amp;O traders (SEBI study, FY22&ndash;24) — 9 in 10 lost money. BruteX exists to find rules that survive that math.</div>
         <div class="arrow">&#8595;</div>
       </div>
       <div class="stat reveal d3">
@@ -301,7 +308,7 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
       </div>
       <div class="stat reveal d4">
         <div class="num">a handful</div>
-        <div class="lbl">running exhaustive combinatorial sweeps at institutional depth (our estimate)</div>
+        <div class="lbl">searching every possible combination at institutional depth (our estimate)</div>
       </div>
     </div>
     <div class="approx-note">Data as of June&ndash;July 2026 — sources: NSDL&middot;CDSL depository statistics (demat), NSE active-client data (Mar 2026), SEBI equity-F&amp;O studies (FY22&ndash;24, FY25). Tiers marked &ldquo;our estimate&rdquo; are derived from public proxies, not official counts.</div>
@@ -317,7 +324,7 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
 
     <div class="pyramid" id="pyramid">
       <div class="tier t1">
-        <div class="t-head">~46M active retail investors</div>
+        <div class="t-head">~4.6 crore active retail investors</div>
         <div class="t-sub">discretionary trades, tips, indicators-by-eye (NSE active clients, Mar 2026)</div>
       </div>
       <div class="tier t2">
@@ -329,8 +336,8 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
         <div class="t-sub">prop desks &amp; quant funds — teams and crores of infra (dozens of SEBI-registered quant PMS/AIF schemes; a handful of major HFT firms)</div>
       </div>
       <div class="tier t4">
-        <div class="t-head">Apex: exhaustive search + statistical deflation</div>
-        <div class="t-sub">BruteX territory — single operator, one workstation</div>
+        <div class="t-head">Apex: searching everything + proving it isn&rsquo;t luck</div>
+        <div class="t-sub">BruteX territory — exhaustive search with statistical deflation; single operator, one workstation</div>
       </div>
     </div>
     <div class="approx-note">Tier sizes are order-of-magnitude estimates grounded in public data: at India&rsquo;s largest retail broker, fewer than 0.05% of customers used trading APIs (2021); SEBI-registered quant PMS schemes number in the dozens.</div>
@@ -342,44 +349,50 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
   <div class="wrap">
     <span class="kicker reveal">The engine</span>
     <h2 class="reveal">What BruteX does</h2>
-    <p class="sub reveal d1">Instead of guessing a strategy and testing it, BruteX defines the full language of market conditions — then tests everything.</p>
+    <p class="sub reveal d1">Most traders test a handful of hunches. BruteX defines the full language of market conditions — then tests every combination.</p>
 
     <div class="grid c3">
       <div class="card reveal">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h13"/></svg></div>
         <div class="big">60 conditions</div>
         <h3>Market vocabulary</h3>
-        <p>A structured vocabulary of 60 atomic market conditions — pivots, Fibonacci levels, VWAP position, market structure, day types — combined mechanically, not by intuition.</p>
+        <p class="plain">Sixty simple building blocks — like &ldquo;price is above yesterday&rsquo;s high&rdquo; — that combine into every strategy the engine tests.</p>
+        <p class="pro">A structured vocabulary of 60 atomic market conditions — pivots, Fibonacci levels, VWAP position, market structure, day types — combined mechanically, not by intuition.</p>
       </div>
       <div class="card reveal d1">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg></div>
         <div class="big">730B &#8594; 33B</div>
-        <h3>Staged exhaustive search</h3>
-        <p>A staged funnel takes the raw 730-billion candidate space down to ~33 billion hot-path backtests: contradictory condition pairs are pruned upfront (~50% of masks — a pattern that can never fire is never run) and every trial is O(1)-deduplicated. Every surviving candidate is backtested to completion — never early-stopped.</p>
+        <h3>Searches everything — in stages</h3>
+        <p class="plain">Instead of trusting a handful of hunches, BruteX tries every possible combination of its rules — billions of them.</p>
+        <p class="pro">A staged funnel takes the raw 730-billion candidate space down to ~33 billion (3,300 crore) hot-path backtests: contradictory condition pairs are pruned upfront (~50% of masks — a pattern that can never fire is never run) and every trial is O(1)-deduplicated. Every surviving candidate is backtested to completion — never early-stopped.</p>
       </div>
       <div class="card reveal d2">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-5 4 4 6-8 3 3"/></svg></div>
         <div class="big">3 indices</div>
         <h3>NIFTY · BANKNIFTY · SENSEX</h3>
-        <p>India's flagship spot indices, studied at 1-minute resolution from 2020 to today, across 21 timeframes derived from one canonical minute stream.</p>
+        <p class="plain">India&rsquo;s three flagship market indices, studied minute by minute from 2020 to today.</p>
+        <p class="pro">Spot index data at 1-minute resolution, across 21 timeframes derived from one canonical minute stream.</p>
       </div>
       <div class="card reveal">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9z"/></svg></div>
         <div class="big">Rust core</div>
         <h3>Deterministic engine</h3>
-        <p>A Rust-accelerated hot kernel with a deterministic, bit-exact evaluation path — the same inputs always produce the same results.</p>
+        <p class="plain">Ask the same question twice and you get exactly the same answer — the engine is built to be exact, never approximate.</p>
+        <p class="pro">A Rust-accelerated hot kernel with a deterministic, bit-exact evaluation path — the same inputs always produce the same results.</p>
       </div>
       <div class="card reveal d1">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg></div>
         <div class="big">21 timeframes</div>
         <h3>One minute to one day</h3>
-        <p>All intraday timeframes and the daily anchor are derived deterministically from stored 1-minute bars — never mixed vendor feeds.</p>
+        <p class="plain">Every chart view — from one minute to a full day — is built from a single trusted stream of data.</p>
+        <p class="pro">All intraday timeframes and the daily anchor are derived deterministically from stored 1-minute bars — never mixed vendor feeds.</p>
       </div>
       <div class="card reveal d2">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="7"/><path d="M12 13V9M9 3h6"/></svg></div>
         <div class="big">2–4 days</div>
         <h3>Full sweep, one workstation</h3>
-        <p>The entire ~33-billion-trial sweep is sized to complete in 2–4 days on a single Apple&nbsp;M4&nbsp;Pro — the locked engineering SLA; no cluster, no cloud bill.</p>
+        <p class="plain">The entire search runs on one desktop-class machine in two to four days — no cluster, no cloud bill.</p>
+        <p class="pro">The ~33-billion-trial sweep is sized to complete in 2–4 days on a single Apple&nbsp;M4&nbsp;Pro — the locked engineering SLA.</p>
       </div>
     </div>
   </div>
@@ -395,33 +408,39 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
     <div class="grid c3">
       <div class="card reveal">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></div>
-        <h3>Deflated Sharpe + CPCV</h3>
-        <p>Overfitting guards built into the pipeline — Deflated Sharpe gates the leaderboard, and a nine-filter statistical cascade (CPCV, SPA, PBO, walk-forward, lockbox, Monte-Carlo among them) runs automatically on every sweep&rsquo;s winners.</p>
+        <h3>Catches lucky flukes</h3>
+        <p class="plain">A rule that only <em>looked</em> good by luck gets caught and thrown out.</p>
+        <p class="pro">Overfitting guards built into the pipeline — Deflated Sharpe (DSR) gates the leaderboard, and a nine-filter statistical cascade (CPCV, SPA, PBO, walk-forward, lockbox, Monte-Carlo among them) runs automatically on every sweep&rsquo;s winners.</p>
       </div>
       <div class="card reveal d1">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 1 3 6.2"/><path d="M4 18v-6h6"/></svg></div>
-        <h3>Bit-for-bit reproducible</h3>
-        <p>Every run is hash-keyed on its exact inputs. Re-run it next year and get identical results, byte for byte.</p>
+        <h3>Same answer, every time</h3>
+        <p class="plain">Run it again next year — you get the exact same answer, provably.</p>
+        <p class="pro">Every run is hash-keyed (blake3) on its exact inputs — data, code and parameters. Re-run it and get identical results, byte for byte.</p>
       </div>
       <div class="card reveal d2">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 8a3 3 0 1 0 0 8M17 8a3 3 0 1 1 0 8M9.5 11h5M9.5 13h5"/></svg></div>
-        <h3>Hash-chained audit trail</h3>
-        <p>Every material action appends to a tamper-evident, hash-chained log. Breaking the chain fails the build.</p>
+        <h3>Everything on the record</h3>
+        <p class="plain">Every action the system takes is written down in a ledger no one can quietly edit.</p>
+        <p class="pro">Every material action appends one line to a tamper-evident, hash-chained JSONL audit log. Breaking the chain fails the build.</p>
       </div>
       <div class="card reveal">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 15h4"/></svg></div>
-        <h3>Correct-or-absent data</h3>
-        <p>Untrustworthy data is refused, loudly — a corrupt bar fails the run rather than slipping through; suspect values are shown absent rather than wrong. Nothing is interpolated, nothing is fabricated.</p>
+        <h3>Bad data gets rejected</h3>
+        <p class="plain">If the data looks wrong, it&rsquo;s thrown out loudly — never quietly patched.</p>
+        <p class="pro">Correct-or-absent, fail-loud: a corrupt bar fails the run rather than slipping through; suspect values are shown absent rather than wrong. Nothing is interpolated, nothing is fabricated.</p>
       </div>
       <div class="card reveal d1">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v.01"/><path d="M12 12v4"/></svg></div>
-        <h3>Look-ahead-proof</h3>
-        <p>The engine can only see the past at every bar — enforced by runtime guards and property tests, not by promise.</p>
+        <h3>Never peeks at the future</h3>
+        <p class="plain">The engine can never peek at tomorrow&rsquo;s prices — tested, not promised.</p>
+        <p class="pro">Look-ahead-proof: at every bar the engine can only see the past — enforced by runtime guards and property tests, not by promise.</p>
       </div>
       <div class="card reveal d2">
         <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/><circle cx="18" cy="18" r="2.5"/></svg></div>
         <h3>Honest cost labeling</h3>
-        <p>Signal-only results are clearly marked signal-only. No quietly ignoring costs and calling it edge.</p>
+        <p class="plain">If a result ignores trading costs, it says so — right on the label.</p>
+        <p class="pro">Signal-only results are clearly marked signal-only. No quietly ignoring costs and calling it edge.</p>
       </div>
     </div>
   </div>
@@ -433,6 +452,7 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
     <div class="limits reveal">
       <span class="kicker">Honest limits</span>
       <h2>What BruteX does not claim</h2>
+      <p class="plain-lead">Every tool has edges. These are BruteX&rsquo;s — stated plainly, not buried in fine print.</p>
       <ul>
         <li><strong>Signal-only P&amp;L today.</strong> Current results measure raw signal quality; the options-translation track models real trading costs.</li>
         <li><strong>Bounded vocabulary.</strong> 60 conditions is deep, not infinite — patterns outside the vocabulary are outside the search.</li>
@@ -463,42 +483,42 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
         </thead>
         <tbody>
           <tr>
-            <th scope="row">Search breadth</th>
+            <th scope="row">How many ideas it tests</th>
             <td>gut feel</td>
             <td>a few dozen combos</td>
             <td>hundreds–thousands</td>
-            <td class="bx">billions, exhaustive</td>
+            <td class="bx">billions — all of them</td>
           </tr>
           <tr>
-            <th scope="row">Overfitting protection</th>
-            <td>none</td>
-            <td>none</td>
+            <th scope="row">Checks it isn&rsquo;t just lucky?</th>
+            <td>no</td>
+            <td>no</td>
             <td>sometimes</td>
-            <td class="bx">DSR+CPCV built-in</td>
+            <td class="bx">yes — built in (DSR + CPCV)</td>
           </tr>
           <tr>
-            <th scope="row">Reproducibility</th>
+            <th scope="row">Same answer every re-run?</th>
             <td>no</td>
             <td>rarely</td>
             <td>internal</td>
-            <td class="bx">bit-for-bit, hash-keyed</td>
+            <td class="bx">yes — bit-for-bit</td>
           </tr>
           <tr>
-            <th scope="row">Data integrity</th>
+            <th scope="row">Spots bad data?</th>
             <td>screenshots</td>
             <td>vendor-as-is</td>
             <td>cleaned</td>
-            <td class="bx">correct-or-absent + audit chain</td>
+            <td class="bx">refused loudly + audit trail</td>
           </tr>
           <tr>
-            <th scope="row">Automation</th>
+            <th scope="row">Runs by itself?</th>
             <td>manual</td>
             <td>semi</td>
             <td>team-run</td>
-            <td class="bx">zero-click nightly</td>
+            <td class="bx">yes — zero-click nightly</td>
           </tr>
           <tr>
-            <th scope="row">Cost</th>
+            <th scope="row">What it costs</th>
             <td>&#8776;free</td>
             <td>cheap</td>
             <td>crores</td>
@@ -553,17 +573,23 @@ footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
      Final values are already present in the markup, so no-JS,
      reduced-motion and print all show the finished figures. */
   function countUp(el){
-    var target = parseInt(el.getAttribute("data-target"), 10);
+    var raw = el.getAttribute("data-target") || "";
+    var target = parseFloat(raw);
     var suffix = el.getAttribute("data-suffix") || "";
     if (!isFinite(target)) return;
+    /* format to exactly the decimals the target carries (23 -> "23",
+       4.6 -> "4.6") so the final animated text equals the static text */
+    var dot = raw.indexOf(".");
+    var decimals = dot >= 0 ? raw.length - dot - 1 : 0;
     var dur = 1400, t0 = null;
+    function fmt(v){ return v.toFixed(decimals); }
     function frame(ts){
       if (t0 === null) t0 = ts;
       var p = Math.min((ts - t0) / dur, 1);
       var eased = 1 - Math.pow(1 - p, 3); /* easeOutCubic */
-      el.textContent = Math.round(eased * target) + suffix;
+      el.textContent = fmt(eased * target) + suffix;
       if (p < 1) requestAnimationFrame(frame);
-      else el.textContent = target + suffix;
+      else el.textContent = fmt(target) + suffix;
     }
     requestAnimationFrame(frame);
   }
