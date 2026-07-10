@@ -321,11 +321,23 @@ class TestComputeSnapshotInjection:
 
 @st.composite
 def _intraday_day(draw: st.DrawFn) -> tuple[list[CandleBar], int]:
-    """A random jagged 1-minute day (contiguous from 09:15) + a random cutoff minute."""
+    """A random jagged 1-minute day (contiguous from 09:15) + a random cutoff minute.
+
+    The generated day is constrained STRICTLY INSIDE the bad-tick screen's
+    ``BAD_TICK_MAX_RATIO = 4.0`` boundary-bad law (DEC-BADTICK-RESAMPLE-INPUT-001
+    wired ``screen_frame_bad_ticks`` into the movers raw-1m seam
+    ``_read_cut_1m_frame``, so a >= 4x in-session ratio would now be SCREENED and
+    the raw HLC3 oracle below would no longer match): every screen reference is a
+    close or the head-median close in ``[1000, 3700]``, so highs ``<= 3750 <
+    4 * 1000`` and lows ``>= 950 > 3700 / 4 = 925`` and close/close ratios
+    ``<= 3.7 < 4.0`` — the screen provably keeps EVERY generated bar (identity
+    frame) and the exact raw-sum oracle stays valid. The screened-poison
+    behaviour is pinned separately by ``TestValueScreensResampleInputPoison``.
+    """
     n = draw(st.integers(min_value=1, max_value=30))
     bars: list[CandleBar] = []
     for i in range(n):
-        close = draw(st.integers(min_value=100, max_value=5000))
+        close = draw(st.integers(min_value=1000, max_value=3700))
         vol = draw(st.integers(min_value=1, max_value=1000))
         spread = draw(st.integers(min_value=0, max_value=50))
         c = Decimal(close)
@@ -377,6 +389,58 @@ def _minute_of(bar: CandleBar) -> int:
     """IST minute-of-day of a UTC-stored 1-minute bar (IST = UTC + 05:30)."""
     total = bar.timestamp.hour * 60 + bar.timestamp.minute + (5 * 60 + 30)
     return total % (24 * 60)
+
+
+# ── the resample-input screen at the movers seam (DEC-BADTICK-RESAMPLE-INPUT-001) ──
+
+
+class TestValueScreensResampleInputPoison:
+    """The movers raw-1m value seam SCREENS poison and stays TF-invariant.
+
+    ``_read_cut_1m_frame`` (movers seam of DEC-BADTICK-RESAMPLE-INPUT-001,
+    MIGRATION.md #1683) runs ``screen_frame_bad_ticks`` over the raw 1-minute
+    session frame, so the spot "Top Value" is computed over the KEPT set — and
+    remains constant across display timeframes — when a bar trips the bad-tick
+    screen. The kept-set oracle below is HAND-derived (never re-runs the screen).
+    """
+
+    def test_poison_high_bar_dropped_value_tf_invariant_over_kept_set(self, tmp_path: Path) -> None:
+        # Bar 0's HIGH (400) is exactly 4x the head-median close (median of
+        # closes [350, 100, 100] = 100) — the boundary-BAD hi/lo law
+        # (DEC-BADTICK-HILO-SCREEN-001, MIGRATION.md #1687) drops the WHOLE bar
+        # even though its own close (350, ratio 3.5) is in-band. Bars 1-4 are
+        # kept (flat 100s vs the median-seeded baseline). Hand-derived kept-set
+        # value: 4 bars x round_money((100+100+100)/3) x vol 1 = 4 x 100.00
+        # rupees = 40_000 paisa; the raw UNscreened sum would have been
+        # 40_000 + round_money((400+300+350)/3) x 1 = 75_000 paisa.
+        from brutex.dashboard.movers_snapshot import compute_spot_candidates
+
+        def _poison_day_bar(i: int, *, o: str, h: str, lo: str, c: str) -> CandleBar:
+            total = (9 * 60 + 15 + i) - (5 * 60 + 30)
+            return CandleBar(
+                timestamp=datetime(
+                    _DAY.year, _DAY.month, _DAY.day, total // 60, total % 60, tzinfo=UTC
+                ),
+                open=Decimal(o),
+                high=Decimal(h),
+                low=Decimal(lo),
+                close=Decimal(c),
+                volume=1,
+                open_interest=None,
+            )
+
+        bars = [_poison_day_bar(0, o="350", h="400", lo="300", c="350")] + [
+            _poison_day_bar(i, o="100", h="100", lo="100", c="100") for i in range(1, 5)
+        ]
+        _write_1m(tmp_path, "NIFTY", bars)
+        values: set[int] = set()
+        for interval in ("1minute", "5minute", "15minute"):
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval=interval, date=_DAY.isoformat(), time="09:19"
+            )
+            assert len(cands.snapshots) == 1
+            values.add(cands.snapshots[0].value_paisa)
+        assert values == {40_000}
 
 
 # ── futures value output byte-parity (the no-touch proof) ─────────────────
