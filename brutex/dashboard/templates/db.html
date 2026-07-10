@@ -853,11 +853,30 @@ function gridTheadHtml(cols) {
   }).join("") + '</tr></thead>';
 }
 function gridRowsHtml(cols, rows) {
-  return rows.map(row =>
-    '<tr>' + row.map((cell, i) =>
-      cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>'
-    ).join("") + '</tr>'
-  ).join("");
+  /* Prev-close CONTIGUITY marker (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001 — the /db
+     twin of the /movers #1539 " *"): when a row's prev_close_contiguous cell is
+     `false`, the %-change baseline BRIDGED a real NSE-session lake hole, so the
+     change_pct / open_gap_pct cells gain a trailing " *" (the served number is
+     MARKED, never silently changed — the #1539 doctrine) and the marker column
+     itself shows "*". `true`/`null` (contiguous / no verdict) show blank. The
+     index is -1 on every non-candle grid (column absent) → the marking is inert.
+     Static "*" + class literals — XSS-safe by construction; the value cell rides
+     the same esc() as before, the " *" appended INSIDE the esc'd payload string
+     exactly like movers.html. */
+  const contigIdx = cols.indexOf("prev_close_contiguous");
+  return rows.map(row => {
+    const noncontig = contigIdx >= 0 && row[contigIdx] === false;
+    return '<tr>' + row.map((cell, i) => {
+      const col = cols[i];
+      if (col === "prev_close_contiguous") {
+        return '<td class="' + (cell === false ? "contig-bad" : "") + '">' + (cell === false ? "*" : "") + '</td>';
+      }
+      if (cell == null) return '<td class="nullcell">null</td>';
+      let txt = fmtCell(col, cell);
+      if (noncontig && (col === "change_pct" || col === "open_gap_pct")) txt += " *";
+      return '<td class="' + moneynessClass(col, cell).trim() + '">' + esc(txt) + '</td>';
+    }).join("") + '</tr>';
+  }).join("");
 }
 function gridRangeText(from, to, total) {
   return from.toLocaleString() + '–' + to.toLocaleString() + ' / ' + total.toLocaleString();
@@ -1441,7 +1460,25 @@ function candleGridHtml(body, err, notice) {
   const stepNote = body.strike_step_confidence === "observed"
     ? '<div class="stepnote">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
     : "";
-  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote;
+  /* Prev-close contiguity legend (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001, the /db
+     twin of the /movers #1539 legend): only when THIS page actually has a bridged
+     baseline — computed from the CURRENT rows so a paging click drops/adds it
+     honestly. Static literal, esc-free (no server text). */
+  const contigNote = candleHasNoncontiguousRow(body)
+    ? '<div class="contignote">* previous close is NOT the immediately-preceding NSE session (a lake hole was bridged; nearest-prior shown) — the %-change is marked, not changed.</div>'
+    : "";
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote + contigNote;
+}
+
+/* True when a candle page carries at least one row whose prev-close baseline
+   bridged a real NSE-session hole (prev_close_contiguous === false) — drives the
+   " *" legend + the tbody-patch-vs-full-rebuild gate so the legend is never
+   stale (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001). */
+function candleHasNoncontiguousRow(body) {
+  if (!body) return false;
+  const idx = (body.columns || []).indexOf("prev_close_contiguous");
+  if (idx < 0) return false;
+  return (body.rows || []).some(r => Array.isArray(r) && r[idx] === false);
 }
 
 /* Publish the candle page window into the ONE delegated Prev/Next pager
@@ -1506,7 +1543,12 @@ function updateCandleGrid(body, err) {
      table, so the tbody-only patch also requires its presence to be unchanged —
      a confidence flip falls back to the full rebuild, never a stale note. */
   const wantNote = !!(body && body.strike_step_confidence === "observed");
+  /* The contiguity legend also renders OUTSIDE the tbody, so a change in its
+     presence across pages must fall back to a full rebuild — else a paging click
+     would leave a stale " *" legend (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001). */
+  const wantContig = candleHasNoncontiguousRow(body);
   const patched = !err && !!body && wantNote === !!grid.querySelector(".stepnote")
+    && wantContig === !!grid.querySelector(".contignote")
     && patchGridRows(grid, body.columns || [], body.rows || [],
       Number(body.total || 0), Number(body.offset || 0));
   if (!patched) grid.innerHTML = candleGridHtml(body, err);
