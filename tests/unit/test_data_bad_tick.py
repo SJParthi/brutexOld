@@ -13,10 +13,12 @@ becoming an unhealable cascade baseline). The end-to-end wiring through
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
+import polars as pl
 import pytest
 from brutex.data.bad_tick import (
+    BAD_TICK_ENABLED_ENV,
     BAD_TICK_HEAD_UNCONFIRMED_EVENT,
     BAD_TICK_MAX_RATIO,
     BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT,
@@ -27,6 +29,7 @@ from brutex.data.bad_tick import (
     bad_tick_screen_enabled,
     is_bad_tick,
     non_finite_keep_mask,
+    screen_frame_bad_ticks,
 )
 from structlog.testing import capture_logs
 
@@ -1145,3 +1148,128 @@ def test_close_only_vote_alone_never_empties_a_session() -> None:
     with capture_logs():
         mask = BadTickScreen().screen_mask(days, closes)
     assert mask == [True, True, True]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# screen_frame_bad_ticks — the RESAMPLE-INPUT frame twin
+# (DEC-BADTICK-RESAMPLE-INPUT-001)
+# ════════════════════════════════════════════════════════════════════════
+
+_UTC_OPEN = datetime(2021, 1, 4, 3, 45, tzinfo=UTC)  # 09:15 IST
+
+
+def _minute_frame(rows: list[tuple[float, float, float, float]]) -> pl.DataFrame:
+    """Build a tz-aware-UTC 1-minute frame of ``(open, high, low, close)`` rows."""
+    ts = [_UTC_OPEN + timedelta(minutes=i) for i in range(len(rows))]
+    return pl.DataFrame(
+        {
+            "ts_utc": pl.Series("ts_utc", ts).cast(pl.Datetime("us", "UTC")),
+            "open": [r[0] for r in rows],
+            "high": [r[1] for r in rows],
+            "low": [r[2] for r in rows],
+            "close": [r[3] for r in rows],
+            "volume": [10 + i for i in range(len(rows))],
+        }
+    )
+
+
+def _clean_rows(n: int) -> list[tuple[float, float, float, float]]:
+    return [(100.0 + i, 110.0 + i, 90.0 + i, 105.0 + i) for i in range(n)]
+
+
+def test_screen_frame_disabled_is_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Kill switch OFF ⇒ the SAME frame object, even with a x10 poison present.
+    monkeypatch.setenv(BAD_TICK_ENABLED_ENV, "0")
+    rows = _clean_rows(6)
+    rows[3] = (1050.0, 1150.0, 950.0, 1080.0)  # x10 scaled poison
+    frame = _minute_frame(rows)
+    result = screen_frame_bad_ticks(frame, source="src")
+    assert result is frame
+
+
+def test_screen_frame_empty_is_identity() -> None:
+    frame = _minute_frame([])
+    result = screen_frame_bad_ticks(frame, source="src")
+    assert result is frame
+    assert result.height == 0
+
+
+def test_screen_frame_clean_returns_same_object() -> None:
+    # Clean data (all bars move << 0.25x/min) ⇒ identity object ⇒ byte-identical
+    # derived timeframes downstream.
+    frame = _minute_frame(_clean_rows(8))
+    with capture_logs() as logs:
+        result = screen_frame_bad_ticks(frame, source="src")
+    assert result is frame
+    assert not logs
+
+
+def test_screen_frame_drops_close_scaled_bar() -> None:
+    rows = _clean_rows(6)
+    rows[4] = (104.0, 114.0, 94.0, 1120.0)  # x10 close only, post-head
+    frame = _minute_frame(rows)
+    with capture_logs() as logs:
+        result = screen_frame_bad_ticks(frame, source="NSE/INDEX/NIFTY/1minute")
+    assert result.height == 5
+    assert 1120.0 not in result.get_column("close").to_list()
+    skip = [r for r in logs if r["event"] == BAD_TICK_SKIP_EVENT]
+    assert len(skip) == 1
+    assert skip[0]["skip_reasons"] == {"close": 1}
+
+
+def test_screen_frame_drops_high_only_scaled_bar() -> None:
+    # The W3-R2 point: a high-only x10 spike (close sane) is dropped WHOLE — a
+    # close-only screen would miss it and it would launder into a bucket HIGH.
+    rows = _clean_rows(6)
+    rows[4] = (104.0, 1140.0, 94.0, 109.0)  # x10 HIGH, sane close
+    frame = _minute_frame(rows)
+    with capture_logs() as logs:
+        result = screen_frame_bad_ticks(frame, source="src")
+    assert result.height == 5
+    assert 1140.0 not in result.get_column("high").to_list()
+    skip = [r for r in logs if r["event"] == BAD_TICK_SKIP_EVENT]
+    assert skip[0]["skip_reasons"] == {"high": 1}
+
+
+def test_screen_frame_drops_low_only_scaled_bar() -> None:
+    # The ÷10 LOW twin: a low far BELOW 1/4x the reference is dropped whole.
+    rows = _clean_rows(6)
+    rows[4] = (104.0, 114.0, 9.0, 109.0)  # ÷~11 LOW, sane close
+    frame = _minute_frame(rows)
+    with capture_logs() as logs:
+        result = screen_frame_bad_ticks(frame, source="src")
+    assert result.height == 5
+    assert 9.0 not in result.get_column("low").to_list()
+    skip = [r for r in logs if r["event"] == BAD_TICK_SKIP_EVENT]
+    assert skip[0]["skip_reasons"] == {"low": 1}
+
+
+def test_screen_frame_drops_non_finite_row() -> None:
+    # A NaN OHLC row is filtered out FIRST (the finite-subset else-branch),
+    # emitting the distinct non-finite WARN — never the ratio-skip WARN.
+    rows = _clean_rows(6)
+    rows[3] = (float("nan"), 113.0, 93.0, 108.0)
+    frame = _minute_frame(rows)
+    with capture_logs() as logs:
+        result = screen_frame_bad_ticks(frame, source="src")
+    assert result.height == 5
+    events = {r["event"] for r in logs}
+    assert NON_FINITE_SKIP_EVENT in events
+    assert BAD_TICK_SKIP_EVENT not in events
+
+
+def test_screen_frame_non_finite_and_scaled_bar_both_dropped() -> None:
+    # Mixed: a NaN row (non-finite screen) AND a later x10 close spike
+    # (ratio screen over the finite subset) are BOTH dropped — the spike is
+    # still caught after the NaN is filtered (the finite-subset re-expansion).
+    rows = _clean_rows(7)
+    rows[2] = (float("inf"), 112.0, 92.0, 107.0)  # non-finite
+    rows[5] = (105.0, 115.0, 95.0, 1150.0)  # x10 close, post-head
+    frame = _minute_frame(rows)
+    with capture_logs() as logs:
+        result = screen_frame_bad_ticks(frame, source="src")
+    assert result.height == 5
+    closes = result.get_column("close").to_list()
+    assert 1150.0 not in closes
+    events = {r["event"] for r in logs}
+    assert {NON_FINITE_SKIP_EVENT, BAD_TICK_SKIP_EVENT} <= events

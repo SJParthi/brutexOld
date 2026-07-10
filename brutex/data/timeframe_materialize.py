@@ -912,6 +912,7 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     """
     import polars as pl
 
+    from brutex.data.bad_tick import screen_frame_bad_ticks
     from brutex.data.price_sanity import validate_frame_price_sanity
 
     columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
@@ -953,7 +954,15 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         validate_frame_price_sanity(
             frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
         )
-        return frame
+        # DEC-BADTICK-RESAMPLE-INPUT-001: screen scaled bad-tick + non-finite
+        # rows out of the SHARED 1-minute base BEFORE it reaches the intraday
+        # AND daily resamplers (this ONE frame is materialize_lake_timeframes'
+        # shared ``df_1m``), so a self-consistent x10-scaled bar the engine read
+        # boundary drops (close OR high/low ratio-spike) can no longer LAUNDER
+        # into a derived 5m/15m/…/1day bucket. Runs AFTER the positivity/ordering
+        # RAISE above (raise-class before skip-class) — disjoint, no double-drop.
+        # OFF (BRUTEX_BAD_TICK_SCREEN) or clean data ⇒ the same frame object.
+        return screen_frame_bad_ticks(frame, source=f"{exchange}/{segment}/{symbol}/1minute")
 
     return _read
 

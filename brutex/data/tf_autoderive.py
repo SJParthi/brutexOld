@@ -71,17 +71,26 @@ def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -
     """
     import polars as pl
 
+    from brutex.data.bad_tick import screen_frame_bad_ticks
     from brutex.data.lake_read import dedup_bars_frame
 
     frame, _dropped = dedup_bars_frame(
         pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
         source=source or f"{symbol_dir.name}/{interval}",
     )
-    return (
+    projected = (
         frame.rename({"timestamp": "ts_utc"})
         .select("ts_utc", "open", "high", "low", "close", "volume")
         .sort("ts_utc")
     )
+    # DEC-BADTICK-RESAMPLE-INPUT-001: screen the ``1minute`` re-derive base ONLY
+    # (never the stored DERIVED interval — it must expose its poison), so the
+    # freshness compare re-derives CLEAN and a legacy derived partition built
+    # from unscreened 1m reads ``"stale"`` → the sweep-preflight gate refuses.
+    # Clean lakes + the BRUTEX_BAD_TICK_SCREEN kill switch OFF ⇒ identity object.
+    if interval == "1minute":
+        return screen_frame_bad_ticks(projected, source=source or f"{symbol_dir.name}/{interval}")
+    return projected
 
 
 def lake_derived_freshness_verdicts(

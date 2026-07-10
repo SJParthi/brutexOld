@@ -280,3 +280,101 @@ class TestLakeDerivedFreshnessVerdicts:
             ("NIFTY", "15minute"): "fresh",
         }
         assert reads["1minute"] == 1
+
+
+class TestBadTickTripwire:
+    """DEC-BADTICK-RESAMPLE-INPUT-001: the G1 freshness gate detects LEGACY
+    derived partitions materialised from UNSCREENED 1-minute (a x10-scaled bar
+    laundered into a bucket). ``read_lake_bars_frame`` screens the ``1minute``
+    re-derive base (only), so the stored poisoned derived reads ``"stale"`` →
+    the sweep-preflight gate refuses the sweep. This is the load-bearing seam of
+    the migration story (an un-re-pulled legacy lake is loudly refused, never
+    silently consumed into run identity)."""
+
+    def _seed_poisoned_lake(self, tmp_path):
+        """Write a 1m base with ONE x10-scaled bar + a LEGACY poisoned 5minute.
+
+        The derived partition is written by resampling the RAW (unscreened) 1m —
+        the shape a pre-fix prebuild produced — so it carries the laundered high.
+        """
+        from datetime import timezone
+        from decimal import Decimal
+        from pathlib import Path
+
+        import polars as pl
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+        from brutex.data.spot_daily_resample import frame_to_candle_bars
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        bars = []
+        for i in range(20):
+            close = Decimal("100.00") + Decimal(i) / 10
+            if i == 10:  # x10-scaled poison, post-head (self-consistent, ordered)
+                close = close * 10
+            bars.append(
+                CandleBar(
+                    timestamp=datetime(2024, 1, 2, 9, 16 + i, tzinfo=ist).astimezone(UTC),
+                    open=close - Decimal("0.05"),
+                    high=close + Decimal("0.05"),
+                    low=close - Decimal("0.10"),
+                    close=close,
+                    volume=1000,
+                    open_interest=None,
+                )
+            )
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=Path(tmp_path)))
+        sink.append(exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=bars)
+        # LEGACY poisoned 5minute: resample the RAW 1m parquet (NOT the screened
+        # reader), then write — the poison high laundered into a bucket.
+        symbol_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        raw = (
+            pl.read_parquet((symbol_dir / "1minute").as_posix() + "/**/*.parquet")
+            .rename({"timestamp": "ts_utc"})
+            .select("ts_utc", "open", "high", "low", "close", "volume")
+            .sort("ts_utc")
+        )
+        derived = resample_1m_to_tf(raw, 5)
+        sink.append(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="5minute",
+            bars=frame_to_candle_bars(derived),
+            merge_mode="latest-wins",
+        )
+        return symbol_dir
+
+    def test_legacy_poisoned_derived_reads_stale_and_preflight_refuses(self, tmp_path) -> None:
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        self._seed_poisoned_lake(tmp_path)
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["5minute"],
+        )
+        assert verdicts == {("NIFTY", "5minute"): "stale"}
+        report = preflight_derived_freshness(verdicts)
+        assert report.stale == (("NIFTY", "5minute"),)
+
+    def test_screen_off_reads_fresh_poison_vs_poison(self, tmp_path, monkeypatch) -> None:
+        """With the kill switch OFF the 1m re-derive base is UNSCREENED too, so a
+        legacy poisoned derived compares poison-vs-poison and reads ``"fresh"`` —
+        the tripwire is load-bearing on the SCREENED 1m read (proves the gate)."""
+        from brutex.data.bad_tick import BAD_TICK_ENABLED_ENV
+
+        self._seed_poisoned_lake(tmp_path)
+        monkeypatch.setenv(BAD_TICK_ENABLED_ENV, "0")
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["5minute"],
+        )
+        assert verdicts == {("NIFTY", "5minute"): "fresh"}
