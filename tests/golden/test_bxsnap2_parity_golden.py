@@ -1,6 +1,6 @@
 """Observational ``bxsnap2`` parity oracle for a FUTURE Rust ``arrow_table_to_bars`` port.
 
-DEC-BXSNAP2-PARITY-GOLDEN-001 (MIGRATION.md #1618). READ-ONLY tripwire — it
+DEC-BXSNAP2-PARITY-GOLDEN-001 (MIGRATION.md #1695). READ-ONLY tripwire — it
 changes NO production behaviour; it freezes the CURRENT Python
 bar-materialization → run-identity digest so a future Rust/Arrow port (or an
 accidental Python edit) that diverges fails loudly and mechanically.

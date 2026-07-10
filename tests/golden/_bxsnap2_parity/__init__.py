@@ -1,7 +1,7 @@
 """Observational parity oracle for a FUTURE Rust ``arrow_table_to_bars`` port.
 
 This helper package is the **observational parity oracle** referenced by
-``DEC-BXSNAP2-PARITY-GOLDEN-001`` (MIGRATION.md #1618). It changes **NO
+``DEC-BXSNAP2-PARITY-GOLDEN-001`` (MIGRATION.md #1695). It changes **NO
 production behaviour** — it only *reads* the current Python bar-materialization
 path and freezes its output.
 
