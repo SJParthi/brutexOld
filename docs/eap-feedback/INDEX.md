@@ -99,10 +99,11 @@ with the real paths and complete the item list from the files themselves.
 ## Round 4 — Coordinator/session-management batch (2026-07-10)
 
 **Status:** final — 7 items, awaiting operator send. (The interim v1
-9-item copy was superseded in-place by the crisp 7-item v2 on 2026-07-10:
-the two model-mapping complaints were dropped after the double-canary
+9-item and 7-item v2 copies were superseded in-place by v3 on 2026-07-10:
+v2 dropped the two model-mapping complaints after the double-canary
 experiment showed model-default propagation working — the defect is
-effort-only.)
+effort-only; v3 cut the submission's preamble — routing/thanks moved into
+the email cover — and tightened line by line.)
 
 7 items (titles as in `round4/EAP_ROUND4_SUBMISSION.md`):
 
