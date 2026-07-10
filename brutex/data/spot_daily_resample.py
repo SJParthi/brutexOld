@@ -1091,9 +1091,36 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     ``open_interest`` column is read — both the ``.select(...)`` and the empty-schema
     fallback frame gain it (``pl.Int64``) — and the OI-aware resampler carries
     last-of-day OI into the derived ``1day`` partition.
+
+    Bad-tick screen (DEC-BADTICK-RESAMPLE-INPUT-001, the 4th resample-input
+    seam): the populated frame is passed through the COMMON
+    :func:`brutex.data.bad_tick.screen_frame_bad_ticks` (non-finite FIRST, then
+    the close+high/low ratio screen) before it reaches the daily resampler —
+    this reader feeds the lake-heal daily RECALL
+    (:func:`brutex.data.lake_heal._recall_derived` → ``derive_daily_for_targets``),
+    so a heal-triggering symbol whose 1-minute carries a surviving x10 poison
+    bar no longer mints a FRESH poisoned ``1day`` (the heal's intraday-TF
+    rebuild leg already read the screened ``make_lake_read_1m``; this closes
+    the clean-intraday/poisoned-1day split). INSTRUMENT-CLASS scoped at fix
+    round 2 via the ONE :func:`~brutex.data.bad_tick.resample_screen_applies`
+    predicate (the heal recall handles FNO targets — ``include_oi=segment ==
+    "FNO"`` — and its CE/PE contract legs must NOT be screened: the
+    index-calibrated 4.0x bound destroys legit option-premium moves; the FNO
+    contract type is decoded from *symbol* via ``parse_fno_symbol`` at build
+    time — ``FUT`` screened, ``CE``/``PE``/undecodable not). Deliberately NO
+    ``price_sanity``
+    raise here — this reader's verify-first contract is no-raise (an absent
+    partition is a clean no-op), and the screen only FILTERS. Clean data / the
+    ``BRUTEX_BAD_TICK_SCREEN`` kill switch OFF ⇒ the same frame object.
     Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
     """
     import polars as pl
+
+    from brutex.data.bad_tick import resample_screen_applies, screen_frame_bad_ticks
+
+    # Fix round 2 (DEC-BADTICK-RESAMPLE-INPUT-001): resolved ONCE at build time
+    # — pure coordinate classification, no I/O.
+    screen_bad_ticks = resample_screen_applies(segment, symbol)
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -1140,13 +1167,24 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
         ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
-        return (
+        frame = (
             df.rename({"timestamp": "ts_utc"})
             .with_columns(ist_date.alias("_ist_date"))
             .filter((pl.col("_ist_date") >= start) & (pl.col("_ist_date") < end))
             .select(*columns)
             .sort("ts_utc")
         )
+        # DEC-BADTICK-RESAMPLE-INPUT-001 (4th seam): screen scaled bad-tick +
+        # non-finite rows out of the daily-derive input — the lake-heal daily
+        # RECALL re-derives the 1day THROUGH this reader, so an unscreened read
+        # here minted a FRESH poisoned 1day from a surviving x10 poison bar
+        # while the intraday rebuild leg (make_lake_read_1m) derived clean.
+        # OFF (BRUTEX_BAD_TICK_SCREEN), an UNSCREENED instrument class (fix
+        # round 2 — FNO CE/PE, see ``screen_bad_ticks`` above), or clean data
+        # ⇒ the same frame object.
+        if not screen_bad_ticks:
+            return frame
+        return screen_frame_bad_ticks(frame, source=f"{exchange}/{segment}/{symbol}/1minute")
 
     return _read
 
