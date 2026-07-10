@@ -109,11 +109,14 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # --cov-fail-under=100) + the whole-package floor — DEC-WRITE-BATCH-COALESCE-001.
         "brutex/dashboard/pull_controller.py",
         # The ~1050-statement ``/db`` lake-viewer module. Its 100% line+branch is
-        # reached by the WHOLE db_view test FAMILY collectively — FIFTEEN files
-        # as of DEC-DASHBOARD-READ-SCREEN-001 (test_dashboard_db_view/_db_query/
+        # reached by the WHOLE db_view test FAMILY collectively — SEVENTEEN files
+        # as of the DEC-DASHBOARD-READ-SCREEN-001 merge with main's
+        # DEC-LAKE-STATS-MANIFEST-001 + DEC-DB-CANDLES-TORN-READ-RETRY-001
+        # additions (test_dashboard_db_view/_db_query/
         # _db_fno/_db_fno_moneyness/_db_candle_count_cache/_db_option_count_cache/
         # _db_ux_pack/_window_payload_retry/_db_view_window_rows_cache/
         # _db_view_ledger_delta_fold/_db_view_ledger_read_cache/
+        # _db_stats_manifest/_db_candles_torn_read_retry/
         # _split_brain_screen + test_db_view_registry/test_db_view_manifest/
         # test_completeness_fno_skip — the exact list lives in the static
         # per-module gate in ``ci.yml``, which runs them together at 100.00%).

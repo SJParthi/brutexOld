@@ -105,6 +105,22 @@ def price_row_insane(
     engine prebuild read path) + the ``arrow_table_to_bars`` except-clause gap
     are the NAMED ENGINE-side follow-up, deliberately not changed here.
 
+    NON-NUMERIC GUARD (round-4 fold, scalar-only like the NaN arm): a
+    NON-NUMERIC price cell — a ``str`` from a DuckDB ``union_by_name`` VARCHAR
+    promotion over an out-of-band parquet (the lake writers never produce
+    one), or a ``bool`` (``isinstance(True, int)`` is True, but a boolean
+    "price" is junk — deliberately classified insane, never coerced to
+    0.0/1.0) — is INSANE, never a raised ``TypeError``. The dashboard callers
+    feed RAW page cells (typed ``Any`` at runtime despite this signature), and
+    without this arm ``math.isnan(str)`` raised through ``screen_rows`` into a
+    /db page 500 — internally inconsistent with
+    :func:`brutex.data.bar_screen.screen_rows`'s ``_sortable_cell``, which
+    already orders such junk cells last. Conservative in direction: DROP,
+    never fabricate. The vectorized twin is untouched (its columns are typed —
+    a VARCHAR-promoted column never reaches ``price_violation_expr`` as a
+    numeric plane), and non-numerics are structurally outside the
+    scalar==vector parity pin's input space (floats only), like NaN.
+
     Parameters
     ----------
     open_, high, low, close
@@ -117,6 +133,12 @@ def price_row_insane(
         (a ``None`` / ``NaN`` price counts as a violation).
     """
     if open_ is None or high is None or low is None or close is None:
+        return True
+    # Non-numeric junk (str/bool — see the docstring) is insane, never a raise;
+    # bool is excluded explicitly (a bool IS an int to isinstance) as junk.
+    if not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in (open_, high, low, close)
+    ):
         return True
     if math.isnan(open_) or math.isnan(high) or math.isnan(low) or math.isnan(close):
         return True

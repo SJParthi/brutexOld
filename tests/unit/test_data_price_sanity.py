@@ -74,6 +74,26 @@ class TestPriceRowInsaneScalar:
         row[field] = float("nan")
         assert price_row_insane(*row) is True
 
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    def test_str_price_is_insane_in_each_field_never_raises(self, field: int) -> None:
+        """Non-numeric guard (round-4 fold): a str price cell (DuckDB
+        union_by_name VARCHAR promotion — lake writers never produce it) is
+        INSANE, never a TypeError — pre-fix ``math.isnan(str)`` raised through
+        screen_rows into a /db page 500."""
+        row: list[object] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = "101.5"
+        assert price_row_insane(*row) is True  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    def test_bool_price_is_insane_in_each_field(self, field: int) -> None:
+        """A bool "price" is junk (round-4 fold): ``isinstance(True, int)`` is
+        True, so without the explicit bool exclusion ``True`` would coerce to a
+        1.0 price — deliberately classified insane instead (documented in the
+        docstring)."""
+        row: list[object] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = True
+        assert price_row_insane(*row) is True  # type: ignore[arg-type]
+
     # NaN is DELIBERATELY excluded from this parity pin's input space
     # (allow_nan=False): the scalar is STRICTER on NaN by design (see
     # price_row_insane's deliberate-asymmetry note) — outcome-parity holds

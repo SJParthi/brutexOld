@@ -184,6 +184,17 @@ class TestScreenFrame:
         out = screen_frame(_movers_frame(_REPRO_CLOSES), ts_col="ts_utc", bad_tick_enabled=False)
         assert out.get_column("close").to_list() == _REPRO_CLOSES
 
+    def test_str_close_column_dropped_insane_never_raises(self) -> None:
+        """Non-numeric guard on the polars path (round-4 fold): a Utf8 close
+        column (a schema-drifted out-of-band frame — one column, one dtype, so
+        EVERY row's close is a str) classifies insane and drops, never a
+        TypeError through the /movers readers."""
+        df = _movers_frame([1000.0, 1001.0]).with_columns(
+            pl.col("close").cast(pl.Utf8).alias("close")
+        )
+        out = screen_frame(df, ts_col="ts_utc")
+        assert out.height == 0  # every str-close row dropped; no raise
+
 
 def _page(closes: list[float], *, descending: bool = False) -> tuple[list[tuple], list[str]]:
     cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
@@ -353,6 +364,39 @@ class TestScreenRows:
         ]
         out = screen_rows(rows, cols)
         assert [r[4] for r in out] == [1000.0]  # NaN dropped; spike still caught
+
+    def test_str_price_cell_dropped_insane_never_raises(self) -> None:
+        """Non-numeric guard (round-4 fold): a str price cell (DuckDB
+        union_by_name VARCHAR promotion) is DROPPED as insane on the sorted
+        path — pre-fix ``math.isnan(str)`` raised a TypeError → a /db 500."""
+        cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
+        rows = [
+            (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None),
+            (_OPEN_UTC + timedelta(minutes=1), 999.0, 1002.0, 998.0, "1001.0", 10, None),
+            (_OPEN_UTC + timedelta(minutes=2), 1001.0, 1004.0, 1000.0, 1002.0, 10, None),
+        ]
+        out = screen_rows(rows, cols)
+        assert [r[4] for r in out] == [1000.0, 1002.0]  # str cell dropped, no raise
+
+    def test_str_price_cell_dropped_on_mixed_tz_fallback_never_raises(self) -> None:
+        """Round-4 fold × round-3 NIT (2a): the mixed-tz insane-preserving
+        fallback feeds RAW cells to price_row_insane directly — a str cell
+        there must also classify insane (dropped), never a TypeError."""
+        cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
+        aware_ok = (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None)
+        naive_str = (
+            _OPEN_UTC.replace(tzinfo=None) + timedelta(minutes=1),
+            999.0,
+            1002.0,
+            998.0,
+            "1001.0",  # non-numeric cell — insane on the fallback path too
+            10,
+            None,
+        )
+        with capture_logs() as logs:
+            out = screen_rows([aware_ok, naive_str], cols)
+        assert out == [aware_ok]
+        assert any(log["event"] == "bar_screen.unsortable_page_bad_tick_skipped" for log in logs)
 
 
 class TestAntiDivergenceOracle:
