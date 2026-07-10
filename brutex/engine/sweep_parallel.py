@@ -161,6 +161,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
 import structlog
 
 from brutex.engine.combo_mask import count_combos
+from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_mem_budget import MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -198,6 +199,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
 
@@ -804,14 +806,20 @@ class TupleWorkResult:
 class _WorkerContext:
     """Immutable per-pool context handed to each worker via the pool initializer.
 
-    Picklable (a frozen dataclass of a ``SweepGridConfig`` + a ``Path``); the
-    worker rebuilds its ``store_for`` factory from ``(root, grid)`` via
-    :func:`~brutex.engine.sweep_orchestrator.make_store_for`, so the un-picklable
-    parent closure never crosses the process boundary.
+    Picklable (a frozen dataclass of a ``SweepGridConfig`` + a ``Path`` + an
+    optional :class:`~brutex.engine.reference_series.TradeReferenceStamper` —
+    itself a frozen slotted dataclass over plain ``datetime → Decimal`` dicts,
+    so it crosses the SPAWN boundary verbatim, pinned by test); the worker
+    rebuilds its ``store_for`` factory from ``(root, grid)`` via
+    :func:`~brutex.engine.sweep_orchestrator.make_store_for`, so the
+    un-picklable parent closure never crosses the process boundary.
+    ``reference_stamper`` is defaulted LAST (DEC-VIX-STAMP-WIRE-001) so a
+    pre-wiring construction stays valid.
     """
 
     grid: SweepGridConfig
     root: Path
+    reference_stamper: TradeReferenceStamper | None = None
 
 
 #: The per-worker-PROCESS context, set ONCE by :func:`_worker_init`. A module
@@ -866,9 +874,13 @@ def _run_tuple_in_worker(
     audit lines (the worker never opens the real chain), a ``_NoDedup`` proves the
     digest path never consults dedup, and the ``bars`` are passed IN (already in
     parent memory) via a trivial ``bars_for`` so no un-picklable loader crosses
-    the boundary. A ``SweepComboError`` is caught → returned as a failed marker
-    ("Resilient: skip + continue"); a ``MemoryError`` (OOM) or any OTHER exception
-    propagates. A worker OOM typically KILLS the worker process, so the pool breaks
+    the boundary. A ``SweepComboError`` — or a
+    :class:`~brutex.engine.results_store.VixTrioConflictError`
+    (DEC-VIX-STAMP-WIRE-001: a redo whose REFERENCE-ONLY VIX trio disagrees
+    because the VIX lake moved between runs) — is caught → returned as a failed
+    marker ("Resilient: skip + continue"); a ``MemoryError`` (OOM) and any OTHER
+    exception (including the PLAIN ``ResultsStoreError`` run-identity conflict)
+    propagate. A worker OOM typically KILLS the worker process, so the pool breaks
     and the parent sees :class:`BrokenProcessPool` on the next ``result()`` — which
     the parent QUARANTINES (DEC-SWEEP-STALL-OOM-GUARDS-001,
     :meth:`ParallelGridDriver._quarantine_broken_pool`) rather than looping on it.
@@ -887,8 +899,11 @@ def _run_tuple_in_worker(
             dedup=_NoDedup(),
             audit=collector,
             skip_empty=True,
+            # The pool-wide stamper (DEC-VIX-STAMP-WIRE-001): every worker
+            # binds the SAME pickled stamper, so parallel == sequential.
+            reference_stamper=ctx.reference_stamper,
         )
-    except SweepComboError as exc:
+    except (SweepComboError, VixTrioConflictError) as exc:
         return TupleWorkResult(
             index=index,
             summary=None,
@@ -1029,6 +1044,7 @@ class ParallelGridDriver:
         "_n_unique",
         "_next_apply",
         "_quarantined",
+        "_reference_stamper",
         "_root",
         "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
@@ -1048,6 +1064,7 @@ class ParallelGridDriver:
         stall_seconds: float | None = None,
         stall_min_mask_bars_per_sec: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        reference_stamper: TradeReferenceStamper | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -1083,6 +1100,11 @@ class ParallelGridDriver:
             environment via :func:`resolve_stall_min_mask_bars_per_sec`.
         monotonic
             Injected monotonic clock (tests drive the stall watchdog with a fake).
+        reference_stamper
+            Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) carried into
+            the picklable :class:`_WorkerContext` so EVERY spawn worker binds
+            the same stamper — parallel output stays byte-identical to the
+            sequential run (regression-pinned).
 
         Raises
         ------
@@ -1124,6 +1146,7 @@ class ParallelGridDriver:
         #: mask count — the heavy-grid work estimate (DEC-SWEEP-STALL-OOM-GUARDS-001).
         self._n_unique = len(set(grid.condition_bits))
         self._monotonic = monotonic
+        self._reference_stamper = reference_stamper
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
@@ -1179,7 +1202,9 @@ class ParallelGridDriver:
         pool_size = self._workers - 1
         max_inflight = pool_size * _INFLIGHT_MULTIPLIER
         heap_cap = pool_size * _HEAP_CAP_MULTIPLIER
-        ctx = _WorkerContext(grid=self._grid, root=self._root)
+        ctx = _WorkerContext(
+            grid=self._grid, root=self._root, reference_stamper=self._reference_stamper
+        )
         try:
             with ProcessPoolExecutor(
                 max_workers=pool_size,
@@ -1908,6 +1933,7 @@ def run_parallel_grid(
     stall_seconds: float | None = None,
     stall_min_mask_bars_per_sec: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -1944,6 +1970,7 @@ def run_parallel_grid(
         stall_seconds=stall_seconds,
         stall_min_mask_bars_per_sec=stall_min_mask_bars_per_sec,
         monotonic=monotonic,
+        reference_stamper=reference_stamper,
     )
     return driver.run()
 

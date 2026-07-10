@@ -259,7 +259,10 @@ def sweep_all_exit_code(tuples_failed: int) -> int:
     Parameters
     ----------
     tuples_failed
-        The count from the :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary`.
+        The count from the :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary`
+        (``cmd_sweep_all`` folds the stage-3 pass's ``cells_conflicted`` —
+        VIX-trio-conflicted refined cells skipped under the same
+        skip-and-continue contract — into this count).
 
     Returns
     -------
@@ -6054,6 +6057,19 @@ def cmd_sweep(
         )
         return EXIT_USER_ERROR
     try:
+        # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): `brutex
+        # sweep` renders a TEXT leaderboard and persists nothing — the report
+        # bytes are regression-pinned IDENTICAL stamped-vs-unstamped
+        # (test_engine_vix_stamper_wiring.py::TestSweepReportSeam::
+        # test_sweep_report_bytes_identical_stamped_vs_unstamped — the report
+        # surface carries no VIX column), so a stamp here is provably
+        # unobservable and a stamper
+        # build would be pure wasted lake I/O. The stream is EXPLICITLY
+        # unstamped via this literal (an enumerated sanctioned literal-None
+        # site, AST-pinned by tests/unit/test_vix_stamper_binding_pin.py —
+        # this call previously OMITTED the kwarg, the silent-omission class
+        # the pin now polices). REVERT LEVER: bind a build_vix_stamper(...)
+        # here if the report ever grows a VIX surface.
         report = sweep_report(
             bars,
             instrument=symbol,
@@ -6069,6 +6085,7 @@ def cmd_sweep(
             sort_by=sort_by,
             validate_oos=validate_oos,
             oos_only=oos_only,
+            reference_stamper=None,
         )
     except ValueError as exc:
         # Honest user errors (over-cap sweep, bad k, --oos-only on a < 2-day window)
@@ -6613,6 +6630,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # BaseException, so an operator Ctrl-C never alerts; the clean path fires
     # only alerter.sweep_complete below (never both).
     with sweep_abort_alert(_emit_pull_halt_alert):
+        # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
+        # launch from the lake's NSE/INDEX/INDIAVIX partitions over the swept
+        # window, then handed to every observable trade surface below (grid
+        # finalist projection, Stage-3 refined rows, Stage-4 cascade). An
+        # absent / empty VIX lake degrades honestly to None (observe-only WARN
+        # inside the builder — the sweep proceeds with unstamped trades, never
+        # a fabricated stamp and never a refused launch). Built INSIDE the
+        # abort-alert wrap (round-3 panel): load_lake_slice runs the L1 heal —
+        # a WRITE-capable lake path whose LakeWriteHalt (disk-full/OOM during
+        # a heal rewrite) is an infrastructure abort that must fire the
+        # CRITICAL push, unlike the clean user-config errors gated above.
+        from brutex.engine.reference_wire import build_vix_stamper
+
+        reference_stamper = build_vix_stamper(
+            lake_root=resolved_lake,
+            start=_parse_dt(start),
+            end=_parse_dt(end),
+            catalog_path=catalog,
+        )
         with (
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
@@ -6673,6 +6709,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     ingest_audit=ingest_audit,
                     guards=guards,
                     workers=workers,
+                    reference_stamper=reference_stamper,
                 )
             else:
                 result = run_supervised_grid(
@@ -6685,6 +6722,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     on_tuple=_on_tuple,
                     on_progress=_on_progress,
                     watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+                    reference_stamper=reference_stamper,
                 )
             # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
             # Runs INSIDE the open audit with-block on this single thread (review
@@ -6704,6 +6742,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 segment=segment,
                 start=start,
                 end=end,
+                # The launch's already-built stamper (never a second lake
+                # read); resolved lazily by the pass so a stage3-disabled
+                # grid pays nothing extra.
+                stamper_for=lambda: reference_stamper,
             )
         # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
         # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
@@ -6730,8 +6772,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
                 f"evals={stage3_report.evals_total} cells={len(stage3_report.cells)} "
                 f"rows_appended={stage3_report.rows_appended} "
+                f"cells_conflicted={stage3_report.cells_conflicted} "
                 f"skipped_empty_train={stage3_report.skipped_empty_train} "
                 f"train_snapshot={stage3_report.train_snapshot_hash}"
+            )
+        if stage3_report.cells_conflicted > 0:
+            # The stage-3 twin of the tuples_failed warning (Golden Rule #10):
+            # a VIX-conflicted refined cell was SKIPPED (store untouched) — the
+            # India-VIX lake moved between launches; the verdict goes non-zero.
+            print(
+                f"[brutex] WARNING: {stage3_report.cells_conflicted} stage-3 cell(s) hold a "
+                f"REFERENCE-ONLY VIX trio conflicting with this launch's re-derivation and "
+                "were SKIPPED — see the stage3_wire.cell_vix_conflict log lines; "
+                "quarantine/delete those cell stores to re-persist against the current VIX "
+                "series (exit code non-zero).",
+                file=sys.stderr,
             )
         print(
             f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}"
@@ -6810,6 +6865,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 cascade_config=cascade_config_for_sweep(sweep_id),
                 stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                 leaderboard_trials=leaderboard_trials,
+                # No stamper seam: the cascade candidate re-simulations are
+                # DISCARDED trade streams (DEC-VIX-STAMP-WIRE-001 round-6 —
+                # see cascade_wire.build_candidate_input's sanctioned
+                # literal-None), so the launch stamper deliberately does NOT
+                # ride into Stage-4.
             )
             print(
                 f"[brutex] cascade — pools={len(cascade_report.groups)} "
@@ -6868,8 +6928,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             )
 
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
-        # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
-        return sweep_all_exit_code(result.tuples_failed)
+        # EXIT_OK; any tuple skipped after a SweepComboError — or any stage-3 cell
+        # skipped on a VIX-trio conflict — makes the exit non-zero.
+        return sweep_all_exit_code(result.tuples_failed + stage3_report.cells_conflicted)
 
 
 def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sleep + lake I/O); the scheduler CORE is 100%-tested in brutex.engine.sweep_scheduler
@@ -7222,6 +7283,10 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
         return EXIT_USER_ERROR
 
     bars_for = load_bars_for_manifest(manifest, lake_root=resolved_lake, catalog_path=catalog)
+    # NO VIX stamper build here (DEC-VIX-STAMP-WIRE-001 round-6): the replayed
+    # candidates' trades are DISCARDED streams (report bytes identical either
+    # way), so the old per-replay vix_stamper_for_manifest build paid a full
+    # window-bounded VIX lake read for zero observable output.
     report = run_and_write_from_manifest(root, bars_for=bars_for)
     print(
         f"[brutex] cascade done — sweep={manifest.sweep_id[:16]} pools={len(report.groups)} "
@@ -7735,6 +7800,30 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
             audit_path = scratch / "audit.jsonl"
             audit_path.parent.mkdir(parents=True, exist_ok=True)
+            # The shadow re-sweep must stamp EXACTLY like the launcher did
+            # (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER): cmd_sweep_all binds
+            # the window-bounded India-VIX stamper into every persisted row,
+            # so an UNSTAMPED recount over a stamped tree would byte-diverge
+            # on the VIX trio and false-condemn every good store as
+            # 'corrupt'. Same build law as the launcher; None-degrade on a
+            # VIX-less lake reproduces a SAME-generation unstamped tree
+            # byte-identically. A PRE-VIX-generation tree (no trio columns
+            # on disk) can NEVER be byte-identical — the reflush appends the
+            # three all-null trio columns — and is attributed as the
+            # non-corrupt schema-migration 'backfill' variant (round-5
+            # panel; _is_pre_vix_schema_migration), never condemned.
+            # RESIDUAL envelope: VIX sits OUTSIDE the recorded context, so a
+            # VIX lake that moved BETWEEN the run and this recount still
+            # diverges the trio — compare_recount classifies that case as
+            # the non-corrupt `recount_vix_divergence` warn, never heal-grade.
+            from brutex.engine.reference_wire import build_vix_stamper
+
+            recount_stamper = build_vix_stamper(
+                lake_root=resolved_lake,
+                start=_parse_dt(start),
+                end=_parse_dt(end),
+                catalog_path=catalog,
+            )
             train_hash_ok = True
             # Dead launch Bloom KILLED here too (R2-SL-F1, the cmd_sweep_all
             # twin): the shadow re-sweep runs the SAME digest path
@@ -7751,6 +7840,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     store_for=make_store_for(scratch, grid),
                     dedup=plan_launch_dedup(grid, digest_path=True),
                     audit=audit,
+                    reference_stamper=recount_stamper,
                 )
                 # "Resilient: skip + continue" (DEC-ENGINE-TUPLE-SKIP-RESILIENT-001):
                 # run_sweep_grid now SKIPS a raising tuple and completes a PARTIAL
@@ -7778,6 +7868,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         segment=segment,
                         start=start,
                         end=end,
+                        # The SAME recount stamper — stage3 cell stores carry
+                        # the trio too (they ride ranked_combo_to_result_row).
+                        stamper_for=lambda: recount_stamper,
                     )
                     # Condition B6: the recomputed train hash must match the
                     # manifest's recorded one — the cell path digests fold it.
@@ -8316,7 +8409,28 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         return []
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
-    trades = simulate_trades(bars, entry_signals, direction=side, tf_minutes=tf_minutes)
+    # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
+    # replayed trades exist ONLY to become SpotSignals — the very next call,
+    # signals_from_spot_trades, reads entry_ts/exit_ts/direction and NOTHING
+    # else (SpotSignal carries no VIX field; _render_options_leaderboard
+    # renders no VIX column), so a stamp here is DISCARDED at conversion and
+    # can never reach any output. The Stage-B bind at this site was
+    # provably-dead work costing a full window-bounded VIX lake read per
+    # invocation (misdescribed as feeding an "OBSERVABLE leaderboard") — the
+    # stream is therefore EXPLICITLY unstamped via this literal (one of the
+    # enumerated sanctioned literal-None seam bindings, AST-pinned with
+    # exact counts by tests/unit/test_vix_stamper_binding_pin.py). REVERT
+    # LEVER: to surface VIX on the options-sim output, re-thread a stamper
+    # kwarg here + bind builds at cmd_options_sim /
+    # _maybe_run_options_sim_on_winners — a conscious follow-up that ALSO
+    # needs a VIX field on SpotSignal + a leaderboard column.
+    trades = simulate_trades(
+        bars,
+        entry_signals,
+        direction=side,
+        tf_minutes=tf_minutes,
+        reference_stamper=None,
+    )
     # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
     # is LAST-wins on a duplicated timestamp — the COMMON gate keeps the first
     # bar + WARNs (the catalog gate upstream already collapses; belt-and-braces).
@@ -8455,6 +8569,10 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         return EXIT_USER_ERROR
 
     audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
+    # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
+    # replay's stamps were provably discarded at the SpotSignal conversion —
+    # see the sanctioned literal-None site in _replay_spot_signals_for_row —
+    # so the Stage-B build here paid a full VIX lake read for zero output.
     results = _options_sim_for_row(
         row,
         lake_root=resolved_lake,
@@ -8512,6 +8630,11 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
         return
     winners = store.top_k(top, by="net_pnl_paisa")
     print(f"[brutex] options-sim: pricing options for top {len(winners)} winner(s)…")
+    # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
+    # Stage-B build at this hook was a SECOND full VIX lake read per
+    # sweep-all --options-sim launch (the launch stamper was already built,
+    # and it even ran for ZERO winners) whose stamps were then discarded at
+    # the SpotSignal conversion — see _replay_spot_signals_for_row.
     for row in winners:
         audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
         try:

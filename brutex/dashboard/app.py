@@ -6636,6 +6636,11 @@ def build_app(
             except CascadeWireError as exc:
                 return 400, {"ok": False, "error": str(exc)}
             bars_for = load_bars_for_manifest(manifest, lake_root=lake)
+            # NO VIX stamper build here (DEC-VIX-STAMP-WIRE-001 round-6): the
+            # replayed candidates' trades are DISCARDED streams (report bytes
+            # identical either way), so the old per-click
+            # vix_stamper_for_manifest build paid a full window-bounded VIX
+            # lake read for zero observable output.
             report = run_and_write_from_manifest(root, bars_for=bars_for)
             return 200, {
                 "ok": True,

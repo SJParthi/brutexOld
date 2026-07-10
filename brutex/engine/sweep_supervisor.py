@@ -93,6 +93,7 @@ from typing import TYPE_CHECKING, Any, Final
 import blake3
 import structlog
 
+from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_cache import SweepCache, combo_digest
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
 from brutex.engine.sweep_kernel import ResidentKernelCache
@@ -118,6 +119,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.results_store import ResultsStore
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_run import DedupSink, SweepRunSummary
@@ -500,6 +502,7 @@ def run_supervised_grid(
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     watchdog_poll_seconds: float | None = None,
     reuse_bar_bits: bool = True,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
 
@@ -520,6 +523,9 @@ def run_supervised_grid(
     3. Elif ``guards.cache.seen(tuple key)``: skip as **cached** (progress + audit
        + ``checkpoint.record``).
     4. Else ``run_one_tuple``: a :class:`~brutex.engine.sweep_run.SweepComboError`
+       — or a :class:`~brutex.engine.results_store.VixTrioConflictError`
+       (DEC-VIX-STAMP-WIRE-001: a redo whose REFERENCE-ONLY VIX trio disagrees
+       because the VIX lake moved between runs)
        → **failed** skip ("Resilient: skip + continue" — progress.advance
        (processed-but-failed) + audit ``TUPLE_FAILED`` naming the offending combo,
        ``tuples_failed`` bumped, but DELIBERATELY **no** ``cache.record`` /
@@ -528,8 +534,10 @@ def run_supervised_grid(
        summary → accumulate, ``cache.record``, ``checkpoint.record``,
        ``progress.advance``, audit ``TUPLE_DONE``, fire ``on_tuple``.
 
-    A non-zero ``tuples_failed`` makes the run's verdict NON-ZERO; only
-    ``SweepComboError`` is caught here — every other exception still propagates to
+    A non-zero ``tuples_failed`` makes the run's verdict NON-ZERO; only those two
+    tuple-scoped errors are caught here — every other exception (including the
+    PLAIN :class:`~brutex.engine.results_store.ResultsStoreError` run-identity
+    conflict, a genuine reproducibility breach) still propagates to
     the abort handler below. Bracketed by ``progress.start`` + a BLAKE3
     ``SUPERVISOR_START`` line and, on
     clean exit, ``progress.finish`` + ``SUPERVISOR_COMPLETE``. On any
@@ -593,6 +601,14 @@ def run_supervised_grid(
         :class:`~brutex.engine.sweep_kernel.ResidentKernelCache`
         (DEC-SWEEP-RESIDENT-KERNEL-001) — byte-identical results, only the
         redundant rebuild is skipped; ``False`` rebuilds per tuple.
+    reference_stamper
+        Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001), forwarded to
+        every tuple's :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`
+        — ONE stamper per supervised run; REFERENCE ONLY: every persisted
+        ``run_id`` and every non-VIX column is byte-identical either way —
+        ONLY the three nullable ``vix_mean``/``vix_min``/``vix_max`` columns
+        differ (Stage C persists the trio; the pre-Stage-C "byte-identical
+        persisted output" wording was reconciled by the round-2 panel, MINOR).
 
     Returns
     -------
@@ -743,9 +759,12 @@ def run_supervised_grid(
             # continue to the remaining tuples. CRITICALLY, the cache + checkpoint
             # are DELIBERATELY NOT recorded for a failed tuple, so a resume/cache
             # re-runs it (the sweep_heal "C5" lesson — a failed tuple must never
-            # be permanently skipped). Only SweepComboError is caught; the outer
+            # be permanently skipped). VixTrioConflictError rides the SAME skip
+            # (DEC-VIX-STAMP-WIRE-001: the VIX lake moved between runs —
+            # tuple-scoped, never grounds to abort the grid); the outer
             # `except Exception` (record-then-reraise ABORT) still handles every
-            # genuinely-fatal error.
+            # genuinely-fatal error, including the PLAIN ResultsStoreError
+            # run-identity conflict.
             try:
                 summary = run_one_tuple(
                     grid,
@@ -756,8 +775,9 @@ def run_supervised_grid(
                     audit=ingest_audit,
                     skip_empty=skip_empty,
                     kernel_cache=kernel_cache,
+                    reference_stamper=reference_stamper,
                 )
-            except SweepComboError as exc:
+            except (SweepComboError, VixTrioConflictError) as exc:
                 tuples_failed += 1
                 had_failure = True
                 _advance(current=label, survived=False, skipped=False)

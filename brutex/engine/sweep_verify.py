@@ -51,13 +51,13 @@ Honest envelope (Golden Rule #10)
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.engine.results_store import ResultsStore, ResultsStoreError
+from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -85,6 +85,8 @@ if TYPE_CHECKING:
     # of this module's runtime import graph (the sweep_run TYPE_CHECKING
     # discipline) so the engine coverage gates stay stable.
     from brutex.engine.cascade_wire import Stage3ManifestRecord
+    from brutex.engine.trial_stats import TupleTrialStats
+    from brutex.engine.tuple_complete import TupleCompletionSentinel
     from brutex.orchestrator.audit import AuditEntry
 
 _LOG = structlog.get_logger("brutex.engine.sweep_verify")
@@ -809,6 +811,207 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
     )
 
 
+def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
+    """Attribute a store-pair diff to the VIX trio — and name the SHAPE, or abstain.
+
+    The attribution test behind the ``recount_vix_divergence`` finding family
+    (DEC-VIX-STAMP-WIRE-001): both stores must LOAD cleanly, hold the SAME
+    ``run_id`` set, agree on EVERY non-VIX field of every row, and either
+    disagree on at least one ``vix_mean``/``vix_min``/``vix_max`` value OR
+    differ ONLY in the trio columns' very EXISTENCE (the schema-generation
+    shape below). Anything less provable returns ``None`` — an unreadable
+    Parquet, a run_id-set drift, a non-VIX field difference, or fully-EQUAL
+    rows over IDENTICAL schemas (the byte diff then has an unknown non-row
+    cause) all fall back to the caller's normal corrupt/inconclusive ladder.
+    Honest attribution only, never a guess (Golden Rule #1).
+
+    A confirmed VIX-only diff is one of THREE cheaply-distinguishable shapes
+    (two row-level + one schema-level) — the round-4 panel caught the old
+    single "the lake moved" wording claiming a cause it had not established
+    for the first shape, and the round-5 panel caught the schema shape
+    silently abstaining onto the generic ladder:
+
+    * ``"backfill"`` (row shape) — every differing trio field is ``None`` on
+      the ORIGINAL side (a VIX lake that has since GAINED coverage, or a
+      part-null store): nothing recorded was contradicted, and a plain redo
+      appends the trio as the sanctioned directional None→value backfill —
+      no quarantine needed.
+    * ``"backfill"`` (schema shape) — every row fully EQUAL (both sides an
+      all-``None`` trio) but the ORIGINAL file predates the trio COLUMNS
+      themselves: a pre-VIX-generation store loads ``None`` per
+      ``_row_from_record``'s optional read, while the recount's reflush
+      writes the current schema WITH the three all-null columns appended, so
+      such a tree can NEVER be byte-identical. Attributed iff the ONLY
+      schema difference is the missing trio
+      (:func:`_is_pre_vix_schema_migration`) — same family, same remedy.
+    * ``"moved"`` — some recorded trio VALUE disagrees with the recount's
+      (value-vs-value, or a recorded value the recount can no longer
+      reproduce): the India-VIX lake genuinely moved between the run and the
+      recount.
+    """
+    try:
+        original_rows = {row.run_id: row for row in ResultsStore.load(original).rows()}
+        scratch_rows = {row.run_id: row for row in ResultsStore.load(scratch).rows()}
+    except ResultsStoreError:
+        return None  # unreadable/corrupt bytes are never VIX-attributable
+    if set(original_rows) != set(scratch_rows):
+        return None
+    vix_differs = False
+    recorded_value_differs = False
+    # Null the trio from the ONE public column source (results_store.VIX_FIELDS,
+    # CLAUDE.md §2 Rule 11 COMMON) — a fourth trio field added there is nulled
+    # here automatically, never a silently-desynced mirrored literal.
+    # dict[str, Any]: the trio fields are typed non-None on ResultRow's
+    # replace() signature, so a dict[str, None] splat fails strict mypy even
+    # though None is the valid null for every nullable trio column.
+    vix_nulled: dict[str, Any] = dict.fromkeys(VIX_FIELDS)
+    for run_id, ours in original_rows.items():
+        theirs = scratch_rows[run_id]
+        if ours == theirs:
+            continue
+        if replace(ours, **vix_nulled) != replace(theirs, **vix_nulled):
+            return None  # a non-VIX field differs — not VIX-attributable
+        vix_differs = True
+        for name in VIX_FIELDS:
+            mine = getattr(ours, name)
+            if mine != getattr(theirs, name) and mine is not None:
+                recorded_value_differs = True
+    if not vix_differs:
+        # Rows fully EQUAL yet the caller saw a byte diff: the ONE provable
+        # cause is the schema-generation migration (a pre-VIX-columns store
+        # vs the current writer's appended all-null trio — the round-5 panel
+        # shape); anything else honestly abstains to the normal ladder.
+        return "backfill" if _is_pre_vix_schema_migration(original, scratch) else None
+    return "moved" if recorded_value_differs else "backfill"
+
+
+def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
+    """``True`` iff *original*'s Parquet schema is exactly *scratch*'s minus the VIX trio.
+
+    The schema test behind :func:`_stores_differ_only_in_vix`'s third shape
+    (round-5 panel): a store written BEFORE the trio columns landed loads an
+    all-``None`` trio, so its rows compare fully EQUAL to an unstamped
+    recount's — yet the recount's reflush writes the CURRENT schema with the
+    three all-null trio columns and the bytes differ. That diff is
+    attributable iff the ONLY schema difference is the missing trio: the
+    scratch must carry all three columns, the original none, and stripping
+    the trio from the scratch schema must reproduce the original schema
+    EXACTLY (names AND dtypes, order-sensitively). Anything less provable —
+    partial trio presence, any other column/dtype drift, an unreadable
+    footer — returns ``False`` and the caller abstains to the normal ladder.
+    Honest attribution only, never a guess (Golden Rule #1). O(columns) —
+    two Parquet footer reads, no row data.
+    """
+    import polars as pl  # deferred exactly like ResultsStore.load (the data extra)
+
+    try:
+        original_schema = list(pl.read_parquet_schema(original).items())
+        scratch_schema = list(pl.read_parquet_schema(scratch).items())
+    except (pl.exceptions.PolarsError, OSError):
+        return False  # an unreadable footer is never VIX-attributable
+    original_names = {name for name, _ in original_schema}
+    if any(name in original_names for name in VIX_FIELDS):
+        return False  # partial/total trio presence — not the pre-VIX generation
+    scratch_names = {name for name, _ in scratch_schema}
+    if any(name not in scratch_names for name in VIX_FIELDS):
+        return False  # the recount side lacks the trio — not this migration
+    stripped = [entry for entry in scratch_schema if entry[0] not in VIX_FIELDS]
+    return stripped == original_schema
+
+
+def _hashes_pair_with_stores(
+    ours_hash: str, theirs_hash: str, store_digests: tuple[str, str]
+) -> bool:
+    """``True`` iff each recorded content hash pairs with its OWN store's digest.
+
+    *store_digests* is the ``(original, scratch)`` sha256 pair computed ONCE
+    per tuple by ``_diff_store``'s memo — the sentinel AND sidecar re-pair
+    checks of one VIX-diverged tuple share it instead of each re-reading +
+    re-hashing both store files (review round-7 NIT).
+    """
+    return (ours_hash, theirs_hash) == store_digests
+
+
+#: The ONE store-pairing hash field the two re-pair checks below exempt from
+#: their non-hash equality gates (it NECESSARILY diverges with a VIX-moved
+#: store; each side is instead verified against its OWN store's actual bytes).
+_STORE_HASH_FIELD: Final[str] = "store_content_hash"
+
+
+def _non_hash_fields_equal(
+    ours: TupleCompletionSentinel | TupleTrialStats,
+    theirs: TupleCompletionSentinel | TupleTrialStats,
+) -> bool:
+    """``True`` iff every field EXCEPT :data:`_STORE_HASH_FIELD` compares equal.
+
+    Enumerated via :func:`dataclasses.fields` so the gate is drift-proof by
+    construction: a field added to either sidecar model LATER is automatically
+    part of the equality gate — a hand-enumerated field list would silently
+    exclude it, letting a divergence in the new field be attributed into the
+    non-corrupt "honest VIX re-pair" family (the unsafe drift direction).
+    """
+    return all(
+        getattr(ours, field.name) == getattr(theirs, field.name)
+        for field in fields(ours)
+        if field.name != _STORE_HASH_FIELD
+    )
+
+
+def _sentinel_diff_is_the_vix_repair(
+    original_sentinel: Path,
+    scratch_sentinel: Path,
+    store_digests: tuple[str, str],
+) -> bool:
+    """``True`` iff the sentinels differ ONLY as the honest re-pair of VIX-moved stores.
+
+    A completion sentinel embeds its store's ``store_content_hash``
+    (DEC-MARK-MANY-SENTINEL-001), so a VIX-only store divergence NECESSARILY
+    diverges the sentinel bytes too. The attribution is accepted only when
+    BOTH sentinels read valid, agree on every non-hash field (enumerated via
+    :func:`_non_hash_fields_equal` — drift-proof, never a hand list), and each hash
+    pairs with its OWN store's actual bytes — anything else (a tampered or
+    stale sentinel) returns ``False`` and falls back to the caller's normal
+    ladder. The caller consults this ONLY after
+    :func:`_stores_differ_only_in_vix` confirmed the store pair itself.
+    """
+    try:
+        ours = read_completion_sentinel(original_sentinel)
+        theirs = read_completion_sentinel(scratch_sentinel)
+    except TupleCompletionError:
+        return False  # an unreadable/invalid sentinel is never VIX-attributable
+    if not _non_hash_fields_equal(ours, theirs):
+        return False  # a non-hash field differs — not the VIX re-pair
+    return _hashes_pair_with_stores(
+        ours.store_content_hash, theirs.store_content_hash, store_digests
+    )
+
+
+def _sidecar_diff_is_the_vix_repair(
+    original_sidecar: Path,
+    scratch_sidecar: Path,
+    store_digests: tuple[str, str],
+) -> bool:
+    """``True`` iff the trial-stats sidecars differ ONLY as the VIX-moved re-pair.
+
+    The sidecar's statistics are VIX-blind (Sharpe moments + prune tallies —
+    a VIX-only store movement cannot change them), but it ALSO embeds its
+    store's ``store_content_hash`` (ADR-0008 condition 5 pairing identity),
+    so it necessarily diverges with a VIX-moved store. Same acceptance law as
+    :func:`_sentinel_diff_is_the_vix_repair`: both sidecars valid, every
+    non-hash field equal, each hash pairing with its OWN store's bytes.
+    """
+    try:
+        ours = read_tuple_trial_stats(original_sidecar)
+        theirs = read_tuple_trial_stats(scratch_sidecar)
+    except TrialStatsError:
+        return False  # an unreadable/invalid sidecar is never VIX-attributable
+    if not _non_hash_fields_equal(ours, theirs):
+        return False  # a statistic differs — not the VIX re-pair
+    return _hashes_pair_with_stores(
+        ours.store_content_hash, theirs.store_content_hash, store_digests
+    )
+
+
 def compare_recount(
     original_root: Path,
     scratch_root: Path,
@@ -846,6 +1049,29 @@ def compare_recount(
     Byte-identity under a MISMATCH is still reported clean (silence): it is
     strong reassurance, never a downgrade.
 
+    THE VIX RESIDUAL (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER fold): the
+    REFERENCE-ONLY ``vix_mean``/``vix_min``/``vix_max`` trio derives from the
+    India-VIX *lake*, which sits deliberately OUTSIDE the recorded context
+    AND the run identity — so a VIX re-pull / ``1day`` re-derivation between
+    the original run and the recount byte-diverges the trio even under a
+    FULLY MATCHED context. A diverging results-store Parquet whose loaded
+    rows prove the divergence is VIX-ONLY (same run_id set, every non-VIX
+    field equal, at least one trio field differing) is therefore classified
+    ``recount_vix_divergence`` (grid) / ``cell_recount_vix_divergence``
+    (cell) at severity ``warn`` — NEVER ``corrupt`` and never heal-grade (the
+    heal consumes only ``recount_divergence``): every reproducibility-bearing
+    column provably reproduced; only the reference annotation moved with its
+    lake. The pairing-artifact divergences that necessarily ride a VIX-only
+    store movement — BOTH the trial-stats sidecar AND the completion sentinel
+    embed the store's content hash — are attributed into the SAME family, but
+    only when the artifact reads valid, agrees on every non-hash field, and
+    each recorded hash pairs with its OWN store's actual bytes
+    (:func:`_sidecar_diff_is_the_vix_repair` /
+    :func:`_sentinel_diff_is_the_vix_repair`). An UNREADABLE store, a
+    run_id-set mismatch, any non-VIX field difference, or a pairing artifact
+    that differs in anything but the honest re-pair falls through to the
+    normal corrupt/inconclusive ladder.
+
     Parameters
     ----------
     original_root, scratch_root
@@ -878,11 +1104,68 @@ def compare_recount(
 
     def _diff_store(store_path: Path, *, is_grid_tuple: bool, leaderboard: tuple[str, str]) -> None:
         nonlocal checked
+        sentinel_path = completion_sentinel_path(store_path)
         artifacts = (
             store_path,
             trial_stats_sidecar_path(store_path),
-            completion_sentinel_path(store_path),
+            sentinel_path,
         )
+        scratch_store = scratch_root / store_path.relative_to(original_root)
+        # Memoised store-pair VIX verdict (one load per tuple; all three
+        # artifacts of a VIX-diverged tuple consult it). The memo holds the
+        # shape string — moved or backfill — or the not-VIX-attributable
+        # None; the separate computed flag distinguishes a memo that has not
+        # run yet from one that ran and honestly abstained.
+        vix_only_memo: str | None = None
+        vix_memo_computed = False
+        store_digest_memo: tuple[str, str] | None = None
+
+        def _vix_only_store_pair() -> str | None:
+            nonlocal vix_only_memo, vix_memo_computed
+            if not vix_memo_computed:
+                vix_only_memo = _stores_differ_only_in_vix(store_path, scratch_store)
+                vix_memo_computed = True
+            return vix_only_memo
+
+        def _store_pair_digests() -> tuple[str, str]:
+            """The ``(original, scratch)`` store sha256 pair, read + hashed ONCE.
+
+            Both pairing-artifact re-pair checks of a VIX-diverged tuple
+            consult the SAME store bytes — memoised beside the row-level
+            verdict so the sentinel and sidecar checks stop independently
+            re-reading + re-hashing both stores (review round-7 NIT).
+            """
+            nonlocal store_digest_memo
+            if store_digest_memo is None:
+                store_digest_memo = (
+                    hashlib.sha256(store_path.read_bytes()).hexdigest(),
+                    hashlib.sha256(scratch_store.read_bytes()).hexdigest(),
+                )
+            return store_digest_memo
+
+        def _artifact_vix_shape(original: Path, scratch: Path) -> str | None:
+            """The VIX-divergence SHAPE for this artifact, or None (not attributable)."""
+            if original == store_path:
+                return _vix_only_store_pair()
+            # A pairing artifact (sidecar/sentinel) is attributable only when
+            # BOTH stores exist AND the store pair itself proved VIX-only.
+            if not (store_path.exists() and scratch_store.exists()):
+                return None
+            shape = _vix_only_store_pair()
+            if shape is None:
+                return None
+            if original == sentinel_path:
+                return (
+                    shape
+                    if _sentinel_diff_is_the_vix_repair(original, scratch, _store_pair_digests())
+                    else None
+                )
+            return (
+                shape
+                if _sidecar_diff_is_the_vix_repair(original, scratch, _store_pair_digests())
+                else None
+            )
+
         for original in artifacts:
             scratch = scratch_root / original.relative_to(original_root)
             rel = _rel(original_root, original)
@@ -921,6 +1204,62 @@ def compare_recount(
                 continue
             if original.read_bytes() == scratch.read_bytes():
                 continue  # byte-identical — verified (silence is the verdict)
+            # VIX-only divergence (see the docstring's VIX RESIDUAL). All
+            # THREE artifacts necessarily ride a VIX-only lake movement: the
+            # results-store Parquet (the trio columns) and BOTH pairing
+            # artifacts — the trial-stats sidecar + the completion sentinel
+            # each embed the store's content hash. A pairing artifact is
+            # attributed ONLY when it reads valid, agrees on every non-hash
+            # field, and re-pairs its OWN store's actual bytes; anything less
+            # provable stays on the normal ladder.
+            vix_shape = _artifact_vix_shape(original, scratch)
+            if vix_shape is not None:
+                # Two honestly-distinguished variants (round-4 panel): the
+                # old single detail definitively claimed "the lake moved",
+                # which is FALSE for the reachable backfill shape (a
+                # pre-VIX-column store recounted under any VIX-carrying
+                # lake) — and its quarantine remedy is over-heavy there.
+                if vix_shape == "moved":
+                    cause_and_remedy = (
+                        "The India-VIX lake moved between the recorded run and "
+                        "this recount (a VIX re-pull or a derived-1day "
+                        "re-derivation); VIX is deliberately OUTSIDE the "
+                        "recorded context and the run identity (CLAUDE.md §2 "
+                        "Rule 3), so this is NOT evidence of corruption and "
+                        "never heal-grade. Remedy: quarantine + redo the tuple "
+                        "to re-stamp against the current VIX series, or keep "
+                        "the older stamps"
+                    )
+                else:
+                    cause_and_remedy = (
+                        "The original rows carry NO trio values — a store "
+                        "written before the VIX columns landed, or a VIX lake "
+                        "that has since GAINED coverage; nothing recorded was "
+                        "contradicted. VIX is deliberately OUTSIDE the recorded "
+                        "context and the run identity (CLAUDE.md §2 Rule 3), so "
+                        "this is NOT evidence of corruption and never "
+                        "heal-grade. Remedy: a plain redo appends the trio as "
+                        "the sanctioned directional None→value backfill — no "
+                        "quarantine needed"
+                    )
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code=(
+                            "recount_vix_divergence"
+                            if is_grid_tuple
+                            else "cell_recount_vix_divergence"
+                        ),
+                        severity="warn",
+                        detail=(
+                            "ONLY the REFERENCE-ONLY vix_mean/vix_min/vix_max trio "
+                            "diverges (the pairing sidecar/sentinel re-pair that "
+                            "store's hash) — every run_id and every non-VIX column "
+                            f"reproduced exactly. {cause_and_remedy}"
+                        ),
+                    )
+                )
+                continue
             if is_grid_tuple:
                 if context_match:
                     grid_corrupt_leaderboards.add(leaderboard)

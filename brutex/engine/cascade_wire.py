@@ -113,6 +113,7 @@ from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Sequence
+    from datetime import datetime
     from pathlib import Path
 
     import numpy as np
@@ -625,6 +626,21 @@ def _make_mc_evaluate(
             tf_minutes=tf_minutes,
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
+            # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
+            # Monte-Carlo permutation filter's trades are the DISCARDED null
+            # distribution — relocated entry signals whose per-trade Sharpe is
+            # the only output; no row, report or operator surface ever sees
+            # the trades themselves — so stamping every permutation's trades
+            # would be pure wasted work with zero observable output. The
+            # stream is EXPLICITLY unstamped via this literal (one of the
+            # ENUMERATED sanctioned literal-None seam bindings — five after
+            # the round-6 review also unstamped the sibling candidate
+            # re-simulation in build_candidate_input — AST-pinned with exact
+            # counts by tests/unit/test_vix_stamper_binding_pin.py — never a
+            # silent omission). REVERT LEVER: thread a stamper through
+            # _make_mc_evaluate and bind it here (one kwarg; the null
+            # statistic is VIX-independent either way).
+            reference_stamper=None,
         )
         rets = [t.pnl_paisa / start_equity_paisa for t in trades]
         sharpe = sharpe_of_returns(rets)
@@ -698,6 +714,23 @@ def build_candidate_input(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
+        # candidate re-simulation's trades are a DISCARDED stream — every
+        # observable output is the CandidateInput SCALARS + returns tuples
+        # built below (no trade object, and no VIX field, survives the
+        # conversion), so the report bytes are provably identical stamped vs
+        # unstamped and a per-candidate stamp would be pure wasted work. The
+        # stream is EXPLICITLY unstamped via this literal (one of the FIVE
+        # enumerated sanctioned literal-None seam bindings, AST-pinned with
+        # exact counts by tests/unit/test_vix_stamper_binding_pin.py — never
+        # a silent omission); the old reference_stamper seam through the
+        # cascade chain was DELETED with the two manual-replay
+        # vix_stamper_for_manifest builds it existed to feed (each paid a
+        # full window-bounded VIX lake read per replay/click for zero
+        # output — the same dead-build class the round-2 review removed at
+        # the options-sim sites). REVERT LEVER: add a VIX surface to
+        # CandidateInput/the cascade report FIRST, then re-thread the seam.
+        reference_stamper=None,
     )
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
@@ -1662,6 +1695,9 @@ def run_and_write_from_specs(
     *results_root*. When the sweep ran the Stage-3 refinement pass
     (DEC-STAGE3-WIRE-001), its :class:`Stage3ManifestRecord` is recorded in the
     manifest so refined-cell specs stay distinguishable from grid-cell specs.
+    The candidate re-simulations are DISCARDED trade streams and stay
+    deliberately unstamped (DEC-VIX-STAMP-WIRE-001 round-6 — see
+    :func:`build_candidate_input`); no stamper seam exists here.
 
     Returns
     -------
@@ -1699,7 +1735,11 @@ def run_and_write_from_manifest(
     Reloads the manifest under *results_root*, re-runs :func:`run_cascade_over_specs`
     with the stored config + specs over freshly-loaded bars, and re-writes
     ``cascade/cascade-report.json``. Given an unchanged lake, the rewritten report
-    is byte-identical to the one the AUTOMATIC path wrote (the golden contract).
+    is byte-identical to the one the AUTOMATIC path wrote (the golden
+    contract). The replay builds NO India-VIX stamper (DEC-VIX-STAMP-WIRE-001
+    round-6): the candidate re-simulations are discarded streams, so the old
+    per-replay ``vix_stamper_for_manifest`` build paid a full window-bounded
+    VIX lake read for zero observable output.
 
     Returns
     -------
@@ -1725,6 +1765,19 @@ def run_and_write_from_manifest(
     return report
 
 
+def _manifest_window_dt(value: str) -> datetime:
+    """Parse a manifest :class:`BarsContext` window endpoint (naive ⇒ UTC).
+
+    The ONE parse for :func:`load_bars_for_manifest`'s slice reads (CLAUDE.md
+    §2 Rule 11 COMMON; the round-6-deleted ``vix_stamper_for_manifest``
+    shared it while the manual replay still built a stamper).
+    """
+    from datetime import UTC, datetime
+
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFeed
     manifest: CascadeManifest,
     *,
@@ -1734,19 +1787,21 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     """Build a ``bars_for`` over the lake for the MANUAL replay (live-lake adapter).
 
     Reloads each ``(instrument, tf_label)`` slice the manifest references from the
-    Parquet lake via the SAME ``Catalog`` / ``ReplayFeed`` path the sweep used
-    (reconciling the catalog from on-disk Parquet first, mirroring
-    ``brutex sweep-all``), keyed by the manifest's :class:`BarsContext` window.
-    Marked ``no cover``: it opens DuckDB + reads the real lake (the pure cascade
-    core + the manifest round-trip are fully tested with injected bars; the L1
-    heal wiring below is exercised end-to-end by
-    ``tests/integration/test_cascade_reconcile_heal.py``).
+    Parquet lake via the ONE COMMON slice-read law
+    (:func:`brutex.engine.lake_slice.load_lake_slice` — the SAME ``Catalog`` /
+    ``ReplayFeed`` path the sweep used, reconciling the catalog from on-disk
+    Parquet first, mirroring ``brutex sweep-all``), keyed by the manifest's
+    :class:`BarsContext` window. Marked ``no cover``: it opens DuckDB + reads
+    the real lake (the pure cascade core + the manifest round-trip are fully
+    tested with injected bars; the L1 heal wiring inside ``load_lake_slice`` is
+    exercised end-to-end by ``tests/integration/test_cascade_reconcile_heal.py``).
 
     DEC-LAKE-HEAL-001 (L1): the reconcile's free invariant piggyback returns
     any poisoned-partition findings on ``ReconcileResult.findings``; ONE
-    :func:`~brutex.data.lake_heal.heal_after_reconcile` call heals them BEFORE
-    the feed consumes the slice (auto mode; ``BRUTEX_LAKE_HEAL=observe`` logs
-    only). ``LakeWriteHalt`` propagates to the CLI top-level halt handling.
+    :func:`~brutex.data.lake_heal.heal_after_reconcile` call (inside
+    ``load_lake_slice``) heals them BEFORE the feed consumes the slice (auto
+    mode; ``BRUTEX_LAKE_HEAL=observe`` logs only). ``LakeWriteHalt`` propagates
+    to the CLI top-level halt handling.
 
     Parameters
     ----------
@@ -1762,18 +1817,8 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     Callable[[str, str], list[CandleBar]]
         A ``(instrument, tf_label) -> bars`` closure over the loaded slices.
     """
-    from datetime import UTC, datetime
-
     from brutex.data.catalog import Catalog
-    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
-    from brutex.data.lake_heal import heal_after_reconcile, lake_heal_audit
-    from brutex.data.lake_read import dedup_bars
-    from brutex.feed.replay import ReplayFeed
-    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
-
-    def _parse(value: str) -> datetime:
-        parsed = datetime.fromisoformat(value)
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    from brutex.engine.lake_slice import load_lake_slice
 
     ctx = manifest.bars_context
     catalog = catalog_path if catalog_path is not None else lake_root / "catalog.duckdb"
@@ -1781,45 +1826,20 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     slices: dict[tuple[str, str], list[CandleBar]] = {}
     with Catalog.open(catalog) as cat:
         for instrument, tf_label in coords:
-            result = reconcile_catalog_from_lake(
+            # The ONE COMMON slice-read law (reconcile → L1 heal → feed →
+            # keep-FIRST dedup); the dedup-source label keeps the historical
+            # ``cascade_wire:<instrument>/<tf>`` log bytes unchanged.
+            slices[(instrument, tf_label)] = load_lake_slice(
                 lake_root=lake_root,
                 catalog=cat,
                 exchange=ctx.exchange,
                 segment=ctx.segment,
                 symbol=instrument,
                 interval=tf_label,
+                start=_manifest_window_dt(ctx.start),
+                end=_manifest_window_dt(ctx.end),
+                dedup_source=f"cascade_wire:{instrument}/{tf_label}",
             )
-            if result.findings:
-                # DEC-LAKE-HEAL-001 L1: heal what the reconcile detected for
-                # free, so the sweep/replay reads clean bars. The audit sink is
-                # opened lazily (findings-gated — a clean lake writes nothing).
-                with lake_heal_audit(lake_root) as audit:
-                    heal_after_reconcile(
-                        result,
-                        lake_root=lake_root,
-                        catalog=cat,
-                        audit=audit,
-                        on_report=lambda r: emit_lake_heal_alert(r, scope="reconcile"),
-                    )
-            feed = ReplayFeed(
-                catalog=cat,
-                lake_root=lake_root,
-                exchange=ctx.exchange,
-                segment=ctx.segment,
-                symbols=[instrument],
-                interval=tf_label,
-                start=_parse(ctx.start),
-                end=_parse(ctx.end),
-            )
-            # Belt-and-braces read gate (DEC-LAKE-READ-UNIQUE-001): the feed's
-            # Catalog.get_bars already collapses stored duplicates keep-FIRST;
-            # this idempotent second pass pins the invariant at the cascade's
-            # own input mouth (a clean stream passes through byte-identically).
-            clean_bars, _dropped = dedup_bars(
-                [event.bar for event in feed],
-                source=f"cascade_wire:{instrument}/{tf_label}",
-            )
-            slices[(instrument, tf_label)] = clean_bars
 
     def bars_for(instrument: str, tf_label: str) -> list[CandleBar]:
         return slices.get((instrument, tf_label), [])

@@ -102,6 +102,7 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
+from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
@@ -160,6 +161,7 @@ if TYPE_CHECKING:
     # path, a ``BufferedAuditCollector`` in a parallel-sweep worker,
     # DEC-MULTICORE-SWEEP-PHASE1-001) — neither is constructed here.
     from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.sweep_kernel import ResidentSweepKernel
     from brutex.orchestrator.audit import AuditSink
 
@@ -738,6 +740,7 @@ def ranked_combo_to_result_row(
     tf_minutes: int,
     sl_paisa: int | None,
     tp_paisa: int | None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> ResultRow:
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
@@ -802,6 +805,20 @@ def ranked_combo_to_result_row(
     tf_minutes, sl_paisa, tp_paisa
         Trade-sim knobs — must match the sweep's so the re-simulated trades
         reproduce the ranked combo's trades exactly.
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001): the FINALIST projection is the OBSERVABLE
+        re-simulation feeding the persisted row, so the run's stamper is bound
+        HERE — the finalist's trades carry ``vix_at_entry`` / ``vix_at_exit``,
+        which the ONE COMMON
+        :func:`~brutex.engine.reference_wire.aggregate_trade_vix` folds into
+        the row's nullable ``vix_mean`` / ``vix_min`` / ``vix_max`` trio.
+        REFERENCE ONLY (CLAUDE.md §2 Rule 3): the trio is never rankable and
+        never in the run identity — the row's ``run_id`` is byte-identical
+        with or without stamping (regression-pinned); ONLY the three nullable
+        VIX columns differ. ``None`` (default) = unstamped → the honest
+        ``(None, None, None)`` trio, never a fabricated level.
 
     Returns
     -------
@@ -818,6 +835,7 @@ def ranked_combo_to_result_row(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        reference_stamper=reference_stamper,
     )
     if trades:
         # Keep-FIRST timestamp map (DEC-LAKE-READ-UNIQUE-001): a plain dict
@@ -836,6 +854,11 @@ def ranked_combo_to_result_row(
         # placeholder pair (a sweep-ranked combo still always has >= MIN_TRADES).
         avg_entry = round_money(Decimal("0"))
         avg_exit = round_money(Decimal("0"))
+
+    # The per-combo VIX summary (DEC-VIX-STAMP-WIRE-001): the ONE COMMON fold
+    # over the finalist's stamped trades. Unstamped / all-miss / zero trades →
+    # the honest (None, None, None) — never fabricated (Golden Rule #1).
+    vix_mean, vix_min, vix_max = aggregate_trade_vix(trades)
 
     return ResultRow(
         run_id=run_id,
@@ -861,6 +884,9 @@ def ranked_combo_to_result_row(
         max_drawdown_pct=m.max_drawdown_pct,
         avg_entry_price=avg_entry,
         avg_exit_price=avg_exit,
+        vix_mean=vix_mean,
+        vix_min=vix_min,
+        vix_max=vix_max,
     )
 
 
@@ -944,6 +970,8 @@ def _build_trade_sim(
     bar_bits: Sequence[int],
     cfg: SweepRunConfig,
     direction_label: str,
+    *,
+    reference_stamper: TradeReferenceStamper | None,
 ) -> ResidentTradeSim:
     """Build the tuple's resident trade-sim; map a failure to the #904 tuple-skip contract.
 
@@ -964,10 +992,18 @@ def _build_trade_sim(
 
     The path choice is logged (``sweep_run.trade_sim_path``, INFO) so a
     Python-degraded sweep is observable, not a silent 40× regression (Golden
-    Rule #10); the wrapper itself already WARNs on every fallback cause.
+    Rule #10); the wrapper itself already WARNs on every fallback cause. The
+    log also carries ``vix_stamped`` (DEC-VIX-STAMP-WIRE-001) so an unstamped
+    inner stream is a stated fact, never a silent omission.
+
+    ``reference_stamper`` is REQUIRED (no default) so every caller makes an
+    EXPLICIT stamping decision for the trades this sim will emit — the
+    one-kwarg revert lever the coordinator ruling demands.
     """
     try:
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=cfg.tf_minutes)
+        sim = ResidentTradeSim(
+            bars, bar_bits, tf_minutes=cfg.tf_minutes, reference_stamper=reference_stamper
+        )
     except MemoryError:
         # OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001), never a tuple skip.
         raise
@@ -979,6 +1015,7 @@ def _build_trade_sim(
     _LOG.info(
         "sweep_run.trade_sim_path",
         rust_active=sim.rust_active,
+        vix_stamped=sim.reference_stamper is not None,
         n_bars=sim.n_bars,
         chunk_masks=_trade_sim_chunk_masks(sim.n_bars),
         instrument=cfg.instrument,
@@ -997,6 +1034,8 @@ def _reattribute_chunk_failure(
     direction_label: str,
     batch_exc: Exception,
     run_id_of: Callable[[int], str],
+    *,
+    reference_stamper: TradeReferenceStamper | None,
 ) -> NoReturn:
     """A batched trade-sim chunk raised — attribute the culprit mask, then fail LOUD.
 
@@ -1010,6 +1049,11 @@ def _reattribute_chunk_failure(
     :func:`mask_run_id` is pure; DEC-SWEEP-STREAMING-RANK-001). ``MemoryError``
     during re-attribution re-raises BARE (the global-stop law holds under
     memory pressure too — never a downgrade to a tuple skip).
+    ``reference_stamper`` is the SIM'S OWN stamper, handed in by
+    :func:`_iter_mask_metrics` (DEC-VIX-STAMP-WIRE-001) so the oracle replay
+    simulates with the EXACT stamping input the failed batch used — the
+    STRUCTURAL oracle≡batch guarantee (required, no default: a second wiring
+    could silently diverge).
 
     If EVERY mask passes the oracle, the failure was batch-level (a PyO3
     marshalling error, a kernel-only validator, a kernel bug): the oracle's
@@ -1041,6 +1085,7 @@ def _reattribute_chunk_failure(
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
+                reference_stamper=reference_stamper,
             )
         except MemoryError:
             raise
@@ -1117,7 +1162,18 @@ def _iter_mask_metrics(
         except MemoryError:
             raise
         except Exception as exc:
-            _reattribute_chunk_failure(bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of)
+            # The sim's OWN stamper rides into the oracle replay — the
+            # STRUCTURAL oracle≡batch stamping guarantee (DEC-VIX-STAMP-WIRE-001).
+            _reattribute_chunk_failure(
+                bars,
+                bar_bits,
+                chunk,
+                cfg,
+                direction_label,
+                exc,
+                run_id_of,
+                reference_stamper=sim.reference_stamper,
+            )
         for mask, (trades, exit_indices) in zip(chunk, chunk_pairs, strict=True):
             try:
                 metrics = metrics_from_trades(
@@ -1201,6 +1257,7 @@ def run_persisted_sweep(
     audit: AuditSink,
     kernel: ResidentSweepKernel | None = None,
     trial_stats_digest: str | None = None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SweepRunSummary:
     """Run a reproducible, deduped, audited K-of-bits sweep over ONE (instrument, TF).
 
@@ -1300,6 +1357,21 @@ def run_persisted_sweep(
         path. ``None`` (default) keeps the legacy probe semantics and writes
         no sidecar/sentinel (library callers; the launcher path supplies the
         digest via :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`).
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001). Bound ONLY at the OBSERVABLE surface — the
+        finalist projection (:func:`ranked_combo_to_result_row`), whose
+        re-simulated trades feed the persisted rows. The K-of-N inner mask
+        stream stays deliberately UNSTAMPED (see the explicit literal at the
+        ``_build_trade_sim`` call). Each persisted finalist row carries the
+        stamps' :func:`~brutex.engine.reference_wire.aggregate_trade_vix`
+        summary in its nullable ``vix_mean`` / ``vix_min`` / ``vix_max``
+        columns (unstamped → the honest ``None`` trio). REFERENCE ONLY: VIX
+        is never a signal, never ranked on, never in the run identity — every
+        persisted ``run_id`` and every non-VIX column is byte-identical with
+        or without the stamper (regression-pinned); ONLY the three nullable
+        VIX columns differ.
 
     Returns
     -------
@@ -1589,7 +1661,24 @@ def run_persisted_sweep(
     columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
     sim: ResidentTradeSim | None = None
     if kept:
-        sim = _build_trade_sim(bars, bar_bits, cfg, direction_label)
+        # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
+        # K-of-N inner mask stream's trades are DISCARDED after the metrics
+        # tail — no row, report or operator surface ever sees them — so
+        # stamping every one of the O(kept x trades) inner trades would be
+        # pure wasted work with zero observable output. The stream is
+        # therefore EXPLICITLY unstamped via this literal (one of the
+        # ENUMERATED sanctioned literal-None seam bindings — five after the
+        # round-6 review also unstamped the cascade candidate re-simulation
+        # — AST-pinned with exact counts by
+        # tests/unit/test_vix_stamper_binding_pin.py — never a silent
+        # omission). REVERT LEVER: pass ``reference_stamper=reference_stamper``
+        # here to stamp the inner stream too (one kwarg; its stamps are
+        # discarded WITH the trades so the persisted bytes are identical
+        # either way — the finalist row's VIX trio derives from the
+        # projector's OWN re-simulation, never this stream — and
+        # trade_sim_path logs vix_stamped=False so the unstamped stream is a
+        # stated fact).
+        sim = _build_trade_sim(bars, bar_bits, cfg, direction_label, reference_stamper=None)
         for mask, metrics in _iter_mask_metrics(
             sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
         ):
@@ -1641,6 +1730,10 @@ def run_persisted_sweep(
             tf_minutes=cfg.tf_minutes,
             sl_paisa=cfg.sl_paisa,
             tp_paisa=cfg.tp_paisa,
+            # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the finalist
+            # re-simulation feeds the persisted row, so the run's stamper
+            # lands here.
+            reference_stamper=reference_stamper,
         )
         store.append(row)
         persisted += 1

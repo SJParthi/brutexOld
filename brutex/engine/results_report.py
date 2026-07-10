@@ -52,7 +52,12 @@ from typing import Final
 
 import structlog
 
-from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
+from brutex.engine.results_store import (
+    ResultRow,
+    ResultsStore,
+    ResultsStoreError,
+    VixTrioConflictError,
+)
 from brutex.money import format_inr
 
 _LOG = structlog.get_logger(__name__)
@@ -253,14 +258,39 @@ def _merge_files_with_sources(
     The provenance map (DEC-ROW-PROVENANCE-001) is what lets the read-back
     label refined rows: the row itself carries no provenance, but its SOURCE
     FILE does — refined cells are distinct files the cascade manifest names.
+
+    A cross-file duplicate whose ONLY difference is two different KNOWN
+    values on the REFERENCE-ONLY VIX trio (DEC-VIX-STAMP-WIRE-001 — the
+    India-VIX lake moved between the two stores' writes, e.g. an
+    overlapping-grid relaunch after a VIX re-pull; ``tuple_store_path``
+    digests fold ``condition_bits``, so overlapping grids legitimately write
+    DISTINCT files carrying the SAME run_ids) is NOT a run-identity breach:
+    this READ surface keeps the deterministic FIRST row (*files* arrive
+    sorted from discovery) and logs one
+    ``results_report.vix_cross_store_divergence`` WARNING per dropped row —
+    the leaderboard must render regardless (the dashboard
+    ``_load_rows_resilient`` precedent; the engine's WRITE surfaces keep the
+    typed tuple/cell-skip). The directional ``None`` → value backfill inside
+    :meth:`ResultsStore.append` still applies silently, and a NON-VIX
+    difference still raises the plain run-identity :class:`ResultsStoreError`
+    (Golden Rule #4 — never masked).
     """
     merged = ResultsStore(path=root)
     sources: dict[str, str] = {}
     for file in files:
         rel = file.relative_to(root).as_posix()
-        rows = ResultsStore.load(file).rows()
-        merged.extend(rows)
-        for row in rows:
+        for row in ResultsStore.load(file).rows():
+            try:
+                merged.append(row)
+            except VixTrioConflictError:
+                _LOG.warning(
+                    "results_report.vix_cross_store_divergence",
+                    run_id=row.run_id,
+                    kept_from=sources.get(row.run_id),
+                    dropped_from=rel,
+                    policy="first-wins",
+                )
+                continue
             sources[row.run_id] = rel
     return merged, sources
 

@@ -732,6 +732,23 @@ REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
 `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
 --strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
 UNMODIFIED.)
+Earlier: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645 —
+India-VIX trade stamping wired end-to-end: `vix_at_entry`/`vix_at_exit` on
+every OBSERVABLE production trade + the persisted nullable
+`vix_mean`/`vix_min`/`vix_max` finalist trio (REFERENCE ONLY — never in the
+60-vocab, `_RANKABLE_FIELDS`, or the BLAKE3 run identity; a missing VIX bar
+stamps `None`, never fabricated); the FIVE sanctioned unstamped
+DISCARDED-stream sites are literal `reference_stamper=None`, AST-pinned with
+exact counts (the round-6 review unstamped the cascade candidate
+re-simulation — stamps provably discarded at the CandidateInput scalar
+conversion — and DELETED the two manual-replay `vix_stamper_for_manifest`
+builds that paid a full VIX lake read per replay/click for zero output);
+redo-honest trio (None→value backfill · the typed tuple-skip
+`VixTrioConflictError` · `sweep-verify --recount` stamps like the launcher and
+attributes VIX-only divergences non-corrupt via `results_store.VIX_FIELDS`,
+the ONE public trio-column source, + `dataclasses.fields()`-driven re-pair
+gates). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100%
+line+branch).
 Earlier: 2026-07-08 (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 —
 the weekly deep mutation gate is made GREEN end-to-end: both cargo-mutants
 jobs restructured onto sharded matrices (6 fno-math + 7 trading-core shards;
@@ -3048,6 +3065,31 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
   change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
   --strict`/pyright clean; the P-06 look-ahead + suffix-independence property suites pass UNMODIFIED.)
+  Earlier: `claude/peaceful-hamilton-kyeu07` (**DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645** — the
+  dormant India-VIX trade stamping WOKEN end-to-end: the lake's `NSE/INDEX/INDIAVIX` series (1-minute ∪ derived 1-day,
+  ONE window-bounded read per launch via NEW `brutex/engine/lake_slice.py::load_lake_slice` +
+  `brutex/engine/reference_wire.py::build_vix_stamper`) stamps `vix_at_entry`/`vix_at_exit` on EVERY OBSERVABLE production trade, and
+  persisted finalist rows gain the derived nullable `vix_mean`/`vix_min`/`vix_max` trio (`aggregate_trade_vix`, the
+  ONE fsum-overflow-safe fold; results_store's PUBLIC `VIX_FIELDS` is the one cross-module column source) — VIX stays
+  REFERENCE ONLY: never in the 60-vocab, never in `_RANKABLE_FIELDS`, never in the BLAKE3 run identity; a missing VIX
+  bar stamps `None`, NEVER fabricated. The stamper seam is threaded/bound across every production trade-sim site
+  (`ResidentTradeSim.reference_stamper` + the hoisted Rust-batch post-stamp converter — kernel byte-untouched; spawn
+  pools carry a picklable stamper, sequential ≡ parallel bytes pinned); the ONLY unstamped trade streams are the FIVE
+  named DISCARDED/unobservable streams (§2 Rule 3), each an explicit literal `reference_stamper=None` enumerated by
+  the exact-count AST pin (`tests/unit/test_vix_stamper_binding_pin.py`) that also REFUSES silently-omitted kwargs +
+  positively pins the entry-point binds AND the once-per-launch builder-call counts. The trio survives redo honestly:
+  None→value backfills, a value-vs-value clash raises the typed tuple-skip `VixTrioConflictError` (the VIX lake moved,
+  NOT non-determinism — grid drivers tuple-skip, stage-3 cell-skips), and `sweep-verify --recount` stamps like the
+  launcher + attributes a VIX-only divergence as the non-corrupt `recount_vix_divergence` (moved/backfill/pre-VIX-
+  schema shapes; the sentinel/sidecar re-pair gates are `dataclasses.fields()`-driven — drift-proof, never a hand
+  list). Round-6 review fixes: the cascade candidate re-simulation's stamps were provably DISCARDED at the
+  CandidateInput scalar conversion (report bytes pinned identical either way), so the cascade chain's dead stamper
+  seam was DELETED along with the two manual-replay `vix_stamper_for_manifest` builds that paid a full window-bounded
+  VIX lake read per `brutex cascade` run / dashboard click for zero observable output (the fifth sanctioned
+  literal-None site now lives inside `build_candidate_input`; revert lever = add a VIX surface to the cascade report
+  FIRST); miss-WARNs are memoised + capped (cap+1 log lines, exact `miss_count` tally). ENGINE semantics UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 new vs the pre-change baseline).
   Earlier: `claude/jolly-tesla-miygwt` (**DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597** — the weekly deep
   mutation gate made GREEN end-to-end: both cargo-mutants jobs restructured onto sharded matrices (6 fno-math +
   7 trading-core shards; worst shard 65 min vs the 120 min job cap), trading-core WIDENED to evaluator+python+spec
@@ -4762,8 +4804,30 @@ hostile-review pass._
 3. **Scope lock.** Track 1 = Groww + spot indexes + India VIX (NIFTY 50,
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
-   every trade, but is NEVER part of brute-force pattern combinations
-   or the 52-condition vocabulary. 21 timeframes — **`1m` is the ONLY
+   every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
+   #1645 — persisted finalist rows additionally carry the derived
+   nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
+   trade streams are the FIVE named DISCARDED/unobservable streams —
+   the Stage-4 cascade candidate re-simulation (stamps would be dropped
+   at the CandidateInput scalar conversion; report bytes pinned
+   identical — the round-6 review DELETED the cascade chain's dead
+   stamper seam plus the two manual-replay `vix_stamper_for_manifest`
+   builds that paid a full VIX lake read per replay/click for zero
+   output), its Monte-Carlo permutation filter, `run_persisted_sweep`'s
+   K-of-N inner stream, the CLI options-sim replay (stamps would be
+   dropped at the SpotSignal conversion) and `brutex sweep`'s
+   text-report replay (report bytes pinned identical) — each an
+   explicit literal `reference_stamper=None` enumerated by an AST pin
+   whose exact-count laws also REFUSE a silently-omitted kwarg
+   and positively pin the entry-point binds (round-2 panel hardening);
+   the trio survives redo honestly — `None → value` backfills, a
+   value-vs-value clash raises the typed tuple-skip
+   `VixTrioConflictError` (the VIX lake moved, NOT non-determinism) and
+   `sweep-verify --recount` stamps like the launcher + attributes a
+   VIX-only divergence as the non-corrupt `recount_vix_divergence`;
+   a missing VIX bar stamps `None`, never fabricated), but is
+   NEVER part of brute-force pattern combinations or the 52-condition
+   vocabulary (nor `_RANKABLE_FIELDS`, nor the BLAKE3 run identity). 21 timeframes — **`1m` is the ONLY
    granularity fetched** and the 19 derived intraday TFs + `1d` are all
    DERIVED from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853; the
    `1d` daily anchor is resampled to midnight-IST from the stored 1-minute and
@@ -5170,6 +5234,11 @@ hostile-review pass._
   anchor at the Stage-1A roll seam + (2) a bounded bad-tick screen at the engine
   read boundary (`arrow_table_to_bars`); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
+  Earlier: `claude/peaceful-hamilton-kyeu07`
+  (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645 — India-VIX trade stamping wired
+  end-to-end: `vix_at_entry`/`vix_at_exit` on every OBSERVABLE trade + the
+  persisted nullable `vix_mean`/`vix_min`/`vix_max` finalist trio, REFERENCE
+  ONLY; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/jolly-tesla-miygwt`
   (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 — the weekly deep mutation
   gate made green end-to-end: sharded cargo-mutants matrices + zero-survivor
@@ -5436,7 +5505,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4804-4805` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4807-4808` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |

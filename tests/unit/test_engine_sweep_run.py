@@ -133,7 +133,11 @@ def _dedup() -> ComboDedup:
 
 
 def _forced_fallback_sim(
-    bars: Sequence[CandleBar], bar_bits: Sequence[int], *, tf_minutes: int
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    *,
+    tf_minutes: int,
+    reference_stamper: object = None,
 ) -> ResidentTradeSim:
     """A ResidentTradeSim with the compiled kernel DISABLED — the pure-Python arm.
 
@@ -143,7 +147,12 @@ def _forced_fallback_sim(
     use; a FACTORY rather than a subclass, so no ``__init__`` overwrites the
     attribute the superclass ctor just built).
     """
-    sim = ResidentTradeSim(bars, bar_bits, tf_minutes=tf_minutes)
+    sim = ResidentTradeSim(
+        bars,
+        bar_bits,
+        tf_minutes=tf_minutes,
+        reference_stamper=reference_stamper,  # type: ignore[arg-type]
+    )
     sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
     return sim
 
@@ -1739,7 +1748,11 @@ class TestSweepComboError:
         to a single-tuple skip, and — because the raise is BEFORE the trial-stats
         sidecar / mark / completion-sentinel writes — the tuple is left
         UN-sentineled and the dedup UN-marked, so a resume deterministically
-        REDOES the whole tuple (Golden Rule #7).
+        REDOES the whole tuple (Golden Rule #7). ONE typed carve-out
+        (DEC-VIX-STAMP-WIRE-001 round-2): a VIX-ONLY ``VixTrioConflictError``
+        (VIX sits outside the run identity — the VIX lake moved, not the
+        engine) IS demoted to a tuple-skip by the grid drivers; the PLAIN
+        ``ResultsStoreError`` exercised here stays a grid abort.
         """
         from brutex.engine.results_store import ResultsStoreError
         from brutex.engine.trial_stats import trial_stats_sidecar_path

@@ -22,7 +22,7 @@ DEC-MONEY-2DP-001).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import count_combos
@@ -36,6 +36,9 @@ from brutex.engine.validation import OOSValidation, validate_out_of_sample
 from brutex.ranking import MIN_TRADES, RankedCombo
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
+
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    from brutex.engine.reference_series import TradeReferenceStamper
 
 #: The leaderboard sort keys ``brutex sweep --sort-by`` accepts. ``composite`` is the
 #: anti-overfit default ranking; ``pnl`` / ``win`` / ``pf`` answer "show me the
@@ -110,6 +113,7 @@ def oos_section(
     proximity: ProximityParams | None,
     prior_n: int,
     train_frac: float = 0.7,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> str:
     """Render the out-of-sample (train → unseen) verdict for each ranked combo.
 
@@ -136,6 +140,7 @@ def oos_section(
                 train_frac=train_frac,
                 proximity=proximity,
                 prior_n=prior_n,
+                reference_stamper=reference_stamper,
             )
         except ValueError as exc:
             # Too short to split (< 2 trading days) — the same for every combo.
@@ -157,6 +162,7 @@ def filter_oos_held(
     proximity: ProximityParams | None,
     prior_n: int,
     train_frac: float = 0.7,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[RankedCombo]:
     """Keep only combos whose edge HELD out-of-sample — the no-illusion filter.
 
@@ -180,6 +186,7 @@ def filter_oos_held(
             train_frac=train_frac,
             proximity=proximity,
             prior_n=prior_n,
+            reference_stamper=reference_stamper,
         ).held_up
     ]
 
@@ -204,6 +211,7 @@ def sweep_report(
     sort_by: str = "composite",
     validate_oos: bool = False,
     oos_only: bool = False,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> str:
     """Run the funnel over *bars* and render the ranked top-combo table as text.
 
@@ -243,6 +251,10 @@ def sweep_report(
         (:func:`filter_oos_held`) before rendering — so only the genuinely-robust
         combos are shown. The header reports ``oos-only=<held>/<gate survivors>``.
         Needs ``>= 2`` IST trading days (else a clear ``ValueError``).
+    reference_stamper
+        Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) threaded to every
+        trade sim behind the sweep + the OOS re-simulations. REFERENCE ONLY —
+        the rendered report is byte-identical with or without it.
 
     Returns
     -------
@@ -274,6 +286,7 @@ def sweep_report(
         prior_n=prior_n,
         max_combos=max_combos,
         min_hits=min_hits,
+        reference_stamper=reference_stamper,
     )
     ranked = sort_ranked(ranked, sort_by)
     n_gate = len(ranked)
@@ -289,6 +302,7 @@ def sweep_report(
             start_equity_paisa=start_equity_paisa,
             proximity=proximity,
             prior_n=prior_n,
+            reference_stamper=reference_stamper,
         )
         oos_only_note = f"  oos-only={len(ranked)}/{n_gate} held"
     table = render_leaderboard(explain_combos(ranked), top_n=top_n)
@@ -312,6 +326,7 @@ def sweep_report(
             start_equity_paisa=start_equity_paisa,
             proximity=proximity,
             prior_n=prior_n,
+            reference_stamper=reference_stamper,
         )
         report = f"{report}\n\n{section}"
     return report
