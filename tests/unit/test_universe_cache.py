@@ -481,7 +481,17 @@ def test_cold_concurrent_pollers_single_flight() -> None:
     assert not leader.is_alive() and all(not t.is_alive() for t in followers)
     assert compute_calls == 1  # single-flight: exactly ONE base-read scan
     assert len(results) == 5
-    assert all(r == {"index_count": 0, "stock_count": 0, "total": 0} for r in results)
+    assert all(
+        r
+        == {
+            "index_count": 0,
+            "stock_count": 0,
+            "total": 0,
+            "reference_stock_count": 0,
+            "stock_count_total": 0,
+        }
+        for r in results
+    )
     assert cache.size() == 1
     assert cache._refreshing == {}  # the single-flight registration was cleaned up
 
