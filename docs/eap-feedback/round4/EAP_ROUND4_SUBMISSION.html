@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Claude Code Projects (beta) — Round-4 Feedback</title>
+<style>
+:root{--fg:#1a1a1a;--muted:#5b6470;--bg:#ffffff;--accent:#b4530a;--accent2:#0a5fb4;
+--border:#e2e6ea;--code-bg:#f5f7f9;--quote-bg:#fbf6ef;--quote-border:#e0b070;
+--th-bg:#f0f3f6;--row-alt:#fafbfc;}
+*{box-sizing:border-box;}
+html{-webkit-text-size-adjust:100%;}
+body{margin:0;background:#eef1f4;color:var(--fg);
+font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.wrap{max-width:920px;margin:0 auto;background:var(--bg);padding:46px 56px 80px;
+box-shadow:0 1px 4px rgba(0,0,0,.08);}
+h1{font-size:22px;line-height:1.28;margin:40px 0 12px;letter-spacing:-.01em;
+color:#fff;background:var(--accent2);padding:11px 18px;border-radius:8px;}
+main>h1:first-child{font-size:30px;color:var(--fg);background:none;padding:0;
+margin:0 0 6px;}
+main>h1:first-child+p{color:var(--muted);}
+h2{font-size:25px;margin:42px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--accent);
+letter-spacing:-.01em;}
+h3{font-size:19px;margin:30px 0 6px;color:var(--accent2);}
+h4{font-size:16px;margin:18px 0 4px;color:var(--fg);}
+h5,h6{font-size:15px;margin:14px 0 4px;color:var(--muted);}
+p{margin:9px 0;}
+a{color:var(--accent2);}
+strong{font-weight:650;}
+hr{border:0;border-top:1px solid var(--border);margin:30px 0;}
+ul{margin:8px 0 8px 4px;padding-left:22px;}
+li{margin:4px 0;}
+code{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;
+padding:1px 5px;font:13.5px/1.4 "SF Mono",ui-monospace,Menlo,Consolas,monospace;
+word-break:break-word;}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;
+padding:14px 16px;overflow:auto;margin:12px 0;}
+pre code{background:none;border:0;padding:0;font-size:13px;
+white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;}
+blockquote{background:var(--quote-bg);border-left:4px solid var(--quote-border);
+margin:14px 0;padding:8px 18px;border-radius:0 6px 6px 0;}
+blockquote p{margin:6px 0;}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px;display:block;overflow-x:auto;}
+th,td{border:1px solid var(--border);padding:8px 11px;text-align:left;vertical-align:top;}
+th{background:var(--th-bg);font-weight:650;}
+tbody tr:nth-child(even){background:var(--row-alt);}
+@media (max-width:680px){.wrap{padding:24px 18px 60px;}h1{font-size:24px;}}
+@media print{body{background:#fff;}.wrap{box-shadow:none;max-width:none;padding:0;}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<h1>Claude Code Projects (beta) — Round-4 Feedback</h1>
+<p>Detailed observations, requests, and open questions accompanying the round-4 feedback email. Prepared 2026-07-10. Where we could not prove a cause, we have said so plainly.</p>
+<p><strong>For:</strong> Claude Code Early Access team &mdash; Diana Liu (claude-code-early-access@anthropic.com)<br/>
+<strong>From:</strong> Parthiban (sjparthi93@gmail.com) &middot; <strong>Date:</strong> 2026-07-10<br/>
+<strong>Workload under test:</strong> BruteX &mdash; now run as a coordinator-orchestrated fleet of more than 10 parallel sessions in one Project.</p>
+<p>This round is <strong>coordinator-scale</strong> feedback. Since round 3 our usage pattern has changed: we now run <strong>one coordinator session that dispatches, sequences, and monitors a fleet of more than ten child sessions</strong> against a single repository. We want to say up front that the pattern itself works remarkably well &mdash; the coordinator reliably sequences the fleet, a fleet-wide broadcast has reached every one of its target sessions without a miss, and the sessions successfully deduplicate shared resources (for example merge slots) between themselves. Everything below is about removing the remaining toil and instability at that scale, not about the pattern failing. And thank you sincerely for extending our EAP access through July 14 &mdash; it is what made this round of observations possible.</p>
+<hr/>
+<h2>Issues at a glance</h2>
+<table>
+<thead><tr><th>#</th><th>Observation</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>The model selected when <strong>scheduling or spinning up a session from the coordinator does not map onto the new session</strong>: the session comes up on the default model and must be corrected by hand. Observed repeatedly.</td></tr>
+<tr><td>2</td><td>Even with the <strong>Project Settings default model</strong> (and the coordinator&rsquo;s own model) configured, each session <strong>still had to be opened and its model re-selected manually</strong> across the fleet, every time &mdash; pure setup toil at fleet scale.</td></tr>
+<tr><td>3</td><td>Changing the <strong>model or the reasoning effort across multiple sessions in quick succession</strong> triggers a sudden Claude Code <strong>desktop app auto-restart</strong> &mdash; reproducibly, and disruptively mid-fleet-operation.</td></tr>
+<tr><td>4</td><td>With the fleet at more than 10 open sessions we see recurring transient rate-limit / &ldquo;service busy&rdquo; / API errors and sudden restarts &mdash; <strong>especially when spinning up new sessions</strong> (session-create bursts). This is round 3&rsquo;s throttle item, now observed at larger scale with a new trigger datum.</td></tr>
+<tr><td>5</td><td><strong>Cross-session messages drop mid-turn</strong>: twice today (2026-07-10), in two different fleet sessions, a <code>send_message</code> delivery was lost mid-turn &mdash; in one case detected by the sender only indirectly, in the other silently &mdash; and coordination recovered only through fallback channels.</td></tr>
+<tr><td>6</td><td>The coordinator can <strong>create, list, and message sessions &mdash; but cannot close or archive one</strong>. Verified against the full tool registry available to the coordinator: no session close/archive/delete exists anywhere. Completed sessions accumulate in the project view, and the human has to inspect each one by hand to know what is safe to close.</td></tr>
+<tr><td>7</td><td>Sessions repeatedly show a <strong>&ldquo;needs input&rdquo; badge when nothing actually needs input</strong> &mdash; opening the session reveals no pending question, prompt, or permission request. In a fleet of more than 10 sessions the human triages by these badges, so a false one sends them into sessions for nothing. Repeatedly observed; mechanism not visible to us.</td></tr>
+<tr><td>8</td><td>The inverse of 7: <strong>actively-working sessions show as &ldquo;idle&rdquo;</strong> in the session list &mdash; sessions demonstrably mid-work (background workers running, CI being driven) read idle, corroborated by the coordinator&rsquo;s own activity digests. The status appears to track only the main conversation turn, not background/agent activity.</td></tr>
+<tr><td>9</td><td>The <strong>project-level default reasoning effort is ignored</strong> &mdash; every new session comes up at the platform default (&ldquo;High&rdquo;). Confirmed today by a controlled two-spawn experiment: project defaults of Max and then Extra both produced sessions reading &ldquo;High&rdquo;, while the model default (Fable 5) mapped correctly in both spawns.</td></tr>
+</tbody>
+</table>
+<hr/>
+<h2>What we would love (raised gently)</h2>
+<ul>
+<li><strong>Honor the model selected at spawn time</strong> &mdash; when a session is created or scheduled from a coordinator with an explicitly selected model, the new session should come up on exactly that model.</li>
+<li><strong>Have the Project Settings default model actually propagate</strong> &mdash; we have it configured, yet every new and spawned session still needed its model re-selected by hand. Either the project default taking effect or the spawn-time selection being honored (ideally both) would remove the largest single piece of manual overhead we have at fleet scale.</li>
+<li><strong>A look at the desktop restart</strong> when the model is changed across several sessions in quick succession &mdash; it is the one crash we can trigger reliably.</li>
+<li><strong>Guidance on the fleet envelope</strong> &mdash; whether running more than ten parallel sessions in one Project is within the intended envelope, and whether session creation should be paced (and if so, at what rate) to avoid the create-burst instability.</li>
+<li><strong>Delivery guarantees for cross-session messages</strong> &mdash; a delivery receipt/acknowledgement visible to the sender, a queued retry on a failed mid-turn delivery, or a dead-letter surface where undelivered messages land &mdash; so a coordination message is never silently lost.</li>
+<li><strong>Coordinator-level session lifecycle (archive/close)</strong> &mdash; a counterpart to session creation, ideally gated on a verified-complete check, so a coordinator or watchdog can retire finished sessions instead of leaving the human to inspect and close each one by hand.</li>
+<li><strong>A &ldquo;needs input&rdquo; badge that clears when the input is resolved</strong> &mdash; so the badge can be trusted as the triage signal it is at fleet scale.</li>
+<li><strong>State indicators that reflect background/agent activity</strong> &mdash; or at minimum a last-activity timestamp alongside the state &mdash; so a session deep in a long background task does not read &ldquo;idle&rdquo; the whole time.</li>
+<li><strong>Make the project-level default Effort actually apply</strong> &mdash; to new and coordinator-spawned sessions alike; expose the effective effort to the session itself (or via an API) so it can be audited without opening the UI; and unify the naming between the settings dropdown (&ldquo;Max&rdquo;) and the session-side control (&ldquo;Ultracode&rdquo;/tier names).</li>
+</ul>
+<hr/>
+<h2>Open questions</h2>
+<ul>
+<li>Is the <strong>Project Settings default model meant to apply</strong> to new and coordinator-spawned sessions? We have it configured, and sessions still come up needing a manual model re-select &mdash; we cannot tell whether that is a bug or an unimplemented mapping.</li>
+<li>Are sessions spawned or scheduled from a coordinator <strong>meant</strong> to come up on the model selected at spawn time (or the coordinator&rsquo;s model)? The same uncertainty as above, at the spawn boundary.</li>
+<li>Is a fleet of more than ten parallel sessions in one Project within the intended envelope for the beta &mdash; and is there a recommended pacing for session creation so that create bursts do not trip the transient throttling?</li>
+<li>Is the desktop auto-restart under rapid model changes across sessions a known crash class, and is there a log or crash report we could capture next time that would help you pinpoint it?</li>
+<li>What are the intended delivery semantics of cross-session messaging &mdash; is a mid-turn delivery delivered without guarantees by design, and should a coordinator assume it must verify receipt itself?</li>
+<li>Is the session list&rsquo;s <strong>state indicator meant to track only the main conversation turn</strong>? That would explain both the lingering &ldquo;needs input&rdquo; badges and the working-sessions-reading-idle pattern &mdash; we cannot see the mechanism from our side.</li>
+<li>Does a <strong>session close/archive capability exist server-side but unexposed</strong>? The platform&rsquo;s docs reference a session-creation surface server-side, so a close counterpart may exist internally &mdash; we could not find it in any coordinator-accessible tool.</li>
+<li>Is there any way for a <strong>session to audit its own effective reasoning effort</strong>? Both canaries in our item-9 experiment confirmed that no effort field exists anywhere in a session&rsquo;s own context &mdash; the UI footer is the only place the truth is visible, so there is no programmatic way to verify what a session is actually running at.</li>
+<li>What is the <strong>relationship between the settings dropdown&rsquo;s &ldquo;Max&rdquo; and the session-side &ldquo;Ultracode&rdquo;</strong> (and the tier names in between)? We asked this in round 2 and it remains unanswered &mdash; item 9 now attaches evidence of the two vocabularies side by side.</li>
+</ul>
+<hr/>
+<h2>Details</h2>
+<h3>1 &mdash; The model selected at spawn time is not mapped onto the new session</h3>
+<p>When we create or schedule a new session <strong>from the coordinator</strong> and explicitly select a model for it, the session comes up on the default model &mdash; the selection is simply not mapped onto the spawned session. We have observed this repeatedly, not once; it appears to be the consistent behavior rather than an intermittent failure. The result is that, in every case we have checked, the session the coordinator spins up begins its work on the default model &mdash; not the one selected for it &mdash; until someone notices and corrects it by hand.</p>
+<p><strong>Why it matters:</strong> the whole point of a coordinator is unattended dispatch. If the spawned session silently ignores the model it was created with, work that was meant to run on a specific model quietly runs on the default &mdash; the same silent-downgrade concern we raised as an open question in round 2, now appearing at the spawn boundary instead of after an idle.</p>
+<p><strong>Suggested fix:</strong> honor the model selection at session-create time, and reflect the applied model back in the new session&rsquo;s UI so a mismatch is visible immediately.</p>
+<h3>2 &mdash; The Project Settings default model does not take effect: every session re-selected by hand</h3>
+<p>Even with the Project Settings default model configured &mdash; and the coordinator itself on the intended model &mdash; every session in the fleet still had to be opened individually and its model re-selected by hand, every time. This is pure hand-work: it is slow, it is error-prone (a missed session runs on the default model unnoticed), and it directly feeds item 3 below, since the fastest way to do it is to click through sessions in quick succession &mdash; which is exactly what triggers the desktop restart.</p>
+<p><strong>Why it matters:</strong> at 3&ndash;5 sessions the manual step is a shrug; at more than ten it dominates fleet-setup time and undermines the unattended operation the coordinator pattern otherwise delivers.</p>
+<p><strong>Suggested fix:</strong> have the Project Settings default model propagate to every new and coordinator-spawned session, with per-session override preserved. If the spawn-time selection (item 1) were honored as well, the two together would eliminate this entirely.</p>
+<h3>3 &mdash; Desktop app auto-restarts when changing the model or effort across sessions in quick succession</h3>
+<p>While working through the manual per-session correction above &mdash; changing the model, and equally the reasoning effort (item 9) &mdash; the Claude Code desktop app <strong>suddenly restarts</strong> &mdash; reproducibly. The pattern is: go session to session changing the model or the effort, and the app restarts on its own. We have not captured a crash report, so we cannot say what dies; we can only say the trigger (rapid successive model-or-effort changes across sessions) is consistent for us.</p>
+<p><strong>Why it matters:</strong> the restart lands mid-fleet-operation &mdash; in the middle of configuring or supervising more than ten live sessions &mdash; and we lose our place in the fleet each time. Combined with items 2 and 9, the current experience is that the one workaround for the non-propagating defaults is itself the thing that crashes the app.</p>
+<p><strong>Suggested fix:</strong> we would gladly capture whatever diagnostics would help (a crash log location or a debug flag). Structurally, of course, items 1, 2, and 9 remove most of the reason to perform rapid model-or-effort changes at all.</p>
+<h3>4 &mdash; Scale instability with more than 10 open sessions, especially on session-create bursts</h3>
+<p>With the fleet at more than 10 open sessions we see recurring transient errors &mdash; rate-limit messages, &ldquo;service busy&rdquo;, generic API errors, and occasional sudden restarts. The clearest new datum since round 3 is the trigger: the errors cluster <strong>when we are spinning up new sessions</strong>, particularly several in a short burst, more than during steady-state work. We want to be careful here, exactly as in round 3: we cannot isolate whether the cause is the create burst itself, the total open-session count, the coordinator&rsquo;s own traffic, or the overall scale &mdash; we share this as the pattern we observed, not a proven mechanism. In our observation the instability concentrates around fleet growth.</p>
+<p><strong>Why it matters:</strong> the coordinator&rsquo;s natural rhythm is to spin up batches of sessions as work becomes ready. If the create burst is the trigger, the coordinator is repeatedly steering into the one maneuver that destabilizes the fleet &mdash; and a paced-create guideline (or server-side smoothing) would let us avoid it entirely.</p>
+<p><strong>Suggested fix:</strong> guidance on a safe session-create rate and fleet ceiling; or, better, back-off-and-retry on session creation so a burst degrades to a queue rather than to errors.</p>
+<h3>5 &mdash; Cross-session messages drop mid-turn, silently</h3>
+<p>Twice today (2026-07-10), in two different fleet sessions, a cross-session <code>send_message</code> was lost mid-turn. The messaging layer surfaced no explicit delivery error to either sender &mdash; one sender inferred the failure indirectly and fell back, the other loss went unnoticed until later:</p>
+<ul>
+<li>A <strong>verifier session&rsquo;s verdict delivery</strong> failed mid-turn; it fell back to posting the verdict as a PR comment and leaving a dead-drop entry in team memory.</li>
+<li>A <strong>decision message from another session</strong> was lost mid-turn and only recovered later via team memory and direct re-confirmation.</li>
+</ul>
+<p>Both recoveries worked, but only because the sessions had independently built fallback channels (PR comments, team memory) &mdash; the messaging layer itself gave no receipt, no retry, and no record of the failure visible to us.</p>
+<p><strong>Why it matters:</strong> in a coordinator-orchestrated fleet, cross-session messages carry verdicts, decisions, and sequencing instructions. A silently-dropped message is worse than a failed one: the sender believes coordination happened, the recipient never knew it was attempted, and the fleet quietly diverges until someone reconciles by hand.</p>
+<p><strong>Suggested fix:</strong> any one of &mdash; a delivery receipt/acknowledgement the sender can check; a queued retry when a mid-turn delivery fails; or a dead-letter surface where undelivered messages land visibly. With any of the three, a coordination message can be delayed but never silently lost.</p>
+<h3>6 &mdash; No way to close or archive a session from the coordinator</h3>
+<p>The coordinator session can create a child session, list the fleet, and message any session &mdash; but there is no counterpart to close, archive, or delete one. We verified this against the full tool registry available to the coordinator: session-creation, listing, messaging, transcript-reading, and Routine/trigger management all exist; no session close/archive/delete exists anywhere. The consequence at fleet scale: completed and merged sessions accumulate in the project view, and the human operator has no reliable way to know which of more-than-ten sessions are truly safe to close without inspecting each one by hand. Today we work around it by having a watchdog session compile an evidence-backed &ldquo;safe to close&rdquo; list that the human then executes manually in the UI. One honest hedge: the platform&rsquo;s docs reference a session-creation surface server-side, so a close counterpart may exist internally &mdash; but it is not exposed to any coordinator-accessible tool we could find.</p>
+<p><strong>Why it matters:</strong> the coordinator pattern&rsquo;s promise is a fleet that manages itself. Creation without retirement is half a lifecycle: the fleet only ever grows, the project view fills with finished sessions that look just like live ones, and the one task that most needs to be safe-by-default &mdash; deciding what can be closed &mdash; falls back on the human.</p>
+<p><strong>Suggested fix:</strong> coordinator-level session lifecycle (archive/close), ideally gated on a verified-complete check so a coordinator cannot retire a session that still has work in flight.</p>
+<h3>7 &mdash; &ldquo;Needs input&rdquo; badge shows when nothing needs input</h3>
+<p>Sessions repeatedly show a &ldquo;needs input&rdquo; indicator in the session list, but opening the session reveals no pending question, prompt, or permission request &mdash; nothing to act on at all. In a fleet of more than ten sessions the human triages by these badges, so a false &ldquo;needs input&rdquo; sends them into sessions for nothing. We report this as a repeatedly-observed pattern; we cannot see the indicator&rsquo;s mechanism from our side, so we cannot say whether the badge is stale, mis-set, or tracking something invisible to us.</p>
+<p><strong>Why it matters:</strong> the badge is the operator&rsquo;s primary triage signal at fleet scale. Every false positive costs an open-inspect-close round trip, and &mdash; worse &mdash; teaches the operator to distrust the signal, which blunts it for the sessions that genuinely do need input.</p>
+<p><strong>Suggested fix:</strong> a &ldquo;needs input&rdquo; badge that clears when the input is resolved (or was never actually pending).</p>
+<h3>8 &mdash; Actively-working sessions show as &ldquo;idle&rdquo;</h3>
+<p>The inverse of item 7. Sessions that are demonstrably mid-work &mdash; long background workers running, CI being driven, folds executing &mdash; show &ldquo;idle&rdquo; in the session list. Here we can say more than &ldquo;observed&rdquo;: the coordinator&rsquo;s own activity digests and a watchdog session&rsquo;s sweep cycles repeatedly confirmed real work in progress during windows where the list read idle. The status appears to track only the main conversation turn, not background/agent activity &mdash; so a session deep in a half-hour background task reads idle the whole time.</p>
+<p><strong>Why it matters:</strong> together with item 7 this means the list&rsquo;s state column cannot be trusted in either direction &mdash; it flags sessions that need nothing and rests sessions that are hard at work &mdash; which is precisely where a fleet operator needs it most. An operator who cannot tell working from idle either interrupts live work or leaves genuinely stuck sessions unattended.</p>
+<p><strong>Suggested fix:</strong> state indicators that reflect background/agent activity &mdash; or at minimum a last-activity timestamp alongside the state, so the operator can distinguish &ldquo;idle for forty minutes&rdquo; from &ldquo;turn ended but workers still running&rdquo; &mdash; and, per item 7, a &ldquo;needs input&rdquo; badge that clears when resolved.</p>
+<h3>9 &mdash; The project-level default reasoning effort is ignored: every new session comes up at the platform default (&ldquo;High&rdquo;)</h3>
+<p>This is our best-evidenced finding this round, because unlike the observational items above we could run a controlled, repeated experiment. Today (2026-07-10) we ran a two-spawn experiment from the coordinator. First, with Project Settings &rarr; Effort set to <strong>Max</strong>, we spawned a fresh canary session: its footer read <strong>&ldquo;Fable 5 &middot; High&rdquo;</strong>, and the effort popover confirmed High &mdash; i.e. the dropdown&rsquo;s &ldquo;Default (High)&rdquo;. Second, we changed the project default to <strong>Extra</strong>, saved, and spawned a second canary: its footer again read <strong>High</strong>. In both spawns the <strong>model</strong> default (Fable 5) mapped correctly &mdash; so the defect is specific to the effort setting: it appears to be ignored entirely in favor of the platform default, for coordinator-spawned sessions in the experiment and, per our day-to-day observation, for manually created sessions as well.</p>
+<p>Two sub-findings from the same experiment: <strong>(a)</strong> a session cannot introspect its own effort tier &mdash; both canaries confirmed that no effort field exists anywhere in a session&rsquo;s own context, so the UI footer is the only place the truth is visible and there is no way to audit this programmatically; <strong>(b)</strong> the terminology is inconsistent &mdash; the settings dropdown says &ldquo;Max&rdquo; while the session-side control uses different naming (&ldquo;Ultracode&rdquo;/tier names), the same Max-vs-Ultracode relationship we asked about in round 2, still unanswered and now with evidence attached.</p>
+<p><strong>Why it matters:</strong> the human must open every session and manually correct the effort &mdash; across more than 10 parallel sessions this is the exact toil the project-level default exists to remove. And per item 3, doing that correction across multiple sessions in quick succession is precisely what triggers the desktop auto-restart &mdash; the workaround for the ignored default steers straight into the one crash we can reproduce.</p>
+<p><strong>Suggested fix:</strong> make the project default Effort actually apply to new and coordinator-spawned sessions; expose the effective effort to the session (or via an API) so it can be audited; and unify the Max/Ultracode naming.</p>
+<hr/>
+<h2>Screenshots (attached with the email)</h2>
+<p>The following screenshots are attached with the email:</p>
+<ol>
+<li><strong>Project Settings showing the configured default model</strong> (item 2) &mdash; the default is set at the Project level, yet new sessions do not come up on it.</li>
+<li><strong>A freshly-spawned session on the default model instead of the configured one</strong> (items 1 and 2) &mdash; the model selected at spawn time and the Project default both absent from the new session.</li>
+<li><strong>The desktop app immediately after an auto-restart</strong> (item 3) &mdash; captured right after changing the model across several sessions in quick succession.</li>
+<li><strong>The session list at fleet scale</strong> (item 4) &mdash; the Project running more than 10 parallel sessions, the scale at which the create-burst errors appear.</li>
+<li><strong>A completed session&rsquo;s view/menu showing no archive/close/delete affordance</strong> (item 6) &mdash; creation, listing, and messaging all exist; no lifecycle counterpart does.</li>
+<li><strong>The session list showing a &ldquo;needs input&rdquo; badge beside the same session opened with no pending prompt visible</strong> (item 7) &mdash; one combined side-by-side image.</li>
+<li><strong>The session list showing &ldquo;idle&rdquo; while that session&rsquo;s transcript shows work in progress at the same minute</strong> (item 8) &mdash; one combined image, timestamps visible in both halves.</li>
+<li><strong>Project Settings showing Effort = Max (and model Fable 5)</strong> (item 9) &mdash; already captured today; the configured project default before the first canary spawn.</li>
+<li><strong>The first canary session&rsquo;s footer and effort popover reading &ldquo;High&rdquo; while the settings said Max</strong> (item 9) &mdash; already captured today; footer &ldquo;Fable 5 &middot; High&rdquo;, popover confirming High.</li>
+<li><strong>The settings Effort dropdown open, showing &ldquo;Default (High)&rdquo; and Extra selected</strong> (item 9) &mdash; already captured today; the project default changed to Extra ahead of the second spawn.</li>
+<li><strong>The second canary&rsquo;s footer reading &ldquo;High&rdquo; under the Extra setting</strong> (item 9) &mdash; already captured today; the second spawn confirming the configured default is ignored regardless of its value.</li>
+</ol>
+<p>Screenshots 8&ndash;11 together form the item-9 evidence sequence: configured default &rarr; spawned session&rsquo;s actual effort, repeated across two configured values (Max, then Extra).</p>
+<hr/>
+<p><em>Prepared 2026-07-10. Where we could not prove a cause, we have said so plainly rather than overstating it.</em></p>
+</main>
+</body>
+</html>
