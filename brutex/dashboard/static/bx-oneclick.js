@@ -434,6 +434,55 @@ function bxFunnelProvenance(source, runId) {
   var EVENTS_PAGE_LIMIT = 200;
   var TRADES_PAGE_LIMIT = 100;
 
+  /* ── one fetch, N consumers (DEC-OPERATOR-PAGE-CONSOLIDATE-001) ──
+     A page-lifetime PROMISE MEMO keyed on runId: the operator card, the
+     combos table, the winners section and the strategy drawer all consume
+     ONE /api/v1/oneclick/top100 network fetch per run selection.
+     Invalidated on run switch (selectRun + the runs poller's first
+     programmatic auto-selection). HONEST: a memo within one page lifetime,
+     NOT a TTL cache — server freshness rides the run-switch invalidation. */
+  var top100Memo = { runId: null, promise: null };
+  function getTop100(runId) {
+    if (top100Memo.runId === runId && top100Memo.promise) {
+      return top100Memo.promise;
+    }
+    var promise = window.BXPoll.fetchJson(
+      TOP100_URL + "?run_id=" + encodeURIComponent(runId),
+      12000
+    );
+    top100Memo = { runId: runId, promise: promise };
+    // a REJECTED promise self-evicts so Retry genuinely refetches:
+    promise.catch(function () {
+      if (top100Memo.promise === promise) {
+        top100Memo = { runId: null, promise: null };
+      }
+    });
+    return promise;
+  }
+
+  /* Run-change observer registry: the ONLY correct hook for a run switch —
+     the runs poller's programmatic auto-selection sets select.value WITHOUT
+     firing a DOM 'change' event, so a listener on the select would miss it. */
+  var runChangeSubs = [];
+  function notifyRunChange(runId) {
+    for (var s = 0; s < runChangeSubs.length; s++) {
+      try {
+        runChangeSubs[s](runId);
+      } catch (subErr) {
+        void subErr; // one bad subscriber never breaks the rest
+      }
+    }
+  }
+
+  /* The last manifest payload the poller rendered (the strategy panel's
+     zero-fetch symbol source when it is for the SAME run). */
+  var lastManifestPayload = null;
+
+  /* ~one-shot /runs read for cold-start deep links (portal use). */
+  function latestRun() {
+    return window.BXPoll.fetchJson(RUNS_URL, 12000);
+  }
+
   var state = {
     selectedRunId: null,
     sweepRunning: false,
@@ -552,6 +601,7 @@ function bxFunnelProvenance(source, runId) {
   /* ── Awaiting banner + run pill (manifest poller) ── */
 
   function renderManifest(payload) {
+    lastManifestPayload = payload; // the BXOneclick.lastManifest() source
     var awaiting = byId("ocAwaiting");
     if (awaiting) {
       if (payload.status === "awaiting") {
@@ -828,8 +878,9 @@ function bxFunnelProvenance(source, runId) {
     if (!state.selectedRunId) {
       return;
     }
-    var url = TOP100_URL + "?run_id=" + encodeURIComponent(state.selectedRunId);
-    window.BXPoll.fetchJson(url, 12000)
+    // Fetch plumbing only: the memo'd getTop100 promise (one network fetch
+    // per run selection, shared with the winners section + the drawer).
+    getTop100(state.selectedRunId)
       .then(function (payload) {
         if (!payload || typeof payload !== "object") {
           return;
@@ -1258,7 +1309,12 @@ function bxFunnelProvenance(source, runId) {
         lastRuns = data;
         if (!state.selectedRunId && data.latest_run_id) {
           state.selectedRunId = data.latest_run_id;
+          top100Memo = { runId: null, promise: null }; // fresh run, fresh memo
           loadRunScoped(); // first selection: fetch the run-scoped one-shots
+          // The programmatic FIRST auto-selection notifies observers too —
+          // a portal mounted before the poller landed would otherwise show
+          // stale/awaiting winners for the auto-selected run.
+          notifyRunChange(state.selectedRunId);
         }
         var select = byId("ocRunSelect");
         if (select && data.runs) {
@@ -1345,7 +1401,16 @@ function bxFunnelProvenance(source, runId) {
     minutePathDdText: bxMinutePathDdText,
     oneshotFetch: bxOneshotFetch,
     renderChainMap: renderChainMap,
+    getTop100: getTop100,
+    onRunChange: function (cb) {
+      runChangeSubs.push(cb);
+    },
+    lastManifest: function () {
+      return lastManifestPayload;
+    },
+    latestRun: latestRun,
     selectRun: function (runId) {
+      top100Memo = { runId: null, promise: null }; // run switch invalidates
       state.selectedRunId = runId;
       state.ring = [];
       state.ringSeen = {};
@@ -1353,6 +1418,7 @@ function bxFunnelProvenance(source, runId) {
       state.earlierCursor = 0;
       renderTimeline();
       loadRunScoped();
+      notifyRunChange(runId);
     }
   };
 

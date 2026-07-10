@@ -260,22 +260,28 @@ class TestWinnerDetailWiring:
             'id="stWorst5"',
         ):
             assert anchor in html, anchor
-        assert "window.BXOneclick.exitMixText(m.exits)" in html
-        assert "window.BXOneclick.worst5DaysText(m.worst5_days, money)" in html
+        # The builder calls live in the ONE shared strategy panel module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — the wiring moved verbatim).
+        panel = (_STATIC / "bx-strategy-panel.js").read_text(encoding="utf-8")
+        assert "window.BXOneclick.exitMixText(m.exits)" in panel
+        assert "window.BXOneclick.worst5DaysText(m.worst5_days, money)" in panel
         assert (
             "window.BXOneclick.avgExtremeText(m.mae_avg_paisa, m.mae_worst_paisa, 'worst', money)"
-            in html
+            in panel
         )
         assert (
             "window.BXOneclick.minutePathDdText(m.max_dd_minute_path_paisa, m.max_dd_minute_path_pct, money)"
-            in html
+            in panel
         )
 
     def test_deep_stats_beginner_summary_rides_the_block_toggle(self) -> None:
         html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
         assert 'class="plain-eng-block"' in html
         assert 'class="jargon-block"' in html
-        assert "body.share-mode .jargon-block { display:none; }" in html
+        # The block-toggle CSS rule moved VERBATIM into the ONE shared
+        # panels stylesheet (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
+        css = (_STATIC / "bx-oneclick-panels.css").read_text(encoding="utf-8")
+        assert "body.share-mode .jargon-block { display:none; }" in css
 
     def test_operator_card_regime_hooks(self) -> None:
         html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")

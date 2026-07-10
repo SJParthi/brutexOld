@@ -1,0 +1,85 @@
+/* bx-oneclick-panels.css — the ONE home for the screener/strategy panel
+ * component CSS (DEC-OPERATOR-PAGE-CONSOLIDATE-001), previously duplicated
+ * in screener.html/strategy.html inline styles. Linked by v29.html,
+ * screener.html and strategy.html AFTER bx-design.css.
+ *
+ * Scope law: every rule sits under the `.bx-scpanel` / `.bx-stpanel` panel
+ * roots (or the portal-owned `.strategy-drawer` / `.drawer-back` roots) so
+ * nothing cascades into v29's own tables. The Beginner/Pro BLOCK twins move
+ * verbatim and deliberately UNSCOPED — the one shared body-class mechanism.
+ *
+ * Deliberately NOT in bx-design.css: that surface's evolution belongs to
+ * the design-system track; a new file is collision-free.
+ */
+
+/* ── screener panel (.bx-scpanel) — moved from screener.html ── */
+
+.bx-scpanel .controls { display:flex; gap:12px; padding:14px 24px; border-bottom:1px solid var(--border);
+  flex-wrap:wrap; align-items:flex-end; }
+.bx-scpanel .ctl { display:flex; flex-direction:column; gap:4px; }
+.bx-scpanel .ctl label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
+.bx-scpanel .ctl select, .bx-scpanel .ctl input {
+  background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
+  border-radius:var(--r-md); min-height:var(--ctl-h); padding:0 12px; font:inherit; font-size:13px;
+  color-scheme:dark; min-width:110px;
+}
+.bx-scpanel .count { padding:10px 24px; font-size:12px; color:var(--muted); }
+.bx-scpanel .tablewrap { margin:0 24px 24px; background:var(--surface); border:1px solid var(--border);
+  border-radius:12px; overflow-x:auto; }
+.bx-scpanel table { width:100%; border-collapse:collapse; font-size:12.5px; }
+.bx-scpanel th, .bx-scpanel td { padding:9px 12px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
+.bx-scpanel th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
+  cursor:pointer; user-select:none; position:sticky; top:0; background:var(--surface); }
+.bx-scpanel tbody tr { cursor:pointer; }
+.bx-scpanel tbody tr:hover { background:var(--surface-2); }
+.bx-scpanel td.pos { color:var(--green-bright); }
+.bx-scpanel td.neg { color:var(--red); }
+.bx-scpanel .showall { margin:0 24px 24px; }
+.bx-scpanel .showall button { cursor:pointer; border:1px dashed var(--border-strong); border-radius:var(--r-md);
+  padding:9px 16px; font:inherit; font-size:12px; color:var(--muted); background:transparent; }
+.bx-scpanel .strip { display:flex; align-items:center; gap:12px; padding:10px 24px; flex-wrap:wrap;
+  border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); }
+
+/* ── strategy panel (.bx-stpanel) — moved from strategy.html ── */
+
+.bx-stpanel section { margin:16px 24px 0; padding:16px 18px; background:var(--surface);
+  border:1px solid var(--border); border-radius:12px; }
+.bx-stpanel section h3 { margin:0 0 10px; font-size:14px; font-weight:800; }
+.bx-stpanel .note { font-size:11.5px; color:var(--muted); margin-top:8px; overflow-wrap:anywhere; }
+.bx-stpanel .warnnote { font-size:12px; color:var(--yellow); font-weight:700; margin-top:8px; }
+.bx-stpanel .chart-host svg { width:100%; height:340px; display:block; background:rgba(0,0,0,0.25);
+  border-radius:8px; }
+.bx-stpanel .equity-host svg { width:100%; height:220px; display:block; background:rgba(0,0,0,0.25);
+  border-radius:8px; }
+.bx-stpanel .bx-candle-wick { stroke: var(--muted); stroke-width: 1; }
+.bx-stpanel .bx-candle-up { fill: #26D9B0; stroke: #26D9B0; }
+.bx-stpanel .bx-candle-down { fill: #FF5C5C; stroke: #FF5C5C; }
+.bx-stpanel .bx-arrow-entry { fill: #26D9B0; }
+.bx-stpanel .bx-arrow-exit { fill: #FFB74D; }
+.bx-stpanel .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
+.bx-stpanel table { width:100%; border-collapse:collapse; font-size:12px; }
+.bx-stpanel th, .bx-stpanel td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
+.bx-stpanel th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }
+.bx-stpanel td.pos { color:var(--green-bright); }
+.bx-stpanel td.neg { color:var(--red); }
+.bx-stpanel .tablewrap { overflow-x:auto; }
+.bx-stpanel .oc-source-badge { padding:2px 8px; border:1px solid var(--border-strong); border-radius:6px;
+  font-size:10.5px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+.bx-stpanel .story-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
+.bx-stpanel .story-cell { background:var(--surface-2); border:1px solid var(--border-strong);
+  border-radius:10px; padding:12px 14px; }
+.bx-stpanel .story-cell .k { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-weight:700; }
+.bx-stpanel .story-cell .v { font-size:18px; font-weight:800; margin-top:4px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.bx-stpanel .vixband { margin-top:10px; padding:8px 12px; border:1px solid var(--border-strong);
+  border-radius:8px; font-size:12px; color:var(--yellow); display:inline-block; }
+.bx-stpanel .pager { display:flex; gap:10px; align-items:center; margin-top:10px; font-size:12px; }
+.bx-stpanel .pager button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
+  padding:6px 12px; font:inherit; font-size:12px; color:var(--text); background:var(--surface-2); }
+
+/* ── Beginner/Pro BLOCK twins (moved verbatim from strategy.html —
+      deliberately UNSCOPED: the one shared body-class mechanism) ── */
+
+.jargon-block { display:block; }
+.plain-eng-block { display:none; }
+body.share-mode .jargon-block { display:none; }
+body.share-mode .plain-eng-block { display:block; }

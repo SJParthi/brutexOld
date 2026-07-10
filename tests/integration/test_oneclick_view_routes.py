@@ -65,6 +65,16 @@ def _template(name: str) -> str:
     return text
 
 
+def _static_js(name: str) -> str:
+    """Read a shared static JS module (DEC-OPERATOR-PAGE-CONSOLIDATE-001:
+    the screener/strategy page wiring moved VERBATIM out of the template
+    inline scripts into mountable modules — the pins below keep their
+    assertion text and only changed the file they grep)."""
+    text = (_STATIC / name).read_text(encoding="utf-8")
+    assert text, f"expected a non-empty static module at {name}"
+    return text
+
+
 def _client_no_lake() -> TestClient:
     return TestClient(build_app(DashboardState(), instrument_store=None))
 
@@ -357,33 +367,36 @@ class TestOneclickSections:
 
 class TestScreenerPage:
     def test_uses_the_one_shared_columns_config(self) -> None:
-        """§11 COMMON: the page consumes BXScreener.COLUMNS, no second list."""
+        """§11 COMMON: the panel consumes BXScreener.COLUMNS, no second list."""
+        js = _static_js("bx-screener-panel.js")
+        assert "BXScreener.COLUMNS" in js
         html = _template("screener.html")
-        assert "BXScreener.COLUMNS" in html
         assert "/static/bx-screener.js" in html
+        assert "/static/bx-screener-panel.js" in html
 
     def test_rows_are_createelement_only(self) -> None:
-        html = _template("screener.html")
-        assert "document.createElement('tr')" in html
-        assert "document.createElement('td')" in html
-        assert re.search(r"\.innerHTML\s*\+?=", html) is None
+        js = _static_js("bx-screener-panel.js")
+        assert "document.createElement('tr')" in js
+        assert "document.createElement('td')" in js
+        assert re.search(r"\.innerHTML\s*\+?=", js) is None
+        assert re.search(r"\.innerHTML\s*\+?=", _template("screener.html")) is None
 
     def test_count_line_uses_the_payload_row_count_denominator(self) -> None:
         """T-M2: never a hardcoded 100."""
-        html = _template("screener.html")
-        assert "state.rowCount" in html
-        assert "row_count" in html
-        assert "' of ' + total + ' shown'" in html
+        js = _static_js("bx-screener-panel.js")
+        assert "state.rowCount" in js
+        assert "row_count" in js
+        assert "' of ' + total + ' shown'" in js
 
     def test_count_line_numerator_is_the_rendered_count_naming_the_cap(self) -> None:
         """[W2-5] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: '500 of 500 shown' over
         a RENDER_CAP-truncated 200-row table was a lie — the numerator is now
         the count actually rendered and a capped table SAYS so."""
-        html = _template("screener.html")
-        assert "String(cap) + ' of ' + total + ' shown'" in html
-        assert "String(sorted.length) + ' of '" not in html  # the lying numerator is gone
-        assert "render cap ' + String(RENDER_CAP)" in html
-        assert "use Show all" in html
+        js = _static_js("bx-screener-panel.js")
+        assert "String(cap) + ' of ' + total + ' shown'" in js
+        assert "String(sorted.length) + ' of '" not in js  # the lying numerator is gone
+        assert "render cap ' + String(RENDER_CAP)" in js
+        assert "use Show all" in js
 
     def test_sort_basis_label_names_the_artifact_preset(self) -> None:
         """[11] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the visible sort-basis
@@ -394,19 +407,23 @@ class TestScreenerPage:
         assert "differs from /results (Rank-by metric, descending)" in html
 
     def test_null_vix_band_exclusion_is_counted(self) -> None:
-        html = _template("screener.html")
-        assert "null_vix_excluded" in html
-        assert "nullVixNote" in html
+        js = _static_js("bx-screener-panel.js")
+        assert "null_vix_excluded" in js
+        assert "nullVixNote" in js
 
     def test_row_click_reaches_the_strategy_page(self) -> None:
-        """≤2 clicks: Operator → Winners → strategy (R36)."""
-        html = _template("screener.html")
-        assert "/strategy?run_id=" in html
+        """≤2 clicks: Operator → Winners → strategy (R36). The href shape
+        lives in the ONE BXPortalState.strategyHref builder; the panel's
+        DEFAULT row click navigates through it."""
+        codec = _static_js("bx-portal-state.js")
+        assert "/strategy?run_id=" in codec
+        panel = _static_js("bx-screener-panel.js")
+        assert "window.BXPortalState.strategyHref" in panel
 
     def test_render_cap_guard_present(self) -> None:
-        html = _template("screener.html")
-        assert "RENDER_CAP" in html
-        assert 'id="scShowAll"' in html
+        js = _static_js("bx-screener-panel.js")
+        assert "RENDER_CAP" in js
+        assert 'id="scShowAll"' in _template("screener.html")
 
     def test_ticker_strip_and_awaiting_state(self) -> None:
         html = _template("screener.html")
@@ -418,8 +435,10 @@ class TestStrategyPage:
     def test_chart_first_layout_markers(self) -> None:
         html = _template("strategy.html")
         assert 'id="stChartHost"' in html
-        assert "/api/v1/db/candles" in html  # the EXISTING candles API
         assert "/static/bx-chart.js" in html
+        assert "/api/v1/db/candles" in _static_js(
+            "bx-strategy-panel.js"
+        )  # the EXISTING candles API
 
     def test_trades_section_is_inline_never_tab_gated(self) -> None:
         """F-M5: the trade table container renders at load — the page carries
@@ -431,80 +450,92 @@ class TestStrategyPage:
         assert "data-tab" not in html
 
     def test_trades_source_badge_visible(self) -> None:
-        """C-M5: the fixture/results_store source is a VISIBLE badge."""
+        """C-M5: the fixture/results_store source is a VISIBLE badge — under
+        the ONE renamed id (stTradesSource): v29 owns #ocTradesSource for its
+        rank-1 trades tab, and bx-oneclick writes THAT unconditionally, so
+        the strategy panel's badge carries its own st* id (the latent
+        cross-page stomp is dead)."""
         html = _template("strategy.html")
-        assert 'id="ocTradesSource"' in html
+        assert 'id="stTradesSource"' in html
+        assert 'id="ocTradesSource"' not in html  # the rename is total here
         assert "source: none" in html
+        assert "byId('stTradesSource')" in _static_js("bx-strategy-panel.js")
 
     def test_null_cost_rows_get_the_gross_equity_caveat(self) -> None:
         """[W2-4] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: Ruling-18 null-cost
         rows render a LABELED gross curve on /strategy AND the operator page
         (never an empty chart / a mislabeled non-integer error)."""
-        html = _template("strategy.html")
-        assert "series.null_cost_rows" in html
-        assert "curve is gross of those costs" in html
+        panel = _static_js("bx-strategy-panel.js")
+        assert "series.null_cost_rows" in panel
+        assert "curve is gross of those costs" in panel
         js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "series.null_cost_rows" in js
         assert "curve is gross of those costs" in js
 
     def test_out_of_window_trade_drops_the_arrow_loudly(self) -> None:
         """F-B1: the -1 sentinel is honored — never a snapped wrong candle."""
-        html = _template("strategy.html")
-        assert "arrow.dropped" in html
-        assert "ARROW_DROPPED_NOTE" in html
+        panel = _static_js("bx-strategy-panel.js")
+        assert "arrow.dropped" in panel
+        assert "ARROW_DROPPED_NOTE" in panel
         js = (_STATIC / "bx-chart.js").read_text(encoding="utf-8")
         assert "trade outside chart window — widen range" in js
 
     def test_trade_centered_window(self) -> None:
-        """F-B1a: ?trade= centers the candle fetch on that trade's entry."""
-        html = _template("strategy.html")
-        assert "params.get('trade')" in html
-        assert "state.tradeIdx" in html
+        """F-B1a: ?trade= centers the candle fetch on that trade's entry
+        (the ?trade= parse lives in the pure BXPortalState codec)."""
+        assert "params.get('trade')" in _static_js("bx-portal-state.js")
+        assert "state.tradeIdx" in _static_js("bx-strategy-panel.js")
 
     def test_equity_curve_sources_are_honestly_labeled(self) -> None:
         """C-MINOR-7, superseded by DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item
         4C: the STORED minute-path series (the /api/v1/oneclick/equity route)
         renders when the sidecar exists, and the per-trade cumsum FALLBACK is
         relabeled so the smoother curve never masquerades as the minute path."""
-        html = _template("strategy.html")
-        assert "/api/v1/oneclick/equity" in html
-        assert "minute-path equity — the stored real series (R27)" in html
-        assert "per-trade close equity (minute-path unavailable for this run)" in html
+        panel = _static_js("bx-strategy-panel.js")
+        assert "/api/v1/oneclick/equity" in panel
+        assert "minute-path equity — the stored real series (R27)" in panel
+        assert "per-trade close equity (minute-path unavailable for this run)" in panel
         # The stale "lands with P3" deferral is DEAD — the route ships.
-        assert "minute-path equity lands with P3" not in html
+        assert "minute-path equity lands with P3" not in panel
         # Hostile-round fold: an ok-verdict sidecar with ZERO rows reads its
         # OWN honest label (empty-for-this-run ≠ unavailable).
-        assert "per-trade close equity (minute-path series empty for this run)" in html
-        assert "state.equityOkEmpty" in html
+        assert "per-trade close equity (minute-path series empty for this run)" in panel
+        assert "state.equityOkEmpty" in panel
         # Audit re-break MINOR: the per-trade fallback note total carries the
         # #12 gross/signal-only vocabulary — never a bare "net" claim.
-        assert "bits.push('gross signal ' + money(series.final_paisa));" in html
-        assert "bits.push('net ' + money(series.final_paisa));" not in html  # killed
+        assert "bits.push('gross signal ' + money(series.final_paisa));" in panel
+        assert "bits.push('net ' + money(series.final_paisa));" not in panel  # killed
+        # The strategy page still carries the equity host the panel fills.
+        assert 'id="stEquityHost"' in _template("strategy.html")
 
     def test_vix_band_on_the_story_card(self) -> None:
         """R31 display duty — via the ONE shared builder ([W3-R4]): a
         null-lo/hi writer band reads the honest not-stamped copy, never
         "works when VIX between null–null"."""
-        html = _template("strategy.html")
-        assert 'id="stVixBand"' in html
-        assert "window.BXOneclick.vixBandText(row.vix_band)" in html
+        assert 'id="stVixBand"' in _template("strategy.html")
+        panel = _static_js("bx-strategy-panel.js")
+        assert "window.BXOneclick.vixBandText(row.vix_band)" in panel
         js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "works when VIX between" in js
         assert "VIX band not stamped for this run" in js
-        # The old inline undefined-only gate is gone from the template.
-        assert "works when VIX between" not in html
+        # The old inline undefined-only gate never returns — the panel
+        # delegates to the shared builder, no hand-rolled copy anywhere.
+        assert "works when VIX between" not in panel
+        assert "works when VIX between" not in _template("strategy.html")
 
     def test_candle_mapper_reads_the_route_timestamp_column(self) -> None:
         """[W3-R1]: the chart mapper is the ONE shared route-shape mapper —
         the dead ``idx.ts`` read (the /api/v1/db/candles column is named
         "timestamp") can never return; parsing + the session-day anchor are
         TZ-safe (never a browser-local Date roundtrip)."""
+        panel = _static_js("bx-strategy-panel.js")
+        assert "window.BXChart.candleRowsFromDbPayload(payload)" in panel
+        assert "window.BXChart.parseTsIst(raw)" in panel
+        assert "window.BXChart.istDateOfEpoch(anchor)" in panel
+        # The dead indexing EXPRESSION is gone (module AND template).
+        assert "[idx.ts]" not in panel
+        assert "toISOString().slice(0, 10)" not in panel
         html = _template("strategy.html")
-        assert "window.BXChart.candleRowsFromDbPayload(payload)" in html
-        assert "window.BXChart.parseTsIst(raw)" in html
-        assert "window.BXChart.istDateOfEpoch(anchor)" in html
-        # The dead indexing EXPRESSION is gone (the prose comment naming the
-        # bug deliberately remains — pin the code token, not the story).
         assert "[idx.ts]" not in html
         assert "toISOString().slice(0, 10)" not in html
         js = (_STATIC / "bx-chart.js").read_text(encoding="utf-8")
@@ -514,8 +545,8 @@ class TestStrategyPage:
     def test_screener_band_cell_uses_the_shared_builder(self) -> None:
         """[W3-R4] screener band column: a null-lo/hi band cell reads
         "not stamped", never "null–null"."""
-        html = _template("screener.html")
-        assert "window.BXOneclick.vixBandCellText(v)" in html
+        js = _static_js("bx-screener-panel.js")
+        assert "window.BXOneclick.vixBandCellText(v)" in js
 
     def test_beginner_pro_toggle_is_the_shared_mechanism(self) -> None:
         """C-MINOR-5: ONE mechanism — bxApplyMode over .jargon/.plain-eng."""
@@ -524,10 +555,17 @@ class TestStrategyPage:
             assert 'id="bxModeToggle"' in html, name
 
     def test_hover_explain_wiring(self) -> None:
+        """Hover explain is bound EXACTLY ONCE — by bx-oneclick's
+        presence-guarded init (#bxTip exists ⇒ bind); NEITHER panel module
+        may carry a second bind (the single-bind law)."""
         html = _template("strategy.html")
         assert 'id="bxTip"' in html
-        assert "bindExplainHover" in html
+        assert 'id="bxTip"' in _template("screener.html")
         assert "data-explain=" in html
+        oneclick = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert "bindExplainHover" in oneclick
+        assert "bindExplainHover" not in _static_js("bx-strategy-panel.js")
+        assert "bindExplainHover" not in _static_js("bx-screener-panel.js")
 
     def test_regime_renders_and_family_stays_named_out_of_scope(self) -> None:
         """HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
@@ -535,13 +573,15 @@ class TestStrategyPage:
         data" deferral is DELETED (the data ships in the artifact); family
         drill-down (R34) stays a NAMED later PR."""
         html = _template("strategy.html")
+        panel = _static_js("bx-strategy-panel.js")
         assert "land with the P3 data they visualize" not in html  # killed token
+        assert "land with the P3 data they visualize" not in panel  # killed token
         assert 'id="stTrendSplit"' in html
         assert 'id="stRegimeWonder"' in html
-        assert "window.BXOneclick.trendSplitText(reg.by_trend, money)" in html
+        assert "window.BXOneclick.trendSplitText(reg.by_trend, money)" in panel
         assert (
             "window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis)"
-            in html
+            in panel
         )
         assert "family drill-down (R34) is a named later PR" in html
 
@@ -559,9 +599,12 @@ class TestFailureLaw:
         js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "errorCard" in js
         assert "retry:" in js
-        for name in ("screener.html", "strategy.html"):
-            html = _template(name)
-            assert "oneshotFetch" in html, name
+        for name in ("bx-screener-panel.js", "bx-strategy-panel.js"):
+            panel = _static_js(name)
+            assert "oneshotFetch" in panel, name
+        # The templates hand their wiring to the self-mounting modules.
+        assert 'data-bx-autopanel="screener"' in _template("screener.html")
+        assert 'data-bx-autopanel="strategy"' in _template("strategy.html")
 
     @pytest.mark.parametrize("name", ["v29.html", "screener.html", "strategy.html"])
     def test_loading_is_never_a_terminal_element_state(self, name: str) -> None:
@@ -639,6 +682,9 @@ class TestRoutesEndToEnd:
             "bx-chart.js",
             "bx-screener.js",
             "bx-explain.js",
+            "bx-portal-state.js",
+            "bx-screener-panel.js",
+            "bx-strategy-panel.js",
         ):
             assert sink.search((_STATIC / js_name).read_text(encoding="utf-8")) is None, js_name
 
