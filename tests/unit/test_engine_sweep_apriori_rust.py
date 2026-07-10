@@ -398,3 +398,41 @@ class TestWorkflowWiring:
         text = self._CI.read_text(encoding="utf-8")
         assert "--cov=brutex.engine.sweep_apriori_rust" in text
         assert "tests/unit/test_engine_sweep_apriori_rust.py" in text
+
+
+# ───────────────────── budget-authority rider pin ─────────────────────
+
+
+class TestBudgetAuthorityRider:
+    """Pin the frozen-contract rider: the mask·bar breaker is the ONLY budget.
+
+    The Slice-1b cross-session contract (DEC-SWEEP-APRIORI-RUST-001) agrees
+    that the Rust Apriori kernel does NOT apply Slice-1's
+    ``enumerate_prefilter`` internal per-call work-cells cap — the per-level
+    pure-integer ``|C_j| * n_bars > max_mask_bars`` trip is the ONE budget
+    authority on the Apriori path. A structural source pin (the #1492-G3
+    drift-pin idiom): the kernel source must never grow a second cap token,
+    and its FFI surface must carry EXACTLY the one budget input
+    (``max_mask_bars``; ``budget_check_stride`` is a decision-preserving
+    memory stride, not a budget).
+    """
+
+    _KERNEL_SRC = (
+        Path(__file__).resolve().parents[2] / "rust" / "fno-math" / "src" / "sweep_apriori_core.rs"
+    )
+
+    def test_kernel_source_has_no_work_cells_cap(self) -> None:
+        text = self._KERNEL_SRC.read_text(encoding="utf-8")
+        for token in ("work_cells", "WORK_CELLS", "MAX_WORK", "work_cap"):
+            assert token not in text, f"forbidden second-budget token {token!r} in kernel source"
+        # The one budget authority is present by name.
+        assert "max_mask_bars" in text
+
+    def test_ffi_budget_inputs_are_exactly_max_mask_bars_and_stride(self) -> None:
+        import fno_math
+
+        doc = fno_math.apriori_frontier_u64.__doc__ or ""
+        sig = getattr(fno_math.apriori_frontier_u64, "__text_signature__", "") or ""
+        surface = doc + sig
+        assert "max_mask_bars" in surface
+        assert "work_cells" not in surface
