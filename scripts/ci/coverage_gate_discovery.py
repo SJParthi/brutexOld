@@ -207,6 +207,37 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # honest instead of coupling every credentials.py-touching PR to the discovery
         # stem-map heuristic (DEC-AWS-ONLY-CREDS-001).
         "brutex/config/credentials.py",
+        # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1678): the NEW losing-streak
+        # resilience module (fold + sidecar + annotation). Its 100% line+branch
+        # is reached by a CURATED multi-file suite — test_resilience_streaks.py
+        # (the pure fold/streak primitives) + test_resilience_sidecar.py (the
+        # sidecar write/read + annotation branches) + the integration
+        # test_resilience_end_to_end.py; the stem file alone tops out at ~62.94%
+        # because the fold/annotation/backfill branches live in the differently
+        # stemmed sidecar + integration files. The discovery gate maps a module
+        # ONLY to its stem-matching tests (test_resilience_streaks*), so it sees
+        # just the one unit file — the SAME multi-file-suite structural mismatch
+        # as pull_controller.py / db_view.py / stage1a.py / sweep_driver.py.
+        # Duplicating the sidecar/integration coverage into the streaks stem file
+        # would be a Golden-Rule-#11 COMMON (no copy-paste) violation. Its real
+        # 100% gate is the DEDICATED static per-module gate in ci.yml (which runs
+        # exactly that three-file suite at --cov-fail-under=100) + the
+        # whole-package --cov=brutex.engine floor; excluding it here keeps the
+        # discovery complement honest instead of blocking on an unreachable
+        # single-file 100%.
+        "brutex/engine/resilience_streaks.py",
+        # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1678): results_depth_pass.py
+        # gains an adoption-backfill + resilience-fence path whose new lines
+        # (~492-528, 760-773) are exercised by the differently stemmed
+        # test_resilience_sidecar.py + the integration test_resilience_end_to_end.py
+        # — test_engine_results_depth_pass.py alone tops out at ~94.88%. Same
+        # curated-multi-file-suite mismatch as sweep_driver.py above; its real
+        # 100% gate is the DEDICATED static per-module gate in ci.yml (which runs
+        # that three-file suite together at --cov-fail-under=100) + the
+        # whole-package floor. Excluding it here keeps the discovery complement
+        # honest instead of coupling every results_depth_pass-touching PR to the
+        # single-stem-file heuristic.
+        "brutex/engine/results_depth_pass.py",
     }
 )
 
