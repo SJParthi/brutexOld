@@ -3087,6 +3087,68 @@ def _start_instrument_autoload(
     ).start()
 
 
+def _warn_pending_intent_while_disabled(
+    lake_root: Path,
+    log: Any,
+    *,
+    intent_store: Any = None,
+) -> None:
+    """Surface a leftover pull intent when the auto-resume master gate is OFF.
+
+    DEC-AUTO-RESUME-DEFAULT-OFF-001 review round 1 (MAJOR 2 — crash-recovery
+    visibility): with ``BRUTEX_AUTO_RESUME`` at its default OFF, a durable
+    ``<lake>/.pull_intent.json`` left by a died-mid-flight pull would otherwise
+    ROT silently — the operator would never learn a pull was interrupted. This
+    probe makes it visible without launching anything: one
+    ``auto_resume.disabled_with_pending_intent`` WARNING plus the critical
+    :class:`~brutex.dashboard.pull_intent.ResumeBanner` payload (rendered by the
+    SAME site-wide red banner the resume crash-loop refusal uses — §11 COMMON),
+    naming the three remediations (start a pull manually / set
+    ``BRUTEX_AUTO_RESUME=1`` / delete the intent file to dismiss). The banner
+    still auto-clears through the existing
+    :func:`~brutex.dashboard.pull_intent.clear_banner_after_start` path once a
+    real pull actually starts (DEC-RESUME-BANNER-AUTOCLEAR-001).
+
+    Best-effort by contract: EVERY failure (an unreadable path, a raising
+    store) is caught, logged as ``auto_resume.intent_probe_failed``, and boot
+    continues — the probe can never break the bind (Golden Rule #10). With no
+    *intent_store* (its construction failed at boot) the path is derived from
+    *lake_root* directly and only the WARNING fires (no banner surface exists).
+    A cheap O(1) ``Path.exists`` probe — the intent payload is deliberately NOT
+    read or validated here (the launch path owns that).
+    """
+    try:
+        if intent_store is not None:
+            intent_path = Path(intent_store.path)
+        else:
+            from brutex.dashboard.pull_intent import PULL_INTENT_FILENAME
+
+            intent_path = lake_root / PULL_INTENT_FILENAME
+        if not intent_path.exists():
+            return
+        message = (
+            "A previous pull was interrupted (found "
+            f"{intent_path}). Boot auto-resume is disabled by default "
+            "(BRUTEX_AUTO_RESUME) — start a pull manually from /universe, set "
+            "BRUTEX_AUTO_RESUME=1 in ~/.brutex/.env to enable boot auto-resume, "
+            "or delete the intent file to dismiss this notice."
+        )
+        log.warning(
+            "auto_resume.disabled_with_pending_intent",
+            path=str(intent_path),
+            hint=message,
+        )
+        banner = getattr(intent_store, "banner", None)
+        if banner is not None:
+            banner.set(level="critical", message=message)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never break boot
+        log.warning(
+            "auto_resume.intent_probe_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
 def _start_auto_resume_on_boot(
     lake_root: Path,
     log: Any,
@@ -3143,12 +3205,21 @@ def _start_auto_resume_on_boot(
     (or either seam unwired) the legacy arm below runs as before — now
     in-process instead of via the deleted child.
 
-    MASTER KILL SWITCH (``BRUTEX_AUTO_RESUME``, default OFF): checked FIRST —
-    before the intent wiring, before any ``.pull_intent.json`` read, and before
-    the daemon thread is spawned — so a leftover intent file can NEVER silently
-    trigger a full-universe pull on boot. Disabled ⇒ nothing starts (neither
-    arm) and ONE ``auto_resume.disabled_by_default`` line is logged. This is a
-    DELIBERATE behaviour change by operator directive (Golden Rule #10): the
+    MASTER KILL SWITCH (``BRUTEX_AUTO_RESUME``, default OFF —
+    DEC-AUTO-RESUME-DEFAULT-OFF-001): checked FIRST — before the intent wiring,
+    before any ``.pull_intent.json`` read, and before the daemon thread is
+    spawned — so a leftover intent file can NEVER silently trigger a
+    full-universe pull on boot. Disabled ⇒ nothing starts (neither arm) and ONE
+    state-classified line is logged: ``auto_resume.disabled_by_default``
+    (unset / blank), ``auto_resume.disabled`` (an explicit falsy value, echoed),
+    or a WARNING ``auto_resume.junk_value_disabled`` (an unrecognised value —
+    still disabled, fail-safe, but loud). CRASH-RECOVERY VISIBILITY: with the
+    gate disabled a pending ``.pull_intent.json`` is still SURFACED — one
+    ``auto_resume.disabled_with_pending_intent`` WARNING + the critical
+    :class:`~brutex.dashboard.pull_intent.ResumeBanner` payload
+    (:func:`_warn_pending_intent_while_disabled`, best-effort — a probe error
+    never breaks boot) — instead of rotting silently. This is a DELIBERATE
+    behaviour change by operator directive (Golden Rule #10): the
     crash-recovery boot-resume is now OPT-IN, overriding the prior default-ON of
     the intent arm. The two per-arm sub-gates (``BRUTEX_PULL_INTENT_RESUME`` /
     ``BRUTEX_AUTO_RESUME_ON_BOOT``) are unchanged and still apply BENEATH this
@@ -3156,15 +3227,34 @@ def _start_auto_resume_on_boot(
     """
     from brutex.orchestrator.auto_resume import (
         AUTO_RESUME_MASTER_ENV,
-        resolve_auto_resume_master,
+        classify_auto_resume_master,
     )
 
-    if not resolve_auto_resume_master():
-        log.info(
-            "auto_resume.disabled_by_default",
-            env=AUTO_RESUME_MASTER_ENV,
-            hint="set BRUTEX_AUTO_RESUME=1 to enable boot-time auto-resume",
-        )
+    gate = classify_auto_resume_master()
+    if not gate.enabled:
+        hint = "set BRUTEX_AUTO_RESUME=1 to enable boot-time auto-resume"
+        if gate.state == "junk_off":
+            # A probable typo — still disabled (fail-safe) but LOUD, never silent.
+            log.warning(
+                "auto_resume.junk_value_disabled",
+                env=AUTO_RESUME_MASTER_ENV,
+                env_value=gate.raw,
+                hint=hint,
+            )
+        elif gate.state == "explicit_off":
+            log.info(
+                "auto_resume.disabled",
+                env=AUTO_RESUME_MASTER_ENV,
+                env_value=gate.raw,
+                hint=hint,
+            )
+        else:
+            log.info(
+                "auto_resume.disabled_by_default",
+                env=AUTO_RESUME_MASTER_ENV,
+                hint=hint,
+            )
+        _warn_pending_intent_while_disabled(lake_root, log, intent_store=intent_store)
         return
 
     import threading
@@ -3512,7 +3602,11 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             _start_liveproof_preflight(liveproof, _log)
         except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
             _log.warning("liveproof.launch_failed", error=str(exc))
-    # Opt-in boot-time auto-resume (DEC-AUTO-RESUME-ON-BOOT-001): if
+    # Opt-in boot-time auto-resume: the BRUTEX_AUTO_RESUME MASTER gate
+    # (DEC-AUTO-RESUME-DEFAULT-OFF-001, default OFF) is checked FIRST inside the
+    # launcher — with it unset NEITHER resume arm fires (a leftover intent only
+    # surfaces a WARNING + critical banner, never a launch); the sub-gates below
+    # apply beneath it once it is on (DEC-AUTO-RESUME-ON-BOOT-001): if
     # BRUTEX_AUTO_RESUME_ON_BOOT is truthy AND the durable window ledger shows an
     # in-progress pull (PLANNED / FAILED windows), auto-continue it IN-PROCESS
     # through the app's own /pull-pipeline launcher (app.state.brutex_resume_legacy
