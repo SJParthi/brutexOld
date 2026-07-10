@@ -298,10 +298,12 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger(__name__)
 
-#: IANA zone the frame screen groups sessions by. India observes NO DST, so
-#: ``Asia/Kolkata`` is a fixed ``+05:30`` for every date — identical to the
-#: fixed-offset :data:`brutex.calendars.nse.IST` the engine read boundary
-#: (:func:`brutex.feed.replay.arrow_table_to_bars`) uses per-timestamp.
+#: IANA zone the frame screen groups sessions by — the SAME zone as
+#: :data:`brutex.calendars.nse.IST` (``ZoneInfo("Asia/Kolkata")``, an IANA
+#: zone, NOT a fixed-offset tzinfo) that the engine read boundary
+#: (:func:`brutex.feed.replay.arrow_table_to_bars`) uses per-timestamp. India
+#: observes NO DST, so the zone resolves to a constant ``+05:30`` for every
+#: date and the two groupings are identical.
 _IST_ZONE: Final[str] = "Asia/Kolkata"
 
 #: The conservative bounded multiple: a bar whose close is ``>= 4x`` OR ``<= 1/4x``
@@ -798,15 +800,25 @@ def screen_frame_bad_ticks(
     divergence class).
 
     Ordering / composition (``DEC-STORED-DATA-VALIDATION-001`` precedent — the
-    engine read boundary's law, mirrored): callers run
-    :func:`brutex.data.price_sanity.validate_frame_price_sanity` FIRST (the
-    positivity + OHLC-ordering RAISE — a FINITE non-positive / mis-ordered bar
-    quarantines the symbol LOUDLY and never reaches this screen), then this
+    engine read boundary's law, mirrored): where a caller runs
+    :func:`brutex.data.price_sanity.validate_frame_price_sanity`, it runs FIRST
+    (the positivity + OHLC-ordering RAISE — a FINITE non-positive / mis-ordered
+    bar quarantines the symbol LOUDLY and never reaches this screen), then this
     helper SKIPS the ratio-spike + non-finite survivors. The two actions are
     disjoint: ``price_sanity`` raises on ``null`` / non-positive / mis-ordered
     finite rows; a NaN sails past it (``nan <= 0`` is ``False``, ``nan < low``
     is ``False``) exactly as it sailed past the engine positivity raise, so the
-    non-finite arm here catches it — no double-drop.
+    non-finite arm here catches it — no double-drop. HONEST SEAM SCOPE: of the
+    four wired seams only the prebuild's
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` runs
+    ``price_sanity`` first; the other three DELIBERATELY omit it —
+    :func:`~brutex.data.spot_daily_resample.make_lake_read_1m_window` (the
+    lake-heal daily recall) is a verify-first NO-RAISE reader, and
+    :func:`~brutex.data.tf_autoderive.read_lake_bars_frame` +
+    :func:`brutex.dashboard.movers_snapshot._read_cut_1m_frame` are non-raising
+    probe/display readers — so on those seams a finite non-positive/mis-ordered
+    bar is NOT raised here and their exclusion set equals the engine read
+    boundary's (which RAISES on that class) only on price-sane lakes.
 
     Whole-session-per-call rule (CRITICAL — :meth:`BadTickScreen.screen_mask`
     head vote is bounded-forward-looking over each session's first up to

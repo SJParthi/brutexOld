@@ -146,6 +146,46 @@ def _derived_lows(lake_root: Path, interval: str) -> list[float]:
     return [float(b.low) for b in bars]
 
 
+def test_window_read_seam_matches_the_shared_seam(tmp_path: Path) -> None:
+    """The 4th seam (review fix round): ``make_lake_read_1m_window`` screens too.
+
+    ``spot_daily_resample.make_lake_read_1m_window`` — the lake-heal daily
+    RECALL's injected 1-minute reader — was a genuine UNSCREENED resample
+    input: over this poisoned fixture the SHARED seam (``make_lake_read_1m``)
+    served 29 rows with the poison ABSENT while the window seam served 30 with
+    the poison PRESENT (the reviewer's demonstration). Both seams now serve
+    the IDENTICAL screened row set, so the heal's daily re-derive consumes the
+    same exclusions as the prebuild's. FAILS-BEFORE with the window-seam
+    wiring reverted (window read: 30 rows, poison high present).
+    """
+    from datetime import date as _date
+
+    from brutex.data.spot_daily_resample import make_lake_read_1m_window
+    from brutex.data.timeframe_materialize import make_lake_read_1m
+
+    poison_bar = _write_1m(tmp_path, poison="all")
+    assert poison_bar is not None
+
+    shared = make_lake_read_1m(
+        lake_root=tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol=_SYMBOL
+    )()
+    window = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=_date(2021, 1, 4),
+        end=_date(2021, 1, 5),
+    )()
+
+    assert shared.height == _N - 1  # the shared seam drops the poison bar
+    assert window.height == _N - 1  # pre-fix: _N (30) — the poison SERVED
+    assert float(poison_bar.high) not in window.get_column("high").to_list()
+    assert float(poison_bar.close) not in window.get_column("close").to_list()
+    # Identical surviving row set — the seam-parity law.
+    assert window.get_column("ts_utc").to_list() == shared.get_column("ts_utc").to_list()
+
+
 def test_clean_data_screen_on_equals_screen_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1258,6 +1258,58 @@ def test_screen_frame_drops_non_finite_row() -> None:
     assert BAD_TICK_SKIP_EVENT not in events
 
 
+def _engine_table(rows: list[tuple[float, float, float, float]]) -> object:
+    """The pyarrow 7-column twin of :func:`_minute_frame` (same rows/instants)."""
+    import pyarrow as pa
+
+    ts = [_UTC_OPEN + timedelta(minutes=i) for i in range(len(rows))]
+    return pa.table(
+        {
+            "timestamp": pa.array(ts, type=pa.timestamp("us", tz="UTC")),
+            "open": pa.array([r[0] for r in rows], type=pa.float64()),
+            "high": pa.array([r[1] for r in rows], type=pa.float64()),
+            "low": pa.array([r[2] for r in rows], type=pa.float64()),
+            "close": pa.array([r[3] for r in rows], type=pa.float64()),
+            "volume": pa.array([10 + i for i in range(len(rows))], type=pa.int64()),
+            "open_interest": pa.array([None] * len(rows), type=pa.int64()),
+        }
+    )
+
+
+@pytest.mark.parametrize("variant", ["scaled_close", "high_only", "low_only", "non_finite"])
+def test_screen_frame_matches_engine_read_survivors(variant: str) -> None:
+    """Cross-boundary composition parity (DEC-BADTICK-RESAMPLE-INPUT-001):
+    :func:`screen_frame_bad_ticks` and the engine read boundary
+    (:func:`brutex.feed.replay.arrow_table_to_bars`) keep the IDENTICAL
+    surviving row set over one shared price-sane bar set — so a future
+    one-sided edit to either screen composition (non-finite-first ordering,
+    the hi/lo arm, the finite-subset re-expansion) fails THIS co-located test,
+    not just an end-to-end integration suite."""
+    pytest.importorskip("pyarrow")
+    from brutex.feed.replay import arrow_table_to_bars
+
+    rows = _clean_rows(8)
+    if variant == "scaled_close":
+        rows[4] = (104.0, 114.0, 94.0, 1120.0)  # x10 close, sane high/low
+    elif variant == "high_only":
+        rows[4] = (104.0, 1140.0, 94.0, 109.0)  # x10 HIGH, sane close
+    elif variant == "low_only":
+        rows[4] = (104.0, 114.0, 9.0, 109.0)  # ÷~11 LOW, sane close
+    else:
+        rows[4] = (float("nan"), 114.0, 94.0, 109.0)  # non-finite OPEN
+
+    with capture_logs():
+        frame_survivors = (
+            screen_frame_bad_ticks(_minute_frame(rows), source="src").get_column("ts_utc").to_list()
+        )
+    with capture_logs():
+        bars = arrow_table_to_bars(_engine_table(rows), source="src")  # type: ignore[arg-type]
+    engine_survivors = [b.timestamp for b in bars]
+
+    assert len(frame_survivors) == len(rows) - 1  # exactly the one poison row dropped
+    assert frame_survivors == engine_survivors
+
+
 def test_screen_frame_non_finite_and_scaled_bar_both_dropped() -> None:
     # Mixed: a NaN row (non-finite screen) AND a later x10 close spike
     # (ratio screen over the finite subset) are BOTH dropped — the spike is

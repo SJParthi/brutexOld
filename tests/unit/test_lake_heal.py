@@ -3170,6 +3170,55 @@ class TestDerivedRecall:
         assert daily["close"].to_list() == [101.0]
         assert daily["volume"].to_list() == [22]
 
+    def test_recall_daily_screens_surviving_bad_ticks(self, tmp_path: Path) -> None:
+        """DEC-BADTICK-RESAMPLE-INPUT-001 4th seam (review fix round): the daily
+        recall's injected reader (``make_lake_read_1m_window``) screens a
+        SURVIVING x10 poison bar, so a dup-triggered heal no longer mints a
+        FRESH poisoned ``1day``. FAILS-BEFORE with the seam-(4) wiring
+        reverted: the re-derived daily high read the poison 1030.0 (the
+        clean-intraday/poisoned-1day split — the heal's intraday-TF rebuild
+        leg already derived clean via the screened ``make_lake_read_1m``)."""
+        lake = tmp_path / "lake"
+        _write_spot(
+            lake,
+            [
+                _bar(_ts(0), close="100.00"),
+                _bar(_ts(1), close="101.00"),
+                _bar(_ts(2), close="102.00"),
+                # x10 poison — self-consistent (flat OHLC), positive, ordered:
+                # passes price_sanity + the heal (which never value-edits) but
+                # is ratio-out-of-band vs the head-median baseline (~101).
+                _bar(_ts(3), close="1030.00", volume=99),
+                _bar(_ts(4), close="104.00"),
+                _bar(_ts(5), close="105.00", volume=12),
+            ],
+        )
+        _replant_with_dup(_dest(lake))  # trigger the IntraFileDup heal → recall
+        scan = scan_lake_invariants(lake)
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.files_scanned,
+            mode="auto",
+            recall=True,
+            now=_now,
+        )
+        assert report.recall is not None
+        assert report.recall.daily_targets == 1
+        # The poison bar SURVIVES the heal in the 1-minute (heal is strictly
+        # row-removing on dup keys, never value-editing; the screen is
+        # read-side only) …
+        minute = _stored_frame(_dest(lake))
+        assert 1030.0 in minute["close"].to_list()
+        # … yet the re-derived 1day aggregates ONLY the screened rows: the
+        # daily high/close/volume are the CLEAN aggregates, never the poison.
+        daily = _stored_frame(_dest(lake, interval="1day"))
+        assert daily["timestamp"].to_list() == [datetime(2024, 6, 2, 18, 30, tzinfo=UTC)]
+        assert daily["high"].to_list() == [105.0]  # clean max — poison screened
+        assert daily["close"].to_list() == [105.0]
+        assert daily["open"].to_list() == [100.0]
+        assert daily["volume"].to_list() == [10 + 10 + 10 + 10 + 12]  # 5 clean bars
+
     def test_recall_cutoff_is_session_close_aware(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
