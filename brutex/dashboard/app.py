@@ -6697,6 +6697,24 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        # Rust sweep-core enum arm (DESIGN_FINAL_RUST_SWEEP_CORE.md §12.2 —
+        # RECONCILE fix-forward (d)): the BRUTEX_SWEEP_RUST_ENUM flag +
+        # BRUTEX_SWEEP_CORE_ENUM_CELLS knob resolve EAGERLY here, exactly like
+        # the CLI arm in cmd_sweep_all — a junk cells budget is a clean 400
+        # BEFORE the single-flight background job launches, never a deep
+        # job-thread failure the operator only sees as a red progress feed
+        # (the repo's eager-env-validation pattern; the plan value is
+        # deliberately discarded — this call is the VALIDATION, the per-tuple
+        # re-resolve inside run_persisted_sweep is the consumer). Imported
+        # lazily like run_sweep_from_request's cmd_sweep_all import, keeping
+        # the dashboard import light.
+        from brutex.engine.sweep_core import resolve_sweep_rust_enum_plan
+
+        try:
+            resolve_sweep_rust_enum_plan()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"sweep config error: {exc}") from exc
+
         results_root = default_results_root(lake)
         # Point the live sweep-progress panel at the exact file cmd_sweep_all
         # publishes to, so GET /api/v1/sweep-progress serves THIS run with no new

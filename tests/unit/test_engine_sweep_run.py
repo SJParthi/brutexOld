@@ -26,9 +26,11 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine import sweep_core
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
 from brutex.engine.sweep_driver import metrics_for_mask
 from brutex.engine.sweep_kernel import ResidentSweepKernel
 from brutex.engine.sweep_run import (
@@ -3110,3 +3112,117 @@ class TestLazyRunIdHardening:
         assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
         assert digest_peak < legacy_peak
         assert legacy_peak - digest_peak > digest.evaluated * 48
+
+
+# ────── Slice-1 enum arm × Apriori source composition (RECONCILE 2026-07-10) ──────
+
+
+class TestEnumArmComposition:
+    """The enum-arm engagement + the RECONCILE Apriori-precedence law.
+
+    Owner decision (disclosed verbatim beside the code in ``sweep_run.py``):
+    the FROZEN Apriori enumeration source WINS — for any tuple where the
+    Apriori source is active (main's exact activation semantics), the Rust
+    enum kernel arm STANDS DOWN (its engagement condition gains the
+    apriori-not-active conjunct) and emits exactly one
+    ``sweep_core.enum_standdown_apriori`` event per tuple (fields: subject +
+    reason). Apriori-active tuples are BYTE-IDENTICAL to main's behavior;
+    non-apriori tuples keep the branch's exact enum-arm semantics
+    (default-OFF kill switch unchanged). The two arms NEVER compose within
+    one tuple.
+    """
+
+    #: Fixed digest so every run below takes the digest (sidecar) path.
+    _DIGEST = "a" * 16
+
+    @pytest.fixture(autouse=True)
+    def _clean_enum_state(self, monkeypatch: pytest.MonkeyPatch) -> Iterable[None]:
+        """Isolate the enum arm's env flags + per-process shadow state."""
+        monkeypatch.delenv(sweep_core.SWEEP_RUST_ENUM_ENV, raising=False)
+        monkeypatch.delenv(sweep_core.SWEEP_CORE_ENUM_CELLS_ENV, raising=False)
+        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        sweep_core.reset_enum_self_check_for_tests()
+        sweep_core.reset_observability_memo_for_tests()
+        yield
+        sweep_core.reset_enum_self_check_for_tests()
+        sweep_core.reset_observability_memo_for_tests()
+
+    def _cfg(self, **overrides: object) -> SweepRunConfig:
+        base: dict[str, object] = {
+            "condition_bits": [0, 1, 2, 3, 4, 5],
+            "k": 2,
+            "min_hits": 3,
+            "top_k": 5,
+        }
+        base.update(overrides)
+        return _make_config(**base)
+
+    def test_enum_arm_engages_on_digest_path_byte_identical_no_standdown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Apriori INACTIVE + flag ON: the enum arm ENGAGES (exactly one
+        ``sweep_rust_enum.engaged`` event, ZERO standdown events) and the
+        summary + store bytes are byte-identical to the default-OFF arm."""
+        bars = _trending_bars(12, 120)
+        off = _run_sweep(tmp_path, "off", bars, self._cfg(), digest=self._DIGEST)
+        monkeypatch.setenv(sweep_core.SWEEP_RUST_ENUM_ENV, "1")
+        with capture_logs() as logs:
+            on = _run_sweep(tmp_path, "on", bars, self._cfg(), digest=self._DIGEST)
+        assert on == off
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+        engaged = [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+        assert len(engaged) == 1  # the anti-vacuous positive pin
+        standdowns = [e for e in logs if e["event"] == "sweep_core.enum_standdown_apriori"]
+        assert standdowns == []  # the apriori-not-active conjunct mutant killer
+
+    def test_top_k_none_digest_tuple_engages_enum_arm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RECONCILE fix-forward (c): a ``top_k=None`` digest tuple ENGAGES on
+        the enum arm — persist-everything is not an engagement exclusion."""
+        bars = _trending_bars(12, 120)
+        off = _run_sweep(tmp_path, "off", bars, self._cfg(top_k=None), digest=self._DIGEST)
+        monkeypatch.setenv(sweep_core.SWEEP_RUST_ENUM_ENV, "1")
+        with capture_logs() as logs:
+            on = _run_sweep(tmp_path, "on", bars, self._cfg(top_k=None), digest=self._DIGEST)
+        assert on == off
+        engaged = [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+        assert len(engaged) == 1
+        fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+        assert fallbacks == []
+
+    def test_apriori_active_stands_down_enum_arm_with_one_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Apriori ACTIVE + enum flag ON: the enum arm STANDS DOWN — exactly
+        one ``sweep_core.enum_standdown_apriori`` event (subject + reason),
+        ZERO engaged events, and the run is BYTE-IDENTICAL to main's
+        apriori-only behavior (enum flag unset)."""
+        bars = _trending_bars(12, 120)
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        apriori_only = _run_sweep(tmp_path, "apr", bars, self._cfg(), digest=self._DIGEST)
+        monkeypatch.setenv(sweep_core.SWEEP_RUST_ENUM_ENV, "1")
+        with capture_logs() as logs:
+            composed = _run_sweep(tmp_path, "both", bars, self._cfg(), digest=self._DIGEST)
+        # BYTE-IDENTICAL to main's apriori arm — the precedence law's teeth.
+        assert composed == apriori_only
+        assert (tmp_path / "both.parquet").read_bytes() == (tmp_path / "apr.parquet").read_bytes()
+        standdowns = [e for e in logs if e["event"] == "sweep_core.enum_standdown_apriori"]
+        assert len(standdowns) == 1  # once per tuple, never silent
+        assert standdowns[0]["subject"]  # the tuple id field is populated
+        assert standdowns[0]["reason"] == "apriori_enumeration_source_active"
+        engaged = [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+        assert engaged == []  # the two arms NEVER compose within one tuple
+
+    def test_apriori_active_enum_flag_off_no_standdown_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Apriori ACTIVE + enum flag OFF: no standdown event — the event
+        fires only when a REQUESTED enum arm yields (the requested conjunct
+        mutant killer)."""
+        bars = _trending_bars(12, 120)
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        with capture_logs() as logs:
+            _run_sweep(tmp_path, "apr", bars, self._cfg(), digest=self._DIGEST)
+        standdowns = [e for e in logs if e["event"] == "sweep_core.enum_standdown_apriori"]
+        assert standdowns == []

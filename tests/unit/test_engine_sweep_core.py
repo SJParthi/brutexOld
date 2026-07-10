@@ -238,6 +238,53 @@ class TestMaskHex:
         # to the mask variable names).
         for banned in ("{mask}", "{mask:", "{kept"):
             assert banned not in rs_src
+        # RECONCILE fix-forward (a): the crate-level indexing-slicing deny is
+        # PRESENT in the Rust core — every slice access is checked-`get` by
+        # construction, and this pin keeps a refactor from silently dropping
+        # the lint wall (the design pack's §7 no-panic discipline).
+        assert "#![deny(clippy::indexing_slicing)]" in rs_src
+
+    def test_no_bare_int_mask_structlog_kwarg(self) -> None:
+        """RECONCILE fix-forward (b): the §12 pin's AST arm — no ``_LOG.*``
+        call in sweep_core.py passes a mask-valued kwarg as a BARE int.
+
+        The f-string grep above cannot see ``_LOG.warning(..., first_mask=mask)``
+        (structlog serializes the kwarg itself), so every keyword whose name
+        mentions ``mask``/``kept`` on a ``_LOG`` call must be a constant or an
+        expression routed through :func:`mask_hex` — never a bare name /
+        subscript / attribute carrying the raw int.
+        """
+        import ast
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parents[2]
+        py_path = repo / "brutex" / "engine" / "sweep_core.py"
+        tree = ast.parse(py_path.read_text())
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "_LOG"
+            ):
+                continue
+            for kw in node.keywords:
+                if kw.arg is None or not ("mask" in kw.arg or "kept" in kw.arg):
+                    continue
+                # COUNT-shaped kwargs carry cardinalities (how many masks),
+                # never a mask's bit-value — they are legitimately bare ints.
+                if any(tok in kw.arg for tok in ("unmet", "remaining", "count", "n_masks")):
+                    continue
+                value = kw.value
+                if isinstance(value, ast.Constant):
+                    continue  # a literal (e.g. None / a count) is not a mask leak
+                if "mask_hex" in ast.unparse(value):
+                    continue  # routed through the ONE sanctioned serializer
+                offenders.append(f"line {node.lineno}: {kw.arg}={ast.unparse(value)}")
+        assert offenders == [], f"bare-int mask structlog kwarg(s): {offenders}"
 
 
 class TestShadowState:

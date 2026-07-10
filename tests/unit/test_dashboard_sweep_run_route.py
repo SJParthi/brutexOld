@@ -260,6 +260,45 @@ def test_second_click_while_running_is_a_noop(
         release.set()
 
 
+def test_junk_enum_cells_env_400_before_job_launch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RECONCILE fix-forward (d): the in-process sweep route pre-validates the
+    BRUTEX_SWEEP_RUST_ENUM / BRUTEX_SWEEP_CORE_ENUM_CELLS pair EAGERLY at
+    launch, exactly like the CLI arm in cmd_sweep_all — a junk cells budget is
+    a clean 400 naming the env var BEFORE the background job starts, never a
+    deep job-thread failure."""
+    from brutex.engine.sweep_core import SWEEP_CORE_ENUM_CELLS_ENV, SWEEP_RUST_ENUM_ENV
+
+    called: list[object] = []
+    monkeypatch.setattr(app_module, "run_sweep_from_request", lambda *a, **k: called.append(a) or 0)
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
+    monkeypatch.setenv(SWEEP_CORE_ENUM_CELLS_ENV, "banana")
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "sweep config error" in detail
+    assert SWEEP_CORE_ENUM_CELLS_ENV in detail
+    assert called == []  # the job never launched — validation is launch-eager
+
+
+def test_valid_enum_env_still_starts_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The (d) twin: a VALID enum env pair sails through the eager validation
+    and the job starts exactly as before (default-preservation)."""
+    from brutex.engine.sweep_core import SWEEP_CORE_ENUM_CELLS_ENV, SWEEP_RUST_ENUM_ENV
+
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
+    monkeypatch.setenv(SWEEP_CORE_ENUM_CELLS_ENV, str(1 << 20))
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert _wait_for_job(client)["state"] == "done"
+
+
 # ── page wiring ───────────────────────────────────────────────────────────────
 
 
