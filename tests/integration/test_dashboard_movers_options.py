@@ -1171,6 +1171,21 @@ class TestOptionsGreeksEndToEnd:
         assert '["Delta","delta","num4"]' in html
         assert 'type === "num4"' in html  # the 4dp display formatter exists
 
+    def test_movers_template_options_offers_value_cr_column(self) -> None:
+        """VIEW-2 (DEC-MOVERS-VWAP-VALUE-001): the options table config carries the
+        "Value (Cr)" column so the "Top Value" ranking metric is VISIBLE on-screen,
+        mirroring the spot + futures tabs — and it sits INSIDE the options ``cols``
+        (before ``Volume``, the tab's last column)."""
+        from brutex.dashboard.app import _render_movers_html
+
+        html = _render_movers_html()
+        assert '["Value (Cr)","value_cr","num"]' in html
+        # The column lands inside the options cols block (…OI Chg % → Value (Cr) → Volume).
+        assert (
+            '["OI Chg %","oi_chg_pct","num"],["Value (Cr)","value_cr","num"],'
+            '["Volume","volume","int"]'
+        ) in html
+
 
 # ── the AUTHORITATIVE registry strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001) ──
 
@@ -2036,6 +2051,7 @@ _OPTION_ROW_KEYS = frozenset(
         "oi_chg",
         "oi_chg_pct",
         "volume",
+        "value_cr",
         "moneyness",
         "moneyness_bucket",
         "atm_offset",
@@ -2096,6 +2112,9 @@ class TestOptionsContiguityGoldens:
             "oi_chg": 100,
             "oi_chg_pct": str((Decimal(1100) - Decimal(1000)) / Decimal(1000) * 100),
             "volume": 500,
+            # HLC3 turnover in ₹ crore (2dp; DEC-MOVERS-VWAP-VALUE-001): bar 150×100 +
+            # 164×400 = 80,600 rupees = 0.00806 crore → 0.01 (ROUND_HALF_UP 2dp).
+            "value_cr": "0.01",
             "moneyness": "?",
             "moneyness_bucket": Moneyness.UNKNOWN.value,
             "atm_offset": None,

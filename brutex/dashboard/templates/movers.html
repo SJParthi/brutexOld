@@ -106,8 +106,11 @@
       <a href="/universe">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers" aria-current="page">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
   </header>
@@ -244,7 +247,7 @@ const ASSETS = {
        session bar; DEC-GREEKS-ENGINE-PR3B-001 over the Phase-2b store) — full-precision
        floats in the payload, 4dp DISPLAY-only ("num4"); null (legacy pre-Greeks
        partition / stamped-NA bar) renders "—", never a fabricated Greek. */
-    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Value (Cr)","value_cr","num"],["Volume","volume","int"]],
   },
 };
 /* Lake interval label → bar minutes for ALL 21 Track-1 timeframes — mirrors
