@@ -849,6 +849,32 @@ def test_hilo_boundary_exactly_max_ratio_high_is_bad() -> None:
     assert _hilo_mask(rows) == [True, True, True, False]
 
 
+def test_hilo_boundary_exactly_inverse_max_ratio_low_is_bad() -> None:
+    # The LOW twin of the exact-boundary pin (round-4 fix-forward NIT): a low
+    # EXACTLY 1/4 the reference is bad — the `value * max_ratio <= reference`
+    # arm of `is_bad_tick` via the lows sequence, boundary-inclusive like the
+    # high arm.
+    rows = [
+        _healthy(_D1, 100.0),
+        _healthy(_D1, 100.0),
+        _healthy(_D1, 100.0),
+        (_D1, 101.0, 102.0, 25.0),  # low == baseline(100) / 4 exactly
+    ]
+    assert _hilo_mask(rows) == [True, True, True, False]
+
+
+def test_hilo_boundary_just_inside_inverse_max_ratio_low_is_kept() -> None:
+    # The strictly-inside twin: a low a hair ABOVE reference/4 is kept —
+    # pins the boundary direction (bad AT the boundary, good inside it).
+    rows = [
+        _healthy(_D1, 100.0),
+        _healthy(_D1, 100.0),
+        _healthy(_D1, 100.0),
+        (_D1, 101.0, 102.0, 25.0001),  # low just inside baseline(100) / 4
+    ]
+    assert _hilo_mask(rows) == [True, True, True, True]
+
+
 def test_hilo_head_bar_judged_against_median() -> None:
     # A head bar with a corrupt high is judged against the head CLOSE median —
     # dropped by the vote while the healthy head bars survive, and the
@@ -1056,7 +1082,9 @@ def test_non_finite_length_mismatch_raises() -> None:
 # Fixer round 1 (DEC-BADTICK-HILO-SCREEN-001 disclosure pins): the #1625
 # "a session can never be emptied by its own head vote" invariant is
 # CLOSE-vote-ONLY — the hi/lo arm judges the median-close bar's OWN high/low,
-# so the median bar can itself drop and a ≤3-bar session whose every head bar
+# so the median bar can itself drop and an EXACTLY-3-bar session (the
+# head-resolving shape; 1-/2-bar sessions are KEPT — the head never resolves)
+# whose every head bar
 # carries an out-of-band high/low is fully EMPTIED (loud: skip WARN with the
 # per-reason breakdown + the majority-dropped WARN with kept=0).
 # ────────────────────────────────────────────────────────────────────────
