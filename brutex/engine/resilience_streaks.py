@@ -1031,7 +1031,9 @@ def render_resilience_line(entry: Mapping[str, object]) -> str:
     OWN length (``worst_streak_len``), never implying the longest run cost the
     worst amount.
     """
-    from brutex.money import format_inr
+    from decimal import Decimal
+
+    from brutex.money import format_inr, round_money
 
     run_id = str(entry["run_id"])
     metrics = entry["metrics"]
@@ -1050,7 +1052,15 @@ def render_resilience_line(entry: Mapping[str, object]) -> str:
     worst_pnl = resilience["worst_streak_pnl_paisa"]
     worst_str = "—" if worst_pnl is None else format_inr(int(worst_pnl))
     pct = resilience["worst_streak_pnl_pct"]
-    pct_str = "—" if pct is None else f"{float(pct):.2f}%"
+    # Display 2dp via the ONE COMMON repo display law
+    # ``round_money(Decimal(str(float)))`` — ROUND_HALF_UP on the shortest
+    # round-trip decimal string (DEC-MONEY-2DP-001 / DEC-STORED-DATA-VALIDATION-001),
+    # the EXACT law the JS ``bx-format.js`` ``bxFixed2`` mirrors, so the CLI, the
+    # /strategy panel and /operator render the SAME value identically (a bare
+    # ``f"{pct:.2f}"`` is ROUND_HALF_EVEN on the binary double and diverges by one
+    # last place on the ``x.xx5`` boundary class, e.g. ``-0.015`` → CLI ``-0.01``
+    # vs the dashboards' ``-0.02``).
+    pct_str = "—" if pct is None else f"{round_money(Decimal(str(float(pct)))):.2f}%"
     uw_trades = _dash(resilience["longest_underwater_trades"])
     uw_days = _dash(resilience["longest_underwater_days"])
     underwater_badge = "STILL UNDERWATER" if resilience["still_underwater_at_end"] else "recovered"

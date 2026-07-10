@@ -10,8 +10,14 @@ is ``test_resilience_sidecar``); no mocks of the module under test.
 # pyright: reportPrivateUsage=none
 from __future__ import annotations
 
+import json
+import re
+import shutil
+import subprocess  # nosec B404 — fixed-argv node invocation, test-only
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 
 import pytest
 from brutex.engine.combo_aggregates import _consecutive_runs
@@ -549,6 +555,142 @@ class TestPayloadAndLine:
     def test_line_fail_loud_on_missing_key(self) -> None:
         with pytest.raises(KeyError):
             render_resilience_line({"run_id": "x", "resilience": {"stats_live": False}})
+
+
+# ── CLI ↔ dashboard % rounding-law parity ─────────────────────────────────────
+#
+# The CLI ``render_resilience_line`` and the JS ``/strategy`` panel + ``/operator``
+# rank-1 cell must render ``worst_streak_pnl_pct`` with the SAME 2dp law, so the
+# SAME run reads the SAME %. Both share the ONE repo display law — ROUND_HALF_UP
+# on the shortest round-trip decimal string (DEC-MONEY-2DP-001 /
+# DEC-STORED-DATA-VALIDATION-001): the CLI via ``round_money(Decimal(str(float)))``,
+# the JS via ``bx-format.js`` ``bxFixed2``. A bare ``f"{pct:.2f}"`` is
+# ROUND_HALF_EVEN on the binary double and diverges by one last place on the
+# ``x.xx5`` boundary class (e.g. ``-0.015`` → ``-0.01`` vs the pinned ``-0.02``);
+# these tests pin the WHOLE boundary class so a reversion in EITHER direction
+# fails.
+_STATIC_BX_FORMAT_JS = (
+    Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static" / "bx-format.js"
+)
+_RESILIENCE_SRC = (
+    Path(__file__).resolve().parents[2] / "brutex" / "engine" / "resilience_streaks.py"
+)
+#: Two-decimal quantum for the parity sweep's divergence sanity check.
+_2DP: Decimal = Decimal("0.01")
+
+
+def _cli_pct_token(worst_sum_paisa: int, start_equity_paisa: int) -> tuple[float, str]:
+    """Drive the REAL fold → ``render_resilience_line`` and return
+    ``(pct_float, rendered_pct_string_without_percent)`` for one single-loss run.
+    """
+    trade = _t(worst_sum_paisa, 2024, 1, 1)
+    record = _fold([trade], start=start_equity_paisa)
+    pct = record.worst_streak_pnl_pct
+    assert pct is not None
+    entry = {
+        "run_id": "z" * 20,
+        "metrics": {"max_consecutive_losses": 1},
+        "resilience": resilience_payload(record),
+    }
+    line = render_resilience_line(entry)
+    tokens = [tok for tok in re.findall(r"\(([^()]*)\)", line) if tok.endswith("%")]
+    assert len(tokens) == 1, line
+    return pct, tokens[0].removesuffix("%")
+
+
+class TestCliDashboardPctParity:
+    #: (worst_sum_paisa, start_equity_paisa, expected 2dp ROUND_HALF_UP string).
+    #: Every ``worst_sum`` lands ``pct`` EXACTLY on an ``x.xx5`` half-up boundary
+    #: at these equities — the class where ``:.2f`` (half-even) diverges.
+    #: Expected strings are HAND-COMPUTED (independent of any rounding code).
+    #: The first four rows DIVERGE (old ``:.2f`` reads one last place lower); the
+    #: last three coincide (pinning agreement across the class). Expected strings
+    #: are HAND-COMPUTED ROUND_HALF_UP over the EXACT float ``worst/start*100``.
+    _BOUNDARY: tuple[tuple[int, int, str], ...] = (
+        (-150, 1_000_000, "-0.02"),  # pct -0.015 → HALF_UP -0.02 (old `:.2f` -0.01)
+        (-450, 1_000_000, "-0.05"),  # pct -0.045 → -0.05 (old -0.04)
+        (-750, 1_000_000, "-0.08"),  # pct -0.075 → -0.08 (old -0.07)
+        (-1050, 1_000_000, "-0.11"),  # pct -0.105 → -0.11 (old -0.10)
+        (-15, 100_000, "-0.02"),  # pct -0.015 at a ₹1,000 base → -0.02 (old -0.01)
+        (-1500, 10_000_000, "-0.02"),  # refuter ₹1-lakh repro: -₹15 → -0.02 (old -0.01)
+        (-123450, 1_000_000, "-12.35"),  # pct -12.345 → -12.35 (both laws agree)
+    )
+
+    @pytest.mark.parametrize(("worst_sum", "start", "expected"), _BOUNDARY)
+    def test_cli_pct_boundary_is_round_half_up(
+        self, worst_sum: int, start: int, expected: str
+    ) -> None:
+        """FAILS-BEFORE on the ``f'{pct:.2f}'`` CLI: the rendered % on the
+        ``x.xx5`` boundary class is ROUND_HALF_UP (ties away from zero), matching
+        the dashboards — never the half-even one-last-place-lower reading.
+        """
+        _pct, token = _cli_pct_token(worst_sum, start)
+        assert token == expected
+
+    def test_the_refuter_repro_diverges_from_half_even(self) -> None:
+        """Teeth: the exact refuter repro (-₹15 worst streak on ₹1-lakh equity →
+        pct -0.015%) reads ``-0.02`` on the CLI now, NOT the old ``:.2f`` -0.01.
+        """
+        pct, token = _cli_pct_token(-1500, 10_000_000)
+        assert pct == pytest.approx(-0.015)
+        assert token == "-0.02"  # the pinned dashboard reading
+        assert f"{pct:.2f}" == "-0.01"  # what the OLD CLI code produced (the bug)
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    def test_cli_pct_matches_shipped_bxfixed2_over_a_sweep(self) -> None:
+        """Cross-surface parity: over a RANGE spanning the ``x.xx5`` boundary
+        class AND non-boundary cents, the CLI's rendered % equals the REAL
+        shipped ``bx-format.js`` ``bxFixed2`` on the SAME float. Discriminates
+        half-even/binary (``:.2f``) from half-up/string — a reversion in either
+        direction fails on the boundary rows.
+        """
+        cases: list[tuple[int, int]] = []
+        # ~200 exact x.xx5 boundaries: worst_sum ≡ 50 (mod 100) at ₹10k equity.
+        cases += [(w, 1_000_000) for w in range(-50, -20_050, -100)]
+        # Non-boundary integer cents (worst_sum ≡ 0 mod 100).
+        cases += [(w, 1_000_000) for w in range(-100, -20_000, -100)]
+        # Larger-magnitude boundaries + the ₹1-lakh default-equity repro class.
+        cases += [(w, 10_000_000) for w in range(-1500, -200_000, -1000)]
+        pcts: list[float] = []
+        cli_tokens: list[str] = []
+        for worst_sum, start in cases:
+            pct, token = _cli_pct_token(worst_sum, start)
+            pcts.append(pct)
+            cli_tokens.append(token)
+        script = (
+            f"const {{ bxFixed2 }} = require({json.dumps(str(_STATIC_BX_FORMAT_JS))});"
+            "const values = JSON.parse(process.argv[1]);"
+            "console.log(JSON.stringify(values.map(bxFixed2)));"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script, json.dumps(pcts)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        js_tokens = json.loads(proc.stdout)
+        assert cli_tokens == js_tokens
+        # Sanity: the sweep actually EXERCISED the boundary class (values whose
+        # half-even reading would diverge), else the test is vacuous.
+        diverged = [
+            p
+            for p in pcts
+            if f"{p:.2f}" != str(Decimal(str(p)).quantize(_2DP, rounding=ROUND_HALF_UP))
+        ]
+        assert len(diverged) >= 100
+
+    def test_both_surfaces_share_one_round_half_up_string_law(self) -> None:
+        """Source-level: the CLI and ``bx-format.js`` name the SAME law — the CLI
+        rounds via ``round_money(Decimal(str(float(pct))))`` (``money.round_money``
+        = ROUND_HALF_UP quantize) and ``bxFixed2`` names ROUND_HALF_UP over the
+        shortest decimal string. No surface may re-drift onto ``f'{pct:.2f}'``.
+        """
+        cli_src = _RESILIENCE_SRC.read_text(encoding="utf-8")
+        assert "round_money(Decimal(str(float(pct))))" in cli_src
+        assert "{float(pct):.2f}%" not in cli_src  # the half-even outlier is gone
+        js_src = _STATIC_BX_FORMAT_JS.read_text(encoding="utf-8")
+        assert "ROUND_HALF_UP" in js_src
+        assert "Decimal(str(n))" in js_src  # mirrors the shortest-string law
 
 
 # ── annotation ────────────────────────────────────────────────────────────────
