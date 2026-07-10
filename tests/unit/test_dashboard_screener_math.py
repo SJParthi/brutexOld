@@ -380,3 +380,116 @@ class TestArmRenderString:
         raw = {"rank": 1, "arm": {"sl_paisa": 80, "tp_paisa": 50}}
         out = _node_call('String(S.fieldValue(ARGS[0], "arm"))', json.dumps(raw))
         assert out == "[object Object]"
+
+
+class TestRenderCaps:
+    """A-r4 node goldens (DEC-ONECLICK-PERF-CLUB-001): the cap/note math.
+
+    Fails-before: "Show all" rendered ``sorted.length`` rows UNBOUNDED —
+    Playwright-measured 4.8 s @ 10k / 14.1 s @ 20k rows of tab freeze — and
+    applyFilters/sortRows processed the whole untrusted payload. The caps
+    below bound every work surface with the truncation NAMED, never silent.
+    """
+
+    def test_cap_constants_are_exported_and_ordered(self) -> None:
+        caps = _node_call("[S.RENDER_CAP, S.SHOW_ALL_CAP, S.INPUT_CAP]")
+        assert caps == [200, 1000, 5000]
+        assert caps[0] < caps[1] < caps[2]  # default < show-all < input bound
+
+    @pytest.mark.parametrize(
+        ("sorted_length", "show_all", "expected"),
+        [
+            (100, False, 100),  # the ≤100-row contract renders whole
+            (100, True, 100),
+            (250, False, 200),  # default view caps at RENDER_CAP
+            (250, True, 250),  # show-all serves it in full (under its cap)
+            (20_000, False, 200),
+            (20_000, True, 1000),  # A-r4: Show all is ITSELF bounded
+            (0, False, 0),
+            (0, True, 0),
+        ],
+    )
+    def test_render_count_law(self, sorted_length: int, show_all: bool, expected: int) -> None:
+        out = _node_call(
+            "S.renderCount(ARGS[0], ARGS[1])", json.dumps(sorted_length), json.dumps(show_all)
+        )
+        assert out == expected
+
+    @pytest.mark.parametrize(
+        ("shown", "sorted_length", "show_all", "expected"),
+        [
+            (100, 100, False, ""),  # nothing truncated — no note
+            (1000, 1000, True, ""),
+            (200, 250, False, " (render cap 200 — use Show all)"),
+            (1000, 20_000, True, " (showing first 1000 of 20000 (render cap 1000))"),
+        ],
+    )
+    def test_cap_note_wording_golden(
+        self, shown: int, sorted_length: int, show_all: bool, expected: str
+    ) -> None:
+        out = _node_call(
+            "S.capNote(ARGS[0], ARGS[1], ARGS[2])",
+            json.dumps(shown),
+            json.dumps(sorted_length),
+            json.dumps(show_all),
+        )
+        assert out == expected
+
+    def test_input_cap_rows_passes_contract_payloads_through_untouched(self) -> None:
+        rows = [{"rank": i} for i in range(100)]
+        out = _node_call("S.inputCapRows(ARGS[0])", json.dumps(rows))
+        assert out == {"rows": rows, "dropped": 0}
+
+    def test_input_cap_rows_truncates_and_counts(self) -> None:
+        rows = [{"rank": i} for i in range(5100)]
+        out = _node_call(
+            "(function () { var c = S.inputCapRows(ARGS[0]);"
+            " return [c.rows.length, c.dropped, c.rows[0].rank, c.rows[4999].rank]; })()",
+            json.dumps(rows),
+        )
+        assert out == [5000, 100, 0, 4999]
+
+    def test_input_cap_rows_non_array_reads_empty(self) -> None:
+        out = _node_call("S.inputCapRows(ARGS[0])", json.dumps(None))
+        assert out == {"rows": [], "dropped": 0}
+
+    @pytest.mark.parametrize(
+        ("dropped", "payload_length", "expected"),
+        [
+            (0, 100, ""),
+            (-1, 100, ""),  # defensive — never a negative claim
+            (100, 5100, " (input capped: first 5000 of 5100 payload rows loaded)"),
+        ],
+    )
+    def test_input_cap_note_wording_golden(
+        self, dropped: int, payload_length: int, expected: str
+    ) -> None:
+        # args ride ONE json array — a bare "-1" argv would read as a node flag
+        out = _node_call(
+            "S.inputCapNote(ARGS[0][0], ARGS[0][1])",
+            json.dumps([dropped, payload_length]),
+        )
+        assert out == expected
+
+    def test_sort_rows_is_input_bounded(self) -> None:
+        """A-r4: rows past INPUT_CAP are never sorted (out-of-contract payload).
+
+        The 5010-row array is generated IN node — a >128 KiB argv would trip
+        the kernel's per-arg limit (the point is the bound, not the wire).
+        """
+        out = _node_call(
+            "(function () { var rows = [];"
+            ' for (var i = 0; i < 5010; i++) { rows.push({rank: i, tf: "5m"}); }'
+            ' return S.sortRows(rows, "rank", "num", "asc").length; })()'
+        )
+        assert out == 5000
+
+    def test_apply_filters_is_input_bounded(self) -> None:
+        """A-r4: rows past INPUT_CAP are never examined (bounded filter work)."""
+        out = _node_call(
+            "(function () { var rows = [];"
+            ' for (var i = 0; i < 5010; i++) { rows.push({rank: i, tf: "5m", metrics: {}}); }'
+            " var a = S.applyFilters(rows, {});"
+            " return [a.rows.length, a.null_vix_excluded]; })()"
+        )
+        assert out == [5000, 0]
