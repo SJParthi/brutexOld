@@ -883,10 +883,20 @@ class BackgroundPullJob:
         ``finally`` when the thread actually exits; a wedge that never exits keeps the
         flag held (honest — the zombie still owns the lake; a process restart releases the
         ``flock`` on fd close, and the CRITICAL alert + marker make the wedge LOUD, never
-        silent). The timer keeps polling so a later heartbeat (the greeks/prebuild/movers
-        seams now beat — the false-positive class is closed) fires the recovery edge and
-        :meth:`_on_recovered` clears the marker. Identity-gated: a late edge for a
-        superseded run never marks a newer run.
+        silent). The timer keeps polling so a later heartbeat fires the recovery edge and
+        :meth:`_on_recovered` clears the marker. HONESTY RECONCILE
+        (DEC-HEAL-SCAN-LIVENESS-BEATS-001): the earlier "the greeks/prebuild/movers seams
+        now beat — the false-positive class is closed" claim here was FALSIFIED by
+        production forensics — the L2 post-pull HEAL SCAN (O(files), 36 min over 101,682
+        files) and the synchronous drain-time window-ledger FULL SAVE (a 12.96 s
+        ``save_slow`` over 68,234 rows) emitted ZERO beats, so this edge falsely fired
+        ``stalled_suspect`` for ~27 min on a provably-healthy run. Those two surfaces now
+        beat too (per-target + per-file inside ``lake_heal.heal_after_pull``'s scan +
+        per healed finding; entry/completion beats around
+        ``window_ledger_store.save_window_ledger``). The class is NARROWED, not closed:
+        any FUTURE >timeout silent stage on the worker re-opens it — the safe failure
+        direction stays a loud false SUSPECT, never a masked true stall.
+        Identity-gated: a late edge for a superseded run never marks a newer run.
 
         The whole body is wrapped in its own ``try/except`` (best-effort): an alert or
         progress call that raises is logged + swallowed so it can never kill the daemon
