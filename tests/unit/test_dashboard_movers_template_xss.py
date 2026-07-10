@@ -238,10 +238,14 @@ def test_movers_prevclose_marker_is_appended_before_the_escaped_cell_write() -> 
 
 def test_movers_note_legend_ships_and_stays_textcontent() -> None:
     """The note legend string ships, appended to the stored server note via
-    textContent only (never innerHTML for server strings)."""
+    textContent only (never innerHTML for server strings). The " *" legend
+    carries the one-word REGULAR truth fix + the shape-neutral "possible lake
+    hole" (DEC-PREVSESSION-MUHURAT-COHERENCE-001 — no unconditional re-pull
+    imperative: the hole may be a stray bar instead)."""
     html = _render_movers_html()
     assert (
-        " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)"
+        " · * baseline is not the immediately-preceding REGULAR NSE session "
+        "(nearest-prior shown — possible lake hole)"
     ) in html
     # The legend rides the ONE noteText textContent write, gated on a rendered
     # row carrying a strictly-false flag.
@@ -266,6 +270,50 @@ def test_movers_legend_helper_recomputes_from_current_rows() -> None:
     assert '$("noteText").textContent = (note||"")' in html
     # No stray innerHTML write of the note anywhere (re-pinned defensively).
     assert '$("noteText").innerHTML' not in html
+
+
+# ── Muhurat baseline marker + legend (DEC-PREVSESSION-MUHURAT-COHERENCE-001) ──
+
+
+def test_movers_muhurat_marker_appends_dagger_on_strictly_true() -> None:
+    """Both ' †' appends ship, each gated STRICTLY `=== true` on the
+    EMIT-ON-TRUE muhurat keys, pre-esc like the ' *' marker — and the ' *'
+    appends stay byte-intact beside them (a genuine hole still marks ' *')."""
+    html = _render_movers_html()
+    assert (
+        'if ((field==="change"||field==="pct_change") && row.prev_close_muhurat === true'
+        ' && v!=="—" && v!=="?") v += " †";'
+    ) in html
+    assert (
+        'if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_muhurat === true'
+        ' && v!=="—" && v!=="?") v += " †";'
+    ) in html
+    # The ' *' hole markers survive UNCHANGED beside the new ' †' markers.
+    assert (
+        'if ((field==="change"||field==="pct_change") && row.prev_close_contiguous === false'
+        ' && v!=="—" && v!=="?") v += " *";'
+    ) in html
+    # Pre-esc placement: both muhurat appends occur BEFORE the single escaped
+    # cell interpolation (the ' *' precedent — the marker rides esc(v)).
+    cell_write = '<td class="${cls}">${esc(v)}</td>'
+    assert html.index("row.prev_close_muhurat === true") < html.index(cell_write)
+    assert html.index("row.oi_baseline_muhurat === true") < html.index(cell_write)
+
+
+def test_movers_muhurat_legend_ships_beside_the_hole_legend() -> None:
+    """The ' †' legend line ships (recomputed from rowsData on the EMIT-ON-TRUE
+    keys, strict `=== true`) and names the two-law design — the Muhurat close
+    is a real session the lake legitimately carries, while engine day-anchors
+    deliberately use the prior regular session."""
+    html = _render_movers_html()
+    assert (
+        " · † baseline is the Diwali Muhurat session close (a real NSE session the lake "
+        "legitimately carries; engine day-anchors deliberately use the prior regular session)"
+    ) in html
+    assert (
+        "const muhuratBaseline = rowsData.some(r => r && "
+        "(r.prev_close_muhurat === true || r.oi_baseline_muhurat === true));"
+    ) in html
 
 
 def test_movers_legend_helper_called_from_both_load_and_applycategory() -> None:

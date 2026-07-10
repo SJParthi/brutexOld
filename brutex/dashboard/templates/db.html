@@ -1458,8 +1458,15 @@ function candleGridHtml(body, err, notice) {
       : '<div class="empty">' + esc(notice.text) + '</div>';
   }
   const stepNote = body.strike_step_confidence === "observed"
-    ? '<div class="stepnote">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
+    ? '<div class="stepnote stepnote-strike">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
     : "";
+  /* STATIC display-law footnote (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the /db
+     derived %-change baseline is the nearest STORED prior bar — including a Diwali
+     Muhurat session's close, a real NSE session the lake legitimately carries —
+     while the engine's day anchors deliberately use the prior REGULAR session
+     (#1616). Template-only honesty text, zero payload/backend change; a per-row
+     Muhurat marker is the named follow-up DEC-DB-MUHURAT-PREVCLOSE-MARK-001. */
+  const prevAnchorNote = '<div class="stepnote">%CHNG anchors on the nearest stored prior bar (including a Diwali Muhurat session\'s close).</div>';
   /* Prev-close contiguity legend (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001, the /db
      twin of the /movers #1539 legend): only when THIS page actually has a bridged
      baseline — computed from the CURRENT rows so a paging click drops/adds it
@@ -1467,7 +1474,7 @@ function candleGridHtml(body, err, notice) {
   const contigNote = candleHasNoncontiguousRow(body)
     ? '<div class="contignote">* previous close is NOT the immediately-preceding NSE session (a lake hole was bridged; nearest-prior shown) — the %-change is marked, not changed.</div>'
     : "";
-  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote + contigNote;
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote + contigNote + prevAnchorNote;
 }
 
 /* True when a candle page carries at least one row whose prev-close baseline
@@ -1541,13 +1548,19 @@ function updateCandleGrid(body, err) {
   grid.classList.remove("is-loading");
   /* The honesty step-note (DEC-MONEYNESS-REGISTRY-STEP-001) renders OUTSIDE the
      table, so the tbody-only patch also requires its presence to be unchanged —
-     a confidence flip falls back to the full rebuild, never a stale note. */
+     a confidence flip falls back to the full rebuild, never a stale note. The
+     gate keys on the DISCRIMINATOR class .stepnote-strike, NOT the shared
+     .stepnote styling class: the STATIC prev-close anchor footnote
+     (DEC-PREVSESSION-MUHURAT-COHERENCE-001) also carries .stepnote and is
+     ALWAYS present, so gating on .stepnote would force a full grid rebuild on
+     every paging click (the browser-truth DOM-identity pin caught exactly
+     that regression). */
   const wantNote = !!(body && body.strike_step_confidence === "observed");
   /* The contiguity legend also renders OUTSIDE the tbody, so a change in its
      presence across pages must fall back to a full rebuild — else a paging click
      would leave a stale " *" legend (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001). */
   const wantContig = candleHasNoncontiguousRow(body);
-  const patched = !err && !!body && wantNote === !!grid.querySelector(".stepnote")
+  const patched = !err && !!body && wantNote === !!grid.querySelector(".stepnote-strike")
     && wantContig === !!grid.querySelector(".contignote")
     && patchGridRows(grid, body.columns || [], body.rows || [],
       Number(body.total || 0), Number(body.offset || 0));
