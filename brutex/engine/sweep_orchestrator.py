@@ -65,7 +65,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import blake3
 import structlog
@@ -87,8 +87,9 @@ from brutex.strategies.types import (
     PriceSource,
     PriceSourceCell,
     Side,
+    price_source_params_fragment,
 )
-from brutex.universe import is_engine_sweep_symbol
+from brutex.universe import is_engine_spot_symbol, is_engine_sweep_symbol
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -344,6 +345,30 @@ class SweepGridConfig:
             raise ValueError(
                 "SweepGridConfig.directions must not contain Side.HOLD "
                 "(a sweep backtests a directional edge)"
+            )
+        # VWAP-source-on-spot advisory (DEC-NIFTY-PRICE-SOURCE-AXIS-001): a spot
+        # index carries NO traded volume, so a VWAP-variant cell (vwap_source !=
+        # HLC3) produces meaningless bits 52-53 on it — a likely operator mistake
+        # that would waste a ~2-day run. NON-BLOCKING: warn once, never refuse (the
+        # operator may deliberately probe it; the run still completes).
+        vwap_variant_cells = sorted(
+            {
+                c.vwap_source.value
+                for c in self.price_source_cells
+                if c.vwap_source is not PriceSource.HLC3
+            }
+        )
+        spot_instruments = sorted({s for s in self.instruments if is_engine_spot_symbol(s)})
+        if vwap_variant_cells and spot_instruments:
+            _LOG.warning(
+                "stage1a.vwap_source_on_spot",
+                vwap_variant_sources=vwap_variant_cells,
+                spot_instruments=spot_instruments,
+                detail=(
+                    "VWAP-source cells are meaningless on spot indices (no traded "
+                    "volume → bits 52-53 never fire); they apply only to NIFTY "
+                    "futures — this run will produce junk VWAP bits for these symbols"
+                ),
             )
         for name in ("mode", "data_snapshot_hash", "indicator_version", "code_commit_sha"):
             if not getattr(self, name):
@@ -740,12 +765,14 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     # The swept price-source cell distinguishes the store address
     # (DEC-NIFTY-PRICE-SOURCE-AXIS-001): two tuples differing ONLY by source
     # evaluate DIFFERENT bits 52-53 / 0-5, so they MUST map to different Parquet
-    # files. DEFAULT-OMITTED (Override 1): the keys are absent for the baseline
-    # ``(HLC3, CLOSE)`` cell so an existing tuple's store path is byte-identical.
-    if tuple_.price_source.vwap_source is not PriceSource.HLC3:
-        descriptor["vwap_source"] = tuple_.price_source.vwap_source.value
-    if tuple_.price_source.ema_source is not PriceSource.CLOSE:
-        descriptor["ema_source"] = tuple_.price_source.ema_source.value
+    # files. DEFAULT-OMITTED (Override 1) via the ONE COMMON fragment (CLAUDE.md
+    # §11): the keys are absent for the baseline ``(HLC3, CLOSE)`` cell so an
+    # existing tuple's store path is byte-identical.
+    descriptor.update(
+        price_source_params_fragment(
+            tuple_.price_source.vwap_source, tuple_.price_source.ema_source
+        )
+    )
     canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
     # str(...) keeps this typed str where the blake3 stubs are absent (the
     # isolated pre-commit mypy env — the #575 hook-portability precedent).
@@ -1010,25 +1037,28 @@ def run_sweep_grid(
         f"grid:{len(grid.instruments)}i×{len(grid.timeframes)}tf×"
         f"{len(grid.directions)}d:tuples={total}"
     )
-    audit.append(
-        action=_ACTION_GRID_START,
-        subject=subject,
-        payload={
-            "tuples_total": total,
-            "instruments": list(grid.instruments),
-            "timeframes": [tf.label for tf in grid.timeframes],
-            "directions": [d.value for d in grid.directions],
-            "k_values": list(grid.k_values),
-            "fib_anchors": [a.value for a in grid.fib_anchors],
-            "price_source_cells": [
-                [c.vwap_source.value, c.ema_source.value] for c in grid.price_source_cells
-            ],
-            "mode": grid.mode,
-            "data_snapshot_hash": grid.data_snapshot_hash,
-            "indicator_version": grid.indicator_version,
-            "code_commit_sha": grid.code_commit_sha,
-        },
-    )
+    grid_start_payload: dict[str, Any] = {
+        "tuples_total": total,
+        "instruments": list(grid.instruments),
+        "timeframes": [tf.label for tf in grid.timeframes],
+        "directions": [d.value for d in grid.directions],
+        "k_values": list(grid.k_values),
+        "fib_anchors": [a.value for a in grid.fib_anchors],
+        "mode": grid.mode,
+        "data_snapshot_hash": grid.data_snapshot_hash,
+        "indicator_version": grid.indicator_version,
+        "code_commit_sha": grid.code_commit_sha,
+    }
+    # DEFAULT-OMIT the price-source axis from the audit config line (Override 1) for
+    # symmetry with every identity/store/cache site: a sole-baseline ``(HLC3, CLOSE)``
+    # grid's GRID_SWEEP_START payload stays byte-identical to the pre-axis form. A
+    # non-default axis surfaces the cells (intended observability).
+    price_source_cells = grid.price_source_cells
+    if not (len(price_source_cells) == 1 and price_source_cells[0].is_default):
+        grid_start_payload["price_source_cells"] = [
+            [c.vwap_source.value, c.ema_source.value] for c in price_source_cells
+        ]
+    audit.append(action=_ACTION_GRID_START, subject=subject, payload=grid_start_payload)
 
     tuples_run = 0
     tuples_skipped_no_bars = 0

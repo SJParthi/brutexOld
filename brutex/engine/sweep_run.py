@@ -144,7 +144,12 @@ from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
-from brutex.strategies.types import FibAnchorKind, PriceSource, Side
+from brutex.strategies.types import (
+    FibAnchorKind,
+    PriceSource,
+    Side,
+    price_source_params_fragment,
+)
 from brutex.vocabulary import ProximityParams, has_conflict
 
 if TYPE_CHECKING:
@@ -694,12 +699,9 @@ def canonical_trade_params(
         "fib_anchor": fib_anchor.value,
         "start_equity_paisa": start_equity_paisa,
     }
-    # DEFAULT-OMIT the price-source axis (Override 1): absent ⟺ the (HLC3, CLOSE)
-    # default, so an existing run's identity is byte-identical.
-    if vwap_source is not PriceSource.HLC3:
-        params["vwap_source"] = vwap_source.value
-    if ema_source is not PriceSource.CLOSE:
-        params["ema_source"] = ema_source.value
+    # DEFAULT-OMIT the price-source axis (Override 1) via the ONE COMMON fragment
+    # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical identity.
+    params.update(price_source_params_fragment(vwap_source, ema_source))
     return params
 
 

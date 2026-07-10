@@ -96,11 +96,17 @@ Hlc3  => let s = h_paisa + l_paisa + c_paisa;   // exact i64 add
          let (q, r) = (s / 3, s % 3);           // Euclidean, s >= 0 always
          q + if 2*r >= 3 { 1 } else { 0 }       // ROUND_HALF_UP on thirds
 
-// EMA -> ema_source: f64
-Open  => o_paisa as f64 (via the SAME Decimal->float single conversion as close)
-Close => c_paisa as f64                         // == today's float(bar.close), verbatim
+// EMA -> ema_source: f64 (RUPEES — the Decimal rupee price cast once, NOT paisa)
+Open  => float(bar.open)                         // == today's float(bar.open), verbatim
+Close => float(bar.close)                        // == today's float(bar.close), verbatim
 Hlc3  => float( (H + L + C) / Decimal(3) )       // Decimal-divide THEN one float() cast
 ```
+
+Note the unit split: the **VWAP** arm is int64 **paisa** (2dp-snapped), the
+**EMA** arm is **rupees** (float) — the EMA source is deliberately NOT
+paisa-snapped (today's unsnapped EMA contract; the snap happens once AFTER the
+recurrence via `_ema_to_paisa`). A literal Rust port MUST feed the rupee value
+to the EMA recurrence, never a ×100 paisa integer.
 
 The integer HLC3 form is **provably bit-identical** to Python's
 `int(round_money((H+L+C)/Decimal(3)) * 100)`: at the paisa scale the remainder
@@ -127,3 +133,30 @@ For EMA HLC3, mirror Decimal-divide-**then**-one-`float()`, **not**
 - **`comparison_price_source`** (sweeping the reference line too) is a **named,
   explicitly-not-shipped** future third axis — see
   `brutex/engine/stage1a.py` §2.4 rationale.
+
+## Honest limits (Golden Rule #10)
+
+- **Stage-3 refinement + verify thread the source (COMPLETE).** A persisted
+  `ResultRow` carries neither the swept `fib_anchor` nor the `(vwap, ema)` source
+  as a column, so `stage3_wire.recover_survivor_cell` re-derives BOTH by matching
+  the row's `run_id` against the grid's `sl × tp × proximity × fib_anchor ×
+  price_source_cells` product, then refines / re-hashes / records the survivor
+  against ITS OWN source bits. The Stage-3 manifest (`Stage3CellRecord`) and the
+  `sweep-verify` reconstruction round-trip the source (additive, default-omitted),
+  so a non-default cell verifies at its originating bits — never a silent
+  `(HLC3, CLOSE)` fallback (before this was fixed, a non-default cell + Stage-3
+  aborted with `Stage3WireError`).
+- **Options-translation replay is BASELINE-SOURCE ONLY.**
+  `cli._replay_spot_signals_for_row` rebuilds `bar_bits` at the default
+  `fib_anchor` (prev-day) + price source `(HLC3, CLOSE)` because a `ResultRow`
+  carries neither as a column. A survivor swept under a non-default `fib_anchor`
+  or price-source cell therefore replays its options translation with the wrong
+  Group-4 / VWAP-EMA bits. This is a **pre-existing** limitation (equally true for
+  `fib_anchor` since #1011); closing it requires `ResultRow` to carry the axis
+  coordinates. Out of scope for this axis.
+- **VWAP-on-spot is documented, not hard-enforced.** A VWAP-variant cell
+  (`vwap_source != HLC3`) on a non-NIFTY-futures / engine-spot instrument produces
+  meaningless bits 52-53 (a spot index carries no traded volume). This is surfaced
+  as a **non-blocking `stage1a.vwap_source_on_spot` WARNING** at grid-config
+  validation (so an operator does not waste a ~2-day run on junk bits) — it is NOT
+  a refusal: the run still completes, and the operator may deliberately probe it.

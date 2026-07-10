@@ -100,6 +100,51 @@ class PriceSourceCell:
     vwap_source: PriceSource = PriceSource.HLC3
     ema_source: PriceSource = PriceSource.CLOSE
 
+    @property
+    def is_default(self) -> bool:
+        """Whether this cell is the baseline ``(HLC3, CLOSE)`` (the default-omit gate).
+
+        The ONE predicate (CLAUDE.md §11 COMMON) every canonicaliser / identity /
+        cache / manifest site consults to decide the default-omit (Override 1): a
+        default cell serialises ABSENT so pre-axis run-identities stay byte-identical.
+        """
+        return self.vwap_source is PriceSource.HLC3 and self.ema_source is PriceSource.CLOSE
+
+
+def price_source_params_fragment(
+    vwap_source: PriceSource, ema_source: PriceSource
+) -> dict[str, str]:
+    """Return the default-OMITTED params fragment for one ``(vwap, ema)`` pair.
+
+    The ONE source of the price-source default-omit rule (CLAUDE.md §11 COMMON,
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override 1): the ``vwap_source`` key is emitted
+    only when it is NOT the default :attr:`PriceSource.HLC3`, and ``ema_source``
+    only when it is NOT :attr:`PriceSource.CLOSE` — each key INDEPENDENTLY. Both
+    default ⇒ an empty dict, so an existing run's canonical params / store address /
+    cache key / manifest entry is byte-identical to the pre-axis form. Every
+    canonicaliser (:func:`~brutex.engine.sweep_run.canonical_trade_params`,
+    :func:`~brutex.strategies.spec.canonical_spec_params`, the orchestrator store
+    digest, the supervisor cache key, the cascade spec dict, the Stage-3 manifest)
+    merges this fragment instead of re-inlining the predicate.
+
+    Parameters
+    ----------
+    vwap_source, ema_source
+        The cell's VWAP / EMA price scalars.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{}`` when both are default, else the non-default key(s) mapped to their
+        :class:`PriceSource` string values.
+    """
+    fragment: dict[str, str] = {}
+    if vwap_source is not PriceSource.HLC3:
+        fragment["vwap_source"] = vwap_source.value
+    if ema_source is not PriceSource.CLOSE:
+        fragment["ema_source"] = ema_source.value
+    return fragment
+
 
 #: The one baseline cell — today's hardcoded ``(HLC3, CLOSE)`` behaviour. The
 #: default price-source axis for every grid; a grid carrying only this cell is

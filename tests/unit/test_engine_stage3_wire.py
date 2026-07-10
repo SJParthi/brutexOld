@@ -68,7 +68,13 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluation
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import (
+    DEFAULT_PRICE_SOURCE_CELL,
+    FibAnchorKind,
+    PriceSource,
+    PriceSourceCell,
+    Side,
+)
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -372,6 +378,7 @@ def _run_id_for(
     tp: int | None,
     mask: int = 0,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    price_source: PriceSourceCell = DEFAULT_PRICE_SOURCE_CELL,
 ) -> str:
     return mask_run_id(
         mask=mask,
@@ -386,6 +393,8 @@ def _run_id_for(
             proximity=None,
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
+            vwap_source=price_source.vwap_source,
+            ema_source=price_source.ema_source,
         ),
         data_snapshot_hash=grid.data_snapshot_hash,
         indicator_version=grid.indicator_version,
@@ -397,13 +406,15 @@ class TestRecoverSurvivorCell:
     def test_recovers_a_non_first_cell_by_identity_match(self) -> None:
         grid = _grid(stop_losses=[80, 100], take_profits=[50, 120])
         run_id = _run_id_for(grid, sl=100, tp=120)
-        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001);
-        # the default prev-day grid recovers PREV_DAY.
+        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001)
+        # AND the price-source cell (DEC-NIFTY-PRICE-SOURCE-AXIS-001); the default
+        # prev-day / (HLC3, CLOSE) grid recovers PREV_DAY + the baseline cell.
         assert recover_survivor_cell(_row_for(run_id), grid) == (
             100,
             120,
             None,
             FibAnchorKind.PREV_DAY,
+            DEFAULT_PRICE_SOURCE_CELL,
         )
 
     def test_recovers_a_non_prev_day_anchor_cell(self) -> None:
@@ -416,10 +427,29 @@ class TestRecoverSurvivorCell:
             50,
             None,
             FibAnchorKind.ROLLING_WEEKLY,
+            DEFAULT_PRICE_SOURCE_CELL,
+        )
+
+    def test_recovers_a_non_default_price_source_cell(self) -> None:
+        # A survivor swept under a NON-default price-source cell recovers THAT cell —
+        # proving the source is part of the identity re-derivation (Golden Rule #4);
+        # the row's run_id ONLY reproduces at its ORIGINATING (vwap, ema) source.
+        non_default = PriceSourceCell(vwap_source=PriceSource.OPEN, ema_source=PriceSource.CLOSE)
+        grid = _grid(price_source_cells=[DEFAULT_PRICE_SOURCE_CELL, non_default])
+        run_id = _run_id_for(grid, sl=80, tp=50, price_source=non_default)
+        assert recover_survivor_cell(_row_for(run_id), grid) == (
+            80,
+            50,
+            None,
+            FibAnchorKind.PREV_DAY,
+            non_default,
         )
 
     def test_unmatchable_row_raises(self) -> None:
-        with pytest.raises(Stage3WireError, match="no \\(sl × tp × proximity × fib_anchor\\) cell"):
+        with pytest.raises(
+            Stage3WireError,
+            match="no \\(sl × tp × proximity × fib_anchor × price_source\\) cell",
+        ):
             recover_survivor_cell(_row_for("ab" * 32), _grid())
 
     def test_matched_cell_with_disabled_sl_leg_raises(self) -> None:
@@ -661,6 +691,99 @@ class TestRunStage3PassFull:
         # Bracketing (F10): nothing STAGE_3 outside START..COMPLETE, and the
         # pass lines appear AFTER the sweep's grid lines (same single thread).
         assert actions.index(STAGE3_ACTION_PASS_START) > actions.index("GRID_SWEEP_COMPLETE")
+
+
+# ────── non-default price-source cell threading (DEC-NIFTY-PRICE-SOURCE-AXIS-001) ──────
+
+
+class TestStage3NonDefaultPriceSource:
+    """MAJOR-1 regression: a non-default price-source cell + Stage-3 COMPLETES.
+
+    Before the fix, ``recover_survivor_cell`` iterated ``sl × tp × proximity ×
+    fib_anchor`` only and always hashed the DEFAULT ``(HLC3, CLOSE)`` source, so a
+    survivor swept under e.g. ``open:close`` never matched its own ``run_id`` and
+    the whole staged use case aborted with ``Stage3WireError``. These tests pin
+    that the pass now completes AND refines against the ORIGINATING source bits.
+    """
+
+    _CELL = PriceSourceCell(vwap_source=PriceSource.OPEN, ema_source=PriceSource.CLOSE)
+
+    def test_full_pass_completes_and_refines_against_the_swept_source(self, tmp_path: Path) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        # Would raise Stage3WireError pre-fix; now the pass runs end-to-end.
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        assert report.enabled is True
+        assert report.masks_refined >= 1
+        assert report.cells
+        # Every refined cell carries the ORIGINATING non-default source (never a
+        # silent (HLC3, CLOSE) fallback).
+        for cell in report.cells:
+            assert cell.tuple_.price_source == self._CELL
+
+    def test_refined_row_identity_re_derives_with_the_non_default_source(
+        self, tmp_path: Path
+    ) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        assert report.train_snapshot_hash is not None
+        cell = report.cells[0]
+        row = ResultsStore.load(cell.path).rows()[0]
+        # The stored run_id ONLY reproduces when canonical_trade_params is fed the
+        # cell's OWN (vwap, ema) source — the correctness teeth for the thread.
+        expected = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=canonical_trade_params(
+                sl_paisa=cell.tuple_.sl_paisa,
+                tp_paisa=cell.tuple_.tp_paisa,
+                prior_n=grid.prior_n,
+                proximity=cell.tuple_.proximity,
+                start_equity_paisa=grid.start_equity_paisa,
+                vwap_source=self._CELL.vwap_source,
+                ema_source=self._CELL.ema_source,
+            ),
+            data_snapshot_hash=report.train_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        assert row.run_id == expected
+        # And it does NOT reproduce at the default source (the false-green a
+        # missing thread would have produced).
+        wrong = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=canonical_trade_params(
+                sl_paisa=cell.tuple_.sl_paisa,
+                tp_paisa=cell.tuple_.tp_paisa,
+                prior_n=grid.prior_n,
+                proximity=cell.tuple_.proximity,
+                start_equity_paisa=grid.start_equity_paisa,
+            ),
+            data_snapshot_hash=report.train_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        assert row.run_id != wrong
+
+    def test_manifest_record_and_cascade_specs_carry_the_source(self, tmp_path: Path) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        record = stage3_manifest_record(report)
+        assert record.refined_cells
+        for rec in record.refined_cells:
+            assert rec.vwap_source is self._CELL.vwap_source
+            assert rec.ema_source is self._CELL.ema_source
+        specs = cascade_specs_for_refined_cells(report.cells, grid=grid)
+        assert specs
+        for spec in specs:
+            assert spec.vwap_source is self._CELL.vwap_source
+            assert spec.ema_source is self._CELL.ema_source
 
 
 # ────── the A/B determinism oracle (review F11) + idempotent re-run ──────

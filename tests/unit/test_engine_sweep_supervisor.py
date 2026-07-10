@@ -71,7 +71,7 @@ from brutex.engine.sweep_supervisor import (
 )
 from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.orchestrator.audit import AuditWriter
-from brutex.strategies.types import Side
+from brutex.strategies.types import PriceSource, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
 from hypothesis import assume, given
 from hypothesis import strategies as st
@@ -179,6 +179,19 @@ class TestIdentity:
 
     def test_grid_identity_differs_with_top_k(self) -> None:
         assert grid_identity(_grid(top_k=5)) != grid_identity(_grid(top_k=9))
+
+    def test_grid_identity_differs_with_non_default_price_source(self) -> None:
+        """The non-default price-source axis emits its descriptor key + re-keys the grid.
+
+        A sole-baseline ``(HLC3, CLOSE)`` axis omits the ``price_source_cells`` key
+        (byte-identical to the pre-axis grid); a non-default axis emits it, so an
+        expanded grid can never silently resume a baseline checkpoint's work.
+        """
+        g_default = _grid()
+        g_non_default = _grid(
+            price_source_cells=[PriceSourceCell(PriceSource.OPEN, PriceSource.CLOSE)]
+        )
+        assert grid_identity(g_default) != grid_identity(g_non_default)
 
     def test_tuple_cache_key_is_32_bytes(self) -> None:
         grid = _grid()

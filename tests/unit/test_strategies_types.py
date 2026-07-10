@@ -14,6 +14,7 @@ from brutex.strategies.types import (
     Signal,
     StrategyState,
     parse_price_source_cells,
+    price_source_params_fragment,
 )
 
 
@@ -135,6 +136,37 @@ class TestPriceSource:
         cell = PriceSourceCell()
         with pytest.raises((AttributeError, TypeError)):
             cell.vwap_source = PriceSource.OPEN  # type: ignore[misc]
+
+    def test_is_default_true_only_for_hlc3_close(self) -> None:
+        assert PriceSourceCell().is_default is True
+        assert PriceSourceCell(PriceSource.HLC3, PriceSource.CLOSE).is_default is True
+        # Any non-default component flips it False (each arm independently).
+        assert PriceSourceCell(PriceSource.OPEN, PriceSource.CLOSE).is_default is False
+        assert PriceSourceCell(PriceSource.HLC3, PriceSource.OPEN).is_default is False
+        assert PriceSourceCell(PriceSource.OPEN, PriceSource.HLC3).is_default is False
+
+
+class TestPriceSourceParamsFragment:
+    """The ONE COMMON default-omit fragment (CLAUDE.md §11, MAJOR-2)."""
+
+    def test_both_default_yields_empty(self) -> None:
+        assert price_source_params_fragment(PriceSource.HLC3, PriceSource.CLOSE) == {}
+
+    def test_non_default_vwap_only(self) -> None:
+        assert price_source_params_fragment(PriceSource.OPEN, PriceSource.CLOSE) == {
+            "vwap_source": "open"
+        }
+
+    def test_non_default_ema_only(self) -> None:
+        assert price_source_params_fragment(PriceSource.HLC3, PriceSource.OPEN) == {
+            "ema_source": "open"
+        }
+
+    def test_both_non_default(self) -> None:
+        assert price_source_params_fragment(PriceSource.LOW, PriceSource.HIGH) == {
+            "vwap_source": "low",
+            "ema_source": "high",
+        }
 
 
 class TestParsePriceSourceCells:

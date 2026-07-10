@@ -106,7 +106,7 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
 from brutex.engine.sweep_run import SweepComboError, _direction_label
 from brutex.engine.sweep_watchdog import SweepWatchdog
-from brutex.strategies.types import PriceSource
+from brutex.strategies.types import price_source_params_fragment
 
 if TYPE_CHECKING:
     # Annotation-only — keep the `fastbloom_rs` / `lmdb` PyO3 wheels (pulled by
@@ -294,11 +294,10 @@ def _price_source_cells_are_default(grid: SweepGridConfig) -> bool:
     for the grid identity + the tuple cache key.
     """
     cells = grid.price_source_cells
-    return (
-        len(cells) == 1
-        and cells[0].vwap_source is PriceSource.HLC3
-        and cells[0].ema_source is PriceSource.CLOSE
-    )
+    # Delegate the per-cell default predicate to the ONE COMMON source of truth
+    # (``PriceSourceCell.is_default``, CLAUDE.md §11) — this fn only adds the
+    # sole-cell (cardinality-1) requirement on top.
+    return len(cells) == 1 and cells[0].is_default
 
 
 def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
@@ -429,12 +428,13 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
     # (DEC-NIFTY-PRICE-SOURCE-AXIS-001): two tuples differing ONLY by source
     # evaluate DIFFERENT bits 52-53 / 0-5, so a cache-skip keyed without it would
     # FALSELY skip the second cell as already-done (the same P0-1 class as the Fib
-    # anchor above). DEFAULT-OMITTED (Override 1): absent ⟺ the (HLC3, CLOSE)
-    # default, so a baseline tuple's cache key is byte-identical to the pre-axis key.
-    if tuple_.price_source.vwap_source is not PriceSource.HLC3:
-        params["vwap_source"] = tuple_.price_source.vwap_source.value
-    if tuple_.price_source.ema_source is not PriceSource.CLOSE:
-        params["ema_source"] = tuple_.price_source.ema_source.value
+    # anchor above). DEFAULT-OMITTED (Override 1) via the ONE COMMON fragment
+    # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical cache key.
+    params.update(
+        price_source_params_fragment(
+            tuple_.price_source.vwap_source, tuple_.price_source.ema_source
+        )
+    )
     return params
 
 

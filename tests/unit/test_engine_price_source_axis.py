@@ -144,6 +144,21 @@ _GOLDEN_BAR = CandleBar(
     open_interest=None,
 )
 
+#: A VALID (L ≤ O,C ≤ H) 2dp bar on which the two EMA-HLC3 float forms DIVERGE in
+#: the last ULP: ``float((H+L+C)/Decimal(3)) == 13999.993333333334`` but
+#: ``(float(H)+float(L)+float(C))/3.0 == 13999.993333333332``. Used by NIT-1's
+#: teeth so a regression to float-add-then-divide is DETECTABLE (the golden bar
+#: above coincides for both forms and could not catch it).
+_HLC3_DIVERGING_BAR = CandleBar(
+    timestamp=datetime(2026, 1, 5, 9, 17, tzinfo=UTC),
+    open=Decimal("14000.00"),
+    high=Decimal("14000.00"),
+    low=Decimal("13999.98"),
+    close=Decimal("14000.00"),
+    volume=100,
+    open_interest=None,
+)
+
 
 # ─────────────────────────── enum + cell + parser ───────────────────────────
 
@@ -262,10 +277,26 @@ class TestReductionBitIdentity:
         assert _reduce_ema_source_float(PriceSource.CLOSE, _GOLDEN_BAR) == float(_GOLDEN_BAR.close)
 
     def test_ema_hlc3_is_decimal_divide_then_one_cast(self) -> None:
-        # Decimal-divide THEN one float() cast — NOT float-add-then-divide.
-        assert _reduce_ema_source_float(PriceSource.HLC3, _GOLDEN_BAR) == float(
-            (_GOLDEN_BAR.high + _GOLDEN_BAR.low + _GOLDEN_BAR.close) / _HLC3_DIVISOR
+        # DIVERGING-bar teeth (NIT-1): on _HLC3_DIVERGING_BAR the two forms differ
+        # in the last ULP, so this pins the impl at the Decimal-divide-THEN-one-cast
+        # value AND asserts it is NOT the float-add-then-divide form — a regression
+        # to ``(f64(H)+f64(L)+f64(C))/3.0`` would now be CAUGHT (the old golden bar
+        # coincided for both forms, so it could not detect that regression).
+        high, low, close = (
+            _HLC3_DIVERGING_BAR.high,
+            _HLC3_DIVERGING_BAR.low,
+            _HLC3_DIVERGING_BAR.close,
         )
+        decimal_divide_then_cast = float((high + low + close) / _HLC3_DIVISOR)
+        float_add_then_divide = (float(high) + float(low) + float(close)) / 3.0
+        # The two forms genuinely diverge on this bar (guards against a coinciding
+        # fixture silently re-tautologising the test).
+        assert decimal_divide_then_cast != float_add_then_divide
+        result = _reduce_ema_source_float(PriceSource.HLC3, _HLC3_DIVERGING_BAR)
+        # Exact expected value pin (impl == the Decimal-divide-then-one-cast path).
+        assert result == 13999.993333333334
+        assert result == decimal_divide_then_cast
+        assert result != float_add_then_divide
 
 
 # ─────────────────── Override 1: the decisive default-omit golden ───────────

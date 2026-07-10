@@ -77,7 +77,7 @@ from brutex.engine.tuple_complete import (
     read_completion_sentinel,
 )
 from brutex.models import BruteXError
-from brutex.strategies.types import Side
+from brutex.strategies.types import PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
 if TYPE_CHECKING:
@@ -505,6 +505,10 @@ def plan_expected_stores(
             # from the manifest so the reconstructed tuple's run_id re-derives at
             # its ORIGINATING anchor (a non-prev-day cell would otherwise mismatch).
             fib_anchor=cell.fib_anchor,
+            # The refined cell's VWAP/EMA price source (DEC-NIFTY-PRICE-SOURCE-AXIS-001)
+            # — round-tripped so the reconstructed tuple's run_id re-derives at its
+            # ORIGINATING source bits (a non-default cell would otherwise mismatch).
+            price_source=PriceSourceCell(vwap_source=cell.vwap_source, ema_source=cell.ema_source),
         )
         plan[tuple_store_path(root, cell_tuple, train_grid)] = (cell_tuple, train_grid, False)
     return plan

@@ -59,7 +59,11 @@ import trading_core
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.errors import StrategyError
 from brutex.strategies.fib_definitions import Direction
-from brutex.strategies.types import FibAnchorKind, PriceSource
+from brutex.strategies.types import (
+    FibAnchorKind,
+    PriceSource,
+    price_source_params_fragment,
+)
 from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -433,12 +437,9 @@ def canonical_spec_params(
         "start_equity_paisa": start_equity_paisa,
         "fib_anchor": fib_anchor.value,
     }
-    # DEFAULT-OMIT the price-source axis (Override 1): absent ⟺ the (HLC3, CLOSE)
-    # default, so an existing spec run's identity is byte-identical.
-    if vwap_source is not PriceSource.HLC3:
-        params["vwap_source"] = vwap_source.value
-    if ema_source is not PriceSource.CLOSE:
-        params["ema_source"] = ema_source.value
+    # DEFAULT-OMIT the price-source axis (Override 1) via the ONE COMMON fragment
+    # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical identity.
+    params.update(price_source_params_fragment(vwap_source, ema_source))
     return params
 
 

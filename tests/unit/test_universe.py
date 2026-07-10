@@ -33,6 +33,7 @@ from brutex.universe import (
     classify_underlying_kind,
     derive_lake_underlyings,
     diagnose_unmatched_option_underlyings,
+    is_engine_spot_symbol,
     is_engine_sweep_symbol,
     is_in_brute_force_scope,
     is_in_fetch_scope,
@@ -996,6 +997,28 @@ class TestIsEngineSweepSymbol:
     )
     def test_everything_else_refused(self, symbol: str) -> None:
         assert is_engine_sweep_symbol(symbol) is False
+
+
+class TestIsEngineSpotSymbol:
+    """The spot-index tier (VWAP-source-on-spot advisory, DEC-NIFTY-PRICE-SOURCE-AXIS-001)."""
+
+    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX"])
+    def test_the_three_spot_indexes_are_spot(self, symbol: str) -> None:
+        assert is_engine_spot_symbol(symbol) is True
+
+    @pytest.mark.parametrize(
+        "symbol",
+        [
+            "NIFTY-FUT-2026-07-30",  # NIFTY futures — engine-sweepable but NOT spot
+            "NSE-NIFTY-30Jul26-FUT",  # lake futures shape — carries volume
+            "INDIAVIX",  # REFERENCE_ONLY
+            "RELIANCE",  # F&O stock
+            "nifty",  # case-exact
+            "",
+        ],
+    )
+    def test_non_spot_symbols_are_not_spot(self, symbol: str) -> None:
+        assert is_engine_spot_symbol(symbol) is False
 
 
 class TestClassifyEngineSweepTarget:

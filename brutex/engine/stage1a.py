@@ -73,7 +73,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 import fno_math
 import structlog
@@ -348,18 +348,24 @@ def _reduce_vwap_source_paisa(
     ``/2`` and ``/4`` CAN tie at ½ paisa → ROUND_HALF_UP becomes load-bearing;
     add a golden then.)
     """
-    if source is PriceSource.OPEN:
-        return open_paisa
-    if source is PriceSource.HIGH:
-        return high_paisa
-    if source is PriceSource.LOW:
-        return low_paisa
-    if source is PriceSource.CLOSE:
-        return close_paisa
-    # HLC3 — the only remaining member (the enum is closed at 5; ``hl2``/``ohlc4``
-    # are deliberately absent and pinned by a membership test). VERBATIM the
-    # pre-axis line so the (HLC3, CLOSE) baseline is byte-identical.
-    return _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+    match source:
+        case PriceSource.OPEN:
+            return open_paisa
+        case PriceSource.HIGH:
+            return high_paisa
+        case PriceSource.LOW:
+            return low_paisa
+        case PriceSource.CLOSE:
+            return close_paisa
+        case PriceSource.HLC3:
+            # VERBATIM the pre-axis line so the (HLC3, CLOSE) baseline is
+            # byte-identical (Override 1 / the golden).
+            return _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        case _:  # pragma: no cover — mypy-exhaustive over the closed 5-member enum
+            # A future enum member (hl2/ohlc4/…) added WITHOUT a reduction arm fails
+            # LOUDLY here (mypy errors at type-check time; this never silently
+            # computes HLC3). Unreachable by construction, hence the pragma.
+            assert_never(source)
 
 
 def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
@@ -372,30 +378,41 @@ def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
     deliberately NOT paisa-snapped (preserving today's unsnapped EMA contract —
     the snap happens once AFTER the recurrence via :func:`_ema_to_paisa`). O(1).
 
-    RUST-OWNER INTERFACE CONTRACT (see :func:`_reduce_vwap_source_paisa`)::
+    RUST-OWNER INTERFACE CONTRACT (see :func:`_reduce_vwap_source_paisa`). NOTE
+    the EMA source is in RUPEES (float), NOT paisa — unlike the VWAP contract
+    above: the EMA arm feeds ``float(bar.<field>)`` (the Decimal rupee price cast
+    to f64 once), deliberately NOT paisa-snapped (today's unsnapped EMA contract).
+    A literal Rust port MUST feed the rupee value, never a ×100 paisa integer::
 
-        // EMA -> ema_source: f64
-        Open  => o_paisa as f64 (via the SAME Decimal->float single conversion as close)
-        Close => c_paisa as f64                       // == today's float(bar.close), verbatim
+        // EMA -> ema_source: f64 (RUPEES — the Decimal rupee price cast once)
+        Open  => float(bar.open)                      // == today's float(bar.open), verbatim
+        Close => float(bar.close)                     // == today's float(bar.close), verbatim
         Hlc3  => float( (H + L + C) / Decimal(3) )     // Decimal-divide THEN one float() cast
 
     CRITICAL: for ``Hlc3`` mirror Python's Decimal-divide-THEN-convert-to-f64-once,
     NOT ``(f64(H)+f64(L)+f64(C))/3.0`` — the two are not IEEE-754-identical. This
     is the one place the Rust owner must ship a golden/property test against
-    Python's ``float((H+L+C)/Decimal(3))`` over a wide paisa corpus. ``Open`` /
-    ``Close`` are exact int→f64 casts (paisa ≪ 2⁵³), trivially identical.
+    Python's ``float((H+L+C)/Decimal(3))`` over a wide rupee-price corpus.
+    ``Open`` / ``Close`` are single Decimal→f64 casts of the rupee price,
+    trivially identical to today's hardcoded ``float(bar.open/close)``.
     """
-    if source is PriceSource.OPEN:
-        return float(bar.open)
-    if source is PriceSource.HIGH:
-        return float(bar.high)
-    if source is PriceSource.LOW:
-        return float(bar.low)
-    if source is PriceSource.CLOSE:
-        return float(bar.close)
-    # HLC3 — the only remaining member (enum closed at 5). Decimal-divide THEN a
-    # single float() cast (never float-add-then-divide — not IEEE-754-identical).
-    return float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+    match source:
+        case PriceSource.OPEN:
+            return float(bar.open)
+        case PriceSource.HIGH:
+            return float(bar.high)
+        case PriceSource.LOW:
+            return float(bar.low)
+        case PriceSource.CLOSE:
+            return float(bar.close)
+        case PriceSource.HLC3:
+            # Decimal-divide THEN a single float() cast (never float-add-then-divide
+            # — not IEEE-754-identical). VERBATIM the pre-axis HLC3 line.
+            return float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        case _:  # pragma: no cover — mypy-exhaustive over the closed 5-member enum
+            # A future enum member added WITHOUT a reduction arm fails LOUDLY here
+            # (mypy errors at type-check time; never silently computes HLC3).
+            assert_never(source)
 
 
 @dataclass

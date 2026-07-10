@@ -387,6 +387,20 @@ def is_engine_sweep_symbol(symbol: str) -> bool:
     )
 
 
+def is_engine_spot_symbol(symbol: str) -> bool:
+    """Return True iff *symbol* is one of the 3 brute-forced SPOT indexes.
+
+    ``NIFTY`` / ``BANKNIFTY`` / ``SENSEX`` (CLAUDE.md §2 Rule 3) — the engine
+    surface that carries NO traded volume, so a session-anchored VWAP is
+    meaningless on it (bits 52-53 never fire). The complement of the
+    NIFTY-futures shape within :func:`is_engine_sweep_symbol`. O(1) (one
+    frozenset probe). Used by the VWAP-source-on-spot advisory
+    (DEC-NIFTY-PRICE-SOURCE-AXIS-001): a VWAP-variant cell on a spot index is a
+    likely operator mistake (a wasted ~2-day run), warned but not refused.
+    """
+    return symbol in _ENGINE_SWEEP_SPOT_SYMBOLS
+
+
 @dataclass(frozen=True, slots=True)
 class EngineSweepVerdict:
     """One symbol's classification under the engine sweep-entry scope law.
@@ -1055,6 +1069,7 @@ __all__ = [
     "classify_underlying_kind",
     "derive_lake_underlyings",
     "diagnose_unmatched_option_underlyings",
+    "is_engine_spot_symbol",
     "is_engine_sweep_symbol",
     "is_in_brute_force_scope",
     "is_in_fetch_scope",

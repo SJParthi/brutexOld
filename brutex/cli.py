@@ -6372,13 +6372,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
     # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
     # axis is dormant at cardinality 1). An unknown token is a clean user error.
-    from brutex.strategies.types import parse_price_source_cells
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
 
     try:
         price_source_cell_list = parse_price_source_cells(price_source_cells)
     except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
         print(
-            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc}",
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
@@ -7534,13 +7536,15 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
     # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
     # axis is dormant at cardinality 1). An unknown token is a clean user error.
-    from brutex.strategies.types import parse_price_source_cells
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
 
     try:
         price_source_cell_list = parse_price_source_cells(price_source_cells)
     except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
         print(
-            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc}",
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
@@ -8387,6 +8391,15 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
 
     if not bars:
         return []
+    # HONEST-LIMITS (DEC-NIFTY-PRICE-SOURCE-AXIS-001 / DEC-NIFTY-FIB-AXIS-001): the
+    # bar_bits here are rebuilt at the BASELINE fib_anchor (prev-day) + price source
+    # (HLC3, CLOSE) because a persisted ResultRow carries neither the fib_anchor nor
+    # the (vwap, ema) source as a column. So this options-translation replay is
+    # BASELINE-SOURCE ONLY: a survivor swept under a non-default fib_anchor or
+    # price-source cell replays here with the wrong Group-4 / VWAP-EMA bits. This is
+    # a PRE-EXISTING limitation (equally true for fib_anchor since #1011) — threading
+    # the source in would require ResultRow to carry it; documented in
+    # docs/price_source_sweep_axis.md ("options-translation replay is baseline-only").
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
     trades = simulate_trades(bars, entry_signals, direction=side, tf_minutes=tf_minutes)
