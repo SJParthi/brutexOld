@@ -305,9 +305,19 @@ jobs:
     # an honest hang guard with headroom over the observed ~75m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60->75 ratchet.
-    # MERGE UNION (2026-07-10, PR #1274 origin/main absorb): main raised
-    # 75 -> 90 concurrently with this branch's 75 -> 120 -> 150 ratchet;
-    # union-resolved to 150 = the higher of the two concurrent raises
+    # 75 -> 90 (2026-07-09, run 29006226255, landed on main via #1355):
+    # cancelled at 75m15s MID the doctor.py auto-discovery touched-module
+    # gate with EVERY executed gate green at 100.00% (whole-package + strict
+    # per-module steps SUCCESS, the cli.py + lake_invariants.py discovery
+    # gates both 100%): pure wall-time growth — main #1275
+    # (DEC-SWEEP-RESULTS-DEPTH-001) added ~12 new per-module gates + PACK1
+    # touches cli.py, whose discovery gate alone is 573 tests / 234s. Zero
+    # real failures; wall-clock budget only — no gate is weakened.
+    # MERGE UNION (2026-07-10, PR #1274 origin/main absorbs): main raised
+    # 75 -> 90 concurrently with this branch's 75 -> 120 -> 150 ratchet
+    # (main's 90 evidenced by runs 29006226255 + 29059772135, the latter
+    # also recorded above; both wall kills, zero real failures);
+    # union-resolved to 150 = the higher of the concurrent raises
     # (the same rule as the 2026-07-04 60-raise union). Wall-clock budget
     # only — no gate is weakened.
     timeout-minutes: 150
@@ -508,10 +518,12 @@ jobs:
           # `check_wheel_freshness` stage whose dedicated suite lives in
           # `test_doctor_wheel_freshness.py`; DEC-RUST-SOURCE-DIGEST-TWIN-001
           # (MIGRATION.md #1258) added the `wheel_source_digest` stages whose
-          # dedicated suite lives in `test_doctor_wheel_source_digest.py` —
-          # the module's covering set is ALL THREE files (the first two alone
-          # read 96.78% since the digest stages landed), so the gate runs
-          # them together.
+          # dedicated suite lives in `test_doctor_wheel_source_digest.py`;
+          # DEC-AUDIT-CENSUS-HONESTY-001 (renumber on merge) added the
+          # `check_lake_uniqueness` UNREADABLE-skip FAIL arms whose tests live
+          # in `test_doctor.py`'s `TestLakeUniquenessSkipHonesty` (the stem-
+          # matched home, so the per-module discovery gate covers them too), so
+          # the covering set stays these three files run together.
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest \
               --cov=brutex.doctor \
