@@ -650,7 +650,7 @@ class TestMutationHardening:
         # would fire at every NON-multiple ([1, 2, 3, 5, 6, 7, 9, 10]) instead.
         monkeypatch.setattr(sweep_apriori, "_BUDGET_CHECK_STRIDE", 4)
         bits = [6, 7, 8, 9, 10]  # 5 conflict-free bits → C(5, 2) = 10 pairs
-        frontier_tuples = [(b,) for b in bits]
+        frontier_tuples: list[tuple[int, ...]] = [(b,) for b in bits]
         frontier_masks = np.array(sorted(1 << b for b in bits), dtype=np.uint64)
         recorded: list[int] = []
         # Whitebox: drive the private join directly to observe the breaker-check
@@ -1102,8 +1102,8 @@ def test_run_persisted_sweep_on_path_matches_off(tmp_path, monkeypatch: pytest.M
 
 
 def test_driver_reports_breaker_trip_as_tuple_failed(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pytest.importorskip("polars")  # store construction needs the [data] extra
     from brutex.data.option_dedup import OptionDedupIndex
     from brutex.engine.sweep_orchestrator import (
