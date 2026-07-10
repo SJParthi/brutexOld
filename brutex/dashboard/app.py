@@ -138,6 +138,10 @@ from brutex.dashboard.fno_underlying import (
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
+from brutex.dashboard.lake_census_holder import (
+    FIRST_SCAN_PER_FILE_BUDGET_S,
+    LakeCensusHolder,
+)
 from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
@@ -164,6 +168,7 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
     pending_asset_payload,
 )
+from brutex.dashboard.movers_underlying_class import build_underlying_kind_map
 from brutex.dashboard.movers_warm import (
     MoversWarmResult,
     futures_warm_grid,
@@ -214,6 +219,7 @@ from brutex.dashboard.pull_intent import (
     persist_intent_for_launch,
     probe_pull_singleflight,
     run_auto_resume,
+    run_legacy_resume,
 )
 from brutex.dashboard.pull_jobs import (
     JOB_KIND_PULL,
@@ -235,7 +241,7 @@ from brutex.dashboard.spot_cascade import (
     build_spot_cascade,
     symbol_to_json,
 )
-from brutex.dashboard.summary_cache import LAKE_UNIQUENESS, OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 
 if TYPE_CHECKING:  # runtime import is LAZY inside build_app — anyio is [ui]-only
@@ -1169,6 +1175,8 @@ def build_app(
     pull_intent_store: PullIntentStore | None = None,
     oneclick_trades_reader: oneclick_artifacts.TradesReader | None = None,
     session_rate: SessionRateController | None = None,
+    census_spawn: Callable[[Callable[[], None]], None] | None = None,
+    census_clock: Callable[[], float] | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1763,6 +1771,48 @@ def build_app(
     # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
     # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
     _options_strikes_cache = MoversSnapshotCache()
+    # The Futures/Options underlying-CLASS kind map cache (DEC-MOVERS-UNDERLYING-CLASS-001):
+    # the `{underlying → index|stock}` map built from the STORED instrument master
+    # (`build_underlying_kind_map`, an O(underlyings) read) stamps each F&O candidate's
+    # `underlying_kind` for the RANK-time `All | Indices | Stocks` filter. The map is a
+    # pure function of the instrument MASTER, so it is keyed on the master CONTENT
+    # revision (`master_revision` — the `_nav_latency_key` component) at a FIXED
+    # generation=0. Review round 1: the original generation-only key missed a keyless
+    # `load-instruments`, which moves the master WITHOUT bumping the write generation
+    # (the documented master_revision trap the sibling nav-latency caches close) — and
+    # a write-generation key would ALSO rebuild pointlessly on every mid-pull write
+    # tick (the #920 lesson), which the content token avoids. Built on the threadpool
+    # worker (it reads `store.connection`). SPOT needs no map (its class comes from
+    # the lake segment). REUSES the COMMON cache.
+    _movers_kind_cache = MoversSnapshotCache()
+    # The cache-key STEM for the underlying-kind map; the master content token is
+    # folded in by `_underlying_kinds_cached` — the ONE key-law home (review round 1).
+    movers_kind_key = "movers_underlying_kinds"
+
+    def _underlying_kinds_cached(store: Any) -> tuple[dict[str, str], str]:
+        """Return ``({F&O underlying → kind}, master_token)``, memoised on the master content token.
+
+        The ONE home of the underlying-kind-map key law (review round 1 — previously
+        two copy-pasted ``get_or_compute`` sites keyed on the write generation alone):
+        the map is a pure function of the instrument MASTER, so the key folds
+        :func:`master_revision` — the content token a keyless ``load-instruments``
+        moves WITHOUT bumping the write generation — at a FIXED ``generation=0``
+        (the ``_nav_latency_key`` / ``_sweep_leaderboard_cache`` token-in-key
+        precedent). The returned *master_token* MUST also be folded into the F&O
+        candidate cache keys by every caller (the movers route AND the post-pull
+        warmer), because the computed candidates carry the map's verdict STAMPED per
+        row — a fresh map beside a stale stamped candidate set would still
+        misclassify (the same staleness class, closed end-to-end).
+        """
+        count, latest = master_revision(store)
+        master_token = f"{count}:{latest}"
+        kinds: dict[str, str] = _movers_kind_cache.get_or_compute(
+            f"{movers_kind_key}|m={master_token}",
+            generation=0,
+            compute=lambda: build_underlying_kind_map(store.list_index_equity_instruments()),
+        )
+        return kinds, master_token
+
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -1783,10 +1833,15 @@ def build_app(
     # O(files), one key-column read per file — and `pull_jobs` bumps the write
     # generation on EVERY per-pair write tick, so a generation-keyed memo would
     # re-run the whole-lake scan on every 15 s chip poll during a pull (the #920
-    # regression class). It rides `_summary_cache.get_or_refresh(LAKE_UNIQUENESS,
-    # …)` instead — the COMMON adaptive-TTL-floor path /coverage/spot uses — so
-    # an expensive scan self-throttles to max(2 s, its own duration) capped 120 s
-    # while an idle lake stays snappy (see `_build_lake_census_payload_cached`).
+    # regression class). Since DEC-LAKE-CENSUS-NONBLOCKING-001 it rides the
+    # `LakeCensusHolder` (constructed beside the route, which needs the scan
+    # closure defined below): the scan runs on a DEDICATED daemon thread (zero
+    # AnyIO tokens), the route serves an O(1) last-known-verdict snapshot, and
+    # the SAME adaptive-TTL-floor law throttles rescans — SUPERSEDING the prior
+    # `_summary_cache.get_or_refresh(LAKE_UNIQUENESS, …)` wiring, whose COLD
+    # single-flight parked every stacked 15 s poller in an unbounded wait ON a
+    # threadpool worker and starved the shared AnyIO limiter for the whole
+    # 26-minute production scan (the reproduced dashboard-wide freeze).
     # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001,
     # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001): the `<lake>/sweeps` discovery +
     # per-tuple Parquet read is O(stores × rows); the ranked leaderboard for a
@@ -3930,6 +3985,15 @@ def build_app(
                 # ONE memoised discovery walk shared by every job in this warm
                 # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
                 warm_datasets = _warm_datasets(gen)
+                # The stored-master kind map + its content token (review round 1):
+                # thread the SAME kinds the route computes with AND fold the SAME
+                # master token into the candidate key, so a warmed entry (a) carries
+                # CORRECT `underlying_kind` stamps (previously the warm computed with
+                # the default `underlying_kinds=None`, stamping everything unknown —
+                # an Indices/Stocks click on a freshly-warmed coordinate returned
+                # EMPTY rows) and (b) is actually HIT by the route's composite key
+                # (key parity, CLAUDE.md §11 COMMON).
+                underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
                     tier = normalize_futures_tier(raw_tier)
@@ -3943,7 +4007,8 @@ def build_app(
                                 date=warm_date,
                                 time=None,
                                 expiry_tier=tier,
-                            ),
+                            )
+                            + f"|m={kinds_token}",
                             generation=gen,
                             compute=lambda: compute_futures_candidates(
                                 lake_root=lake_root,
@@ -3953,6 +4018,7 @@ def build_app(
                                 exchange=exch,
                                 expiry_tier=tier,
                                 datasets=warm_datasets,
+                                underlying_kinds=underlying_kinds,
                             ),
                             # force_fresh — the warm re-seed must never be served
                             # its own pull-active floor's stale pre-pull entry
@@ -3989,6 +4055,9 @@ def build_app(
                 # ONE memoised discovery walk shared by every job in this warm
                 # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
                 warm_datasets = _warm_datasets(gen)
+                # The stored-master kind map + its content token (review round 1 —
+                # see the futures warm above): correct stamps + route key parity.
+                underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
@@ -4021,7 +4090,8 @@ def build_app(
                                 time=None,
                                 expiry_tier=tier,
                                 expiry_track=trk,
-                            ),
+                            )
+                            + f"|m={kinds_token}",
                             generation=gen,
                             compute=lambda: compute_options_candidates(
                                 lake_root=lake_root,
@@ -4034,6 +4104,7 @@ def build_app(
                                 datasets=warm_datasets,
                                 calendar_expiries=calendar_expiries,
                                 registry_chain_for=registry_chain_for,
+                                underlying_kinds=underlying_kinds,
                             ),
                             # force_fresh — the warm re-seed must never be served
                             # its own pull-active floor's stale pre-pull entry
@@ -4441,6 +4512,34 @@ def build_app(
             )
 
         app.state.brutex_resume_pipeline = _resume_pipeline_from_intent
+
+        def _resume_legacy_pull() -> None:
+            """Boot-time seam: the LEGACY ledger-triggered resume, in-process.
+
+            Exposed as ``app.state.brutex_resume_legacy`` for the
+            ``cli.cmd_dashboard`` startup launcher (DEC-AUTO-RESUME-INPROCESS-001
+            — replaces the deleted DOA ``brutex fetch --until-clean`` subprocess
+            child, which died in ~0.3 s every opted-in boot on DuckDB's
+            exclusive cross-process locks: ``catalog.duckdb`` first — held by
+            the boot-window L3 lake-heal sweeper, the incident's first-raising
+            site — and the dashboard's lifetime-held ``instruments.duckdb``
+            one step later). Every load-bearing
+            decision lives in the 100 %-tested
+            :func:`~brutex.dashboard.pull_intent.run_legacy_resume` /
+            :func:`~brutex.dashboard.pull_intent.run_auto_resume`; this binding
+            supplies the SAME real launcher + JOB-root-keyed single-flight probe
+            the intent seam above binds, so the two resumes contend on ONE lock.
+            Raises only on the loud intent-write refusal (an unwritable lake) —
+            the caller's ``maybe_resume_on_boot`` guard turns that into the
+            honest ``error`` verdict.
+            """
+            run_legacy_resume(
+                _intent_store,
+                launch=_resume_launch,
+                probe_singleflight=_probe_job_singleflight,
+            )
+
+        app.state.brutex_resume_legacy = _resume_legacy_pull
 
     @app.post("/api/v1/universe/retry-failed")
     async def api_universe_retry_failed(  # pragma: no cover — thin route over the 100%-tested core
@@ -5407,16 +5506,22 @@ def build_app(
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
 
-    def _build_lake_census_payload() -> dict[str, Any]:
+    def _build_lake_census_payload(
+        per_file_pause: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """Scan the lake + fold the duplicate census JSON (DEC-LAKE-HEAL-001, thin I/O glue).
 
-        The ONE builder behind the cached ``/api/v1/universe/lake-uniqueness`` route:
+        The ONE builder behind the ``/api/v1/universe/lake-uniqueness`` route —
+        since DEC-LAKE-CENSUS-NONBLOCKING-001 invoked ONLY by the
+        ``LakeCensusHolder``'s dedicated daemon scan thread, never a request:
         runs the bounded invariant scanner (READ-ONLY / observe — the ROUTE never
         heals; healing belongs to the L2 pull seams + the L3 startup sweep), folds
         :func:`~brutex.data.lake_invariants.build_lake_census`, and stamps the heal
         mode + the ``.lake_heal`` stats/sentinel reads into the SAME dict shape
         ``brutex lake audit-unique --json`` prints. ``{"present": False}`` when no
         lake root can be resolved (mirrors the sibling panel routes' honest gate).
+        *per_file_pause* is the holder's live progress tick, threaded through the
+        scanner's EXISTING L3 throttle seam (fires per file incl. skips).
         """
         from brutex.data.lake_heal import (
             load_heal_stats,
@@ -5428,7 +5533,7 @@ def build_app(
         if not isinstance(lake_db, Path):
             return {"present": False}
         lake = lake_db.parent
-        census = build_lake_census(scan_lake_invariants(lake))
+        census = build_lake_census(scan_lake_invariants(lake, per_file_pause=per_file_pause))
         return census_to_dict(
             census,
             mode=resolve_lake_heal_mode(),
@@ -5436,52 +5541,152 @@ def build_app(
             last_sweep=load_last_sweep(lake),
         )
 
-    def _build_lake_census_payload_cached() -> dict[str, Any]:
-        """Memoise the lake census behind the ``SummaryCache`` adaptive TTL floor.
+    def _census_files_estimate() -> int | None:
+        """The honest census progress denominator — the L3 sweep sentinel's count.
 
-        DEC-LAKE-HEAL-001 (hostile-review MAJOR fold): the census rides the SAME
-        ``_summary_cache.get_or_refresh`` path ``/coverage/spot`` uses — NOT a
-        generation-KEYED memo. ``pull_jobs`` bumps the write generation on every
-        per-pair write tick, so a generation-keyed cache re-ran this whole-lake
-        O(files) scan on every 15 s chip poll during a pull (the #920 regression
-        class); the ``SummaryCache`` instead serves the dirty entry until the
-        ADAPTIVE floor — ``max(2 s, the last scan's own duration)`` capped 120 s
-        (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001) — elapses, so an expensive scan
-        self-throttles to a ≤50% duty cycle while an idle lake keeps the snappy
-        2 s floor. Freshness: a pull, a materialize, OR a heal (the L3 sweeper's
-        ``on_healed=summary_cache.mark_dirty``) dirties the entry → one fresh
-        scan once past the floor; staleness is bounded by that floor, never
-        indefinite (Golden Rule #1, stated honestly per Golden Rule #10). The
-        payload dict is byte-identical to the uncached build — only the refresh
-        SCHEDULING changed. (The single-payload dict rides the ``SummaryPayload``
-        list shape as a one-element list.)
+        Reads ``.lake_heal/last_sweep.json``'s ``files_scanned`` (the last L3
+        startup sweep's own full-lake tally — the best available prior for how
+        many files THIS scan will visit). ``None`` on a first-ever lake with no
+        sentinel / a foreign-shaped sentinel — the UI then reads ``~?`` instead
+        of a fabricated total (Golden Rule #1). Runs ON the census daemon
+        thread (it is lake I/O), guarded by the holder's estimate fence.
         """
-        rows = _summary_cache.get_or_refresh(
-            LAKE_UNIQUENESS, recompute=lambda: [_build_lake_census_payload()]
-        )
-        return rows[0]
+        from brutex.data.lake_heal import load_last_sweep
+
+        lake_db = getattr(instrument_store, "path", None)
+        if not isinstance(lake_db, Path):
+            return None
+        sweep = load_last_sweep(lake_db.parent)
+        if sweep is None:
+            return None
+        files = sweep.get("files_scanned")
+        if isinstance(files, bool) or not isinstance(files, int) or files < 0:
+            return None
+        return files
+
+    def _census_first_scan_bound_hint() -> float | None:
+        """Seed the FIRST-scan stall bound from the L3 sweep sentinel.
+
+        Prefers the sentinel's own recorded duration (``duration_ms`` /
+        ``duration_s`` when a future sweep stores one — none does today),
+        else derives ``files_scanned × FIRST_SCAN_PER_FILE_BUDGET_S`` (the
+        conservative 2 ms/file budget). ``None`` on a first-ever lake / a
+        foreign-shaped sentinel — the holder then uses the bare 30-min
+        floor. NON-FINITE sentinel values are junk, never a hint (round-1
+        refuter: ``Infinity`` is valid JSON to Python's tolerant decoder,
+        passes ``> 0``, and would have yielded an INFINITE stall bound —
+        staleness detection silently disabled); a FINITE positive hint of
+        ANY magnitude is ACCEPTED here and CLAMPED by the holder's
+        ``_stale_bound_locked`` at ``FIRST_SCAN_BOUND_CEILING_S`` (24 h) —
+        the ONE clamp site (rounds 2+3 refuters: the round-2 upper REJECT
+        here dropped a legitimate >24 h hint — the conservative 2 ms/file
+        budget crosses 24 h at ~43.2M files — to the 30-min floor,
+        re-opening the large-lake first-scan false-stall the hint exists
+        to prevent; the most-authoritative signal is never discarded, only
+        bounded). Round-4 refuter: the ``duration_ms`` arm converts under
+        a local ``OverflowError`` guard — a JSON int beyond float range
+        (``10**309``) made ``math.isfinite`` RAISE, failing the whole hint
+        callable (repeating WARN each check cycle) and collapsing the
+        bound to the floor; a positive-huge int now SATURATES to a huge
+        finite float and rides the same holder-clamp path as its ``1e308``
+        float twin. The ``files_scanned`` arm is a non-negative int
+        (structurally finite) whose product with the per-file budget is
+        guarded against an absurd-magnitude ``OverflowError`` → ``None``;
+        its result rides the same holder clamp. Runs ON the census daemon
+        thread (lake I/O), guarded by the holder's hint fence.
+        """
+        from brutex.data.lake_heal import load_last_sweep
+
+        lake_db = getattr(instrument_store, "path", None)
+        if not isinstance(lake_db, Path):
+            return None
+        sweep = load_last_sweep(lake_db.parent)
+        if sweep is None:
+            return None
+        duration_ms = sweep.get("duration_ms")
+        if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+            d: float | None
+            try:
+                d = float(duration_ms)
+            except OverflowError:
+                # Round-4 refuter: a JSON *int* beyond float range (10**309)
+                # made `math.isfinite(duration_ms)` raise pre-fix — the whole
+                # hint callable failed (a repeating holder
+                # `first_scan_bound_hint_failed` WARN each check cycle) and
+                # the bound collapsed to the bare floor: the round-3
+                # never-a-floor-collapse doctrine violated again, through the
+                # INT shape. A positive-huge int is mathematically FINITE —
+                # SATURATE it to a huge finite float so it rides the SAME
+                # finite-positive → holder-clamp path as its 1e308 float twin
+                # (→ the 24 h ceiling, never the floor); a negative-huge int
+                # is unusable like any non-positive value (falls through to
+                # the files arm).
+                d = 1e308 if duration_ms > 0 else None
+            if d is not None and math.isfinite(d) and d > 0:
+                return d / 1000.0
+        files = sweep.get("files_scanned")
+        if isinstance(files, bool) or not isinstance(files, int) or files < 0:
+            return None
+        try:
+            return files * FIRST_SCAN_PER_FILE_BUDGET_S
+        except OverflowError:
+            # An int too large for float conversion — junk sentinel.
+            return None
+
+    # DEC-LAKE-CENSUS-NONBLOCKING-001: the census holder — the scan runs on a
+    # DEDICATED named daemon thread (zero AnyIO threadpool tokens), single-flight
+    # (a concurrent poll neither spawns a second scan nor waits), and the route
+    # below serves an O(1) snapshot. The generation probe (`_summary_cache
+    # .generation` — one ledger stat + the O(dirs) sweeps digest, lake I/O per
+    # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002 #1622) is read ON the daemon thread,
+    # never the event loop. `census_spawn`/`census_clock` are the build_app test
+    # seams (a synchronous spawn + fake clock make the holder deterministic).
+    _lake_census_holder = LakeCensusHolder(
+        scan=_build_lake_census_payload,
+        generation=lambda: _summary_cache.generation,
+        files_total_estimate=_census_files_estimate,
+        spawn=census_spawn,
+        clock=census_clock,
+        first_scan_bound_hint=_census_first_scan_bound_hint,
+    )
 
     @app.get("/api/v1/universe/lake-uniqueness")
     async def api_universe_lake_uniqueness() -> JSONResponse:
         """GET /api/v1/universe/lake-uniqueness — the lake duplicate-census verdict.
 
-        DEC-LAKE-HEAL-001: per-segment (INDEX/CASH/FNO/OPTIONS) clean vs
-        dup/foreign/overlap/drift file counts + the ENGINE-index
-        (NIFTY/BANKNIFTY/SENSEX) ``engine_clean`` verdict + the heal mode and
-        ``.lake_heal`` stats/sentinel — the ``/universe`` chip's data source.
-        READ-ONLY (never heals). Served through the ``SummaryCache`` adaptive
-        TTL floor (the #920 machinery): a repeat poll is an O(1) handoff
-        within the TTL window, and a scan's own cost sets its refresh floor
-        (``max(2 s, scan duration)`` capped 120 s) — so a pull's write-tick
-        generation storm can never amplify the 15 s poll into back-to-back
-        whole-lake scans. HONEST: the refresh itself stays O(files); a dirty
-        census may be served up to one floor window stale — bounded, never
-        indefinite. No store wired → 503; no resolvable lake root →
-        ``{"present": false}``.
+        DEC-LAKE-HEAL-001 payload; DEC-LAKE-CENSUS-NONBLOCKING-001 serving law:
+        per-segment (INDEX/CASH/FNO/OPTIONS) clean vs dup/foreign/overlap/drift
+        file counts + the ENGINE-index (NIFTY/BANKNIFTY/SENSEX) ``engine_clean``
+        verdict + the heal mode and ``.lake_heal`` stats/sentinel — the
+        ``/universe`` chip's data source. READ-ONLY (never heals). The route is
+        **O(1) and never blocks**: it returns the holder's LAST-KNOWN verdict
+        merged with the additive ``scan_in_progress`` / ``scan_progress`` /
+        ``as_of_utc`` / ``scan_error`` / ``scan_stalled`` keys (the last =
+        the LOUD staleness verdict — an in-flight scan past
+        ``max(2 x last duration, 30 min)`` is flagged + WARNed once per
+        episode; detection, never termination), after arming (at most) ONE
+        single-flight background freshness check on the DEDICATED census daemon
+        thread — no ``run_in_threadpool`` (a 26-minute production scan + the
+        stacked 15 s pollers previously starved the shared AnyIO limiter and
+        froze the whole data surface), no on-loop lake I/O (the generation
+        probe runs on the daemon thread, the #1622 offload law). Rescans keep
+        the pre-fix freshness law: generation moved AND past the adaptive
+        floor (``max(2 s, scan duration)`` capped 120 s). HONEST: the scan
+        itself stays O(files); the first-ever boot serves ``scan_in_progress``
+        with live progress until one scan lands — never a fabricated verdict.
+        No store wired → 503; no resolvable lake root → ``{"present": false}``.
         """
-        _require_store()
-        payload = await _run_lake(_build_lake_census_payload_cached)
-        return JSONResponse(payload)
+        store = _require_store()
+        lake_db = getattr(store, "path", None)
+        if not isinstance(lake_db, Path):
+            return JSONResponse({"present": False})
+        # DEC-LAKE-CENSUS-NONBLOCKING-001: the census deliberately does NOT ride
+        # `_run_lake` (DEC-DASHBOARD-LAKE-IO-LIMITER-001) — its ~26-min scan
+        # would pin a limiter token for its whole runtime; the holder keeps the
+        # census OFF every request path (zero AnyIO/limiter tokens), the
+        # ledgered L4 doctrine exception.
+        _lake_census_holder.maybe_refresh()
+        return JSONResponse(_lake_census_holder.snapshot())
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
@@ -5618,6 +5823,7 @@ def build_app(
         track: str | None = Query(default=None),
         exchange: str | None = Query(default=None),
         min_volume: int = Query(default=0, ge=0),
+        underlying_class: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
@@ -5672,6 +5878,13 @@ def build_app(
             whole-day bar). A malformed value is a 400.
         top_n
             Ranking depth for each category (1..500; default 100 — DEC-MOVERS-COMPLETENESS-001).
+        underlying_class
+            ``All`` / ``Indices`` / ``Stocks`` underlying-class filter
+            (DEC-MOVERS-UNDERLYING-CLASS-001) applied at RANK time on all three
+            tabs; blank / unknown ⇒ ``all`` (byte-identical default — no filtering).
+            SPOT class comes from the lake segment; FUTURES/OPTIONS from the stored
+            instrument-master ``is_index`` kind map. An unclassifiable underlying is
+            in ``all`` but excluded from both ``Indices`` and ``Stocks`` (counted).
 
         **Honest envelope (Golden Rule #10):** the snapshot is only as good as the
         ingested lake — an empty lake (or a store with no lake root) returns an
@@ -5680,6 +5893,19 @@ def build_app(
         day's close; volume/value are the cumulative FRESH session from 09:15.
         """
         store = _require_store()
+        # ECHO HONESTY (DEC-MOVERS-DAILY-ASOF-ECHO-HONEST-001): a non-intraday
+        # interval (``1day`` / any unknown label) has NO intraday as-of — the bar
+        # IS the day, so the VALUE already ignores ``time``
+        # (``compute_spot_candidates`` cuts whole-day via ``cutoff_min=None``,
+        # DEC-MOVERS-ASOF-LATEST-DEFAULT-001). Null the echoed ``time`` here — the
+        # ONE COMMON ``is_intraday_interval`` predicate (mirroring the ``latest_time``
+        # gate below) — so every downstream echo surface (the "As-of …" note +
+        # ``payload["time"]`` across spot/futures/options/empty/pending/gated) is
+        # truthful instead of claiming an as-of the served whole-day close never
+        # honoured. Byte-identical for value (daily already ignores it) and for a
+        # genuine intraday interval (the predicate is True → ``time`` untouched).
+        if not is_intraday_interval(interval):
+            time = None
         try:
             # Movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while
             # the one-click pull pipeline runs, answer with the honest `gated: true`
@@ -5735,6 +5961,7 @@ def build_app(
                             top_n=top_n,
                             skipped=0,
                             min_volume=min_volume,
+                            underlying_class=underlying_class,
                         )
                     )
                 if asset == "options":
@@ -5747,6 +5974,7 @@ def build_app(
                             top_n=top_n,
                             skipped=0,
                             min_volume=min_volume,
+                            underlying_class=underlying_class,
                         )
                     )
                 return JSONResponse(
@@ -5758,6 +5986,7 @@ def build_app(
                         top_n=top_n,
                         skipped=0,
                         min_volume=min_volume,
+                        underlying_class=underlying_class,
                     )
                 )
             lake_root = store_path.parent
@@ -5862,14 +6091,27 @@ def build_app(
                         cache=_options_strikes_cache,
                         generation=generation,
                     )
-                    key = candidate_key(
-                        asset="options",
-                        exchange=exch,
-                        interval=interval,
-                        date=date_str,
-                        time=time,
-                        expiry_tier=tier,
-                        expiry_track=trk,
+                    # The stored-master index-vs-stock kind map for the RANK-time
+                    # `All | Indices | Stocks` filter (DEC-MOVERS-UNDERLYING-CLASS-001) —
+                    # memoised on the master CONTENT token via the ONE
+                    # `_underlying_kinds_cached` helper (review round 1: a keyless
+                    # load-instruments moves the master with NO generation bump). The
+                    # class itself is NOT a candidate_key coordinate (rank-time filter
+                    # over the shared set), but the MASTER token IS folded into the key
+                    # below — the candidates carry the map's verdict STAMPED per row,
+                    # so stale stamps would defeat a fresh map.
+                    underlying_kinds, kinds_token = _underlying_kinds_cached(store)
+                    key = (
+                        candidate_key(
+                            asset="options",
+                            exchange=exch,
+                            interval=interval,
+                            date=date_str,
+                            time=time,
+                            expiry_tier=tier,
+                            expiry_track=trk,
+                        )
+                        + f"|m={kinds_token}"
                     )
                     opt_cands = _movers_cache.get_or_compute(
                         key,
@@ -5885,6 +6127,7 @@ def build_app(
                             datasets=movers_datasets,
                             calendar_expiries=calendar_expiries,
                             registry_chain_for=registry_chain_for,
+                            underlying_kinds=underlying_kinds,
                         ),
                     )
                     return build_options_payload(
@@ -5900,6 +6143,7 @@ def build_app(
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
                         pcr=opt_cands.pcr,
                         latest_time=latest_time,
+                        underlying_class=underlying_class,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -5908,13 +6152,23 @@ def build_app(
                     # cache + rank independently (never a stale Near row served for
                     # a Far request) — DEC-MOVERS-FUTURES-TIER-001.
                     fut_tier = normalize_futures_tier(expiry)
-                    key = candidate_key(
-                        asset="futures",
-                        exchange=exch,
-                        interval=interval,
-                        date=date_str,
-                        time=time,
-                        expiry_tier=fut_tier,
+                    # The stored-master kind map for the RANK-time class filter
+                    # (DEC-MOVERS-UNDERLYING-CLASS-001) — memoised on the master
+                    # CONTENT token via the ONE `_underlying_kinds_cached` helper
+                    # (review round 1); the master token is ALSO folded into the
+                    # candidate key below (the stamped-verdict staleness class —
+                    # see the options arm above).
+                    underlying_kinds, kinds_token = _underlying_kinds_cached(store)
+                    key = (
+                        candidate_key(
+                            asset="futures",
+                            exchange=exch,
+                            interval=interval,
+                            date=date_str,
+                            time=time,
+                            expiry_tier=fut_tier,
+                        )
+                        + f"|m={kinds_token}"
                     )
                     fut_cands = _movers_cache.get_or_compute(
                         key,
@@ -5927,6 +6181,7 @@ def build_app(
                             exchange=exch,
                             datasets=movers_datasets,
                             expiry_tier=fut_tier,
+                            underlying_kinds=underlying_kinds,
                         ),
                     )
                     return build_futures_payload(
@@ -5939,6 +6194,7 @@ def build_app(
                         expiry_tier=fut_cands.expiry_tier,
                         min_volume=min_volume,
                         latest_time=latest_time,
+                        underlying_class=underlying_class,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -5979,6 +6235,7 @@ def build_app(
                     stored_reads=spot_cands.stored_reads,
                     resampled_reads=spot_cands.resampled_reads,
                     latest_time=latest_time,
+                    underlying_class=underlying_class,
                 )
 
             payload = await _run_lake(_resolve)

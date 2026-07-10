@@ -122,6 +122,10 @@
         <span id="pills"></span>
         <span class="spacer"></span>
         <select id="exchange" title="Exchange"><option>NSE</option><option>BSE</option></select>
+        <!-- Underlying-class filter (DEC-MOVERS-UNDERLYING-CLASS-001): All | Indices | Stocks
+             on all three tabs. Default "All" is NOT sent, so the payload stays byte-identical;
+             Indices/Stocks filter the SAME cached candidate set server-side at rank time. -->
+        <select id="uclass" title="Underlying class"><option>All</option><option>Indices</option><option>Stocks</option></select>
         <select id="track" title="Expiry cadence (Options)" style="display:none;"></select>
         <select id="expiry" title="Expiry" style="display:none;"></select>
       </div>
@@ -333,7 +337,15 @@ function fillTimes() {
    (DEC-DASHBOARD-XSS-HARDENING-001). */
 function refreshBaselineLegend(note) {
   const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
-  $("noteText").textContent = (note||"") + (staleBaseline ? " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)" : "");
+  /* Muhurat legend (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the EMIT-ON-TRUE keys
+     arrive only when the baseline is the legitimate Diwali Muhurat close — a real
+     NSE session, never a lake hole — so it gets its OWN " †" legend, distinct from
+     the " *" possible-lake-hole legend (whose wording is shape-neutral: no
+     unconditional re-pull imperative — the hole may be a stray bar instead). */
+  const muhuratBaseline = rowsData.some(r => r && (r.prev_close_muhurat === true || r.oi_baseline_muhurat === true));
+  $("noteText").textContent = (note||"")
+    + (staleBaseline ? " · * baseline is not the immediately-preceding REGULAR NSE session (nearest-prior shown — possible lake hole)" : "")
+    + (muhuratBaseline ? " · † baseline is the Diwali Muhurat session close (a real NSE session the lake legitimately carries; engine day-anchors deliberately use the prior regular session)" : "");
 }
 /* Sub-filter (pill) switch: re-render the already-fetched payload's other category
    list IN THE BROWSER — the server returned every category for this coordinate, so
@@ -503,6 +515,11 @@ function renderRows() {
        esc(v) return — the marker rides the same escape as the value. */
     if ((field==="change"||field==="pct_change") && row.prev_close_contiguous === false && v!=="—" && v!=="?") v += " *";
     if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_contiguous === false && v!=="—" && v!=="?") v += " *";
+    /* " †" Muhurat marker (DEC-PREVSESSION-MUHURAT-COHERENCE-001): STRICT === true
+       on the EMIT-ON-TRUE keys — a legitimate Diwali Muhurat baseline is flagged
+       distinctly from the " *" possible-lake-hole marker; pre-esc like " *". */
+    if ((field==="change"||field==="pct_change") && row.prev_close_muhurat === true && v!=="—" && v!=="?") v += " †";
+    if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_muhurat === true && v!=="—" && v!=="?") v += " †";
     return `<td class="${cls}">${esc(v)}</td>`;
   }).join("") + "</tr>").join("");
 }
@@ -543,6 +560,9 @@ async function load() {
   /* OPT-IN Top Volume floor (DEC-MOVERS-MIN-VOLUME-001): only send a POSITIVE value, so
      blank / 0 stays byte-identical to the no-floor default (the route default is 0). */
   if (parseInt($("minvol").value, 10) > 0) p.set("min_volume", $("minvol").value);
+  /* Underlying-class filter (DEC-MOVERS-UNDERLYING-CLASS-001): only send a non-"All"
+     value, so "All" (the default) stays byte-identical to today (the route default). */
+  if ($("uclass").value && $("uclass").value !== "All") p.set("underlying_class", $("uclass").value);
   if (state.asset!=="spot") p.set("expiry", $("expiry").value||"Near");
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
@@ -728,7 +748,7 @@ $("time").onchange = () => { state.time = $("time").value; load(); };
 const DEBOUNCE_MS = 200;
 let debounceTimer = null;
 function debouncedLoad() { clearTimeout(debounceTimer); debounceTimer = setTimeout(load, DEBOUNCE_MS); }
-["exchange","expiry","track","date"].forEach(id => $(id).onchange = load);
+["exchange","uclass","expiry","track","date"].forEach(id => $(id).onchange = load);
 ["topn","minvol"].forEach(id => $(id).onchange = debouncedLoad);
 $("refresh").onclick = load;
 fillTimes(); renderPills(); load();
