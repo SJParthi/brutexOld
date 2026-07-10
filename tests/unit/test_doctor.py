@@ -722,3 +722,74 @@ class TestLakeUniqueness:
         named = doctor_module._lake_offender(_WithCoords())
         assert named == "bars/NSE/INDEX/NIFTY/1minute/2025/09.parquet"
         assert doctor_module._lake_offender("stray") == "'stray'"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# lake_uniqueness — census-honesty skip arms (DEC-AUDIT-CENSUS-HONESTY-001)
+# Relocated from ``test_audit_census_honesty.py`` so the per-module coverage
+# DISCOVERY gate (which stem-maps ``brutex/doctor.py`` → ``test_doctor*``)
+# exercises the UNREADABLE-skip FAIL arms under its own gate (BLOCKER-2).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _plant_engine_garbage(
+    lake_root: Path, *, symbol: str = "BANKNIFTY", exchange: str = "NSE"
+) -> None:
+    """Non-parquet bytes on an engine series → a caught read error → a skip."""
+    dest = lake_root / "bars" / exchange / "INDEX" / symbol / "1minute" / "2025" / "09.parquet"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"not a parquet file at all")
+
+
+def _plant_engine_drift(lake_root: Path, *, symbol: str = "SENSEX", exchange: str = "BSE") -> None:
+    """A VALID parquet MISSING the OHLC columns on an engine series → read raises → skip."""
+    from datetime import UTC, datetime
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest = lake_root / "bars" / exchange / "INDEX" / symbol / "1minute" / "2025" / "09.parquet"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime(2025, 9, 1, 4, 0, tzinfo=UTC)
+    table = pa.table({"timestamp": pa.array([ts], type=pa.timestamp("us", tz="UTC"))})
+    pq.write_table(table, dest)
+
+
+class TestLakeUniquenessSkipHonesty:
+    """An UNREADABLE engine-index file is a FAIL, never a silent PASS over corruption."""
+
+    def test_engine_garbage_fails(self, tmp_path: Path) -> None:
+        _write_engine_partition(tmp_path)
+        _plant_engine_garbage(tmp_path, symbol="BANKNIFTY")
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "FAIL"
+        assert "census INCOMPLETE" in result.detail
+        assert "UNREADABLE" in result.detail
+
+    def test_engine_schema_drift_fails(self, tmp_path: Path) -> None:
+        # SENSEX (BSE-index) is an engine coord — the engine-scoped scan reaches it.
+        _plant_engine_drift(tmp_path, symbol="SENSEX", exchange="BSE")
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "FAIL"
+        assert "census INCOMPLETE" in result.detail
+
+    def test_dup_and_skip_fails_naming_both(self, tmp_path: Path) -> None:
+        _plant_dup_partition(tmp_path, symbol="NIFTY")
+        _plant_engine_garbage(tmp_path, symbol="BANKNIFTY")
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "FAIL"
+        assert "engine-index partitions poisoned" in result.detail
+        assert "UNREADABLE (skipped)" in result.detail
+
+    def test_malformed_engine_path_fails(self, tmp_path: Path) -> None:
+        """MAJOR: an engine file whose PATH fails to parse also FAILs (agrees with CLI/census)."""
+        dest = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "notayear" / "09.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"not a parquet file at all")
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "FAIL"
+        assert "census INCOMPLETE" in result.detail
+
+    def test_clean_engine_still_passes(self, tmp_path: Path) -> None:
+        _write_engine_partition(tmp_path)
+        assert check_lake_uniqueness(tmp_path).status == "PASS"

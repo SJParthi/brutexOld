@@ -23,12 +23,14 @@ from dataclasses import dataclass
 
 import pytest
 from brutex.orchestrator.auto_resume import (
+    AUTO_RESUME_MASTER_ENV,
     AUTO_RESUME_ON_BOOT_ENV,
     IncompletePull,
     LedgerLike,
     ResumeVerdict,
     detect_incomplete_pull,
     maybe_resume_on_boot,
+    resolve_auto_resume_master,
     resolve_auto_resume_on_boot,
 )
 
@@ -88,6 +90,48 @@ def test_resolve_flag_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatc
     assert resolve_auto_resume_on_boot() is True
     monkeypatch.delenv(AUTO_RESUME_ON_BOOT_ENV, raising=False)
     assert resolve_auto_resume_on_boot() is False
+
+
+# ── resolve_auto_resume_master (the MASTER kill switch, default OFF) ─────────
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "on", " on ", "ON"])
+def test_resolve_master_truthy_values_enable(value: str) -> None:
+    """Every explicit truthy value (case / whitespace-insensitive) enables the master gate."""
+    assert resolve_auto_resume_master({AUTO_RESUME_MASTER_ENV: value}) is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "  ", "maybe", "2"])
+def test_resolve_master_falsy_or_unrecognised_disable(value: str) -> None:
+    """A falsy / blank / unrecognised (junk) value keeps the safe default-OFF SILENTLY.
+
+    Mirrors the sibling :func:`resolve_auto_resume_on_boot` junk handling EXACTLY
+    (never raises; unknown token ⇒ the flag's default) — the task's "match how
+    the siblings handle junk" pin.
+    """
+    assert resolve_auto_resume_master({AUTO_RESUME_MASTER_ENV: value}) is False
+
+
+def test_resolve_master_unset_disables() -> None:
+    """An env WITHOUT the key returns False — the default-OFF the whole fix delivers."""
+    assert resolve_auto_resume_master({}) is False
+
+
+def test_resolve_master_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no env injected, the master resolver reads the real ``os.environ``."""
+    monkeypatch.setenv(AUTO_RESUME_MASTER_ENV, "yes")
+    assert resolve_auto_resume_master() is True
+    monkeypatch.delenv(AUTO_RESUME_MASTER_ENV, raising=False)
+    assert resolve_auto_resume_master() is False
+
+
+def test_resolve_master_is_independent_of_the_legacy_sub_gate() -> None:
+    """The master gate reads ONLY ``BRUTEX_AUTO_RESUME`` — the legacy sub-gate cannot enable it.
+
+    A boot with the legacy ``BRUTEX_AUTO_RESUME_ON_BOOT=1`` set but the master
+    gate unset stays DISABLED (the master sits ABOVE the sub-gates).
+    """
+    assert resolve_auto_resume_master({AUTO_RESUME_ON_BOOT_ENV: "1"}) is False
 
 
 # ── detect_incomplete_pull ──────────────────────────────────────────────────

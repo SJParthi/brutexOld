@@ -299,6 +299,7 @@ class TestOneclickSections:
         for hook in (
             "r1_rank",
             "r1_name",
+            "r1_instrument",
             "r1_net",
             "r1_max_dd",
             "r1_sharpe",
@@ -381,8 +382,13 @@ class TestScreenerPage:
         html = _template("screener.html")
         assert "String(cap) + ' of ' + total + ' shown'" in html
         assert "String(sorted.length) + ' of '" not in html  # the lying numerator is gone
-        assert "render cap ' + String(RENDER_CAP)" in html
-        assert "use Show all" in html
+        # A-r4 (DEC-ONECLICK-PERF-CLUB-001): the cap/note math moved into the
+        # node-goldened BXScreener primitives — the page consumes them (the
+        # wording itself is pinned by test_dashboard_screener_math.py).
+        assert "window.BXScreener.renderCount(sorted.length, state.showAll)" in html
+        assert "window.BXScreener.capNote(cap, sorted.length, state.showAll)" in html
+        assert "window.BXScreener.inputCapNote(" in html
+        assert "window.BXScreener.inputCapRows(" in html
 
     def test_sort_basis_label_names_the_artifact_preset(self) -> None:
         """[11] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the visible sort-basis
@@ -460,10 +466,25 @@ class TestStrategyPage:
         assert "params.get('trade')" in html
         assert "state.tradeIdx" in html
 
-    def test_equity_curve_labeled_per_trade_close(self) -> None:
-        """C-MINOR-7: the smoother curve never masquerades as the minute path."""
+    def test_equity_curve_sources_are_honestly_labeled(self) -> None:
+        """C-MINOR-7, superseded by DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item
+        4C: the STORED minute-path series (the /api/v1/oneclick/equity route)
+        renders when the sidecar exists, and the per-trade cumsum FALLBACK is
+        relabeled so the smoother curve never masquerades as the minute path."""
         html = _template("strategy.html")
-        assert "per-trade close equity — minute-path equity lands with P3" in html
+        assert "/api/v1/oneclick/equity" in html
+        assert "minute-path equity — the stored real series (R27)" in html
+        assert "per-trade close equity (minute-path unavailable for this run)" in html
+        # The stale "lands with P3" deferral is DEAD — the route ships.
+        assert "minute-path equity lands with P3" not in html
+        # Hostile-round fold: an ok-verdict sidecar with ZERO rows reads its
+        # OWN honest label (empty-for-this-run ≠ unavailable).
+        assert "per-trade close equity (minute-path series empty for this run)" in html
+        assert "state.equityOkEmpty" in html
+        # Audit re-break MINOR: the per-trade fallback note total carries the
+        # #12 gross/signal-only vocabulary — never a bare "net" claim.
+        assert "bits.push('gross signal ' + money(series.final_paisa));" in html
+        assert "bits.push('net ' + money(series.final_paisa));" not in html  # killed
 
     def test_vix_band_on_the_story_card(self) -> None:
         """R31 display duty — via the ONE shared builder ([W3-R4]): a
@@ -513,9 +534,21 @@ class TestStrategyPage:
         assert "bindExplainHover" in html
         assert "data-explain=" in html
 
-    def test_regime_family_named_out_of_scope(self) -> None:
+    def test_regime_renders_and_family_stays_named_out_of_scope(self) -> None:
+        """HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
+        breakdown RENDERS from entry.regime — the stale "lands with the P3
+        data" deferral is DELETED (the data ships in the artifact); family
+        drill-down (R34) stays a NAMED later PR."""
         html = _template("strategy.html")
-        assert "land with the P3 data they visualize" in html
+        assert "land with the P3 data they visualize" not in html  # killed token
+        assert 'id="stTrendSplit"' in html
+        assert 'id="stRegimeWonder"' in html
+        assert "window.BXOneclick.trendSplitText(reg.by_trend, money)" in html
+        assert (
+            "window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis)"
+            in html
+        )
+        assert "family drill-down (R34) is a named later PR" in html
 
     def test_ticker_strip_present(self) -> None:
         assert 'id="bxTickerStrip"' in _template("strategy.html")

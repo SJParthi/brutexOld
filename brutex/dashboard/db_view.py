@@ -77,6 +77,7 @@ from brutex.data.fno_candle_lake import (
     FNO_CANDLE_LAKE_SEGMENT,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.greeks_provenance import greeks_status_label
 from brutex.data.lake_keys import spot_recovery_candidates
 from brutex.data.lake_manifest import (
     ledger_stat_token,
@@ -508,9 +509,19 @@ FNO_MONEYNESS_COLUMNS: Final = ("moneyness",)
 #: resolvable for any decodable contract (option OR future), ``None`` only when undecodable.
 FNO_VALUE_COLUMNS: Final = ("spot", "intrinsic", "time_value", "days_to_expiry")
 
-#: The full F&O derived column set in display order: the combined moneyness label, then the
-#: value columns. ``_fno_derived_columns`` returns this for an ``FNO`` page.
-FNO_DERIVED_COLUMNS: Final = FNO_MONEYNESS_COLUMNS + FNO_VALUE_COLUMNS
+#: The derived HUMAN-READABLE Greeks status column (DEC-DB-FNO-DISPLAY-TRUTH-001 item 3):
+#: the stored ``greeks_provenance_id`` stamp's packed status decoded into words at READ
+#: time via the ONE COMMON :func:`brutex.data.greeks_provenance.greeks_status_label`
+#: (``"ok"`` / ``"below intrinsic — no unique IV"`` / …; ``"not enriched"`` when the bar
+#: carries no stamp — the overlay is stored on the ``1minute`` partition only; ``"—"``
+#: for a future, which is never enriched by design). Rides the page's own SELECT — no
+#: extra I/O; never a bare packed int presented as the only explanation of a NULL Greek.
+FNO_GREEKS_STATUS_COLUMNS: Final = ("greeks_status",)
+
+#: The full F&O derived column set in display order: the combined moneyness label, the
+#: value columns, then the decoded Greeks status. ``_fno_derived_columns`` returns this
+#: for an ``FNO`` page.
+FNO_DERIVED_COLUMNS: Final = FNO_MONEYNESS_COLUMNS + FNO_VALUE_COLUMNS + FNO_GREEKS_STATUS_COLUMNS
 
 #: Spot segments probed (in order) to resolve an F&O contract's UNDERLYING spot series —
 #: an index underlying rides ``INDEX``, a single-stock underlying rides ``CASH``. The
@@ -2880,23 +2891,39 @@ def query_candles(
     The glob is scoped to ONE ``(symbol, interval)`` (its whole-year/month
     files only), and the page is ``LIMIT``-bounded — so a click never
     materialises more than ``limit`` rows in PYTHON regardless of how many
-    years are stored. HONEST engine-cost envelope
-    (DEC-LATENCY-HONESTY-BATCH-001, Golden Rule #10 — corrects the prior
-    "DuckDB additionally skips row-groups via min/max stats" claim, which this
-    query shape DEFEATS): the read-side dedup ``QUALIFY`` window
-    (DEC-LAKE-READ-UNIQUE-001) must rank every row of the partition before
-    ``LIMIT`` applies, and the date bounds compare a derived
-    ``(timestamp AT TIME ZONE …)::DATE`` expression that DuckDB does not prune
-    through against the raw ``timestamp`` column's row-group min/max stats —
-    so each paging click is a full-partition columnar scan ENGINE-side
-    (O(partition rows), not O(page)). That scan is flat enough to pass the
-    shared-CI < 8× depth-ratio gate (``tests/bench/test_db_candle_query_o1.py``);
-    genuine row-group pruning would need stats-compatible raw-column
-    predicates — named future work, not claimed. *start* / *end* are inclusive
-    ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC calendar date
-    (IST for the derived ``1day`` — see :func:`_date_bounds`).
-    Returns an empty
-    page (never raises) when the partition set has no Parquet files yet.
+    years are stored. *start* / *end* are inclusive ISO ``YYYY-MM-DD`` bounds
+    matched against the bar's UTC calendar date (IST for the derived ``1day``
+    — see :func:`_date_bounds`). Returns an empty page (never raises) when
+    the partition set has no Parquet files yet.
+
+    HONEST complexity (Golden Rule #10 — this is NOT O(page) in partition
+    depth; DEC-DB-OPAGE-HONESTY-001, folding the DEC-LATENCY-HONESTY-BATCH-001
+    correction of the prior "DuckDB additionally skips row-groups via min/max
+    stats" claim, which this query shape DEFEATS): the page DATA query
+    performs a FULL columnar scan of every matched partition row before it
+    slices the page. The read-side keep-FIRST dedup ``QUALIFY row_number()
+    OVER (PARTITION BY timestamp …) = 1`` window (DEC-LAKE-READ-UNIQUE-001)
+    hash-partitions the whole matched set, the ``ORDER BY "timestamp"`` sorts
+    it, and the date bounds compare a derived ``(timestamp AT TIME ZONE
+    …)::DATE`` expression that DuckDB does not prune through against the raw
+    ``timestamp`` column's row-group min/max stats — and only THEN do
+    ``LIMIT``/``OFFSET`` take the slice. So the DuckDB engine cost is
+    **O(total matched partition rows)** (plus one Parquet footer open per
+    file), NOT O(page): ``LIMIT`` bounds ONLY how many rows materialise in
+    Python — the FIRST page is not cheaper than the whole scan — and a deep
+    ``OFFSET`` is O(row-groups up to the offset) on top. The page ``total``
+    is a ``COUNT(DISTINCT timestamp)``, itself **O(rows)** on the first
+    computation per write-generation and O(1) on a cached repeat (see
+    *count_cache*). That scan is flat enough to pass the shared-CI < 8×
+    depth-ratio gate (``tests/bench/test_db_candle_query_o1.py``); genuine
+    row-group pruning would need stats-compatible raw-column predicates, and
+    a write-time page manifest (true O(page) reads) stays the named future
+    work (#867 / #1025). This mirrors the
+    :func:`brutex.data.lake_read.dedup_qualify_sql` /
+    :func:`~brutex.data.lake_read.dedup_qualify_latest_sql` honest envelope;
+    a prev/next paging click therefore RE-SCANS the partition — flat only in
+    that the count + F&O stored-life span are cached, never in the row-scan
+    term.
 
     Parameters
     ----------
@@ -2918,9 +2945,11 @@ def query_candles(
     count_cache, generation
         Optional generation-stamped cache for the page ``total``
         (DEC-DB-CANDLE-COUNT-CACHE-001) + the current write-generation it is keyed
-        by. When supplied, the O(files) Parquet-footer ``COUNT(*)`` is memoised per
-        ``(coords, start, end)`` so a prev/next paging click within one dataset is
-        an O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        by. When supplied, the ``COUNT(DISTINCT timestamp)`` total — O(rows) on the
+        first computation per write-generation, O(1) on a cached repeat — is
+        memoised per ``(coords, start, end)`` so a prev/next paging click within one
+        dataset is an O(1) hit; a pull bumps *generation* → recompute (never a stale
+        total).
         The SAME cache also memoises the F&O default-range STORED-LIFE span under
         :func:`candle_span_key` (coords-only — the span is bound/paging-invariant),
         so the applied-range chip (DEC-DB-UX-PACK-001 Feature 2) never re-runs its
@@ -3009,11 +3038,14 @@ def query_candles(
     base = lake_root / "bars" / exchange / segment / symbol / interval
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         empty_cols = list(columns) if columns is not None else list(CANDLE_COLUMNS)
-        # An F&O page ALWAYS carries the strike-step honesty field so the frontend's
-        # key set is stable across an empty vs populated partition; an empty page
-        # presents no step, so the label is an honest None
-        # (DEC-MONEYNESS-REGISTRY-STEP-001).
-        empty_step_confidence = {"strike_step_confidence": None} if is_fno else {}
+        # An F&O page ALWAYS carries the strike-step honesty field + the spot-join
+        # provenance so the frontend's key set is stable across an empty vs populated
+        # partition; an empty page presents no step and joins nothing, so both are an
+        # honest None (DEC-MONEYNESS-REGISTRY-STEP-001; DEC-DB-FNO-DISPLAY-TRUTH-001
+        # item 9).
+        empty_step_confidence = (
+            {"strike_step_confidence": None, "spot_join_interval": None} if is_fno else {}
+        )
         return {
             **empty_step_confidence,
             "symbol": symbol,
@@ -3068,7 +3100,16 @@ def query_candles(
     # timestamps. The PAGE query collapses them keep-FIRST in the same single
     # scan (QUALIFY over filename + file_row_number order — deterministic), and
     # the TOTAL counts DISTINCT timestamps so it equals what the deduped pages
-    # actually serve. A clean partition is byte-identical.
+    # actually serve. A clean partition is byte-identical. HONEST complexity
+    # (DEC-DB-OPAGE-HONESTY-001, see the docstring): this QUALIFY window +
+    # ``ORDER BY`` is an O(total matched rows) columnar scan per click — the
+    # LIMIT/OFFSET below bound only the Python materialisation, NOT the scan.
+    # The QUALIFY is NOT skipped on a "clean" partition: no reliable O(1) /
+    # footer-only clean signal exists (the only detector is COUNT(*) ==
+    # COUNT(DISTINCT ts), itself an O(rows) scan), and skipping the window
+    # would be a constant-factor win, not a complexity change — so the dedup
+    # correctness guard stays on (deferred follow-up, never a correctness risk
+    # for a perf win).
     page_source = DEDUP_PARQUET_SOURCE_SQL
     qualify_sql = dedup_qualify_sql(("timestamp",))
 
@@ -3100,10 +3141,12 @@ def query_candles(
         use_stats_manifest=use_stats_manifest,
     )
 
-    # The page total is a `COUNT(*)` over `read_parquet(glob)` — DuckDB answers it
-    # from each Parquet file's FOOTER metadata, so it is O(files), NOT O(1): on a
-    # deep multi-year partition it re-reads every monthly file's footer on EVERY
-    # paging click (~8 ms at 6 years, growing as the lake deepens). The total is
+    # The page total is a `COUNT(DISTINCT timestamp)` over `read_parquet(glob)` —
+    # the deduped row count the keep-FIRST pages serve, NOT a footer `COUNT(*)`. So
+    # it is O(rows), NOT O(1): DuckDB scans the whole matched row set to count the
+    # distinct timestamps, so on a deep multi-year partition the first computation
+    # per write-generation grows with the stored rows on EVERY uncached paging
+    # click. The total is
     # invariant across paging / sort / column subsetting of the same
     # (coords, start, end), so the dashboard injects a generation-stamped cache
     # (DEC-DB-CANDLE-COUNT-CACHE-001): a prev/next click within one dataset is an
@@ -3282,8 +3325,9 @@ def query_candles(
     # against the underlying spot at each bar (DEC-FNO-MONEYNESS-001); spot pages do not.
     extra_columns: list[str] = [*SPOT_DERIVED_COLUMNS, *_fno_derived_columns(segment)]
     step_confidence: StepConfidence | None = None
+    spot_join_interval: str | None = None
     if segment == FNO_CANDLE_LAKE_SEGMENT:
-        fno_cells, step_confidence = _fno_derived_rows(
+        fno_cells, step_confidence, spot_join_interval = _fno_derived_rows(
             conn,
             lake_root,
             exchange=exchange,
@@ -3383,6 +3427,13 @@ def query_candles(
         payload["strike_step_confidence"] = (
             step_confidence.value if step_confidence is not None else None
         )
+        # The spot-join provenance (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9): which spot
+        # interval served the per-bar moneyness/spot join — "1minute" marks the
+        # fallback join on a partially-prebuilt lake (the frontend renders an honest
+        # note when it differs from the page interval); None when nothing joined.
+        # ALWAYS stamped on an F&O page (the strike_step_confidence stable-key-set
+        # precedent).
+        payload["spot_join_interval"] = spot_join_interval
     return payload
 
 
@@ -4000,7 +4051,7 @@ def _underlying_spot_close_by_ts(
     underlying: str,
     interval: str,
     ts_values: list[datetime],
-) -> dict[datetime, Decimal]:
+) -> tuple[dict[datetime, Decimal], str | None]:
     """Read ``{bar_instant: underlying_spot_close}`` for an F&O contract's underlying.
 
     The per-bar spot needed to classify an option's moneyness (DEC-FNO-MONEYNESS-001).
@@ -4011,9 +4062,12 @@ def _underlying_spot_close_by_ts(
     materialises more than the page's worth of spot bars regardless of how many years
     are stored — O(page) once, then O(1) per-bar lookup downstream (CLAUDE.md §5).
 
-    Returns ``{}`` (→ every bar classifies UNKNOWN, never raising) when *ts_values* is
-    empty, the underlying coordinate is illegal, or the underlying spot is absent from
-    both segments (Golden Rule #1 — an honest UNKNOWN, never a fabricated spot).
+    Returns ``(spots, joined_interval)`` — *joined_interval* names the spot interval
+    that actually served the join (the page *interval*, or ``"1minute"`` on the
+    fallback below), ``None`` when nothing joined. Returns ``({}, None)`` (→ every bar
+    classifies UNKNOWN, never raising) when *ts_values* is empty, the underlying
+    coordinate is illegal, or the underlying spot is absent everywhere (Golden Rule #1
+    — an honest UNKNOWN, never a fabricated spot).
 
     When the exact *underlying* probe comes back EMPTY (and only then — zero extra
     I/O and NO log on the hot path), the COMMON spot-key drift-recovery ladder
@@ -4026,54 +4080,105 @@ def _underlying_spot_close_by_ts(
     ``MIDCPNIFTY`` over a ``NIFTYMIDSELECT``-keyed spot dir read moneyness UNKNOWN on
     every bar even though the spot data existed on disk). Ladder exhaustion returns
     the honest empty map — never a fabricated spot.
+
+    **1-minute fallback on a partially-prebuilt lake (DEC-DB-FNO-DISPLAY-TRUTH-001
+    item 9):** when the whole walk at the display *interval* joins nothing AND
+    ``interval != "1minute"``, the SAME key walk re-runs at
+    :data:`_INTRADAY_BASE_INTERVAL` — the always-present base feed, exactly mirroring
+    the %CHNG baseline convention (DEC-SPOT-PREVCLOSE-1MIN-001, which ALWAYS reads
+    ``1minute`` regardless of the viewed timeframe). The fallback joins ONLY the
+    page's own bar instants (a bound-parameter ``IN`` list, ≤ page size — O(page);
+    a ``BETWEEN`` at 1minute would materialise every minute in the page's wall
+    span). Semantics, honestly disclosed: it serves the 1-minute close AT the bar's
+    labelled instant (the bucket-OPEN minute), whereas a prebuilt display-interval
+    partition serves the bucket's resampled close (its LAST minute) — both real
+    stored data, the drift surfaced via *joined_interval* provenance (the page
+    stamps ``spot_join_interval``), never a fabricated value. Honest limit: a
+    ``1day`` page's bar instants are midnight-IST — no 1-minute bar exists at those
+    instants, so a 1day page cannot fall back (stays ``"?"``). One
+    ``db_view.spot_tf_fallback`` info per page marks the fallback arm.
     """
     if not ts_values:
-        return {}
+        return {}, None
     min_ts, max_ts = min(ts_values), max(ts_values)
 
-    def _probe(key: str) -> dict[datetime, Decimal]:
+    def _probe(key: str, probe_interval: str) -> dict[datetime, Decimal]:
         for segment in _SPOT_PROBE_SEGMENTS:
             try:
-                _validate_candle_coords(exchange, segment, key, interval)
+                _validate_candle_coords(exchange, segment, key, probe_interval)
             except ValueError:
                 return {}  # a key that is not a legal coordinate → no spot under it.
-            base = lake_root / "bars" / exchange / segment / key / interval
+            base = lake_root / "bars" / exchange / segment / key / probe_interval
             if not (base.is_dir() and any(base.rglob("*.parquet"))):
                 continue
-            # glob built from validated coordinates (no free user text); path + both
-            # bounds are bound parameters (same SQL/path-injection guard as
-            # query_candles). A NULL close is filtered in SQL so a stray null spot bar
-            # degrades that instant to UNKNOWN (the no-spot bucket) rather than raising
-            # in `_to_decimal(None)` — honouring the "never raises / honest UNKNOWN"
-            # contract. Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt
-            # underlying-spot Parquet degrades the join to its readable subset (the
-            # affected option bars classify UNKNOWN), never a 500.
+            # glob built from validated coordinates (no free user text); path + every
+            # bound (BETWEEN pair / IN-list instants) are bound parameters (same
+            # SQL/path-injection guard as query_candles). A NULL close is filtered in
+            # SQL so a stray null spot bar degrades that instant to UNKNOWN (the
+            # no-spot bucket) rather than raising in `_to_decimal(None)` — honouring
+            # the "never raises / honest UNKNOWN" contract. Resilient read
+            # (DEC-DB-CORRUPT-SKIP-001): a corrupt underlying-spot Parquet degrades
+            # the join to its readable subset (the affected option bars classify
+            # UNKNOWN), never a 500.
+            if probe_interval == interval:
+                where_sql = 'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL'
+                params: list[Any] = [min_ts, max_ts]
+            else:
+                # The 1minute FALLBACK joins only the page's own bar instants — a
+                # bound-parameter IN list keeps the read O(page) instead of an
+                # O(minutes-in-span) BETWEEN over the base feed.
+                placeholders = ", ".join("?" for _ in ts_values)
+                where_sql = f'WHERE "timestamp" IN ({placeholders}) AND close IS NOT NULL'
+                params = list(ts_values)
+            # S608 suppression justification: the two WHERE shapes are trusted module
+            # constants (a literal BETWEEN, or "?" placeholders only); the path +
+            # every value are bound parameters — no free text reaches the SQL.
+            sql = (
+                'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '  # noqa: S608  # nosec B608
+                + where_sql
+            )
             rows = _execute_parquet_resilient(
                 conn,
                 base,
-                'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
-                'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
-                [min_ts, max_ts],
-                source=f"candle-spotjoin:{exchange}/{segment}/{key}/{interval}",
+                sql,
+                params,
+                source=f"candle-spotjoin:{exchange}/{segment}/{key}/{probe_interval}",
             )
             return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
         return {}
 
-    spots = _probe(underlying)
-    if spots:
+    def _walk(probe_interval: str) -> dict[datetime, Decimal]:
+        spots = _probe(underlying, probe_interval)
+        if spots:
+            return spots
+        for candidate in spot_recovery_candidates(underlying, exchange):
+            recovered = _probe(candidate, probe_interval)
+            if recovered:
+                _LOG.info(
+                    "db_view.spot_key_recovered",
+                    underlying=underlying,
+                    recovered_key=candidate,
+                    exchange=exchange,
+                    interval=probe_interval,
+                )
+                return recovered
         return spots
-    for candidate in spot_recovery_candidates(underlying, exchange):
-        recovered = _probe(candidate)
-        if recovered:
+
+    spots = _walk(interval)
+    if spots:
+        return spots, interval
+    if interval != _INTRADAY_BASE_INTERVAL:
+        fallback = _walk(_INTRADAY_BASE_INTERVAL)
+        if fallback:
             _LOG.info(
-                "db_view.spot_key_recovered",
+                "db_view.spot_tf_fallback",
                 underlying=underlying,
-                recovered_key=candidate,
                 exchange=exchange,
                 interval=interval,
+                fallback=_INTRADAY_BASE_INTERVAL,
             )
-            return recovered
-    return spots
+            return fallback, _INTRADAY_BASE_INTERVAL
+    return {}, None
 
 
 def _fno_strike_step(
@@ -4194,8 +4299,12 @@ def _fno_derived_rows(
     registry_path: Path | None = None,
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
-) -> tuple[list[tuple[str, str | None, str | None, str | None, int | None]], StepConfidence | None]:
-    """Compute the per-bar F&O derived cells: ``(moneyness, spot, intrinsic, time_value, days_to_expiry)``.
+) -> tuple[
+    list[tuple[str, str | None, str | None, str | None, int | None, str]],
+    StepConfidence | None,
+    str | None,
+]:
+    """Compute the per-bar F&O derived cells: ``(moneyness, spot, intrinsic, time_value, days_to_expiry, greeks_status)``.
 
     Matches :data:`FNO_DERIVED_COLUMNS`. The combined ``moneyness`` label (bucket + signed
     strike-depth, ``"ITM -1"`` / ``"OTM +10"`` / ``"ATM"``) is classified against the
@@ -4207,7 +4316,13 @@ def _fno_derived_rows(
     * ``intrinsic`` — :func:`_option_intrinsic` (2-dp), ``None`` when no spot;
     * ``time_value`` — ``close − intrinsic`` (2-dp), ``None`` when no spot;
     * ``days_to_expiry`` — pure ``(expiry − bar IST date).days`` (no I/O), resolvable for any
-      decodable contract (option OR future), ``None`` only when undecodable / no timestamp.
+      decodable contract (option OR future), ``None`` only when undecodable / no timestamp;
+    * ``greeks_status`` — the stored ``greeks_provenance_id`` stamp's packed status decoded
+      into words (DEC-DB-FNO-DISPLAY-TRUTH-001 item 3) via the ONE COMMON
+      :func:`brutex.data.greeks_provenance.greeks_status_label` — no extra I/O (the pid rides
+      the page's own SELECT); a stamp-less bar (legacy 7-column partition, derived-TF page —
+      the overlay lives on ``1minute`` — or a ``greeks_provenance_id``-less column
+      projection) honestly reads ``"not enriched"``, a future ``"—"``.
 
     A FUTURE (or an undecodable symbol) reads ``moneyness="—"`` with ``None`` value columns
     and no spot read attempted — but still gets ``days_to_expiry`` when its expiry decodes; an
@@ -4219,8 +4334,8 @@ def _fno_derived_rows(
     column projection therefore reads ``UNKNOWN``/``None`` on every bar (honest — the join key
     is absent — never a fabricated value), not a crash.
 
-    Returns ``(rows, step_confidence)`` — the second element labels which ladder
-    produced the ATM±N strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001):
+    Returns ``(rows, step_confidence, spot_join_interval)`` — the second element labels
+    which ladder produced the ATM±N strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001):
     :attr:`~brutex.data.moneyness.StepConfidence.REGISTRY` when the AUTHORITATIVE
     vendor chain (read from *registry_path* via the generation-memoised
     :func:`_registry_strike_chain`) supplied it,
@@ -4228,6 +4343,9 @@ def _fno_derived_rows(
     lake-observed sibling ladder did (the page then carries an honest low-confidence
     marker — the observed min gap can overestimate the true base step), and ``None``
     when no step was derivable at all (or the page is a future/undecodable contract).
+    The third element is the spot interval that actually served the per-bar join
+    (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9 — ``"1minute"`` marks the fallback join on a
+    partially-prebuilt lake; ``None`` when nothing joined / no join was attempted).
     """
     parts = parse_fno_symbol(symbol)
     option_type = parts.option_type if parts is not None else None
@@ -4236,12 +4354,32 @@ def _fno_derived_rows(
     expiry = parts.expiry if parts is not None else None
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
     close_idx = out_columns.index("close") if "close" in out_columns else -1
+    pid_idx = (
+        out_columns.index("greeks_provenance_id") if "greeks_provenance_id" in out_columns else -1
+    )
 
     def _dte(ts: Any) -> int | None:
         """Calendar days from the bar's IST date to expiry — pure, ``None`` if unknown."""
         if expiry is None or not isinstance(ts, datetime):
             return None
         return (expiry - _bar_ist_date(ts)).days
+
+    def _greeks_status(row: tuple[Any, ...]) -> str:
+        """Decode the row's stored provenance stamp into the display words.
+
+        A missing / non-int cell (legacy partition NULL, derived-TF page, a
+        ``greeks_provenance_id``-less column projection) is an honest ``None`` stamp
+        → ``"not enriched"`` for an option (mirrors the documented timestamp-less-
+        projection behaviour above — never a fabricated status, never a raise).
+        """
+        pid = row[pid_idx] if pid_idx >= 0 else None
+        # DuckDB fetchall() returns a native Python int for INTEGER-family columns
+        # (NULL → None) — the driver contract this isinstance narrowing relies on.
+        # bool is EXCLUDED explicitly (bool subclasses int, so a stray True would
+        # otherwise decode as packed id 1 → a fabricated "ok"); DuckDB never yields
+        # bool for an INTEGER column, but Golden Rule #1 forbids relying on that.
+        packed = pid if isinstance(pid, int) and not isinstance(pid, bool) else None
+        return greeks_status_label(packed, is_option=option_type is not None)
 
     # A future / undecodable contract (or an option with no decoded strike) has no
     # moneyness/value — "—" + None on every bar, no spot read; days_to_expiry still resolves
@@ -4250,10 +4388,21 @@ def _fno_derived_rows(
     # ``parse_fno_symbol`` returns ``None`` → caught by ``underlying is None``).
     if option_type is None or underlying is None or strike is None:
         na_label = moneyness_view(option_type, strike, None, None).label
-        return [
-            (na_label, None, None, None, _dte(row[ts_idx] if ts_idx >= 0 else None))
-            for row in raw_rows
-        ], None
+        return (
+            [
+                (
+                    na_label,
+                    None,
+                    None,
+                    None,
+                    _dte(row[ts_idx] if ts_idx >= 0 else None),
+                    _greeks_status(row),
+                )
+                for row in raw_rows
+            ],
+            None,
+            None,
+        )
 
     ts_values = [
         row[ts_idx] for row in raw_rows if ts_idx >= 0 and isinstance(row[ts_idx], datetime)
@@ -4274,7 +4423,7 @@ def _fno_derived_rows(
         lake_root, exchange=exchange, symbol=symbol, registry_strikes=registry_strikes
     )
     step = resolved_step.step
-    spot_by_ts = _underlying_spot_close_by_ts(
+    spot_by_ts, spot_join_interval = _underlying_spot_close_by_ts(
         conn,
         lake_root,
         exchange=exchange,
@@ -4282,13 +4431,13 @@ def _fno_derived_rows(
         interval=interval,
         ts_values=ts_values,
     )
-    rows: list[tuple[str, str | None, str | None, str | None, int | None]] = []
+    rows: list[tuple[str, str | None, str | None, str | None, int | None, str]] = []
     for row in raw_rows:
         ts = row[ts_idx] if ts_idx >= 0 else None
         spot = spot_by_ts.get(_utc_instant(ts)) if isinstance(ts, datetime) else None
         view = moneyness_view(option_type, strike, spot, step)
         if spot is None:
-            rows.append((view.label, None, None, None, _dte(ts)))
+            rows.append((view.label, None, None, None, _dte(ts), _greeks_status(row)))
             continue
         intrinsic = _option_intrinsic(option_type, strike, spot)
         close = row[close_idx] if close_idx >= 0 else None
@@ -4300,9 +4449,10 @@ def _fno_derived_rows(
                 str(round_money(intrinsic)),
                 time_value,
                 _dte(ts),
+                _greeks_status(row),
             )
         )
-    return rows, resolved_step.confidence
+    return rows, resolved_step.confidence, spot_join_interval
 
 
 def option_candle_count_key(series: str, start: str | None, end: str | None) -> str:
@@ -4350,8 +4500,21 @@ def query_option_candles(
     data duplication, the lake stays the single source of truth. *series* is the
     filesystem-safe segment from :func:`list_option_datasets` and is validated
     against :func:`_validate_option_segment` (NO free user text in the glob,
-    same path/SQL-injection guard as the spot reader). The page is
-    ``LIMIT``-bounded so a click never materialises more than *limit* rows.
+    same path/SQL-injection guard as the spot reader).
+
+    HONEST complexity (Golden Rule #10 — this is NOT O(page) in series depth;
+    DEC-DB-OPAGE-HONESTY-001): identical envelope to :func:`query_candles`. The
+    page DATA query performs a FULL columnar scan of every matched series row —
+    the keep-FIRST dedup ``QUALIFY row_number() OVER (PARTITION BY (side,
+    timestamp) …) = 1`` window hash-partitions the whole matched set and the
+    ``ORDER BY "timestamp"`` sorts it — BEFORE ``LIMIT``/``OFFSET`` slice the
+    page. So the engine cost is **O(total matched series rows)** (plus one
+    Parquet footer open per file); ``LIMIT`` bounds ONLY the Python
+    materialisation and a deep ``OFFSET`` is O(row-groups up to the offset) on
+    top. The page ``total`` is a ``COUNT(DISTINCT (side, timestamp))``, itself
+    **O(rows)** on the first computation per write-generation and O(1) on a
+    cached repeat (see *count_cache*). A write-time page manifest (true O(page)
+    reads) stays the named future work (#867 / #1025).
 
     Projects the 11 :data:`OPTION_CANDLE_COLUMNS` — the OHLCV+OI set PLUS the
     per-bar option stamps ``side`` / ``strike`` / ``spot`` / ``iv``. *start* /
@@ -4382,9 +4545,11 @@ def query_option_candles(
     count_cache, generation
         Optional generation-stamped cache for the page ``total``
         (DEC-LAKE-READ-O1-AUDIT-001) + the current write-generation it is keyed
-        on. When supplied, the ``COUNT(*)`` over the whole series glob is memoised
-        per ``(series, start, end)`` (paging-invariant) so a prev/next click is an
-        O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        on. When supplied, the ``COUNT(DISTINCT (side, timestamp))`` total over the
+        whole series glob — O(rows) on the first computation per write-generation,
+        O(1) on a cached repeat — is memoised per ``(series, start, end)``
+        (paging-invariant) so a prev/next click is an O(1) hit; a pull bumps
+        *generation* → recompute (never a stale total).
         The SAME cache also memoises the default-range STORED-LIFE span under
         :func:`option_candle_span_key` (series-only key), so the applied-range chip
         (DEC-DB-UX-PACK-001 Feature 2) never re-runs its MIN/MAX scan on a paging
@@ -4509,7 +4674,9 @@ def query_option_candles(
     )
 
     def _legacy_count_total() -> int:
-        """Run the O(files) deduped-total footer-scan over the whole series glob.
+        """Run the O(rows) ``COUNT(DISTINCT (side, timestamp))`` deduped-total scan
+        over the whole series glob (the deduped composite-key count the keep-FIRST
+        pages serve, NOT a footer ``COUNT(*)``; O(1) on a cached repeat).
 
         Routed through the COMMON :func:`_execute_parquet_resilient` (the series
         dir is FLAT, so its recursive ``**/*.parquet`` glob reads the identical
@@ -6394,10 +6561,17 @@ def build_window_payload(
         and (wanted_status == r.status if wanted_status else r.status != "PLANNED")
     ]
     selected.sort(key=lambda r: _WINDOW_STATUS_ORDER.get(r.status, 9))
+    # The legacy page honours *offset* exactly like the DuckDB fast path (which binds
+    # `LIMIT ? OFFSET ?`) — pre-fix this slice was `selected[:limit]`, so on a legacy
+    # backing (None conn / legacy-shape base / double duckdb.Error / status_log) every
+    # "Next ›" click silently re-served page 1 (DEC-DB-FNO-DISPLAY-TRUTH-001 item 2).
+    # Same COMMON clamp_offset guard as every other pager; a past-the-end offset
+    # honestly returns an empty page ("returned" possibly 0), `matched` unchanged.
+    safe_offset = clamp_offset(offset)
     rows = [
         # The legacy status log has no first_seen_at — getattr keeps ONE shape.
         _window_row(r, first_seen_at=getattr(r, "first_seen_at", None), symbol_for_id=symbol_for_id)
-        for r in selected[:limit]
+        for r in selected[safe_offset : safe_offset + limit]
     ]
     return {
         "source": source,

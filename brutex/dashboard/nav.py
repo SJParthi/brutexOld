@@ -37,8 +37,15 @@ NAV_LINKS: tuple[NavLink, ...] = (
     NavLink("/universe", "Universe"),
     NavLink("/db", "Database"),
     NavLink("/coverage", "Coverage"),
+    # DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (audit item 5 / the ledger-#31
+    # gap): the completeness scoreboard + the one-click screener/strategy
+    # pages were served-but-unreachable — no nav entry pointed at them.
+    # /strategy with no query resolves the latest run at rank 1 client-side.
+    NavLink("/completeness", "Completeness"),
     NavLink("/movers", "Movers"),
     NavLink("/results", "Results"),
+    NavLink("/screener", "Screener"),
+    NavLink("/strategy", "Strategy"),
     NavLink("/reports", "Reports"),
 )
 
