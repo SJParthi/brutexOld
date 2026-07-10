@@ -29,6 +29,7 @@ from brutex.data.bad_tick import (
     bad_tick_screen_enabled,
     is_bad_tick,
     non_finite_keep_mask,
+    resample_screen_applies,
     screen_frame_bad_ticks,
 )
 from structlog.testing import capture_logs
@@ -1325,3 +1326,53 @@ def test_screen_frame_non_finite_and_scaled_bar_both_dropped() -> None:
     assert 1150.0 not in closes
     events = {r["event"] for r in logs}
     assert {NON_FINITE_SKIP_EVENT, BAD_TICK_SKIP_EVENT} <= events
+
+
+# ════════════════════════════════════════════════════════════════════════
+# resample_screen_applies — the instrument-class gate
+# (DEC-BADTICK-RESAMPLE-INPUT-001 fix round 2)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestResampleScreenApplies:
+    """The ONE COMMON class gate: SPOT + FNO FUT screened, FNO CE/PE not.
+
+    The refuter-confirmed round-2 finding: the index-circuit-breaker-calibrated
+    4.0x bound is UNJUSTIFIED for option premiums (a clean ₹2 → ₹9 = 4.5x
+    deep-OTM print is legit and was DROPPED — plus the session's re-priced
+    remainder, via the skipped-bar-never-advances-baseline law), so the
+    resample-input seams gate the screen on this coordinate predicate.
+    """
+
+    @pytest.mark.parametrize("segment", ["INDEX", "CASH"])
+    def test_spot_segments_are_screened(self, segment: str) -> None:
+        assert resample_screen_applies(segment, "NIFTY") is True
+
+    def test_fno_future_is_screened(self) -> None:
+        # A future tracks its underlying (same circuit-band physics) AND
+        # NIFTY futures are ENGINE scope — derived futures TFs must stay
+        # screened for the engine-truth invariant.
+        assert resample_screen_applies("FNO", "NSE-NIFTY-30Sep25-FUT") is True
+
+    @pytest.mark.parametrize(
+        "symbol",
+        ["NSE-NIFTY-30Sep25-24650-CE", "BSE-SENSEX-25Sep25-79500-PE"],
+    )
+    def test_fno_option_is_not_screened(self, symbol: str) -> None:
+        assert resample_screen_applies("FNO", symbol) is False
+
+    def test_undecodable_fno_symbol_is_not_screened(self) -> None:
+        # Cannot prove futures → the conservative identity read (never destroy
+        # real data on an unproven class; mirrors lake_heal's
+        # _prebuild_kind_from_coords None = never-rebuild for the same shape).
+        assert resample_screen_applies("FNO", "NSE-JUNKDIR") is False
+
+    def test_gated_frame_screen_would_destroy_the_legit_option_move(self) -> None:
+        # The teeth behind the gate: the SAME class-agnostic frame screen,
+        # applied to the legit option ladder, destroys 6 of 10 bars — the
+        # predicate is what keeps it away from CE/PE coordinates.
+        closes = [2.0, 2.05, 2.1, 2.15, 9.0, 9.1, 9.2, 9.3, 9.4, 9.5]
+        rows = [(c, c + 0.05, max(c - 0.05, 0.05), c) for c in closes]
+        with capture_logs():
+            result = screen_frame_bad_ticks(_minute_frame(rows), source="src")
+        assert result.height == 4  # the 4.5x print + its re-priced remainder dropped

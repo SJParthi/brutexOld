@@ -792,6 +792,13 @@ def _read_cut_1m_frame(
     # (make_lake_read_1m) — a poison bar that the stored side drops is dropped
     # here too, keeping the movers stored-vs-resample byte-equality contract
     # under poison as well as on clean data (identity object when clean / OFF).
+    # Fix round 2 (instrument-class scope): NO resample_screen_applies gate is
+    # needed here — this reader is STRUCTURALLY spot-only: its ONLY consumers
+    # (_read_session_bars + spot_session_value_paisa) are fed by
+    # compute_spot_candidates, whose discovery whitelists SPOT_PROBE_SEGMENTS
+    # (INDEX/CASH — an FNO coordinate never reaches this read), so the
+    # unconditional call below screens exactly the screened classes. The F&O
+    # movers tabs ride the deliberately UNSCREENED _read_future_session.
     day_df = screen_frame_bad_ticks(day_df, source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
         return None

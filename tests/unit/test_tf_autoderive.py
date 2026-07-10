@@ -12,7 +12,7 @@ removed auto-derive surface stays removed.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import polars as pl
 from brutex.data import tf_autoderive
@@ -378,3 +378,93 @@ class TestBadTickTripwire:
             intervals=["5minute"],
         )
         assert verdicts == {("NIFTY", "5minute"): "fresh"}
+
+
+class TestInstrumentClassScope:
+    """DEC-BADTICK-RESAMPLE-INPUT-001 fix round 2: the seam-2 screen is scoped
+    by instrument class exactly like the write seams — SPOT + FNO ``FUT``
+    screened, FNO ``CE``/``PE`` NOT — so an HONEST options derived partition
+    (built, correctly, from the UNSCREENED 1m) can never read false-stale off
+    a one-sided screened re-derive base. This matters beyond the sweep gate:
+    the doctor's ``check_derived_freshness`` walks ``bars/*/*/*`` (FNO
+    contract dirs included) and verdicts the FIRST symbol with derived TFs,
+    so a false-stale options contract would FAIL the whole doctor check."""
+
+    _OPTION = "NSE-NIFTY-30Sep25-24650-CE"
+    _FUTURE = "NSE-NIFTY-30Sep25-FUT"
+    #: A legit deep-OTM re-pricing — a clean 2.00 → 9.00 print is 4.5x.
+    _OPTION_CLOSES = (2.0, 2.05, 2.1, 2.15, 9.0, 9.1, 9.2, 9.3, 9.4, 9.5)
+
+    def _seed_fno(self, lake_root, symbol: str, closes: tuple[float, ...]):
+        """Write one FNO 1m series + its derived 5minute built from the RAW 1m."""
+        from decimal import Decimal
+        from pathlib import Path
+
+        import polars as pl
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+        from brutex.data.spot_daily_resample import frame_to_candle_bars
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        bars = [
+            CandleBar(
+                timestamp=datetime(2024, 1, 2, 9, 16 + i, tzinfo=ist).astimezone(UTC),
+                open=Decimal(str(c)),
+                high=Decimal(str(round(c + 0.05, 2))),
+                low=Decimal(str(round(max(c - 0.05, 0.05), 2))),
+                close=Decimal(str(c)),
+                volume=1000,
+                open_interest=50,
+            )
+            for i, c in enumerate(closes)
+        ]
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=Path(lake_root)))
+        sink.append(exchange="NSE", segment="FNO", symbol=symbol, interval="1minute", bars=bars)
+        symbol_dir = lake_root / "bars" / "NSE" / "FNO" / symbol
+        raw = (
+            pl.read_parquet((symbol_dir / "1minute").as_posix() + "/**/*.parquet")
+            .rename({"timestamp": "ts_utc"})
+            .select("ts_utc", "open", "high", "low", "close", "volume")
+            .sort("ts_utc")
+        )
+        sink.append(
+            exchange="NSE",
+            segment="FNO",
+            symbol=symbol,
+            interval="5minute",
+            bars=frame_to_candle_bars(resample_1m_to_tf(raw, 5)),
+        )
+
+    def test_honest_option_derived_partition_never_reads_false_stale(self, tmp_path) -> None:
+        """FIX ROUND 2 regression (fails-before on fe81ef83: ``"stale"``): the
+        options derived partition — built from the RAW 1m, its class-correct
+        build — reads ``"fresh"``; pre-fix the one-sided SCREENED re-derive
+        base dropped the legit 4.5x print + its re-priced remainder and the
+        row counts diverged → a false-stale on an honest partition."""
+        self._seed_fno(tmp_path, self._OPTION, self._OPTION_CLOSES)
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbols=[self._OPTION],
+            intervals=["5minute"],
+        )
+        assert verdicts == {(self._OPTION, "5minute"): "fresh"}
+
+    def test_futures_legacy_poisoned_derived_still_reads_stale(self, tmp_path) -> None:
+        """The FUT arm keeps the migration tripwire: a legacy FUTURES derived
+        partition built from a RAW 1m carrying a x10 poison bar still reads
+        ``"stale"`` (the re-derive base IS screened for futures)."""
+        closes = [100.0 + i for i in range(10)]
+        closes[7] = closes[7] * 10  # x10 poison, post-head
+        self._seed_fno(tmp_path, self._FUTURE, tuple(closes))
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbols=[self._FUTURE],
+            intervals=["5minute"],
+        )
+        assert verdicts == {(self._FUTURE, "5minute"): "stale"}

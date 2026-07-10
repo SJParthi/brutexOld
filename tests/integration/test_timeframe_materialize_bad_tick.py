@@ -232,3 +232,157 @@ def test_kill_switch_off_lets_poison_launder(
     _materialize(tmp_path)
     highs = _derived_highs(tmp_path, "1day")
     assert float(poison_bar.high) in highs
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Instrument-class scope (DEC-BADTICK-RESAMPLE-INPUT-001 fix round 2):
+# SPOT + FNO FUT screened; FNO CE/PE deliberately NOT screened.
+# ════════════════════════════════════════════════════════════════════════
+
+_FNO_SEGMENT = "FNO"
+_OPTION_SYMBOL = "NSE-NIFTY-30Sep25-24650-CE"
+_FUTURE_SYMBOL = "NSE-NIFTY-30Sep25-FUT"
+#: A LEGIT deep-OTM re-pricing: a clean ₹2 → ₹9 one-minute print is 4.5x —
+#: real option-premium physics, NOT corruption (the refuter's captured repro).
+_OPTION_CLOSES = [2.0, 2.05, 2.1, 2.15, 9.0, 9.1, 9.2, 9.3, 9.4, 9.5]
+
+
+def _write_fno_1m(lake_root: Path, symbol: str, closes: list[float]) -> None:
+    """Write one in-session 1-minute series under an FNO contract coordinate."""
+    bars = [
+        CandleBar(
+            timestamp=_SESSION_OPEN_UTC + timedelta(minutes=i),
+            open=Decimal(str(c)),
+            high=Decimal(str(round(c + 0.05, 2))),
+            low=Decimal(str(round(max(c - 0.05, 0.05), 2))),
+            close=Decimal(str(c)),
+            volume=100 + i,
+            open_interest=50,
+        )
+        for i, c in enumerate(closes)
+    ]
+    ParquetBarSink(writer=ParquetWriter(lake_root=lake_root)).append(
+        exchange=_EXCHANGE, segment=_FNO_SEGMENT, symbol=symbol, interval="1minute", bars=bars
+    )
+
+
+def _stored_closes(lake_root: Path, symbol: str, interval: str) -> list[float]:
+    """Raw polars read of a derived FNO partition's closes (no engine screen)."""
+    import polars as pl
+
+    part = lake_root / "bars" / _EXCHANGE / _FNO_SEGMENT / symbol / interval
+    files = sorted(part.rglob("*.parquet"))
+    assert files, f"no {interval} partition written for {symbol}"
+    frame = pl.read_parquet([f.as_posix() for f in files]).sort("timestamp")
+    return [float(v) for v in frame.get_column("close").to_list()]
+
+
+def test_option_legit_move_survives_resample_seams(tmp_path: Path) -> None:
+    """FIX ROUND 2 regression (fails-before on fe81ef83): an OPTION session
+
+    with a legit > 4x clean premium move materialises UNCHANGED through seam 1
+    (``make_lake_read_1m``) AND seam 4 (``make_lake_read_1m_window``). Pre-fix
+    the index-calibrated screen DROPPED the ₹2 → ₹9 print and — because a
+    skipped bar never advances the baseline — cascade-dropped the session's
+    re-priced 9.x remainder too (captured: 4 of 10 rows served), silently
+    filtering legit bars out of the REFERENCE_ONLY derived partitions and
+    diverging from the deliberately-unscreened F&O movers display path.
+    """
+    from datetime import date as _date
+
+    from brutex.data.spot_daily_resample import make_lake_read_1m_window
+    from brutex.data.timeframe_materialize import make_lake_read_1m
+
+    _write_fno_1m(tmp_path, _OPTION_SYMBOL, _OPTION_CLOSES)
+
+    # Seam 1: the shared prebuild read serves EVERY bar (pre-fix: 4 of 10).
+    shared = make_lake_read_1m(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_OPTION_SYMBOL,
+        with_open_interest=True,
+    )()
+    assert shared.height == len(_OPTION_CLOSES)
+    assert shared.get_column("close").to_list() == _OPTION_CLOSES
+
+    # Seam 4: the lake-heal daily-recall window read serves EVERY bar too.
+    window = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_OPTION_SYMBOL,
+        start=_date(2021, 1, 4),
+        end=_date(2021, 1, 5),
+        include_oi=True,
+    )()
+    assert window.height == len(_OPTION_CLOSES)
+    assert window.get_column("close").to_list() == _OPTION_CLOSES
+
+    # End-to-end: the materialised derived TFs carry the re-priced 9.x closes.
+    materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_OPTION_SYMBOL,
+        kind=PrebuildKind.OPTIONS,
+        tfs=("5m",),
+        include_daily=True,
+        daily_before=date(2021, 1, 5),
+    )
+    assert 9.5 in _stored_closes(tmp_path, _OPTION_SYMBOL, "5minute")
+    assert _stored_closes(tmp_path, _OPTION_SYMBOL, "1day") == [9.5]
+
+
+def test_futures_poison_still_screened_through_resample_seams(tmp_path: Path) -> None:
+    """The FUT arm of the class gate: a x10 poison bar under an FNO FUT
+
+    coordinate is STILL dropped at seam 1 + seam 4 and never reaches a derived
+    bucket — futures move like their underlying (no legit > 4x/min under the
+    NSE circuit bands) and NIFTY futures are ENGINE scope, so the engine-truth
+    invariant keeps derived futures timeframes screened.
+    """
+    from datetime import date as _date
+
+    from brutex.data.spot_daily_resample import make_lake_read_1m_window
+    from brutex.data.timeframe_materialize import make_lake_read_1m
+
+    closes = [100.0 + i for i in range(10)]
+    closes[7] = closes[7] * _SCALE  # x10 poison, post-head
+    _write_fno_1m(tmp_path, _FUTURE_SYMBOL, closes)
+
+    shared = make_lake_read_1m(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_FUTURE_SYMBOL,
+        with_open_interest=True,
+    )()
+    assert shared.height == len(closes) - 1
+    assert closes[7] not in shared.get_column("close").to_list()
+
+    window = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_FUTURE_SYMBOL,
+        start=_date(2021, 1, 4),
+        end=_date(2021, 1, 5),
+        include_oi=True,
+    )()
+    assert window.height == len(closes) - 1
+    assert window.get_column("ts_utc").to_list() == shared.get_column("ts_utc").to_list()
+
+    materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_FUTURE_SYMBOL,
+        kind=PrebuildKind.FUTURES,
+        tfs=("5m",),
+        include_daily=True,
+        daily_before=date(2021, 1, 5),
+    )
+    for interval in ("5minute", "1day"):
+        stored = _stored_closes(tmp_path, _FUTURE_SYMBOL, interval)
+        assert closes[7] not in stored, f"{interval} laundered the futures poison"

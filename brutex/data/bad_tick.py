@@ -264,6 +264,34 @@ ordering ValueError; ONLY ``+inf``-in-HIGH genuinely flows raw. The OFF
 path is byte-identical to the pre-screen tree case-for-case (the
 pre-existing envelope, unchanged — disclosed precisely).
 
+Resample-input instrument-class scope (``DEC-BADTICK-RESAMPLE-INPUT-001``
+fix round 2)
+--------------------------------------------------------------------------
+
+The :data:`BAD_TICK_MAX_RATIO` = 4.0 bound is justified by INDEX
+circuit-breaker physics (above) — that justification extends to CASH single
+stocks (the same 10/15/20% surveillance bands) and to FUTURES (a future
+tracks its underlying tick-for-tick, so its one-minute returns obey the same
+bands; NIFTY futures are ENGINE scope per DEC-NIFTY-DYNAMIC-STRATEGY-001, so
+the engine-truth invariant NEEDS derived futures timeframes screened), but
+NOT to OPTION PREMIUMS: a deep-OTM / expiry-day option legitimately moves
+``> 4x`` in one minute (a clean ₹2 → ₹9 print is 4.5x — reproduced DROPPED
+pre-fix, with the skipped-bar-never-advances-baseline law then
+cascade-dropping the session's re-priced remainder). The RESAMPLE-INPUT
+seams therefore gate the :func:`screen_frame_bad_ticks` call on the ONE
+COMMON class predicate :func:`resample_screen_applies` — SPOT (``INDEX`` /
+``CASH``) + FNO ``FUT`` screened, FNO ``CE`` / ``PE`` (and an UNDECODABLE
+FNO symbol — cannot prove futures, never destroy real data on an unproven
+class) NOT screened. Options are REFERENCE_ONLY (never engine-served) and
+the F&O movers DISPLAY resample is deliberately unscreened, so the skip also
+restores stored ≡ display consistency for options. The ENGINE READ boundary
+(:func:`brutex.feed.replay.arrow_table_to_bars`) is NOT class-gated — it
+serves only engine-scoped instruments (the 3 spot indices + NIFTY futures,
+all screened classes). HONEST residual: a GENUINELY-corrupt option bar (a
+x10 vendor scaling on a premium) in derived TFs is now NOT screened — an
+option-aware threshold needs premium-calibrated physics, the named
+follow-up DEC-BADTICK-OPTION-THRESHOLD-001.
+
 Contract (deliberately narrow, to never destroy real data):
 
 * the comparison is **within the SAME IST session only**;
@@ -289,6 +317,8 @@ import os
 from typing import TYPE_CHECKING, Final
 
 import structlog
+
+from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Sequence
@@ -358,6 +388,10 @@ _OHLC_FIELDS: Final[tuple[str, str, str, str]] = ("open", "high", "low", "close"
 #: ``volume_keepalive`` kill-switch vocabulary (CLAUDE.md §11 COMMON pattern).
 _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 
+#: The F&O lake segment directory name (``bars/<exch>/FNO/<groww_symbol>/…``)
+#: — the coordinate :func:`resample_screen_applies` classes on.
+_FNO_SEGMENT: Final[str] = "FNO"
+
 
 def bad_tick_screen_enabled(raw: str | None = None) -> bool:
     """Return whether the bad-tick screen is ENABLED (default ``True``).
@@ -378,6 +412,54 @@ def bad_tick_screen_enabled(raw: str | None = None) -> bool:
     """
     value = os.environ.get(BAD_TICK_ENABLED_ENV) if raw is None else raw
     return not (value is not None and value.strip().lower() in _FALSY)
+
+
+def resample_screen_applies(segment: str, symbol: str) -> bool:
+    """Whether the RESAMPLE-INPUT bad-tick screen applies to one lake coordinate.
+
+    The ONE COMMON instrument-class gate (CLAUDE.md §11) of
+    ``DEC-BADTICK-RESAMPLE-INPUT-001`` fix round 2 (module docstring,
+    "instrument-class scope"): the 4.0x bound is INDEX-circuit-breaker
+    calibrated, which extends to CASH stocks and to FUTURES (a future tracks
+    its underlying; NIFTY futures are ENGINE scope) but NOT to option
+    premiums (a deep-OTM / expiry-day option legitimately moves ``> 4x`` in
+    one minute), so the resample-input seams
+    (:func:`~brutex.data.timeframe_materialize.make_lake_read_1m`,
+    :func:`~brutex.data.tf_autoderive.read_lake_bars_frame`,
+    :func:`~brutex.data.spot_daily_resample.make_lake_read_1m_window`) gate
+    their :func:`screen_frame_bad_ticks` call on this predicate instead of
+    screening every class. Pure (no I/O — one string compare + one
+    :func:`~brutex.data.fno_symbol.parse_fno_symbol` decode).
+
+    Parameters
+    ----------
+    segment
+        The lake partition's segment directory name (``INDEX`` / ``CASH`` /
+        ``FNO`` — the ``bars/<exch>/<segment>/<symbol>`` layout).
+    symbol
+        The partition's symbol directory name — for ``FNO`` a contract
+        ``groww_symbol`` (``NSE-NIFTY-30Sep25-24650-CE``), decoded via the
+        canonical :func:`~brutex.data.fno_symbol.parse_fno_symbol` exactly as
+        :func:`brutex.data.lake_heal._prebuild_kind_from_coords` classifies
+        the TF-rebuild kind (the coordinate law is equivalent to the
+        prebuild's :class:`~brutex.data.timeframe_materialize.PrebuildKind`
+        on every production input — contract kinds derive from the SAME
+        symbol decode at cascade discovery).
+
+    Returns
+    -------
+    bool
+        ``True`` for a non-``FNO`` (spot) coordinate and for an ``FNO``
+        ``FUT`` contract — the screened classes. ``False`` for an ``FNO``
+        ``CE`` / ``PE`` contract AND for an UNDECODABLE ``FNO`` symbol
+        (cannot prove futures — the conservative identity read; never
+        destroy real data on an unproven class, mirroring lake_heal's
+        ``None`` = never-rebuild for the same shape).
+    """
+    if segment != _FNO_SEGMENT:
+        return True  # SPOT (INDEX / CASH) — the W3-R2 core class, screened.
+    parts = parse_fno_symbol(symbol)
+    return parts is not None and parts.instrument_type == FUTURE_TYPE
 
 
 def is_bad_tick(prev_close: float, close: float, *, max_ratio: float = BAD_TICK_MAX_RATIO) -> bool:
@@ -819,6 +901,13 @@ def screen_frame_bad_ticks(
     probe/display readers — so on those seams a finite non-positive/mis-ordered
     bar is NOT raised here and their exclusion set equals the engine read
     boundary's (which RAISES on that class) only on price-sane lakes.
+    INSTRUMENT-CLASS SCOPE (fix round 2): this helper is class-AGNOSTIC — the
+    wired resample-input seams gate the CALL on the ONE
+    :func:`resample_screen_applies` predicate (SPOT + FNO ``FUT`` screened;
+    FNO ``CE``/``PE`` + undecodable-FNO NOT screened — the 4.0x bound is
+    index-calibrated and unjustified for option premiums; module docstring),
+    and the movers spot fallback is structurally spot-only (its candidate
+    discovery whitelists ``SPOT_PROBE_SEGMENTS``).
 
     Whole-session-per-call rule (CRITICAL — :meth:`BadTickScreen.screen_mask`
     head vote is bounded-forward-looking over each session's first up to
@@ -905,5 +994,6 @@ __all__ = [
     "bad_tick_screen_enabled",
     "is_bad_tick",
     "non_finite_keep_mask",
+    "resample_screen_applies",
     "screen_frame_bad_ticks",
 ]

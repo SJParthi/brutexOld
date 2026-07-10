@@ -1101,7 +1101,14 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     so a heal-triggering symbol whose 1-minute carries a surviving x10 poison
     bar no longer mints a FRESH poisoned ``1day`` (the heal's intraday-TF
     rebuild leg already read the screened ``make_lake_read_1m``; this closes
-    the clean-intraday/poisoned-1day split). Deliberately NO ``price_sanity``
+    the clean-intraday/poisoned-1day split). INSTRUMENT-CLASS scoped at fix
+    round 2 via the ONE :func:`~brutex.data.bad_tick.resample_screen_applies`
+    predicate (the heal recall handles FNO targets — ``include_oi=segment ==
+    "FNO"`` — and its CE/PE contract legs must NOT be screened: the
+    index-calibrated 4.0x bound destroys legit option-premium moves; the FNO
+    contract type is decoded from *symbol* via ``parse_fno_symbol`` at build
+    time — ``FUT`` screened, ``CE``/``PE``/undecodable not). Deliberately NO
+    ``price_sanity``
     raise here — this reader's verify-first contract is no-raise (an absent
     partition is a clean no-op), and the screen only FILTERS. Clean data / the
     ``BRUTEX_BAD_TICK_SCREEN`` kill switch OFF ⇒ the same frame object.
@@ -1109,7 +1116,11 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     """
     import polars as pl
 
-    from brutex.data.bad_tick import screen_frame_bad_ticks
+    from brutex.data.bad_tick import resample_screen_applies, screen_frame_bad_ticks
+
+    # Fix round 2 (DEC-BADTICK-RESAMPLE-INPUT-001): resolved ONCE at build time
+    # — pure coordinate classification, no I/O.
+    screen_bad_ticks = resample_screen_applies(segment, symbol)
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -1168,7 +1179,11 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # RECALL re-derives the 1day THROUGH this reader, so an unscreened read
         # here minted a FRESH poisoned 1day from a surviving x10 poison bar
         # while the intraday rebuild leg (make_lake_read_1m) derived clean.
-        # OFF (BRUTEX_BAD_TICK_SCREEN) or clean data ⇒ the same frame object.
+        # OFF (BRUTEX_BAD_TICK_SCREEN), an UNSCREENED instrument class (fix
+        # round 2 — FNO CE/PE, see ``screen_bad_ticks`` above), or clean data
+        # ⇒ the same frame object.
+        if not screen_bad_ticks:
+            return frame
         return screen_frame_bad_ticks(frame, source=f"{exchange}/{segment}/{symbol}/1minute")
 
     return _read
