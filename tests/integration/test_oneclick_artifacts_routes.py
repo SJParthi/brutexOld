@@ -393,6 +393,53 @@ class TestTradesRoute:
 # ── /api/v1/oneclick/verify ─────────────────────────────────────────────
 
 
+class TestEquityRoute:
+    """GET /api/v1/oneclick/equity (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 4C).
+
+    The ok-path off REAL engine-written sidecars lives in the writer→reader
+    golden (test_oneclick_top100_writer_reader.py); here: the honesty
+    degrades through the route — never a 500, never a fabricated curve.
+    """
+
+    def test_production_default_without_sidecars_is_awaiting(self, tmp_path: Path) -> None:
+        client = _client(_lake_with_corpus(tmp_path))
+        payload = client.get(f"/api/v1/oneclick/equity?run_id={RUN_ID}&rank=1").json()
+        assert payload["status"] == "awaiting"
+        assert payload["rows"] == []
+        assert payload["total"] is None
+        assert payload["source"] == "none"
+        assert "pre-#1275" in payload["detail"]
+
+    def test_fixture_root_is_honest_awaiting_never_synthesized(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fixture tree carries trades pages but NO equity sidecars — the
+        route says so instead of synthesizing a curve from the trades."""
+        monkeypatch.setenv(oc.FIXTURE_ROOT_ENV, str(_FIXTURES))
+        payload = _client(None).get(f"/api/v1/oneclick/equity?run_id={RUN_ID}&rank=1").json()
+        assert payload["status"] == "awaiting"
+        assert "no results-depth equity sidecars" in payload["detail"]
+        assert payload["fixture_root_active"] is True
+
+    def test_no_lake_configuration_is_awaiting(self, tmp_path: Path) -> None:
+        payload = _client(None).get("/api/v1/oneclick/equity?run_id=r-x&rank=1").json()
+        assert payload["status"] == "awaiting"
+        assert "no lake root wired for the equity series" in payload["detail"]
+
+    def test_missing_and_traversal_run_id_are_400(self, tmp_path: Path) -> None:
+        client = _client(_lake_with_corpus(tmp_path))
+        assert client.get("/api/v1/oneclick/equity").status_code == 400
+        assert client.get("/api/v1/oneclick/equity?run_id=..%2Fevil&rank=1").status_code == 400
+
+    def test_hostile_query_bounds_are_422_by_validation(self, tmp_path: Path) -> None:
+        client = _client(_lake_with_corpus(tmp_path))
+        assert client.get(f"/api/v1/oneclick/equity?run_id={RUN_ID}&rank=0").status_code == 422
+        assert (
+            client.get(f"/api/v1/oneclick/equity?run_id={RUN_ID}&rank=1&limit=999999").status_code
+            == 422
+        )
+
+
 class TestVerifyRoute:
     def test_cold_peek_reads_awaiting_chain(self, tmp_path: Path) -> None:
         """T-M4 cold branch: never verified ⇒ awaiting — no surprise O(file) hash."""
