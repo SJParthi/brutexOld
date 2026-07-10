@@ -113,6 +113,9 @@ class TestInstrumentWiring:
     def test_strategy_identity_strip_reads_the_shared_builder(self) -> None:
         html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
         assert 'instrument <span id="stInstr" data-explain="instrument">—</span>' in html
+        # The v29 drawer copy carries the same identity strip (portal parity).
+        v29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert 'instrument <span id="stInstr" data-explain="instrument">—</span>' in v29
         # The fill line lives VERBATIM in the ONE shared strategy panel
         # module (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — element lookup stays
         # document-global byId, so the pin survives character-for-character).
@@ -125,6 +128,9 @@ class TestInstrumentWiring:
     def test_screener_filter_control_is_wired(self) -> None:
         html = (_TEMPLATES / "screener.html").read_text(encoding="utf-8")
         assert '<select id="scInstrument"><option value="">All</option></select>' in html
+        # The v29 winners copy carries the same control (portal parity).
+        v29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert '<select id="scInstrument"><option value="">All</option></select>' in v29
         # The filter wiring lives in the ONE shared screener panel module
         # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — moved verbatim).
         panel = (_STATIC / "bx-screener-panel.js").read_text(encoding="utf-8")

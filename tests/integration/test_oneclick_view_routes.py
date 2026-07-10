@@ -342,13 +342,22 @@ class TestOneclickSections:
         assert 'href="/screener"' in html
 
     def test_v29_loads_the_oneclick_js_in_dependency_order(self) -> None:
+        """The original 5-file law + the DEC-OPERATOR-PAGE-CONSOLIDATE-001
+        extension (strictly stronger): the pure layers (bx-screener +
+        bx-portal-state) precede bx-oneclick; the panel modules and the
+        portal glue follow it."""
         html = _template("v29.html")
         order = [
             "/static/bx-ui.js",
             "/static/bx-poll.js",
             "/static/bx-explain.js",
             "/static/bx-chart.js",
+            "/static/bx-screener.js",
+            "/static/bx-portal-state.js",
             "/static/bx-oneclick.js",
+            "/static/bx-screener-panel.js",
+            "/static/bx-strategy-panel.js",
+            "/static/bx-operator-portal.js",
         ]
         positions = [html.index(src) for src in order]
         assert positions == sorted(positions), "one-click JS load order drifted"
@@ -419,6 +428,9 @@ class TestScreenerPage:
         assert "/strategy?run_id=" in codec
         panel = _static_js("bx-screener-panel.js")
         assert "window.BXPortalState.strategyHref" in panel
+        # The v29 drawer's open-full link consumes the SAME builder.
+        assert 'id="ocDrawerOpenFull"' in _template("v29.html")
+        assert "window.BXPortalState.strategyHref" in _static_js("bx-operator-portal.js")
 
     def test_render_cap_guard_present(self) -> None:
         js = _static_js("bx-screener-panel.js")
@@ -460,6 +472,11 @@ class TestStrategyPage:
         assert 'id="ocTradesSource"' not in html  # the rename is total here
         assert "source: none" in html
         assert "byId('stTradesSource')" in _static_js("bx-strategy-panel.js")
+        # The v29 drawer copy carries the SAME renamed badge (its own
+        # rank-1 #ocTradesSource stays, unstomped).
+        v29 = _template("v29.html")
+        assert 'id="stTradesSource"' in v29
+        assert 'id="ocTradesSource"' in v29  # the operator rank-1 badge remains
 
     def test_null_cost_rows_get_the_gross_equity_caveat(self) -> None:
         """[W2-4] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: Ruling-18 null-cost
@@ -505,8 +522,12 @@ class TestStrategyPage:
         # #12 gross/signal-only vocabulary — never a bare "net" claim.
         assert "bits.push('gross signal ' + money(series.final_paisa));" in panel
         assert "bits.push('net ' + money(series.final_paisa));" not in panel  # killed
-        # The strategy page still carries the equity host the panel fills.
+        # BOTH panel hosts exist — the strategy page AND the v29 drawer copy
+        # (the operator #ocEquityHost stays per-trade — the #48 ruling).
         assert 'id="stEquityHost"' in _template("strategy.html")
+        v29 = _template("v29.html")
+        assert 'id="stEquityHost"' in v29
+        assert 'id="ocEquityHost"' in v29
 
     def test_vix_band_on_the_story_card(self) -> None:
         """R31 display duty — via the ONE shared builder ([W3-R4]): a
@@ -561,11 +582,13 @@ class TestStrategyPage:
         html = _template("strategy.html")
         assert 'id="bxTip"' in html
         assert 'id="bxTip"' in _template("screener.html")
+        assert 'id="bxTip"' in _template("v29.html")  # the portal gains the node
         assert "data-explain=" in html
         oneclick = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "bindExplainHover" in oneclick
         assert "bindExplainHover" not in _static_js("bx-strategy-panel.js")
         assert "bindExplainHover" not in _static_js("bx-screener-panel.js")
+        assert "bindExplainHover" not in _static_js("bx-operator-portal.js")
 
     def test_regime_renders_and_family_stays_named_out_of_scope(self) -> None:
         """HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
@@ -688,6 +711,7 @@ class TestRoutesEndToEnd:
             "bx-portal-state.js",
             "bx-screener-panel.js",
             "bx-strategy-panel.js",
+            "bx-operator-portal.js",
         ):
             assert sink.search((_STATIC / js_name).read_text(encoding="utf-8")) is None, js_name
 

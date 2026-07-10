@@ -226,6 +226,13 @@ class TestWinnerDetailWiring:
         assert "signal-only — costs modeled in the options-translation track" in html
         assert 'id="stSignalOnly"' in html
         assert "Edge — net P&amp;L" not in html  # killed label
+        # The v29 drawer copy carries the SAME label + chip + killed
+        # negative (DEC-OPERATOR-PAGE-CONSOLIDATE-001 parity).
+        v29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "Edge — gross signal P&amp;L" in v29
+        assert "signal-only — costs modeled in the options-translation track" in v29
+        assert 'id="stSignalOnly"' in v29
+        assert "Edge — net P&amp;L" not in v29  # killed label
 
     def test_operator_hero_gross_signal_label(self) -> None:
         html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
@@ -249,6 +256,7 @@ class TestWinnerDetailWiring:
 
     def test_strategy_deep_stats_section_reads_the_builders(self) -> None:
         html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
+        v29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
         for anchor in (
             'id="stExpectancy"',
             'id="stRecovery"',
@@ -260,6 +268,7 @@ class TestWinnerDetailWiring:
             'id="stWorst5"',
         ):
             assert anchor in html, anchor
+            assert anchor in v29, anchor  # the drawer copy (portal parity)
         # The builder calls live in the ONE shared strategy panel module
         # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — the wiring moved verbatim).
         panel = (_STATIC / "bx-strategy-panel.js").read_text(encoding="utf-8")
@@ -278,6 +287,9 @@ class TestWinnerDetailWiring:
         html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
         assert 'class="plain-eng-block"' in html
         assert 'class="jargon-block"' in html
+        v29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert 'class="plain-eng-block"' in v29  # the drawer copy
+        assert 'class="jargon-block"' in v29
         # The block-toggle CSS rule moved VERBATIM into the ONE shared
         # panels stylesheet (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
         css = (_STATIC / "bx-oneclick-panels.css").read_text(encoding="utf-8")

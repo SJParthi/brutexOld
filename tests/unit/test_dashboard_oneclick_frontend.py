@@ -44,14 +44,23 @@ _IDS = ("bx-poll", "bx-chart", "bx-screener", "bx-explain", "bx-oneclick")
 _PORTAL_STATE = _STATIC / "bx-portal-state.js"
 _SCREENER_PANEL = _STATIC / "bx-screener-panel.js"
 _STRATEGY_PANEL = _STATIC / "bx-strategy-panel.js"
-_CONSOLIDATE_FILES = (_PORTAL_STATE, _SCREENER_PANEL, _STRATEGY_PANEL)
-_CONSOLIDATE_IDS = ("bx-portal-state", "bx-screener-panel", "bx-strategy-panel")
+_OPERATOR_PORTAL = _STATIC / "bx-operator-portal.js"
+_CONSOLIDATE_FILES = (_PORTAL_STATE, _SCREENER_PANEL, _STRATEGY_PANEL, _OPERATOR_PORTAL)
+_CONSOLIDATE_IDS = (
+    "bx-portal-state",
+    "bx-screener-panel",
+    "bx-strategy-panel",
+    "bx-operator-portal",
+)
 
-#: Per-file DOM-builder expectation (the role-aware createElement law).
+#: Per-file DOM-builder expectation (the role-aware createElement law):
+#: the panels BUILD nodes; the pure codec and the class-flipping portal
+#: glue must never grow node-building code.
 _CONSOLIDATE_BUILDS_DOM = {
     _PORTAL_STATE: False,
     _SCREENER_PANEL: True,
     _STRATEGY_PANEL: True,
+    _OPERATOR_PORTAL: False,
 }
 
 
@@ -140,7 +149,8 @@ class TestConsolidateFileDiscipline:
             assert "textContent" in js
         else:
             assert "createElement" not in js, (
-                f"{path.name} is the PURE codec — it must never grow DOM code"
+                f"{path.name} builds no DOM nodes by design (pure codec / "
+                "class-flipping glue) — it must never grow node-building code"
             )
 
 

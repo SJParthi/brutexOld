@@ -18,7 +18,16 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
+_Last updated: 2026-07-10 (DEC-OPERATOR-PAGE-CONSOLIDATE-001,
+MIGRATION.md #1714 — the operator single-portal consolidation on
+`claude/operator-page-consolidate`: /screener + /strategy fold into the
+Operator page (/) as an expandable All-100-winners section + an in-page
+strategy drawer over ONE set of extracted shared modules; both standalone
+pages stay alive as thin deep-link targets; DISPLAY zone only, ZERO Python
+changes — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). The record lives in the
+§1 Active-branch blurb + the MIGRATION.md entry — this header carries
+pointers, never round narration.)
+Earlier: 2026-07-09 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
 DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665 —
 renumbered from #1632/#1633→#1633/#1634→#1664/#1665: #1633–#1636 were
 #1323's reserved block (landed on main 2026-07-10), #1664/#1665
@@ -1918,7 +1927,40 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/oneclick-instrument-display` (**DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
+- **Active branch:** `claude/operator-page-consolidate` (**DEC-OPERATOR-PAGE-CONSOLIDATE-001,
+  MIGRATION.md #1714** — the coordinator-reserved slot; live-main ledger max #1698 at branch time —
+  /screener + /strategy FOLD into the Operator page (/) as a SINGLE PORTAL: an expandable animated
+  "All 100 winners" section + an in-page strategy drawer, with BOTH standalone pages kept alive as
+  thin deep-link targets consuming the SAME extracted modules. NEW static files: `bx-portal-state.js`
+  (the PURE `?winners=1&rank=N` URL codec + `bxStrategyHref` — the ONE /strategy href builder; the
+  pinned deep-link contract expressions live here VERBATIM, node-goldened) · `bx-screener-panel.js` +
+  `bx-strategy-panel.js` (the template inline IIFEs moved VERBATIM into mount-once + `update()`
+  modules with the count-pinned load-generation guard on every async render arm — a stale rank
+  response never paints a newer load / a closed drawer / a switched run) · `bx-operator-portal.js`
+  (v29-only glue: lazy winners mount, drawer state machine — drawer-open is the ONLY pushState,
+  close NEVER `history.back()`, popstate reconciler under the `reconciling` flag, focus
+  trap/inert/scroll-lock/Esc/backdrop, run-change via the `BXOneclick.onRunChange` observer — close
+  drawer → strip rank+run_id → reload winners) · `bx-oneclick-panels.css` (moved panel CSS under
+  `.bx-scpanel`/`.bx-stpanel` scopes + ALL choreography under the LOCKED motion covenants — numbers
+  never count-animate, honest states render instantly un-animated, zero new looping keyframes,
+  reduced-motion + `bx-paused` blocks, the ONE sanctioned layout transition = the winners
+  grid-rows unfold, stated honestly). bx-oneclick.js gains the ADDITIVE `getTop100` promise memo
+  (ONE top100 fetch per run selection feeding four consumers; a rejected promise self-evicts;
+  invalidated by `selectRun` AND the runs poller's programmatic first auto-selection) +
+  `onRunChange`/`lastManifest`/`latestRun`; the ONE id rename `ocTradesSource`→`stTradesSource`
+  (kills the latent rank≠1 badge stomp); v29's three static-string sink sites refactored sink-free
+  and v29.html JOINS the hostile sink scan; 30 pinned tests re-pointed file-target-only (assertion
+  text never weakened) + the NEW `tests/unit/test_dashboard_operator_portal.py` (codec/pure-helper
+  node goldens · T-N2 ONE-inventory hook-parity fence over BOTH markup copies · T-N3 id uniqueness
+  with an EMPTY baseline · T-N4 portal wiring pins · T-N5 honest-degrade route matrix incl. the
+  bad-rank deep-link honest miss · T-N6 zero new pollers · T-N7 gen-guard count pin · T-N8
+  motion-covenant pins). HONEST: DOM wiring is source-string-pinned, not executed (the #1557
+  envelope); the drawer equity is minute-path-first with the labeled per-trade fallback while the
+  operator `#ocEquityHost` stays per-trade (the #48 ruling). DISPLAY zone ONLY — ZERO Python
+  changes; the two oneclick 100% line+branch gates stay green byte-untouched; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX. Named follow-ups: DEC-OPERATOR-PORTAL-RUNID-001 (URL run_id/trade write
+  side) · DEC-COMBOS-TABLE-CONFIG-UNIFY-001 (combos hrefs through `bxStrategyHref`).)
+  Earlier: `claude/oneclick-instrument-display` (**DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
   DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665** — renumbered from
   #1632/#1633→#1633/#1634→#1664/#1665 across the 2026-07-09 + 2026-07-10 main-folds (main took #1632 with
   DEC-DASHBOARD-VISUAL-OVERHAUL-001, PR #1354; #1633–#1636 were #1323's reserved block; #1664/#1665
@@ -4937,7 +4979,18 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/oneclick-instrument-display`
+- **Active feature branch:** `claude/operator-page-consolidate`
+  (DEC-OPERATOR-PAGE-CONSOLIDATE-001, MIGRATION.md #1714 — the operator
+  single-portal consolidation: /screener + /strategy fold into "/" as an
+  expandable All-100-winners section + an in-page strategy drawer over the
+  extracted shared modules (bx-portal-state / bx-screener-panel /
+  bx-strategy-panel / bx-operator-portal + bx-oneclick-panels.css) and the
+  additive BXOneclick getTop100 memo/onRunChange seam; both standalone pages
+  stay alive as thin deep-link targets; the ONE id rename
+  ocTradesSource→stTradesSource; DISPLAY zone only, ZERO Python changes;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the
+  full blurb)
+  Earlier: `claude/oneclick-instrument-display`
   (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 + DEC-ONECLICK-INSTRUMENT-DISPLAY-001,
   MIGRATION.md #1664–#1665, renumbered #1632/#1633→#1633/#1634→#1664/#1665 —
   #1633–#1636 were #1323's reserved block, #1664/#1665 coordinator-assigned

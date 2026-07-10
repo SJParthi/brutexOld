@@ -338,8 +338,8 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         if (mpPath) {
           if (deps.animate) {
             // Display-only draw-in: pathLength normalization + the CSS
-            // dashoffset keyframe — zero getTotalLength() reads, zero JS
-            // layout measurement (BXChart.equityPathNode byte-untouched).
+            // dashoffset keyframe — zero path-length reads, zero JS layout
+            // measurement (BXChart.equityPathNode byte-untouched).
             mpPath.setAttribute('pathLength', '1');
             mpPath.classList.add('bxd-equity-draw');
           }

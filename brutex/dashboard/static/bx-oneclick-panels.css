@@ -83,3 +83,121 @@
 .plain-eng-block { display:none; }
 body.share-mode .jargon-block { display:none; }
 body.share-mode .plain-eng-block { display:block; }
+
+/* ════════════════════════════════════════════════════════════════════
+   Operator-portal choreography (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
+   Motion covenants: numbers never count-animate (values snap via
+   textContent, then may receive a one-shot pop); empty/awaiting/corrupt
+   states render instantly un-animated; ZERO new looping keyframes;
+   transform/opacity/stroke-dashoffset only (the ONE sanctioned layout
+   transition — the winners grid-template-rows unfold — lives in v29's
+   inline style with its own honesty comment); prefers-reduced-motion +
+   the html.bx-paused hidden-tab pause both collapse everything.
+   Shared keyframes bxRowIn / bxRiseIn / bxCountPop are REUSED from
+   bx-design.css — never redefined here.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Sticky winners filter bar (the mode-bar blur idiom). */
+.wn-filterbar { position:sticky; top:58px; z-index:5; background:rgba(10,13,17,.85);
+  backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
+@media (max-width: 720px) { .wn-filterbar { position:static; } }
+
+/* Winners row cascade — one-shot on section OPEN only; the stagger index
+   (--wn-i, set inline by the row builder) is CAPPED at 24 rows via min()
+   so a full table lands within ~340 ms; rows 25+ ride the last wave. */
+.wn-cascade tr { animation: bxRowIn .32s var(--ease) backwards;
+  animation-delay: calc(min(var(--wn-i, 0), 24) * 14ms); }
+
+/* You-are-here: the drawer's current winners row, tracking prev/next. */
+.wn-row-active { background:var(--surface-2);
+  box-shadow: inset 3px 0 0 var(--yellow); }
+
+/* The strategy drawer (slide-over) + backdrop. Visibility discipline is
+   CSS-owned: shut = visibility:hidden (untabbable) + translateX; .open
+   flips visibility instantly and slides in; on CLOSE the delayed
+   visibility transition re-hides the drawer only AFTER the slide-out
+   completes — transform/opacity/visibility only, no display toggling. */
+.strategy-drawer { position:fixed; inset:0 0 0 auto; width:min(760px,94vw);
+  background:var(--surface); border-left:1px solid var(--border-strong);
+  box-shadow:-24px 0 60px rgba(0,0,0,.5); transform:translateX(103%);
+  visibility:hidden;
+  transition: transform .32s var(--ease), visibility 0s linear .34s;
+  overflow-y:auto; overscroll-behavior:contain; z-index:1300; }
+.strategy-drawer.open { transform:translateX(0); visibility:visible;
+  transition: transform .32s var(--ease), visibility 0s; }
+.drawer-back { position:fixed; inset:0; z-index:1290; background:rgba(6,8,12,.55);
+  backdrop-filter:blur(6px); opacity:0; visibility:hidden; pointer-events:none;
+  transition: opacity .32s var(--ease), visibility 0s linear .34s; }
+.drawer-back.open { opacity:1; visibility:visible; pointer-events:auto;
+  transition: opacity .32s var(--ease), visibility 0s; }
+.drawer-head { position:sticky; top:0; z-index:6; display:flex; gap:10px;
+  align-items:center; padding:12px 16px; background:rgba(10,13,17,.85);
+  backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
+.drawer-head button { cursor:pointer; border:1px solid var(--border-strong);
+  border-radius:8px; padding:6px 12px; font:inherit; font-size:13px;
+  color:var(--text); background:var(--surface-2); }
+.drawer-head button:disabled { opacity:.4; cursor:default; }
+.drawer-head a { color:var(--blue); font-size:12px; text-decoration:none; }
+.drawer-head .drawer-close { margin-left:auto; }
+.drawer-rank-pill { position:relative; padding:4px 12px; border:1px solid var(--border-strong);
+  border-radius:999px; font-weight:800; font-size:13px; color:var(--yellow); }
+.drawer-rank-pill::after { content:""; position:absolute; inset:-3px;
+  border-radius:999px; border:1px solid var(--yellow); opacity:0;
+  animation: bxdGlowRing 1.2s var(--ease) 2; pointer-events:none; }
+body.bx-drawer-open { overflow:hidden; } /* scroll lock while the drawer is open */
+
+/* Drawer section rise — one-shot nth-of-type ladder (≤ .35s tail). */
+.strategy-drawer .drawer-body section { animation: bxRiseIn .3s var(--ease) backwards; }
+.strategy-drawer .drawer-body section:nth-of-type(2) { animation-delay:.05s; }
+.strategy-drawer .drawer-body section:nth-of-type(3) { animation-delay:.1s; }
+.strategy-drawer .drawer-body section:nth-of-type(4) { animation-delay:.15s; }
+.strategy-drawer .drawer-body section:nth-of-type(5) { animation-delay:.2s; }
+.strategy-drawer .drawer-body section:nth-of-type(6) { animation-delay:.25s; }
+.strategy-drawer .drawer-body section:nth-of-type(7) { animation-delay:.3s; }
+
+/* Candle materialization: the WHOLE session rises off the axis as ONE
+   animated group (O(1) animated elements over ≤500 nodes). */
+.bxd-chart-reveal { transform-origin:50% 100%;
+  animation: bxdChartIn .45s var(--ease) backwards; }
+/* Arrows land AFTER the candles (their own one-shot group). */
+.bxd-arrows-in { animation: bxdArrowDrop .3s var(--ease) .45s backwards; }
+/* Equity line draw-in: pathLength="1" normalization + a dashoffset
+   keyframe — zero getTotalLength() reads, zero JS measurement. */
+.bxd-equity-draw { stroke-dasharray:1; stroke-dashoffset:1;
+  animation: bxdDraw .8s var(--ease) .15s forwards; }
+/* Deep-stat value pop — added ONLY on a real '—'→value transition
+   (covenant: numbers snap to truth first, then may pop). */
+.bxd-pop { animation: bxCountPop .45s var(--ease); }
+/* Trades cascade — first render per (rank, page) only, capped 16 rows. */
+.bxd-cascade tr { animation: bxRowIn .28s var(--ease) backwards;
+  animation-delay: calc(min(var(--bxd-i, 0), 16) * 12ms); }
+/* Rank-surf swap: direction-aware fade-through of ONE container. */
+.bxd-swap { animation: bxdSwap .28s var(--ease); }
+.bxd-swapRev { animation: bxdSwapRev .28s var(--ease); }
+
+/* NEW keyframes — all one-shot, none loops forever. */
+@keyframes bxdChartIn { from { opacity:0; transform:scaleY(.85); } to { opacity:1; transform:none; } }
+@keyframes bxdArrowDrop { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:none; } }
+@keyframes bxdDraw { to { stroke-dashoffset:0; } }
+@keyframes bxdSwap { 0% { opacity:1; transform:none; } 45% { opacity:0; transform:translateX(-14px); } 55% { opacity:0; transform:translateX(14px); } 100% { opacity:1; transform:none; } }
+@keyframes bxdSwapRev { 0% { opacity:1; transform:none; } 45% { opacity:0; transform:translateX(14px); } 55% { opacity:0; transform:translateX(-14px); } 100% { opacity:1; transform:none; } }
+@keyframes bxdGlowRing { 0% { opacity:0; transform:scale(1); } 35% { opacity:.9; } 100% { opacity:0; transform:scale(1.25); } }
+
+/* Covenant #5: this sheet carries its OWN reduced-motion block —
+   strategy.html/screener.html lack v29's global kill. */
+@media (prefers-reduced-motion: reduce) {
+  .wn-cascade tr, .wn-filterbar, .strategy-drawer, .drawer-back,
+  .strategy-drawer .drawer-body section, .bxd-chart-reveal, .bxd-arrows-in,
+  .bxd-equity-draw, .bxd-pop, .bxd-cascade tr, .bxd-swap, .bxd-swapRev,
+  .drawer-rank-pill::after {
+    animation: none !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+/* Covenant #6: the hidden-tab pause (BXUI.initVisibilityPause stamps
+   html.bx-paused) freezes any in-flight one-shots. */
+html.bx-paused .strategy-drawer *, html.bx-paused .bx-scpanel *,
+html.bx-paused .drawer-rank-pill::after {
+  animation-play-state: paused !important;
+}

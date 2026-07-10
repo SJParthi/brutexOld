@@ -484,6 +484,19 @@ class TestEngineWriterThroughRoutes:
         assert "/static/bx-portal-state.js" in template
         assert "/static/bx-strategy-panel.js" in template
         assert 'data-bx-autopanel="strategy"' in template
+        # Contract consumer #3: the v29 drawer's open-full link is built by
+        # the SAME BXPortalState.strategyHref (DEC-OPERATOR-PAGE-
+        # CONSOLIDATE-001 — one href law, three consumers).
+        v29 = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "templates"
+            / "v29.html"
+        ).read_text(encoding="utf-8")
+        assert 'id="ocDrawerOpenFull"' in v29
+        portal = (static / "bx-operator-portal.js").read_text(encoding="utf-8")
+        assert "window.BXPortalState.strategyHref(state.runId, rank)" in portal
 
     def test_route_names_a_future_schema_version_corruptly_never_500(self, tmp_path: Path) -> None:
         """A NEWER writer's artifact degrades to a NAMED corrupt through the
