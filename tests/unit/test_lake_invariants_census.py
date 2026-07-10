@@ -104,6 +104,30 @@ def _plant_schema_drift(dest: Path) -> None:
     pq.write_table(table, dest)
 
 
+def _plant_out_of_range(dest: Path) -> None:
+    """A sound-schema bars file whose ``Datetime`` column holds an i64 value no
+    Python ``datetime`` can represent (``2**62`` µs ≈ year 146,000) — the
+    round-18 crash class, now classified under ``datetime_out_of_range_errors``
+    and skipped like an unreadable file (the fold's NEW skip site)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    price = [100.0]
+    table = pa.table(
+        {
+            "timestamp": pa.array([2**62], type=pa.int64()).cast(pa.timestamp("us", tz="UTC")),
+            "open": pa.array(price, type=pa.float64()),
+            "high": pa.array(price, type=pa.float64()),
+            "low": pa.array(price, type=pa.float64()),
+            "close": pa.array(price, type=pa.float64()),
+            "volume": pa.array([10], type=pa.int64()),
+            "open_interest": pa.array([None], type=pa.int64()),
+        }
+    )
+    pq.write_table(table, dest)
+
+
 def _plant_dup(dest: Path) -> None:
     """Duplicate timestamps planted VERBATIM (the writer refuses dups) — a real POISON finding."""
     import pyarrow as pa
@@ -207,6 +231,36 @@ class TestCensusEngineSkipFold:
         # MINOR (hostile-review): the FIRST offending file is named in json too,
         # not only on the human CLI disambiguation line.
         assert payload["first_skipped_path"] == census.first_skipped_path
+
+
+class TestDatetimeOutOfRangeSkipFold:
+    """The main-fold's NEW bars skip site (``datetime_out_of_range_errors``)
+    rides the SAME census-honesty law: an out-of-range ENGINE file flips the
+    verdict; a reference-only one is counted but never fakes engine distrust."""
+
+    def test_engine_out_of_range_flips_engine_verdict(self, tmp_path: Path) -> None:
+        _plant_out_of_range(_partition(tmp_path, symbol="NIFTY"))
+        report = scan_lake_invariants(tmp_path)
+        assert report.files_skipped == 1
+        assert report.engine_files_skipped == 1
+        census = build_lake_census(report)
+        assert census.engine_clean is False
+        assert census.first_skipped_path == str(_partition(tmp_path, symbol="NIFTY"))
+        assert "UNREADABLE" in census.engine_detail
+
+    def test_non_engine_out_of_range_stays_engine_clean(self, tmp_path: Path) -> None:
+        # The FALSE arm of the engine gate on the datetime-out-of-range skip
+        # site: a CASH/reference file is skipped + counted + named, but the
+        # engine verdict is untouched.
+        bad = _partition(tmp_path, segment="CASH", symbol="RELIANCE")
+        _plant_out_of_range(bad)
+        report = scan_lake_invariants(tmp_path)
+        assert report.files_skipped == 1
+        assert report.engine_files_skipped == 0
+        assert report.first_skipped_path == str(bad)  # _note_first_skip fired
+        census = build_lake_census(report)
+        assert census.engine_clean is True
+        assert census.files_skipped == 1  # honestly INCOMPLETE, never hidden
 
 
 class TestEngineMalformedPathAttribution:
