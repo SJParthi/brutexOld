@@ -561,3 +561,70 @@ class TestFixtureFlagStampedEverywhere:
             ov.build_verify_payload("r", _AWAITING, None, False, fixture_root_active=active),
         ]
         assert all(payload["fixture_root_active"] is active for payload in payloads)
+
+
+class TestBuildBaselinePayload:
+    """B1 (DEC-RESULTS-TRUST-HONESTY-001): the stored series served VERBATIM."""
+
+    @staticmethod
+    def _ok_result() -> Any:
+        from datetime import date
+        from decimal import Decimal
+
+        from brutex.dashboard.oneclick_artifacts import BaselineResult
+        from brutex.engine.baseline import BaselineSeries
+
+        series = BaselineSeries(
+            instrument="NSE-NIFTY",
+            start=date(2024, 1, 5),
+            end=date(2024, 1, 8),
+            anchor_open=Decimal("100.00"),
+            sessions=(
+                (date(2024, 1, 5), Decimal("101.00")),
+                (date(2024, 1, 8), Decimal("103.00")),
+            ),
+            total_return_pct=3.0031218374618234,
+            source_note="computed from the sweep's own bars",
+        )
+        return BaselineResult(
+            "ok",
+            "NSE-NIFTY",
+            "baseline-NSE-NIFTY.json",
+            series,
+            ("NSE-NIFTY",),
+            "",
+            "1:2",
+        )
+
+    def test_ok_arm_serves_exact_stored_values(self) -> None:
+        payload = ov.build_baseline_payload("r-x", self._ok_result(), fixture_root_active=False)
+        assert payload["status"] == "ok"
+        assert payload["run_id"] == "r-x"
+        assert payload["instrument"] == "NSE-NIFTY"
+        assert payload["filename"] == "baseline-NSE-NIFTY.json"
+        assert payload["instruments"] == ["NSE-NIFTY"]
+        assert payload["anchor_open"] == "100.00"  # the exact 2-dp price STRING
+        assert payload["start"] == "2024-01-05"
+        assert payload["end"] == "2024-01-08"
+        assert payload["sessions"] == [["2024-01-05", "101.00"], ["2024-01-08", "103.00"]]
+        # Full precision, never rounded (CLAUDE.md §4 — a statistical figure).
+        assert payload["total_return_pct"] == 3.0031218374618234
+        assert payload["source_note"] == "computed from the sweep's own bars"
+        assert payload["detail"] == ""
+        assert payload["revision"] == "1:2"
+        assert payload["fixture_root_active"] is False
+
+    def test_non_ok_arm_keeps_series_keys_null(self) -> None:
+        from brutex.dashboard.oneclick_artifacts import BaselineResult
+
+        result = BaselineResult(
+            "awaiting", None, None, None, ("NSE-NIFTY", "BSE-SENSEX"), "instrument required", None
+        )
+        payload = ov.build_baseline_payload("r-x", result, fixture_root_active=True)
+        assert payload["status"] == "awaiting"
+        assert payload["instrument"] is None
+        assert payload["instruments"] == ["NSE-NIFTY", "BSE-SENSEX"]
+        for key in ("anchor_open", "start", "end", "sessions", "total_return_pct", "source_note"):
+            assert payload[key] is None, key
+        assert payload["detail"] == "instrument required"
+        assert payload["fixture_root_active"] is True

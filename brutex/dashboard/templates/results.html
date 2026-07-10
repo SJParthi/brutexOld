@@ -276,6 +276,10 @@
     board already min-trades-gated at rank time — Min DSR floors the tuple-N column.
     A † on the rank marks a row failing a persisted hard door on serve-time re-check
     (a legacy or non-gated store row) — marked, never dropped.
+    B&amp;H bench % is the STORED buy-&amp;-hold return of the combo's results-depth run
+    (the R27 baseline artifact) over the window in the tooltip — served verbatim, never
+    recomputed; a combo no depth run captured reads —. It is a same-window reference,
+    NOT the combo's own %return (the row's P&amp;L is absolute paisa, not %).
   </div>
 
   <div class="foot">
@@ -412,6 +416,17 @@ function cascadeDsrCell(r) {
   return '<span title="cascade filter-#2 DSR — deflated against N=' + n + ' (' + src + ')">'
     + metric(r.cascade_dsr) + "</span>";
 }
+/* DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 1): the STORED buy-&-hold
+   benchmark of the combo's producing results-depth run (R27 baseline artifact,
+   served verbatim — never recomputed at serve). null = no depth run captured
+   this combo (or no stored baseline for its instrument) — an honest "—". */
+function benchCell(r) {
+  if (r.benchmark_return_pct == null) return "—";
+  const win = r.benchmark_window ? esc(String(r.benchmark_window)) : "window unknown";
+  return '<span title="buy &amp; hold over ' + win
+    + ' — stored by the results-depth pass, never recomputed">'
+    + pctVal(r.benchmark_return_pct) + "</span>";
+}
 function cascadeBadge(r) {
   const v = r.cascade_verdict;
   if (!v) return "—"; /* not judged — absence is never "passed" */
@@ -455,6 +470,7 @@ const COLS = [
   ["max_drawdown_pct", "Max DD %", (r) => pctVal(r.max_drawdown_pct)],
   ["expectancy_paisa", "Expectancy (paisa)", (r) => num(r.expectancy_paisa)],
   ["total_trades", "Trades", (r) => num(r.total_trades)],
+  ["benchmark_return_pct", "B&H bench %", benchCell],
   /* The honesty law (DEC-RESULTS-TRUST-HONESTY-001): the tuple-scoped DSR is
      NEVER presented unlabeled — its header names the inflating tuple-N scope;
      the cascade's corrected figure sits beside it as "DSR @ search N". */
@@ -473,7 +489,7 @@ const COLS = [
 ];
 const NUMERIC = new Set(["rank", "net_pnl_rupees", "sharpe_ratio", "sortino_ratio",
   "profit_factor", "win_rate", "total_trades", "max_year_share",
-  "deflated_sharpe", "cascade_dsr",
+  "deflated_sharpe", "cascade_dsr", "benchmark_return_pct",
   "calmar_ratio", "max_drawdown_pct", "expectancy_paisa"]);
 
 /* The 4 KPI cards: label + formatter. Values are the SAME num() strings as ever

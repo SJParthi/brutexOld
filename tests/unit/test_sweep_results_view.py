@@ -715,3 +715,191 @@ class TestFilterParamParsers:
     def test_float_junk_raises_naming_the_param(self, raw: str) -> None:
         with pytest.raises(ValueError, match="max_abs_dd_pct"):
             parse_filter_float("max_abs_dd_pct", raw)
+
+
+# ── B1 benchmark join (DEC-RESULTS-TRUST-HONESTY-001, audit BLOCKER 1) ──
+
+
+def _write_depth_stamp(lake_root: Path, *, grid_run: str, combo_run_ids: list[str]) -> None:
+    """REAL writer-produced results-depth sidecars under ``<lake>/sweep_runs``."""
+    from datetime import UTC, date, datetime
+
+    from brutex.calendars.nse import IST
+    from brutex.engine.minute_path import PathStatus, SessionEquityPoint
+    from brutex.engine.trade_capture import CapturedTrade, ComboCapture
+    from brutex.engine.trade_store import sidecar_paths_for, write_tuple_sidecars
+    from brutex.strategies.types import Side
+
+    day = date(2024, 1, 5)
+
+    def _ts(hh: int, mm: int) -> datetime:
+        return datetime(day.year, day.month, day.day, hh, mm, tzinfo=IST).astimezone(UTC)
+
+    captures = []
+    for seq, combo_run_id in enumerate(combo_run_ids):
+        trade = CapturedTrade(
+            entry_ts=_ts(9, 16 + 2 * seq),
+            entry_px=Decimal("100.00"),
+            exit_ts=_ts(9, 17 + 2 * seq),
+            exit_px=Decimal("100.50"),
+            direction=Side.BUY,
+            lots=None,
+            exit_reason="take_profit",
+            pnl_paisa=50,
+            costs_paisa=None,
+            mae_paisa=10,
+            mfe_paisa=60,
+            mae_1m_paisa=None,
+            mfe_1m_paisa=None,
+            path_1m_status=PathStatus.NO_1M_DATA,
+            vix_entry=None,
+            vix_exit=None,
+        )
+        captures.append(
+            ComboCapture(
+                run_id=combo_run_id,
+                trades=(trade,),
+                equity=(SessionEquityPoint(day, 10_000_050, 9_999_990, 1),),
+                equity_status=PathStatus.OK,
+                vix_missing_trades=1,
+                parity_ok=True,
+                parity_detail="",
+            )
+        )
+    store = lake_root / "sweeps" / "NIFTY" / "1minute" / f"bull_k1_{'0' * 16}.parquet"
+    paths = sidecar_paths_for(store, lake_root / "sweeps", run_id=grid_run)
+    write_tuple_sidecars(paths, captures, [], store_content_hash="12" * 32)
+
+
+def _write_run_baseline(
+    lake_root: Path,
+    *,
+    grid_run: str,
+    instrument: str = "NIFTY",
+    series_instrument: str | None = None,
+) -> Path:
+    """A REAL engine-writer baseline at ``sweep_runs/<grid_run>/baseline-<instrument>.json``."""
+    from datetime import date
+
+    from brutex.engine.baseline import BaselineSeries, baseline_filename, write_baseline
+
+    series = BaselineSeries(
+        instrument=series_instrument or instrument,
+        start=date(2024, 1, 5),
+        end=date(2024, 1, 8),
+        anchor_open=Decimal("100.00"),
+        sessions=((date(2024, 1, 5), Decimal("101.00")), (date(2024, 1, 8), Decimal("103.00"))),
+        total_return_pct=3.0,
+        source_note="unit fixture",
+    )
+    run_dir = lake_root / "sweep_runs" / grid_run
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / baseline_filename(instrument)
+    write_baseline(path, series, data_snapshot_hash="ab" * 32)
+    return path
+
+
+class TestBenchmarkJoin:
+    """The STORED buy-&-hold facts join — never recomputed, never fabricated."""
+
+    def test_no_depth_runs_yields_null_benchmark_keys(self, tmp_path: Path) -> None:
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[_row(seed=1)])
+        board = build_sweep_leaderboard(tmp_path)
+        assert load_sweep_scan(tmp_path).benchmarks == {}
+        assert board.rows[0]["benchmark_return_pct"] is None
+        assert board.rows[0]["benchmark_window"] is None
+
+    def test_benchmark_joined_from_the_stored_baseline(self, tmp_path: Path) -> None:
+        row = _row(seed=1)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row])
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[row.run_id])
+        _write_run_baseline(tmp_path, grid_run="grid-a")
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.rows[0]["benchmark_return_pct"] == 3.0
+        assert board.rows[0]["benchmark_window"] == "2024-01-05 → 2024-01-08"
+
+    def test_combo_without_a_stamp_reads_null(self, tmp_path: Path) -> None:
+        captured = _row(seed=1)
+        uncaptured = _row(seed=2, sharpe=0.5)
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[captured, uncaptured],
+        )
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[captured.run_id])
+        _write_run_baseline(tmp_path, grid_run="grid-a")
+        board = build_sweep_leaderboard(tmp_path)
+        by_id = {r["run_id"]: r for r in board.rows}
+        assert by_id[captured.run_id]["benchmark_return_pct"] == 3.0
+        assert by_id[uncaptured.run_id]["benchmark_return_pct"] is None
+
+    def test_missing_baseline_file_reads_null(self, tmp_path: Path) -> None:
+        row = _row(seed=1)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row])
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[row.run_id])
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.rows[0]["benchmark_return_pct"] is None
+
+    def test_instrument_mismatched_artifact_is_never_served(self, tmp_path: Path) -> None:
+        """A renamed/foreign artifact must not serve under the wrong name."""
+        row = _row(seed=1)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row])
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[row.run_id])
+        _write_run_baseline(
+            tmp_path, grid_run="grid-a", instrument="NIFTY", series_instrument="BANKNIFTY"
+        )
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.rows[0]["benchmark_return_pct"] is None
+
+    def test_one_validated_load_per_baseline_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two combos on one depth run share ONE memoised baseline load."""
+        import brutex.dashboard.sweep_results_view as srv
+
+        row_a = _row(seed=1)
+        row_b = _row(seed=2, sharpe=0.5)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row_a, row_b])
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[row_a.run_id, row_b.run_id])
+        _write_run_baseline(tmp_path, grid_run="grid-a")
+        calls = {"n": 0}
+        real = srv.load_baseline
+
+        def _counting(path: Path) -> object:
+            calls["n"] += 1
+            return real(path)
+
+        monkeypatch.setattr(srv, "load_baseline", _counting)
+        facts = load_sweep_scan(tmp_path).benchmarks
+        assert set(facts) == {row_a.run_id, row_b.run_id}
+        assert calls["n"] == 1
+
+    def test_depth_run_dir_path_law(self, tmp_path: Path) -> None:
+        from brutex.dashboard.sweep_results_view import _depth_run_dir
+        from brutex.engine.trade_store import RESULTS_DEPTH_DIRNAME
+
+        run_dir = tmp_path / "sweep_runs" / "grid-a"
+        stamp = run_dir / RESULTS_DEPTH_DIRNAME / "NIFTY" / "x.stamp.json"
+        assert _depth_run_dir(stamp) == run_dir
+        assert _depth_run_dir(tmp_path / "elsewhere" / "x.stamp.json") is None
+
+    def test_defensive_stamp_outside_the_depth_shape_reads_null(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stamp with NO results-depth ancestor is skipped, never guessed."""
+        import brutex.dashboard.sweep_results_view as srv
+        from brutex.engine.trade_store import SidecarPaths
+
+        row = _row(seed=1)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row])
+        weird = tmp_path / "sweep_runs" / "grid-a" / "x.stamp.json"
+        paths = SidecarPaths(
+            trades=weird.with_suffix(".trades.parquet"),
+            aggs=weird.with_suffix(".aggs.parquet"),
+            equity=weird.with_suffix(".equity.parquet"),
+            stamp=weird,
+        )
+        monkeypatch.setattr(srv, "build_sidecar_index", lambda _lake: {row.run_id: paths})
+        assert srv._benchmark_facts(tmp_path, [row]) == {}

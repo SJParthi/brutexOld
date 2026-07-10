@@ -79,6 +79,8 @@ from typing import Any, Final
 import structlog
 
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
+from brutex.dashboard.sweep_temporal_view import build_sidecar_index
+from brutex.engine.baseline import BaselineSeries, baseline_filename, load_baseline
 from brutex.engine.cascade_wire import (
     VerdictMarker,
     load_verdict_markers,
@@ -87,6 +89,7 @@ from brutex.engine.cascade_wire import (
 )
 from brutex.engine.period_stats import decode_judged_years, decode_period_stats, year_key
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
+from brutex.engine.trade_store import RESULTS_DEPTH_DIRNAME
 from brutex.money import format_inr, paisa_to_rupees
 from brutex.ranking import persisted_hard_gates_recheck
 from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_preset
@@ -355,9 +358,82 @@ class SweepScan:
     directions: tuple[str, ...]
     snapshot_hashes: tuple[str, ...]
     verdicts: Mapping[str, VerdictMarker] = field(default_factory=dict)
+    #: Combo ``run_id`` → the STORED buy-&-hold facts of its producing
+    #: results-depth run (``{"total_return_pct": float, "window": str}``) —
+    #: DEC-RESULTS-TRUST-HONESTY-001 · B1. Resolved via the sidecar-stamp
+    #: index (the ONLY stored combo→run-dir mapping) + the engine's
+    #: validating baseline loader; a combo no depth run captured is simply
+    #: ABSENT (its row keys read null — never recomputed, never fabricated).
+    benchmarks: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     cascade_report_present: bool = False
     cascade_report_groups: int | None = None
     cascade_report_mtime_ns: int | None = None
+
+
+def _depth_run_dir(stamp: Path) -> Path | None:
+    """The results-depth RUN directory that owns *stamp*, or ``None``.
+
+    A stamp lives at ``<sweep_runs>/<run>/results-depth/**/*.stamp.json``
+    (the :func:`brutex.dashboard.sweep_temporal_view.build_sidecar_index`
+    glob), so the run dir is the parent of the ``results-depth`` path
+    component. Path-mechanical only; a stamp outside that shape (no
+    ``results-depth`` ancestor) reads ``None`` — the combo then simply has
+    no resolvable benchmark, never a guessed directory.
+    """
+    for parent in stamp.parents:
+        if parent.name == RESULTS_DEPTH_DIRNAME:
+            return parent.parent
+    return None
+
+
+def _benchmark_facts(lake_root: Path, rows: Sequence[ResultRow]) -> dict[str, dict[str, Any]]:
+    """Resolve each combo's STORED buy-&-hold benchmark facts (B1).
+
+    STORED values only (DEC-RESULTS-TRUST-HONESTY-001, audit BLOCKER 1 —
+    Golden Rule #1): the combo → run-dir mapping comes from the results-depth
+    sidecar STAMPS (:func:`build_sidecar_index` — the only durable record of
+    which depth run captured which combo), and the figures come from the
+    engine's VALIDATING :func:`brutex.engine.baseline.load_baseline` over
+    that run dir's ``baseline-<instrument>.json`` (R27). A combo with no
+    stamp, a run dir with no baseline for the combo's instrument, a damaged
+    baseline, or an instrument-mismatched artifact is simply ABSENT from the
+    map — its row keys read ``null``; nothing is recomputed at serve time
+    and nothing is fabricated.
+
+    Honest cost + freshness (Golden Rule #10): one O(run dirs × stamps)
+    index walk + one validated JSON load per DISTINCT baseline path (memoised
+    across rows), paid inside :func:`load_sweep_scan` — i.e. once per
+    ``sweep_results_revision`` under the route cache, never per poll. That
+    token watches the ``sweeps`` tree + audit chain, NOT ``sweep_runs/`` — a
+    standalone depth-pass rerun that writes ONLY run artifacts lands on the
+    next sweeps/audit movement (the production pass runs post-cascade inside
+    the same sweep, which moves the token).
+    """
+    index = build_sidecar_index(lake_root)
+    if not index:
+        return {}
+    facts: dict[str, dict[str, Any]] = {}
+    loaded: dict[Path, BaselineSeries | None] = {}
+    for row in rows:
+        paths = index.get(row.run_id)
+        if paths is None:
+            continue
+        run_dir = _depth_run_dir(paths.stamp)
+        if run_dir is None:
+            continue
+        baseline_path = run_dir / baseline_filename(row.instrument)
+        if baseline_path not in loaded:
+            loaded[baseline_path] = load_baseline(baseline_path)
+        series = loaded[baseline_path]
+        if series is None or series.instrument != row.instrument:
+            # Absent/damaged artifact (load_baseline logged the named reason)
+            # or a renamed/mismatched one — never served under the wrong name.
+            continue
+        facts[row.run_id] = {
+            "total_return_pct": series.total_return_pct,
+            "window": f"{series.start.isoformat()} → {series.end.isoformat()}",
+        }
+    return facts
 
 
 def load_sweep_scan(lake_root: Path) -> SweepScan:
@@ -411,6 +487,14 @@ def load_sweep_scan(lake_root: Path) -> SweepScan:
     report_present = report_mtime_ns is not None
     report_groups = report_group_count(report_file) if report_present else None
 
+    # Benchmark join (DEC-RESULTS-TRUST-HONESTY-001 · B1): resolved once per
+    # scan (= once per revision under the route cache). Honest cost (Golden
+    # Rule #10): one O(run dirs × stamps) sidecar-index walk + one small
+    # validated JSON load per DISTINCT (run dir, instrument) — bounded by the
+    # results-depth artifact tree, paid beside the already-O(stores × rows)
+    # scan, never per poll/click.
+    benchmarks = _benchmark_facts(lake_root, all_rows) if all_rows else {}
+
     return SweepScan(
         rows=tuple(all_rows),
         store_count=store_count,
@@ -422,6 +506,7 @@ def load_sweep_scan(lake_root: Path) -> SweepScan:
         directions=directions,
         snapshot_hashes=snapshot_hashes,
         verdicts=verdicts,
+        benchmarks=benchmarks,
         cascade_report_present=report_present,
         cascade_report_groups=report_groups,
         cascade_report_mtime_ns=report_mtime_ns,
@@ -920,7 +1005,12 @@ def _cascade_row_keys(verdict: VerdictMarker | None) -> dict[str, Any]:
 
 
 def _project_row(
-    row: ResultRow, rank: int, *, snapshot_era: str, verdict: VerdictMarker | None = None
+    row: ResultRow,
+    rank: int,
+    *,
+    snapshot_era: str,
+    verdict: VerdictMarker | None = None,
+    benchmark: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project one :class:`ResultRow` into the leaderboard display dict.
 
@@ -944,6 +1034,12 @@ def _project_row(
     (:func:`_cascade_row_keys`) are ADDITIVE per-row markers
     (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — exactly the ``snapshot_era`` pattern:
     marker, never exclusion; ``None``/``null`` = no stored data / not judged.
+    The two ``benchmark_*`` keys (DEC-RESULTS-TRUST-HONESTY-001 · B1) carry
+    the STORED buy-&-hold facts of the combo's producing results-depth run
+    (:func:`_benchmark_facts`): ``benchmark_return_pct`` (the R27
+    full-precision figure, never rounded) + ``benchmark_window`` (the series'
+    session span). Unresolvable ⇒ both ``null`` — rendered ``—``, never
+    recomputed at serve, never fabricated.
     """
     projected = {
         "rank": rank,
@@ -988,6 +1084,9 @@ def _project_row(
             max_drawdown_pct=row.max_drawdown_pct,
             win_rate=row.win_rate,
         ),
+        # STORED buy-&-hold benchmark facts (B1) — see the docstring above.
+        "benchmark_return_pct": None if benchmark is None else benchmark["total_return_pct"],
+        "benchmark_window": None if benchmark is None else benchmark["window"],
     }
     projected.update(_temporal_row_keys(row))
     projected.update(_cascade_row_keys(verdict))
@@ -1119,6 +1218,7 @@ def build_sweep_leaderboard(
             rank,
             snapshot_era=_row_snapshot_era(r, scan.eras),
             verdict=scan.verdicts.get(r.run_id),
+            benchmark=scan.benchmarks.get(r.run_id),
         )
         for rank, r in enumerate(ordered[:depth], start=1)
     )

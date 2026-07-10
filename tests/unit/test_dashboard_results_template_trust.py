@@ -58,3 +58,20 @@ def test_hard_gates_recheck_marks_never_hides() -> None:
     assert 'r.hard_gates_recheck === "marked"' in html
     assert "fails a persisted hard door on re-check" in html
     assert "marked, never dropped" in html
+
+
+def test_results_ships_the_stored_benchmark_column() -> None:
+    """B1 (audit BLOCKER 1): the STORED buy-&-hold benchmark column — served
+    verbatim from the results-depth baseline artifact, rendered "—" when the
+    combo has no captured depth run, and NEVER recomputed at serve."""
+    html = _render_results_html()
+    assert '["benchmark_return_pct", "B&H bench %", benchCell]' in html
+    assert "function benchCell(r)" in html
+    assert 'if (r.benchmark_return_pct == null) return "—";' in html
+    assert "stored by the results-depth pass, never recomputed" in html
+    # The window travels through esc() before innerHTML (the page XSS law).
+    assert "esc(String(r.benchmark_window))" in html
+    # Numeric client-side sort + the legend honesty sentence.
+    assert '"deflated_sharpe", "cascade_dsr", "benchmark_return_pct",' in html
+    assert "B&amp;H bench % is the STORED buy-&amp;-hold return" in html
+    assert "NOT the combo's own %return" in html

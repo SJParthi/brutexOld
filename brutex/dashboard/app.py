@@ -6790,6 +6790,73 @@ def build_app(
 
         return JSONResponse(await run_in_threadpool(_resolve))
 
+    @app.get("/api/v1/oneclick/baseline")
+    async def api_oneclick_baseline(
+        run_id: str | None = Query(default=None),
+        instrument: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/baseline — one run's STORED buy-&-hold series (R27).
+
+        DEC-RESULTS-TRUST-HONESTY-001 (B1, audit BLOCKER 1): the baselines the
+        results-depth pass already computes + stores
+        (``sweep_runs/<run_id>/baseline-<instrument>.json``, filename resolved
+        via the top100.json object root's ``baselines`` map) finally get a
+        serving route. STORED bytes only — a missing/interim/damaged artifact
+        chain reads a loud ``awaiting``/``corrupt`` payload, never a 500 and
+        never a recomputed series; the filename ref is validated as ONE safe
+        path segment before any disk touch (a tampered map cannot traverse).
+        ``instrument`` may be omitted when exactly one baseline is stored.
+        Cached on the run-dir + top100 stat tokens (the sibling-route law).
+        """
+        rid = _oneclick_require_run_id(run_id)
+        wanted = instrument.strip() if instrument is not None and instrument.strip() else None
+
+        def _resolve() -> dict[str, Any]:
+            """Resolve the baseline payload off the event loop (stat-token cached)."""
+            root, fixture_root = _oneclick_roots()
+            fixture_active = fixture_root is not None
+            if root is None:
+                return oneclick_view.build_baseline_payload(
+                    rid,
+                    oneclick_artifacts.BaselineResult(
+                        "awaiting",
+                        wanted,
+                        None,
+                        None,
+                        (),
+                        "no lake configured — awaiting real run artifact",
+                        None,
+                    ),
+                    fixture_root_active=fixture_active,
+                )
+            run_dir = oneclick_artifacts.runs_root(root) / rid
+            # The compute depends on top100.json (the baselines map) AND the
+            # baseline file; the run DIR stat moves on any atomic replace
+            # inside it (os.replace updates the directory mtime), so the pair
+            # (top100 rev, run-dir rev) is a sound invalidation token.
+            top100_rev = oneclick_artifacts.artifact_revision(
+                run_dir / oneclick_artifacts.TOP100_FILENAME
+            )
+            dir_rev = oneclick_artifacts.artifact_revision(run_dir)
+
+            def _fresh() -> dict[str, Any]:
+                return oneclick_view.build_baseline_payload(
+                    rid,
+                    oneclick_artifacts.load_baseline_result(run_dir, wanted),
+                    fixture_root_active=fixture_active,
+                )
+
+            if top100_rev is None or dir_rev is None:
+                return _fresh()
+            return _oneclick_cache.get_or_compute(
+                f"oc_baseline|{rid}|i={wanted or ''}|t100={top100_rev}|dir={dir_rev}"
+                f"|fx={fixture_active}",
+                generation=0,
+                compute=_fresh,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
+
     @app.get("/api/v1/oneclick/events")
     async def api_oneclick_events(
         run_id: str | None = Query(default=None),
