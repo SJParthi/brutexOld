@@ -86,7 +86,7 @@ from __future__ import annotations
 import contextlib
 import json
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -502,6 +502,7 @@ def run_supervised_grid(
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     watchdog_poll_seconds: float | None = None,
     reuse_bar_bits: bool = True,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
@@ -601,6 +602,12 @@ def run_supervised_grid(
         :class:`~brutex.engine.sweep_kernel.ResidentKernelCache`
         (DEC-SWEEP-RESIDENT-KERNEL-001) — byte-identical results, only the
         redundant rebuild is skipped; ``False`` rebuilds per tuple.
+    roll_schedule_by_instrument
+        ADR-0012 futures roll schedules keyed by instrument symbol
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — argument-plumbed straight into
+        :func:`~brutex.engine.sweep_orchestrator.run_one_tuple` (identity-safe;
+        see :func:`~brutex.engine.sweep_orchestrator.run_sweep_grid`). ``None``
+        (the default) is the byte-identical spot path.
     reference_stamper
         Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001), forwarded to
         every tuple's :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`
@@ -775,6 +782,7 @@ def run_supervised_grid(
                     audit=ingest_audit,
                     skip_empty=skip_empty,
                     kernel_cache=kernel_cache,
+                    roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
                 )
             except (SweepComboError, VixTrioConflictError) as exc:

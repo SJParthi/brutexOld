@@ -73,7 +73,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
@@ -84,6 +84,7 @@ import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
 from brutex.engine.results_store import ResultsStore, VixTrioConflictError
+from brutex.engine.stage1a import apply_1day_mask_for
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_run import (
@@ -332,8 +333,8 @@ class SweepGridConfig:
                         f"SweepGridConfig.instruments contains {symbol!r}, which is "
                         "outside the brute-force engine scope — allowed: the 3 spot "
                         "indexes NIFTY/BANKNIFTY/SENSEX (CLAUDE.md §2 Rule 3) plus "
-                        "NIFTY futures (ADR-0012; series-key 'NIFTY-FUT-YYYY-MM-DD' "
-                        "or a lake 'NSE-NIFTY-<DDMmmYY>-FUT' contract symbol). "
+                        "the NIFTY-futures series alias 'NSE-NIFTY-FUT' (ADR-0012 / "
+                        "DEC-FUTURES-ADDRESSING-PIN-001). "
                         "Research escape hatch: construct with "
                         "unsafe_allow_out_of_scope_instruments=True "
                         "(the CLI flag is --allow-out-of-scope)"
@@ -475,7 +476,12 @@ class SweepTuple:
     proximity: ProximityParams | None
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
 
-    def to_run_config(self, grid: SweepGridConfig) -> SweepRunConfig:
+    def to_run_config(
+        self,
+        grid: SweepGridConfig,
+        *,
+        roll_schedule: tuple[int, ...] | None = None,
+    ) -> SweepRunConfig:
         """Build the single-slice :class:`SweepRunConfig` for this tuple under *grid*.
 
         Threads the grid's shared context (mode + the three reproducibility
@@ -488,6 +494,14 @@ class SweepTuple:
         ----------
         grid
             The owning :class:`SweepGridConfig`.
+        roll_schedule
+            ADR-0012 futures roll schedule for this tuple's instrument
+            (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — argument-plumbed, never a
+            grid field, so ``_tuple_digest`` / ``_grid_descriptor`` /
+            ``_tuple_cache_params`` stay byte-identical for spot grids.
+            ``None`` (every spot tuple) is byte-identical to the pre-launch
+            config; the :class:`~brutex.engine.sweep_run.SweepRunConfig`
+            instrument⟺schedule invariant enforces consistency.
 
         Returns
         -------
@@ -516,6 +530,7 @@ class SweepTuple:
             top_k=grid.top_k,
             min_hits=grid.min_hits,
             overfit=grid.overfit,
+            roll_schedule=roll_schedule,
         )
 
 
@@ -807,6 +822,7 @@ def run_one_tuple(
     audit: AuditSink,
     skip_empty: bool = True,
     kernel_cache: ResidentKernelCache | None = None,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
@@ -850,6 +866,12 @@ def run_one_tuple(
         from it and handed to :func:`~brutex.engine.sweep_run.run_persisted_sweep`
         (``kernel=``) — a byte-identical result, only the redundant rebuild is
         skipped (Golden Rule #4). ``None`` rebuilds per tuple (legacy path).
+    roll_schedule_by_instrument
+        ADR-0012 futures roll schedules keyed by instrument symbol
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — argument-plumbed alongside
+        ``bars_for`` (identity-safe: enters NO digest / descriptor / cache
+        params). ``None`` / an absent key means no schedule (every spot
+        tuple), byte-identical to the pre-launch path.
     reference_stamper
         Optional India-VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
@@ -881,6 +903,11 @@ def run_one_tuple(
                 f"(skip_empty=False)"
             )
         return None
+    roll_schedule = (
+        roll_schedule_by_instrument.get(tuple_.instrument)
+        if roll_schedule_by_instrument is not None
+        else None
+    )
     kernel = (
         kernel_cache.get(
             bars,
@@ -889,13 +916,15 @@ def run_one_tuple(
             proximity=tuple_.proximity,
             prior_n=grid.prior_n,
             fib_anchor=tuple_.fib_anchor,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
         )
         if kernel_cache is not None
         else None
     )
     return run_persisted_sweep(
         bars,
-        tuple_.to_run_config(grid),
+        tuple_.to_run_config(grid, roll_schedule=roll_schedule),
         store=store_for(tuple_),
         dedup=dedup,
         audit=audit,
@@ -917,6 +946,7 @@ def run_sweep_grid(
     skip_empty: bool = True,
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     reuse_bar_bits: bool = True,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> SweepGridSummary:
     """Run the full grid sweep: enumerate the outer product + persist every tuple.
@@ -984,6 +1014,17 @@ def run_sweep_grid(
         ``False`` to rebuild per tuple (the legacy path). Honest envelope (Golden
         Rule #10): the cache holds at most ``|proximities|`` bar windows resident →
         bounded ``O(|proximities| · N_bars)`` memory, never O(1) total.
+    roll_schedule_by_instrument
+        ADR-0012 futures roll schedules keyed by instrument symbol
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), resolved ONCE by the launcher
+        (:func:`brutex.data.futures_series.resolve_futures_series`) and
+        argument-plumbed here alongside ``bars_for`` — IDENTITY-SAFE like
+        ``unsafe_allow_out_of_scope_instruments``: it enters NONE of
+        ``_tuple_digest`` / ``_grid_descriptor`` / ``_tuple_cache_params``
+        (spot grids' digests are byte-identical with and without it); per-run
+        identity moves ONLY via ``SweepRunConfig.roll_schedule`` →
+        ``canonical_trade_params``. ``None`` (the default) is the
+        byte-identical spot path.
     reference_stamper
         Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001), forwarded to
         every tuple's :func:`run_one_tuple` — ONE stamper per grid run.
@@ -1065,6 +1106,7 @@ def run_sweep_grid(
                 audit=audit,
                 skip_empty=skip_empty,
                 kernel_cache=kernel_cache,
+                roll_schedule_by_instrument=roll_schedule_by_instrument,
                 reference_stamper=reference_stamper,
             )
         except (SweepComboError, VixTrioConflictError) as exc:

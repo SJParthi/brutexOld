@@ -121,6 +121,14 @@ def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
 
 
+#: An ADR-0012 roll schedule covering the `_trending_bars` fixture (base day
+#: 2026-01-05 IST): one mid-stream roll + a covering tail, as day-ordinals.
+_FUT_SCHEDULE: tuple[int, ...] = (
+    datetime(2026, 1, 8, tzinfo=_IST).date().toordinal(),
+    datetime(2026, 3, 31, tzinfo=_IST).date().toordinal(),
+)
+
+
 # ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 test seams ──────
 #
 # The wired sweep batch-simulates via `sweep_run.ResidentTradeSim`; failure
@@ -409,6 +417,35 @@ class TestSweepRunConfig:
         cfg = _make_config(proximity=prox)
         assert cfg.proximity is prox
 
+    # ── ADR-0012 instrument⟺schedule hard invariant (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) ──
+
+    def test_futures_alias_requires_a_roll_schedule(self) -> None:
+        # Direction 1: the alias with NO schedule is refused — a futures run
+        # can never silently sweep the constant-key path.
+        with pytest.raises(ValueError, match="roll_schedule is required for"):
+            _make_config(instrument="NSE-NIFTY-FUT")
+
+    @pytest.mark.parametrize("instrument", ["NIFTY", "BANKNIFTY", "SENSEX"])
+    def test_spot_instrument_forbids_a_roll_schedule(self, instrument: str) -> None:
+        # Direction 2: a spot config with a schedule is refused — presence is a
+        # TOTAL function of the identity field, so no instrument can ever mint
+        # both a with-key and a without-key run identity (the #1062 bug class).
+        with pytest.raises(ValueError, match="roll_schedule is required for"):
+            _make_config(instrument=instrument, roll_schedule=_FUT_SCHEDULE)
+
+    def test_futures_alias_with_a_schedule_constructs(self) -> None:
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        assert cfg.roll_schedule == _FUT_SCHEDULE
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [(), (5, 5), (7, 3), (-1, 5)],
+        ids=["empty", "duplicate", "decreasing", "negative"],
+    )
+    def test_invalid_roll_schedule_shape_rejected(self, schedule: tuple[int, ...]) -> None:
+        with pytest.raises(ValueError, match="non-empty strictly increasing"):
+            _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=schedule)
+
 
 # ────── ranked_combo_to_result_row ──────
 
@@ -682,6 +719,81 @@ class TestCanonicalTradeParams:
 
         assert _canonical_params(cfg) == expected
         assert mask_run_id(mask=1, params=_canonical_params(cfg), **_CTX) == rid_via_helper
+
+    # ── ADR-0012 roll_schedule — conditional emission + the aliasing kill-shot ──
+
+    def test_spot_params_carry_no_roll_schedule_key(self) -> None:
+        """No schedule ⇒ NO key — spot run-ids stay byte-identical (P2).
+
+        The exact dict (not just key absence) is pinned so a renamed or
+        default-emitted key can never slip in.
+        """
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+            roll_schedule=None,
+        )
+        assert params == {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "proximity_bps": None,
+            "fib_anchor": "prev_day",
+            "start_equity_paisa": 10_000_000,
+        }
+        assert "roll_schedule" not in params
+
+    def test_roll_schedule_emitted_as_json_canonical_ints(self) -> None:
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+            roll_schedule=_FUT_SCHEDULE,
+        )
+        assert params["roll_schedule"] == list(_FUT_SCHEDULE)
+        assert all(isinstance(v, int) for v in params["roll_schedule"])
+
+    def test_aliasing_kill_shot_distinct_schedules_mint_distinct_run_ids(self) -> None:
+        """TWO different schedules over IDENTICAL bar bytes ⇒ DISTINCT run_ids.
+
+        The §1062-class containment teeth (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
+        the snapshot hash captures the BARS, so if two lakes stitch identical
+        bytes under different boundary ordinals, ONLY the recorded
+        ``roll_schedule`` separates the two computations — the run identity
+        must move on the schedule alone.
+        """
+        ctx = dict(_CTX, instrument="NSE-NIFTY-FUT")
+
+        def _rid(schedule: tuple[int, ...]) -> str:
+            params = canonical_trade_params(
+                sl_paisa=80,
+                tp_paisa=50,
+                prior_n=3,
+                proximity=None,
+                start_equity_paisa=10_000_000,
+                roll_schedule=schedule,
+            )
+            # SAME mask, SAME context, SAME data_snapshot_hash — the bars are
+            # byte-identical by construction; only the schedule differs.
+            return mask_run_id(mask=0b101, params=params, **ctx)
+
+        other_schedule = (_FUT_SCHEDULE[0] + 1, _FUT_SCHEDULE[1])
+        assert _rid(_FUT_SCHEDULE) != _rid(other_schedule)
+
+    def test_futures_config_identity_routes_the_schedule(self) -> None:
+        # §11 COMMON: the futures config's identity params ARE this helper's
+        # output, schedule included.
+        from brutex.engine.sweep_run import (
+            _canonical_params,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        assert _canonical_params(cfg)["roll_schedule"] == list(_FUT_SCHEDULE)
 
 
 # ────── trial-stats sidecar write point (DEC-TRIAL-STATS-WRITE-001) ──────
@@ -2027,6 +2139,112 @@ class TestResidentKernelBarMismatch:
         with (
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(ValueError, match="kernel was built for Fib anchor"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+
+class TestResidentKernelRollScheduleMismatch:
+    """The ADR-0012 roll-schedule twin of the Fib-anchor kernel guard.
+
+    A pre-built kernel's ``bar_bits`` are schedule-SPECIFIC (the per-contract
+    hard resets move with the boundaries), so a kernel built under a DIFFERENT
+    schedule than the tuple's would silently misplace every roll boundary
+    (DEC-STAGE1A-ROLL-RESET-001) — fail-fast, exactly like the ``n_bars`` /
+    anchor guards.
+    """
+
+    def test_kernel_built_for_other_schedule_raises(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        # SAME bars, SAME anchor — only the schedule disagrees (a one-entry
+        # covering schedule vs the tuple's two-entry one).
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            roll_schedule=(_FUT_SCHEDULE[-1],),
+        )
+        assert kernel.n_bars == len(bars)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for roll_schedule"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_scheduleless_kernel_for_a_futures_tuple_raises(self, tmp_path: Path) -> None:
+        # None vs tuple is ALSO a mismatch — a spot-built kernel can never
+        # serve a futures tuple (its bits never hard-reset at the rolls).
+        bars = _trending_bars()
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        kernel = ResidentSweepKernel(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for roll_schedule"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_matching_schedule_kernel_is_accepted(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        bars = _trending_bars(n_days=4)
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            roll_schedule=_FUT_SCHEDULE,
+        )
+        summary = _run_sweep(tmp_path, "ok", bars, cfg, kernel=kernel)
+        assert summary.evaluated > 0
+
+    def test_kernel_built_with_other_1day_mask_flag_raises(self, tmp_path: Path) -> None:
+        # The D12 twin (review round-1 finding 5): a hand-built kernel whose
+        # ``apply_1day_mask`` flag disagrees with the tuple's derived flag
+        # carries bar_bits with the intraday-only bits (ToD 44-47 / VWAP
+        # 52-53) wrongly set/cleared — fail-fast, exactly like the schedule
+        # guard (unreachable via the production cache, whose key contains
+        # instrument+tf, the flag's only inputs).
+        from brutex.engine.stage1a import apply_1day_mask_for
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        assert apply_1day_mask_for(cfg.instrument, cfg.tf) is False
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            apply_1day_mask=True,
+        )
+        assert kernel.n_bars == len(bars)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built with apply_1day_mask"),
         ):
             run_persisted_sweep(
                 bars,
