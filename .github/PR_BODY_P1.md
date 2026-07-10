@@ -47,8 +47,10 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
   partial India-VIX coverage (reference-only, never blocks, NSE-only gated),
   insufficient free disk space, an SLA overrun with/without acknowledgement
   (both per-group and multi-group SUMMED), a duplicate-symbol request
-  (`"NIFTY,NIFTY"`), an out-of-engine-scope symbol, an `sl="none"`/off-grid
-  SL-TP leg incompatible with the mandatory institutional Stage-3 grid, a
+  (`"NIFTY,NIFTY"`), an out-of-engine-scope symbol, a `none`-carrying
+  SL/TP leg (whole-`none` AND mixed `"none,5,100,200"` — RUNNABLE with a
+  per-launch Stage-3 downgrade per operator ruling R54), an off-grid
+  NON-none SL/TP leg under the effective stage3-ON posture (still refused), a
   per-exchange-group crash/non-zero-exit inside the background job, an
   overflow-scale `top`/calibration-file value.
 - Concurrent: a pull already holding the account-wide single-flight lock at
@@ -67,11 +69,17 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
 - An un-acknowledged SLA overrun (per-group OR the combined multi-group
   total) → refused with the projected wall-clock and the acknowledge-flag
   instruction, never a silent proceed.
-- An `sl`/`tp` leg that is `"none"` or off the locked Mode-A CMA-ES grid
-  (the institutional default's `stage3_enable=True` cannot use either
-  shape) → refused with a clear 400 at request-resolution time, before any
-  background job starts — never a preflight `ok: true` for an unrunnable
-  launch (a round-11 adversarial-refuter finding; see below).
+- An `sl`/`tp` leg carrying `none` (whole-leg or any CSV cell, e.g.
+  `"none,5,100,200"`) → RUNNABLE, never refused (operator ruling R54,
+  2026-07-08): the derived `SweepRunRequest.stage3_enable` downgrades that
+  launch's EFFECTIVE Stage-3 to OFF (the engine accepts `None` legs with
+  Stage-3 off, so the launch stays provably runnable — R16 preserved), with
+  one `sweep_runner.none_leg_stage3_downgrade` WARN per exchange-group
+  kwargs build, a requested→applied `stage3_enable` Clamp row per
+  downgraded group in the one-click verdict, and `stage3_enable` echoed in
+  the `POST /api/v1/sweep/run` response. An OFF-GRID non-none leg under the
+  effective stage3-ON posture is STILL refused with a clear 400 before any
+  background job starts (the round-11 deep-crash class stays closed).
 - A malformed/degenerate date window → the window is CLAMPED (not crashed);
   a window entirely outside published NSE holiday-calendar coverage
   collapses to a single-day window at the nearest boundary, with BOTH
@@ -118,11 +126,12 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
   SEMANTICS beyond "any refusal refuses the whole logical run" — both stay
   open operator decisions; this PR defaults to flag-and-run per the
   operator's pre-declared instruction, not a silent choice.
-- The R19 4th SL/TP arm (NONE/signal-to-signal exit) — structurally
-  incompatible with `stage3_enable=True`'s Mode-A CMA-ES grid constraint
-  as it exists on `main` today; now loudly REFUSED (round 11) rather than
-  silently possible, but still not itself resolved — flagged, not routed
-  around.
+- ~~The R19 4th SL/TP arm (NONE/signal-to-signal exit)~~ — RESOLVED by the
+  R54 operator ruling (2026-07-08, folded 2026-07-10): `none` legs are
+  first-class RUNNABLE via the per-launch Stage-3 downgrade (see Failure
+  modes + MIGRATION.md #1712's R54 addendum); the engine-level
+  `SweepGridConfig` incompatibility of `None`-legs-WITH-Stage-3-ON remains
+  real and is honestly routed around by the downgrade, never silently.
 - Any P2/P3/P4/P5/P6-owned file.
 
 ---
@@ -133,7 +142,7 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
 |---|---|
 | 100% code coverage | `estimator_calibration.py` 61/18, `sweep_estimator.py` 53/12, `sweep_oneclick_preflight.py` 132/48, `sweep_runner.py` 196/48 stmts/branches — 0 missing, all 4, re-measured after every fix round |
 | 100% audit coverage | Every refusal/clamp carries symbol/tf/reason; ledger entry #1712 documents every arm's true Big-O cost and all 11 review rounds |
-| 100% testing coverage | 183 tests across 6 files, including crash-regression pins, an SLA-aggregation pin, and a Mode-A-grid refusal pin |
+| 100% testing coverage | 200+ tests across 6 files, including crash-regression pins, an SLA-aggregation pin, and the R54 pins (`test_explicit_none_sl_leg_is_runnable_r54`, `test_both_none_legs_runnable_with_one_warn_at_build_r54`, `test_mixed_csv_none_leg_is_runnable_end_to_end_r54`, `test_gridded_legs_emit_no_downgrade_warn_and_keep_stage3_r54` — replacing the retired round-11 refusal pin) |
 | 100% code checks | ruff/mypy --strict/pyright all clean |
 | 100% code performance | Disk-guard full-lake scan hoisted to ONCE per plan (not per exchange group) |
 | 100% monitoring | Existing `structlog` sla_projection/lake.invariant.scan_complete events unchanged, exercised by these tests |
@@ -163,7 +172,7 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
 
 | Layer | Status |
 |---|---|
-| DETECT | Every hard-data gap AND every unrunnable-launch condition (off-grid SL/TP) is DETECTED before compute or launch |
+| DETECT | Every hard-data gap AND every unrunnable-launch condition (off-grid non-none SL/TP under effective stage3-ON) is DETECTED before compute or launch; a none-carrying leg is DETECTED and downgraded (WARN + Clamp + payload echo), never refused (R54) |
 | VERIFY | `mypy --strict`, `pyright`, `ruff`, 100% line+branch coverage, verified locally before every commit; 11 rounds of independent adversarial verification |
 | RECONCILE | The estimator's true trial count is reconciled against the engine's OWN dedup behavior; the preflight's `ok` verdict is now reconciled against the ACTUAL `SweepGridConfig` construction constraints (round 11) |
 | PREVENT | Loud refusal-before-launch prevents any partial/silent institutional run on incomplete data OR an unrunnable grid configuration |
@@ -213,7 +222,11 @@ own shape) or any off-grid paisa value passed the ENTIRE preflight with
 contradicting the "a run that starts is provably runnable" design claim.
 Fixed by adding Mode-A-grid validation to `resolve_sweep_request` (used by
 every entry point), refusing loudly with a 400 before any background job
-starts.
+starts. **[R54 SUPERSESSION, 2026-07-10: the none-arm HALF of that refusal
+is RELAXED per the binding operator ruling R54 (2026-07-08) — none legs now
+downgrade the launch's effective `stage3_enable` instead of refusing; the
+off-grid non-none refusal under effective stage3-ON is byte-kept. See
+MIGRATION.md #1712's R54 addendum.]**
 
 **Adversarial-refuter round 12:** confirmed the round-11 fix closes the
 gap across all 3 entry points (legacy route + both one-click routes,
@@ -241,17 +254,20 @@ Full detail, each round's exact findings and fixes, in docs/MIGRATION.md
   estimate today is honestly `estimate_basis="provisional"` (R23
   MEASURED-TIMING-ONLY, verified 2026-07-08: zero references to
   `estimator_calibration` anywhere in the tree before this module); the
-  preflight's `ok: true` now genuinely means the launch's SL/TP legs are
-  grid-compatible (round 11), not merely that hard-data coverage exists.
+  preflight's `ok: true` now genuinely means the launch is provably
+  runnable: gridded legs are Mode-A-grid-compatible (round 11) and a
+  none-carrying launch is downgraded to a Stage-3-off posture the engine
+  accepts (R54), not merely that hard-data coverage exists.
 - 🟡 PARTIAL: the sweep-vs-pull exclusion is a read-only PROBE, not a held
   lock — a TOCTOU gap between the preflight click and the actual launch is
   disclosed, not silently accepted (closing it needs a new cross-process
-  lock, out of this phase's scope). R19's 4th SL/TP arm is structurally
-  incompatible with the institutional Stage-3 default as it exists today —
-  now loudly refused rather than silently possible, but the incompatibility
-  itself remains an open engineering question, not routed around.
+  lock, out of this phase's scope). R19's 4th SL/TP arm is RESOLVED by the
+  R54 relax (none legs runnable via the per-launch Stage-3 downgrade); the
+  underlying `None`-legs-WITH-Stage-3-ON engine incompatibility remains
+  real (ADR-0007 condition 3) and is handled by the disclosed downgrade,
+  never silently.
 - 📋 ROADMAP: P2's calibration-file WRITER (turns every future estimate from
   provisional to calibrated); a real cross-process sweep/pull exclusion
-  lock; a ruling on VWAP EXCLUDE-vs-FLAG, exact cross-group run semantics
-  beyond "any refusal refuses the whole logical run", and the R19 4th-arm /
-  Stage-3 grid incompatibility.
+  lock; a ruling on VWAP EXCLUDE-vs-FLAG and exact cross-group run
+  semantics beyond "any refusal refuses the whole logical run" (the R19
+  4th-arm question is CLOSED by R54).
