@@ -244,10 +244,12 @@ class TestMoversFuturesSplitBrain:
         BRUTEX_BAD_TICK_SCREEN) and this test FAILS — the teeth the behavioral
         guard above cannot provide (there both shapes pass `False`).
         """
-        import brutex.dashboard.movers_futures as mf
+        # ONE import style for this module in this file (CodeQL
+        # py/import-and-import-from; the sibling tests use `from ... import`).
+        from brutex.dashboard import movers_futures as movers_futures_module
 
         recorded: list[object] = []
-        real_screen_frame = mf.screen_frame
+        real_screen_frame = movers_futures_module.screen_frame
 
         def _spy(df: object, **kwargs: object) -> object:
             recorded.append(kwargs.get("bad_tick_enabled", "MISSING"))
@@ -258,8 +260,8 @@ class TestMoversFuturesSplitBrain:
         _write_fno(tmp_path, _GOOD_CLOSES, symbol=fut)
         _fno_premium(tmp_path, opt)
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(mf, "screen_frame", _spy)
-            mf._read_future_session(
+            mp.setattr(movers_futures_module, "screen_frame", _spy)
+            movers_futures_module._read_future_session(
                 tmp_path,
                 exchange="NSE",
                 segment="FNO",
@@ -268,7 +270,7 @@ class TestMoversFuturesSplitBrain:
                 cutoff_min=None,
                 bad_tick=True,  # the futures posture
             )
-            mf._read_future_session(
+            movers_futures_module._read_future_session(
                 tmp_path,
                 exchange="NSE",
                 segment="FNO",
