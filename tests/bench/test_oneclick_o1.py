@@ -431,15 +431,40 @@ class TestManifestPollFlatVsHistory:
     """B-6 — the primed manifest poll is flat vs run-history depth (F-M6)."""
 
     @staticmethod
-    def _primed_manifest(root: Path) -> tuple[MoversSnapshotCache, str, Path]:
+    def _sibling_tokens(gate: oca.OutageGate, run_dir: Path) -> tuple[str | None, str | None]:
+        """The route's two sibling probes through ``sibling_key_token`` (r2 NIT-1
+        — B-6 mirrors the folded route shape exactly as B-7 does)."""
+        top_tok = oca.sibling_key_token(
+            gate,
+            coordinate=f"oc_manifest|{_RID}|sib=top100|fx=False",
+            probe=oca.artifact_probe(run_dir / oca.TOP100_FILENAME),
+        )
+        ev_tok = oca.sibling_key_token(
+            gate,
+            coordinate=f"oc_manifest|{_RID}|sib=events|fx=False",
+            probe=oca.artifact_probe(run_dir / oca.EVENTS_FILENAME),
+        )
+        return top_tok, ev_tok
+
+    @classmethod
+    def _manifest_key(cls, gate: oca.OutageGate, run_dir: Path) -> str:
+        """Re-derive the route's composite manifest key (probe + 2 sibling tokens)."""
+        m_rev = oca.artifact_revision(run_dir / oca.MANIFEST_FILENAME)
+        assert m_rev is not None
+        top_tok, ev_tok = cls._sibling_tokens(gate, run_dir)
+        return (
+            f"oc_manifest|{_RID}|rev={m_rev}"
+            f"|files={int(top_tok is not None)}{int(ev_tok is not None)}"
+            f"|ev={ev_tok}|fx=False"
+        )
+
+    @classmethod
+    def _primed_manifest(cls, root: Path) -> tuple[MoversSnapshotCache, oca.OutageGate, str, Path]:
         """Prime one manifest payload under the route's composite-token key shape."""
         run_dir = oca.runs_root(root) / _RID
-        m_rev = oca.artifact_revision(run_dir / oca.MANIFEST_FILENAME)
-        top_rev = oca.artifact_revision(run_dir / oca.TOP100_FILENAME)
-        ev_rev = oca.artifact_revision(run_dir / oca.EVENTS_FILENAME)
-        assert m_rev is not None
         cache = MoversSnapshotCache()
-        key = f"oc_manifest|{_RID}|rev={m_rev}|files={top_rev}{ev_rev}|ev={ev_rev}|fx=False"
+        gate = oca.OutageGate()
+        key = cls._manifest_key(gate, run_dir)
 
         def _fresh() -> dict[str, Any]:
             # The route's fresh compute: manifest parse + run-dir probe + one
@@ -458,36 +483,37 @@ class TestManifestPollFlatVsHistory:
             return payload
 
         cache.get_or_compute(key, generation=0, compute=_fresh)
-        return cache, key, run_dir
+        return cache, gate, key, run_dir
 
     def test_manifest_repeat_poll_flat_vs_history_depth(self, tmp_path: Path) -> None:
         """A 100-run history does NOT slow the primed manifest poll of one run.
 
-        Measured 2026-07-07 (sandbox): 26.3 µs/poll @ 5 runs vs 26.4 µs/poll
-        @ 100 runs → ratio 1.00× (per poll: three ``os.stat`` artifact tokens
-        + one cache hit — the route's repeat-poll work). HONEST: the FIRST
-        poll per changed manifest pays the O(artifact) parse + probe + the
-        O(page, limit=200) events tail for the chain map — stated per
-        F-M6/F-M3, deliberately outside the timed loop. Ceiling:
-        ``ratio_ceiling(8.0)``.
+        Measured 2026-07-10 (sandbox, r2 NIT-1 route-mirror re-measure):
+        36.4 µs/poll @ 5 runs vs 36.4 µs/poll @ 100 runs → ratio 1.00× (per
+        poll: three ``os.stat`` artifact tokens — the two siblings through
+        the ``sibling_key_token`` outage-gate arm, exactly the folded route
+        shape — + one cache hit). HONEST: the FIRST poll per changed
+        manifest pays the O(artifact) parse + probe + the O(page, limit=200)
+        events tail for the chain map — stated per F-M6/F-M3, deliberately
+        outside the timed loop. Ceiling: ``ratio_ceiling(8.0)``.
         """
         root_small = tmp_path / "small" / "sweeps"
         root_big = tmp_path / "big" / "sweeps"
         _write_runs_tree(root_small, runs=5, events_lines=_SMALL_EVENT_LINES)
         _write_runs_tree(root_big, runs=100, events_lines=_SMALL_EVENT_LINES)
-        cache_s, key_s, dir_s = self._primed_manifest(root_small)
-        cache_l, key_l, dir_l = self._primed_manifest(root_big)
+        cache_s, gate_s, key_s, dir_s = self._primed_manifest(root_small)
+        cache_l, gate_l, key_l, dir_l = self._primed_manifest(root_big)
 
-        def _poll(cache: MoversSnapshotCache, key: str, run_dir: Path) -> None:
-            # Re-derive the three stat tokens exactly like the route, then hit.
-            assert oca.artifact_revision(run_dir / oca.MANIFEST_FILENAME) is not None
-            oca.artifact_revision(run_dir / oca.TOP100_FILENAME)
-            oca.artifact_revision(run_dir / oca.EVENTS_FILENAME)
+        def _poll(
+            cache: MoversSnapshotCache, gate: oca.OutageGate, key: str, run_dir: Path
+        ) -> None:
+            # Re-derive the composite key exactly like the route, then hit.
+            assert self._manifest_key(gate, run_dir) == key
             cache.get_or_compute(key, generation=0, compute=_must_not_run)
 
-        _poll(cache_s, key_s, dir_s), _poll(cache_l, key_l, dir_l)  # warm
-        t_small = _best_of(lambda: _poll(cache_s, key_s, dir_s))
-        t_large = _best_of(lambda: _poll(cache_l, key_l, dir_l))
+        _poll(cache_s, gate_s, key_s, dir_s), _poll(cache_l, gate_l, key_l, dir_l)  # warm
+        t_small = _best_of(lambda: _poll(cache_s, gate_s, key_s, dir_s))
+        t_large = _best_of(lambda: _poll(cache_l, gate_l, key_l, dir_l))
         ratio = t_large / t_small if t_small > 0 else 1.0
         assert ratio < ratio_ceiling(8.0), (
             f"manifest repeat poll scaled with run-history depth: {ratio:.2f}x"
@@ -497,7 +523,7 @@ class TestManifestPollFlatVsHistory:
         """Deterministic teeth: the primed manifest key never re-runs the compute."""
         root = tmp_path / "root" / "sweeps"
         _write_runs_tree(root, runs=5, events_lines=100)
-        cache, key, _run_dir = self._primed_manifest(root)
+        cache, _gate, key, _run_dir = self._primed_manifest(root)
         payload: dict[str, Any] = cache.get_or_compute(key, generation=0, compute=_must_not_run)
         assert payload["run_id"] == _RID
         assert len(payload["chain_links"]) == 8

@@ -7335,8 +7335,10 @@ def build_app(
         F1 (DEC-ONECLICK-PERF-CLUB-001): the WHOLE payload is revision-cached
         like the sibling routes — the key folds the manifest stat token
         (primary probe) + the events + top100 tokens + the chain
-        verified-state, so a primed poll is four ``os.stat`` probes + a
-        cache-peek + one hit; the FIRST poll per changed revision pays the
+        verified-state, so a primed poll is three ``os.stat`` probes + the
+        raising chain cache-peek + one hit (r2 sweep M1 — the chain state is
+        a cache-peek, never a stat; the B-7 bench measures exactly this
+        shape); the FIRST poll per changed revision pays the
         O(manifest) parse + funnel reconcile + the one-row trades probe.
         HONEST bound (Golden Rule #10): a results-depth sidecar rewrite that
         moves NONE of the three artifact tokens does not move the key — in

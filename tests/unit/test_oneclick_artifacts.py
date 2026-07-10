@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -1141,54 +1143,109 @@ class TestOutageGate:
         gate.healthy("h2", "k-2")  # evicts h1, NOT the in-outage coordinate
         assert gate.outage_key("out") == "k-out"  # survived the churn past capacity
 
+    def test_sustained_outage_refreshes_in_outage_recency_never_rewarns(self) -> None:
+        """r2 NIT-2: an actively-polled outage survives ``_in_outage`` churn.
 
-class TestOutageGateConcurrency:
-    """Teeth for the class docstring's "Thread-safe" claim (r1 gates MINOR).
+        A wider-than-capacity outage must evict the STALEST outage
+        coordinate, never one still actively polling (pre-fix,
+        ``_in_outage`` was insertion-ordered — the fresh coordinate "c"
+        evicted the still-polling "a", which then re-WARNed mid-outage).
+        """
+        gate = oc.OutageGate(capacity=2)
+        with structlog.testing.capture_logs() as logs:
+            gate.outage_key("a")  # warn — in_outage: [a]
+            gate.outage_key("b")  # warn — in_outage: [a, b]
+            gate.outage_key("a")  # sustained poll refreshes → [b, a]
+            gate.outage_key("c")  # warn — evicts the STALE "b", not "a"
+            gate.outage_key("a")  # still latched: NO re-warn
+        warns_a = [
+            e for e in logs if e["event"] == "oneclick.probe_outage" and e["coordinate"] == "a"
+        ]
+        assert len(warns_a) == 1
 
-    Barrier-driven, the partition_lock/governor concurrency-test precedent:
-    the routes call the ONE shared gate from the AnyIO threadpool, so the
-    exactly-one-WARN-per-outage latch and the last-known map must hold under
-    real thread interleaving, not just by construction.
+
+class _YieldingContains(OrderedDict[str, None]):
+    """Fault-injection map: the membership check YIELDS the GIL mid-window.
+
+    ``in`` on a C-level (Ordered)dict gives CPython NO eval-breaker
+    checkpoint between the gate's ``coordinate not in _in_outage`` check and
+    its ``_in_outage[coordinate] = None`` set, so a lock-removal mutant is
+    untouchable by scheduling pressure alone (empirically 0/200 at
+    switchinterval 1e-9 — the r2 MINOR-1 theater proof, and 0/10 for the
+    barrier-aligned fresh-coordinate hammer too). A Python-level
+    ``__contains__`` with a ``sleep`` inserts a REAL preemption point INSIDE
+    the check-then-set window: under the production lock the window stays
+    mutually excluded (the yield happens while the lock is held, so racing
+    threads block at ``with self._lock``); with the lock removed, racing
+    first-polls interleave through the yield, both read "first", and
+    double-WARN — the mutant dies.
     """
 
-    def test_concurrent_outage_polls_warn_once_and_never_lose_the_last_key(self) -> None:
+    def __contains__(self, key: object) -> bool:
+        present = super().__contains__(key)
+        time.sleep(1e-6)  # release + reacquire the GIL — a real switch point
+        return present
+
+
+class TestOutageGateConcurrency:
+    """REAL teeth for the class docstring's "Thread-safe" claim (r2 MINOR-1).
+
+    The r1 hammer (8 threads free-running one SHARED already-latched
+    coordinate) was proven THEATER: its only lock-protected race — the
+    check-then-set on ``_in_outage`` — happened exactly ONCE per run, GIL-
+    serialised, and a lock-removal mutant survived 200/200 hammer runs (the
+    reviewer's reproduction). This rewrite (a) makes EVERY round a
+    barrier-aligned 8-way FIRST-poll race on a FRESH seeded coordinate and
+    (b) injects a genuine preemption point inside the check-then-set window
+    via :class:`_YieldingContains` (whitebox on the ``_in_outage`` seam —
+    the file's declared private-pin discipline) — the mutant double-WARNs
+    (verified in-session: the no-op-lock mutant fails this test every run;
+    the locked gate passes deterministically).
+    """
+
+    def test_first_poll_races_warn_once_per_coordinate(self) -> None:
         gate = oc.OutageGate()
-        gate.healthy("out", "k-out")
+        gate._in_outage = _YieldingContains()  # the injected preemption point
         n_threads = 8
-        rounds = 25
+        rounds = 200  # every round stays under the 512-capacity maps
+        coordinates = [f"race-{i}" for i in range(rounds)]
+        for i, coordinate in enumerate(coordinates):
+            gate.healthy(coordinate, f"k-{i}")
         barrier = threading.Barrier(n_threads)
-        served: list[str | None] = []
+        served: list[tuple[str | None, str | None]] = []  # (expected, got)
         errors: list[BaseException] = []
 
-        def _hammer(worker: int) -> None:
+        def _hammer() -> None:
             try:
-                barrier.wait(timeout=10)
-                for i in range(rounds):
-                    # the shared coordinate is ONLY ever outage-polled here…
-                    served.append(gate.outage_key("out"))
-                    # …while sibling coordinates churn healthy/absent through
-                    # the same lock (bounded well under capacity — recency
-                    # eviction is the separate MINOR-3 test's concern).
-                    gate.healthy(f"churn-{worker}-{i % 4}", f"k-{i}")
-                    gate.absent(f"churn-{worker}-{i % 4}")
+                for i, coordinate in enumerate(coordinates):
+                    # ALL threads' first outage poll of this coordinate lands
+                    # together — a genuine check-then-set race each round.
+                    barrier.wait(timeout=10)
+                    served.append((f"k-{i}", gate.outage_key(coordinate)))
             except BaseException as exc:  # surfaced to the assert below
                 errors.append(exc)
 
-        threads = [threading.Thread(target=_hammer, args=(w,)) for w in range(n_threads)]
+        threads = [threading.Thread(target=_hammer) for _ in range(n_threads)]
         with structlog.testing.capture_logs() as logs:
             for thread in threads:
                 thread.start()
             for thread in threads:
-                thread.join(timeout=30)
+                thread.join(timeout=60)
         assert not any(thread.is_alive() for thread in threads)
         assert errors == []
-        # no lost last_key: EVERY concurrent outage poll served the seeded key
-        assert served == ["k-out"] * (n_threads * rounds)
-        outages = [
-            e for e in logs if e["event"] == "oneclick.probe_outage" and e["coordinate"] == "out"
-        ]
-        assert len(outages) == 1  # exactly one WARN per outage across all threads
-        assert outages[0]["last_known"] is True
+        # no lost last_key: EVERY concurrent poll served its seeded key
+        assert len(served) == n_threads * rounds
+        assert all(got == expected for expected, got in served)
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        # THE teeth: warns == distinct coordinates — an unlocked
+        # check-then-set lets two threads both observe "first" and
+        # double-WARN one coordinate (r2 MINOR-1 recipe).
+        assert len(outages) == rounds, (
+            f"expected one WARN per coordinate ({rounds}), got {len(outages)} — "
+            "a duplicate means the first-poll check-then-set raced"
+        )
+        assert {e["coordinate"] for e in outages} == set(coordinates)
+        assert all(e["last_known"] is True for e in outages)
 
 
 class TestSiblingKeyToken:

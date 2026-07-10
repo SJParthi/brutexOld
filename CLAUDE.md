@@ -28,12 +28,14 @@ the queued post-#1373 oneclick perf/hygiene club on
 opens after #1373 lands): (F1) `/api/v1/oneclick/verify` — the ONE
 oneclick route with no revision cache — joins the stat-token family (key
 folds manifest + events + top100 tokens + the chain verified-state; a
-primed poll is four stats + a cache-peek + one hit; NEW B-7 bench pin,
+primed poll is three stats + the chain cache-peek + one hit; NEW B-7
+bench pin,
 measured 0.95× flat vs a 1000× manifest); (C-r2-5) ALL FIVE cached
 oneclick routes ride the NEW `serve_revision_cached` chokepoint — a stat
 OUTAGE (now distinguished from honest ABSENCE by `artifact_probe`) serves
 the LAST-KNOWN payload with ONE `oneclick.probe_outage` WARN per outage
-(never a silent per-poll O(artifact) re-parse; recovery logs + resumes
+per COORDINATE (a whole-volume flap warns once per touched coordinate;
+never a silent per-poll O(artifact) re-parse; recovery logs + resumes
 normal keying; `OutageGate` LRU-bounded 512); (F4) `discover_runs`
 stat-stamps + sorts FIRST and parses only the newest-limit manifests
 (identical selection; the F5 uncapped runs_revision stat walk stands);
@@ -1960,8 +1962,9 @@ hostile-review pass._
   per REQUEST; the whole payload is now stat-token cached like the siblings
   (key = manifest token [primary probe] + events + top100 tokens + the chain
   verified-state — a `check=chain` click re-keys exactly once, then plain polls
-  serve the clicked payload; a primed poll is four `os.stat` probes + the
-  raising chain cache-peek + one hit; HONEST: a sidecar rewrite moving none of
+  serve the clicked payload; a primed poll is three `os.stat` probes + the
+  raising chain cache-peek + one hit (r2 sweep M1 — the chain state is a
+  cache-peek, never a stat); HONEST: a sidecar rewrite moving none of
   the three tokens does not move the key — the #1617 pass lands sidecars
   BEFORE top100.json, so the trades-wired flag refreshes with the top100
   token; a manifest-less run computes fresh per poll, cheaply). NEW B-7 bench
@@ -1976,7 +1979,10 @@ hostile-review pass._
   `serve_revision_cached` chokepoint + `OutageGate` [thread-safe, both maps
   LRU-bounded at OUTAGE_GATE_CAPACITY=512 — the events coordinate folds
   client-typed page params, so unbounded dicts would be a hostile-poll leak]
-  with exactly ONE `oneclick.probe_outage` WARN per outage and a
+  with ONE `oneclick.probe_outage` WARN per outage per COORDINATE (r2
+  MINOR-2 honesty — a whole-volume flap warns once per distinct coordinate
+  touching the volume, a verify poll probes 3: primary + events + top100
+  siblings; never per poll) and a
   `oneclick.probe_recovered` INFO on recovery — the pre-fix rev-None arm was
   an UNCACHED full O(artifact) re-parse per poll with ZERO logs, Breaker-C
   measured ~450×); ALL FIVE cached oneclick routes (runs · manifest · top100 ·
@@ -5043,7 +5049,8 @@ hostile-review pass._
   NEW B-7 bench pin measured 0.95× flat) · C-r2-5 the stat-outage
   serve-last-known doctrine on ALL FIVE cached oneclick routes
   (`artifact_probe` absent≠outage + `OutageGate` + the ONE
-  `serve_revision_cached` chokepoint; one WARN per outage, recovery INFO,
+  `serve_revision_cached` chokepoint; one WARN per outage per coordinate,
+  recovery INFO,
   never a silent per-poll re-parse) · F4 `discover_runs` stat-sorts first and
   parses only the newest-limit manifests (identical selection; 50-of-60
   parse-spy pin) · A-r4 the /screener client-side bounds (Show all capped at

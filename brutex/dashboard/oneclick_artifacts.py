@@ -357,15 +357,22 @@ class OutageGate:
     full O(artifact) re-parse per poll with ZERO logs. This gate remembers,
     per logical route coordinate, the LAST cache key served healthily so an
     outage poll can serve the last-known payload instead — and logs the
-    outage exactly ONCE (``oneclick.probe_outage`` WARN on the first outage
-    poll, ``oneclick.probe_recovered`` INFO when the probe answers again).
+    outage once per COORDINATE per outage (``oneclick.probe_outage`` WARN on
+    the coordinate's first outage poll, ``oneclick.probe_recovered`` INFO
+    when the probe answers again; r2 MINOR-2 honesty: a whole-volume flap
+    warns once per distinct coordinate touching the volume — a verify poll
+    probes THREE (primary + events + top100 siblings) — never per poll).
 
     Thread-safe; every call is O(1) dict/OrderedDict work; both maps are
     LRU-bounded at *capacity* (an evicted coordinate merely re-logs / falls
     back to the honest fresh compute — bounded, disclosed). A serve from
-    last-known REFRESHES the coordinate's LRU recency (r1 MINOR-3), so a
-    long outage under multi-coordinate cache pressure keeps its last-known
-    key instead of degrading to a per-poll fresh recompute mid-outage.
+    last-known REFRESHES the coordinate's LRU recency in BOTH maps
+    (``_last_key`` — r1 MINOR-3; ``_in_outage`` — r2 NIT-2), so a long
+    outage under multi-coordinate churn keeps its last-known key instead of
+    degrading to a per-poll fresh recompute mid-outage, and a
+    wider-than-capacity outage evicts the STALEST outage coordinate, never
+    one still actively polling (the bounded re-warn envelope is
+    idle-coordinate churn past capacity only).
 
     Parameters
     ----------
@@ -429,9 +436,10 @@ class OutageGate:
     def outage_key(self, coordinate: str) -> str | None:
         """Return *coordinate*'s last-known cache key (or ``None``); WARN once.
 
-        The ``oneclick.probe_outage`` WARN fires on the FIRST outage poll of
-        each outage only (never per poll, never silent — C-r2-5); it names
-        whether a last-known payload exists to serve.
+        The ``oneclick.probe_outage`` WARN fires on *coordinate*'s FIRST
+        outage poll of each outage only (once per coordinate per outage —
+        never per poll, never silent — C-r2-5); it names whether a
+        last-known payload exists to serve.
 
         Parameters
         ----------
@@ -450,6 +458,13 @@ class OutageGate:
                 self._in_outage[coordinate] = None
                 while len(self._in_outage) > self._capacity:
                     self._in_outage.popitem(last=False)
+            else:
+                # r2 NIT-2: a sustained outage poll refreshes its OWN
+                # ``_in_outage`` recency (symmetric with the ``_last_key``
+                # refresh below), so a wider-than-capacity outage evicts the
+                # STALEST outage coordinate — never one still actively
+                # polling, which would re-WARN mid-outage.
+                self._in_outage.move_to_end(coordinate)
             key = self._last_key.get(coordinate)
             if key is not None:
                 # r1 MINOR-3: a serve-last-known refreshes LRU recency so a
@@ -495,7 +510,8 @@ def serve_revision_cached(
 
     * probe **OUTAGE** → serve the LAST-KNOWN cached payload when one exists
       (bounded staleness — the payload last served healthily for this
-      coordinate) with ONE ``oneclick.probe_outage`` WARN per outage; no
+      coordinate) with ONE ``oneclick.probe_outage`` WARN per outage per
+      coordinate; no
       last-known (or LRU-evicted) → compute fresh UNCACHED — still logged,
       never silent, never a raise (C-r2-5).
     * **ABSENT** (token ``None``, no outage) → compute fresh UNCACHED (the
@@ -563,7 +579,8 @@ def sibling_key_token(gate: OutageGate, *, coordinate: str, probe: ArtifactProbe
     TOKEN instead of a full cache key —
 
     * probe **OUTAGE** → the last-known token (or ``None`` when never seen /
-      evicted) with the gate's one-``oneclick.probe_outage``-WARN-per-outage
+      evicted) with the gate's
+      one-``oneclick.probe_outage``-WARN-per-coordinate-per-outage
       discipline — the folded key holds steady, so the route's healthy
       primary serve stays a cache HIT on the pre-flap payload;
     * **ABSENT** → ``None``, the last-known token FORGOTTEN (a deleted
@@ -881,6 +898,12 @@ def runs_revision(results_root: Path) -> str | None:
     (a manifest rewrite / a new run) — the pre-existing #1631 envelope:
     cosmetic presence dots on the index only, while the manifest / top100 /
     verify routes key on their own per-artifact tokens, which DO move.
+
+    r2 sweep N2 (documentation of intent): since the runs route moved onto
+    the outage-aware :func:`runs_revision_probe`, this function has ZERO
+    production callers — it survives DELIBERATELY as the probe's reference
+    twin / test surface over the shared :func:`_runs_digest` body (the
+    healthy-token-equality pin proves the two never drift), not dead code.
 
     Parameters
     ----------
