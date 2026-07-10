@@ -357,9 +357,12 @@ def test_headless_binds_market_hours_guard_for_real_pull(
     """DEC-GROWW-MARKET-HOURS-GUARD-001: a REAL build binds the ONCE-resolved clock-only
     belt (env parsed once at build, not per-window) — the MINOR fix vs the per-call
     ``guard_active_default``. With the env unset (guard enabled) it is the clock-only
-    ``_market_clock_blocked`` predicate."""
-    from brutex.calendars.market_hours import _market_clock_blocked
+    ``_market_clock_blocked`` predicate. (The suite-wide conftest hermeticity default
+    sets the kill switch to ``0``; the enabled arm is restored explicitly here —
+    ``delenv`` = the production unset-⇒-enabled default this test pins.)"""
+    from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV, _market_clock_blocked
 
+    monkeypatch.delenv(MARKET_HOURS_GUARD_ENV, raising=False)
     hp, _spies, _store = _wire(monkeypatch, tmp_path, dry_run=False)
     assert hp.market_closed is _market_clock_blocked
 

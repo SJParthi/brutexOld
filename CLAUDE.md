@@ -1968,7 +1968,14 @@ hostile-review pass._
   BLOCK-in-window (fail-safe). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only, no fetch/rate/pool/
   governor change; `market_hours.py` + `data/errors.py` + `universe_phases.py` + `metadata_pull.py` +
   `pipeline_pull.py` + nightly binding 100% line+branch; ruff/ruff-format clean, `mypy --strict`
-  clean, pyright at the pre-change baseline).
+  clean, pyright at the pre-change baseline. LAND-PASS FIX ROUND (2026-07-10, same branch, pre-merge): the async
+  `fetch_pipeline._is_pool_isolatable` now treats `MarketHoursHalt` as a POOL-WIDE trip (the #1038 drift-pin's demand — the
+  async twin of the spines' `_GLOBAL_STOP_ERRORS`; dedicated unit pin, module re-verified 100%); suite-wide WALL-CLOCK
+  hermeticity — `tests/conftest.py` runs the suite under the documented kill switch (`BRUTEX_MARKET_HOURS_GUARD=0`,
+  `setdefault`) because the real-clock START gate made every un-injected `BackgroundPullJob.start` test FAIL inside
+  08:45-15:35 IST (reproduced 2026-07-10; the #1380 hermeticity philosophy applied to the clock — the guard's own tests
+  inject env/clock/guards explicitly and stay armed on both arms); two stale `#1624` docstring citations corrected to
+  #1673; the fold's duplicated #1632 ledger entry deduped).
   Earlier: `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a** — RENAMED from -001 at the 2026-07-10 merge-reconcile: main's #1634 (PR #1323) claimed -001 for the minute-basis calendar-cross-check ADVANCE while this branch was in flight; -002 delivers #1634's named OPEN work (the observed-overlay COMMON-ization + thin delegator) + the hole-shape WARN observability + the #1649b Muhurat coherence pack — renumbered
   #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335),
   then #1631/#1632 for DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (PR #1352) + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the coordinator
