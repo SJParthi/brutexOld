@@ -54,9 +54,10 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <tr><td>2</td><td>Correcting the <strong>effort across multiple sessions in quick succession</strong> triggers a Claude Code <strong>desktop app auto-restart</strong> &mdash; the trigger is consistent for us; cause not captured.</td></tr>
 <tr><td>3</td><td>With more than 10 parallel sessions, transient rate-limit / &ldquo;service busy&rdquo; / API errors cluster around <strong>session-create bursts</strong>.</td></tr>
 <tr><td>4</td><td><strong>Cross-session messages dropped mid-turn</strong> &mdash; twice on 2026-07-10, both silently; recovered only via fallback channels.</td></tr>
-<tr><td>5</td><td>The coordinator can create, list, and message sessions but <strong>cannot close or archive one</strong> &mdash; verified against the full coordinator tool registry.</td></tr>
+<tr><td>5</td><td>Sessions <strong>cannot be DELETED from the coordinator</strong> &mdash; it can create, list, open, and message every session in the fleet, but has no way to delete (or close/archive) one; verified against the full coordinator tool registry.</td></tr>
 <tr><td>6</td><td><strong>False &ldquo;needs input&rdquo; badges</strong> &mdash; sessions flagged when nothing is pending.</td></tr>
 <tr><td>7</td><td><strong>Actively-working sessions show &ldquo;idle&rdquo;</strong> &mdash; the status appears to track only the main conversation turn.</td></tr>
+<tr><td>8</td><td>With more than 10 parallel sessions working one repository, <strong>merge ORDER is uncontrollable</strong> &mdash; any ready+green PR can land the moment it is un-drafted, and every landing invalidates the other open PRs&rsquo; CI runs. We had to hand-build a freeze protocol (draft-converting the whole board) to sequence a single priority merge.</td></tr>
 </tbody>
 </table>
 <hr/>
@@ -66,9 +67,10 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <li><strong>A look at the desktop restart</strong> on rapid effort changes &mdash; the one crash we can trigger reliably; we will gladly capture diagnostics.</li>
 <li><strong>Guidance on the fleet envelope</strong> &mdash; is more than 10 parallel sessions in one Project intended, and should session creation be paced?</li>
 <li><strong>Delivery guarantees for cross-session messages</strong> &mdash; a receipt, a queued retry, or a dead-letter surface; delayed is fine, silently lost is not.</li>
-<li><strong>Coordinator-level session lifecycle (archive/close)</strong> &mdash; ideally gated on a verified-complete check.</li>
+<li><strong>Coordinator-level session deletion/archival</strong> &mdash; gated on a verified-complete check.</li>
 <li><strong>A &ldquo;needs input&rdquo; badge that clears</strong> when nothing is pending.</li>
 <li><strong>State indicators that reflect background/agent activity</strong> &mdash; or at minimum a last-activity timestamp.</li>
+<li><strong>A coordinator-level merge-queue / hold primitive</strong>, so a fleet can sequence landings without draft-converting the board.</li>
 </ul>
 <hr/>
 <h2>Open questions</h2>
@@ -76,10 +78,11 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <li>Is the desktop auto-restart under rapid effort changes a known crash class, and is there a log or crash report we could capture next time?</li>
 <li>Is more than 10 parallel sessions in one Project within the intended beta envelope, and is there a recommended session-create pacing?</li>
 <li>What are the intended delivery semantics of cross-session messaging &mdash; must a coordinator verify receipt itself?</li>
-<li>Does a session close/archive capability exist server-side but unexposed? No coordinator-accessible tool offers it.</li>
+<li>If the coordinator can create, list, and message sessions, why can it not delete one? Is deletion deliberately UI-only, or simply not yet exposed?</li>
 <li>Is the session list&rsquo;s state indicator meant to track only the main conversation turn? That would explain items 6 and 7.</li>
 <li>Can a session audit its own effective reasoning effort? Both canaries confirmed no effort field exists anywhere in a session&rsquo;s own context.</li>
 <li>What is the relationship between the settings dropdown&rsquo;s &ldquo;Max&rdquo; and the session-side &ldquo;Ultracode&rdquo; (asked in round 2, still open &mdash; item 1 attaches side-by-side evidence)?</li>
+<li>Is there an intended pattern for ORDERING merges across many sessions on one repository, or is hand-rolled coordination the expectation today?</li>
 </ul>
 <hr/>
 <h2>Details</h2>
@@ -99,10 +102,10 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <p>Twice on 2026-07-10, in two different fleet sessions, a <code>send_message</code> delivery was lost mid-turn with no error surfaced to the sender: a verifier session&rsquo;s verdict (recovered via a PR-comment fallback plus a team-memory dead-drop) and a decision message from another session (recovered later via team memory and re-confirmation). Both recoveries worked only because the sessions had independently built fallback channels.</p>
 <p><strong>Why it matters:</strong> a silently-dropped coordination message is worse than a failed one &mdash; the sender believes coordination happened, and the fleet quietly diverges.</p>
 <p><strong>Suggested fix:</strong> a delivery receipt, a queued retry, or a dead-letter surface &mdash; delayed is fine, silently lost is not.</p>
-<h3>5 &mdash; No way to close or archive a session from the coordinator</h3>
-<p>The coordinator can create, list, message, and read sessions, but no close/archive/delete exists &mdash; verified against the full tool registry available to the coordinator. Completed sessions accumulate in the project view; today a watchdog session compiles an evidence-backed &ldquo;safe to close&rdquo; list that the human executes by hand. One hedge: the docs reference a server-side session-creation surface, so a close counterpart may exist internally, unexposed.</p>
+<h3>5 &mdash; Sessions cannot be DELETED from the coordinator</h3>
+<p>The coordinator can create, list, open, and message sessions &mdash; yet it cannot delete one. No delete (or close/archive) capability exists &mdash; verified against the full tool registry available to the coordinator. Completed sessions accumulate in the project view; today a watchdog session compiles an evidence-backed &ldquo;safe to close&rdquo; list that the human executes by hand. One hedge: the docs reference a server-side session-creation surface, so a delete counterpart may exist internally, unexposed.</p>
 <p><strong>Why it matters:</strong> creation without retirement is half a lifecycle &mdash; the fleet only ever grows, and the decision that most needs to be safe-by-default falls on the human.</p>
-<p><strong>Suggested fix:</strong> a coordinator-level archive/close, ideally gated on a verified-complete check.</p>
+<p><strong>Suggested fix:</strong> coordinator-level session deletion/archival, gated on a verified-complete check.</p>
 <h3>6 &mdash; &ldquo;Needs input&rdquo; badge shows when nothing needs input</h3>
 <p>Sessions repeatedly show a &ldquo;needs input&rdquo; badge, yet opening them reveals no pending question, prompt, or permission request. The badge&rsquo;s mechanism is invisible from our side &mdash; stale or mis-set, we cannot tell.</p>
 <p><strong>Why it matters:</strong> the badge is the operator&rsquo;s primary triage signal at fleet scale &mdash; false positives cost round trips and teach the operator to distrust it.</p>
@@ -111,6 +114,10 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <p>The inverse of item 6: sessions demonstrably mid-work &mdash; background workers running, CI being driven &mdash; read &ldquo;idle&rdquo; in the session list, corroborated by the coordinator&rsquo;s activity digests and a watchdog&rsquo;s sweeps. The status appears to track only the main conversation turn, not background/agent activity.</p>
 <p><strong>Why it matters:</strong> with item 6, the state column cannot be trusted in either direction &mdash; the operator either interrupts live work or leaves stuck sessions unattended.</p>
 <p><strong>Suggested fix:</strong> reflect background/agent activity in the state, or add a last-activity timestamp beside it.</p>
+<h3>8 &mdash; Fleet merge coordination has no platform support</h3>
+<p>Sessions coordinating merges on one repository race each other: whichever PR reaches ready+green first lands, and each landing re-dirties the other open PRs against shared append-style files, costing each a re-fold plus a full CI lap per merge ahead of it. To land one operator-priority fix first today we had to draft-convert 51 open PRs, run an enforcer loop, and maintain a hand-written slot queue &mdash; it worked, but every piece was improvised. Honest context: part of the collision rate comes from our own repository conventions (an append-only decision ledger and a repo-side auto-merge workflow), and we say so plainly &mdash; but the platform offers no primitive at all for cross-session merge sequencing.</p>
+<p><strong>Why it matters:</strong> at fleet scale, landing order IS the workflow &mdash; races cost hours of duplicated CI.</p>
+<p><strong>Suggested fix:</strong> a coordinator-level merge-sequencing primitive &mdash; a queue, hold, or slot mechanism sessions can respect natively &mdash; so controlling landing order does not require draft-churn hacks.</p>
 <hr/>
 <h2>Screenshots (attached with the email)</h2>
 <ol>

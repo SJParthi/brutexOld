@@ -1,7 +1,7 @@
 # 📸 EAP Round-4 Screenshot Guide — what to capture & the caption for each
 
 Checklist for the NINE screenshots attached to the round-4 EAP email, in the
-submission's order (each "Backs" points at the submission's 7-item issue
+submission's order (each "Backs" points at the submission's 8-item issue
 table). Entries 1–4 (the item-1 effort-evidence sequence) were captured
 2026-07-10 — just attach them; entries 5–9 still need capturing on the Mac.
 

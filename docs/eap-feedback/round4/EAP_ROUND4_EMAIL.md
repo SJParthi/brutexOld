@@ -36,7 +36,7 @@ sessions deduplicate shared resources like merge slots between themselves;
 the items below are about removing the remaining toil and instability at
 that scale.
 
-The seven items, one line each:
+The eight items, one line each:
 
 1) The project-level default reasoning effort is ignored — every new
    session comes up at the platform default (High), proven by a controlled
@@ -52,13 +52,20 @@ The seven items, one line each:
 4) Cross-session messages dropped mid-turn — twice today, silently, with
    no receipt or error to the sender; recovered only via fallback channels.
 
-5) The coordinator can create, list, and message sessions but cannot close
-   or archive one — verified against the full coordinator tool registry.
+5) Sessions cannot be DELETED from the coordinator — it can create, list,
+   open, and message every session in the fleet, but has no way to delete
+   (or close/archive) one; verified against the full coordinator tool
+   registry.
 
 6) Sessions show a false "needs input" badge when nothing is pending.
 
 7) The inverse of 6: actively-working sessions read "idle" — the status
    appears to track only the main conversation turn.
+
+8) With more than 10 parallel sessions on one repository, merge ORDER is
+   uncontrollable — to land one priority fix first we had to hand-build a
+   freeze protocol (draft-converting 51 open PRs); a merge-queue / hold
+   primitive would remove the hack.
 
 The attached write-up (MD + HTML) has the details, suggested fixes, and
 open questions, with 9 screenshots: the four-image item-1 evidence
