@@ -5,8 +5,9 @@ conversion — design pack ``docs/design/sweep_core/`` on branch
 ``claude/rust-sweep-core``). The metric body ``_compute_metrics_impl``
 became the pure composition ``combine_metrics_from_folds(_fold_trades(...))``
 with ZERO numeric change: every moved expression is token-for-token the
-pre-decomposition body. This suite is the SHIP CONDITION's independent
-proof, in three layers:
+pre-decomposition body. This suite is the SHIP CONDITION's proof — its
+oracle is BODY-level-independent ONLY (see the independence scope note in
+layer 1) — in three layers:
 
 1. **Frozen oracle.** :func:`_oracle_metrics_pre_slice0` is the VERBATIM
    pre-Slice-0 ``_compute_metrics_impl`` body (origin/main ``95955a71``),
@@ -15,6 +16,18 @@ proof, in three layers:
    ``_consecutive_runs`` / ``_accumulate_moments`` / ``_percentile`` /
    ``_safe_ratio`` / ``_skewness`` / ``_excess_kurtosis`` /
    ``_CAGR_CAP_PCT`` — ``git diff`` shows them byte-unchanged).
+   INDEPENDENCE SCOPE (Verifier B Slice-0 re-pin, 2026-07-10): because
+   those leaf helpers are IMPORTED from live ``compute.py``, the oracle
+   is independent at the BODY level only — a defect INSIDE a shared leaf
+   hits both arms identically and is invisible to every oracle
+   comparison in this file and in the C23 differential gate. Measured
+   blindness example: an injected Pébay-m3 delta-sign mutant in
+   ``_accumulate_moments`` passed the differential 4/4 and every
+   byte-parity comparison here, killed only by the ``float.fromhex``
+   exact-value pins. Correct AND disclosed for Slice-0 (the helpers were
+   not moved; these gates verify the SPLIT) — but Slice 2's Rust arm
+   must bind to a GENUINELY independent oracle (design §6 mandate on
+   ``claude/rust-sweep-core``).
 2. **Bit-compare harness.** :func:`_pack_metrics` encodes every
    :class:`ResultMetrics` field via ``struct.pack("<d", ...)`` for floats
    (signed zeros and every ULP distinguished — the harness proves its own
