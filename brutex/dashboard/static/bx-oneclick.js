@@ -178,16 +178,34 @@ function bxResDash(value) {
   return value === null || value === undefined ? "—" : String(value);
 }
 
+/* The ONE 2dp ROUND_HALF_UP display formatter (bx-format.js, §11 COMMON):
+   the browser global (bx-format.js is loaded BEFORE this file on the
+   strategy/operator pages) or the CommonJS export under the node golden — so
+   the resilience display % rounds to 2dp EXACTLY like the CLI's
+   `f"{pct:.2f}%"` (never a raw IEEE float such as -12.333333333333334 beside a
+   2dp ₹ — the same datum reads the same on every surface). */
+var bxFmt2 =
+  typeof window !== "undefined" && typeof window.bxFixed2 === "function"
+    ? window.bxFixed2
+    : typeof require === "function"
+      ? require("./bx-format.js").bxFixed2
+      : null;
+
 /**
  * A signed percent string with the page's minus convention (U+2212, matching
- * the money() ₹ formatter) — never a mix of ASCII "-" and U+2212 in one panel.
+ * the money() ₹ formatter) and 2dp ROUND_HALF_UP rounding (matching the CLI)
+ * — never a mix of ASCII "-" and U+2212, and never a raw full-precision float.
  * "—" for a null/undefined pct (never a fabricated 0%).
  *
  * @param {*} pct - worst_streak_pnl_pct (a signed float, ≤ 0 for live records).
- * @returns {string} e.g. -12.5 -> "−12.5%"; "—" when null.
+ * @returns {string} e.g. -12.5 -> "−12.50%"; -12.3333 -> "−12.33%"; "—" null.
  */
 function bxResPct(pct) {
-  return pct === null || pct === undefined ? "—" : (String(pct) + "%").replace(/^-/, "−");
+  if (pct === null || pct === undefined) {
+    return "—";
+  }
+  var body = bxFmt2 ? bxFmt2(pct) : String(pct);
+  return (body + "%").replace(/^-/, "−");
 }
 
 /**

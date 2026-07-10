@@ -143,8 +143,10 @@ class TestResilienceCellsLive:
         assert out["worstStreak"] == "5 in a row"
         assert out["worstStreakSub"] == "typical 2 · P95 4"
         # Consistent minus glyph: the pct uses the page's U+2212 (matching the
-        # ₹ formatter), never a mixed ASCII "-" / U+2212 in one cell.
-        assert out["cost"] == "−₹1250.00 (−12.5%)"
+        # ₹ formatter), never a mixed ASCII "-" / U+2212 in one cell. FIX 3
+        # (R4 cross-surface consistency): the % is 2dp ROUND_HALF_UP — the SAME
+        # value the CLI renders (f"{-12.5:.2f}%" == "-12.50%"), never "−12.5%".
+        assert out["cost"] == "−₹1250.00 (−12.50%)"
         # UTC 04:15 + 05:30 = 09:45 IST; 09:20 + 05:30 = 14:50 IST.
         assert out["costSub"] == "4 losses · 2024-03-01 09:45 IST → 2024-03-05 14:50 IST"
         assert out["underwater"] == "7 trades · 30 days"
@@ -160,6 +162,20 @@ class TestResilienceCellsLive:
     def test_money_cell_reads_dash_without_a_formatter(self) -> None:
         out = _node_call("O.bxResilienceCells(ARGS[0])", json.dumps(_LIVE_ROW))
         assert out["cost"] == "—"
+
+    def test_worst_streak_pct_rounds_to_2dp_like_the_cli(self) -> None:
+        """FIX 3 (R4 cross-surface consistency): a full-precision IEEE pct is
+        rendered at 2dp ROUND_HALF_UP — the SAME string the CLI emits — never a
+        raw float like "−12.333333333333334%" beside a clean 2dp ₹. Fails-before
+        (the pre-fix ``String(pct)`` path) rendered the full-precision float."""
+        row = json.loads(json.dumps(_LIVE_ROW))
+        row["resilience"]["worst_streak_pnl_pct"] = -12.333333333333334
+        panel = _node_call(f"O.bxResilienceCells(ARGS[0], {_FMT})", json.dumps(row))
+        rank1 = _node_call("O.bxResilienceRankOneCells(ARGS[0])", json.dumps(row))
+        # `f"{-12.333333333333334:.2f}%"` == "-12.33%"; U+2212 minus on both.
+        assert panel["cost"] == "−₹1250.00 (−12.33%)"
+        assert rank1["worstStreakPct"] == "−12.33%"
+        assert "333333" not in panel["cost"] and "333333" not in rank1["worstStreakPct"]
 
     def test_still_underwater_badge_and_lower_bound_guide(self) -> None:
         row = json.loads(json.dumps(_LIVE_ROW))
@@ -218,8 +234,9 @@ class TestResilienceRankOneCells:
 
     def test_live_row_renders_pct_and_days(self) -> None:
         out = _node_call("O.bxResilienceRankOneCells(ARGS[0])", json.dumps(_LIVE_ROW))
-        # Consistent minus glyph (U+2212), matching the panel + the ₹ formatter.
-        assert out["worstStreakPct"] == "−12.5%"
+        # Consistent minus glyph (U+2212) + 2dp ROUND_HALF_UP (FIX 3), matching
+        # the panel, the ₹ formatter, and the CLI's f"{-12.5:.2f}%" == "-12.50%".
+        assert out["worstStreakPct"] == "−12.50%"
         assert out["uwDays"] == "30"
 
     def test_null_row_gates_both_hooks_to_dash(self) -> None:

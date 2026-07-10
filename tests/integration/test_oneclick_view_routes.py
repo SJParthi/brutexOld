@@ -421,6 +421,7 @@ class TestScreenerPage:
         for key in (
             "metrics.max_consecutive_losses",
             "resilience.losing_streak_p95",
+            "resilience.worst_streak_len",
             "resilience.worst_streak_pnl_paisa",
             "resilience.longest_underwater_days",
             "resilience.worst_loss_month_count",
@@ -432,6 +433,15 @@ class TestScreenerPage:
             '"resilience.worst_streak_pnl_paisa", label: "Worst streak ₹", type: "num", money: true'
             in js
         )
+        # FIX 1 (R4): the conflation is dead on /screener too. The by-COUNT
+        # column reads CLEARLY by count ("Longest streak (count)"), the worst
+        # streak BY ₹ carries its OWN run length ("Worst streak len") in the
+        # column immediately beside its ₹ — so a trader can never read "the
+        # longest streak (N losses) cost ₹X". The old bare, ambiguous "Worst
+        # streak" by-count label (which invited exactly that read) is GONE.
+        assert '"metrics.max_consecutive_losses", label: "Longest streak (count)"' in js
+        assert '"resilience.worst_streak_len", label: "Worst streak len"' in js
+        assert 'label: "Worst streak",' not in js
 
 
 class TestStrategyPage:

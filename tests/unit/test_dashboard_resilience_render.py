@@ -259,8 +259,10 @@ class TestStrategyPanelDomRender:
         out = _render("strategy", _live_row(), tmp_path)
         assert out["worstStreak"] == "5 in a row"
         assert out["worstStreakSub"] == "typical 2 · P95 4"
-        # The money path runs through the page's REAL bx-explain paisa→₹ converter.
-        assert out["cost"] == "−₹1250.00 (−12.5%)"
+        # The money path runs through the page's REAL bx-explain paisa→₹ converter;
+        # FIX 3 (R4) the % is 2dp ROUND_HALF_UP through the REAL page render — the
+        # SAME value the CLI emits (f"{-12.5:.2f}%" == "-12.50%"), never "−12.5%".
+        assert out["cost"] == "−₹1250.00 (−12.50%)"
         assert out["costSub"] == "4 losses · 2024-03-01 09:45 IST → 2024-03-05 14:50 IST"
         assert out["underwater"] == "7 trades · 30 days"
         assert out["underwaterBadge"] == "● recovered"
