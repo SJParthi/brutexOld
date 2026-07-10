@@ -45,21 +45,62 @@ var BX_TIMELINE_RING_LABEL =
 
 /**
  * Append records to the ring, trimming the OLDEST from the front past cap
- * (pure — mutates and returns `ring`).
+ * (pure — mutates and returns `ring`). When the optional `seen` dedup map
+ * is given, each trimmed-out record's canonical-line key is EVICTED from it
+ * (the ONE trim site — Breaker B #5 memory-leak fix: pre-fix, keys were
+ * inserted before the trim and never evicted, a 153.6 B/event GC-immune
+ * growth on a long-lived operator tab).
  *
  * @param {object[]} ring - the ring array (oldest first).
  * @param {object[]} records - new records to append.
  * @param {number} cap - the capacity (BX_TIMELINE_RING_CAP).
+ * @param {Object<string, boolean>} [seen] - optional dedup map keyed on
+ *   bxEventLineText; trimmed records' keys are deleted from it.
  * @returns {object[]} the same ring, trimmed to cap.
  */
-function bxRingPush(ring, records, cap) {
+function bxRingPush(ring, records, cap, seen) {
   for (var i = 0; i < records.length; i++) {
     ring.push(records[i]);
   }
   if (ring.length > cap) {
-    ring.splice(0, ring.length - cap);
+    var dropped = ring.splice(0, ring.length - cap);
+    if (seen) {
+      for (var j = 0; j < dropped.length; j++) {
+        delete seen[bxEventLineText(dropped[j])];
+      }
+    }
   }
   return ring;
+}
+
+/**
+ * Dedup-gate `records` against `seen` then push the fresh ones onto the
+ * ring, evicting trimmed-out keys (pure — mutates `ring` + `seen`).
+ *
+ * WINDOW-SCOPED DEDUP SEMANTIC: the capped ring IS the dedup window —
+ * `seen` holds exactly the keys of the records currently inside the ring
+ * (bounded at `cap` keys, never whole-history), so an event whose key has
+ * LEFT the window MAY legitimately be re-admitted if the server re-sends
+ * it. That matches the honest "showing last 5,000 events" label; dedup
+ * stays exact for everything inside the window.
+ *
+ * @param {object[]} ring - the ring array (oldest first).
+ * @param {Object<string, boolean>} seen - key → true for in-ring records.
+ * @param {object[]} records - candidate records (keyed on bxEventLineText).
+ * @param {number} cap - the capacity (BX_TIMELINE_RING_CAP).
+ * @returns {number} how many records were actually admitted.
+ */
+function bxRingAdd(ring, seen, records, cap) {
+  var fresh = [];
+  for (var i = 0; i < records.length; i++) {
+    var key = bxEventLineText(records[i]);
+    if (!seen[key]) {
+      seen[key] = true;
+      fresh.push(records[i]);
+    }
+  }
+  bxRingPush(ring, fresh, cap, seen);
+  return fresh.length;
 }
 
 /**
@@ -421,6 +462,187 @@ function bxResilienceRankOneCells(row) {
 }
 
 /**
+ * The instrument display cell/label (DEC-ONECLICK-INSTRUMENT-DISPLAY-001,
+ * pure — textContent-rendered on the operator rank-1 card, the combos
+ * table's Inst column and the /strategy identity strip).
+ *
+ * The engine writer always emits the additive per-entry ``instrument``
+ * (``top100_artifact._entry_payload`` — the winner's own market, e.g.
+ * "NSE-NIFTY"); a pre-instrument artifact / null / non-string value reads
+ * the honest "—" — never "undefined"/"null" as prose, never an invented
+ * market (the operator must be able to tell WHICH index the best strategy
+ * trades, or see that the artifact does not say).
+ *
+ * @param {*} value - the row's instrument value (string | null | undefined).
+ * @returns {string} the instrument string or the honest "—".
+ */
+function bxInstrumentText(value) {
+  if (typeof value === "string" && value !== "") {
+    return value;
+  }
+  return "—";
+}
+
+/* ── Winner-detail builders (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001, pure —
+      the /strategy story card renders the SHIPPED results-depth aggregates
+      the writer already persists; every builder reads the writer's exact
+      keys, formats money through an injected house formatter, and degrades
+      to the honest "—" — never an invented number, never "null" prose). ── */
+
+/**
+ * The exit-reason mix line from the writer's ``metrics.exits`` object
+ * (``{stop_loss, take_profit, signal, forced_1520, end_of_data}`` —
+ * ``top100_artifact._metrics_payload``).
+ *
+ * @param {*} exits - the metrics.exits value.
+ * @returns {string} "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0" or "—";
+ *   a non-numeric count reads "?" (counted-but-unreadable, never invented).
+ */
+function bxExitMixText(exits) {
+  if (!exits || typeof exits !== "object" || Array.isArray(exits)) {
+    return "—";
+  }
+  var parts = [
+    ["SL", exits.stop_loss],
+    ["TP", exits.take_profit],
+    ["signal", exits.signal],
+    ["15:20", exits.forced_1520],
+    ["EOD", exits.end_of_data]
+  ];
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var n = parts[i][1];
+    out.push(parts[i][0] + " " + (typeof n === "number" && isFinite(n) ? String(n) : "?"));
+  }
+  return out.join(" · ");
+}
+
+/**
+ * The worst-5-days line from the writer's ``metrics.worst5_days``
+ * (``[[iso_date, pnl_paisa], …]`` ≤ 5 — NOTE: a METRICS key, not a regime
+ * key; verified against ``_metrics_payload``).
+ *
+ * @param {*} worst5 - the metrics.worst5_days value.
+ * @param {function(*): string} fmt - the house paisa→₹ formatter.
+ * @returns {string} "2024-01-02 −₹5.00 · …", "none stored" for a valid
+ *   empty list, "—" for absent/malformed.
+ */
+function bxWorst5DaysText(worst5, fmt) {
+  if (!Array.isArray(worst5)) {
+    return "—";
+  }
+  if (worst5.length === 0) {
+    return "none stored";
+  }
+  var out = [];
+  for (var i = 0; i < worst5.length; i++) {
+    var entry = worst5[i];
+    if (!Array.isArray(entry) || entry.length < 2) {
+      return "—"; // one malformed entry ⇒ the whole line abstains, never a partial fabrication
+    }
+    out.push(String(entry[0]) + " " + fmt(entry[1]));
+  }
+  return out.join(" · ");
+}
+
+/**
+ * The trend-regime P&L split from the writer's ``regime.by_trend`` object
+ * (``_regime_payload`` — trend label → pnl paisa), keys sorted for a
+ * deterministic line.
+ *
+ * @param {*} byTrend - the regime.by_trend value.
+ * @param {function(*): string} fmt - the house paisa→₹ formatter.
+ * @returns {string} "sideways +₹… · trending +₹…" or "—".
+ */
+function bxTrendSplitText(byTrend, fmt) {
+  if (!byTrend || typeof byTrend !== "object" || Array.isArray(byTrend)) {
+    return "—";
+  }
+  var keys = Object.keys(byTrend).sort();
+  if (keys.length === 0) {
+    return "—";
+  }
+  var out = [];
+  for (var i = 0; i < keys.length; i++) {
+    var v = byTrend[keys[i]];
+    out.push(keys[i] + " " + (typeof v === "number" && isFinite(v) ? fmt(v) : "?"));
+  }
+  return out.join(" · ");
+}
+
+/**
+ * The one-regime-wonder verdict sentence from the writer's
+ * ``regime.one_regime_wonder`` + ``regime.regime_wonder_axis``.
+ *
+ * @param {*} wonder - the boolean flag (writer truth).
+ * @param {*} axis - the concentrating axis name (string | null).
+ * @returns {string} the loud wonder warning / the spread verdict / "—".
+ */
+function bxRegimeWonderText(wonder, axis) {
+  if (wonder === true) {
+    var ax = typeof axis === "string" && axis !== "" ? axis : "regime";
+    return "ONE-REGIME WONDER — profits concentrate in a single " + ax;
+  }
+  if (wonder === false) {
+    return "profits spread across regimes";
+  }
+  return "—";
+}
+
+/**
+ * An "avg X · <label> Y" pair cell (MAE avg·worst / MFE avg·best) — each
+ * leg renders only when it is a finite number; both absent reads "—".
+ *
+ * @param {*} avg - the average paisa value.
+ * @param {*} extreme - the worst/best paisa value.
+ * @param {string} extremeLabel - "worst" | "best".
+ * @param {function(*): string} fmt - the house paisa→₹ formatter.
+ * @returns {string} the pair text or "—".
+ */
+function bxAvgExtremeText(avg, extreme, extremeLabel, fmt) {
+  var avgOk = typeof avg === "number" && isFinite(avg);
+  var extOk = typeof extreme === "number" && isFinite(extreme);
+  if (!avgOk && !extOk) {
+    return "—";
+  }
+  var parts = [];
+  if (avgOk) {
+    parts.push("avg " + fmt(avg));
+  }
+  if (extOk) {
+    parts.push(extremeLabel + " " + fmt(extreme));
+  }
+  return parts.join(" · ");
+}
+
+/**
+ * The minute-path max-drawdown cell (``max_dd_minute_path_paisa`` +
+ * ``max_dd_minute_path_pct`` — the R22 minute-granular equity path).
+ *
+ * SCALE LAW (hostile-round MAJOR-1): the wire's ``max_dd_minute_path_pct``
+ * is a 0-1 RATIO (``minute_path.py`` ``drop / peak``, served verbatim by
+ * ``top100_artifact.py``) — unlike the sibling ``max_drawdown_pct``, which
+ * the writer percent-scales (``compute.py`` ``* 100.0``). The builder
+ * scales ×100 HERE (bounded to 2dp) so an equal-magnitude event reads
+ * "30%" on BOTH cells of the same card — never a 100×-understated "0.3%".
+ *
+ * @param {*} paisa - the minute-path DD paisa value.
+ * @param {*} pct - the minute-path DD as a 0-1 RATIO (writer scale).
+ * @param {function(*): string} fmt - the house paisa→₹ formatter.
+ * @returns {string} "−₹… (1.5%)" / "−₹…" / "—".
+ */
+function bxMinutePathDdText(paisa, pct, fmt) {
+  if (!(typeof paisa === "number") || !isFinite(paisa)) {
+    return "—";
+  }
+  var out = fmt(paisa);
+  if (typeof pct === "number" && isFinite(pct)) {
+    out += " (" + String(Math.round(pct * 10000) / 100) + "%)";
+  }
+  return out;
+}
+
+/**
  * Funnel write-precedence law (C-M2, pure): the live source may always
  * write; the manifest fill applies ONLY while NO sweep is running.
  *
@@ -475,7 +697,10 @@ function bxFunnelProvenance(source, runId) {
     selectedRunId: null,
     sweepRunning: false,
     ring: [],
-    ringSeen: {}, // canonical-line dedupe for the load-earlier pager
+    // Canonical-line dedupe, WINDOW-scoped: holds exactly the keys inside
+    // the ring (bxRingAdd evicts trimmed keys), so it is bounded at
+    // BX_TIMELINE_RING_CAP — never whole-history (Breaker B #5).
+    ringSeen: {},
     eventsCursor: -1, // -1 = tail-anchored first page
     earlierCursor: 0 // forward cursor for the "load earlier" pager
   };
@@ -766,6 +991,9 @@ function bxFunnelProvenance(source, runId) {
     var m = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
     setOc("r1_rank", "#" + String(row.rank));
     setOc("r1_name", conditionsText(row));
+    // The winner's OWN market (additive writer key) — honest "—" when the
+    // artifact predates the instrument field (never invented).
+    setOc("r1_instrument", bxInstrumentText(row.instrument));
     setOc("r1_tf", String(row.tf));
     setOc("r1_direction", String(row.direction));
     setOc("r1_arm", String(row.arm));
@@ -778,6 +1006,13 @@ function bxFunnelProvenance(source, runId) {
     setOc("r1_cpcv", metricText(m.cpcv_pass_pct));
     setOc("r1_trades", metricText(m.trades));
     setOc("r1_vix_band", vixBandText(row.vix_band));
+    /* Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown +
+       worst-5-days on the OPERATOR card too — one_regime_wonder/by_trend
+       from entry.regime; worst5_days is a METRICS key (writer truth). */
+    var reg = row.regime && typeof row.regime === "object" ? row.regime : {};
+    setOc("r1_trend_split", bxTrendSplitText(reg.by_trend, paisaText));
+    setOc("r1_regime_wonder", bxRegimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis));
+    setOc("r1_worst5", bxWorst5DaysText(m.worst5_days, paisaText));
     // Losing-streak resilience rank-1 hooks (the sibling block; the pure
     // builder is stats_live-gated, so a NULL/parity-failed record → "—",
     // never a fabricated 0 — defense-in-depth mirror of the /strategy panel).
@@ -818,7 +1053,9 @@ function bxFunnelProvenance(source, runId) {
       tr.appendChild(td("#" + String(row.rank), null, row.rank));
       tr.appendChild(td(String(row.mask_hex), null, undefined));
       tr.appendChild(td(conditionsText(row), null, undefined));
-      tr.appendChild(td("—", null, undefined)); // Inst — instrument is not a top100 row field
+      // Inst — the entry's additive `instrument` key (the writer always
+      // emits it; a pre-instrument artifact reads the honest "—").
+      tr.appendChild(td(bxInstrumentText(row.instrument), null, undefined));
       tr.appendChild(td(String(row.tf), null, undefined));
       tr.appendChild(td(String(row.direction), null, undefined));
       tr.appendChild(td(metricText(m.trades), null, m.trades === undefined ? 0 : m.trades));
@@ -1095,15 +1332,9 @@ function bxFunnelProvenance(source, runId) {
   /* ── Timeline: capped ring + window-scoped search + load-earlier pager ── */
 
   function ringAdd(records) {
-    var fresh = [];
-    for (var i = 0; i < records.length; i++) {
-      var key = bxEventLineText(records[i]);
-      if (!state.ringSeen[key]) {
-        state.ringSeen[key] = true;
-        fresh.push(records[i]);
-      }
-    }
-    bxRingPush(state.ring, fresh, BX_TIMELINE_RING_CAP);
+    // Window-scoped dedup + bounded seen set — the ONE pure core
+    // (bxRingAdd) owns the gate + the trimmed-key eviction.
+    bxRingAdd(state.ring, state.ringSeen, records, BX_TIMELINE_RING_CAP);
     if (state.ring.length >= BX_TIMELINE_RING_CAP) {
       setText("ocTimelineLabel", BX_TIMELINE_RING_LABEL); // loud, honest cap label
     }
@@ -1364,12 +1595,20 @@ function bxFunnelProvenance(source, runId) {
     VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     RESILIENCE_UNAVAILABLE: BX_RESILIENCE_UNAVAILABLE,
     ringPush: bxRingPush,
+    ringAdd: bxRingAdd,
     ringFilter: bxRingFilter,
     eventLineText: bxEventLineText,
     funnelWriteAllowed: bxFunnelWriteAllowed,
     funnelProvenance: bxFunnelProvenance,
     vixBandText: bxVixBandText,
     vixBandCellText: bxVixBandCellText,
+    instrumentText: bxInstrumentText,
+    exitMixText: bxExitMixText,
+    worst5DaysText: bxWorst5DaysText,
+    trendSplitText: bxTrendSplitText,
+    regimeWonderText: bxRegimeWonderText,
+    avgExtremeText: bxAvgExtremeText,
+    minutePathDdText: bxMinutePathDdText,
     winRateSpreadText: bxWinRateSpread,
     resilienceCells: bxResilienceCells,
     resilienceRankOneCells: bxResilienceRankOneCells,
@@ -1405,12 +1644,20 @@ if (typeof module !== "undefined" && module.exports) {
     BX_VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     BX_RESILIENCE_UNAVAILABLE: BX_RESILIENCE_UNAVAILABLE,
     bxRingPush: bxRingPush,
+    bxRingAdd: bxRingAdd,
     bxRingFilter: bxRingFilter,
     bxEventLineText: bxEventLineText,
     bxFunnelWriteAllowed: bxFunnelWriteAllowed,
     bxFunnelProvenance: bxFunnelProvenance,
     bxVixBandText: bxVixBandText,
     bxVixBandCellText: bxVixBandCellText,
+    bxInstrumentText: bxInstrumentText,
+    bxExitMixText: bxExitMixText,
+    bxWorst5DaysText: bxWorst5DaysText,
+    bxTrendSplitText: bxTrendSplitText,
+    bxRegimeWonderText: bxRegimeWonderText,
+    bxAvgExtremeText: bxAvgExtremeText,
+    bxMinutePathDdText: bxMinutePathDdText,
     bxWinRateSpread: bxWinRateSpread,
     bxResilienceCells: bxResilienceCells,
     bxResilienceRankOneCells: bxResilienceRankOneCells,

@@ -216,6 +216,7 @@ from brutex.dashboard.pull_intent import (
     persist_intent_for_launch,
     probe_pull_singleflight,
     run_auto_resume,
+    run_legacy_resume,
 )
 from brutex.dashboard.pull_jobs import (
     JOB_KIND_PULL,
@@ -4508,6 +4509,34 @@ def build_app(
 
         app.state.brutex_resume_pipeline = _resume_pipeline_from_intent
 
+        def _resume_legacy_pull() -> None:
+            """Boot-time seam: the LEGACY ledger-triggered resume, in-process.
+
+            Exposed as ``app.state.brutex_resume_legacy`` for the
+            ``cli.cmd_dashboard`` startup launcher (DEC-AUTO-RESUME-INPROCESS-001
+            — replaces the deleted DOA ``brutex fetch --until-clean`` subprocess
+            child, which died in ~0.3 s every opted-in boot on DuckDB's
+            exclusive cross-process locks: ``catalog.duckdb`` first — held by
+            the boot-window L3 lake-heal sweeper, the incident's first-raising
+            site — and the dashboard's lifetime-held ``instruments.duckdb``
+            one step later). Every load-bearing
+            decision lives in the 100 %-tested
+            :func:`~brutex.dashboard.pull_intent.run_legacy_resume` /
+            :func:`~brutex.dashboard.pull_intent.run_auto_resume`; this binding
+            supplies the SAME real launcher + JOB-root-keyed single-flight probe
+            the intent seam above binds, so the two resumes contend on ONE lock.
+            Raises only on the loud intent-write refusal (an unwritable lake) —
+            the caller's ``maybe_resume_on_boot`` guard turns that into the
+            honest ``error`` verdict.
+            """
+            run_legacy_resume(
+                _intent_store,
+                launch=_resume_launch,
+                probe_singleflight=_probe_job_singleflight,
+            )
+
+        app.state.brutex_resume_legacy = _resume_legacy_pull
+
     @app.post("/api/v1/universe/retry-failed")
     async def api_universe_retry_failed(  # pragma: no cover — thin route over the 100%-tested core
         kind: str | None = Query(default=None),
@@ -7200,6 +7229,45 @@ def build_app(
             )
 
         return JSONResponse(await _run_lake(_resolve))
+
+    @app.get("/api/v1/oneclick/equity")
+    async def api_oneclick_equity(
+        run_id: str | None = Query(default=None),
+        rank: int = Query(default=1, ge=1),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=5000, ge=1, le=5000),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/equity — the stored minute-path equity SERIES page.
+
+        DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (audit item 4C — the #48
+        overlap): serves the entry's ``equity_ref`` sidecar points
+        (``{session_date, equity_close_paisa, equity_intraday_low_paisa,
+        trades_closed}``) through the SAME typed reader seam + honesty
+        degrades as the trades route (pre-#1275 artifact / absent sidecars /
+        fixture / no-lake → honest awaiting; hostile tuple ref / unreadable
+        sidecar → NAMED corrupt; never a 500, never a fabricated curve).
+        HONEST O-envelope: the FIRST read per (sidecar revision, combo) is an
+        O(equity-file) run_id filter (the stamp indexes no equity spans);
+        repeat pages slice the reader's memo — O(page). One row per session,
+        so the default limit 5000 charts ~20 years in one fetch.
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Build the equity payload off the event loop via the TradesReader seam."""
+            root, fixture_root = _oneclick_roots()
+            reader = _oneclick_reader(root, fixture_root)
+            page = reader.equity_page(rid, rank, offset=offset, limit=limit)
+            return oneclick_view.build_equity_payload(
+                rid,
+                rank,
+                page,
+                offset=offset,
+                limit=limit,
+                fixture_root_active=fixture_root is not None,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(

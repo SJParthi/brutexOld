@@ -41,6 +41,7 @@
 var BX_SCREENER_COLUMNS = [
   { key: "rank", label: "#", type: "num", explain: "rank" },
   { key: "conditions", label: "Strategy", type: "str", explain: "conditions" },
+  { key: "instrument", label: "Inst", type: "str", explain: "instrument" },
   { key: "tf", label: "TF", type: "str", explain: "tf" },
   { key: "direction", label: "Dir", type: "str", explain: "direction" },
   { key: "arm", label: "SL/TP arm", type: "str", explain: "arm" },
@@ -192,6 +193,8 @@ function bxVixOverlap(band, lo, hi) {
  * Non-VIX filter predicate for one row (pure).
  *
  * filters: { tf: string[]|null, direction: string|null,
+ *            instrument: string|null (exact match; an absent-instrument row
+ *            never matches an active filter),
  *            min_win_rate: number|null, min_pf: number|null,
  *            max_abs_dd_paisa: number|null (magnitude cap — max_dd_paisa is
  *            stored NEGATIVE, the cap compares |dd|) }.
@@ -209,6 +212,14 @@ function bxFilterRow(row, filters) {
     return false;
   }
   if (filters.direction && row.direction !== filters.direction) {
+    return false;
+  }
+  // Instrument is exact-match like direction (DEC-ONECLICK-INSTRUMENT-
+  // DISPLAY-001): a row WITHOUT the additive `instrument` key (a
+  // pre-instrument artifact) never matches an ACTIVE filter — but the page
+  // only offers filter options harvested from the loaded rows, so on such
+  // an artifact the dropdown stays empty and the filter is never active.
+  if (filters.instrument && row.instrument !== filters.instrument) {
     return false;
   }
   var m = row.metrics || {};

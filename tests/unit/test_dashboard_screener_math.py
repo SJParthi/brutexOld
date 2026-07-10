@@ -295,6 +295,78 @@ class TestApplyFilters:
         assert out == expected
 
 
+class TestInstrumentFilter:
+    """DEC-ONECLICK-INSTRUMENT-DISPLAY-001 — the instrument column + filter.
+
+    Fails-before: the screener had NO instrument column/filter, so the
+    operator could not tell (or filter by) WHICH index a winner trades.
+    The column is config-driven off BXScreener.COLUMNS; the filter is the
+    direction-style exact match with the documented absent-key law (a
+    pre-instrument artifact row never matches an ACTIVE filter — and the
+    page only offers options harvested from rows that carry the key).
+    """
+
+    def test_columns_config_carries_the_instrument_column(self) -> None:
+        cols = _node_call("S.COLUMNS")
+        keys = [c["key"] for c in cols]
+        assert "instrument" in keys
+        col = cols[keys.index("instrument")]
+        assert col == {
+            "key": "instrument",
+            "label": "Inst",  # the combos-table header vocabulary (audit item 1c)
+            "type": "str",
+            "explain": "instrument",
+        }
+        # Placed in the identity block, right after the strategy name.
+        assert keys.index("instrument") == keys.index("conditions") + 1
+
+    def test_matching_instrument_filter_keeps_every_fixture_row(self) -> None:
+        rows = _fixture_rows()
+        assert all(r["instrument"] == "NSE-NIFTY" for r in rows)  # fixture truth
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"instrument": "NSE-NIFTY"}),
+        )
+        assert len(out["rows"]) == 100
+
+    def test_non_matching_instrument_filter_drops_every_fixture_row(self) -> None:
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(_fixture_rows()),
+            json.dumps({"instrument": "NSE-BANKNIFTY"}),
+        )
+        assert out["rows"] == []
+
+    def test_absent_instrument_row_never_matches_an_active_filter(self) -> None:
+        """The documented pre-instrument-artifact law: no key ⇒ excluded under
+        an ACTIVE filter, kept when the filter is inactive."""
+        rows = [
+            {"rank": 1, "instrument": "NSE-NIFTY", "metrics": {}},
+            {"rank": 2, "metrics": {}},  # a pre-instrument artifact row
+        ]
+        active = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"instrument": "NSE-NIFTY"}),
+        )
+        assert [r["rank"] for r in active["rows"]] == [1]
+        inactive = _node_call("S.applyFilters(ARGS[0], ARGS[1])", json.dumps(rows), json.dumps({}))
+        assert [r["rank"] for r in inactive["rows"]] == [1, 2]
+
+    def test_instrument_column_sorts_deterministically_with_rank_tie_break(self) -> None:
+        rows = [
+            {"rank": 1, "instrument": "NSE-NIFTY"},
+            {"rank": 2, "instrument": "BSE-SENSEX"},
+            {"rank": 3, "instrument": "NSE-NIFTY"},
+        ]
+        out = _node_call(
+            'S.sortRows(ARGS[0], "instrument", "str", "asc").map((r) => r.rank)',
+            json.dumps(rows),
+        )
+        assert out == [2, 1, 3]  # alpha ascending; the NIFTY tie keeps rank order
+
+
 class TestArmRenderString:
     """Hostile-round F1 node golden: the arm column renders the BRIDGED string.
 
