@@ -124,6 +124,7 @@ from brutex.dashboard.movers_snapshot import (
     _calendar_exchange,
     _cutoff_minute,
     _NoncontiguousWarnState,
+    info_prev_baseline_muhurat,
     interval_minutes,
     make_expected_session_resolver,
     normalize_min_volume,
@@ -131,6 +132,7 @@ from brutex.dashboard.movers_snapshot import (
     prev_baseline_provenance,
     resolve_candle_datasets,
     resolve_prev_close,
+    value_crore_str,
     value_meets_volume_floor,
     warn_prev_baseline_noncontiguous,
 )
@@ -322,12 +324,21 @@ class OptionMover:
         Calendar-contiguity provenance of the ``pct_change`` baseline
         (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — the ISO session date the prior
         close actually came from + whether it IS the immediately-preceding NSE
-        session (``None`` = no baseline / calendar abstained). Additive +
+        session (``False`` = the baseline provably skipped a nearer REGULAR
+        session, or a stray non-session bar served it — a lake defect either
+        way; ``None`` = no baseline / calendar abstained). Additive +
         defaulted; the row projector emits the pair ONLY on ``False``.
     oi_baseline_session, oi_baseline_contiguous
         The INDEPENDENT OI twin — a null-OI 1-day bar makes the OI baseline
         fall to the minute fallback on a possibly DIFFERENT day than the close
         baseline, so the two flags never share a verdict.
+    prev_close_muhurat, oi_baseline_muhurat
+        ``True`` iff that baseline is a legitimate Diwali **Muhurat** session
+        close after the prior REGULAR session (the day-after-Diwali boundary —
+        a healthy lake, never a hole; DEC-PREVSESSION-MUHURAT-COHERENCE-001).
+        Judged INDEPENDENTLY per baseline like the contiguity pair; emitted
+        ON TRUE ONLY. The engine's day anchors deliberately skip the Muhurat
+        session instead (#1616) — the recorded two-law design.
     underlying_kind
         The resolved index-vs-stock class of this contract's underlying
         (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
@@ -361,6 +372,8 @@ class OptionMover:
     prev_close_contiguous: bool | None = None
     oi_baseline_session: str | None = None
     oi_baseline_contiguous: bool | None = None
+    prev_close_muhurat: bool = False
+    oi_baseline_muhurat: bool = False
     underlying_kind: str = KIND_UNKNOWN
 
     @property
@@ -383,6 +396,17 @@ class OptionMover:
         if strike == strike.to_integral_value():
             strike = strike.quantize(Decimal(1))
         return f"{self.underlying} {format_contract_date(self.expiry)} {strike} {self.opt_type}"
+
+    @property
+    def value_crore(self) -> str:
+        """Cumulative HLC3 turnover rendered in ₹ crore (2dp) — shares the COMMON formatter.
+
+        Mirrors :attr:`~brutex.dashboard.movers_snapshot.MoverSnapshot.value_crore`
+        and the Futures tab, so the "Top Value" ranking metric (``value_paisa``,
+        DEC-MOVERS-VWAP-VALUE-001) is VISIBLE on the Options screen's "Value (Cr)"
+        column instead of ranking by an invisible field.
+        """
+        return value_crore_str(self.value_paisa)
 
     @property
     def ltp_inr(self) -> str:
@@ -607,6 +631,10 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
         "oi_chg": mover.oi_chg,
         "oi_chg_pct": str(mover.oi_chg_pct) if mover.oi_chg_pct is not None else None,
         "volume": mover.volume,
+        # The HLC3 session turnover behind the "Top Value" ranking, rendered in ₹ crore
+        # (2dp) — mirrors the spot + futures "value_cr" cell so the ranking metric is
+        # VISIBLE on-screen (DEC-MOVERS-VWAP-VALUE-001).
+        "value_cr": mover.value_crore,
         # The ONE moneyness cell the screen shows — bucket + signed depth as a single
         # string ("ITM -1" / "OTM +10" / "ATM"); DEC-FNO-MONEYNESS-001. The raw bucket
         # + signed ATM±N stay in the payload for sorting / programmatic use.
@@ -635,6 +663,13 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
     if mover.oi_baseline_contiguous is False:
         row["oi_baseline_session"] = mover.oi_baseline_session
         row["oi_baseline_contiguous"] = mover.oi_baseline_contiguous
+    # EMIT-ON-TRUE-ONLY, each baseline INDEPENDENT (DEC-PREVSESSION-MUHURAT-
+    # COHERENCE-001): the baseline is the legitimate Diwali Muhurat session's
+    # close/OI — a healthy lake, never a hole; non-Muhurat rows byte-identical.
+    if mover.prev_close_muhurat:
+        row["prev_close_muhurat"] = True
+    if mover.oi_baseline_muhurat:
+        row["oi_baseline_muhurat"] = True
     return row
 
 
@@ -1345,12 +1380,15 @@ def compute_options_candidates(
         # Baseline calendar-contiguity provenance, close + OI judged INDEPENDENTLY
         # (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — mirrors the Futures loop). Served
         # values are untouched; each strictly-False verdict gets ONE capped WARN.
+        # A legitimate day-after-Diwali Muhurat baseline is contiguous-True +
+        # flagged per baseline with ONE per-build INFO instead (never a false
+        # WARN — DEC-PREVSESSION-MUHURAT-COHERENCE-001).
         cal_exchange = _calendar_exchange(contract_exchange)
         expected_session = expected_session_for(cal_exchange)
-        close_iso, close_contig = prev_baseline_provenance(
+        close_iso, close_contig, close_muhurat = prev_baseline_provenance(
             close_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
-        oi_iso, oi_contig = prev_baseline_provenance(
+        oi_iso, oi_contig, oi_muhurat = prev_baseline_provenance(
             oi_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         mover = replace(
@@ -1359,6 +1397,8 @@ def compute_options_candidates(
             prev_close_contiguous=close_contig,
             oi_baseline_session=oi_iso,
             oi_baseline_contiguous=oi_contig,
+            prev_close_muhurat=close_muhurat,
+            oi_baseline_muhurat=oi_muhurat,
             # DEC-MOVERS-UNDERLYING-CLASS-001: index-vs-stock class from the
             # stored-master kind map. The PARSED token is hyphen-preserving
             # (parse_fno_symbol yields BAJAJ-AUTO) while the map keys the
@@ -1390,6 +1430,26 @@ def compute_options_candidates(
                 snapshot_day=day,
                 found_session=oi_iso,
                 expected_session=expected_session,
+            )
+        if close_muhurat and close_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="prev_close",
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                snapshot_day=day,
+                found_session=close_iso,
+            )
+        if oi_muhurat and oi_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="oi",
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                snapshot_day=day,
+                found_session=oi_iso,
             )
         movers.append(mover)
 

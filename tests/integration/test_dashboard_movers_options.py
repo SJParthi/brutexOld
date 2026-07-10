@@ -1171,6 +1171,21 @@ class TestOptionsGreeksEndToEnd:
         assert '["Delta","delta","num4"]' in html
         assert 'type === "num4"' in html  # the 4dp display formatter exists
 
+    def test_movers_template_options_offers_value_cr_column(self) -> None:
+        """VIEW-2 (DEC-MOVERS-VWAP-VALUE-001): the options table config carries the
+        "Value (Cr)" column so the "Top Value" ranking metric is VISIBLE on-screen,
+        mirroring the spot + futures tabs — and it sits INSIDE the options ``cols``
+        (before ``Volume``, the tab's last column)."""
+        from brutex.dashboard.app import _render_movers_html
+
+        html = _render_movers_html()
+        assert '["Value (Cr)","value_cr","num"]' in html
+        # The column lands inside the options cols block (…OI Chg % → Value (Cr) → Volume).
+        assert (
+            '["OI Chg %","oi_chg_pct","num"],["Value (Cr)","value_cr","num"],'
+            '["Volume","volume","int"]'
+        ) in html
+
 
 # ── the AUTHORITATIVE registry strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001) ──
 
@@ -1998,8 +2013,22 @@ class TestOptionsPcr:
 from brutex.data.moneyness import Moneyness  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
 
-#: The FROZEN additive-key vocabulary this decision may ever add to a row.
+#: The FROZEN additive-key vocabulary this decision family may ever add to a
+#: row. DELIBERATE widening 2026-07-09 (DEC-PREVSESSION-MUHURAT-COHERENCE-001):
+#: the two EMIT-ON-TRUE-ONLY Muhurat keys join the #1539 EMIT-ON-FALSE pairs.
 _CONTIGUITY_KEYS = frozenset(
+    {
+        "prev_close_session",
+        "prev_close_contiguous",
+        "oi_baseline_session",
+        "oi_baseline_contiguous",
+        "prev_close_muhurat",
+        "oi_baseline_muhurat",
+    }
+)
+
+#: The #1539 EMIT-ON-FALSE lake-hole pairs alone (the noncontiguous-arm wire).
+_HOLE_KEYS = frozenset(
     {
         "prev_close_session",
         "prev_close_contiguous",
@@ -2022,6 +2051,7 @@ _OPTION_ROW_KEYS = frozenset(
         "oi_chg",
         "oi_chg_pct",
         "volume",
+        "value_cr",
         "moneyness",
         "moneyness_bucket",
         "atm_offset",
@@ -2082,6 +2112,9 @@ class TestOptionsContiguityGoldens:
             "oi_chg": 100,
             "oi_chg_pct": str((Decimal(1100) - Decimal(1000)) / Decimal(1000) * 100),
             "volume": 500,
+            # HLC3 turnover in ₹ crore (2dp; DEC-MOVERS-VWAP-VALUE-001): bar 150×100 +
+            # 164×400 = 80,600 rupees = 0.00806 crore → 0.01 (ROUND_HALF_UP 2dp).
+            "value_cr": "0.01",
             "moneyness": "?",
             "moneyness_bucket": Moneyness.UNKNOWN.value,
             "atm_offset": None,
@@ -2114,9 +2147,55 @@ class TestOptionsContiguityGoldens:
         assert row["prev_close_contiguous"] is False
         assert row["oi_baseline_session"] == "2025-09-25"
         assert row["oi_baseline_contiguous"] is False
-        assert set(row) - _OPTION_ROW_KEYS == _CONTIGUITY_KEYS
+        assert set(row) - _OPTION_ROW_KEYS == _HOLE_KEYS
         warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
         assert sorted((e["kind"], e["symbol"]) for e in warns) == [
             ("oi", _G_CE),
             ("prev_close", _G_CE),
         ]
+
+    def test_muhurat_boundary_close_and_oi_flagged_no_warn_one_info(self, tmp_path: Path) -> None:
+        # DEC-PREVSESSION-MUHURAT-COHERENCE-001, the options OI twin: the ONLY
+        # prior 1-day bar is the 2024-11-01 Diwali Muhurat session — BOTH
+        # baselines legitimately ride it → both EMIT-ON-TRUE muhurat keys, no
+        # hole pair, ZERO noncontiguous WARNs, exactly ONE per-build INFO.
+        day = date(2024, 11, 4)
+        ce = "NSE-NIFTY-28Nov24-24000-CE"
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=ce,
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=day),
+                _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=day),
+            ],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=ce,
+            interval="1day",
+            bars=[_day_bar(day=date(2024, 11, 1), close="100", oi=1000)],
+        )
+        with capture_logs() as logs:
+            payload = run_options_snapshot(
+                lake_root=tmp_path, interval="1day", date=day.isoformat(), time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # VALUE-EQUALITY: served numbers baseline on the REAL Muhurat close/OI.
+        assert row["ltp"] == "₹164.00"
+        assert row["pct_change"] == str(
+            (Decimal("164.00") - Decimal("100.00")) / Decimal("100.00") * 100
+        )
+        assert row["oi_chg"] == 100
+        # The SANCTIONED wire delta: exactly the two muhurat keys, no hole pair.
+        assert row["prev_close_muhurat"] is True
+        assert row["oi_baseline_muhurat"] is True
+        assert set(row) & _HOLE_KEYS == set()
+        assert set(row) - _OPTION_ROW_KEYS == {"prev_close_muhurat", "oi_baseline_muhurat"}
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        infos = [e for e in logs if e["event"] == "movers.prev_baseline_muhurat"]
+        assert len(infos) == 1
+        assert infos[0]["symbol"] == ce
+        assert infos[0]["found_session"] == "2024-11-01"

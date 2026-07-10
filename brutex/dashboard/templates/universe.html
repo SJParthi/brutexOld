@@ -484,8 +484,11 @@
       <a href="/universe" aria-current="page">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
     <div class="badge" id="previewBadge">● PREVIEW · synthetic data</div>
@@ -766,7 +769,19 @@ let fnoOnly = false;
 
 function buildTabs(summary) {
   tabsEl.innerHTML = "";
-  const counts = {index: summary.index_count, stock: summary.stock_count};
+  /* Badge label truth (DEC-LABEL-TRUTH-001): the Stocks badge counts the SAME
+     population the Stocks tab LISTS — stock_count_total (the full held universe,
+     reference-only rows included) — with the F&O subset labelled beside it
+     ("Stocks · M F&O", M = stock_count_total − reference_stock_count) so the
+     ~212-F&O figure is never lost. `!= null` fallbacks keep the page working
+     against a stale cached payload that predates the additive keys. */
+  const stockTotal = summary.stock_count_total != null
+    ? summary.stock_count_total : summary.stock_count;
+  const refStocks = summary.reference_stock_count;
+  const fnoStocks = (typeof stockTotal === "number" && isFinite(stockTotal)
+    && typeof refStocks === "number" && isFinite(refStocks))
+    ? (stockTotal - refStocks) : null;
+  const counts = {index: summary.index_count, stock: stockTotal};
   TABS.forEach(([k,lbl,c]) => {
     const t = document.createElement("div");
     t.className = "tab" + (k === filter ? " active" : "");
@@ -774,6 +789,12 @@ function buildTabs(summary) {
     t.innerHTML = `<span class="dot" style="background:${c}"></span>`
       + `<div><div class="n" data-target="${counts[k] || 0}">0</div>`
       + `<div class="lbl">${lbl}</div></div>`;
+    if (k === "stock" && fnoStocks !== null) {
+      // textContent-only: the F&O split rides the label, never markup.
+      t.querySelector(".lbl").textContent = lbl + " · " + fnoStocks + " F&O";
+      t.title = fnoStocks + " F&O + " + refStocks
+        + " reference-only — the badge counts the full held universe the list shows";
+    }
     t.onclick = () => {
       filter = k;
       document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.k === k));
@@ -886,8 +907,17 @@ async function loadInstrumentMaster(msgId) {
       throw new Error(detail);
     }
     if (msg) {
+      /* Label truth (DEC-LABEL-TRUTH-001): show the LIST's stock population
+         (stock_count_total) with the F&O subset beside it, mirroring the badge.
+         Falls back to the legacy undifferentiated count on a payload that
+         predates the additive keys. */
+      const msgTotal = body.stock_count_total != null ? body.stock_count_total : body.stock_count;
+      const msgFno = (typeof body.stock_count_total === "number"
+        && typeof body.reference_stock_count === "number")
+        ? ` — ${body.stock_count_total - body.reference_stock_count} F&O`
+        : "";
       msg.textContent = `Loaded ${body.total} instruments `
-        + `(${body.index_count} indices · ${body.stock_count} stocks).`;
+        + `(${body.index_count} indices · ${msgTotal} stocks${msgFno}).`;
     }
     // The master changed → every tab's cache is stale; bump the epoch (so any
     // in-flight pre-reload fetch aborts instead of re-pinning stale data) and drop
@@ -1240,9 +1270,21 @@ async function loadLakeUniqueness() {
       }
       return;
     }
-    if (m.findings_total === 0) {
+    /* DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review BLOCKER): a skipped/unreadable
+       file is NEVER classified, so "0 findings" alone can NOT certify clean — the
+       CLEAN branch is gated on zero findings AND zero skips, and a skip paints a
+       distinct UNREADABLE red (engine vs reference-only, mirroring the CLI
+       disambiguation). Runs in the verdict-present path regardless of any
+       rescanning state so a skip is never silent-green. */
+    if (m.findings_total === 0 && (m.files_skipped || 0) === 0) {
       verdict.textContent = " ✅ CLEAN";
       verdict.style.color = "#4ade80";
+    } else if ((m.engine_files_skipped || 0) > 0) {
+      verdict.textContent = " ❌ engine indexes UNREADABLE — census incomplete, cannot certify clean";
+      verdict.style.color = "#f87171";
+    } else if ((m.files_skipped || 0) > 0) {
+      verdict.textContent = " ❌ scan incomplete — reference/non-engine file unreadable; ENGINE indexes verified CLEAN";
+      verdict.style.color = "#f87171";
     } else if (m.engine_clean) {
       verdict.textContent = " ❌ " + m.findings_total + " poisoned";
       verdict.style.color = "#f87171";

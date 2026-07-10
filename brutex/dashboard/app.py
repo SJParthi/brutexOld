@@ -262,7 +262,11 @@ from brutex.dashboard.sweep_runner import (
     run_sweep_from_request,
     sweep_progress_file,
 )
-from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revision
+from brutex.dashboard.universe_cache import (
+    UniverseSnapshotCache,
+    coverage_revision,
+    master_revision,
+)
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
@@ -278,7 +282,7 @@ from brutex.data.greeks_backfill import (
     scan_stale_greeks_targets,
 )
 from brutex.data.greeks_enrich import resolve_risk_free_source
-from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
+from brutex.data.lake_footprint import META_MEASURED_AT, make_disk_guard, record_lake_footprint
 from brutex.data.lake_invariants import (
     build_lake_census,
     census_to_dict,
@@ -4959,20 +4963,27 @@ def build_app(
         """Build the COMPOSITE cache key for the nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001).
 
         Encodes the route name, the dashboard write-generation (``_summary_cache.generation``,
-        bumped by every pull / materialize) AND the instrument-master content revision
+        bumped by every pull / materialize), the instrument-master content revision
         (:func:`master_revision`, moved by a keyless ``load-instruments`` that does NOT bump
-        the generation) into ONE string key, plus any route-specific ``extra`` discriminants
-        (e.g. the coverage ``years`` span). Folding BOTH freshness signals into the KEY — and
-        passing ``generation=0`` to :meth:`MoversSnapshotCache.get_or_compute` — means a cache
-        hit fires ONLY when neither the ledger NOR the master has changed since the entry was
-        stored, so a pull or an instrument load always yields a fresh key (never a stale
-        payload — Golden Rule #1). The token is cheap (a COUNT+MAX over the lean master table
-        plus an O(1) generation read), strictly lighter than the projection it guards.
+        the generation) AND the coverage-ledger content revision (:func:`coverage_revision`,
+        moved by every ``upsert_coverage`` — a metadata pull, in THIS process or another one,
+        writes coverage cells without moving either of the first two signals;
+        DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660) into ONE string key, plus any
+        route-specific ``extra`` discriminants (e.g. the coverage ``years`` span). Folding ALL
+        THREE freshness signals into the KEY — and passing ``generation=0`` to
+        :meth:`MoversSnapshotCache.get_or_compute` — means a cache hit fires ONLY when neither
+        the ledger, the master, NOR the coverage ledger has changed since the entry was
+        stored, so a pull, an instrument load, or a coverage write always yields a fresh key
+        (never a stale payload — Golden Rule #1). The token is cheap (two COUNT+MAX
+        aggregates over the lean master + the PK-indexed coverage ledger plus an O(1)
+        generation read), strictly lighter than the projections it guards; an unchanged
+        store yields a byte-identical key (no thrash).
         """
         gen = _summary_cache.generation
         count, latest = master_revision(store)
+        c_count, c_latest = coverage_revision(store)
         extra_repr = "|".join(repr(item) for item in extra)
-        return f"{name}|gen={gen}|m={count}:{latest}|{extra_repr}"
+        return f"{name}|gen={gen}|m={count}:{latest}|c={c_count}:{c_latest}|{extra_repr}"
 
     @app.get("/api/v1/coverage")
     async def api_coverage() -> JSONResponse:
@@ -6351,7 +6362,17 @@ def build_app(
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse({"symbols": []})
+            # Same additive freshness-key shape as the real path (stable key set;
+            # DEC-STALENESS-CACHE-TRUTH-001) — a store without a filesystem lake
+            # has trivially never observed a prebuild.
+            return JSONResponse(
+                {
+                    "symbols": [],
+                    "basis": report_basis,
+                    "basis_derived": report_basis == "day",
+                    "derived_last_built": None,
+                }
+            )
         lake = lake_root.parent
 
         def _resolve() -> dict[str, Any]:
@@ -6388,6 +6409,17 @@ def build_app(
                     for e, s, y in triples
                 ],
                 "basis": report_basis,
+                # 1day-basis freshness (DEC-STALENESS-CACHE-TRUTH-001): the 1day
+                # partitions the "day" basis reads are written ONLY by the
+                # pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001), so a
+                # CLI-pulled / mid-pull lake serves a 1day basis that lags the
+                # 1-minute truth. `derived_last_built` = the last SUCCESSFUL
+                # post-prebuild footprint OBSERVATION (lake_footprint's
+                # META_MEASURED_AT stamp, one O(1) get_meta — lake-wide, not
+                # per-symbol; best-effort writer, so None = honestly never
+                # observed, e.g. a CLI-only lake — never a fabricated time).
+                "basis_derived": report_basis == "day",
+                "derived_last_built": store.get_meta(META_MEASURED_AT),
             }
 
         return JSONResponse(await _run_lake(_resolve))
@@ -7229,6 +7261,45 @@ def build_app(
             )
 
         return JSONResponse(await _run_lake(_resolve))
+
+    @app.get("/api/v1/oneclick/equity")
+    async def api_oneclick_equity(
+        run_id: str | None = Query(default=None),
+        rank: int = Query(default=1, ge=1),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=5000, ge=1, le=5000),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/equity — the stored minute-path equity SERIES page.
+
+        DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (audit item 4C — the #48
+        overlap): serves the entry's ``equity_ref`` sidecar points
+        (``{session_date, equity_close_paisa, equity_intraday_low_paisa,
+        trades_closed}``) through the SAME typed reader seam + honesty
+        degrades as the trades route (pre-#1275 artifact / absent sidecars /
+        fixture / no-lake → honest awaiting; hostile tuple ref / unreadable
+        sidecar → NAMED corrupt; never a 500, never a fabricated curve).
+        HONEST O-envelope: the FIRST read per (sidecar revision, combo) is an
+        O(equity-file) run_id filter (the stamp indexes no equity spans);
+        repeat pages slice the reader's memo — O(page). One row per session,
+        so the default limit 5000 charts ~20 years in one fetch.
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Build the equity payload off the event loop via the TradesReader seam."""
+            root, fixture_root = _oneclick_roots()
+            reader = _oneclick_reader(root, fixture_root)
+            page = reader.equity_page(rid, rank, offset=offset, limit=limit)
+            return oneclick_view.build_equity_payload(
+                rid,
+                rank,
+                page,
+                offset=offset,
+                limit=limit,
+                fixture_root_active=fixture_root is not None,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(

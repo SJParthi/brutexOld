@@ -1,0 +1,42 @@
+{
+  "_comment": "DEC-BXSNAP2-PARITY-GOLDEN-001 \u2014 observational parity oracle for a future Rust arrow_table_to_bars port. Frozen bxsnap2 digests of the current Python bar-materialization path. Regenerate ONLY on a deliberate Python-path change (new DEC id + MIGRATION note; every run identity goes cold). Changes NO production behaviour.",
+  "preimage_version": "bxsnap2",
+  "scope": {
+    "exchange": "NSE",
+    "segment": "INDEX",
+    "start": "2024-01-01",
+    "end": "2024-12-31",
+    "symbol": "NSE-NIFTY",
+    "interval": "1minute"
+  },
+  "cases": [
+    {
+      "name": "integer_prices",
+      "description": "All-integer OHLC prices \u2014 the Decimal(str(float)) render is '20000.0' not '20000.00'; first bar OI is None (renders 'None').",
+      "expected_kept": 3,
+      "kept": 3,
+      "digest": "055ef76781131c155bfc459ad6817ac701bc3c31f3a24b17c6f9272bef3acd88"
+    },
+    {
+      "name": "half_paisa_grid",
+      "description": "2dp tick-grid closes: 100.5 renders '100.5' (not '100.50'); 99.95 / 100.05 render their exact two decimals.",
+      "expected_kept": 3,
+      "kept": 3,
+      "digest": "6ec552012848235f41196858c935ab304649c6630b71f8a9112768b665925c6c"
+    },
+    {
+      "name": "bad_tick_kept_set",
+      "description": "Bad-tick screen: a divide-by-10 scaled spike is SKIPPED (not in the digest); its healthy successor is KEPT; a new session's first bar (large reopen gap) is KEPT (first-bar exempt). Kept 3, skip 1.",
+      "expected_kept": 3,
+      "kept": 3,
+      "digest": "33f656eade574e2f4bb10c57da5458d93d0bf5e901b745a26a5c04ac9600bcc7"
+    },
+    {
+      "name": "muhurat_kept_set",
+      "description": "Diwali Muhurat evening session (2024-11-01 18:00-19:00 IST): the read boundary keeps every bar (no calendar filter). Kept 3.",
+      "expected_kept": 3,
+      "kept": 3,
+      "digest": "e5eab9afeec6eed29579dcc48620958ff951dc165320a75e0982a46a7736c33f"
+    }
+  ]
+}
