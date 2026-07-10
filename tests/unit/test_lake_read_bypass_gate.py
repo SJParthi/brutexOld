@@ -109,6 +109,13 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "writes (aggs join + twin entry-ts sets) — engine artifacts, not "
         "lake bars (DEC-SWEEP-RESULTS-DEPTH-001)"
     ),
+    "brutex/dashboard/oneclick_artifacts.py": (
+        "display-zone read of the results-depth EQUITY sidecar "
+        "(<stem>.equity.parquet under sweep_runs/, run_id-keyed — the "
+        "trade_store writer/reader pair's stored series) for "
+        "/api/v1/oneclick/equity — engine artifacts, not lake bars; dedup "
+        "identity does not apply (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001)"
+    ),
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
         "bar/options lake — dedup identity does not apply"
