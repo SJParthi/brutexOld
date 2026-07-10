@@ -621,6 +621,35 @@ class TestBuildOptionsPayload:
         assert row["iv"] is None
         assert row["delta"] is None
 
+    def test_value_crore_property_matches_independent_recompute(self) -> None:
+        """VIEW-2 (DEC-MOVERS-VWAP-VALUE-001): OptionMover.value_crore renders the HLC3
+        turnover in ₹ crore (2dp), mirroring the spot/futures ``value_cr`` cell so the
+        "Top Value" ranking metric is VISIBLE — matching an INDEPENDENT recompute
+        (paisa / 1e9 rupees-per-crore, ROUND_HALF_UP 2dp)."""
+        from decimal import ROUND_HALF_UP
+
+        vp = 33_205_000_000_000  # 33,205 crore in paisa (1 crore = 1e9 paisa)
+        expected = str(
+            (Decimal(vp) / Decimal(10**9)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        )
+        assert _mover(value_paisa=vp).value_crore == expected == "33205.00"
+
+    def test_row_projection_carries_value_cr(self) -> None:
+        """The Options row payload now carries ``value_cr`` (the visible "Value (Cr)"
+        cell), mirroring the spot + futures rows."""
+        payload = build_options_payload(
+            [_mover(value_paisa=16_400_000)],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+        )
+        row = payload["highest_oi"][0]
+        # 16,400,000 paisa = 0.0164 crore -> 0.02 (ROUND_HALF_UP 2dp).
+        assert row["value_cr"] == "0.02"
+        assert row["value_cr"] == _mover(value_paisa=16_400_000).value_crore
+
     def test_row_projection_stored_greeks_verbatim(self) -> None:
         """Stored iv/delta reach the payload as FULL-PRECISION floats — never
         stringified/rounded (DEC-GREEKS-ENGINE-PR3B-001; CLAUDE.md §4)."""
