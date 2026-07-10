@@ -133,11 +133,22 @@ class TestHeaderRoundNarrationRetired:
     rounds 3-8 — a within-file freshness drift baked into the header's shape.
     The header now carries a stale-proof POINTER to the two authoritative
     per-round records instead; these pins keep the narration from returning.
+
+    2026-07-09 merge-reconcile (DEC-PREOPEN-PREVDAY-COMMON-002 — renamed from -001 — landing on
+    top): a NEWER decision now heads the ``_Last updated:`` region and the
+    DEC-LAKE-STATS-MANIFEST-001 blurb was demoted verbatim to the header
+    chain's first ``Earlier:`` slot — so the pin anchors on THAT blurb's own
+    ``(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #`` marker (renumber-proof,
+    position-independent) instead of assuming it still heads the file. The
+    guarded law is unchanged: the compressed blurb carries the pointer, not
+    the per-round story.
     """
 
     def test_header_points_at_the_authoritative_records(self) -> None:
         text = _CLAUDE_MD.read_text(encoding="utf-8")
-        header = _normalized_region(text, "_Last updated:", "Earlier:")
+        header = _normalized_region(
+            text, "(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #", "Earlier:"
+        )
         assert "review round 1 (which" not in header, (
             "the CLAUDE.md _Last updated: header resurrected per-round narration — "
             "it froze at round 2 once (endgame round 2); keep the pointer, not the story"
@@ -170,7 +181,10 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # sharded-matrix / wedge-proofed-loop rationale comments in mutation.yml
     # and the 3-field pair-format note in the wiring pin's docstring cite
     # THAT decision's entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597}),
+    # 1685 = DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 (Slice 0 of the Rust sweep-core
+    # conversion): its recorded compute.py pair-scope decision comment above
+    # the mutmut pair list cites THAT decision's entry, not this one.
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685}),
     "brutex/data/lake_stats_manifest.py": frozenset({867}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),
