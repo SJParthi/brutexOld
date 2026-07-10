@@ -1195,8 +1195,13 @@ async function loadLakeUniqueness() {
   /* Read-only: the lake duplicate-census verdict (DEC-LAKE-HEAL-001). CLEAN when the
      bounded scan found zero findings; otherwise the poisoned finding count, with the
      ENGINE-index (NIFTY/BANKNIFTY/SENSEX) verdict called out — the operator's headline
-     answer. Built with textContent ONLY (the universe.html CodeQL XSS guard).
-     Never throws — keeps the last shown verdict on a transient fetch error. */
+     answer. Since DEC-LAKE-CENSUS-NONBLOCKING-001 the route is an O(1) snapshot: the
+     scan runs on a dedicated backend daemon thread, so before the FIRST scan lands
+     this renders the honest warming state ("census scanning… X / ~Y files"), and a
+     rescan alongside a last-known verdict appends "(rescanning…)". The 15 s poll
+     cadence is DELIBERATELY unchanged (no unguarded faster poll). Built with
+     textContent ONLY (the universe.html CodeQL XSS guard). Never throws — keeps the
+     last shown verdict on a transient fetch error. */
   try {
     const r = await fetch("/api/v1/universe/lake-uniqueness");
     if (!r.ok) return;
@@ -1206,6 +1211,35 @@ async function loadLakeUniqueness() {
     const detail = document.getElementById("lakedetail");
     if (!panel || !m.present) return;
     panel.style.display = "block";
+    const hasVerdict = (typeof m.findings_total === "number");
+    const p = m.scan_progress || {};
+    const startedAgo = (function () {
+      /* "started X ago" from the server's started_utc — approximate (client
+         clock vs server wall clock); NaN/absent degrades to omission. */
+      const t = Date.parse(p.started_utc || "");
+      if (!isFinite(t)) return "";
+      const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+      return " — started " + mins + " min ago";
+    })();
+    if (!hasVerdict) {
+      /* The honest no-verdict-yet arm — never a fabricated CLEAN/poisoned. */
+      if (m.scan_stalled) {
+        verdict.textContent = " ⚠️ census scan stalled" + startedAgo;
+        verdict.style.color = "#f87171";
+        detail.textContent = " · " + (p.files_scanned || 0) + " files scanned so far";
+      } else if (m.scan_in_progress) {
+        const est = (p.files_total_estimate == null) ? "?" : String(p.files_total_estimate);
+        verdict.textContent = " ⏳ census scanning… " + (p.files_scanned || 0) +
+          " / ~" + est + " files";
+        verdict.style.color = "#facc15";
+        detail.textContent = m.scan_error ? (" · previous scan failed: " + m.scan_error) : "";
+      } else if (m.scan_error) {
+        verdict.textContent = " ⚠ census scan failed — retries on the next poll";
+        verdict.style.color = "#f87171";
+        detail.textContent = " · " + m.scan_error;
+      }
+      return;
+    }
     if (m.findings_total === 0) {
       verdict.textContent = " ✅ CLEAN";
       verdict.style.color = "#4ade80";
@@ -1215,6 +1249,21 @@ async function loadLakeUniqueness() {
     } else {
       verdict.textContent = " ❌ " + m.findings_total + " poisoned · engine indexes POISONED";
       verdict.style.color = "#f87171";
+    }
+    if (m.scan_stalled) {
+      verdict.textContent += " ⚠️ (census scan stalled" + startedAgo + ")";
+    } else if (m.refresh_probe_wedged) {
+      /* The refresh PROBE wedged behind this served verdict (distinct from a
+         stalled scan — the verdict stands, only its freshness check is stuck;
+         judged server-side from the probe's OWN arming stamp, never the old
+         scan's started_utc). Minutes from refresh_probe_wedged_s; a missing/
+         non-numeric value degrades to omission of the count. */
+      const ws = m.refresh_probe_wedged_s;
+      const mins = (typeof ws === "number" && isFinite(ws))
+        ? " (" + Math.max(0, Math.round(ws / 60)) + "m)" : "";
+      verdict.textContent += " ⚠️ refresh probe wedged" + mins;
+    } else if (m.scan_in_progress) {
+      verdict.textContent += " (rescanning… " + (p.files_scanned || 0) + " files)";
     }
     const segs = (m.segments || []).map(s => s.segment + " " + s.clean + "/" + s.files)
       .join(" · ");
@@ -1717,7 +1766,10 @@ async function refreshWindowsLine() {
   if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   if (!pullStarted) return;
   try {
-    const r = await fetch('/api/v1/coverage/windows');
+    /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this line reads ONLY .counts —
+       ?limit=0 keeps the identical counts payload while dropping the
+       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
+    const r = await fetch('/api/v1/coverage/windows?limit=0');
     if (!r.ok) return;
     const counts = (await r.json()).counts || {};
     const grand = {noData: 0, resolved: 0, pending: 0, failed: 0, total: 0};
@@ -1749,6 +1801,10 @@ async function startAndPoll(path, label) {
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
   pullStarted = true;   // DEC-UNIVERSE-WINDOW-SEGMENTS-001: gate the all-segments line on a started pull
+                        // — armed for the WHOLE watch (incl. the pre-POST paint below) and cleared in
+                        // finishLive after one final refresh (DEC-LATENCY-HONESTY-BATCH-001), so a
+                        // refused/failed start (catch → finishLive) can never leave the 5 s poller
+                        // armed forever.
   pollFeedRetries = 0; lastProgressOkMs = null; lastProgressOkWallMs = null; hadProgressSuccess = false; lastPollLabel = null; resetSubUnit();   // a new watch starts clean
   watchActive = true;   // opens the visibility re-poll gate for the whole watch (cleared in finishLive)
   // Refuter-confirmed fix: start the staleness ticker BEFORE the start POST, so a
@@ -2158,6 +2214,15 @@ function finishLive() {
   const suEl = document.getElementById('subunit');
   if (suEl) suEl.textContent = '';
   updateStallChip(null);  // a settled run is never stalled-suspect — hide the chip (DEC-PULL-STALL-CHIP-001)
+  // DEC-LATENCY-HONESTY-BATCH-001: disarm the all-segments windows poller when the
+  // watch settles. pullStarted was set true at startAndPoll and NEVER cleared, so
+  // ONE pull click — even a REFUSED start (the catch path lands here too) — armed
+  // the 5 s full-payload /coverage/windows poll FOREVER. One final refresh paints
+  // the settled counts (it reads the still-armed flag synchronously at entry),
+  // then the flag drops and the interval's guard goes back to a no-op until the
+  // next startAndPoll arms it.
+  refreshWindowsLine();
+  pullStarted = false;
   setBulkDisabled(false);
   // Restore the ONE pull button to its selection-driven label/enabled state
   // (the pipeline button is re-enabled by setBulkDisabled(false); the manual
