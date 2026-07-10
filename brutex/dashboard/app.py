@@ -210,12 +210,15 @@ from brutex.dashboard.pull_controller import (
     resolve_pull_targets,
 )
 from brutex.dashboard.pull_intent import (
+    BANNER_LEVEL_CRITICAL,
     BANNER_LEVEL_NOTICE,
     PullIntent,
     PullIntentStore,
+    ResumeLaunchRefused,
     clear_banner_after_start,
     persist_intent_for_launch,
     probe_pull_singleflight,
+    retire_resume_launch_notice,
     run_auto_resume,
     run_legacy_resume,
 )
@@ -4400,7 +4403,22 @@ def build_app(
                 to_date=to_date,
                 restarts=intent_restarts,
             )
-            on_finally = pull_intent_store.clear
+            _finally_store: PullIntentStore = pull_intent_store
+
+            def _pull_finished_cleanup(store: PullIntentStore = _finally_store) -> None:
+                """Run-end hook: clear the durable intent + retire the launch notice.
+
+                The intent clear is the pre-existing crash-recovery contract; the
+                notice retire (review round 1, minor 19) drops the
+                "pull auto-resume LAUNCHED …" amber strip when the pull it
+                announced actually ENDS — identity-gated inside
+                :func:`retire_resume_launch_notice` (prefix + notice level), so
+                a CRITICAL banner set mid-run or a foreign notice survives.
+                """
+                store.clear()
+                retire_resume_launch_notice(store)
+
+            on_finally = _pull_finished_cleanup
         started = _pull_job.start(
             _work,
             total=len(targets),
@@ -4480,7 +4498,12 @@ def build_app(
             resume core: a 4xx is DETERMINISTIC (the same intent can never
             launch → the core clears it), while a 5xx (credentials not yet
             fixed at boot) is transient (the core keeps the intent and re-tries
-            next boot, bounded by the cap).
+            next boot, bounded by the cap). LAUNCH CONTRACT (review round 1,
+            MAJOR 1.7): returning attests a genuinely-STARTED pull — a
+            ``started=False`` payload (``BackgroundPullJob.start`` refused)
+            raises :class:`~brutex.dashboard.pull_intent.ResumeLaunchRefused`
+            so the core never announces FIRED / "LAUNCHED" for a pull that is
+            not running (intent kept; honest refusal banner + alert instead).
             """
             try:
                 payload = _launch_pipeline(
@@ -4495,16 +4518,44 @@ def build_app(
                 if exc.status_code < _SERVER_ERROR_FLOOR:
                     raise ValueError(str(exc.detail)) from exc
                 raise RuntimeError(str(exc.detail)) from exc
+            if payload.get("started") is not True:
+                # LAUNCH CONTRACT (review round 1, MAJOR 1.7): returning attests
+                # a genuinely-STARTED pull. `_launch_pipeline` returns
+                # started=False WITHOUT raising when `BackgroundPullJob.start`
+                # refuses — shapes the boot probe cannot see (it probes only the
+                # lake-root flock): an in-process job already running, the
+                # ACCOUNT-keyed lock held by a same-account pull on another
+                # lake root, a fresh FOREIGN-host lease, or the documented
+                # probe→start TOCTOU. Announcing FIRED here fabricated a
+                # site-wide "pull auto-resume LAUNCHED" banner while /universe
+                # simultaneously showed the refused job FAILED — raise the
+                # DISTINCT refusal instead (the core keeps the intent, banners
+                # the honest "REFUSED … intent kept", alerts, and never claims
+                # FIRED). The payload carries no refusal reason field, so the
+                # reason is derived from the job's own state (honest
+                # enumeration, never a guess presented as fact).
+                reason = (
+                    "a pull/sweep job is already running in this process"
+                    if _pull_job.running
+                    else (
+                        "the cross-process pull guards refused (a same-account peer "
+                        "pull, lake flock contention, or a fresh foreign-host lease "
+                        "— see the pull_job log for the exact refusal)"
+                    )
+                )
+                raise ResumeLaunchRefused(f"BackgroundPullJob.start refused: {reason}")
             # ONE announce-on-launch headline WITH the resolved target count
             # (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the 100%-tested resume core
             # sets the operator-facing notice banner but cannot know the count
             # (its `launch` returns None by contract) — THIS binding has the
             # launch payload, so the machine count lives here (the banner
             # carries the human scope; decoupled, never a fabricated number).
+            # Logged only for a genuinely-STARTED launch (the started gate
+            # above) — never for a refused start (MAJOR 1.7).
             _LOG.info(
                 "auto_resume.launch_announced",
                 targets=payload.get("targets"),
-                started=payload.get("started"),
+                started=True,
                 symbols=intent.symbols,
                 symbol=intent.symbol,
                 restarts=intent.restarts,
@@ -4565,7 +4616,7 @@ def build_app(
 
     @app.post("/api/v1/pull/stop")
     async def api_pull_stop() -> JSONResponse:
-        """POST /api/v1/pull/stop — kill the auto-resume re-loop + best-effort graceful stop.
+        """POST /api/v1/pull/stop — kill the INTENT-arm re-loop + best-effort graceful stop.
 
         DEC-AUTO-RESUME-ZERO-SURPRISES-001 (the honest-minimum STOP control —
         there was previously NO stop mechanism at all: no job cancel, no
@@ -4573,11 +4624,23 @@ def build_app(
         naming exactly what it did and what it could NOT do:
 
         1. **Clears the durable pull intent** (``<lake>/.pull_intent.json``
-           via the existing :meth:`PullIntentStore.clear`) so a subsequent
-           kill / restart does NOT auto-resume the pull (the re-loop is dead
-           even if the process is then hard-killed).
+           via the existing :meth:`PullIntentStore.clear`) so the INTENT arm
+           of the boot resume cannot re-fire this pull — even if the process
+           is then hard-killed. HONEST SCOPE (review round 1, MAJOR 1.5 —
+           reworded, not tombstoned): the boot resume has a SECOND, LEGACY
+           ledger-triggered arm this route does NOT suppress. It needs an
+           explicit double opt-in (the ``BRUTEX_AUTO_RESUME`` master gate,
+           default OFF — PR #1407, covering both arms — AND the default-OFF
+           ``BRUTEX_AUTO_RESUME_ON_BOOT``); when the operator has enabled
+           BOTH, a boot that finds outstanding ``FAILED`` / ``PLANNED``
+           windows in the durable ledger (a kill mid-phase deliberately
+           leaves them re-pullable) can still re-fire a whole-universe pull.
+           Every stop surface names that exception instead of the prior
+           unconditional "next boot will NOT auto-resume" claim.
         2. **Sets the cooperative stop flag**
-           (:meth:`BackgroundPullJob.request_stop`) — ADVISORY: only the
+           (:meth:`BackgroundPullJob.request_stop` — linearized with
+           ``start()``'s claim, MAJOR 1.6: a ``pull_running=True`` verdict
+           GUARANTEES the run observes the flag) — ADVISORY: only the
            full-PIPELINE pull consults it (``run_full_pipeline``'s phase
            boundaries: after spot, after metadata, after historical —
            prebuild + movers skipped). The in-flight phase (and every window
@@ -4587,7 +4650,11 @@ def build_app(
            ever marked SUCCESS by stopping — the durable ledger keeps every
            outstanding window re-pullable.
         3. **Raises a NOTICE banner** (the amber ``bx-liveproof.js`` strip)
-           so the stop request is visible on every page.
+           whose text matches what ACTUALLY happened (minors 13/14: an idle
+           stop says "no pull was running"; the intent clause appears only
+           when an intent existed) — UNLESS a CRITICAL banner is standing
+           (a crash-loop refusal), which is never clobbered by a notice
+           (``banner_set`` reads ``False``; the JSON verdict still returns).
 
         Deliberately NOT touching the halt-exception machinery
         (``_GLOBAL_STOP_ERRORS`` / ``LakeWriteHalt``) — those are error paths,
@@ -4596,8 +4663,10 @@ def build_app(
         """
 
         def _stop() -> dict[str, Any]:
-            pull_running = _pull_job.running
-            _pull_job.request_stop()
+            # Linearized set+read (MAJOR 1.6): a True here means the live run's
+            # start-claim clear already happened, so the flag SURVIVES and the
+            # run genuinely stops at its next phase boundary.
+            pull_running = _pull_job.request_stop()
             intent_present = False
             intent_cleared = False
             banner_set = False
@@ -4606,21 +4675,45 @@ def build_app(
                 if intent_present:
                     pull_intent_store.clear()
                     intent_cleared = True
-                pull_intent_store.banner.set(
-                    level=BANNER_LEVEL_NOTICE,
-                    message=(
+                # Truthful per-state message (minors 13/14) — never a fixed
+                # claim pair regardless of what actually happened.
+                if pull_running:
+                    message = (
                         "pull stop requested — the running pipeline stops at the next "
-                        "phase boundary (in-flight windows finish; a process restart is "
-                        "the hard stop); the durable pull intent was cleared, so the "
-                        "next boot will NOT auto-resume this pull."
-                    ),
+                        "phase boundary (in-flight windows finish; a process restart "
+                        "is the hard stop)"
+                    )
+                else:
+                    message = "pull stop requested — no pull was running"
+                if intent_cleared:
+                    message += (
+                        "; the crash-recovery intent was cleared, so the intent arm "
+                        "cannot re-fire this pull on the next boot"
+                    )
+                else:
+                    message += "; no crash-recovery intent was present"
+                message += (
+                    ". Exception: if the legacy ledger arm is explicitly enabled "
+                    "(BRUTEX_AUTO_RESUME=1 AND BRUTEX_AUTO_RESUME_ON_BOOT=1), "
+                    "outstanding FAILED/PLANNED ledger windows can still re-fire a "
+                    "whole-universe pull on boot."
                 )
-                banner_set = True
+                current = pull_intent_store.banner.snapshot()
+                if current is not None and current.get("level") == BANNER_LEVEL_CRITICAL:
+                    # Never clobber a standing CRITICAL banner with a notice
+                    # (minor 14) — the operator's crash-loop refusal outranks
+                    # the stop acknowledgement; the JSON verdict still carries
+                    # the whole truth.
+                    _LOG.info("pull.stop_route.banner_preserved_critical")
+                else:
+                    pull_intent_store.banner.set(level=BANNER_LEVEL_NOTICE, message=message)
+                    banner_set = True
             _LOG.info(
                 "pull.stop_route",
                 pull_running=pull_running,
                 intent_present=intent_present,
                 intent_cleared=intent_cleared,
+                banner_set=banner_set,
             )
             return {
                 "stop_requested": True,
@@ -4634,7 +4727,10 @@ def build_app(
                     "— prebuild + movers skipped); the in-flight phase finishes first; "
                     "other job kinds (sweep, single-symbol, retry-failed) are NOT "
                     "stopped; a process restart remains the hard stop. Intent cleared ⇒ "
-                    "no auto-resume on the next boot. Nothing was marked complete."
+                    "the INTENT arm cannot re-fire on the next boot; the LEGACY ledger "
+                    "arm — only when explicitly enabled via BRUTEX_AUTO_RESUME=1 AND "
+                    "BRUTEX_AUTO_RESUME_ON_BOOT=1 — can still re-fire outstanding "
+                    "FAILED/PLANNED windows. Nothing was marked complete."
                 ),
             }
 

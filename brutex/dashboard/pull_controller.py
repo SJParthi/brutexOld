@@ -778,6 +778,12 @@ class BulkSpotReport:
     """MAX absolute keep-first close delta across the pull's conflicts — exact
     Decimal rupees (never float, CLAUDE.md §6 price-unit row); ``None`` when no
     conflict was recorded."""
+    settled_exhausted: int = 0
+    """The FETCH-EXHAUSTED subset of :attr:`settled_skipped` (review round 1,
+    MAJOR 1.4 — :attr:`~brutex.data.window_ledger.WindowLedger.newly_exhausted_failed`):
+    windows settled because every fetch ERRORED, named separately by the
+    verdict note — never folded into "permanent no-data". Appended LAST so any
+    positional construction stays byte-compatible."""
 
     @property
     def total_symbols(self) -> int:
@@ -824,6 +830,7 @@ class BulkSpotReport:
             quota_exhausted=self.quota_exhausted,
             mass_empty_cause=self.mass_empty_cause,
             settled_skipped=self.settled_skipped,
+            settled_exhausted=self.settled_exhausted,
         )
         if self.dry_run:
             return mark_synthetic(verdict)
@@ -2684,6 +2691,10 @@ def pull_all_spot(
             # verdict can NAME the count + the reopen-skipped re-verify path. 0 for a
             # dry-run (no ledger — nothing settles).
             settled_skipped=ledger.newly_settled_skipped if ledger is not None else 0,
+            # The FETCH-EXHAUSTED subset (review round 1, MAJOR 1.4): named
+            # SEPARATELY by the verdict note — an exhausted settle is an
+            # errored-every-fetch write-off, never "vendor confirmed no-data".
+            settled_exhausted=ledger.newly_exhausted_failed if ledger is not None else 0,
         )
         verdict = bulk.verdict
         _LOG.info(

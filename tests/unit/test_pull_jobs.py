@@ -1710,3 +1710,138 @@ class TestCooperativeStop:
         job.request_stop()
         assert job.start(lambda _h: None, total=1) is False  # refused — already running
         assert job.stop_requested is True
+
+
+# ── Stop-vs-start linearization (review round 1, MAJOR 1.6) ──────────────────
+
+
+class TestStopStartLinearization:
+    """The stop flag's clear is linearized with start()'s claim.
+
+    Pre-fix, start() cleared the event AFTER the seconds-scale cross-process
+    guard acquisition: a POST /api/v1/pull/stop landing in that window read
+    ``pull_running=True`` (the claim had flipped), replied "stops at the next
+    phase boundary" — and was then silently wiped by the late clear, so the
+    multi-hour pipeline ran ALL phases. Now the clear lives inside the locked
+    claim block and request_stop sets+reads under the SAME lock, so a stop
+    that observed a live run is GUARANTEED to survive.
+    """
+
+    @staticmethod
+    def _noop_guard_factory() -> pull_jobs.LeaseFactory:
+        from collections.abc import Iterator
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _guard(_root: Path) -> Iterator[None]:  # test double
+            yield
+
+        return _guard
+
+    def _job_with_stop_injected_mid_acquisition(
+        self, tmp_path: Path
+    ) -> tuple[BackgroundPullJob, list[bool]]:
+        """A job whose lake flock acquisition simulates the racing stop POST."""
+        from contextlib import contextmanager
+
+        stop_replies: list[bool] = []
+        holder: dict[str, BackgroundPullJob] = {}
+
+        @contextmanager
+        def stop_injecting_flock(_root: object):  # test double
+            # The stop POST lands DURING start()'s guard acquisition — after
+            # the claim (pull_running already True), before the PRE-FIX clear
+            # site. The route's linearized request_stop is called verbatim.
+            stop_replies.append(holder["job"].request_stop())
+            yield
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=stop_injecting_flock,
+            account_key_resolver=lambda: None,  # graceful account-lock skip
+            lease_factory=self._noop_guard_factory(),
+        )
+        holder["job"] = job
+        return job, stop_replies
+
+    def test_stop_observing_a_live_start_is_never_swallowed(self, tmp_path: Path) -> None:
+        # Invariant (i): a stop that observes pull_running=True genuinely stops
+        # the run at its next consulted boundary — pre-fix this observed
+        # [False] (the late clear wiped the event) while the route had already
+        # promised the stop.
+        job, stop_replies = self._job_with_stop_injected_mid_acquisition(tmp_path)
+        observed: list[bool] = []
+
+        def work(_hook: object) -> None:
+            observed.append(job.stop_requested)  # the phase-boundary consult
+
+        assert job.start(work, total=1) is True
+        assert stop_replies == [True], "the racing stop observed the live claim"
+        assert observed == [True], "the promised stop reached the run — never swallowed"
+
+    def test_stop_with_no_claimed_run_reports_false_and_never_poisons(self) -> None:
+        # Invariant (ii): an idle-time stop returns pull_running=False and the
+        # next run starts unstopped (the claim-block clear drops the stale
+        # event).
+        job = _job()
+        assert job.request_stop() is False
+        seen: list[bool] = []
+        assert job.start(lambda _h: seen.append(job.stop_requested), total=1) is True
+        assert seen == [False]
+
+    def test_boot_resume_interleave_stop_kills_the_reloop_end_to_end(self, tmp_path: Path) -> None:
+        # Invariant (iii) — the boot-resume interleave the stop button exists
+        # for: the stop lands after run_auto_resume's bump + the launch's
+        # intent re-persist, DURING start()'s acquisition. The event must
+        # survive (the run stops at its first boundary), the worker's finally
+        # (on_finally = intent clear) must remove the RE-PERSISTED intent, and
+        # the next boot's intent arm must find NO intent.
+        from brutex.dashboard.pull_intent import (
+            PullIntentStore,
+            ResumeAction,
+            persist_intent_for_launch,
+            run_auto_resume,
+        )
+
+        store = PullIntentStore(tmp_path)
+        assert persist_intent_for_launch(
+            store, dry_run=False, symbols=None, symbol=None, from_date=None, to_date=None
+        )
+        job, stop_replies = self._job_with_stop_injected_mid_acquisition(tmp_path)
+        phases_run: list[str] = []
+
+        def launch(intent: object) -> None:
+            # The route body's shape: re-persist the intent (with the bumped
+            # counter), then start the job with the intent clear as on_finally.
+            persist_intent_for_launch(
+                store,
+                dry_run=False,
+                symbols=None,
+                symbol=None,
+                from_date=None,
+                to_date=None,
+                restarts=getattr(intent, "restarts", 0),
+            )
+
+            def work(_hook: object) -> None:
+                phases_run.append("spot")
+                if job.stop_requested:  # the first phase boundary
+                    return
+                phases_run.append("metadata")
+
+            assert job.start(work, total=1, on_finally=store.clear) is True
+
+        action = run_auto_resume(store, launch=launch, probe_singleflight=lambda: True)
+        assert action is ResumeAction.FIRED
+        assert stop_replies == [True]
+        # The run stopped at the FIRST boundary — later phases never ran.
+        assert phases_run == ["spot"]
+        # The worker's finally removed the re-persisted intent…
+        assert store.load() is None
+        # …so the next boot's intent arm finds nothing to re-fire.
+        assert (
+            run_auto_resume(store, launch=lambda _i: None, probe_singleflight=lambda: True)
+            is ResumeAction.NO_INTENT
+        )

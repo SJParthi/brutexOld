@@ -30,7 +30,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import pytest
 from brutex.adapters.groww.client import GrowwClient
@@ -3724,6 +3724,79 @@ class TestVendorSurfacePhaseThreading:
         assert payload["max_close_delta"] == "44.70"
         without = HistoricalPullReport(**base)  # type: ignore[arg-type]
         assert without.to_dict()["max_close_delta"] is None
+
+
+class TestSettledExhaustedThreading:
+    """Review round 1, MAJOR 1.4 — the F&O verdict names exhausted settles."""
+
+    _BASE: ClassVar[dict[str, object]] = {
+        "dry_run": False,
+        "intervals": ("1minute",),
+        "contracts_selected": 1,
+        "contracts_completed": 1,
+        "bars_appended": 10,
+        "windows": 1,
+        "failed_pairs": 0,
+        "still_failed_windows": 0,
+        "auth_aborted": False,
+        "note": "ok",
+        "phase1_clean": True,
+        "phase1_complete": ("C",),
+        "start_dates": {"C": "2024-01-01"},
+        "minute_requested": True,
+        "minute_skipped": False,
+    }
+
+    def test_report_verdict_threads_the_exhausted_subset(self) -> None:
+        # Kills the dropped-`settled_exhausted=` kwarg mutant in
+        # HistoricalPullReport.verdict: an all-exhausted settle must read as
+        # fetch failures, never "permanent no-data".
+        report = HistoricalPullReport(
+            **self._BASE,  # type: ignore[arg-type]
+            settled_skipped=2,
+            settled_exhausted=2,
+        )
+        verdict = report.verdict
+        assert verdict.settled_exhausted == 2
+        assert "settled after repeated fetch failures" in verdict.action
+        assert "permanent no-data" not in verdict.action
+        assert report.to_dict()["settled_exhausted"] == 2
+
+    def test_default_zero_keeps_the_no_data_wording(self) -> None:
+        report = HistoricalPullReport(
+            **self._BASE,  # type: ignore[arg-type]
+            settled_skipped=2,
+        )
+        assert report.settled_exhausted == 0
+        assert "permanent no-data" in report.verdict.action
+        assert "repeated fetch failures" not in report.verdict.action
+
+    def test_both_ledger_tallies_reach_the_phase_and_report_builders(self) -> None:
+        # SOURCE pin (the `test_pipeline_work_binds_should_stop_to_the_job_flag`
+        # pattern): the ledger→_PhaseResult and _PhaseResult→report threading
+        # lives inside the heavy phase fold / report build — sever either
+        # `settled_exhausted` hop and the verdict silently reverts to the
+        # "permanent no-data" lie for exhausted windows.
+        import inspect
+
+        source = inspect.getsource(hp)
+        assert (
+            "settled_exhausted=ledger.newly_exhausted_failed if ledger is not None else 0" in source
+        )
+        assert "settled_exhausted=minute.settled_exhausted" in source
+
+    def test_spot_builder_threads_the_exhausted_tally_too(self) -> None:
+        # The spot twin's source pin (`pull_controller` — its end-to-end
+        # threading proof lives in test_pull_controller_step_groups.py's
+        # stuck-group test; this pins the exact seam expression).
+        import inspect
+
+        from brutex.dashboard import pull_controller as pc
+
+        source = inspect.getsource(pc)
+        assert (
+            "settled_exhausted=ledger.newly_exhausted_failed if ledger is not None else 0" in source
+        )
 
 
 def test_fno_pull_emits_written_settled_mismatch_warning(

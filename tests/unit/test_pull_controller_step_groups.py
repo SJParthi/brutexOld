@@ -652,6 +652,17 @@ class TestGroupScopedUntilClean:
         rec = next(r for r in load_window_ledger(tmp_path).records() if r.security_id == "ADANIENT")
         assert rec.status == "SKIPPED"
         assert is_fetch_exhausted_settle_reason(rec.last_error)
+        # The OPERATOR VERDICT names the exhausted settle SEPARATELY (review
+        # round 1, MAJOR 1.4 — the end-to-end threading pin killing a dropped
+        # `settled_exhausted=` kwarg at the BulkSpotReport build site): the
+        # only settle this pull made is the exhausted one, so the action must
+        # carry the fetch-failure wording and ZERO "permanent no-data" text —
+        # the exact lie the distinct ledger stamp exists to prevent.
+        assert report.settled_exhausted == 1
+        verdict = report.verdict
+        assert verdict.settled_exhausted == 1
+        assert "settled after repeated fetch failures" in verdict.action
+        assert "permanent no-data" not in verdict.action
 
 
 class TestDualIntervalPhaseRestart:

@@ -317,6 +317,10 @@ class HistoricalPullReport:
     settled_skipped: int = 0
     """Windows THIS pull newly settled as terminal ``SKIPPED`` (the per-pull ledger
     tally) — the honest-verdict count (never "no action" over a settling pull)."""
+    settled_exhausted: int = 0
+    """The FETCH-EXHAUSTED subset of :attr:`settled_skipped` (review round 1,
+    MAJOR 1.4): windows settled because every fetch ERRORED — the verdict note
+    names them separately, never as "permanent no-data"."""
     expiries_out_of_scope: int = 0
     """Distinct ``(underlying, expiry)`` groups EXCLUDED by the operator's expiry
     scope (DEC-FNO-EXPIRY-SCOPE-001): an out-of-scope expiry is fetched not at
@@ -382,6 +386,7 @@ class HistoricalPullReport:
             completed=self.contracts_completed,
             mass_empty_cause=self.mass_empty_cause,
             settled_skipped=self.settled_skipped,
+            settled_exhausted=self.settled_exhausted,
         )
         if self.dry_run:
             return mark_synthetic(verdict)
@@ -410,6 +415,7 @@ class HistoricalPullReport:
             "note": self.note,
             "mass_empty_cause": self.mass_empty_cause,
             "settled_skipped": self.settled_skipped,
+            "settled_exhausted": self.settled_exhausted,
             "expiries_out_of_scope": self.expiries_out_of_scope,
             "contracts_out_of_scope": self.contracts_out_of_scope,
             "conflicts": self.conflicts,
@@ -725,6 +731,11 @@ class _PhaseResult:
     #: MAX absolute keep-first close delta across the phase (exact Decimal;
     #: ``None`` = no conflict anywhere).
     max_close_delta: Decimal | None = None
+    #: The FETCH-EXHAUSTED subset of :attr:`settled_skipped` (review round 1,
+    #: MAJOR 1.4 — the per-pull ledger's ``newly_exhausted_failed`` tally):
+    #: windows settled because every fetch ERRORED, named separately by the
+    #: verdict note. Appended LAST (positional back-compat).
+    settled_exhausted: int = 0
 
 
 def _drain_fetch_pipeline_in_phase(pipeline: FetchPipeline | None) -> None:
@@ -1687,6 +1698,9 @@ def _run_phase(
         # window THIS phase newly settled SKIPPED (fast-settle + streak promotion),
         # counted by the per-pull ledger instance. 0 on a dry-run (no ledger).
         settled_skipped=ledger.newly_settled_skipped if ledger is not None else 0,
+        # The FETCH-EXHAUSTED subset (review round 1, MAJOR 1.4) — named
+        # SEPARATELY by the verdict note, never "vendor confirmed no-data".
+        settled_exhausted=ledger.newly_exhausted_failed if ledger is not None else 0,
         # Vendor-behaviour honesty counters (DEC-VENDOR-CONFLICT-SURFACE-001):
         # conflicts/dup-drops SUM across passes (keep-first sink — a re-pulled
         # round re-records only what it re-touched); the delta MAX-folds.
@@ -2458,6 +2472,7 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         # the honest settle tally ride the report (see `HistoricalPullReport.verdict`).
         mass_empty_cause=minute.mass_empty_cause,
         settled_skipped=minute.settled_skipped,
+        settled_exhausted=minute.settled_exhausted,
         # DEC-FNO-EXPIRY-SCOPE-001: the honest out-of-scope tallies (0/0 unscoped).
         expiries_out_of_scope=scoped.expiries_out_of_scope,
         contracts_out_of_scope=scoped.contracts_out_of_scope,

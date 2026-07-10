@@ -133,15 +133,14 @@ def test_sigkill_survivor_intent_resumes_full_pipeline_on_fresh_app(
         assert spot_calls[0]["dry_run"] is False
         # The completed resume cleared the durable intent.
         _wait_for(lambda: not intent_store.path.exists())
-        # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the
-        # successful resume is no longer silent — the NON-critical amber
-        # notice names the launch (supersedes the pre-fix "no banner on
-        # success" pin; the next real pull's clear_banner_after_start or a
-        # newer payload retires it).
-        banner = intent_store.banner.snapshot()
-        assert banner is not None
-        assert banner["level"] == "notice"
-        assert "pull auto-resume LAUNCHED" in banner["message"]
+        # ANNOUNCE-ON-LAUNCH lifecycle (DEC-AUTO-RESUME-ZERO-SURPRISES-001 ×
+        # review round 1, minor 19): the launch notice announces the RUNNING
+        # pull (pinned mid-run by the gated route test) — and the run's OWN
+        # end retires it via the on_finally hook (`retire_resume_launch_notice`,
+        # identity-gated), so the completed resume leaves NO stale
+        # "a pull is running" banner (supersedes the interim
+        # notice-survives-completion pin).
+        _wait_for(lambda: intent_store.banner.snapshot() is None)
 
 
 def test_peer_running_pull_defers_resume_then_completion_clears_the_intent(

@@ -1220,10 +1220,15 @@ def _process_window_tail(
         # FAILED + return a transient outcome (NOT a symbol-quarantine, NOT a rate-controller
         # step: a lock-acquire timeout is OUR partition contention and a write-deadline is OUR
         # wedged-disk hang — both are our-pipeline stalls, not vendor pressure, so the rate
-        # stays unchanged). The window re-pulls next round; the worker / fetch lane is freed
-        # instead of pinned until the 600 s watchdog kill. ``error_type`` (the class name)
-        # distinguishes ``PartitionLockTimeout`` (lock acquire) from ``WriteDeadlineExceeded``
-        # (hung durable write) in the ledger + the WARNING below.
+        # stays unchanged). The window re-pulls next round — and keeps re-pulling on EVERY
+        # later pull until the volume/lock recovers: these two error-type strings are in the
+        # ledger's FAILED_STREAK_EXEMPT_ERRORS set (review round 1, MAJOR 1.8a), so a local
+        # deferral never counts toward the fetch-exhausted FAILED→SKIPPED terminal settle —
+        # the re-pull promise here holds BECAUSE of that exclusion. The worker / fetch lane
+        # is freed instead of pinned until the 600 s watchdog kill. ``error_type`` (the class
+        # name) distinguishes ``PartitionLockTimeout`` (lock acquire) from
+        # ``WriteDeadlineExceeded`` (hung durable write) in the ledger + the WARNING below —
+        # and IS the exemption's match key, so it must stay the exact class name.
         defer_seconds = (
             exc.timeout_seconds if isinstance(exc, PartitionLockTimeout) else exc.deadline_seconds
         )

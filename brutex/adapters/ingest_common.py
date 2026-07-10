@@ -867,6 +867,16 @@ class PullVerdict:
     CIRCUIT-BREAKER-001 honest-verdict rule). When > 0 the ``action`` text SAYS so
     (count + the ``brutex reopen-skipped`` re-verify hint) on EVERY kind — a pull
     that permanently settled windows may never read "No action needed"."""
+    settled_exhausted: int = 0
+    """The FETCH-EXHAUSTED subset of :attr:`settled_skipped` (review round 1,
+    MAJOR 1.4 — DEC-AUTO-RESUME-ZERO-SURPRISES-001): windows settled because
+    every fetch ERRORED :data:`~brutex.data.window_ledger.FAILED_TERMINAL_THRESHOLD`
+    consecutive times (:attr:`~brutex.data.window_ledger.WindowLedger.newly_exhausted_failed`).
+    The settle note names these SEPARATELY — calling them "vendor confirmed
+    no-data" would be the exact lie the distinct ledger stamp exists to prevent
+    (the vendor never confirmed anything). Always ``0 <= settled_exhausted <=
+    settled_skipped`` from the ledger's tallies; a defensive clamp in the note
+    builder keeps a violating caller from rendering a negative count."""
 
     @property
     def needs_operator(self) -> bool:
@@ -909,6 +919,7 @@ class PullVerdict:
             "completed": self.completed,
             "auth_cause": self.auth_cause,
             "settled_skipped": self.settled_skipped,
+            "settled_exhausted": self.settled_exhausted,
         }
 
 
@@ -923,6 +934,7 @@ def classify_pull(
     quota_exhausted: bool = False,
     mass_empty_cause: str | None = None,
     settled_skipped: int = 0,
+    settled_exhausted: int = 0,
 ) -> PullVerdict:
     """Classify a finished pull into ONE prioritised, actionable :class:`PullVerdict`.
 
@@ -963,6 +975,15 @@ def classify_pull(
     count and the ``brutex reopen-skipped`` re-verify path: a pull that permanently
     settled windows may never read as a bare "No action needed".
 
+    *settled_exhausted* (review round 1, MAJOR 1.4 —
+    DEC-AUTO-RESUME-ZERO-SURPRISES-001) is the FETCH-EXHAUSTED subset of
+    *settled_skipped*
+    (:attr:`~brutex.data.window_ledger.WindowLedger.newly_exhausted_failed`):
+    windows settled because every fetch ERRORED. The note names them
+    SEPARATELY — never as "permanent no-data" (the vendor never confirmed
+    anything for them). Both production verdict builders thread the pair from
+    the ONE per-pull ledger instance.
+
     Pure + deterministic (no I/O / clock). ``auth_cause`` is preserved ONLY on
     the ``auth_expired`` verdict.
     """
@@ -975,6 +996,7 @@ def classify_pull(
             completed,
             auth_cause,
             settled_skipped=settled_skipped,
+            settled_exhausted=settled_exhausted,
         )
     if mass_empty_cause is not None:
         # The breaker's own message carries the counts (empty/observed/consecutive) —
@@ -987,6 +1009,7 @@ def classify_pull(
             completed,
             None,
             settled_skipped=settled_skipped,
+            settled_exhausted=settled_exhausted,
         )
         return replace(verdict, action=f"{mass_empty_cause} {verdict.action}")
     if quota_exhausted:
@@ -998,6 +1021,7 @@ def classify_pull(
             completed,
             None,
             settled_skipped=settled_skipped,
+            settled_exhausted=settled_exhausted,
         )
     if still_failed_windows > 0:
         # Genuine retryable WINDOWS remain (transient 429/timeout): a re-pull / the
@@ -1010,6 +1034,7 @@ def classify_pull(
             completed,
             None,
             settled_skipped=settled_skipped,
+            settled_exhausted=settled_exhausted,
         )
     if failed_pairs > 0:
         # No retryable windows — the ONLY "failures" are quarantined symbols (not on Groww,
@@ -1023,6 +1048,7 @@ def classify_pull(
             completed,
             None,
             settled_skipped=settled_skipped,
+            settled_exhausted=settled_exhausted,
         )
     if completed == 0 and no_data > 0:
         return _make_verdict(
@@ -1033,6 +1059,7 @@ def classify_pull(
             completed,
             None,
             settled_skipped=settled_skipped,
+            settled_exhausted=settled_exhausted,
         )
     return _make_verdict(
         "clean",
@@ -1042,24 +1069,47 @@ def classify_pull(
         completed,
         None,
         settled_skipped=settled_skipped,
+        settled_exhausted=settled_exhausted,
     )
 
 
-def _settled_skipped_note(settled_skipped: int) -> str:
+def _settled_skipped_note(settled_skipped: int, settled_exhausted: int = 0) -> str:
     """The honest-verdict settle note appended to EVERY verdict that settled windows.
 
     DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001: names the count + the re-verify path, so
     a permanent settle is never silent (register R2 — "surface settle counts in the
-    verdict; make SKIPPED reversible"). Pure + O(1).
+    verdict; make SKIPPED reversible"). Review round 1, MAJOR 1.4
+    (DEC-AUTO-RESUME-ZERO-SURPRISES-001): *settled_exhausted* — the
+    FETCH-EXHAUSTED subset of *settled_skipped* — is named SEPARATELY: those
+    windows settled because EVERY fetch ERRORED, so folding them into the
+    "permanent no-data" wording was factually false (the vendor never answered
+    — exactly the lie the ledger's distinct settle stamp exists to prevent);
+    only the remainder reads as vendor-confirmed no-data. Pure + O(1); the
+    subset is defensively clamped into ``[0, settled_skipped]`` so a violating
+    caller can never render a negative count.
     """
-    return (
-        f"NOTE: {settled_skipped} window(s) were settled as permanent no-data (SKIPPED) "
-        "this pull. If that is unexpected (a vendor soft-throttle or a mis-addressed "
+    exhausted = min(max(settled_exhausted, 0), settled_skipped)
+    no_data = settled_skipped - exhausted
+    parts: list[str] = []
+    if no_data > 0:
+        parts.append(
+            f"NOTE: {no_data} window(s) were settled as permanent no-data (SKIPPED) this pull."
+        )
+    if exhausted > 0:
+        parts.append(
+            f"NOTE: {exhausted} window(s) settled after repeated fetch failures "
+            "(SKIPPED, exhausted — every fetch ERRORED; the vendor never confirmed "
+            "no-data): inspect the failure cause (each row's stamp names its last "
+            "error), then `brutex reopen-skipped`."
+        )
+    parts.append(
+        "If that is unexpected (a vendor soft-throttle or a mis-addressed "
         "symbol can fake no-data), run `brutex reopen-skipped` to re-open them "
         "(`--symbol`/`--market` scope it, `--limit N` bounds a sample re-verify), then "
         "re-pull — re-opened (REOPENED) windows are breaker-exempt deliberate "
         "re-checks, so the re-verify pull cannot re-trip the mass-empty breaker on them."
     )
+    return " ".join(parts)
 
 
 def _make_verdict(
@@ -1071,16 +1121,19 @@ def _make_verdict(
     auth_cause: str | None,
     *,
     settled_skipped: int = 0,
+    settled_exhausted: int = 0,
 ) -> PullVerdict:
     """Build a :class:`PullVerdict` for *kind* with the canonical headline + action.
 
     When *settled_skipped* > 0 the settle note REPLACES a bare "No action needed."
     action (never both — a settling pull is not action-free) and is APPENDED to any
-    other action text (the primary instruction stays first).
+    other action text (the primary instruction stays first). *settled_exhausted*
+    (the FETCH-EXHAUSTED subset — review round 1, MAJOR 1.4) makes the note name
+    exhausted windows separately from vendor-confirmed no-data settles.
     """
     action = _ACTION[kind]
     if settled_skipped > 0:
-        note = _settled_skipped_note(settled_skipped)
+        note = _settled_skipped_note(settled_skipped, settled_exhausted)
         action = note if action == _ACTION["clean"] else f"{action} {note}"
     return PullVerdict(
         kind=kind,
@@ -1092,6 +1145,7 @@ def _make_verdict(
         completed=completed,
         auth_cause=auth_cause,
         settled_skipped=settled_skipped,
+        settled_exhausted=settled_exhausted,
     )
 
 

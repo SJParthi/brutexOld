@@ -19,7 +19,9 @@ from brutex.data.window_ledger import (
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
     FAILED,
+    FAILED_STREAK_EXEMPT_ERRORS,
     FAILED_TERMINAL_THRESHOLD,
+    MAX_EXHAUSTED_SETTLES_PER_PULL,
     PLANNED,
     REOPENED_MARKER,
     SETTLED_STATUSES,
@@ -2247,6 +2249,16 @@ class TestFetchExhaustedReason:
         assert reason == "repeated fetch failure (5 failed attempt(s), exhausted)"
         assert is_fetch_exhausted_settle_reason(reason) is True
 
+    def test_reason_embeds_the_causal_error_and_round_trips(self) -> None:
+        # Minor 11 (review round 1): the settle stamp CARRIES the causal error
+        # type so "inspect the failure cause" is actionable — and the prefix +
+        # suffix survive, so the predicate keys both shapes.
+        reason = fetch_exhausted_settle_reason(5, last_error="GrowwServerError")
+        assert reason == (
+            "repeated fetch failure (5 failed attempt(s), last error GrowwServerError, exhausted)"
+        )
+        assert is_fetch_exhausted_settle_reason(reason) is True
+
     def test_predicate_rejects_none_and_foreign_reasons(self) -> None:
         assert is_fetch_exhausted_settle_reason(None) is False
         assert is_fetch_exhausted_settle_reason("GrowwServerError") is False
@@ -2293,7 +2305,9 @@ class TestFetchExhaustedSettle:
         rec = ledger.records()[0]
         assert rec.status == SKIPPED
         assert is_fetch_exhausted_settle_reason(rec.last_error)
-        assert rec.last_error == fetch_exhausted_settle_reason(FAILED_TERMINAL_THRESHOLD)
+        assert rec.last_error == fetch_exhausted_settle_reason(
+            FAILED_TERMINAL_THRESHOLD, last_error="GrowwServerError"
+        )
         assert rec.failed_streak == FAILED_TERMINAL_THRESHOLD
         assert ledger.is_skippable(_key()) is True
         # The distinct verdict tally + the generic one both count it.
@@ -2352,7 +2366,7 @@ class TestFetchExhaustedSettle:
         # The next UNsuppressed failure settles honestly (streak 6 named).
         assert _fail(ledger, times=1) == SKIPPED
         assert ledger.records()[0].last_error == fetch_exhausted_settle_reason(
-            FAILED_TERMINAL_THRESHOLD + 1
+            FAILED_TERMINAL_THRESHOLD + 1, last_error="GrowwServerError"
         )
 
     def test_degraded_demotion_never_bumps_or_settles_the_failure_run(self) -> None:
@@ -2457,7 +2471,9 @@ class TestFetchExhaustedSettle:
             _key(), raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=_NOW
         )
         assert status == SKIPPED
-        assert restored.records()[0].last_error == fetch_exhausted_settle_reason(2)
+        assert restored.records()[0].last_error == fetch_exhausted_settle_reason(
+            2, last_error="GrowwServerError"
+        )
 
     def test_plan_and_seed_rows_start_with_zero_failed_streak(self) -> None:
         ledger = WindowLedger()
@@ -2481,3 +2497,149 @@ class TestFetchExhaustedSettle:
         assert rec.empty_streak == EMPTY_TERMINAL_THRESHOLD
         assert not is_fetch_exhausted_settle_reason(rec.last_error)
         assert rec.failed_streak == 0
+
+
+def _defer(ledger: WindowLedger, *, error: str, times: int = 1, symbol: str = "NIFTY") -> str:
+    """Record `times` LOCAL-deferral FAILED outcomes (the write-defer classes)."""
+    status = ""
+    for _ in range(times):
+        status = ledger.record(
+            _key(symbol),
+            raw_bars=0,
+            error_type=error,
+            bars_appended=0,
+            now=_NOW,
+        )
+    return status
+
+
+class TestFetchExhaustedExemptDeferrals:
+    """Review round 1, MAJOR 1.8a — local deferrals never consume the K budget.
+
+    ``PartitionLockTimeout`` / ``WriteDeadlineExceeded`` are the spines'
+    write-defer records: the FETCH succeeded, only the durable write stalled,
+    so cementing the window ``SKIPPED`` off K deferrals would drop
+    vendor-available bars from the automatic re-pull — falsifying the live
+    #999 contract (``write_deadline.py``: "defers the same window(s) every
+    pull until the volume recovers … never silently losing data").
+    """
+
+    def test_exempt_names_match_the_real_error_classes(self) -> None:
+        # The exemption keys on the ledger's stored error-TYPE strings — pin
+        # them against the REAL exception classes so a rename can never
+        # silently sever it (the set would go dead and deferrals would cement).
+        from brutex.data.errors import PartitionLockTimeout, WriteDeadlineExceeded
+
+        expected = {PartitionLockTimeout.__name__, WriteDeadlineExceeded.__name__}
+        assert expected == FAILED_STREAK_EXEMPT_ERRORS
+
+    def test_lock_timeout_deferrals_never_settle_exhausted(self) -> None:
+        # The confirmed 1.8 repro shape: 5 (and more) consecutive deferrals —
+        # pre-fix the 5th settled SKIPPED with the false "repeated fetch
+        # failure … exhausted" stamp; now the window stays re-pullable FOREVER.
+        ledger = WindowLedger()
+        status = _defer(ledger, error="PartitionLockTimeout", times=FAILED_TERMINAL_THRESHOLD + 2)
+        rec = ledger.records()[0]
+        assert status == FAILED
+        assert rec.status == FAILED
+        assert rec.failed_streak == 0, "a local deferral never bumps the streak"
+        assert rec.last_error == "PartitionLockTimeout"
+        assert ledger.is_skippable(_key()) is False
+        assert ledger.newly_exhausted_failed == 0
+        assert ledger.newly_settled_skipped == 0
+
+    def test_write_deadline_deferrals_never_settle_exhausted(self) -> None:
+        ledger = WindowLedger()
+        status = _defer(ledger, error="WriteDeadlineExceeded", times=FAILED_TERMINAL_THRESHOLD + 2)
+        assert status == FAILED
+        assert ledger.records()[0].failed_streak == 0
+        assert ledger.is_skippable(_key()) is False
+        assert ledger.newly_exhausted_failed == 0
+
+    def test_deferral_preserves_a_genuine_failure_run(self) -> None:
+        # PRESERVE, never reset (the empty_streak-under-FAILED convention): a
+        # deferral is no evidence about the vendor either way, so genuine
+        # vendor-failure progress survives it and the settle still lands at K
+        # GENUINE failures.
+        ledger = WindowLedger()
+        _fail(ledger, times=3)
+        _defer(ledger, error="WriteDeadlineExceeded")
+        assert ledger.records()[0].failed_streak == 3, "preserved across the deferral"
+        assert _fail(ledger, times=FAILED_TERMINAL_THRESHOLD - 3) == SKIPPED
+        assert ledger.newly_exhausted_failed == 1
+
+    def test_deferral_never_settles_on_a_preexisting_streak_at_threshold(self) -> None:
+        # A suppress_settle-era streak can reach K without settling; the settle
+        # must then fire only on a GENUINE failure record — never ON a deferral
+        # (which would stamp the exhausted reason onto a write stall).
+        ledger = WindowLedger()
+        _fail(ledger, times=FAILED_TERMINAL_THRESHOLD, suppress_settle=True)
+        assert ledger.records()[0].failed_streak == FAILED_TERMINAL_THRESHOLD
+        status = _defer(ledger, error="PartitionLockTimeout")
+        assert status == FAILED
+        assert ledger.records()[0].status == FAILED
+        assert ledger.newly_exhausted_failed == 0
+        # The next GENUINE failure settles honestly.
+        assert _fail(ledger, times=1) == SKIPPED
+        assert ledger.newly_exhausted_failed == 1
+
+
+class TestMassExhaustionRail:
+    """Review round 1, MAJOR 1.8b — the per-pull cap on exhausted settles."""
+
+    @staticmethod
+    def _exhaust(ledger: WindowLedger, symbol: str) -> str:
+        status = ""
+        for _ in range(FAILED_TERMINAL_THRESHOLD):
+            status = ledger.record(
+                _key(symbol),
+                raw_bars=0,
+                error_type="GrowwServerError",
+                bars_appended=0,
+                now=_NOW,
+            )
+        return status
+
+    def test_cap_engages_beyond_the_per_pull_budget_with_one_warn(self) -> None:
+        ledger = WindowLedger()
+        with structlog.testing.capture_logs() as logs:
+            for i in range(MAX_EXHAUSTED_SETTLES_PER_PULL):
+                assert self._exhaust(ledger, f"S{i:03d}") == SKIPPED
+            # The cap-th + 1 window would settle — the rail keeps it FAILED.
+            assert self._exhaust(ledger, "OVERFLOW-1") == FAILED
+            assert self._exhaust(ledger, "OVERFLOW-2") == FAILED
+        over1 = next(r for r in ledger.records() if r.security_id == "OVERFLOW-1")
+        assert over1.status == FAILED, "beyond the cap the window stays re-pullable"
+        assert over1.failed_streak >= FAILED_TERMINAL_THRESHOLD
+        assert not is_fetch_exhausted_settle_reason(over1.last_error)
+        assert ledger.newly_exhausted_failed == MAX_EXHAUSTED_SETTLES_PER_PULL
+        assert ledger.exhausted_settles_suppressed == 2
+        # ONE summary WARN for the whole pull — never one per suppressed window
+        # — and the per-settle WARN is bounded at the cap (minor 10).
+        suppressed = [
+            e for e in logs if e["event"] == "window_ledger.fetch_exhausted_settle_suppressed"
+        ]
+        assert len(suppressed) == 1
+        assert suppressed[0]["log_level"] == "warning"
+        assert suppressed[0]["cap"] == MAX_EXHAUSTED_SETTLES_PER_PULL
+        settled_warns = [e for e in logs if e["event"] == "window_ledger.fetch_exhausted_settled"]
+        assert len(settled_warns) == MAX_EXHAUSTED_SETTLES_PER_PULL
+
+    def test_below_the_cap_settles_exactly_as_before(self) -> None:
+        # The genuine vendor-error window still settles at K=5 (the existing
+        # convergence contract) — the rail only engages past the budget.
+        ledger = WindowLedger()
+        assert self._exhaust(ledger, "ONLY") == SKIPPED
+        assert ledger.newly_exhausted_failed == 1
+        assert ledger.exhausted_settles_suppressed == 0
+
+    def test_settle_warn_carries_the_causal_error(self) -> None:
+        # Minor 11: the WARN + the stored stamp both preserve the cause.
+        ledger = WindowLedger()
+        with structlog.testing.capture_logs() as logs:
+            self._exhaust(ledger, "CAUSE")
+        warn = next(e for e in logs if e["event"] == "window_ledger.fetch_exhausted_settled")
+        assert warn["causal_error"] == "GrowwServerError"
+        rec = ledger.records()[0]
+        assert rec.last_error is not None
+        assert "last error GrowwServerError" in rec.last_error

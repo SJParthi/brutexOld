@@ -25,10 +25,12 @@ from brutex.dashboard.pull_intent import (
     MAX_AUTO_RESTARTS,
     PULL_INTENT_FILENAME,
     PULL_INTENT_RESUME_ENV,
+    RESUME_LAUNCH_NOTICE_PREFIX,
     PullIntent,
     PullIntentStore,
     ResumeAction,
     ResumeBanner,
+    ResumeLaunchRefused,
     build_resume_error_hook,
     clear_banner_after_start,
     emit_restart_cap_alert,
@@ -39,6 +41,7 @@ from brutex.dashboard.pull_intent import (
     resolve_pull_intent_resume,
     restart_cap_message,
     resume_launch_message,
+    retire_resume_launch_notice,
     run_auto_resume,
     run_legacy_resume,
     synthesize_legacy_intent,
@@ -491,7 +494,11 @@ def test_active_escape_hatch_off_short_circuits(tmp_path: Path) -> None:
 
 def test_cap_message_names_scope_and_dates() -> None:
     msg = restart_cap_message(_intent(restarts=2), MAX_AUTO_RESTARTS)
-    assert "2 automatic restart(s)" in msg
+    # MAJOR 1.7 (review round 1): the burnt token counts launch ATTEMPTS —
+    # crashed AND refused — and the wording says so (the token is never
+    # un-bumped on a refusal, so "restarts fired" would over-claim).
+    assert "2 automatic launch attempt(s)" in msg
+    assert "including refused starts" in msg
     assert "NIFTY,BANKNIFTY" in msg
     assert "2024-01-01" in msg
     assert PULL_INTENT_FILENAME in msg
@@ -951,7 +958,12 @@ def test_resume_launch_message_names_whole_universe_mode() -> None:
         _intent(symbols=None, symbol=None, from_date=None, to_date=None, restarts=1)
     )
     assert "whole-universe resume" in msg
-    assert "WHOLE admitted universe" in msg
+    # Minor 17 (review round 1): honest scope — "the full configured universe",
+    # never "every underlying" (NTM names are REFERENCE_ONLY) and never a
+    # hardcoded target figure (the app binding logs the real count).
+    assert "the full configured universe" in msg
+    assert "every underlying" not in msg
+    assert "776" not in msg
     assert "from: default, to: default" in msg
     assert f"restart 1 of {MAX_AUTO_RESTARTS}" in msg
     assert "/api/v1/pull/stop" in msg  # the stop lever is NAMED
@@ -1133,3 +1145,149 @@ def test_error_hook_banner_failure_still_alerts(
     hook = build_resume_error_hook(store)
     hook(RuntimeError("resume died"))  # must not raise
     assert len(fired) == 1  # the alert leg is independent of the banner leg
+
+
+# ── review round 1, MAJOR 1.7: a REFUSED start never announces "LAUNCHED" ────
+
+
+def _refusing_launch(_intent: PullIntent) -> None:
+    raise ResumeLaunchRefused("BackgroundPullJob.start refused: peer flock held")
+
+
+def test_refused_start_returns_launch_failed_never_fired(tmp_path: Path) -> None:
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(restarts=0))
+    action = run_auto_resume(store, launch=_refusing_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.LAUNCH_FAILED, "a refused start may never read FIRED"
+
+
+def test_refused_start_keeps_intent_and_banners_the_honest_refusal(tmp_path: Path) -> None:
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(restarts=0))
+    alerted: list[Exception] = []
+    run_auto_resume(
+        store,
+        launch=_refusing_launch,
+        probe_singleflight=lambda: True,
+        launch_alert=alerted.append,
+    )
+    # Intent KEPT (transient refusal — the next boot re-tries, cap-bounded)
+    # with the token honestly burnt.
+    reloaded = store.load()
+    assert reloaded is not None
+    assert reloaded.restarts == 1
+    # The banner is the CRITICAL refusal — wording per the round-1 ruling —
+    # never the fabricated "pull auto-resume LAUNCHED" notice.
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == BANNER_LEVEL_CRITICAL
+    assert "pull auto-resume launch REFUSED" in banner["message"]
+    assert "intent kept" in banner["message"]
+    assert f"attempt 1 of {MAX_AUTO_RESTARTS}" in banner["message"]
+    assert "including refused starts" in banner["message"]
+    assert RESUME_LAUNCH_NOTICE_PREFIX not in banner["message"]
+    # Announce-on-failure fired once.
+    assert len(alerted) == 1
+    assert isinstance(alerted[0], ResumeLaunchRefused)
+
+
+def test_refused_start_never_logs_resumed(tmp_path: Path) -> None:
+    import structlog.testing
+
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(restarts=0))
+    with structlog.testing.capture_logs() as logs:
+        run_auto_resume(store, launch=_refusing_launch, probe_singleflight=lambda: True)
+    events = [e["event"] for e in logs]
+    assert "pull_intent.resumed" not in events, "FIRED telemetry must never fabricate"
+    assert "pull_intent.launch_refused_not_started" in events
+
+
+def test_refused_starts_march_to_the_cap_not_past_it(tmp_path: Path) -> None:
+    # The recorded smaller-correct-change decision: the burnt token stands on
+    # a refusal, so repeat refusals reach OVER_CAP (bounded — never a livelock
+    # past the cap) and the cap wording counts attempts incl. refused starts.
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(restarts=0))
+    for _ in range(MAX_AUTO_RESTARTS):
+        assert (
+            run_auto_resume(store, launch=_refusing_launch, probe_singleflight=lambda: True)
+            is ResumeAction.LAUNCH_FAILED
+        )
+    assert (
+        run_auto_resume(store, launch=_refusing_launch, probe_singleflight=lambda: True)
+        is ResumeAction.OVER_CAP
+    )
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert "including refused starts" in banner["message"]
+
+
+def test_notice_message_threads_the_callers_cap(tmp_path: Path) -> None:
+    # Minor 17: the announce quotes the CALLER's max_restarts, never the
+    # module default while a different cap is enforced.
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(restarts=0))
+    action = run_auto_resume(
+        store, launch=lambda _i: None, probe_singleflight=lambda: True, max_restarts=7
+    )
+    assert action is ResumeAction.FIRED
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert "restart 1 of 7" in banner["message"]
+
+
+# ── review round 1, minor 19: the launch notice retires when the pull ends ───
+
+
+def test_retire_clears_only_the_launch_notice(tmp_path: Path) -> None:
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level=BANNER_LEVEL_NOTICE, message=resume_launch_message(_intent()))
+    assert retire_resume_launch_notice(store) is True
+    assert store.banner.snapshot() is None
+    # Idempotent: a second retire clears nothing (and logs nothing).
+    assert retire_resume_launch_notice(store) is False
+
+
+def test_retire_never_clobbers_a_critical_banner(tmp_path: Path) -> None:
+    # A CRITICAL banner set mid-run (a crash-loop refusal) outranks the
+    # run-end notice retire — identity-gated on level + prefix.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level=BANNER_LEVEL_CRITICAL, message="pull auto-resume HALTED: …")
+    assert retire_resume_launch_notice(store) is False
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == BANNER_LEVEL_CRITICAL
+
+
+def test_retire_never_clobbers_a_foreign_notice(tmp_path: Path) -> None:
+    # A NEWER foreign notice (the stop route's acknowledgement) survives.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level=BANNER_LEVEL_NOTICE, message="pull stop requested — …")
+    assert retire_resume_launch_notice(store) is False
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["message"].startswith("pull stop requested")
+
+
+def test_launch_message_starts_with_the_retire_prefix(tmp_path: Path) -> None:
+    # The ONE-prefix law: the announce and the retire share the constant, so
+    # neither can drift onto a second spelling.
+    assert resume_launch_message(_intent()).startswith(RESUME_LAUNCH_NOTICE_PREFIX)
+    assert resume_launch_message(
+        _intent(symbols=None, symbol=None, from_date=None, to_date=None)
+    ).startswith(RESUME_LAUNCH_NOTICE_PREFIX)
+
+
+def test_clear_notice_with_prefix_is_atomic_and_exactly_gated(tmp_path: Path) -> None:
+    banner = ResumeBanner()
+    # Unset → False.
+    assert banner.clear_notice_with_prefix("pull auto-resume LAUNCHED") is False
+    # Wrong prefix → survives.
+    banner.set(level=BANNER_LEVEL_NOTICE, message="something else entirely")
+    assert banner.clear_notice_with_prefix("pull auto-resume LAUNCHED") is False
+    assert banner.snapshot() is not None
+    # Matching notice → cleared.
+    banner.set(level=BANNER_LEVEL_NOTICE, message="pull auto-resume LAUNCHED [x]: …")
+    assert banner.clear_notice_with_prefix("pull auto-resume LAUNCHED") is True
+    assert banner.snapshot() is None

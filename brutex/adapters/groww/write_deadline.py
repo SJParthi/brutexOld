@@ -46,7 +46,12 @@ shard invariant), a LATER window of the SAME partition that lands on that consum
 the still-held in-process lock — but that later append is ALSO wrapped here, so it too defers in
 bounded time rather than wedging. A persistently-wedged volume therefore defers the same window(s)
 every pull until the volume recovers (the operator's signal to act), never silently losing data
-(idempotent keep-first sink + the durable window ledger). The number of abandoned daemons is
+(idempotent keep-first sink + the durable window ledger). That indefinite-re-pull promise holds
+BECAUSE the ledger EXEMPTS the deferral error types (``WriteDeadlineExceeded`` +
+``PartitionLockTimeout`` — ``window_ledger.FAILED_STREAK_EXEMPT_ERRORS``, review round 1 MAJOR
+1.8a) from the fetch-exhausted ``FAILED`` -> ``SKIPPED`` terminal settle: a local write stall's
+fetch SUCCEEDED, so its FAILED records never consume the K-attempt exhaustion budget and the
+window can never be cemented un-pullable by its own deferrals. The number of abandoned daemons is
 bounded by the distinct wedged partitions, not by the window count.
 
 This module is import-cheap: it imports only :func:`run_with_deadline`, the constants, the

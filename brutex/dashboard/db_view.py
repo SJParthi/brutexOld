@@ -4784,12 +4784,16 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
     * ``SKIPPED`` carrying a FETCH-EXHAUSTED settle stamp
       (DEC-AUTO-RESUME-ZERO-SURPRISES-001 — the ledger settled a window that
       FAILED :data:`~brutex.data.window_ledger.FAILED_TERMINAL_THRESHOLD`
-      separate pulls for a NON-empty reason, stamping
+      CONSECUTIVE recorded attempts for a NON-empty reason — accumulated
+      across pulls AND across one pull's bounded retry re-records (the
+      test-pinned counting envelope on the threshold constant; NOT
+      "separate pulls"), stamping
       :func:`~brutex.data.window_ledger.fetch_exhausted_settle_reason` as
       ``last_error``) → ``"permanently FAILED — <stamp>; inspect, then
       re-open via `brutex reopen-skipped`"``: the "vendor confirmed no
       trades" wording would be a LIE (every fetch ERRORED — the vendor never
-      confirmed anything), and the label must name the recovery lever.
+      confirmed anything), and the label must name the recovery lever (the
+      stamp itself carries the CAUSAL error type since the minor-11 fold).
     * ``SKIPPED`` carrying a data-completeness DEMOTION reason
       (:data:`~brutex.data.window_ledger.DEMOTED_SETTLE_REASONS` —
       ``ALL_FILTERED`` / ``INTERIOR_GAP`` / ``SUSPECTED_PARTIAL`` plus the

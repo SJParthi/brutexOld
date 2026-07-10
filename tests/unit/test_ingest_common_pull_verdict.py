@@ -186,6 +186,7 @@ class TestPullVerdictSerialisation:
             "completed": 0,
             "auth_cause": "DH-906",
             "settled_skipped": 0,
+            "settled_exhausted": 0,
         }
 
     def test_needs_operator_false_for_clean_and_known_gap(self) -> None:
@@ -467,3 +468,79 @@ class TestReVerifyGuidanceTexts:
         )
         assert "--limit N" in verdict.action
         assert "breaker-exempt" in verdict.action
+
+
+class TestSettledExhaustedHonesty:
+    """Review round 1, MAJOR 1.4 — exhausted settles are never 'permanent no-data'."""
+
+    def _verdict(self, *, settled_skipped: int, settled_exhausted: int) -> PullVerdict:
+        return classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=5,
+            settled_skipped=settled_skipped,
+            settled_exhausted=settled_exhausted,
+        )
+
+    def test_mixed_settle_names_both_counts_correctly(self) -> None:
+        # 5 settles, 2 of them exhausted: the no-data wording covers ONLY the
+        # 3 genuine settles; the 2 exhausted ones are named as fetch failures.
+        verdict = self._verdict(settled_skipped=5, settled_exhausted=2)
+        assert "3 window(s) were settled as permanent no-data" in verdict.action
+        assert "2 window(s) settled after repeated fetch failures" in verdict.action
+        assert "every fetch ERRORED" in verdict.action
+        assert "the vendor never confirmed no-data" in verdict.action
+        assert "reopen-skipped" in verdict.action
+        assert verdict.settled_skipped == 5
+        assert verdict.settled_exhausted == 2
+        assert verdict.to_dict()["settled_exhausted"] == 2
+
+    def test_all_exhausted_settle_never_reads_no_data(self) -> None:
+        # The pre-fix lie, pinned dead: an all-exhausted pull must carry ZERO
+        # "permanent no-data" wording — every fetch errored.
+        verdict = self._verdict(settled_skipped=2, settled_exhausted=2)
+        assert "permanent no-data" not in verdict.action
+        assert "2 window(s) settled after repeated fetch failures" in verdict.action
+
+    def test_zero_exhausted_keeps_the_prior_wording(self) -> None:
+        verdict = self._verdict(settled_skipped=4, settled_exhausted=0)
+        assert "4 window(s) were settled as permanent no-data" in verdict.action
+        assert "repeated fetch failures" not in verdict.action
+
+    def test_exhausted_clamped_into_the_skipped_total(self) -> None:
+        # Defensive: a violating caller (exhausted > skipped) never renders a
+        # negative no-data count — the subset is clamped.
+        verdict = self._verdict(settled_skipped=2, settled_exhausted=7)
+        assert "-" not in verdict.action.split("NOTE:")[1].split("window(s)")[0]
+        assert "2 window(s) settled after repeated fetch failures" in verdict.action
+        assert "permanent no-data" not in verdict.action
+
+    def test_exhausted_note_rides_non_clean_kinds_too(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=3,
+            failed_pairs=0,
+            no_data=0,
+            completed=1,
+            settled_skipped=1,
+            settled_exhausted=1,
+        )
+        assert verdict.kind == "transient_residual"
+        assert verdict.action.startswith("Re-pull to finish")
+        assert "settled after repeated fetch failures" in verdict.action
+
+    def test_default_zero_is_byte_identical(self) -> None:
+        # Omitting settled_exhausted reproduces the pre-feature action text.
+        with_default = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=5,
+            settled_skipped=3,
+        )
+        explicit = self._verdict(settled_skipped=3, settled_exhausted=0)
+        assert with_default.action == explicit.action
+        assert with_default.settled_exhausted == 0

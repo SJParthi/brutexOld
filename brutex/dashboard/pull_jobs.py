@@ -528,11 +528,16 @@ class BackgroundPullJob:
         self._empty_ambient_beats = 0
         #: COOPERATIVE stop flag (DEC-AUTO-RESUME-ZERO-SURPRISES-001 — the
         #: honest-minimum STOP control): set by :meth:`request_stop` (the
-        #: ``POST /api/v1/pull/stop`` route), read via :attr:`stop_requested`
-        #: by work bodies that OPT IN to consulting it (today: the pipeline
-        #: pull's ``run_full_pipeline(should_stop=…)`` phase boundaries).
-        #: CLEARED on every genuinely-starting :meth:`start` (a stale request
-        #: never poisons the next run). HONEST envelope (Golden Rule #10):
+        #: ``POST /api/v1/pull/stop`` route) UNDER ``self._lock``, read via
+        #: :attr:`stop_requested` by work bodies that OPT IN to consulting it
+        #: (today: the pipeline pull's ``run_full_pipeline(should_stop=…)``
+        #: phase boundaries). CLEARED inside :meth:`start`'s locked CLAIM block
+        #: (review round 1, MAJOR 1.6 — linearized with the ``_running`` flip,
+        #: so a stop that observed a live run always survives the clear; a
+        #: stale request from between runs never poisons the next run — a
+        #: guard-refused start also drops such a stale event, which by
+        #: definition targeted an already-finished run). HONEST envelope
+        #: (Golden Rule #10):
         #: this is ADVISORY — a work body that never consults it is unaffected
         #: (the sweep, single-symbol pulls, retry-failed), in-flight windows
         #: finish, and a process restart remains the only hard stop. It NEVER
@@ -669,6 +674,22 @@ class BackgroundPullJob:
             self._pull_id = run_pull_id
             self._foreign_beat_warned = False
             self._empty_ambient_beats = 0
+            # Per-run reset of the cooperative stop flag (DEC-AUTO-RESUME-ZERO-
+            # SURPRISES-001), LINEARIZED with the claim (review round 1, MAJOR
+            # 1.6): the clear runs INSIDE the same locked block that flips
+            # ``_running`` True, and :meth:`request_stop` sets-the-event AND
+            # reads ``_running`` under this SAME lock — so a stop that observed
+            # ``pull_running=True`` necessarily landed AFTER this clear and is
+            # NEVER wiped by it (pre-fix the clear ran after the seconds-scale
+            # cross-process guard acquisition, silently swallowing any stop that
+            # landed in that window while the route had already promised "stops
+            # at the next phase boundary"). A stale stop from between runs
+            # (``request_stop`` with no live run) is cleared here exactly as
+            # before, so it can never poison the fresh run; the
+            # singleflight-REFUSED rollback below deliberately does NOT restore
+            # the event — with ``_running`` False at claim time any pending
+            # event was stale by definition (its target run had already ended).
+            self._stop_event.clear()
         # Cross-process account-wide single-flight gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001).
         # Taken AFTER the in-process flag (so a same-process double-click is filtered by the
         # cheap flag first) but BEFORE any work is spawned. On contention a peer process is
@@ -709,11 +730,10 @@ class BackgroundPullJob:
             self._account_singleflight = None
         self._ledger_synced = ledger_synced
         self._pair_progress = False  # per-run reset; a phase opts in via set_phase
-        # Per-run reset of the cooperative stop flag (DEC-AUTO-RESUME-ZERO-
-        # SURPRISES-001): cleared HERE — strictly after every refusal path
-        # above — so only a genuinely-starting run resets it and a stale
-        # request_stop() from a prior run can never stop the fresh one.
-        self._stop_event.clear()
+        # NOTE: the cooperative stop flag is cleared INSIDE the locked claim
+        # block above (review round 1, MAJOR 1.6) — clearing it HERE (after the
+        # seconds-scale cross-process acquisition) silently swallowed a stop
+        # POST that landed mid-start while its route reply promised the stop.
         self._progress.start(total=total, detail=detail)
         # Wire the HUNG→HEALTHY recovery edge so a heartbeat landing after a HUNG
         # declaration clears the stalled-suspect marker (DEC-PIPELINE-STALL-HEARTBEAT-001).
@@ -1457,11 +1477,19 @@ class BackgroundPullJob:
         reacts, the in-flight phase finishes first, and a process restart
         remains the only hard stop — the ``False`` return tells the route to
         SAY when no run was live (the flag is still set, but the next
-        :meth:`start` clears it, so it stops nothing). Never touches the
+        :meth:`start` clears it, so it stops nothing). LINEARIZED against
+        :meth:`start` (review round 1, MAJOR 1.6): the set + the ``_running``
+        read happen under the SAME ``self._lock`` the start claim clears the
+        event under, so a ``True`` return is a GUARANTEE — the observed run's
+        clear already happened, the event survives, and the run genuinely
+        stops at its next consulted boundary (never the pre-fix silent swallow
+        where a stop landing during the cross-process guard acquisition was
+        wiped by the post-acquisition clear). Never touches the
         halt-exception machinery. O(1), idempotent, logged once per call.
         """
-        self._stop_event.set()
-        live = self.running
+        with self._lock:
+            self._stop_event.set()
+            live = self._running
         _LOG.info("pull_job.stop_requested", pull_running=live)
         return live
 
@@ -1469,8 +1497,10 @@ class BackgroundPullJob:
     def stop_requested(self) -> bool:
         """``True`` once :meth:`request_stop` fired for the CURRENT run — O(1).
 
-        Cleared by the next genuinely-starting :meth:`start` (see the per-run
-        reset there), so a stale request can never stop a fresh run.
+        Cleared inside the next :meth:`start`'s locked claim block (review
+        round 1, MAJOR 1.6), so a stale request can never stop a fresh run —
+        while a stop that observed THIS run live is guaranteed to survive
+        (the set + the liveness read are linearized under the same lock).
         """
         return self._stop_event.is_set()
 

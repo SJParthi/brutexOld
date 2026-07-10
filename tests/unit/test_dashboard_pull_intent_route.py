@@ -415,29 +415,39 @@ def test_resume_refires_the_same_quadruple_and_clears_on_completion(
         spot_calls.append(dict(kwargs))
         return _fake_spot(*args, **kwargs)
 
-    monkeypatch.setattr(app_module, "pull_all_spot", _spot)
+    gate = threading.Event()
+
+    def _gated_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        opened = gate.wait(timeout=10.0)
+        assert opened
+        return _spot(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _gated_spot)
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
     monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
     intent_store.write(
         PullIntent(symbols="NIFTY", symbol=None, from_date="2024-01-01", to_date="2024-02-01")
     )
     client.app.state.brutex_resume_pipeline()  # type: ignore[attr-defined]
+    # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): while the
+    # resumed pull RUNS the NON-critical notice banner names the launch, and
+    # it SURVIVED the launch's own clear_banner_after_start (ordering pin:
+    # start → clear → set-notice).
+    banner = intent_store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == "notice"
+    assert "intent resume" in banner["message"]
+    gate.set()
     assert _wait_for_job(client)["state"] == "done"
     # The SAME persisted dates reached the spot phase (never re-guessed).
     assert spot_calls[0]["from_date"] == "2024-01-01"
     assert spot_calls[0]["to_date"] == "2024-02-01"
     assert spot_calls[0]["dry_run"] is False
-    # The resumed run's completion cleared the intent (on_finally).
+    # The resumed run's completion cleared the intent (on_finally)…
     _wait_for(lambda: not intent_store.path.exists())
-    # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): a successful
-    # resume is no longer silent — the NON-critical notice banner names the
-    # launch, and it SURVIVES the launch's own clear_banner_after_start
-    # (ordering pin: start → clear → set-notice). Supersedes the pre-fix
-    # "no banner on success" assertion.
-    banner = intent_store.banner.snapshot()
-    assert banner is not None
-    assert banner["level"] == "notice"
-    assert "intent resume" in banner["message"]
+    # …and RETIRED the launch notice (review round 1, minor 19 — the banner
+    # told the operator a pull IS running; the run ended, so it must go).
+    _wait_for(lambda: intent_store.banner.snapshot() is None)
 
 
 def test_resume_stale_selection_clears_intent_and_raises_banner(
@@ -548,22 +558,37 @@ def test_legacy_seam_fires_whole_universe_pull_and_clears_on_completion(
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
     monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
     assert not intent_store.path.exists(), "the legacy seam starts from a bare lake"
+    gate = threading.Event()
+    inner_spot = spot_calls  # closure clarity — the recorder above
+
+    def _gated_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        opened = gate.wait(timeout=10.0)
+        assert opened
+        return _spot(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _gated_spot)
     client.app.state.brutex_resume_legacy()  # type: ignore[attr-defined]
-    assert _wait_for_job(client)["state"] == "done"
-    # The whole-universe defaults reached the spot phase (no fabricated dates).
-    assert spot_calls[0]["from_date"] is None
-    assert spot_calls[0]["to_date"] is None
-    assert spot_calls[0]["dry_run"] is False
-    # The resumed run's completion cleared the synthesized intent (on_finally).
-    _wait_for(lambda: not intent_store.path.exists())
     # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the legacy
-    # WHOLE-UNIVERSE re-fire — the loudest surprise — now names itself on the
-    # notice banner (supersedes the pre-fix "no banner on success" pin).
+    # WHOLE-UNIVERSE re-fire — the loudest surprise — names itself on the
+    # notice while it RUNS, with the honest scope wording (review round 1,
+    # minor 17: "the full configured universe", never "every underlying"
+    # nor a hardcoded target figure).
     banner = intent_store.banner.snapshot()
     assert banner is not None
     assert banner["level"] == "notice"
     assert "whole-universe resume" in banner["message"]
-    assert "WHOLE admitted universe" in banner["message"]
+    assert "the full configured universe" in banner["message"]
+    assert "every underlying" not in banner["message"]
+    gate.set()
+    assert _wait_for_job(client)["state"] == "done"
+    # The whole-universe defaults reached the spot phase (no fabricated dates).
+    assert inner_spot[0]["from_date"] is None
+    assert inner_spot[0]["to_date"] is None
+    assert inner_spot[0]["dry_run"] is False
+    # The resumed run's completion cleared the synthesized intent (on_finally)…
+    _wait_for(lambda: not intent_store.path.exists())
+    # …and RETIRED the launch notice (review round 1, minor 19).
+    _wait_for(lambda: intent_store.banner.snapshot() is None)
 
 
 def test_legacy_seam_peer_held_flock_skips_quietly(
@@ -586,3 +611,45 @@ def test_legacy_seam_peer_held_flock_skips_quietly(
         "the synthesized intent is cleaned on the peer skip — the next boot "
         "re-decides from the ledger, never an unconditional intent re-fire"
     )
+
+
+def test_resume_refused_start_never_announces_launched(
+    client: TestClient,
+    store: InstrumentStore,
+    intent_store: PullIntentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 1, MAJOR 1.7 — a refused BackgroundPullJob.start is never FIRED.
+
+    The documented probe→start TOCTOU shape, made deterministic: the peer
+    probe is pinned acquirable while a peer HOLDS the job-root flock, so the
+    launch body runs, `start()` refuses (started=False) — pre-fix the seam
+    still logged `pull_intent.resumed` and raised the site-wide
+    "pull auto-resume LAUNCHED" notice for a pull that was never running,
+    marching repeat boots to an OVER_CAP banner claiming "the pull keeps
+    dying" though it never launched once.
+    """
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    # Pin the probe acquirable (the TOCTOU: probe passes, start refuses).
+    monkeypatch.setattr(app_module, "probe_pull_singleflight", lambda _root: True)
+    intent_store.write(
+        PullIntent(symbols="NIFTY", symbol=None, from_date=None, to_date=None, restarts=0)
+    )
+    with pull_singleflight_lock(store.path.parent):
+        client.app.state.brutex_resume_pipeline()  # type: ignore[attr-defined]
+    # The intent SURVIVES (transient refusal — the next boot re-tries,
+    # cap-bounded) with the token honestly burnt.
+    reloaded = intent_store.load()
+    assert reloaded is not None
+    assert reloaded.restarts == 1
+    # NO fabricated launch state: the banner is the CRITICAL refusal naming
+    # the honest attempt count — never the "LAUNCHED" notice.
+    banner = intent_store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == "critical"
+    assert "pull auto-resume launch REFUSED" in banner["message"]
+    assert "intent kept" in banner["message"]
+    assert "including refused starts" in banner["message"]
+    assert "pull auto-resume LAUNCHED" not in banner["message"]
+    assert client.get("/api/v1/liveproof").json()["resume"]["level"] == "critical"
