@@ -73,7 +73,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final, assert_never
+from typing import TYPE_CHECKING, Final
 
 import fno_math
 import structlog
@@ -350,23 +350,25 @@ def _reduce_vwap_source_paisa(
     """
     match source:
         case PriceSource.OPEN:
-            result = open_paisa
+            return open_paisa
         case PriceSource.HIGH:
-            result = high_paisa
+            return high_paisa
         case PriceSource.LOW:
-            result = low_paisa
+            return low_paisa
         case PriceSource.CLOSE:
-            result = close_paisa
+            return close_paisa
         case PriceSource.HLC3:
             # VERBATIM the pre-axis line so the (HLC3, CLOSE) baseline is
             # byte-identical (Override 1 / the golden).
-            result = _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
-        case _:  # pragma: no cover — mypy-exhaustive over the closed 5-member enum
-            # A future enum member (hl2/ohlc4/…) added WITHOUT a reduction arm fails
-            # LOUDLY here (mypy errors at type-check time; this never silently
-            # computes HLC3). Unreachable by construction, hence the pragma.
-            assert_never(source)
-    return result
+            return _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        case _:  # pragma: no cover — unreachable: PriceSource is a closed 5-member enum
+            # A future enum member (hl2/ohlc4/…) added WITHOUT a reduction arm raises
+            # LOUDLY here at runtime (never silently computes HLC3). All 5 real
+            # members are exercised by test_vwap_reduction_all_five (runtime
+            # exhaustiveness). An explicit ``raise`` — not ``assert_never`` — keeps
+            # every path returning-or-raising so CodeQL can prove no implicit-None
+            # fall-through and no uninitialized read.
+            raise AssertionError(f"unreachable PriceSource: {source!r}")
 
 
 def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
@@ -399,22 +401,24 @@ def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
     """
     match source:
         case PriceSource.OPEN:
-            result = float(bar.open)
+            return float(bar.open)
         case PriceSource.HIGH:
-            result = float(bar.high)
+            return float(bar.high)
         case PriceSource.LOW:
-            result = float(bar.low)
+            return float(bar.low)
         case PriceSource.CLOSE:
-            result = float(bar.close)
+            return float(bar.close)
         case PriceSource.HLC3:
             # Decimal-divide THEN a single float() cast (never float-add-then-divide
             # — not IEEE-754-identical). VERBATIM the pre-axis HLC3 line.
-            result = float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
-        case _:  # pragma: no cover — mypy-exhaustive over the closed 5-member enum
-            # A future enum member added WITHOUT a reduction arm fails LOUDLY here
-            # (mypy errors at type-check time; never silently computes HLC3).
-            assert_never(source)
-    return result
+            return float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        case _:  # pragma: no cover — unreachable: PriceSource is a closed 5-member enum
+            # A future enum member added WITHOUT a reduction arm raises LOUDLY here at
+            # runtime (never silently computes HLC3). All 5 real members are exercised
+            # by test_ema_reduction_all_five (runtime exhaustiveness). An explicit
+            # ``raise`` — not ``assert_never`` — keeps every path returning-or-raising
+            # so CodeQL can prove no implicit-None fall-through and no uninitialized read.
+            raise AssertionError(f"unreachable PriceSource: {source!r}")
 
 
 @dataclass
