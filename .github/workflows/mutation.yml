@@ -168,11 +168,11 @@ jobs:
       # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention, cf.
       # doctor-daily.yml): never persist the job token into .git/config while
       # later steps execute a broad third-party build surface.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -190,7 +190,7 @@ jobs:
         # fails before a single mutant is checked (DEC-MUTATION-GATE-RANKING-001).
         run: pip install -e ".[dev,data,ui]" "mutmut>=2.5,<3.0"
       - name: Install Rust toolchain (for the PyO3 wheels)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the wheel build up to 3
@@ -541,7 +541,7 @@ jobs:
         # this step had uploaded NOTHING ever ("No files were found" on every
         # live run) until the flag was set.
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: mutmut-cache
           path: ".mutmut-cache*"
@@ -571,7 +571,7 @@ jobs:
         # dedup race — unlike the Rust matrices, whose filers moved to the
         # fan-in mutation-verdict job).
         if: (failure() || cancelled()) && github.event_name != 'workflow_dispatch'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             // Cause-NEUTRAL title (DEC-MUTATION-RUNTIME-003 fixer round): the old
@@ -633,15 +633,15 @@ jobs:
       # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention): this
       # job inherits the read-only workflow token AND never needs git auth after
       # checkout, while cargo-mutants executes hundreds of third-party builds.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust/fno-math -> target
           shared-key: "mutation-fno-math"
@@ -660,7 +660,7 @@ jobs:
         # An unpinned `latest` could silently flip those mutants to MISSED and
         # red the gate with a mislabelled cause; version bumps are DELIBERATE
         # (mirrors the pinned RUST_VERSION above).
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
@@ -695,7 +695,7 @@ jobs:
             --release
       - name: Upload cargo-mutants report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cargo-mutants-report-fno-math-shard-${{ matrix.shard }}
           path: rust/fno-math/cargo-mutants.out
@@ -732,15 +732,15 @@ jobs:
         working-directory: rust/trading-core
     steps:
       # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust/trading-core -> target
           shared-key: "mutation-trading-core"
@@ -750,7 +750,7 @@ jobs:
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin (the 229-UNVIABLE python.rs
         # PyResult-alias measurement + shard budgets are 27.1.0-specific).
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
@@ -793,7 +793,7 @@ jobs:
             --release
       - name: Upload cargo-mutants report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cargo-mutants-report-trading-core-shard-${{ matrix.shard }}
           path: rust/trading-core/cargo-mutants.out
@@ -835,7 +835,7 @@ jobs:
     steps:
       - name: Open GitHub issue — fno-math gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result) && github.event_name != 'workflow_dispatch'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const outcome = '${{ needs.rust-mutation.result }}';
@@ -856,7 +856,7 @@ jobs:
             });
       - name: Open GitHub issue — trading-core gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-trading-core.result) && github.event_name != 'workflow_dispatch'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const outcome = '${{ needs.rust-mutation-trading-core.result }}';
@@ -881,7 +881,7 @@ jobs:
           && needs.python-mutation.result == 'success'
           && needs.rust-mutation.result == 'success'
           && needs.rust-mutation-trading-core.result == 'success'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             // Zero-click lifecycle (CLAUDE.md §2 Rule 11 AUTOMATED). Close ONLY:
