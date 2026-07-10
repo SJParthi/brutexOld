@@ -785,6 +785,169 @@ class TestStage3NonDefaultPriceSource:
             assert spec.vwap_source is self._CELL.vwap_source
             assert spec.ema_source is self._CELL.ema_source
 
+    def test_ema_varying_cell_moves_refined_bar_bits_0_to_5(self, tmp_path: Path) -> None:
+        """GAP-2: an EMA-source-varying cell demonstrably changes REFINED bits 0-5.
+
+        The sibling acceptance test above sweeps ``(OPEN vwap, CLOSE ema)`` — on
+        this volume-flat spot fixture the swept VWAP source is INERT (bits 52-53
+        need traded volume to separate) and the only swept condition is bit 1 (an
+        EMA bit), so ``(OPEN, CLOSE)`` refines against bar_bits that differ from
+        the default at ZERO positions: it proved the identity-hash thread but NOT
+        that the source moves any refined bit. Here the cell varies ``ema_source``
+        (``hlc3:open``), which flips bits 0-5, and we assert the refined bar_bits
+        the pass built for the cell genuinely differ from the ``(HLC3, CLOSE)``
+        default on the SAME train slice + params — and that the change is CONFINED
+        to the EMA group 0-5 (the ``build_bar_bits`` source-locality contract).
+        """
+        ema_cell = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.OPEN)
+        grid = _grid(price_source_cells=[ema_cell])
+        bars = _trending_bars(_N_DAYS)
+        report = _run_full(tmp_path, bars, grid)
+        assert report.enabled is True
+        assert report.masks_refined >= 1
+        assert report.cells
+        for cell in report.cells:
+            assert cell.tuple_.price_source == ema_cell
+
+        # Reconstruct the exact train-slice bar_bits the pass used for this cell
+        # vs the (HLC3, CLOSE) default, same proximity=None / prior_n / anchor.
+        train = train_slice_bars(bars)
+        default_bits = build_bar_bits(train, prior_n=grid.prior_n)
+        ema_bits = build_bar_bits(train, prior_n=grid.prior_n, ema_source=PriceSource.OPEN)
+        moved = {
+            bit
+            for base, ema in zip(default_bits, ema_bits, strict=True)
+            for bit in range(128)
+            if ((base ^ ema) >> bit) & 1
+        }
+        # The refined bits genuinely MOVE (unlike the (OPEN, CLOSE) sibling) …
+        assert moved, "ema_source=open must flip at least one EMA bit vs the default"
+        # … and the movement is confined to the EMA group 0-5 (source locality).
+        assert moved <= set(range(6))
+        assert moved & set(range(6))
+
+
+# ────── the bar_bits memo MUST be price-source-keyed (GAP-1) ──────
+
+
+def _spiked_trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
+    """Upward-drifting session with a large per-bar HIGH spike.
+
+    The +8.0 high spike lifts each bar's HLC3 well above its close, so the
+    ``EMA(HLC3)`` baseline sits far above the ``EMA(CLOSE)`` baseline: bit 1
+    (``close_below_ema20``, an EMA bit that fires WITHOUT traded volume — unlike
+    the inert VWAP bits 52-53 on this volume-flat fixture) fires on a much larger
+    bar set under ``ema_source=HLC3`` (~196 fires) than under ``ema_source=CLOSE``
+    (~83), yet is non-zero under BOTH — so the k=1 bit-1 mask trades AND ranks
+    under both cells, but on disjoint entry bars, refining to genuinely different
+    rows. The upward drift keeps the BUY TP leg winning so the masks survive.
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 0.6 if m % 3 else price - 0.3
+            open_ = price
+            hi = max(open_, close) + 8.0
+            lo = min(open_, close) - 0.5
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(open_, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+class TestStage3MemoIsPriceSourceKeyed:
+    """GAP-1 kill: the Stage-3 ``bits_memo`` key MUST include ``price_source``.
+
+    Dropping ``price_source`` from the memo key (``stage3_wire.py`` — the
+    ``memo_key = (instrument, tf, proximity, fib_anchor, price_source)`` line)
+    survived the whole prior suite: every earlier fixture's surviving masks were
+    source-INDEPENDENT (a k=0 enter-every-bar mask, or a bit the swept source
+    never moved), so the second-processed cell being served the first cell's bits
+    produced no observable difference.
+
+    Here TWO cells differ ONLY in ``ema_source`` and BOTH produce a surviving k=1
+    bit-1 (``close_below_ema20``) mask whose train-slice bar_bits genuinely differ
+    (measured 196 vs 83 fires). If the memo key drops the source, whichever cell
+    is processed SECOND is served the first cell's bar_bits and refines WRONG.
+
+    The order-independent oracle: each cell's refined rows in the 2-cell pass must
+    byte-match that SAME cell's refined rows in a SINGLE-cell pass (where no memo
+    collision is possible). Under the mutation the second-processed cell diverges
+    from its single-cell baseline (verified: applying the mutation flips one of
+    the two equalities to False), so asserting BOTH catches it regardless of the
+    intra-leaderboard processing order.
+    """
+
+    _A = DEFAULT_PRICE_SOURCE_CELL  # (HLC3, CLOSE)
+    _B = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.HLC3)
+
+    @staticmethod
+    def _rows_by_source(
+        report: Stage3PassReport,
+    ) -> dict[PriceSourceCell, list[tuple[object, ...]]]:
+        """Aggregate every refined-cell row, grouped by the recovered source cell."""
+        out: dict[PriceSourceCell, list[tuple[object, ...]]] = {}
+        for cell in report.cells:
+            rows = ResultsStore.load(cell.path).rows()
+            out.setdefault(cell.tuple_.price_source, []).extend(
+                (r.mask_bits, r.run_id, r.net_pnl_paisa, r.total_trades) for r in rows
+            )
+        return {src: sorted(v) for src, v in out.items()}
+
+    def test_each_cell_refines_against_its_own_source_bits(self, tmp_path: Path) -> None:
+        bars = _spiked_trending_bars(_N_DAYS)
+        # top_k / stage3_top_k widened so the merged (instrument, tf, mode)
+        # leaderboard keeps BOTH cells' masks (2 masks × 2 cells) — otherwise the
+        # bounding could drop a cell and mask the collision.
+        single_a = self._rows_by_source(
+            _run_full(
+                tmp_path / "a",
+                bars,
+                _grid(price_source_cells=[self._A], top_k=8, stage3_top_k=8),
+            )
+        )[self._A]
+        single_b = self._rows_by_source(
+            _run_full(
+                tmp_path / "b",
+                bars,
+                _grid(price_source_cells=[self._B], top_k=8, stage3_top_k=8),
+            )
+        )[self._B]
+        both = self._rows_by_source(
+            _run_full(
+                tmp_path / "ab",
+                bars,
+                _grid(price_source_cells=[self._A, self._B], top_k=8, stage3_top_k=8),
+            )
+        )
+
+        # Precondition (guards against a coinciding fixture silently tautologising
+        # the test): the two cells genuinely refine to DIFFERENT rows, and BOTH
+        # produced the ema-sensitive k=1 bit-1 (mask == 0b10) survivor.
+        assert single_a != single_b
+        assert any(mask == 0b10 for mask, *_ in single_a)
+        assert any(mask == 0b10 for mask, *_ in single_b)
+
+        # The kill: in the 2-cell pass each cell reproduces its OWN single-cell
+        # refinement (its own source bits), never the sibling's. Under the
+        # dropped-source memo mutation the second-processed cell diverges from its
+        # single-cell baseline, flipping one of these equalities to False.
+        assert both[self._A] == single_a
+        assert both[self._B] == single_b
+
 
 # ────── the A/B determinism oracle (review F11) + idempotent re-run ──────
 

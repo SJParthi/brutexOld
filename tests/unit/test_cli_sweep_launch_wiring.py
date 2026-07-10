@@ -66,6 +66,34 @@ def test_sweep_all_parser_help_names_the_env_fallbacks() -> None:
     assert not hasattr(daemon_args, "sweep_cache_map_mb")
 
 
+def test_price_source_cells_argparse_default_is_baseline_cardinality_one() -> None:
+    """GAP-3: the ``--price-source-cells`` argparse DEFAULT resolves to the sole
+    baseline ``(HLC3, CLOSE)`` cell — the swept axis stays default-OMITTED/dormant.
+
+    The config-layer default (``price_source_cells: str = "hlc3:close"`` on the
+    ``cmd_sweep_all`` shim) is pinned elsewhere, but the PARSER-layer default was
+    unpinned: flipping the argparse ``default=`` string to e.g. ``"open:close"``
+    would silently turn the axis default-ON (breaking Override 1's byte-identity
+    for every plain ``sweep-all`` invocation) without tripping any test. The
+    assertion rides ``build_parser()`` (NOT the ``# pragma: no cover``
+    declarative-wiring helper), so it exercises + bites the real default value.
+    """
+    from brutex.strategies.types import (
+        DEFAULT_PRICE_SOURCE_CELL,
+        PriceSourceCell,
+        parse_price_source_cells,
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["sweep-all", "--start", "2024-01-01", "--end", "2024-01-02"])
+    # The raw parser default string (the mutation target).
+    assert args.price_source_cells == "hlc3:close"
+    # …which resolves to exactly the cardinality-1 baseline cell (axis dormant).
+    resolved = parse_price_source_cells(args.price_source_cells)
+    assert resolved == [DEFAULT_PRICE_SOURCE_CELL]
+    assert tuple(resolved) == (PriceSourceCell(),)
+
+
 # ────────────────────────────────────────────────────────────────────────
 # --acknowledge-sla-overrun (DEC-SLA-LAUNCH-GUARD-001)
 # ────────────────────────────────────────────────────────────────────────
