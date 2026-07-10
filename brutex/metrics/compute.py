@@ -721,13 +721,30 @@ def combine_metrics_from_folds(
     bit-identity; DEC-SWEEP-COMPUTE-FOLD-DECOMP-001). Requires
     ``folds.n_trades >= 1`` — the zero-trade row is
     :func:`_empty_metrics`, the caller's own arm (mirroring the sweep
-    core's ``zero_trade`` arm in the design) — plus the same scalar
-    validity contract as :func:`_compute_metrics_impl` (``total_bars >=
-    1``, ``start_equity_paisa > 0``, finite positive ``span_years``).
+    core's ``zero_trade`` arm in the design) — and that requirement is
+    enforced FAIL-LOUD below (a Slice-0 round-1 review fold: this is
+    now PUBLIC API, so contract misuse raises a typed :class:`ValueError`
+    naming the caller's arm instead of an untyped ``ZeroDivisionError``
+    deep in the body; the guard sits BEFORE the verbatim tail, so every
+    valid input's bytes are untouched). The same scalar validity contract
+    as :func:`_compute_metrics_impl` (``total_bars >= 1``,
+    ``start_equity_paisa > 0``, finite positive ``span_years``) stays the
+    caller's own boundary.
+
+    Raises
+    ------
+    ValueError
+        If ``folds.n_trades < 1`` — the zero-trade row is
+        :func:`_empty_metrics`, computed by the caller.
 
     Spec citations live on the inline comments; conventions where the
     spec is silent are recorded in DEC-METRICS-001 (MIGRATION.md #305).
     """
+    if folds.n_trades < 1:
+        raise ValueError(
+            f"combine_metrics_from_folds: folds.n_trades must be >= 1, got "
+            f"{folds.n_trades} — the zero-trade row is _empty_metrics, the caller's arm"
+        )
     n_trades = folds.n_trades
     net_pnl = folds.net_pnl_paisa
     gross_profit = folds.gross_profit_paisa
