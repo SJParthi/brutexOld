@@ -97,6 +97,33 @@ EXIT_HEAL_REFUSED = 5
 EXIT_SWEEP_TUPLE_FAILED = 6
 
 
+#: Monotonic boot origin, captured on the first :func:`_boot_mark` call.
+_BOOT_T0: float | None = None
+
+
+def _boot_mark(phase: str) -> None:
+    """Dependency-free boot-phase marker to stderr (before structlog exists).
+
+    Captures a monotonic origin on first call and prints elapsed deltas for the
+    pre-``configure_logging`` dashboard-boot phases (imports, ``build_app``,
+    ``InstrumentStore.open``, teardown) that are otherwise invisible in the log
+    file (F2, DEC-LAKE-HEAL-STARTUP-EPOCH-001). STDERR only — never stdout (the
+    ``version`` byte-exact stdout contract is untouched). Best-effort: never
+    raises (a broken stderr must not kill boot). Zero behaviour change.
+    """
+    global _BOOT_T0  # noqa: PLW0603 — the one-shot boot origin, single-threaded at boot
+    import time
+
+    # A broken stderr (or a monotonic failure) must NEVER kill boot — and it
+    # cannot be logged either (stderr IS the sink here), so suppress broadly.
+    with contextlib.suppress(Exception):
+        now = time.monotonic()
+        if _BOOT_T0 is None:
+            _BOOT_T0 = now
+        sys.stderr.write(f"[brutex boot +{now - _BOOT_T0:6.1f}s] {phase}\n")
+        sys.stderr.flush()
+
+
 class CliUserError(Exception):
     """A user-input error that must exit cleanly (DEC-CLI-USER-ERROR-HYGIENE-001).
 
@@ -3259,7 +3286,18 @@ def _dashboard_allowed_hosts(host: str) -> list[str] | None:
 
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
+    # F2 boot instrumentation (DEC-LAKE-HEAL-STARTUP-EPOCH-001): the earliest
+    # point our dashboard code runs, BEFORE the heavy `build_app` import — so
+    # the pre-`configure_logging` dead air is attributable. The atexit hook
+    # stamps the DYING process's teardown (a SIGINT-driven uvicorn shutdown
+    # re-raises into interpreter exit → atexit fires), so a shared-log gap that
+    # brackets an old process's still-running content-token walk is visible.
+    import atexit
+
+    _boot_mark("dispatch: cmd_dashboard entry")
+    atexit.register(lambda: _boot_mark("process.shutdown"))
     try:
+        _boot_mark("imports: begin")
         import uvicorn
 
         from brutex.dashboard.app import (
@@ -3268,6 +3306,8 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             build_app,
         )
         from brutex.dashboard.summary_cache import SummaryCache
+
+        _boot_mark("imports: done (uvicorn+build_app+summary_cache)")
     except ImportError as exc:
         print(
             f'[brutex] dashboard requires fastapi+uvicorn — run: pip install -e ".[ui]"  ({exc})',
@@ -3288,6 +3328,9 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
 
     log_path = configure_logging(json_renderer=False, enable_file=True)
     _log = structlog.get_logger("brutex.dashboard")
+    # F2: logging is live from here — plain-stderr markers give way to structlog.
+    _boot_mark("logging configured")
+    _log.info("boot.logging_configured", log_file=str(log_path))
 
     # Quiet uvicorn's "GET ... 200" access firehose — the 1 s /pull-progress +
     # 4 s coverage polls drowned the structured business events. The new
@@ -3363,9 +3406,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # sibling `_resolve_lake_root` call sites in this function (+ cmd_run,
     # which pre-resolves) — previously a bare `brutex dashboard` silently
     # opened NO InstrumentStore at all (R2-OCLI-F6 asymmetry fix).
+    import time as _time_boot
+
     from brutex.data.instrument_store import InstrumentStore
 
+    _log.info("boot.instrument_store_open_begin")
+    _store_open_t0 = _time_boot.monotonic()
     store: Any = InstrumentStore.open(_resolve_lake_root(lake_root) / "instruments.duckdb")
+    _log.info(
+        "boot.instrument_store_open_done",
+        elapsed_s=round(_time_boot.monotonic() - _store_open_t0, 3),
+    )
 
     # The instrument autoload (keyless Groww master + best-effort NTM
     # constituent enrichment) can block ~90 s when niftyindices.com
@@ -3423,6 +3474,8 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         pull_intent_store = PullIntentStore(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("pull_intent.build_failed", error=str(exc))
+    _log.info("boot.build_app_begin")
+    _build_app_t0 = _time_boot.monotonic()
     app = build_app(
         state,
         instrument_store=store,
@@ -3431,6 +3484,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         allowed_hosts=allowed_hosts,
         pull_intent_store=pull_intent_store,
     )
+    _log.info("boot.build_app_done", elapsed_s=round(_time_boot.monotonic() - _build_app_t0, 3))
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
     # ITSELF (the hard operator law). Guarded like the auto-resume launch so
