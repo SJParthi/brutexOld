@@ -6213,9 +6213,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.sweep_apriori import apriori_enabled, effective_max_combos
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
     from brutex.engine.sweep_checkpoint import SweepCheckpointStore
+    from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
     from brutex.engine.sweep_launch import (
         plan_launch_dedup,
         resolve_launch_cache_knobs,
@@ -6464,8 +6466,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     }
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
-    if max_combos is not None:
-        grid_kwargs["max_combos"] = max_combos
+    # Apriori-aware max_combos pre-flight (DEC-SWEEP-APRIORI-TUPLE-001): the Apriori
+    # bypass replaces ONLY the DEFAULT max_combos guard value — with the flag ON the
+    # deterministic MAX_MASK_BARS breaker is the real guardrail, so the raw C(n,k)
+    # pre-flight is auto-raised to ADMIT every requested k (otherwise a full-vocab
+    # k>=4 grid is refused before Apriori ever runs). An EXPLICIT operator
+    # --max-combos always WINS (never auto-raised); the non-Apriori path returns the
+    # requested value unchanged, so setting the default explicitly == the field
+    # default and the grid is byte-identical. `--max-combos` argparse default is None
+    # → None means "not passed" (the built-in default, not explicit).
+    grid_kwargs["max_combos"] = effective_max_combos(
+        apriori_enabled=apriori_enabled(),
+        k_values=k_list,
+        n_unique=len(set(condition_bits)),
+        requested_max_combos=max_combos if max_combos is not None else DEFAULT_MAX_COMBOS,
+        requested_is_explicit=max_combos is not None,
+    )
     if overfit_gate:
         grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
     if scope.overridden:
