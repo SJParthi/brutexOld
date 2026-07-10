@@ -57,7 +57,6 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <tr><td>5</td><td>Sessions <strong>cannot be DELETED from the coordinator</strong> &mdash; it can create, list, open, and message every session in the fleet, but has no way to delete (or close/archive) one; verified against the full coordinator tool registry.</td></tr>
 <tr><td>6</td><td><strong>False &ldquo;needs input&rdquo; badges</strong> &mdash; sessions flagged when nothing is pending.</td></tr>
 <tr><td>7</td><td><strong>Actively-working sessions show &ldquo;idle&rdquo;</strong> &mdash; the status appears to track only the main conversation turn.</td></tr>
-<tr><td>8</td><td>With more than 10 parallel sessions working one repository, <strong>merge ORDER is uncontrollable</strong> &mdash; any ready+green PR can land the moment it is un-drafted, and every landing invalidates the other open PRs&rsquo; CI runs. We had to hand-build a freeze protocol (draft-converting the whole board) to sequence a single priority merge.</td></tr>
 </tbody>
 </table>
 <hr/>
@@ -70,7 +69,6 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <li><strong>Coordinator-level session deletion/archival</strong> &mdash; gated on a verified-complete check.</li>
 <li><strong>A &ldquo;needs input&rdquo; badge that clears</strong> when nothing is pending.</li>
 <li><strong>State indicators that reflect background/agent activity</strong> &mdash; or at minimum a last-activity timestamp.</li>
-<li><strong>A coordinator-level merge-queue / hold primitive</strong>, so a fleet can sequence landings without draft-converting the board.</li>
 </ul>
 <hr/>
 <h2>Open questions</h2>
@@ -82,7 +80,6 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <li>Is the session list&rsquo;s state indicator meant to track only the main conversation turn? That would explain items 6 and 7.</li>
 <li>Can a session audit its own effective reasoning effort? Both canaries confirmed no effort field exists anywhere in a session&rsquo;s own context.</li>
 <li>What is the relationship between the settings dropdown&rsquo;s &ldquo;Max&rdquo; and the session-side &ldquo;Ultracode&rdquo; (asked in round 2, still open &mdash; item 1 attaches side-by-side evidence)?</li>
-<li>Is there an intended pattern for ORDERING merges across many sessions on one repository, or is hand-rolled coordination the expectation today?</li>
 </ul>
 <hr/>
 <h2>Details</h2>
@@ -114,10 +111,6 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <p>The inverse of item 6: sessions demonstrably mid-work &mdash; background workers running, CI being driven &mdash; read &ldquo;idle&rdquo; in the session list, corroborated by the coordinator&rsquo;s activity digests and a watchdog&rsquo;s sweeps. The status appears to track only the main conversation turn, not background/agent activity.</p>
 <p><strong>Why it matters:</strong> with item 6, the state column cannot be trusted in either direction &mdash; the operator either interrupts live work or leaves stuck sessions unattended.</p>
 <p><strong>Suggested fix:</strong> reflect background/agent activity in the state, or add a last-activity timestamp beside it.</p>
-<h3>8 &mdash; Fleet merge coordination has no platform support</h3>
-<p>Sessions coordinating merges on one repository race each other: whichever PR reaches ready+green first lands, and each landing re-dirties the other open PRs against shared append-style files, costing each a re-fold plus a full CI lap per merge ahead of it. To land one operator-priority fix first today we had to draft-convert 51 open PRs, run an enforcer loop, and maintain a hand-written slot queue &mdash; it worked, but every piece was improvised. Honest context: part of the collision rate comes from our own repository conventions (an append-only decision ledger and a repo-side auto-merge workflow), and we say so plainly &mdash; but the platform offers no primitive at all for cross-session merge sequencing.</p>
-<p><strong>Why it matters:</strong> at fleet scale, landing order IS the workflow &mdash; races cost hours of duplicated CI.</p>
-<p><strong>Suggested fix:</strong> a coordinator-level merge-sequencing primitive &mdash; a queue, hold, or slot mechanism sessions can respect natively &mdash; so controlling landing order does not require draft-churn hacks.</p>
 <hr/>
 <h2>Screenshots (attached with the email)</h2>
 <ol>

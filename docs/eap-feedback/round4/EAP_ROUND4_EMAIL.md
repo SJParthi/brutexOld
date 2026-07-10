@@ -1,7 +1,7 @@
 # EAP Feedback — Round 4 — Ready-to-send Email
 
 > **To:** claude-code-early-access@anthropic.com — reply on the existing
-> thread with Tim.
+> thread with Tim; Diana Liu included.
 > **From:** Parthiban (sjparthi93@gmail.com) · **Send date:** 2026-07-10.
 > **Workload:** BruteX, run as a coordinator-orchestrated fleet of more than
 > 10 parallel sessions in one Project.
@@ -17,16 +17,16 @@ Claude Code Projects EAP — Round 4 feedback (BruteX), coordinator-scale fleet 
 
 ---
 
-*Copy the rendered body below (from "Hi Tim," through "Thanks, Parthi") straight into Gmail — the table pastes formatted.*
+*Copy the rendered body below (from "Hi Tim and Diana," through "Thanks, Parthi") straight into Gmail — the table pastes formatted.*
 
 ## Body (verbatim — paste as-is)
 
-Hi Tim,
+Hi Tim and Diana,
 
 One more from the beta — coordinator-scale platform feedback this time,
-eight items.
+seven items.
 
-The ask: 30 minutes on a screen-share call to walk through all eight
+The ask: 30 minutes on a screen-share call to walk through all seven
 live, one by one. Several of them — the desktop auto-restart, the
 session-create-burst instability, the stale idle / "needs input" badges —
 are timing-dependent and nearly impossible to capture after the fact; on
@@ -36,9 +36,8 @@ Thank you for extending our access through July 14 — it made this round
 possible. BruteX now runs as one coordinator session dispatching,
 sequencing, and monitoring a fleet of more than 10 parallel sessions in
 one Project. The pattern itself works remarkably well — a fleet-wide
-broadcast reached every target session without a miss, and sessions
-deduplicate shared resources like merge slots between themselves. The
-eight items are the remaining toil and instability at that scale:
+broadcast reached every target session without a miss. The seven items
+are the remaining toil and instability at that scale:
 
 | # | Issue | Impact |
 |---|-------|--------|
@@ -49,7 +48,6 @@ eight items are the remaining toil and instability at that scale:
 | 5 | Sessions cannot be DELETED from the coordinator — create, list, open, message all exist; verified against the full tool registry | The fleet only ever grows; retirement is manual |
 | 6 | False "needs input" badges when nothing is pending | Wasted triage round trips |
 | 7 | Actively-working sessions read "idle" — status tracks only the main conversation turn | Cannot tell working from stuck |
-| 8 | Merge ORDER across sessions on one repo is uncontrollable — we hand-built a freeze protocol (draft-converting 51 open PRs) to land one priority fix | Hours of duplicated CI; a merge-queue / hold primitive would remove the hack |
 
 The attached write-up (MD + HTML) has the details, suggested fixes, and
 open questions. The attached report lists the coordinator and test-session
@@ -66,6 +64,6 @@ Parthi
 ## Send checklist
 
 - [ ] Attach `EAP_ROUND4_SUBMISSION.md` + the HTML render (renamed for sharing).
-- [ ] Confirm the To: address is `claude-code-early-access@anthropic.com` (reply on the thread with Tim).
+- [ ] Confirm the To: address is `claude-code-early-access@anthropic.com` (reply on the existing thread with Tim; Diana Liu included).
 - [ ] The headline ask is the 30-minute screen-share walkthrough — propose 2–3 slots when sending.
 - [ ] Keep the thread Confidential per the Trusted Tester Agreement.
