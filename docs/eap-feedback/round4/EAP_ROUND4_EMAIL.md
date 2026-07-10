@@ -1,14 +1,13 @@
 # EAP Feedback — Round 4 — Ready-to-send Email
 
-> **To:** claude-code-early-access@anthropic.com (contact: Diana Liu, Product
-> Operations Manager, Claude Code) — send, or reply on the existing thread.
+> **To:** claude-code-early-access@anthropic.com — reply on the existing
+> thread with Tim.
 > **From:** Parthiban (sjparthi93@gmail.com) · **Send date:** 2026-07-10.
 > **Workload:** BruteX, run as a coordinator-orchestrated fleet of more than
 > 10 parallel sessions in one Project.
 > Attach `EAP_ROUND4_SUBMISSION.md` + its HTML render (rename on send to
-> `BruteX-ClaudeCode-EAP-Round4.md` / `.html`) plus the 9 screenshots listed
-> at the end of the write-up. EAP access extended through 2026-07-14.
-> Materials are Confidential per the Trusted Tester Agreement.
+> `BruteX-ClaudeCode-EAP-Round4.md` / `.html`). EAP access extended through
+> 2026-07-14. Materials are Confidential per the Trusted Tester Agreement.
 
 ---
 
@@ -23,67 +22,46 @@ Claude Code Projects EAP — Round 4 feedback (BruteX), coordinator-scale fleet 
 ## Body (verbatim — paste as-is)
 
 ```
-Hi Diana, and the Claude Code team,
+Hi Tim,
 
-Thank you sincerely for extending our EAP access through July 14 — it made
-this round possible.
+One more from the beta — coordinator-scale platform feedback this time,
+eight items.
 
-Round 4 is coordinator-scale feedback: BruteX now runs as one coordinator
-session dispatching, sequencing, and monitoring a fleet of more than 10
-parallel sessions in a single Project. The pattern works remarkably well —
-a fleet-wide broadcast reached every target session without a miss, and
-sessions deduplicate shared resources like merge slots between themselves;
-the items below are about removing the remaining toil and instability at
-that scale.
+The ask: 30 minutes on a screen-share call to walk through all eight
+live, one by one. Several of them — the desktop auto-restart, the
+session-create-burst instability, the stale idle / "needs input" badges —
+are timing-dependent and nearly impossible to capture after the fact; on
+a call we can simply make them happen in front of you.
 
-The eight items, one line each:
+Thank you for extending our access through July 14 — it made this round
+possible. BruteX now runs as one coordinator session dispatching,
+sequencing, and monitoring a fleet of more than 10 parallel sessions in
+one Project. The pattern itself works remarkably well — a fleet-wide
+broadcast reached every target session without a miss, and sessions
+deduplicate shared resources like merge slots between themselves. The
+eight items are the remaining toil and instability at that scale:
 
-1) The project-level default reasoning effort is ignored — every new
-   session comes up at the platform default (High), proven by a controlled
-   double-canary experiment (Max then Extra, both spawned at High) while
-   the model default mapped correctly both times.
-
-2) Correcting the effort across multiple sessions in quick succession
-   reproducibly auto-restarts the Claude Code desktop app mid-fleet-operation.
-
-3) At more than 10 parallel sessions, transient rate-limit / "service
-   busy" / API errors cluster around session-create bursts.
-
-4) Cross-session messages dropped mid-turn — twice today, silently, with
-   no receipt or error to the sender; recovered only via fallback channels.
-
-5) Sessions cannot be DELETED from the coordinator — it can create, list,
-   open, and message every session in the fleet, but has no way to delete
-   (or close/archive) one; verified against the full coordinator tool
-   registry.
-
-6) Sessions show a false "needs input" badge when nothing is pending.
-
-7) The inverse of 6: actively-working sessions read "idle" — the status
-   appears to track only the main conversation turn.
-
-8) With more than 10 parallel sessions on one repository, merge ORDER is
-   uncontrollable — to land one priority fix first we had to hand-build a
-   freeze protocol (draft-converting 51 open PRs); a merge-queue / hold
-   primitive would remove the hack.
+| # | Issue | Impact |
+|---|-------|--------|
+| 1 | Project-level default reasoning effort is ignored — every new session spawns at the platform default (High); double-canary proven (Max, then Extra — both spawned High; the model default mapped correctly both times) | Every session corrected by hand |
+| 2 | Correcting the effort across sessions in quick succession auto-restarts the desktop app | The workaround for 1 crashes the app mid-fleet |
+| 3 | At more than 10 parallel sessions, rate-limit / "service busy" / API errors cluster around session-create bursts | Growing the fleet destabilizes the fleet |
+| 4 | Cross-session messages dropped mid-turn — twice today, silently, no receipt or error to the sender | Coordination silently diverges |
+| 5 | Sessions cannot be DELETED from the coordinator — create, list, open, message all exist; verified against the full tool registry | The fleet only ever grows; retirement is manual |
+| 6 | False "needs input" badges when nothing is pending | Wasted triage round trips |
+| 7 | Actively-working sessions read "idle" — status tracks only the main conversation turn | Cannot tell working from stuck |
+| 8 | Merge ORDER across sessions on one repo is uncontrollable — we hand-built a freeze protocol (draft-converting 51 open PRs) to land one priority fix | Hours of duplicated CI; a merge-queue / hold primitive would remove the hack |
 
 The attached write-up (MD + HTML) has the details, suggested fixes, and
-open questions, with 9 screenshots: the four-image item-1 evidence
-sequence (configured effort default vs the spawned session's actual
-effort, across two configured values), the post-restart desktop app, the
-fleet-scale session list, the missing close/archive affordance, and the
-false "needs input" / working-but-idle status mismatches. Where we could
-not prove a cause, we say so plainly.
+open questions. Every item carries session IDs and timestamps, so your
+team can pull the server-side traces — stronger evidence than anything we
+could show from our side. Where we could not prove a cause, we say so
+plainly.
 
-Happy to capture whatever diagnostics would help — especially on the
-desktop restart and the create-burst instability. I'll keep sending
-findings through the extended window.
+I'll keep sending findings through the extended window.
 
-Thank you again — it's a pleasure to help push this.
-
-Best,
-Parthiban
-(sjparthi93@gmail.com)
+Thanks,
+Parthi
 ```
 
 ---
@@ -91,6 +69,6 @@ Parthiban
 ## Send checklist
 
 - [ ] Attach `EAP_ROUND4_SUBMISSION.md` + the HTML render (renamed for sharing).
-- [ ] Attach the 9 screenshots (the 4-image item-1 effort-default evidence sequence · post-restart app · fleet-scale session list · no close/archive affordance · false "needs input" badge · working-but-idle status).
-- [ ] Confirm the To: address is `claude-code-early-access@anthropic.com`.
+- [ ] Confirm the To: address is `claude-code-early-access@anthropic.com` (reply on the thread with Tim).
+- [ ] The headline ask is the 30-minute screen-share walkthrough — propose 2–3 slots when sending.
 - [ ] Keep the thread Confidential per the Trusted Tester Agreement.
