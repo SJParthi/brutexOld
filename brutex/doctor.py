@@ -495,6 +495,7 @@ def check_lake_uniqueness(lake_root: Path) -> CheckResult:
 
         offenders: list[str] = []
         files = 0
+        skipped = 0
         for exchange, segment, symbol in ENGINE_INDEX_COORDS:
             report = scan_lake_invariants(
                 lake_root,
@@ -504,20 +505,39 @@ def check_lake_uniqueness(lake_root: Path) -> CheckResult:
                 include_options=False,
             )
             files += report.files_scanned
+            skipped += report.files_skipped
             offenders.extend(_lake_offender(finding) for finding in report.findings)
         if offenders:
             named = ", ".join(offenders[:3])
             extra = len(offenders) - len(offenders[:3])
             suffix = f" (+{extra} more)" if extra else ""
+            # DEC-AUDIT-CENSUS-HONESTY-001: name any UNREADABLE engine file too —
+            # a poisoned lake that ALSO has skips is still incompletely audited.
+            skip_note = f"; {skipped} engine-index file(s) UNREADABLE (skipped)" if skipped else ""
             return CheckResult(
                 name="lake_uniqueness",
                 status="FAIL",
                 detail=(
-                    f"engine-index partitions poisoned: {named}{suffix} — heal runs "
-                    "automatically (BRUTEX_LAKE_HEAL=auto) on dashboard startup / "
+                    f"engine-index partitions poisoned: {named}{suffix}{skip_note} — heal "
+                    "runs automatically (BRUTEX_LAKE_HEAL=auto) on dashboard startup / "
                     "post-pull / sweep start; run `brutex lake audit-unique --json` "
                     "for the full census; quarantined originals under "
                     f"{lake_root / '.quarantine'}"
+                ),
+            )
+        if skipped:
+            # No classifiable findings, but some engine-index file was UNREADABLE
+            # (garbage bytes / schema drift) so the scan could not certify it
+            # clean — a FAIL, never a silent PASS over corruption
+            # (DEC-AUDIT-CENSUS-HONESTY-001).
+            return CheckResult(
+                name="lake_uniqueness",
+                status="FAIL",
+                detail=(
+                    f"engine-index census INCOMPLETE: {skipped} file(s) UNREADABLE "
+                    "(garbage bytes / schema drift) — cannot certify clean; run "
+                    "`brutex lake audit-unique --json` for the full census + "
+                    f"re-pull or quarantine the offending partition(s) under {lake_root}"
                 ),
             )
         sweep = load_last_sweep(lake_root)

@@ -195,6 +195,51 @@ the f028fe65-era measure). The FULL
 per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
 #1625 — this header carries outcome summaries, never the round-by-round
 story.)
+Earlier: 2026-07-09 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
+DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665 —
+renumbered from #1632/#1633→#1633/#1634→#1664/#1665: #1633–#1636 were
+#1323's reserved block (landed on main 2026-07-10), #1664/#1665
+coordinator-assigned from the in-flight reservation map —
+the strategy-detail honesty pack on `claude/oneclick-instrument-display`
+(built on PR #1352's head; the PR opens after #1352 lands),
+viewer-reads-storage ONLY (every rendered value verified against
+`top100_artifact.py`): (#1664) the winner's `instrument` reaches every
+one-click surface — ONE pure `bxInstrumentText` builder feeds the operator
+rank-1 card (`r1_instrument`), the combos Inst cell (the hardcoded "—" +
+FALSE "not a top100 row field" comment KILLED; `fInst` options repointed to
+the ENGINE tokens), the /strategy identity strip (`stInstr`), and /screener
+(config-driven `instrument` column + a direction-style exact-match filter
+whose options are harvested ONLY from rows carrying the key); the
+metric-key-map audit concern was VERIFIED already covered by #1631 with
+zero residue — no duplicate work. (#1665) the gross relabel — the signal-only
+P&L reads "Gross signal P&L" + the persistent "signal-only — costs modeled
+in the options-translation track" chip on the /strategy card AND the operator
+hero (killed-token-pinned); the SHIPPED results-depth aggregates render in
+the NEW /strategy Deep-stats section (expectancy · recovery factor · loss
+streak · MAE/MFE pairs · minute-path DD · exit mix · worst-5-days — worst5
+is a METRICS key, the audit refinement) via six pure node-goldened builders
+with honest "—" degrades + Beginner block-toggle summary; the regime
+breakdown (one_regime_wonder/axis + by_trend) renders on BOTH cards and the
+stale "lands with the P3 data" deferral is DELETED; the equity SERIES
+sidecar gains `GET /api/v1/oneclick/equity` (the #48 overlap — Protocol
+`equity_page` on all three readers, the ONE `_resolve_sidecars` chain,
+display-zone parquet read with the honest O(equity-file)-first-read /
+O(page)-memo envelope, clamp [1,5000] NAMED, null lows pass through) and the
+/strategy equity host renders the stored series labeled "minute-path equity —
+the stored real series (R27)" with the per-trade cumsum RELABELED as the
+honest fallback (the operator host stays per-trade — the #48 follow-up); the
+`/strategy?run_id=&rank=` deep-link contract is PINNED for the /results-side
+producer; nav.py NAV_LINKS gains /completeness · /screener · /strategy
+(12 template navs updated, the unreachable-page class closed); the two
+chart-mapper finder NITs land (`bxBarPrice` — no `Number(null)→0` candles;
+skipped rows COUNTED + surfaced "N row(s) skipped (unreadable)"). HIGH #40
+composite_score /results join stays DEFERRED (results-storage seam,
+coordinator brokering). DISPLAY zone + one additive display route — ENGINE
+UNCHANGED (NIFTY/BANKNIFTY/SENSEX); engine writers byte-untouched; both
+oneclick modules 100% line+branch standalone; ruff/ruff-format/`mypy
+--strict`/pyright clean; `node --check` clean. Any per-round record lives
+ONLY in the §1 Active-branch blurb + the MIGRATION.md entry — this header
+carries pointers, never round narration.)
 Earlier: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a — renamed from -001 at the 2026-07-10 merge-reconcile (main's #1634/PR #1323 claimed -001 for the minute-basis calendar-cross-check ADVANCE; -002 is the COMMON-ization remainder + hole-shape observability + the #1649b Muhurat pack) —
 renumbered #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took
 #1623 for DEC-DASHBOARD-POLL-HYGIENE-001, then #1631/#1632 for
@@ -2194,6 +2239,67 @@ hostile-review pass._
   suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
   --strict` clean, pyright at the pre-change baseline, 0 new (round-2
   post-merge: 40 errors = the f028fe65 main baseline exactly).)
+  Earlier: `claude/oneclick-instrument-display` (**DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 +
+  DEC-ONECLICK-INSTRUMENT-DISPLAY-001, MIGRATION.md #1664–#1665** — renumbered from
+  #1632/#1633→#1633/#1634→#1664/#1665 across the 2026-07-09 + 2026-07-10 main-folds (main took #1632 with
+  DEC-DASHBOARD-VISUAL-OVERHAUL-001, PR #1354; #1633–#1636 were #1323's reserved block; #1664/#1665
+  coordinator-assigned from the in-flight reservation map) — the
+  strategy-detail honesty pack,
+  viewer-reads-storage only, built on PR #1352's `claude/oneclick-top100-object-root` head 31a7cf0a (ONE PR, opens
+  after #1352 lands). #1665 (the umbrella): the gross relabel — every signal-only P&L label on the /strategy story
+  card + the operator hero/kpi/Returns/verdict-narrative reads "Gross signal P&L" with the persistent
+  "signal-only — costs modeled in the options-translation track" chip (killed-token pins on the bare "net P&L"
+  labels; combos gross/charges/net split untouched — net == gross while costs are structurally absent, noted);
+  the SHIPPED results-depth aggregates render in the NEW /strategy Deep-stats section
+  (expectancy_paisa · recovery_factor · max_consecutive_losses · mae_avg/worst · mfe_avg/best ·
+  max_dd_minute_path_paisa/pct · exits mix · worst5_days — a METRICS key per the audit refinement, NOT regime)
+  via SIX pure node-goldened bx-oneclick builders (`bxExitMixText`/`bxWorst5DaysText`/`bxTrendSplitText`/
+  `bxRegimeWonderText`/`bxAvgExtremeText`/`bxMinutePathDdText`; money via an INJECTED house formatter; honest "—"
+  degrades, a malformed worst5 entry abstains the whole line) under the NEW block-level `jargon-block`/
+  `plain-eng-block` Beginner/Pro twins + 11 new BX_EXPLAIN hover lines; the regime breakdown
+  (one_regime_wonder + regime_wonder_axis + by_trend) renders on the /strategy card AND the operator card
+  (`r1_trend_split`/`r1_regime_wonder`/`r1_worst5`), the stale "lands with the P3 data" deferral DELETED
+  (negative-pinned; family drill-down R34 stays a named later PR); the equity SERIES sidecar (`entry.equity_ref` →
+  `<stem>.equity.parquet`, previously served by NO route) gains `GET /api/v1/oneclick/equity` through the typed
+  seam — the `TradesReader` Protocol grows `equity_page` on all three readers (Awaiting/Fixture → honest awaiting,
+  never a synthesized curve; `TradeStoreReader` resolves rank → `equity_ref.tuple` via the ONE refactored
+  `_resolve_sidecars` chain shared with trades), the display-zone `_load_equity_records` parquet read is honestly
+  O(equity-file) on the FIRST read per (revision, combo) — the stamp indexes no equity spans — with a single-entry
+  memo making repeat pages O(page), limit clamps [1, 5000] NAMED (one row/session ≈ 250/yr), a no-1m session's
+  null `equity_intraday_low_paisa` passes through, polars-missing/unreadable files read the NAMED corrupt (never a
+  500), and `build_equity_payload` DELEGATES to the ONE page projector (§11 COMMON); the /strategy equity host
+  consumes the route — the stored series renders labeled "minute-path equity — the stored real series (R27)" via
+  NEW `bx-chart.js::bxMinutePathSeries` (same series shape as the cumsum builder — ONE `equityPathNode` renders
+  either; invalid points skipped + counted) with the per-trade close cumsum RELABELED "per-trade close equity
+  (minute-path unavailable for this run)" as the honest fallback (the OPERATOR equity host deliberately stays
+  per-trade — the #48 owner ruling is the named follow-up); the `/strategy?run_id=<id>&rank=<n>` deep-link
+  contract is verified already-honored and CONTRACT-PINNED (`test_strategy_link_contract_run_id_rank_params` —
+  the display-truth session builds the /results link against it); nav.py `NAV_LINKS` gains
+  /completeness · /screener · /strategy (the served-but-unreachable class; all 12 guarded template navs updated,
+  aria-current on each page's own link) and the nav consistency guard enforces the 10-link canon; the two
+  round-2 finder NITs land in `bxCandleRowsFromDbPayload` — NEW `bxBarPrice` (a null/blank/boolean/non-finite
+  OHLC SKIPS the row; `Number(null)→0` never plots a fabricated 0-price candle — the trap itself pinned) + the
+  `skipped` counter surfaced via `bxSkippedRowsNote` ("N row(s) skipped (unreadable)") on the /strategy coords
+  line. HIGH #40 (composite_score persist/join for /results) stays DEFERRED — a results-storage seam under
+  coordinator brokering; the score is already on the one-click wire. TESTS: the writer→reader golden extended
+  (equity route off REAL `write_tuple_sidecars` bytes — awaiting-before/ok-after + the honest null low on the
+  wire; the link-contract pin), `TestEquityPage` (12) + `TestBuildEquityPayload` keep BOTH oneclick modules
+  100.00% line+branch on the ci.yml-exact gates, `TestEquityRoute` route degrades (400/422 bounds), NEW
+  `tests/unit/test_dashboard_winner_detail.py` node goldens + wiring pins. #1664 (folded first): the winner's
+  `instrument` on every surface — ONE pure `bxInstrumentText` builder feeding the operator rank-1 card
+  (`r1_instrument` hooks), the combos Inst cell (hardcoded "—" + the FALSE "instrument is not a top100 row field"
+  comment KILLED; the dead `fInst` filter's v29-preview display names repointed to the ENGINE tokens
+  NSE-NIFTY/NSE-BANKNIFTY/BSE-SENSEX), the /strategy identity strip (`stInstr`), and /screener (config-driven
+  `instrument` column labeled "Inst" after the strategy name + the direction-style exact-match filter with the
+  documented absent-key law — options harvested ONLY from rows carrying the key, so a pre-instrument artifact's
+  dropdown stays empty); the audit's metric-key concern VERIFIED covered by #1631 with zero residue (every metrics
+  consumer flows through the ONE `/api/v1/oneclick/top100` route → `load_top100` → `TOP100_METRIC_KEY_MAP`;
+  proof = the existing writer→reader golden + wire-type assertions + the node blast-radius pin — no duplicate
+  work). HONEST: DOM wiring pinned by source strings, not executed (the #1557 envelope); the fixture corpus is
+  byte-untouched; the screener instrument filter is exact-match, not a normalizing join. DISPLAY zone + one
+  additive display route — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX); engine writers byte-untouched;
+  `oneclick_artifacts.py` + `oneclick_view.py` 100% line+branch standalone; ruff/ruff-format clean, `mypy
+  --strict` clean, pyright 0 new; `node --check` clean on the four touched JS files.)
   Earlier: `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a** — RENAMED from -001 at the 2026-07-10 merge-reconcile: main's #1634 (PR #1323) claimed -001 for the minute-basis calendar-cross-check ADVANCE while this branch was in flight; -002 delivers #1634's named OPEN work (the observed-overlay COMMON-ization + thin delegator) + the hole-shape WARN observability + the #1649b Muhurat coherence pack — renumbered
   #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335),
   then #1631/#1632 for DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (PR #1352) + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the coordinator
@@ -5195,6 +5301,29 @@ hostile-review pass._
   instead of the whole-grid-aborting resolver ValueError; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
   blurb)
+  Earlier: `claude/oneclick-instrument-display`
+  (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 + DEC-ONECLICK-INSTRUMENT-DISPLAY-001,
+  MIGRATION.md #1664–#1665, renumbered #1632/#1633→#1633/#1634→#1664/#1665 —
+  #1633–#1636 were #1323's reserved block, #1664/#1665 coordinator-assigned
+  from the in-flight reservation map — the strategy-detail
+  honesty pack,
+  viewer-reads-storage only: the winner's `instrument` on every one-click
+  surface (ONE `bxInstrumentText` builder; combos Inst cell + `fInst`
+  engine-token repoint; /screener "Inst" column + filter); the gross
+  signal-P&L relabel + persistent signal-only chip on the /strategy card AND
+  the operator hero; the results-depth aggregates (expectancy · recovery ·
+  streaks · MAE/MFE · minute-path DD · exit mix · worst-5-days) + the regime
+  breakdown rendered from the stored artifact (the stale "lands with P3"
+  deferral DELETED); NEW `GET /api/v1/oneclick/equity` over the equity_ref
+  sidecar + the /strategy minute-path equity render with the honest
+  per-trade fallback (the operator host stays per-trade — the #48
+  follow-up); the `/strategy?run_id=&rank=` link contract pinned; nav gains
+  /completeness · /screener · /strategy; the two chart-mapper NITs
+  (no `Number(null)→0` candles; skipped rows counted + surfaced); HIGH #40
+  composite_score /results join DEFERRED (cross-session seam); built on PR
+  #1352's head, PR opens after #1352 lands; DISPLAY zone + one additive
+  display route; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active
+  branch for the full blurb)
   Earlier: `claude/preopen-prevday-common`
   (DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a — renamed from -001 (main's #1634/PR #1323 claimed -001 for the minute-basis cross-check ADVANCE; -002 = the COMMON-ization remainder + observability + the #1649b Muhurat pack); renumbered
   #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623
@@ -5551,7 +5680,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4757-4758` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4804-4805` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
