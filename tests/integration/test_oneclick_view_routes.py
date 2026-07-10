@@ -673,8 +673,11 @@ class TestRoutesEndToEnd:
             "alert(1)" in body
         )
         # The rendering layer: zero string-to-DOM sinks in every new surface.
+        # v29.html JOINS the scan (DEC-OPERATOR-PAGE-CONSOLIDATE-001): its
+        # three static-string sink sites (confetti reset + the two toggle
+        # labels) were refactored sink-free in the SAME change.
         sink = re.compile(r"\.innerHTML\s*\+?=|insertAdjacentHTML|document\.write\(")
-        for name in ("screener.html", "strategy.html"):
+        for name in ("screener.html", "strategy.html", "v29.html"):
             assert sink.search(_template(name)) is None, name
         for js_name in (
             "bx-oneclick.js",

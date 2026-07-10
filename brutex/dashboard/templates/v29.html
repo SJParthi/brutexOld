@@ -2988,7 +2988,7 @@
       piece.style.transform = `rotate(${Math.random() * 360}deg)`;
       c.appendChild(piece);
     }
-    setTimeout(() => { c.innerHTML = ''; }, 4500);
+    setTimeout(() => { c.replaceChildren(); }, 4500);
   }
 
   // Export
@@ -3252,9 +3252,13 @@
     btn.addEventListener('click', () => {
       const expanded = grid.classList.toggle('show-all');
       btn.classList.toggle('expanded', expanded);
-      btn.innerHTML = expanded
-        ? 'Hide last 6 filters <span class="chev">▾</span>'
-        : 'Show 6 more filters <span class="chev">▾</span>';
+      // Static-string label rebuilt sink-free: textContent + one span node
+      // (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — v29 joins the hostile sink scan).
+      btn.textContent = expanded ? 'Hide last 6 filters ' : 'Show 6 more filters ';
+      const chev = document.createElement('span');
+      chev.className = 'chev';
+      chev.textContent = '▾';
+      btn.appendChild(chev);
     });
   })();
 
@@ -3266,9 +3270,13 @@
         const card = btn.closest('.rule-card.v29-collapse');
         if (!card) return;
         const expanded = card.classList.toggle('v29-expanded');
-        btn.innerHTML = expanded
-          ? 'Hide mechanics <span class="chev">▾</span>'
-          : 'Show mechanics <span class="chev">▾</span>';
+        // Static-string label rebuilt sink-free (same law as the filter
+        // reveal toggle above).
+        btn.textContent = expanded ? 'Hide mechanics ' : 'Show mechanics ';
+        const chev = document.createElement('span');
+        chev.className = 'chev';
+        chev.textContent = '▾';
+        btn.appendChild(chev);
       });
     });
   })();
