@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from unittest import mock
 
+import pytest
 from brutex import cli
+
+pytestmark = pytest.mark.usefixtures("_inert_sweep_logging_guard")  # see tests/conftest.py
 
 
 def test_main_dispatch_sweep_all_threads_cache_knobs_none_when_unset() -> None:

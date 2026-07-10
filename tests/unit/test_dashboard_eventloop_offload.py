@@ -32,6 +32,14 @@ note). This test PINS that already-correct offload — the one offloaded lake ro
 that previously lacked a dedicated regression — so a future refactor cannot
 silently inline the scan back onto the loop.
 
+DEC-OPERATOR-PAGE-REAL-001 (hostile-round MINOR-2): the same pin for ALL SIX
+``/api/v1/oneclick/*`` routes. Each route's blocking artifact work lives in a
+``_resolve`` closure offloaded via ``run_in_threadpool``; every ``_resolve``
+begins by resolving the fixture root, so blocking
+``oneclick_artifacts.resolve_fixture_root`` blocks the whole read path of
+each route on a WORKER — a future refactor that inlines ``_resolve`` back
+onto the ``async def`` body wedges the loop and fails the pin.
+
 Skipped cleanly without the ``[ui]`` extra (matches the sibling dashboard
 suites).
 """
@@ -42,6 +50,7 @@ import threading
 import time
 from collections.abc import Generator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -228,30 +237,182 @@ def _empty_scan_report() -> LakeScanReport:
     )
 
 
-def test_lake_uniqueness_scan_runs_off_the_event_loop(
+def test_lake_uniqueness_scan_runs_on_the_dedicated_census_daemon_thread(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The lake-uniqueness census must not wedge the loop (DEC-LAKE-UNIQUENESS-OFFLOAD-001).
+    """The census runs on the DEDICATED daemon thread — never the loop, never the pool.
 
-    ``GET /api/v1/universe/lake-uniqueness`` offloads its ``scan_lake_invariants``
-    whole-lake walk (measured 30-46 s on a ~40k-contract lake) to the threadpool.
-    This pins that offload: while the scan blocks a worker, a concurrent
-    ``/api/v1/state`` must still complete within budget (a free loop). If a future
-    refactor inlined the scan onto the ``async def`` body, the loop would wedge for
-    the whole hold and this fails — exactly the #1143 preopen regression class.
+    SUPERSESSION (DEC-LAKE-CENSUS-NONBLOCKING-001): this test previously pinned
+    the DEC-LAKE-UNIQUENESS-OFFLOAD-001 ``run_in_threadpool`` offload of the
+    census scan. That offload was REAL (#1302/#1316 — the loop never wedged),
+    but it consumed shared AnyIO threadpool tokens, and ``SummaryCache``'s cold
+    single-flight parked every stacked 15 s poller in an unbounded wait ON a
+    worker — the reproduced 26-minute dashboard-wide freeze. The route now uses
+    NO threadpool at all: it returns the ``LakeCensusHolder``'s O(1) snapshot
+    immediately, and the scan runs on the named ``brutex-lake-census`` daemon
+    thread (asserted below — an AnyIO worker carries a different name; the
+    route completing while the scan is STILL HELD proves the request awaits
+    neither the loop nor a worker running the scan).
     """
-    stub = _BlockingStub(result=_empty_scan_report())
-    monkeypatch.setattr("brutex.dashboard.app.scan_lake_invariants", stub)
+    thread_names: list[str] = []
+    entered = threading.Event()
+    release = threading.Event()
 
-    status, payload = _assert_loop_free_while_blocked(
-        client, stub, "/api/v1/universe/lake-uniqueness"
-    )
-    # The offloaded request still returns the real census payload once released:
-    # the REAL build_lake_census + census_to_dict ran on the worker over the
-    # (stubbed-empty) scan, so a resolvable lake root reads present=True with a
-    # zero-finding verdict — never the {"present": False} no-lake gate.
-    assert status == 200
-    assert isinstance(payload, dict)
+    def _held_scan(*args: object, **kwargs: object) -> object:
+        thread_names.append(threading.current_thread().name)
+        entered.set()
+        release.wait(timeout=_WALK_HOLD_S)
+        return _empty_scan_report()
+
+    monkeypatch.setattr("brutex.dashboard.app.scan_lake_invariants", _held_scan)
+    try:
+        # The arming poll returns IMMEDIATELY (an O(1) snapshot) — the pre-fix
+        # route blocked here for the whole scan on a threadpool worker.
+        t0 = time.perf_counter()
+        first = client.get("/api/v1/universe/lake-uniqueness")
+        first_elapsed = time.perf_counter() - t0
+        assert first.status_code == 200
+        assert first_elapsed < _READ_BUDGET_S, (
+            f"the arming census poll took {first_elapsed * 1000:.1f}ms — the route "
+            "must snapshot, never wait for the scan."
+        )
+        assert entered.wait(timeout=5.0), "the census scan was never entered"
+
+        # While the scan is held: the loop is free AND the snapshot is honest.
+        t0 = time.perf_counter()
+        state = client.get("/api/v1/state")
+        elapsed = time.perf_counter() - t0
+        assert state.status_code == 200
+        assert elapsed < _READ_BUDGET_S, (
+            f"/api/v1/state took {elapsed * 1000:.1f}ms while the census scan was "
+            "held — the scan is running ON the event loop (regression)."
+        )
+        held = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert held["present"] is True
+        assert held["scan_in_progress"] is True
+        assert "findings_total" not in held  # no verdict fabricated mid-first-scan
+    finally:
+        release.set()
+
+    # The scan ran on the DEDICATED census daemon thread — zero AnyIO tokens.
+    assert thread_names == ["brutex-lake-census"]
+
+    # Once the scan lands, the verdict serves (the REAL build_lake_census +
+    # census_to_dict ran on the daemon thread over the stubbed-empty report).
+    deadline = time.time() + 10.0
+    payload: dict[str, object] = {}
+    while time.time() < deadline:
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        if "findings_total" in payload:
+            break
+        time.sleep(0.05)
     assert payload["present"] is True
     assert payload["findings_total"] == 0
     assert payload["files_scanned"] == 0
+    assert payload["scan_in_progress"] is False
+
+
+# ── DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the /universe backend + generation probe ──
+
+
+def test_universe_summary_read_runs_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``/universe/summary`` cache read must not wedge the loop.
+
+    ``GET /api/v1/universe/summary`` now offloads ``UniverseSnapshotCache.summary``
+    (its revision probe is a sync DuckDB ``COUNT`` + ``MAX``, plus the three base
+    reads on a miss) via ``run_in_threadpool``. Blocking the cache's revision probe
+    proves the read runs on a worker: a concurrent ``/api/v1/state`` still answers.
+    On the pre-fix code the probe ran in the ``async def`` body and wedged the loop.
+    """
+    stub = _BlockingStub(result=(0, ""))
+    monkeypatch.setattr("brutex.dashboard.universe_cache.master_revision", stub)
+
+    status, payload = _assert_loop_free_while_blocked(client, stub, "/api/v1/universe/summary")
+    assert status == 200
+    assert payload == {"index_count": 0, "stock_count": 0, "total": 0}
+
+
+def test_universe_index_constituents_reads_run_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, store: InstrumentStore
+) -> None:
+    """The ``/universe/index-constituents`` store reads must not wedge the loop.
+
+    The three master reads + the COMMON classifier now run in a ``_held_universe``
+    threadpool closure. Blocking the first store read proves they run on a worker:
+    a concurrent ``/api/v1/state`` still answers. The best-effort NSE resolve is
+    stubbed so the test exercises the store-read offload, not the network path.
+    """
+    monkeypatch.setattr(
+        "brutex.dashboard.constituents_cache.resolve_constituents",
+        lambda *_a, **_k: SimpleNamespace(rows=[], source="unavailable", as_of=None),
+    )
+    stub = _BlockingStub(result=frozenset())
+    monkeypatch.setattr(store, "fno_eligible_underlyings", stub)
+
+    status, payload = _assert_loop_free_while_blocked(
+        client, stub, "/api/v1/universe/index-constituents?symbol=NIFTY"
+    )
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["source"] == "unavailable"
+    assert payload["members"] == []
+
+
+def test_fno_cascade_generation_probe_runs_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-generation probe must not wedge the loop (the MAJOR-6 class).
+
+    ``_summary_cache.generation`` stats the window ledger + digests the sweeps tree
+    (an O(dirs) read via ``lake_revision``). The cascade/movers/preopen/db-datasets
+    routes now read it INSIDE their offloaded closure, so blocking ``lake_revision``
+    blocks a worker — a concurrent ``/api/v1/state`` still answers. On the pre-fix
+    code ``gen = _summary_cache.generation`` ran on the event loop and wedged it.
+    """
+    stub = _BlockingStub(result="rev-blocking-token")
+    monkeypatch.setattr("brutex.dashboard.app.lake_revision", stub)
+
+    status, payload = _assert_loop_free_while_blocked(client, stub, "/api/v1/db/fno/underlyings")
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["underlyings"] == []
+    assert payload["unparsed"] == []
+
+
+#: The six sweep-oneclick artifact routes (DEC-OPERATOR-PAGE-REAL-001) — the
+#: threadpool-doctrine audit set (hostile-round MINOR-2).
+_ONECLICK_OFFLOAD_URLS = (
+    "/api/v1/oneclick/runs",
+    "/api/v1/oneclick/manifest?run_id=r-1",
+    "/api/v1/oneclick/top100?run_id=r-1",
+    "/api/v1/oneclick/events?run_id=r-1",
+    "/api/v1/oneclick/trades?run_id=r-1",
+    "/api/v1/oneclick/verify?run_id=r-1",
+)
+
+
+@pytest.mark.parametrize("url", _ONECLICK_OFFLOAD_URLS)
+def test_oneclick_routes_run_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """All six /api/v1/oneclick/* routes ride the threadpool (MINOR-2 pin).
+
+    Every route's ``_resolve`` body starts by resolving the fixture root
+    (``_oneclick_roots`` for the artifact routes; directly for trades), so a
+    blocked ``resolve_fixture_root`` blocks the WHOLE artifact read path of
+    each route. While it blocks a worker, a concurrent ``/api/v1/state`` must
+    still answer within budget (a free loop). If a future refactor inlined
+    ``_resolve`` onto the ``async def`` body, the loop would wedge for the
+    whole hold — exactly the #1143 preopen regression class.
+    """
+    stub = _BlockingStub(result=None)  # None ⇒ the production (no-fixture) path
+    monkeypatch.setattr("brutex.dashboard.oneclick_artifacts.resolve_fixture_root", stub)
+
+    status, payload = _assert_loop_free_while_blocked(client, stub, url)
+    # Once released the route completes with the honest production payload
+    # (no fixture root, no artifacts on this empty lake) — never a 500.
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["fixture_root_active"] is False

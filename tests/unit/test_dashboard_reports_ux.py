@@ -117,10 +117,13 @@ def test_sweep_start_picker_prefilled_with_backend_default() -> None:
     by ``test_default_start_matches_pull_floor``) means a future floor move
     cannot leave the template stale.
     """
-    from brutex.dashboard.app import _render_reports_html
+    from brutex.dashboard.app import _render_index_html
     from brutex.dashboard.sweep_runner import DEFAULT_START
 
-    html = _render_reports_html()
+    # DEC-OPERATOR-PAGE-REAL-001 / R25: the sweep controls (incl. the swStart
+    # picker) MOVED from /reports to the Operator page — the drift guard
+    # follows the control.
+    html = _render_index_html()
     assert f'<input id="swStart" type="date" value="{DEFAULT_START}">' in html
 
 

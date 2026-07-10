@@ -73,6 +73,9 @@
 
   var ENDPOINT = "/api/v1/liveproof";
   var POLL_MS = 5000;
+  // Bounded-fetch deadline (DEC-WINDOWS-COUNTS-ONLY-001 M15 — the sibling
+  // bx-rate-monitor.js fetchJson discipline): armed through the BODY read.
+  var FETCH_TIMEOUT_MS = 10000;
   // Auto-collapse the pill to the compact dot badge this long after a verdict
   // is first shown (DEC-UNIVERSE-UI-POLISH-002 — never occlude page content).
   var AUTO_MIN_MS = 8000;
@@ -599,6 +602,18 @@
     pollTimer = setTimeout(poll, delayMs);
   }
 
+  // Poll-fetch discipline (DEC-WINDOWS-COUNTS-ONLY-001 M15, merged with the
+  // display-truth self-scheduling chain — mirrors the sibling
+  // bx-rate-monitor.js fetchJson): at most ONE request in flight (the
+  // pollInFlight guard below — the visibilitychange catch-up can never stack a
+  // second request onto the browser's ~6-per-origin connection pool), and the
+  // monotonic pollSeq token (declared with the widget state above) discards a
+  // stale response so it can never paint over a fresher one. HONEST envelope
+  // (Golden Rule #10): on an ancient browser without AbortController the
+  // deadline arm is inert (same as the sibling widget) — the in-flight release
+  // then waits on the browser's own fetch failure.
+  var pollInFlight = false;   // one-in-flight guard (M15) — never stack requests
+
   // Bounded JSON fetch (mirrors bx-rate-monitor.js): a non-ok status THROWS (a
   // counted failure) and the abort timer stays ARMED through the BODY read —
   // cleared only after r.json() settles — so a hung fetch OR a stalled body is
@@ -656,9 +671,15 @@
     // BEFORE pollSeq is bumped and BEFORE any fetch, so a hidden period counts
     // ZERO pollFailures — no spurious backoff/staleness while hidden.
     if (document.hidden) { schedulePoll(POLL_MS); return; }
+    // One-in-flight guard (DEC-WINDOWS-COUNTS-ONLY-001 M15): the visibilitychange
+    // catch-up can never stack a second request — the in-flight fetch's OWN
+    // settle handler schedules the next tick, so the chain never dies here.
+    if (pollInFlight) { return; }
+    pollInFlight = true;
     var seq = ++pollSeq;   // a superseded response never renders or schedules
     fetchJson(ENDPOINT)
       .then(function (data) {
+        pollInFlight = false;
         if (seq !== pollSeq) { return; }
         // A reachable backend (ANY 2xx JSON, wired or not) resets the freshness
         // clock; only a genuine PAYLOAD drives render() (present:false stays inert).
@@ -674,6 +695,7 @@
         // a fetch rejection AND a malformed body are ALL counted failures that feed
         // the staleness clock + back off 3 s -> 30 s; NEVER a stale green pill reading
         // fresh forever. The last real VERDICT is retained — only freshness escalates.
+        pollInFlight = false;
         if (seq !== pollSeq) { return; }
         pollFailures += 1;
         renderAge();

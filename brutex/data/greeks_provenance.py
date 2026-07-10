@@ -65,9 +65,11 @@ __all__ = [
 #: v2 = the DEC-GREEKS-CORRECTNESS-AUDIT-001 round (degenerate time-value
 #: pre-screen + value-hardened reuse + 2dp spot snap): every v1 stored bar —
 #: incl. the IVX-1 at-floor artifacts — recomputes + restamps on the next
-#: enrich pass over its window. HONEST envelope: that pass reaches only
-#: contracts still inside a live pull window; expired contracts keep v1
-#: stamps until a bulk re-enrich surface exists (named follow-up).
+#: enrich pass over its window. The pull-side pass reaches only contracts
+#: still inside a live pull window; EXPIRED contracts (and a CLI-pulled lake
+#: that never enriches) are reached by the bulk re-enrich backfill surface
+#: (:mod:`brutex.data.greeks_backfill` + ``brutex greeks-backfill`` —
+#: DEC-GREEKS-BULK-REENRICH-001, closing the #1188 named follow-up).
 GREEKS_FORMULA_VERSION: Final[int] = 2
 
 #: Rate-source ids packed into the provenance stamp (bits 8-11).

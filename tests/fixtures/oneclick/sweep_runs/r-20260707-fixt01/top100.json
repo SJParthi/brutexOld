@@ -1,0 +1,6607 @@
+{
+ "baselines": {},
+ "entries": [
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_00",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0001",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.93,
+    "max_drawdown_paisa": -158117,
+    "net_pnl_paisa": 8962469,
+    "profit_factor": 2.5,
+    "sharpe_ratio": 3.2,
+    "total_trades": 187,
+    "win_rate": 0.61
+   },
+   "rank": 1,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2987490,
+     "trending": 5974979
+    },
+    "by_year": {
+     "2024": 5974979,
+     "2025": 2987490
+    },
+    "entry_hour_hist": {
+     "10": 83,
+     "9": 101
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.375,
+     "max": 17.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 187,
+    "win": {
+     "avg": 14.875,
+     "max": 18.0,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_01",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0001",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000007",
+   "metrics": {
+    "deflated_sharpe": 0.9259,
+    "max_drawdown_paisa": -166234,
+    "net_pnl_paisa": 8924938,
+    "profit_factor": 2.4887,
+    "sharpe_ratio": 3.1827,
+    "total_trades": 194,
+    "win_rate": 0.6077
+   },
+   "rank": 2,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2974980,
+     "trending": 5949958
+    },
+    "by_year": {
+     "2024": 5949958,
+     "2025": 2974980
+    },
+    "entry_hour_hist": {
+     "10": 86,
+     "9": 102
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.0,
+     "max": 18.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 194,
+    "win": {
+     "avg": 15.5,
+     "max": 18.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_02",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0001",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.9218,
+    "max_drawdown_paisa": -174351,
+    "net_pnl_paisa": 8887407,
+    "profit_factor": 2.4774,
+    "sharpe_ratio": 3.1654,
+    "total_trades": 201,
+    "win_rate": 0.6054
+   },
+   "rank": 3,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2962470,
+     "trending": 5924937
+    },
+    "by_year": {
+     "2024": 5924937,
+     "2025": 2962470
+    },
+    "entry_hour_hist": {
+     "10": 89,
+     "9": 103
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.625,
+     "max": 18.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 201,
+    "win": {
+     "avg": 16.125,
+     "max": 19.0,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_03",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0001",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "0000000000000000000000000000000d",
+   "metrics": {
+    "deflated_sharpe": 0.9177,
+    "max_drawdown_paisa": -182468,
+    "net_pnl_paisa": 8849876,
+    "profit_factor": 2.4661,
+    "sharpe_ratio": 3.1481,
+    "total_trades": 208,
+    "win_rate": 0.6031
+   },
+   "rank": 4,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2949960,
+     "trending": 5899916
+    },
+    "by_year": {
+     "2024": 5899916,
+     "2025": 2949960
+    },
+    "entry_hour_hist": {
+     "10": 92,
+     "9": 104
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.25,
+     "max": 19.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 208,
+    "win": {
+     "avg": 16.75,
+     "max": 19.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_04",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0002",
+   "family_members": [
+    "fam-0002"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000015",
+   "metrics": {
+    "deflated_sharpe": 0.9136,
+    "max_drawdown_paisa": -190585,
+    "net_pnl_paisa": 8812345,
+    "profit_factor": 2.4548,
+    "sharpe_ratio": 3.1308,
+    "total_trades": 215,
+    "win_rate": 0.6008
+   },
+   "rank": 5,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2937450,
+     "trending": 5874895
+    },
+    "by_year": {
+     "2024": 5874895,
+     "2025": 2937450
+    },
+    "entry_hour_hist": {
+     "10": 95,
+     "9": 105
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 15.0,
+     "max": 19.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 215,
+    "win": {
+     "avg": 15.5,
+     "max": 20.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_05",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0002",
+   "family_members": [
+    "fam-0002"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000025",
+   "metrics": {
+    "deflated_sharpe": 0.9095,
+    "max_drawdown_paisa": -198702,
+    "net_pnl_paisa": 8774814,
+    "profit_factor": 2.4435,
+    "sharpe_ratio": 3.1135,
+    "total_trades": 222,
+    "win_rate": 0.5985
+   },
+   "rank": 6,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2924940,
+     "trending": 5849874
+    },
+    "by_year": {
+     "2024": 5849874,
+     "2025": 2924940
+    },
+    "entry_hour_hist": {
+     "10": 98,
+     "9": 106
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.625,
+     "max": 20.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 222,
+    "win": {
+     "avg": 16.125,
+     "max": 20.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_06",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0002",
+   "family_members": [
+    "fam-0002"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000045",
+   "metrics": {
+    "deflated_sharpe": 0.9054,
+    "max_drawdown_paisa": -206819,
+    "net_pnl_paisa": 8737283,
+    "profit_factor": 2.4322,
+    "sharpe_ratio": 3.0962,
+    "total_trades": 229,
+    "win_rate": 0.5962
+   },
+   "rank": 7,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2912430,
+     "trending": 5824853
+    },
+    "by_year": {
+     "2024": 5824853,
+     "2025": 2912430
+    },
+    "entry_hour_hist": {
+     "10": 101,
+     "9": 107
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 14.5,
+     "max": 17.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 229,
+    "win": {
+     "avg": 15.0,
+     "max": 17.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_07",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0002",
+   "family_members": [
+    "fam-0002"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000085",
+   "metrics": {
+    "deflated_sharpe": 0.9013,
+    "max_drawdown_paisa": -214936,
+    "net_pnl_paisa": 8699752,
+    "profit_factor": 2.4209,
+    "sharpe_ratio": 3.0789,
+    "total_trades": 236,
+    "win_rate": 0.5939
+   },
+   "rank": 8,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2899920,
+     "trending": 5799832
+    },
+    "by_year": {
+     "2024": 5799832,
+     "2025": 2899920
+    },
+    "entry_hour_hist": {
+     "10": 104,
+     "9": 108
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.125,
+     "max": 17.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 236,
+    "win": {
+     "avg": 15.625,
+     "max": 18.0,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_08",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0003",
+   "family_members": [
+    "fam-0003"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000105",
+   "metrics": {
+    "deflated_sharpe": 0.8972,
+    "max_drawdown_paisa": -223053,
+    "net_pnl_paisa": 8662221,
+    "profit_factor": 2.4096,
+    "sharpe_ratio": 3.0616,
+    "total_trades": 243,
+    "win_rate": 0.5916
+   },
+   "rank": 9,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2887410,
+     "trending": 5774811
+    },
+    "by_year": {
+     "2024": 5774811,
+     "2025": 2887410
+    },
+    "entry_hour_hist": {
+     "10": 107,
+     "9": 109
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.75,
+     "max": 18.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 243,
+    "win": {
+     "avg": 16.25,
+     "max": 18.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_09",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0003",
+   "family_members": [
+    "fam-0003"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000205",
+   "metrics": {
+    "deflated_sharpe": 0.8931,
+    "max_drawdown_paisa": -231170,
+    "net_pnl_paisa": 8624690,
+    "profit_factor": 2.3983,
+    "sharpe_ratio": 3.0443,
+    "total_trades": 250,
+    "win_rate": 0.5893
+   },
+   "rank": 10,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2874900,
+     "trending": 5749790
+    },
+    "by_year": {
+     "2024": 5749790,
+     "2025": 2874900
+    },
+    "entry_hour_hist": {
+     "10": 110,
+     "9": 110
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.5,
+     "max": 18.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 250,
+    "win": {
+     "avg": 15.0,
+     "max": 19.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_10",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0003",
+   "family_members": [
+    "fam-0003"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000405",
+   "metrics": {
+    "deflated_sharpe": 0.889,
+    "max_drawdown_paisa": -239287,
+    "net_pnl_paisa": 8587159,
+    "profit_factor": 2.387,
+    "sharpe_ratio": 3.027,
+    "total_trades": 257,
+    "win_rate": 0.587
+   },
+   "rank": 11,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2862390,
+     "trending": 5724769
+    },
+    "by_year": {
+     "2024": 5724769,
+     "2025": 2862390
+    },
+    "entry_hour_hist": {
+     "10": 113,
+     "9": 111
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.125,
+     "max": 19.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 257,
+    "win": {
+     "avg": 15.625,
+     "max": 19.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_11",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0003",
+   "family_members": [
+    "fam-0003"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000805",
+   "metrics": {
+    "deflated_sharpe": 0.8849,
+    "max_drawdown_paisa": -247404,
+    "net_pnl_paisa": 8549628,
+    "profit_factor": 2.3757,
+    "sharpe_ratio": 3.0097,
+    "total_trades": 264,
+    "win_rate": 0.5847
+   },
+   "rank": 12,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2849880,
+     "trending": 5699748
+    },
+    "by_year": {
+     "2024": 5699748,
+     "2025": 2849880
+    },
+    "entry_hour_hist": {
+     "10": 116,
+     "9": 112
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.75,
+     "max": 19.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 264,
+    "win": {
+     "avg": 16.25,
+     "max": 20.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_12",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0004",
+   "family_members": [
+    "fam-0004"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000001005",
+   "metrics": {
+    "deflated_sharpe": 0.8808,
+    "max_drawdown_paisa": -255521,
+    "net_pnl_paisa": 8512097,
+    "profit_factor": 2.3644,
+    "sharpe_ratio": 2.9924,
+    "total_trades": 271,
+    "win_rate": 0.5824
+   },
+   "rank": 13,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2837370,
+     "trending": 5674727
+    },
+    "by_year": {
+     "2024": 5674727,
+     "2025": 2837370
+    },
+    "entry_hour_hist": {
+     "10": 119,
+     "9": 113
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 16.375,
+     "max": 20.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 271,
+    "win": {
+     "avg": 16.875,
+     "max": 20.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_13",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0004",
+   "family_members": [
+    "fam-0004"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000002005",
+   "metrics": {
+    "deflated_sharpe": 0.8767,
+    "max_drawdown_paisa": -263638,
+    "net_pnl_paisa": 8474566,
+    "profit_factor": 2.3531,
+    "sharpe_ratio": 2.9751,
+    "total_trades": 278,
+    "win_rate": 0.5801
+   },
+   "rank": 14,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2824860,
+     "trending": 5649706
+    },
+    "by_year": {
+     "2024": 5649706,
+     "2025": 2824860
+    },
+    "entry_hour_hist": {
+     "10": 122,
+     "9": 114
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.25,
+     "max": 17.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 278,
+    "win": {
+     "avg": 15.75,
+     "max": 17.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_14",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0004",
+   "family_members": [
+    "fam-0004"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000004005",
+   "metrics": {
+    "deflated_sharpe": 0.8726,
+    "max_drawdown_paisa": -271755,
+    "net_pnl_paisa": 8437035,
+    "profit_factor": 2.3418,
+    "sharpe_ratio": 2.9578,
+    "total_trades": 285,
+    "win_rate": 0.5778
+   },
+   "rank": 15,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2812350,
+     "trending": 5624685
+    },
+    "by_year": {
+     "2024": 5624685,
+     "2025": 2812350
+    },
+    "entry_hour_hist": {
+     "10": 125,
+     "9": 115
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.0,
+     "max": 17.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 285,
+    "win": {
+     "avg": 14.5,
+     "max": 18.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_15",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0004",
+   "family_members": [
+    "fam-0004"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000008005",
+   "metrics": {
+    "deflated_sharpe": 0.8685,
+    "max_drawdown_paisa": -279872,
+    "net_pnl_paisa": 8399504,
+    "profit_factor": 2.3305,
+    "sharpe_ratio": 2.9405,
+    "total_trades": 292,
+    "win_rate": 0.5755
+   },
+   "rank": 16,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2799840,
+     "trending": 5599664
+    },
+    "by_year": {
+     "2024": 5599664,
+     "2025": 2799840
+    },
+    "entry_hour_hist": {
+     "10": 128,
+     "9": 116
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.625,
+     "max": 18.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 292,
+    "win": {
+     "avg": 15.125,
+     "max": 18.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_16",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0005",
+   "family_members": [
+    "fam-0005"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000010005",
+   "metrics": {
+    "deflated_sharpe": 0.8644,
+    "max_drawdown_paisa": -287989,
+    "net_pnl_paisa": 8361973,
+    "profit_factor": 2.3192,
+    "sharpe_ratio": 2.9232,
+    "total_trades": 299,
+    "win_rate": 0.5732
+   },
+   "rank": 17,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2787330,
+     "trending": 5574643
+    },
+    "by_year": {
+     "2024": 5574643,
+     "2025": 2787330
+    },
+    "entry_hour_hist": {
+     "10": 131,
+     "9": 117
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.25,
+     "max": 18.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 299,
+    "win": {
+     "avg": 15.75,
+     "max": 19.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_17",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0005",
+   "family_members": [
+    "fam-0005"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000020005",
+   "metrics": {
+    "deflated_sharpe": 0.8603,
+    "max_drawdown_paisa": -296106,
+    "net_pnl_paisa": 8324442,
+    "profit_factor": 2.3079,
+    "sharpe_ratio": 2.9059,
+    "total_trades": 306,
+    "win_rate": 0.5709
+   },
+   "rank": 18,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2774820,
+     "trending": 5549622
+    },
+    "by_year": {
+     "2024": 5549622,
+     "2025": 2774820
+    },
+    "entry_hour_hist": {
+     "10": 134,
+     "9": 118
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.875,
+     "max": 19.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 306,
+    "win": {
+     "avg": 16.375,
+     "max": 19.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_18",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0005",
+   "family_members": [
+    "fam-0005"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000040005",
+   "metrics": {
+    "deflated_sharpe": 0.8562,
+    "max_drawdown_paisa": -304223,
+    "net_pnl_paisa": 8286911,
+    "profit_factor": 2.2966,
+    "sharpe_ratio": 2.8886,
+    "total_trades": 313,
+    "win_rate": 0.5686
+   },
+   "rank": 19,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2762310,
+     "trending": 5524601
+    },
+    "by_year": {
+     "2024": 5524601,
+     "2025": 2762310
+    },
+    "entry_hour_hist": {
+     "10": 137,
+     "9": 119
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.5,
+     "max": 19.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 313,
+    "win": {
+     "avg": 17.0,
+     "max": 20.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_19",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0005",
+   "family_members": [
+    "fam-0005"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000080005",
+   "metrics": {
+    "deflated_sharpe": 0.8521,
+    "max_drawdown_paisa": -312340,
+    "net_pnl_paisa": 8249380,
+    "profit_factor": 2.2853,
+    "sharpe_ratio": 2.8713,
+    "total_trades": 320,
+    "win_rate": 0.5663
+   },
+   "rank": 20,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2749800,
+     "trending": 5499580
+    },
+    "by_year": {
+     "2024": 5499580,
+     "2025": 2749800
+    },
+    "entry_hour_hist": {
+     "10": 140,
+     "9": 120
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 15.25,
+     "max": 20.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 320,
+    "win": {
+     "avg": 15.75,
+     "max": 20.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_20",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0006",
+   "family_members": [
+    "fam-0006"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000100005",
+   "metrics": {
+    "deflated_sharpe": 0.848,
+    "max_drawdown_paisa": -320457,
+    "net_pnl_paisa": 8211849,
+    "profit_factor": 2.274,
+    "sharpe_ratio": 2.854,
+    "total_trades": 327,
+    "win_rate": 0.564
+   },
+   "rank": 21,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2737290,
+     "trending": 5474559
+    },
+    "by_year": {
+     "2024": 5474559,
+     "2025": 2737290
+    },
+    "entry_hour_hist": {
+     "10": 143,
+     "9": 121
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.125,
+     "max": 17.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 327,
+    "win": {
+     "avg": 14.625,
+     "max": 17.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_21",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0006",
+   "family_members": [
+    "fam-0006"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000200005",
+   "metrics": {
+    "deflated_sharpe": 0.8439,
+    "max_drawdown_paisa": -328574,
+    "net_pnl_paisa": 8174318,
+    "profit_factor": 2.2627,
+    "sharpe_ratio": 2.8367,
+    "total_trades": 334,
+    "win_rate": 0.5617
+   },
+   "rank": 22,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2724780,
+     "trending": 5449538
+    },
+    "by_year": {
+     "2024": 5449538,
+     "2025": 2724780
+    },
+    "entry_hour_hist": {
+     "10": 146,
+     "9": 122
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 14.75,
+     "max": 17.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 334,
+    "win": {
+     "avg": 15.25,
+     "max": 18.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_22",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0006",
+   "family_members": [
+    "fam-0006"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000400005",
+   "metrics": {
+    "deflated_sharpe": 0.8398,
+    "max_drawdown_paisa": -336691,
+    "net_pnl_paisa": 8136787,
+    "profit_factor": 2.2514,
+    "sharpe_ratio": 2.8194,
+    "total_trades": 341,
+    "win_rate": 0.5594
+   },
+   "rank": 23,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2712270,
+     "trending": 5424517
+    },
+    "by_year": {
+     "2024": 5424517,
+     "2025": 2712270
+    },
+    "entry_hour_hist": {
+     "10": 149,
+     "9": 123
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.375,
+     "max": 18.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 341,
+    "win": {
+     "avg": 15.875,
+     "max": 18.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_23",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0006",
+   "family_members": [
+    "fam-0006"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000800005",
+   "metrics": {
+    "deflated_sharpe": 0.8357,
+    "max_drawdown_paisa": -344808,
+    "net_pnl_paisa": 8099256,
+    "profit_factor": 2.2401,
+    "sharpe_ratio": 2.8021,
+    "total_trades": 348,
+    "win_rate": 0.5571
+   },
+   "rank": 24,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2699760,
+     "trending": 5399496
+    },
+    "by_year": {
+     "2024": 5399496,
+     "2025": 2699760
+    },
+    "entry_hour_hist": {
+     "10": 152,
+     "9": 124
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.0,
+     "max": 18.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 348,
+    "win": {
+     "avg": 16.5,
+     "max": 19.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_24",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0007",
+   "family_members": [
+    "fam-0007"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000001000005",
+   "metrics": {
+    "deflated_sharpe": 0.8316,
+    "max_drawdown_paisa": -352925,
+    "net_pnl_paisa": 8061725,
+    "profit_factor": 2.2288,
+    "sharpe_ratio": 2.7848,
+    "total_trades": 355,
+    "win_rate": 0.5548
+   },
+   "rank": 25,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2687250,
+     "trending": 5374475
+    },
+    "by_year": {
+     "2024": 5374475,
+     "2025": 2687250
+    },
+    "entry_hour_hist": {
+     "10": 155,
+     "9": 125
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.75,
+     "max": 19.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 355,
+    "win": {
+     "avg": 15.25,
+     "max": 19.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_25",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0007",
+   "family_members": [
+    "fam-0007"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000002000005",
+   "metrics": {
+    "deflated_sharpe": 0.8275,
+    "max_drawdown_paisa": -361042,
+    "net_pnl_paisa": 8024194,
+    "profit_factor": 2.2175,
+    "sharpe_ratio": 2.7675,
+    "total_trades": 362,
+    "win_rate": 0.5525
+   },
+   "rank": 26,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2674740,
+     "trending": 5349454
+    },
+    "by_year": {
+     "2024": 5349454,
+     "2025": 2674740
+    },
+    "entry_hour_hist": {
+     "10": 158,
+     "9": 126
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.375,
+     "max": 19.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 362,
+    "win": {
+     "avg": 15.875,
+     "max": 20.0,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_26",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0007",
+   "family_members": [
+    "fam-0007"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000004000005",
+   "metrics": {
+    "deflated_sharpe": 0.8234,
+    "max_drawdown_paisa": -369159,
+    "net_pnl_paisa": 7986663,
+    "profit_factor": 2.2062,
+    "sharpe_ratio": 2.7502,
+    "total_trades": 369,
+    "win_rate": 0.5502
+   },
+   "rank": 27,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2662230,
+     "trending": 5324433
+    },
+    "by_year": {
+     "2024": 5324433,
+     "2025": 2662230
+    },
+    "entry_hour_hist": {
+     "10": 161,
+     "9": 127
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 16.0,
+     "max": 20.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 369,
+    "win": {
+     "avg": 16.5,
+     "max": 20.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_27",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0007",
+   "family_members": [
+    "fam-0007"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000008000005",
+   "metrics": {
+    "deflated_sharpe": 0.8193,
+    "max_drawdown_paisa": -377276,
+    "net_pnl_paisa": 7949132,
+    "profit_factor": 2.1949,
+    "sharpe_ratio": 2.7329,
+    "total_trades": 376,
+    "win_rate": 0.5479
+   },
+   "rank": 28,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2649720,
+     "trending": 5299412
+    },
+    "by_year": {
+     "2024": 5299412,
+     "2025": 2649720
+    },
+    "entry_hour_hist": {
+     "10": 164,
+     "9": 128
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 14.875,
+     "max": 17.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 376,
+    "win": {
+     "avg": 15.375,
+     "max": 17.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_28",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0008",
+   "family_members": [
+    "fam-0008"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000010000005",
+   "metrics": {
+    "deflated_sharpe": 0.8152,
+    "max_drawdown_paisa": -385393,
+    "net_pnl_paisa": 7911601,
+    "profit_factor": 2.1836,
+    "sharpe_ratio": 2.7156,
+    "total_trades": 383,
+    "win_rate": 0.5456
+   },
+   "rank": 29,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2637210,
+     "trending": 5274391
+    },
+    "by_year": {
+     "2024": 5274391,
+     "2025": 2637210
+    },
+    "entry_hour_hist": {
+     "10": 167,
+     "9": 129
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.5,
+     "max": 17.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 383,
+    "win": {
+     "avg": 16.0,
+     "max": 18.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_29",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0008",
+   "family_members": [
+    "fam-0008"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000020000005",
+   "metrics": {
+    "deflated_sharpe": 0.8111,
+    "max_drawdown_paisa": -393510,
+    "net_pnl_paisa": 7874070,
+    "profit_factor": 2.1723,
+    "sharpe_ratio": 2.6983,
+    "total_trades": 390,
+    "win_rate": 0.5433
+   },
+   "rank": 30,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2624700,
+     "trending": 5249370
+    },
+    "by_year": {
+     "2024": 5249370,
+     "2025": 2624700
+    },
+    "entry_hour_hist": {
+     "10": 80,
+     "9": 130
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.25,
+     "max": 18.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 390,
+    "win": {
+     "avg": 14.75,
+     "max": 18.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_30",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0008",
+   "family_members": [
+    "fam-0008"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000040000005",
+   "metrics": {
+    "deflated_sharpe": 0.807,
+    "max_drawdown_paisa": -401627,
+    "net_pnl_paisa": 7836539,
+    "profit_factor": 2.161,
+    "sharpe_ratio": 2.681,
+    "total_trades": 397,
+    "win_rate": 0.541
+   },
+   "rank": 31,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2612190,
+     "trending": 5224349
+    },
+    "by_year": {
+     "2024": 5224349,
+     "2025": 2612190
+    },
+    "entry_hour_hist": {
+     "10": 83,
+     "9": 131
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.875,
+     "max": 18.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 397,
+    "win": {
+     "avg": 15.375,
+     "max": 19.0,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_31",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0008",
+   "family_members": [
+    "fam-0008"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000080000005",
+   "metrics": {
+    "deflated_sharpe": 0.8029,
+    "max_drawdown_paisa": -409744,
+    "net_pnl_paisa": 7799008,
+    "profit_factor": 2.1497,
+    "sharpe_ratio": 2.6637,
+    "total_trades": 404,
+    "win_rate": 0.5387
+   },
+   "rank": 32,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2599680,
+     "trending": 5199328
+    },
+    "by_year": {
+     "2024": 5199328,
+     "2025": 2599680
+    },
+    "entry_hour_hist": {
+     "10": 86,
+     "9": 132
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.5,
+     "max": 19.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 404,
+    "win": {
+     "avg": 16.0,
+     "max": 19.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_32",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0009",
+   "family_members": [
+    "fam-0009"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000100000005",
+   "metrics": {
+    "deflated_sharpe": 0.7988,
+    "max_drawdown_paisa": -417861,
+    "net_pnl_paisa": 7761477,
+    "profit_factor": 2.1384,
+    "sharpe_ratio": 2.6464,
+    "total_trades": 411,
+    "win_rate": 0.5364
+   },
+   "rank": 33,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2587170,
+     "trending": 5174307
+    },
+    "by_year": {
+     "2024": 5174307,
+     "2025": 2587170
+    },
+    "entry_hour_hist": {
+     "10": 89,
+     "9": 133
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 16.125,
+     "max": 19.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 411,
+    "win": {
+     "avg": 16.625,
+     "max": 20.0,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_33",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0009",
+   "family_members": [
+    "fam-0009"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000200000005",
+   "metrics": {
+    "deflated_sharpe": 0.7947,
+    "max_drawdown_paisa": -425978,
+    "net_pnl_paisa": 7723946,
+    "profit_factor": 2.1271,
+    "sharpe_ratio": 2.6291,
+    "total_trades": 418,
+    "win_rate": 0.5341
+   },
+   "rank": 34,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2574660,
+     "trending": 5149286
+    },
+    "by_year": {
+     "2024": 5149286,
+     "2025": 2574660
+    },
+    "entry_hour_hist": {
+     "10": 92,
+     "9": 134
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.75,
+     "max": 20.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 418,
+    "win": {
+     "avg": 17.25,
+     "max": 20.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_34",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0009",
+   "family_members": [
+    "fam-0009"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000400000005",
+   "metrics": {
+    "deflated_sharpe": 0.7906,
+    "max_drawdown_paisa": -434095,
+    "net_pnl_paisa": 7686415,
+    "profit_factor": 2.1158,
+    "sharpe_ratio": 2.6118,
+    "total_trades": 425,
+    "win_rate": 0.5318
+   },
+   "rank": 35,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2562150,
+     "trending": 5124265
+    },
+    "by_year": {
+     "2024": 5124265,
+     "2025": 2562150
+    },
+    "entry_hour_hist": {
+     "10": 95,
+     "9": 135
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 13.75,
+     "max": 17.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 425,
+    "win": {
+     "avg": 14.25,
+     "max": 17.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_35",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0009",
+   "family_members": [
+    "fam-0009"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000800000005",
+   "metrics": {
+    "deflated_sharpe": 0.7865,
+    "max_drawdown_paisa": -442212,
+    "net_pnl_paisa": 7648884,
+    "profit_factor": 2.1045,
+    "sharpe_ratio": 2.5945,
+    "total_trades": 432,
+    "win_rate": 0.5295
+   },
+   "rank": 36,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2549640,
+     "trending": 5099244
+    },
+    "by_year": {
+     "2024": 5099244,
+     "2025": 2549640
+    },
+    "entry_hour_hist": {
+     "10": 98,
+     "9": 136
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.375,
+     "max": 17.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 432,
+    "win": {
+     "avg": 14.875,
+     "max": 18.0,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_36",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0010",
+   "family_members": [
+    "fam-0010"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000001000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7824,
+    "max_drawdown_paisa": -450329,
+    "net_pnl_paisa": 7611353,
+    "profit_factor": 2.0932,
+    "sharpe_ratio": 2.5772,
+    "total_trades": 439,
+    "win_rate": 0.5272
+   },
+   "rank": 37,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2537130,
+     "trending": 5074223
+    },
+    "by_year": {
+     "2024": 5074223,
+     "2025": 2537130
+    },
+    "entry_hour_hist": {
+     "10": 101,
+     "9": 137
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.0,
+     "max": 18.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 439,
+    "win": {
+     "avg": 15.5,
+     "max": 18.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_37",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0010",
+   "family_members": [
+    "fam-0010"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000002000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7783,
+    "max_drawdown_paisa": -458446,
+    "net_pnl_paisa": 7573822,
+    "profit_factor": 2.0819,
+    "sharpe_ratio": 2.5599,
+    "total_trades": 186,
+    "win_rate": 0.5249
+   },
+   "rank": 38,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2524620,
+     "trending": 5049202
+    },
+    "by_year": {
+     "2024": 5049202,
+     "2025": 2524620
+    },
+    "entry_hour_hist": {
+     "10": 104,
+     "9": 138
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.625,
+     "max": 18.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 186,
+    "win": {
+     "avg": 16.125,
+     "max": 19.0,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_38",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0010",
+   "family_members": [
+    "fam-0010"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000004000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7742,
+    "max_drawdown_paisa": -466563,
+    "net_pnl_paisa": 7536291,
+    "profit_factor": 2.0706,
+    "sharpe_ratio": 2.5426,
+    "total_trades": 193,
+    "win_rate": 0.5226
+   },
+   "rank": 39,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2512110,
+     "trending": 5024181
+    },
+    "by_year": {
+     "2024": 5024181,
+     "2025": 2512110
+    },
+    "entry_hour_hist": {
+     "10": 107,
+     "9": 139
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.25,
+     "max": 19.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 193,
+    "win": {
+     "avg": 16.75,
+     "max": 19.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_39",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0010",
+   "family_members": [
+    "fam-0010"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000008000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7701,
+    "max_drawdown_paisa": -474680,
+    "net_pnl_paisa": 7498760,
+    "profit_factor": 2.0593,
+    "sharpe_ratio": 2.5253,
+    "total_trades": 200,
+    "win_rate": 0.5203
+   },
+   "rank": 40,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2499600,
+     "trending": 4999160
+    },
+    "by_year": {
+     "2024": 4999160,
+     "2025": 2499600
+    },
+    "entry_hour_hist": {
+     "10": 110,
+     "9": 140
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 15.0,
+     "max": 19.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 200,
+    "win": {
+     "avg": 15.5,
+     "max": 20.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_40",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0011",
+   "family_members": [
+    "fam-0011"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000010000000005",
+   "metrics": {
+    "deflated_sharpe": 0.766,
+    "max_drawdown_paisa": -482797,
+    "net_pnl_paisa": 7461229,
+    "profit_factor": 2.048,
+    "sharpe_ratio": 2.508,
+    "total_trades": 207,
+    "win_rate": 0.518
+   },
+   "rank": 41,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2487090,
+     "trending": 4974139
+    },
+    "by_year": {
+     "2024": 4974139,
+     "2025": 2487090
+    },
+    "entry_hour_hist": {
+     "10": 113,
+     "9": 141
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.625,
+     "max": 20.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 207,
+    "win": {
+     "avg": 16.125,
+     "max": 20.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_41",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0011",
+   "family_members": [
+    "fam-0011"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000020000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7619,
+    "max_drawdown_paisa": -490914,
+    "net_pnl_paisa": 7423698,
+    "profit_factor": 2.0367,
+    "sharpe_ratio": 2.508,
+    "total_trades": 214,
+    "win_rate": 0.5157
+   },
+   "rank": 42,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2474580,
+     "trending": 4949118
+    },
+    "by_year": {
+     "2024": 4949118,
+     "2025": 2474580
+    },
+    "entry_hour_hist": {
+     "10": 116,
+     "9": 142
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 14.5,
+     "max": 17.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 214,
+    "win": {
+     "avg": 15.0,
+     "max": 17.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_42",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0011",
+   "family_members": [
+    "fam-0011"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000040000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7578,
+    "max_drawdown_paisa": -499031,
+    "net_pnl_paisa": 7386167,
+    "profit_factor": 2.0254,
+    "sharpe_ratio": 2.4734,
+    "total_trades": 221,
+    "win_rate": 0.5134
+   },
+   "rank": 43,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2462070,
+     "trending": 4924097
+    },
+    "by_year": {
+     "2024": 4924097,
+     "2025": 2462070
+    },
+    "entry_hour_hist": {
+     "10": 119,
+     "9": 143
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.125,
+     "max": 17.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 221,
+    "win": {
+     "avg": 15.625,
+     "max": 18.0,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_43",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0011",
+   "family_members": [
+    "fam-0011"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000080000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7537,
+    "max_drawdown_paisa": -507148,
+    "net_pnl_paisa": 7348636,
+    "profit_factor": 2.0141,
+    "sharpe_ratio": 2.4561,
+    "total_trades": 228,
+    "win_rate": 0.5111
+   },
+   "rank": 44,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2449560,
+     "trending": 4899076
+    },
+    "by_year": {
+     "2024": 4899076,
+     "2025": 2449560
+    },
+    "entry_hour_hist": {
+     "10": 122,
+     "9": 144
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.75,
+     "max": 18.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 228,
+    "win": {
+     "avg": 16.25,
+     "max": 18.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_44",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0012",
+   "family_members": [
+    "fam-0012"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000100000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7496,
+    "max_drawdown_paisa": -515265,
+    "net_pnl_paisa": 7311105,
+    "profit_factor": 2.0028,
+    "sharpe_ratio": 2.4388,
+    "total_trades": 235,
+    "win_rate": 0.5088
+   },
+   "rank": 45,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2437050,
+     "trending": 4874055
+    },
+    "by_year": {
+     "2024": 4874055,
+     "2025": 2437050
+    },
+    "entry_hour_hist": {
+     "10": 125,
+     "9": 145
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.5,
+     "max": 18.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 235,
+    "win": {
+     "avg": 15.0,
+     "max": 19.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_45",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0012",
+   "family_members": [
+    "fam-0012"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000200000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7455,
+    "max_drawdown_paisa": -523382,
+    "net_pnl_paisa": 7273574,
+    "profit_factor": 1.9915,
+    "sharpe_ratio": 2.4215,
+    "total_trades": 242,
+    "win_rate": 0.5065
+   },
+   "rank": 46,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2424540,
+     "trending": 4849034
+    },
+    "by_year": {
+     "2024": 4849034,
+     "2025": 2424540
+    },
+    "entry_hour_hist": {
+     "10": 128,
+     "9": 146
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.125,
+     "max": 19.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 242,
+    "win": {
+     "avg": 15.625,
+     "max": 19.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_46",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0012",
+   "family_members": [
+    "fam-0012"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000400000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7414,
+    "max_drawdown_paisa": -531499,
+    "net_pnl_paisa": 7236043,
+    "profit_factor": 1.9802,
+    "sharpe_ratio": 2.4042,
+    "total_trades": 249,
+    "win_rate": 0.5042
+   },
+   "rank": 47,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2412030,
+     "trending": 4824013
+    },
+    "by_year": {
+     "2024": 4824013,
+     "2025": 2412030
+    },
+    "entry_hour_hist": {
+     "10": 131,
+     "9": 147
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.75,
+     "max": 19.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 249,
+    "win": {
+     "avg": 16.25,
+     "max": 20.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_47",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0012",
+   "family_members": [
+    "fam-0012"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000800000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7373,
+    "max_drawdown_paisa": -539616,
+    "net_pnl_paisa": 7198512,
+    "profit_factor": 1.9689,
+    "sharpe_ratio": 2.3869,
+    "total_trades": 256,
+    "win_rate": 0.5019
+   },
+   "rank": 48,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2399520,
+     "trending": 4798992
+    },
+    "by_year": {
+     "2024": 4798992,
+     "2025": 2399520
+    },
+    "entry_hour_hist": {
+     "10": 134,
+     "9": 148
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 16.375,
+     "max": 20.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 256,
+    "win": {
+     "avg": 16.875,
+     "max": 20.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_48",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0013",
+   "family_members": [
+    "fam-0013"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000001000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7332,
+    "max_drawdown_paisa": -547733,
+    "net_pnl_paisa": 7160981,
+    "profit_factor": 1.9576,
+    "sharpe_ratio": 2.3696,
+    "total_trades": 263,
+    "win_rate": 0.4996
+   },
+   "rank": 49,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2387010,
+     "trending": 4773971
+    },
+    "by_year": {
+     "2024": 4773971,
+     "2025": 2387010
+    },
+    "entry_hour_hist": {
+     "10": 137,
+     "9": 149
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.25,
+     "max": 17.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 263,
+    "win": {
+     "avg": 15.75,
+     "max": 17.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_49",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0013",
+   "family_members": [
+    "fam-0013"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000002000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7291,
+    "max_drawdown_paisa": -555850,
+    "net_pnl_paisa": 7123450,
+    "profit_factor": 1.9463,
+    "sharpe_ratio": 2.3523,
+    "total_trades": 270,
+    "win_rate": 0.4973
+   },
+   "rank": 50,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2374500,
+     "trending": 4748950
+    },
+    "by_year": {
+     "2024": 4748950,
+     "2025": 2374500
+    },
+    "entry_hour_hist": {
+     "10": 140,
+     "9": 150
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.0,
+     "max": 17.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 270,
+    "win": {
+     "avg": 14.5,
+     "max": 18.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_50",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0013",
+   "family_members": [
+    "fam-0013"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000004000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.725,
+    "max_drawdown_paisa": -563967,
+    "net_pnl_paisa": 7085919,
+    "profit_factor": 1.935,
+    "sharpe_ratio": 2.335,
+    "total_trades": 277,
+    "win_rate": 0.495
+   },
+   "rank": 51,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2361990,
+     "trending": 4723929
+    },
+    "by_year": {
+     "2024": 4723929,
+     "2025": 2361990
+    },
+    "entry_hour_hist": {
+     "10": 143,
+     "9": 151
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.625,
+     "max": 18.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 277,
+    "win": {
+     "avg": 15.125,
+     "max": 18.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_51",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0013",
+   "family_members": [
+    "fam-0013"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000008000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7209,
+    "max_drawdown_paisa": -572084,
+    "net_pnl_paisa": 7048388,
+    "profit_factor": 1.9237,
+    "sharpe_ratio": 2.3177,
+    "total_trades": 284,
+    "win_rate": 0.4927
+   },
+   "rank": 52,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2349480,
+     "trending": 4698908
+    },
+    "by_year": {
+     "2024": 4698908,
+     "2025": 2349480
+    },
+    "entry_hour_hist": {
+     "10": 146,
+     "9": 152
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.25,
+     "max": 18.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 284,
+    "win": {
+     "avg": 15.75,
+     "max": 19.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_52",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0014",
+   "family_members": [
+    "fam-0014"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000010000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7168,
+    "max_drawdown_paisa": -580201,
+    "net_pnl_paisa": 7010857,
+    "profit_factor": 1.9124,
+    "sharpe_ratio": 2.3004,
+    "total_trades": 291,
+    "win_rate": 0.4904
+   },
+   "rank": 53,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2336970,
+     "trending": 4673887
+    },
+    "by_year": {
+     "2024": 4673887,
+     "2025": 2336970
+    },
+    "entry_hour_hist": {
+     "10": 149,
+     "9": 153
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.875,
+     "max": 19.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 291,
+    "win": {
+     "avg": 16.375,
+     "max": 19.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_53",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0014",
+   "family_members": [
+    "fam-0014"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000020000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7127,
+    "max_drawdown_paisa": -588318,
+    "net_pnl_paisa": 6973326,
+    "profit_factor": 1.9011,
+    "sharpe_ratio": 2.2831,
+    "total_trades": 298,
+    "win_rate": 0.4881
+   },
+   "rank": 54,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2324460,
+     "trending": 4648866
+    },
+    "by_year": {
+     "2024": 4648866,
+     "2025": 2324460
+    },
+    "entry_hour_hist": {
+     "10": 152,
+     "9": 154
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.5,
+     "max": 19.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 298,
+    "win": {
+     "avg": 17.0,
+     "max": 20.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_54",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0014",
+   "family_members": [
+    "fam-0014"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000040000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7086,
+    "max_drawdown_paisa": -596435,
+    "net_pnl_paisa": 6935795,
+    "profit_factor": 1.8898,
+    "sharpe_ratio": 2.2658,
+    "total_trades": 305,
+    "win_rate": 0.4858
+   },
+   "rank": 55,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2311950,
+     "trending": 4623845
+    },
+    "by_year": {
+     "2024": 4623845,
+     "2025": 2311950
+    },
+    "entry_hour_hist": {
+     "10": 155,
+     "9": 155
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 15.25,
+     "max": 20.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 305,
+    "win": {
+     "avg": 15.75,
+     "max": 20.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_55",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0014",
+   "family_members": [
+    "fam-0014"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000080000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7045,
+    "max_drawdown_paisa": -604552,
+    "net_pnl_paisa": 6898264,
+    "profit_factor": 1.8785,
+    "sharpe_ratio": 2.2485,
+    "total_trades": 312,
+    "win_rate": 0.4835
+   },
+   "rank": 56,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2299440,
+     "trending": 4598824
+    },
+    "by_year": {
+     "2024": 4598824,
+     "2025": 2299440
+    },
+    "entry_hour_hist": {
+     "10": 158,
+     "9": 156
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.125,
+     "max": 17.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 312,
+    "win": {
+     "avg": 14.625,
+     "max": 17.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_56",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0015",
+   "family_members": [
+    "fam-0015"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000100000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.7004,
+    "max_drawdown_paisa": -612669,
+    "net_pnl_paisa": 6860733,
+    "profit_factor": 1.8672,
+    "sharpe_ratio": 2.2312,
+    "total_trades": 319,
+    "win_rate": 0.4812
+   },
+   "rank": 57,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2286930,
+     "trending": 4573803
+    },
+    "by_year": {
+     "2024": 4573803,
+     "2025": 2286930
+    },
+    "entry_hour_hist": {
+     "10": 161,
+     "9": 157
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 14.75,
+     "max": 17.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 319,
+    "win": {
+     "avg": 15.25,
+     "max": 18.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_57",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0015",
+   "family_members": [
+    "fam-0015"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000200000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.6963,
+    "max_drawdown_paisa": -620786,
+    "net_pnl_paisa": 6823202,
+    "profit_factor": 1.8559,
+    "sharpe_ratio": 2.2139,
+    "total_trades": 326,
+    "win_rate": 0.4789
+   },
+   "rank": 58,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2274420,
+     "trending": 4548782
+    },
+    "by_year": {
+     "2024": 4548782,
+     "2025": 2274420
+    },
+    "entry_hour_hist": {
+     "10": 164,
+     "9": 158
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.375,
+     "max": 18.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 326,
+    "win": {
+     "avg": 15.875,
+     "max": 18.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_58",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0015",
+   "family_members": [
+    "fam-0015"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000400000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.6922,
+    "max_drawdown_paisa": -628903,
+    "net_pnl_paisa": 6785671,
+    "profit_factor": 1.8446,
+    "sharpe_ratio": 2.1966,
+    "total_trades": 333,
+    "win_rate": 0.4766
+   },
+   "rank": 59,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2261910,
+     "trending": 4523761
+    },
+    "by_year": {
+     "2024": 4523761,
+     "2025": 2261910
+    },
+    "entry_hour_hist": {
+     "10": 167,
+     "9": 159
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.0,
+     "max": 18.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 333,
+    "win": {
+     "avg": 16.5,
+     "max": 19.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_59",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0015",
+   "family_members": [
+    "fam-0015"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000800000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.6881,
+    "max_drawdown_paisa": -637020,
+    "net_pnl_paisa": 6748140,
+    "profit_factor": 1.8333,
+    "sharpe_ratio": 2.1793,
+    "total_trades": 340,
+    "win_rate": 0.4743
+   },
+   "rank": 60,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2249400,
+     "trending": 4498740
+    },
+    "by_year": {
+     "2024": 4498740,
+     "2025": 2249400
+    },
+    "entry_hour_hist": {
+     "10": 80,
+     "9": 160
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.75,
+     "max": 19.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 340,
+    "win": {
+     "avg": 15.25,
+     "max": 19.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_00",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0016",
+   "family_members": [
+    "fam-0016"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.684,
+    "max_drawdown_paisa": -645137,
+    "net_pnl_paisa": 6710609,
+    "profit_factor": 1.822,
+    "sharpe_ratio": 2.162,
+    "total_trades": 347,
+    "win_rate": 0.472
+   },
+   "rank": 61,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2236890,
+     "trending": 4473719
+    },
+    "by_year": {
+     "2024": 4473719,
+     "2025": 2236890
+    },
+    "entry_hour_hist": {
+     "10": 83,
+     "9": 161
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.375,
+     "max": 19.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 347,
+    "win": {
+     "avg": 15.875,
+     "max": 20.0,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_01",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0016",
+   "family_members": [
+    "fam-0016"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000007",
+   "metrics": {
+    "deflated_sharpe": 0.6799,
+    "max_drawdown_paisa": -653254,
+    "net_pnl_paisa": 6673078,
+    "profit_factor": 1.8107,
+    "sharpe_ratio": 2.1447,
+    "total_trades": 354,
+    "win_rate": 0.4697
+   },
+   "rank": 62,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2224380,
+     "trending": 4448698
+    },
+    "by_year": {
+     "2024": 4448698,
+     "2025": 2224380
+    },
+    "entry_hour_hist": {
+     "10": 86,
+     "9": 162
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 16.0,
+     "max": 20.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 354,
+    "win": {
+     "avg": 16.5,
+     "max": 20.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_02",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0016",
+   "family_members": [
+    "fam-0016"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.6758,
+    "max_drawdown_paisa": -661371,
+    "net_pnl_paisa": 6635547,
+    "profit_factor": 1.7994,
+    "sharpe_ratio": 2.1274,
+    "total_trades": 361,
+    "win_rate": 0.4674
+   },
+   "rank": 63,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2211870,
+     "trending": 4423677
+    },
+    "by_year": {
+     "2024": 4423677,
+     "2025": 2211870
+    },
+    "entry_hour_hist": {
+     "10": 89,
+     "9": 163
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 14.875,
+     "max": 17.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 361,
+    "win": {
+     "avg": 15.375,
+     "max": 17.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_03",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0016",
+   "family_members": [
+    "fam-0016"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "0000000000000000000000000000000d",
+   "metrics": {
+    "deflated_sharpe": 0.6717,
+    "max_drawdown_paisa": -669488,
+    "net_pnl_paisa": 6598016,
+    "profit_factor": 1.7881,
+    "sharpe_ratio": 2.1101,
+    "total_trades": 368,
+    "win_rate": 0.4651
+   },
+   "rank": 64,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2199360,
+     "trending": 4398656
+    },
+    "by_year": {
+     "2024": 4398656,
+     "2025": 2199360
+    },
+    "entry_hour_hist": {
+     "10": 92,
+     "9": 164
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.5,
+     "max": 17.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 368,
+    "win": {
+     "avg": 16.0,
+     "max": 18.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_04",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0017",
+   "family_members": [
+    "fam-0017"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000015",
+   "metrics": {
+    "deflated_sharpe": 0.6676,
+    "max_drawdown_paisa": -677605,
+    "net_pnl_paisa": 6560485,
+    "profit_factor": 1.7768,
+    "sharpe_ratio": 2.0928,
+    "total_trades": 375,
+    "win_rate": 0.4628
+   },
+   "rank": 65,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2186850,
+     "trending": 4373635
+    },
+    "by_year": {
+     "2024": 4373635,
+     "2025": 2186850
+    },
+    "entry_hour_hist": {
+     "10": 95,
+     "9": 165
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.25,
+     "max": 18.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 375,
+    "win": {
+     "avg": 14.75,
+     "max": 18.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_05",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0017",
+   "family_members": [
+    "fam-0017"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000025",
+   "metrics": {
+    "deflated_sharpe": 0.6635,
+    "max_drawdown_paisa": -685722,
+    "net_pnl_paisa": 6522954,
+    "profit_factor": 1.7655,
+    "sharpe_ratio": 2.0755,
+    "total_trades": 382,
+    "win_rate": 0.4605
+   },
+   "rank": 66,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2174340,
+     "trending": 4348614
+    },
+    "by_year": {
+     "2024": 4348614,
+     "2025": 2174340
+    },
+    "entry_hour_hist": {
+     "10": 98,
+     "9": 166
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.875,
+     "max": 18.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 382,
+    "win": {
+     "avg": 15.375,
+     "max": 19.0,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_06",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0017",
+   "family_members": [
+    "fam-0017"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000045",
+   "metrics": {
+    "deflated_sharpe": 0.6594,
+    "max_drawdown_paisa": -693839,
+    "net_pnl_paisa": 6485423,
+    "profit_factor": 1.7542,
+    "sharpe_ratio": 2.0582,
+    "total_trades": 389,
+    "win_rate": 0.4582
+   },
+   "rank": 67,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2161830,
+     "trending": 4323593
+    },
+    "by_year": {
+     "2024": 4323593,
+     "2025": 2161830
+    },
+    "entry_hour_hist": {
+     "10": 101,
+     "9": 167
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.5,
+     "max": 19.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 389,
+    "win": {
+     "avg": 16.0,
+     "max": 19.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_07",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0017",
+   "family_members": [
+    "fam-0017"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000085",
+   "metrics": {
+    "deflated_sharpe": 0.6553,
+    "max_drawdown_paisa": -701956,
+    "net_pnl_paisa": 6447892,
+    "profit_factor": 1.7429,
+    "sharpe_ratio": 2.0409,
+    "total_trades": 396,
+    "win_rate": 0.4559
+   },
+   "rank": 68,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2149320,
+     "trending": 4298572
+    },
+    "by_year": {
+     "2024": 4298572,
+     "2025": 2149320
+    },
+    "entry_hour_hist": {
+     "10": 104,
+     "9": 168
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 16.125,
+     "max": 19.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 396,
+    "win": {
+     "avg": 16.625,
+     "max": 20.0,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_08",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0018",
+   "family_members": [
+    "fam-0018"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000105",
+   "metrics": {
+    "deflated_sharpe": 0.6512,
+    "max_drawdown_paisa": -710073,
+    "net_pnl_paisa": 6410361,
+    "profit_factor": 1.7316,
+    "sharpe_ratio": 2.0236,
+    "total_trades": 403,
+    "win_rate": 0.4536
+   },
+   "rank": 69,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2136810,
+     "trending": 4273551
+    },
+    "by_year": {
+     "2024": 4273551,
+     "2025": 2136810
+    },
+    "entry_hour_hist": {
+     "10": 107,
+     "9": 169
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.75,
+     "max": 20.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 403,
+    "win": {
+     "avg": 17.25,
+     "max": 20.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_09",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0018",
+   "family_members": [
+    "fam-0018"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000205",
+   "metrics": {
+    "deflated_sharpe": 0.6471,
+    "max_drawdown_paisa": -718190,
+    "net_pnl_paisa": 6372830,
+    "profit_factor": 1.7203,
+    "sharpe_ratio": 2.0063,
+    "total_trades": 410,
+    "win_rate": 0.4513
+   },
+   "rank": 70,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2124300,
+     "trending": 4248530
+    },
+    "by_year": {
+     "2024": 4248530,
+     "2025": 2124300
+    },
+    "entry_hour_hist": {
+     "10": 110,
+     "9": 170
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 13.75,
+     "max": 17.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 410,
+    "win": {
+     "avg": 14.25,
+     "max": 17.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_10",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0018",
+   "family_members": [
+    "fam-0018"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000405",
+   "metrics": {
+    "deflated_sharpe": 0.643,
+    "max_drawdown_paisa": -726307,
+    "net_pnl_paisa": 6335299,
+    "profit_factor": 1.709,
+    "sharpe_ratio": 1.989,
+    "total_trades": 417,
+    "win_rate": 0.449
+   },
+   "rank": 71,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2111790,
+     "trending": 4223509
+    },
+    "by_year": {
+     "2024": 4223509,
+     "2025": 2111790
+    },
+    "entry_hour_hist": {
+     "10": 113,
+     "9": 171
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.375,
+     "max": 17.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 417,
+    "win": {
+     "avg": 14.875,
+     "max": 18.0,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_11",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0018",
+   "family_members": [
+    "fam-0018"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000805",
+   "metrics": {
+    "deflated_sharpe": 0.6389,
+    "max_drawdown_paisa": -734424,
+    "net_pnl_paisa": 6297768,
+    "profit_factor": 1.6977,
+    "sharpe_ratio": 1.9717,
+    "total_trades": 424,
+    "win_rate": 0.4467
+   },
+   "rank": 72,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2099280,
+     "trending": 4198488
+    },
+    "by_year": {
+     "2024": 4198488,
+     "2025": 2099280
+    },
+    "entry_hour_hist": {
+     "10": 116,
+     "9": 172
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.0,
+     "max": 18.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 424,
+    "win": {
+     "avg": 15.5,
+     "max": 18.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_12",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0019",
+   "family_members": [
+    "fam-0019"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000001005",
+   "metrics": {
+    "deflated_sharpe": 0.6348,
+    "max_drawdown_paisa": -742541,
+    "net_pnl_paisa": 6260237,
+    "profit_factor": 1.6864,
+    "sharpe_ratio": 1.9544,
+    "total_trades": 431,
+    "win_rate": 0.4444
+   },
+   "rank": 73,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2086770,
+     "trending": 4173467
+    },
+    "by_year": {
+     "2024": 4173467,
+     "2025": 2086770
+    },
+    "entry_hour_hist": {
+     "10": 119,
+     "9": 173
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.625,
+     "max": 18.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 431,
+    "win": {
+     "avg": 16.125,
+     "max": 19.0,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_13",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0019",
+   "family_members": [
+    "fam-0019"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000002005",
+   "metrics": {
+    "deflated_sharpe": 0.6307,
+    "max_drawdown_paisa": -750658,
+    "net_pnl_paisa": 6222706,
+    "profit_factor": 1.6751,
+    "sharpe_ratio": 1.9371,
+    "total_trades": 438,
+    "win_rate": 0.4421
+   },
+   "rank": 74,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2074260,
+     "trending": 4148446
+    },
+    "by_year": {
+     "2024": 4148446,
+     "2025": 2074260
+    },
+    "entry_hour_hist": {
+     "10": 122,
+     "9": 174
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.25,
+     "max": 19.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 438,
+    "win": {
+     "avg": 16.75,
+     "max": 19.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_14",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0019",
+   "family_members": [
+    "fam-0019"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000004005",
+   "metrics": {
+    "deflated_sharpe": 0.6266,
+    "max_drawdown_paisa": -758775,
+    "net_pnl_paisa": 6185175,
+    "profit_factor": 1.6638,
+    "sharpe_ratio": 1.9198,
+    "total_trades": 185,
+    "win_rate": 0.4398
+   },
+   "rank": 75,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2061750,
+     "trending": 4123425
+    },
+    "by_year": {
+     "2024": 4123425,
+     "2025": 2061750
+    },
+    "entry_hour_hist": {
+     "10": 125,
+     "9": 175
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 15.0,
+     "max": 19.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 185,
+    "win": {
+     "avg": 15.5,
+     "max": 20.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_15",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0019",
+   "family_members": [
+    "fam-0019"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000008005",
+   "metrics": {
+    "deflated_sharpe": 0.6225,
+    "max_drawdown_paisa": -766892,
+    "net_pnl_paisa": 6147644,
+    "profit_factor": 1.6525,
+    "sharpe_ratio": 1.9025,
+    "total_trades": 192,
+    "win_rate": 0.4375
+   },
+   "rank": 76,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2049240,
+     "trending": 4098404
+    },
+    "by_year": {
+     "2024": 4098404,
+     "2025": 2049240
+    },
+    "entry_hour_hist": {
+     "10": 128,
+     "9": 176
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.625,
+     "max": 20.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 192,
+    "win": {
+     "avg": 16.125,
+     "max": 20.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_16",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0020",
+   "family_members": [
+    "fam-0020"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000010005",
+   "metrics": {
+    "deflated_sharpe": 0.6184,
+    "max_drawdown_paisa": -775009,
+    "net_pnl_paisa": 6110113,
+    "profit_factor": 1.6412,
+    "sharpe_ratio": 1.8852,
+    "total_trades": 199,
+    "win_rate": 0.4352
+   },
+   "rank": 77,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2036730,
+     "trending": 4073383
+    },
+    "by_year": {
+     "2024": 4073383,
+     "2025": 2036730
+    },
+    "entry_hour_hist": {
+     "10": 131,
+     "9": 177
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 14.5,
+     "max": 17.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 199,
+    "win": {
+     "avg": 15.0,
+     "max": 17.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_17",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0020",
+   "family_members": [
+    "fam-0020"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000020005",
+   "metrics": {
+    "deflated_sharpe": 0.6143,
+    "max_drawdown_paisa": -783126,
+    "net_pnl_paisa": 6072582,
+    "profit_factor": 1.6299,
+    "sharpe_ratio": 1.8679,
+    "total_trades": 206,
+    "win_rate": 0.4329
+   },
+   "rank": 78,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2024220,
+     "trending": 4048362
+    },
+    "by_year": {
+     "2024": 4048362,
+     "2025": 2024220
+    },
+    "entry_hour_hist": {
+     "10": 134,
+     "9": 178
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.125,
+     "max": 17.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 206,
+    "win": {
+     "avg": 15.625,
+     "max": 18.0,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_18",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0020",
+   "family_members": [
+    "fam-0020"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000040005",
+   "metrics": {
+    "deflated_sharpe": 0.6102,
+    "max_drawdown_paisa": -791243,
+    "net_pnl_paisa": 6035051,
+    "profit_factor": 1.6186,
+    "sharpe_ratio": 1.8506,
+    "total_trades": 213,
+    "win_rate": 0.4306
+   },
+   "rank": 79,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2011710,
+     "trending": 4023341
+    },
+    "by_year": {
+     "2024": 4023341,
+     "2025": 2011710
+    },
+    "entry_hour_hist": {
+     "10": 137,
+     "9": 179
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.75,
+     "max": 18.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 213,
+    "win": {
+     "avg": 16.25,
+     "max": 18.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_19",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0020",
+   "family_members": [
+    "fam-0020"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000080005",
+   "metrics": {
+    "deflated_sharpe": 0.6061,
+    "max_drawdown_paisa": -799360,
+    "net_pnl_paisa": 5997520,
+    "profit_factor": 1.6073,
+    "sharpe_ratio": 1.8333,
+    "total_trades": 220,
+    "win_rate": 0.4283
+   },
+   "rank": 80,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1999200,
+     "trending": 3998320
+    },
+    "by_year": {
+     "2024": 3998320,
+     "2025": 1999200
+    },
+    "entry_hour_hist": {
+     "10": 140,
+     "9": 180
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.5,
+     "max": 18.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 220,
+    "win": {
+     "avg": 15.0,
+     "max": 19.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_20",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0021",
+   "family_members": [
+    "fam-0021"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000100005",
+   "metrics": {
+    "deflated_sharpe": 0.602,
+    "max_drawdown_paisa": -807477,
+    "net_pnl_paisa": 5959989,
+    "profit_factor": 1.596,
+    "sharpe_ratio": 1.816,
+    "total_trades": 227,
+    "win_rate": 0.426
+   },
+   "rank": 81,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1986690,
+     "trending": 3973299
+    },
+    "by_year": {
+     "2024": 3973299,
+     "2025": 1986690
+    },
+    "entry_hour_hist": {
+     "10": 143,
+     "9": 181
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.125,
+     "max": 19.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 227,
+    "win": {
+     "avg": 15.625,
+     "max": 19.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_21",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0021",
+   "family_members": [
+    "fam-0021"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000200005",
+   "metrics": {
+    "deflated_sharpe": 0.5979,
+    "max_drawdown_paisa": -815594,
+    "net_pnl_paisa": 5922458,
+    "profit_factor": 1.5847,
+    "sharpe_ratio": 1.7987,
+    "total_trades": 234,
+    "win_rate": 0.4237
+   },
+   "rank": 82,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1974180,
+     "trending": 3948278
+    },
+    "by_year": {
+     "2024": 3948278,
+     "2025": 1974180
+    },
+    "entry_hour_hist": {
+     "10": 146,
+     "9": 182
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.75,
+     "max": 19.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 234,
+    "win": {
+     "avg": 16.25,
+     "max": 20.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_22",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0021",
+   "family_members": [
+    "fam-0021"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000400005",
+   "metrics": {
+    "deflated_sharpe": 0.5938,
+    "max_drawdown_paisa": -823711,
+    "net_pnl_paisa": 5884927,
+    "profit_factor": 1.5734,
+    "sharpe_ratio": 1.7814,
+    "total_trades": 241,
+    "win_rate": 0.4214
+   },
+   "rank": 83,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1961670,
+     "trending": 3923257
+    },
+    "by_year": {
+     "2024": 3923257,
+     "2025": 1961670
+    },
+    "entry_hour_hist": {
+     "10": 149,
+     "9": 183
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 16.375,
+     "max": 20.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 241,
+    "win": {
+     "avg": 16.875,
+     "max": 20.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_23",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0021",
+   "family_members": [
+    "fam-0021"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000800005",
+   "metrics": {
+    "deflated_sharpe": 0.5897,
+    "max_drawdown_paisa": -831828,
+    "net_pnl_paisa": 5847396,
+    "profit_factor": 1.5621,
+    "sharpe_ratio": 1.7641,
+    "total_trades": 248,
+    "win_rate": 0.4191
+   },
+   "rank": 84,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1949160,
+     "trending": 3898236
+    },
+    "by_year": {
+     "2024": 3898236,
+     "2025": 1949160
+    },
+    "entry_hour_hist": {
+     "10": 152,
+     "9": 184
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.25,
+     "max": 17.0,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 248,
+    "win": {
+     "avg": 15.75,
+     "max": 17.5,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_24",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0022",
+   "family_members": [
+    "fam-0022"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000001000005",
+   "metrics": {
+    "deflated_sharpe": 0.5856,
+    "max_drawdown_paisa": -839945,
+    "net_pnl_paisa": 5809865,
+    "profit_factor": 1.5508,
+    "sharpe_ratio": 1.7468,
+    "total_trades": 255,
+    "win_rate": 0.4168
+   },
+   "rank": 85,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1936650,
+     "trending": 3873215
+    },
+    "by_year": {
+     "2024": 3873215,
+     "2025": 1936650
+    },
+    "entry_hour_hist": {
+     "10": 155,
+     "9": 185
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.0,
+     "max": 17.5,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 255,
+    "win": {
+     "avg": 14.5,
+     "max": 18.0,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_25",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0022",
+   "family_members": [
+    "fam-0022"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000002000005",
+   "metrics": {
+    "deflated_sharpe": 0.5815,
+    "max_drawdown_paisa": -848062,
+    "net_pnl_paisa": 5772334,
+    "profit_factor": 1.5395,
+    "sharpe_ratio": 1.7295,
+    "total_trades": 262,
+    "win_rate": 0.4145
+   },
+   "rank": 86,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1924140,
+     "trending": 3848194
+    },
+    "by_year": {
+     "2024": 3848194,
+     "2025": 1924140
+    },
+    "entry_hour_hist": {
+     "10": 158,
+     "9": 186
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.625,
+     "max": 18.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 262,
+    "win": {
+     "avg": 15.125,
+     "max": 18.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_26",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0022",
+   "family_members": [
+    "fam-0022"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000004000005",
+   "metrics": {
+    "deflated_sharpe": 0.5774,
+    "max_drawdown_paisa": -856179,
+    "net_pnl_paisa": 5734803,
+    "profit_factor": 1.5282,
+    "sharpe_ratio": 1.7122,
+    "total_trades": 269,
+    "win_rate": 0.4122
+   },
+   "rank": 87,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1911630,
+     "trending": 3823173
+    },
+    "by_year": {
+     "2024": 3823173,
+     "2025": 1911630
+    },
+    "entry_hour_hist": {
+     "10": 161,
+     "9": 187
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.25,
+     "max": 18.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 269,
+    "win": {
+     "avg": 15.75,
+     "max": 19.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_27",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0022",
+   "family_members": [
+    "fam-0022"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000008000005",
+   "metrics": {
+    "deflated_sharpe": 0.5733,
+    "max_drawdown_paisa": -864296,
+    "net_pnl_paisa": 5697272,
+    "profit_factor": 1.5169,
+    "sharpe_ratio": 1.6949,
+    "total_trades": 276,
+    "win_rate": 0.4099
+   },
+   "rank": 88,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1899120,
+     "trending": 3798152
+    },
+    "by_year": {
+     "2024": 3798152,
+     "2025": 1899120
+    },
+    "entry_hour_hist": {
+     "10": 164,
+     "9": 188
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.875,
+     "max": 19.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 276,
+    "win": {
+     "avg": 16.375,
+     "max": 19.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_28",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0023",
+   "family_members": [
+    "fam-0023"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000010000005",
+   "metrics": {
+    "deflated_sharpe": 0.5692,
+    "max_drawdown_paisa": -872413,
+    "net_pnl_paisa": 5659741,
+    "profit_factor": 1.5056,
+    "sharpe_ratio": 1.6776,
+    "total_trades": 283,
+    "win_rate": 0.4076
+   },
+   "rank": 89,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1886610,
+     "trending": 3773131
+    },
+    "by_year": {
+     "2024": 3773131,
+     "2025": 1886610
+    },
+    "entry_hour_hist": {
+     "10": 167,
+     "9": 189
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.5,
+     "max": 19.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 283,
+    "win": {
+     "avg": 17.0,
+     "max": 20.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_29",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0023",
+   "family_members": [
+    "fam-0023"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000020000005",
+   "metrics": {
+    "deflated_sharpe": 0.5651,
+    "max_drawdown_paisa": -880530,
+    "net_pnl_paisa": 5622210,
+    "profit_factor": 1.4943,
+    "sharpe_ratio": 1.6603,
+    "total_trades": 290,
+    "win_rate": 0.4053
+   },
+   "rank": 90,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1874100,
+     "trending": 3748110
+    },
+    "by_year": {
+     "2024": 3748110,
+     "2025": 1874100
+    },
+    "entry_hour_hist": {
+     "10": 80,
+     "9": 190
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 15.25,
+     "max": 20.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 290,
+    "win": {
+     "avg": 15.75,
+     "max": 20.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_30",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0023",
+   "family_members": [
+    "fam-0023"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000040000005",
+   "metrics": {
+    "deflated_sharpe": 0.561,
+    "max_drawdown_paisa": -888647,
+    "net_pnl_paisa": 5584679,
+    "profit_factor": 1.483,
+    "sharpe_ratio": 1.643,
+    "total_trades": 297,
+    "win_rate": 0.403
+   },
+   "rank": 91,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1861590,
+     "trending": 3723089
+    },
+    "by_year": {
+     "2024": 3723089,
+     "2025": 1861590
+    },
+    "entry_hour_hist": {
+     "10": 83,
+     "9": 191
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.125,
+     "max": 17.0,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 297,
+    "win": {
+     "avg": 14.625,
+     "max": 17.5,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_31",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0023",
+   "family_members": [
+    "fam-0023"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000080000005",
+   "metrics": {
+    "deflated_sharpe": 0.5569,
+    "max_drawdown_paisa": -896764,
+    "net_pnl_paisa": 5547148,
+    "profit_factor": 1.4717,
+    "sharpe_ratio": 1.6257,
+    "total_trades": 304,
+    "win_rate": 0.4007
+   },
+   "rank": 92,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1849080,
+     "trending": 3698068
+    },
+    "by_year": {
+     "2024": 3698068,
+     "2025": 1849080
+    },
+    "entry_hour_hist": {
+     "10": 86,
+     "9": 192
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 12.5,
+    "loss": {
+     "avg": 14.75,
+     "max": 17.5,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 304,
+    "win": {
+     "avg": 15.25,
+     "max": 18.0,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_32",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0024",
+   "family_members": [
+    "fam-0024"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000100000005",
+   "metrics": {
+    "deflated_sharpe": 0.5528,
+    "max_drawdown_paisa": -904881,
+    "net_pnl_paisa": 5509617,
+    "profit_factor": 1.4604,
+    "sharpe_ratio": 1.6084,
+    "total_trades": 311,
+    "win_rate": 0.3984
+   },
+   "rank": 93,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1836570,
+     "trending": 3673047
+    },
+    "by_year": {
+     "2024": 3673047,
+     "2025": 1836570
+    },
+    "entry_hour_hist": {
+     "10": 89,
+     "9": 193
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.375,
+     "max": 18.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 311,
+    "win": {
+     "avg": 15.875,
+     "max": 18.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_33",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0024",
+   "family_members": [
+    "fam-0024"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000200000005",
+   "metrics": {
+    "deflated_sharpe": 0.5487,
+    "max_drawdown_paisa": -912998,
+    "net_pnl_paisa": 5472086,
+    "profit_factor": 1.4491,
+    "sharpe_ratio": 1.5911,
+    "total_trades": 318,
+    "win_rate": 0.3961
+   },
+   "rank": 94,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1824060,
+     "trending": 3648026
+    },
+    "by_year": {
+     "2024": 3648026,
+     "2025": 1824060
+    },
+    "entry_hour_hist": {
+     "10": 92,
+     "9": 194
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 16.0,
+     "max": 18.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 318,
+    "win": {
+     "avg": 16.5,
+     "max": 19.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_34",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0024",
+   "family_members": [
+    "fam-0024"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000400000005",
+   "metrics": {
+    "deflated_sharpe": 0.5446,
+    "max_drawdown_paisa": -921115,
+    "net_pnl_paisa": 5434555,
+    "profit_factor": 1.4378,
+    "sharpe_ratio": 1.5738,
+    "total_trades": 325,
+    "win_rate": 0.3938
+   },
+   "rank": 95,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1811550,
+     "trending": 3623005
+    },
+    "by_year": {
+     "2024": 3623005,
+     "2025": 1811550
+    },
+    "entry_hour_hist": {
+     "10": 95,
+     "9": 195
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 19.5,
+    "lo": 11.0,
+    "loss": {
+     "avg": 14.75,
+     "max": 19.0,
+     "min": 10.5
+    },
+    "missing": 0,
+    "stamped": 325,
+    "win": {
+     "avg": 15.25,
+     "max": 19.5,
+     "min": 11.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": null,
+    "tp_paisa": null
+   },
+   "conditions": [
+    "COND_BIT_35",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0024",
+   "family_members": [
+    "fam-0024"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000800000005",
+   "metrics": {
+    "deflated_sharpe": 0.5405,
+    "max_drawdown_paisa": -929232,
+    "net_pnl_paisa": 5397024,
+    "profit_factor": 1.4265,
+    "sharpe_ratio": 1.5565,
+    "total_trades": 332,
+    "win_rate": 0.3915
+   },
+   "rank": 96,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1799040,
+     "trending": 3597984
+    },
+    "by_year": {
+     "2024": 3597984,
+     "2025": 1799040
+    },
+    "entry_hour_hist": {
+     "10": 98,
+     "9": 196
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 20.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 15.375,
+     "max": 19.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 332,
+    "win": {
+     "avg": 15.875,
+     "max": 20.0,
+     "min": 11.75
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "COND_BIT_36",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0025",
+   "family_members": [
+    "fam-0025"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000001000000005",
+   "metrics": {
+    "deflated_sharpe": 0.5364,
+    "max_drawdown_paisa": 0,
+    "net_pnl_paisa": 0,
+    "profit_factor": 0.0,
+    "sharpe_ratio": 0.0,
+    "total_trades": 0,
+    "win_rate": 0.0
+   },
+   "rank": 97,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1786530,
+     "trending": 3572963
+    },
+    "by_year": {
+     "2024": 3572963,
+     "2025": 1786530
+    },
+    "entry_hour_hist": {
+     "10": 101,
+     "9": 197
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 20.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 16.0,
+     "max": 20.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 339,
+    "win": {
+     "avg": 16.5,
+     "max": 20.5,
+     "min": 12.5
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "COND_BIT_37",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0025",
+   "family_members": [
+    "fam-0025"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000002000000005",
+   "metrics": {
+    "deflated_sharpe": 0.5323,
+    "max_drawdown_paisa": -945466,
+    "net_pnl_paisa": 5321962,
+    "profit_factor": -0.5,
+    "sharpe_ratio": 1.5219,
+    "total_trades": 346,
+    "win_rate": 0.3869
+   },
+   "rank": 98,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1774020,
+     "trending": 3547942
+    },
+    "by_year": {
+     "2024": 3547942,
+     "2025": 1774020
+    },
+    "entry_hour_hist": {
+     "10": 104,
+     "9": 198
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 17.5,
+    "lo": 13.25,
+    "loss": {
+     "avg": 14.875,
+     "max": 17.0,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 346,
+    "win": {
+     "avg": 15.375,
+     "max": 17.5,
+     "min": 13.25
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "COND_BIT_38",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "fam-0025",
+   "family_members": [
+    "fam-0025"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000004000000005",
+   "metrics": {
+    "deflated_sharpe": 0.5282,
+    "max_drawdown_paisa": -9999999999,
+    "net_pnl_paisa": 5284431,
+    "profit_factor": 1.3926,
+    "sharpe_ratio": 1.5046,
+    "total_trades": 353,
+    "win_rate": 0.3846
+   },
+   "rank": 99,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1761510,
+     "trending": 3522921
+    },
+    "by_year": {
+     "2024": 3522921,
+     "2025": 1761510
+    },
+    "entry_hour_hist": {
+     "10": 107,
+     "9": 199
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 14.0,
+    "loss": {
+     "avg": 15.5,
+     "max": 17.5,
+     "min": 13.5
+    },
+    "missing": 0,
+    "stamped": 353,
+    "win": {
+     "avg": 16.0,
+     "max": 18.0,
+     "min": 14.0
+    }
+   }
+  },
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 6250
+   },
+   "conditions": [
+    "COND_BIT_39",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "fam-0025",
+   "family_members": [
+    "fam-0025"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000008000000005",
+   "metrics": {
+    "deflated_sharpe": 0.5241,
+    "max_drawdown_paisa": -961700,
+    "net_pnl_paisa": 5246900,
+    "profit_factor": 1.3813,
+    "sharpe_ratio": 1.4873,
+    "total_trades": 360,
+    "win_rate": 0.3823
+   },
+   "rank": 100,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 1749000,
+     "trending": 3497900
+    },
+    "by_year": {
+     "2024": 3497900,
+     "2025": 1749000
+    },
+    "entry_hour_hist": {
+     "10": 110,
+     "9": 200
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": null
+  }
+ ],
+ "preset": "min_dd_first",
+ "run_id": "r-20260707-fixt01",
+ "schema_version": 1,
+ "source": {
+  "data_snapshot_hashes": [
+   "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  ],
+  "excluded_no_aggs": 0,
+  "families_collapsed": 0,
+  "gate_passers": 100,
+  "margin_roi_wired": false,
+  "parity_excluded": 0,
+  "pool": 100,
+  "reasons_wired": false,
+  "stores": 3,
+  "zero_trade_excluded": 0
+ }
+}

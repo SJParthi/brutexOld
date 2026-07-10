@@ -125,6 +125,10 @@
         <span id="pills"></span>
         <span class="spacer"></span>
         <select id="exchange" title="Exchange"><option>NSE</option><option>BSE</option></select>
+        <!-- Underlying-class filter (DEC-MOVERS-UNDERLYING-CLASS-001): All | Indices | Stocks
+             on all three tabs. Default "All" is NOT sent, so the payload stays byte-identical;
+             Indices/Stocks filter the SAME cached candidate set server-side at rank time. -->
+        <select id="uclass" title="Underlying class"><option>All</option><option>Indices</option><option>Stocks</option></select>
         <select id="track" title="Expiry cadence (Options)" style="display:none;"></select>
         <select id="expiry" title="Expiry" style="display:none;"></select>
       </div>
@@ -536,6 +540,17 @@ function syncControls() {
   $("topn").max = "500";  // matches the /api/v1/movers route cap (DEC-MOVERS-COMPLETENESS-001).
 }
 async function load() {
+  /* Hidden-tab pause for the gated auto-retry (DEC-DASHBOARD-POLL-HYGIENE-001):
+     while the pull pipeline GATES movers, load() re-arms itself every 5 s — a
+     background tab must not keep hammering /api/v1/movers. If hidden while a gate
+     cycle is active, re-arm the retry WITHOUT fetching and bail; the
+     visibilitychange listener below fires an immediate load() on return. A
+     non-gated hidden load is left untouched (movers does not poll when idle). */
+  if (document.hidden && wasGated) {
+    clearTimeout(gateTimer);
+    gateTimer = setTimeout(load, GATE_RETRY_MS);
+    return;
+  }
   /* The server note ECHOES the raw ?asset= query param (pending_asset_payload),
      so it is set via textContent on a dedicated span — the static "<b>Note:</b>"
      label stays in the DOM — never innerHTML (DEC-DASHBOARD-XSS-HARDENING-001).
@@ -554,6 +569,9 @@ async function load() {
   /* OPT-IN Top Volume floor (DEC-MOVERS-MIN-VOLUME-001): only send a POSITIVE value, so
      blank / 0 stays byte-identical to the no-floor default (the route default is 0). */
   if (parseInt($("minvol").value, 10) > 0) p.set("min_volume", $("minvol").value);
+  /* Underlying-class filter (DEC-MOVERS-UNDERLYING-CLASS-001): only send a non-"All"
+     value, so "All" (the default) stays byte-identical to today (the route default). */
+  if ($("uclass").value && $("uclass").value !== "All") p.set("underlying_class", $("uclass").value);
   if (state.asset!=="spot") p.set("expiry", $("expiry").value||"Near");
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
@@ -780,10 +798,16 @@ $("time").onchange = () => { state.time = $("time").value; load(); };
 const DEBOUNCE_MS = 200;
 let debounceTimer = null;
 function debouncedLoad() { clearTimeout(debounceTimer); debounceTimer = setTimeout(load, DEBOUNCE_MS); }
-["exchange","expiry","track","date"].forEach(id => $(id).onchange = load);
+["exchange","uclass","expiry","track","date"].forEach(id => $(id).onchange = load);
 ["topn","minvol"].forEach(id => $(id).onchange = debouncedLoad);
 $("refresh").onclick = load;
 fillTimes(); renderPills(); load();
+/* Immediate catch-up on tab return while GATED (DEC-DASHBOARD-POLL-HYGIENE-001):
+   the gated auto-retry pauses fetches while hidden, so re-poll NOW on becoming
+   visible; clear the pending hidden-armed retry first so it cannot double-fire. */
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden && wasGated) { clearTimeout(gateTimer); load(); }
+});
 </script>
 </body>
 </html>

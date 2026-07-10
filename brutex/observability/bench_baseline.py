@@ -29,9 +29,11 @@ Contract (CLAUDE.md §11 COMMON · DYNAMIC · AUTOMATED):
   one row in ``tests/bench/_abs_baseline_registry.py``; existing entries
   keep gating while the new one abstains per-entry until auto-blessed.
 
-Honest envelope (Golden Rule #10): the gate is dormant until the m4pro
-runner is online AND the first bless PR merges; until then compare ABSTAINS
-green-but-loud (never a fake pass, never a false red). This gate catches
+Honest envelope (Golden Rule #10): the m4pro runner is online (LIVE since
+2026-07-07 — the bench-m4pro.yml header), so the gate's remaining dormancy
+is the unblessed baseline: until the first bless PR merges a measured
+baseline, compare ABSTAINS green-but-loud (never a fake pass, never a
+false red). This gate catches
 STRICTLY-greater-than-``tolerance_pct`` drift ONLY (the boundary law is a
 strict ``>`` — a regression landing EXACTLY at the tolerance threshold
 passes; boundary-pinned): at-or-below-tolerance drift passes and can

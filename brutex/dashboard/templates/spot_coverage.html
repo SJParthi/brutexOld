@@ -393,6 +393,10 @@ function renderStaleChip(body) {
 }
 
 async function poll() {
+  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
+     ZERO fetches; the interval keeps ticking (hidden ticks are free) and the
+     visibilitychange listener below re-polls immediately on return. */
+  if (document.hidden) return;
   try {
     const r = await doFetch("/api/v1/coverage/spot");
     if (!r.ok) {
@@ -429,6 +433,10 @@ async function poll() {
 
 poll();
 setInterval(poll, 4000);
+/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001). */
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden) poll();
+});
 /* Deferred bx-ui.js is guaranteed executed by DOMContentLoaded: pause every
    ambient animation while the tab is hidden (richer feel, lower cost). */
 document.addEventListener("DOMContentLoaded", function () {

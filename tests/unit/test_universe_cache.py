@@ -10,10 +10,13 @@ per-``kind`` instrument payloads, keyed by a content-revision token over the
 * a bad ``kind`` raises ``ValueError`` and is NOT cached;
 * a master change (a second ``upsert_many`` → a fresh ``fetched_at``) moves the
   token and forces a rebuild (no stale illusion — Golden Rule #1);
-* the defensive ``_revision`` branches (a ``None`` row / a ``None`` count); and
+* the defensive ``_revision`` branches (a ``None`` row / a ``None`` count);
 * the two concurrent-install re-check branches (``_current`` adopting a peer's
   snapshot, ``summary`` adopting a peer's memo) via deterministic side-effect
-  fakes — the real (rare) interleavings, simulated without threads.
+  fakes — the real (rare) interleavings, simulated without threads; and
+* the per-revision single-flight (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002): N
+  concurrent cold pollers pay ONE base-read scan, and a base-read error releases
+  the single-flight event (never a wedged waiter) + stores nothing.
 """
 # pyright: reportPrivateUsage=none
 # (whitebox: these tests reach into the cache's own _revision / _current / _snapshot
@@ -21,6 +24,8 @@ per-``kind`` instrument payloads, keyed by a content-revision token over the
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
@@ -408,3 +413,114 @@ def test_summary_adopts_concurrent_peer_memo(
     monkeypatch.setattr(uc, "universe_summary", _peer_sets_summary)
     result = cache.summary(store)
     assert result is peer_value  # adopted the peer's memo, not this call's value.
+
+
+# ── single-flight cold miss (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002) ────────────────
+
+
+def test_cold_concurrent_pollers_single_flight() -> None:
+    """N simultaneous cold misses pay ONE base-read scan (per-revision single-flight).
+
+    The leader is held inside its FIRST base read while the followers pile up behind
+    the single-flight event; releasing the leader wakes every follower onto the
+    published snapshot. If the single-flight were absent, each follower would run its
+    own base reads and ``compute_calls`` would climb past 1.
+    """
+    cache = UniverseSnapshotCache()
+    leader_in = threading.Event()
+    release = threading.Event()
+    count_lock = threading.Lock()
+    compute_calls = 0
+
+    class _CountingStore:
+        """A store whose first base read counts + blocks until released."""
+
+        @property
+        def connection(self) -> Any:
+            return SimpleNamespace(execute=lambda _sql: SimpleNamespace(fetchone=lambda: (0, None)))
+
+        def fno_eligible_underlyings(self) -> frozenset[tuple[Exchange, str]]:
+            nonlocal compute_calls
+            with count_lock:
+                compute_calls += 1
+            leader_in.set()
+            assert release.wait(timeout=5.0), "leader was never released"
+            return frozenset()
+
+        def list_index_equity_instruments(self) -> list[Instrument]:
+            return []
+
+        def reference_only_security_ids(self) -> frozenset[int]:
+            return frozenset()
+
+    store = _CountingStore()
+    results: list[dict[str, int]] = []
+    results_lock = threading.Lock()
+
+    def _poll() -> None:
+        value = cache.summary(store)
+        with results_lock:
+            results.append(value)
+
+    # The leader enters the (blocked) base read first; the followers then register
+    # behind its single-flight event (still held, so they all take the wait path).
+    leader = threading.Thread(target=_poll)
+    leader.start()
+    assert leader_in.wait(timeout=5.0), "the leader never entered the base-read compute"
+    followers = [threading.Thread(target=_poll) for _ in range(4)]
+    for thread in followers:
+        thread.start()
+    # Give the followers a beat to reach ``event.wait()`` before releasing (harmless
+    # if already there — a set event returns immediately, no lost wakeup).
+    time.sleep(0.05)
+    release.set()
+    leader.join(timeout=10.0)
+    for thread in followers:
+        thread.join(timeout=10.0)
+
+    assert not leader.is_alive() and all(not t.is_alive() for t in followers)
+    assert compute_calls == 1  # single-flight: exactly ONE base-read scan
+    assert len(results) == 5
+    assert all(r == {"index_count": 0, "stock_count": 0, "total": 0} for r in results)
+    assert cache.size() == 1
+    assert cache._refreshing == {}  # the single-flight registration was cleaned up
+
+
+class _RaisingStore:
+    """A store whose FIRST base read raises — exercises the leader failure path."""
+
+    def __init__(self, token: tuple[int, str]) -> None:
+        self._token = token
+
+    @property
+    def connection(self) -> Any:
+        return SimpleNamespace(
+            execute=lambda _sql: SimpleNamespace(fetchone=lambda: (self._token[0], None))
+        )
+
+    def fno_eligible_underlyings(self) -> frozenset[tuple[Exchange, str]]:
+        raise RuntimeError("store read failed")
+
+    def list_index_equity_instruments(self) -> list[Instrument]:
+        raise AssertionError("unreachable — the first base read raised")
+
+    def reference_only_security_ids(self) -> frozenset[int]:
+        raise AssertionError("unreachable — the first base read raised")
+
+
+def test_compute_error_releases_single_flight() -> None:
+    """A base-read error propagates, releases the event, and stores nothing.
+
+    The leader's ``finally`` must drop the single-flight registration on failure so a
+    waiter (or the next caller) can retry instead of hanging, and no snapshot is
+    installed from the failed compute.
+    """
+    cache = UniverseSnapshotCache()
+    raising = _RaisingStore(token=(0, ""))
+    with pytest.raises(RuntimeError, match="store read failed"):
+        cache.summary(raising)
+    assert cache._refreshing == {}  # registration dropped — no waiter can hang
+    assert cache.size() == 0  # nothing resident from the failed compute
+    # A second call must also RAISE (not hang), proving the event was released.
+    with pytest.raises(RuntimeError, match="store read failed"):
+        cache.summary(raising)
