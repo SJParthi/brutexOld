@@ -60,18 +60,32 @@ operands, so ``max_mask_bars == 2**64 - 1`` stays NATIVE with bit-exact
 Python-big-int parity). When the resolved ``max_mask_bars`` or ``n_bars``
 exceeds ``2**64 - 1`` this seam transparently DELEGATES to the frozen Python
 generator (arbitrary-precision integers) BEFORE calling the kernel; and when
-ANY OTHER FFI operand overflows its converted type — a ``bar_bits`` value
-outside ``u64`` (including a negative one), ``min_hits`` outside ``i64``, a
-``root_mod`` modulus beyond ``u64``, or a hypothetical future ``>= 64``-bit
-``CONFLICT_PAIRS`` mask — the PyO3 argument-conversion ``OverflowError`` is
-caught and the SAME delegation applies (the conversion happens before the
-kernel executes, so no partial side effect precedes it). Either way parity is
-exact inside the ``u64`` envelope and honestly delegated beyond it: the
-frozen oracle's behaviour — success OR its own typed errors — is reproduced
-verbatim, never a raw ``OverflowError`` (which is not a ``SweepComboError``
-and would abort a whole grid instead of the graceful tuple skip). The
-``< 64``-bit condition guard (raised BEFORE any counting) keeps the 60-bit
-production vocabulary always inside the envelope.
+ANY OTHER FFI operand fails its PyO3 argument conversion — an integer
+OVERFLOWING its converted type (a ``bar_bits`` value outside ``u64`` including
+a negative one, ``min_hits`` outside ``i64``, a ``root_mod`` modulus beyond
+``u64``, or a hypothetical future ``>= 64``-bit ``CONFLICT_PAIRS`` mask →
+``OverflowError``) OR a NON-``__index__`` numeric operand violating the
+declared ``int`` types that the frozen oracle happens to accept (a ``float``
+``bar_bits`` value at ``k <= 1``, a ``float`` ``min_hits`` / ``n_bars`` /
+``max_mask_bars`` / ``root_mod`` component → ``TypeError``) — the conversion
+exception is caught and the SAME delegation applies (conversion happens
+before the kernel executes, so no partial side effect precedes it; the
+delegated call is passed the ALREADY-RESOLVED ``max_mask_bars`` so the
+fail-loud invalid-env WARN of
+:func:`~brutex.engine.sweep_apriori.resolve_max_mask_bars` is never emitted
+twice). Either way parity is exact inside the ``u64`` envelope and honestly
+delegated beyond it: the frozen oracle's behaviour — success OR its own typed
+errors — is reproduced verbatim, never a raw ``OverflowError``/``TypeError``
+(neither is a ``SweepComboError`` and either would abort a whole grid instead
+of the graceful tuple skip). The ``< 64``-bit condition guard (raised BEFORE
+any counting) keeps the 60-bit production vocabulary always inside the
+envelope. NOTE the type-violating inputs are OUT of the declared
+``Sequence[int]`` / ``int`` / ``tuple[int, int]`` contract (``mypy --strict``
+enforced; the production caller passes ``build_bar_bits`` /
+``kernel.bar_bits`` ints and ``root_mod=(0, 1)`` only) — the delegation is
+defence-in-depth honesty, not a sanctioned input class. NumPy integer
+operands convert natively via ``__index__`` (probe-verified) and never
+delegate.
 """
 
 from __future__ import annotations
@@ -207,11 +221,12 @@ def generate_apriori_candidates_rust(
     Parameters mirror the frozen generator exactly. Validation, the ``>= 64``-bit
     u128 refusal, the census, and the breaker error are single-sourced from the
     frozen module. Beyond the ``u64`` envelope — ``max_mask_bars`` or ``n_bars``
-    exceeding ``2**64 - 1`` (guarded eagerly), or ANY other FFI operand
-    overflowing its converted type (``bar_bits`` values outside ``u64`` incl.
-    negatives, ``min_hits`` outside ``i64``, a ``root_mod`` modulus beyond
-    ``u64``; caught at the PyO3 conversion) — this transparently delegates to
-    the frozen Python generator, reproducing the oracle's behaviour exactly.
+    exceeding ``2**64 - 1`` (guarded eagerly), or ANY other FFI operand failing
+    its PyO3 conversion (``bar_bits`` values outside ``u64`` incl. negatives,
+    ``min_hits`` outside ``i64``, a ``root_mod`` modulus beyond ``u64`` →
+    ``OverflowError``; a type-violating non-``__index__`` numeric operand →
+    ``TypeError``) — this transparently delegates to the frozen Python
+    generator, reproducing the oracle's behaviour exactly.
 
     Returns
     -------
@@ -263,7 +278,13 @@ def generate_apriori_candidates_rust(
 
     def _delegate_to_frozen() -> list[int]:
         # Validation above already ran identically, so the delegated call
-        # re-validates harmlessly (idempotent, same messages).
+        # re-validates harmlessly (idempotent, same messages). The ALREADY-
+        # RESOLVED `limit` is passed (never the original None) so the frozen
+        # generator does not re-run resolve_max_mask_bars() — behaviour-
+        # identical (the seam's resolution IS the oracle's resolution and it
+        # already passed the > 0 validation), and it keeps the fail-loud
+        # `sweep.apriori.max_mask_bars.invalid` WARN at EXACTLY ONE emission
+        # per call on the delegation path (the round-2 double-WARN fix).
         return _apriori.generate_apriori_candidates(
             bar_bits,
             condition_bits=condition_bits,
@@ -272,7 +293,7 @@ def generate_apriori_candidates_rust(
             count_hits=count_hits,
             n_bars=n_bars,
             root_mod=root_mod,
-            max_mask_bars=max_mask_bars,
+            max_mask_bars=limit,
             cell_label=cell_label,
         )
 
@@ -306,17 +327,25 @@ def generate_apriori_candidates_rust(
             # production-unreachable, the stride is a Final with no env knob.)
             _apriori._BUDGET_CHECK_STRIDE,  # pyright: ignore[reportPrivateUsage]
         )
-    except OverflowError:
+    except (OverflowError, TypeError):
         # Honest envelope, catch arm: PyO3 argument conversion is the ONLY
-        # OverflowError source here (the kernel itself raises nothing) — a
-        # bar_bits value outside u64 (incl. negative), min_hits outside i64,
-        # a root_mod modulus beyond u64, or a future >= 64-bit CONFLICT_PAIRS
-        # mask. Conversion happens BEFORE the kernel executes, so no partial
-        # side effect (no census) precedes this delegation; the frozen oracle's
-        # behaviour — success OR its own typed errors — is reproduced exactly,
-        # never a raw OverflowError (not a SweepComboError → would abort a
-        # whole grid). Caught rather than pre-scanned so the hot path never
-        # pays an O(n_bars) Python range pre-scan per cell.
+        # source of either exception here (the kernel itself raises nothing) —
+        # OverflowError for an integer outside its converted type (a bar_bits
+        # value outside u64 incl. negative, min_hits outside i64, a root_mod
+        # modulus beyond u64, a future >= 64-bit CONFLICT_PAIRS mask), and
+        # TypeError for a type-violating non-__index__ numeric operand (a
+        # float bar_bits value / min_hits / n_bars / max_mask_bars / root_mod
+        # component — inputs the frozen oracle incidentally ACCEPTS on several
+        # shapes, e.g. float bar_bits at k <= 1 where no bar VALUE is ever
+        # read; the round-2 fix widening the round-1 OverflowError-only catch).
+        # Conversion happens BEFORE the kernel executes, so no partial side
+        # effect (no census) precedes this delegation; the frozen oracle's
+        # behaviour — success OR its own typed errors (a float bar_bits input
+        # the oracle DOES reject re-raises the oracle's own TypeError verbatim)
+        # — is reproduced exactly, never a raw OverflowError/TypeError (neither
+        # is a SweepComboError → would abort a whole grid). Caught rather than
+        # pre-scanned so the hot path never pays an O(n_bars) Python type/range
+        # pre-scan per cell.
         return _delegate_to_frozen()
 
     # Emit the pre-trip census records via the frozen emitter (identical events).

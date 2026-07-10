@@ -292,6 +292,110 @@ def test_ffi_overflow_operands_delegate_to_frozen(monkeypatch: pytest.MonkeyPatc
     assert calls["n"] == 3  # every overflow class delegated exactly once
 
 
+def test_ffi_type_violating_operands_delegate_to_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The round-2 widened catch: a PyO3 conversion ``TypeError`` delegates too.
+
+    A non-``__index__`` numeric operand (float) violates the declared ``int``
+    types, yet the frozen oracle SUCCEEDS on several such shapes (at ``k <= 1``
+    it never reads bar VALUES; a float ``min_hits`` / ``n_bars`` /
+    ``max_mask_bars`` / ``root_mod`` component plain-numeric-compares fine).
+    The round-1 ``except OverflowError`` let the PyO3 ``TypeError`` leak raw —
+    not a ``SweepComboError`` → the whole-grid-abort class. Every shape must
+    now reproduce the frozen oracle's outcome exactly: success verbatim, and
+    where the oracle itself raises (a float bar value reaching the counting
+    path), the oracle's OWN ``TypeError`` verbatim — never the raw PyO3 one.
+    """
+    from typing import Any
+
+    calls = {"n": 0}
+    real = _apriori.generate_apriori_candidates
+
+    def spy(*a, **k):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(_apriori, "generate_apriori_candidates", spy)
+
+    float_bars: Any = [1.5, 2.5]
+    float_root_mod: Any = (0.0, 1.0)
+    float_min_hits: Any = 0.5
+    float_n_bars: Any = 10.5
+    float_limit: Any = 100.5
+
+    # (a) float bar VALUES at k=1, min_hits=0 — the oracle never reads them
+    #     (no counting call) and returns the singleton masks.
+    assert generate_apriori_candidates_rust(float_bars, condition_bits=[0, 1], k=1, min_hits=0) == [
+        1,
+        2,
+    ]
+    # (b) float bar VALUES at k=0 — the oracle returns the empty mask.
+    assert generate_apriori_candidates_rust(float_bars, condition_bits=[0, 1], k=0, min_hits=0) == [
+        0
+    ]
+    # (c) float root_mod — the oracle's `bit % 1.0 == 0.0` shard test works.
+    assert generate_apriori_candidates_rust(
+        [3], condition_bits=[0, 1], k=1, min_hits=0, root_mod=float_root_mod
+    ) == [1, 2]
+    # (d) float min_hits / n_bars / max_mask_bars — plain numeric compares.
+    assert generate_apriori_candidates_rust(
+        [0b11] * 4, condition_bits=[0, 1], k=1, min_hits=float_min_hits
+    ) == [1, 2]
+    assert generate_apriori_candidates_rust(
+        [0b11] * 4, condition_bits=[0, 1], k=1, min_hits=0, n_bars=float_n_bars
+    ) == [1, 2]
+    assert generate_apriori_candidates_rust(
+        [0b11] * 4, condition_bits=[0, 1], k=1, min_hits=0, max_mask_bars=float_limit
+    ) == [1, 2]
+    assert calls["n"] == 6  # every type-violating shape delegated exactly once
+
+    # (e) a shape the ORACLE ITSELF rejects — float bar values reaching the
+    #     counting path (k=2 → the level-1 hit filter runs `count_supermasks`
+    #     over the float bars; at k <= 1 the target level is never hit-filtered
+    #     so counting is skipped entirely). The delegated oracle's own
+    #     TypeError propagates verbatim on BOTH arms (message equality pinned).
+    with pytest.raises(TypeError) as py_ei:
+        _apriori.generate_apriori_candidates(float_bars, condition_bits=[0, 1], k=2, min_hits=1)
+    with pytest.raises(TypeError) as rs_ei:
+        generate_apriori_candidates_rust(float_bars, condition_bits=[0, 1], k=2, min_hits=1)
+    assert str(rs_ei.value) == str(py_ei.value)
+
+
+def test_delegation_emits_invalid_env_warn_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The round-2 double-WARN fix: delegation passes the ALREADY-resolved limit.
+
+    With an invalid ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` AND a delegating
+    operand (a negative bar value → PyO3 ``OverflowError``), the seam resolves
+    the limit once (one fail-loud ``sweep.apriori.max_mask_bars.invalid`` WARN)
+    and the delegated frozen call must NOT re-resolve it — the Rust arm's log
+    stream carries EXACTLY the oracle arm's ONE WARN, and the outputs match.
+    """
+    from collections.abc import Mapping, Sequence
+
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv(_apriori.MAX_MASK_BARS_ENV, "banana")
+    bars = [-5, 3]
+
+    with capture_logs() as py_logs:
+        py_out = _apriori.generate_apriori_candidates(bars, condition_bits=[0, 1], k=1, min_hits=1)
+    with capture_logs() as rs_logs:
+        rs_out = generate_apriori_candidates_rust(bars, condition_bits=[0, 1], k=1, min_hits=1)
+
+    assert rs_out == py_out
+
+    def _invalid_warns(logs: Sequence[Mapping[str, object]]) -> int:
+        return sum(1 for e in logs if e["event"] == "sweep.apriori.max_mask_bars.invalid")
+
+    assert _invalid_warns(py_logs) == 1
+    assert _invalid_warns(rs_logs) == 1  # was 2 pre-fix (seam resolve + oracle re-resolve)
+    # The whole observable log stream matches arm-for-arm, not just the WARN.
+    assert [e["event"] for e in rs_logs] == [e["event"] for e in py_logs]
+
+
 # ───────────────────── run_persisted_sweep composed-gate wiring ─────────────────────
 
 

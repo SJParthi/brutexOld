@@ -503,9 +503,24 @@ use pyo3::prelude::*;
 /// exception is raised here — every frozen-pinned error (validation, unsupported
 /// bit, budget trip) is raised by the Python seam so its EXACT message + type
 /// are single-sourced from the frozen module.
+///
+/// The core compute runs under `Python::detach` (pyo3-0.29's `allow_threads`)
+/// — all ten parameters are owned, converted values (no Python object is
+/// touched inside the closure), so the GIL is RELEASED for the whole frontier
+/// build and a multi-second dense cell (e.g. nbits=44 k=6, ~11 s) never blocks
+/// sibling Python threads in an in-process host (the dashboard sweep job's
+/// uvicorn loop / watchdog beats). Liveness-only: the result is a pure
+/// function of the arguments, so parity is unaffected. NOTE `python.rs`
+/// records a historical "detach does not link under the no-libpython
+/// `cargo test` build" constraint that forgoes the GIL release there; under
+/// the current pinned pyo3 (0.29) `cargo test --release` compiles AND links
+/// this `detach` cleanly (verified — the spec's "ONLY IF it compiles cleanly"
+/// gate now passes), so the round-2 review's GIL-hold finding is fixed here
+/// rather than documented away.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn apriori_frontier_u64(
+    py: Python<'_>,
     bar_bits: Vec<u64>,
     unique_bits: Vec<u32>,
     k: u32,
@@ -517,18 +532,20 @@ pub fn apriori_frontier_u64(
     conflict_pair_masks: Vec<u64>,
     budget_check_stride: u64,
 ) -> (Vec<u64>, Vec<CensusRecord>, Option<u64>) {
-    let outcome = apriori_frontier_core(
-        &bar_bits,
-        &unique_bits,
-        k,
-        min_hits,
-        n_bars,
-        w,
-        big_w,
-        max_mask_bars,
-        &conflict_pair_masks,
-        budget_check_stride,
-    );
+    let outcome = py.detach(|| {
+        apriori_frontier_core(
+            &bar_bits,
+            &unique_bits,
+            k,
+            min_hits,
+            n_bars,
+            w,
+            big_w,
+            max_mask_bars,
+            &conflict_pair_masks,
+            budget_check_stride,
+        )
+    });
     (outcome.masks, outcome.census, outcome.budget_trip)
 }
 
@@ -717,8 +734,18 @@ mod tests {
         // u64::MAX, the strict > read false, and the cell RAN (fail-open) —
         // and the level-1 census was emitted where the oracle raises first.
         let bars = vec![(1u64 << 6) | (1u64 << 7); 4];
-        let out =
-            apriori_frontier_core(&bars, &[6, 7], 1, 0, 1 << 63, 0, 1, u64::MAX, &[], PROD_STRIDE);
+        let out = apriori_frontier_core(
+            &bars,
+            &[6, 7],
+            1,
+            0,
+            1 << 63,
+            0,
+            1,
+            u64::MAX,
+            &[],
+            PROD_STRIDE,
+        );
         assert_eq!(out.budget_trip, Some(2)); // |C_1| = 2
         assert!(out.masks.is_empty());
         assert!(out.census.is_empty()); // trip precedes census
