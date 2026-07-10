@@ -965,7 +965,9 @@ ZERO cross-call state — no files, no statics, no caches, no cursors.**
 - **Kernel panic** (`panic="abort"`): SIGABRT = worker death → pool-broken
   quarantine. **PANIC-RECOVERY RE-ROUTE (Verifier B checkpoint-1 audit
   C6 — the previous routing to "#1295's crash-loop breaker" is
-  WITHDRAWN: that breaker is #1295's G12 checkpoint-CORRUPTION counter,
+  WITHDRAWN: that breaker is #1295's G12 checkpoint-CORRUPTION counter
+  [independently verified TRUE by Verifier B at 871b3129 —
+  sweep_quarantine.py:84/:113],
   structurally blind to routed crash-loop classes — it counts checkpoint
   corruption events, not worker deaths, so it CANNOT fire for a panic;
   #1295 is additionally UNMERGED, §11 F7).** The mechanisms that
@@ -3503,8 +3505,11 @@ Golden Rule #1):
   precedent bumped trading-core 0.3.0→0.3.1, and fno-math (0.3.0,
   rust/fno-math/Cargo.toml:11) does NOT appear in the string (the §12
   table row above already records this). The precedent that actually
-  governs an fno-math kernel is #1531/#1546 (rust_metrics /
-  ResidentSweepSimU128): fno-math kernels ship under the BIT-IDENTITY
+  governs an fno-math kernel is #1531/#1549 (rust_metrics /
+  ResidentSweepSimU128 — cite corrected from "#1546" per the Verifier B
+  v5 re-audit: the u128 kernel is DEC-TRADE-SIM-U128-KERNEL-001,
+  MIGRATION.md #1549 within the renumbered #1546–#1550 pack; #1546 is
+  DEC-RUN-IDENTITY-GUARD-PARITY-001): fno-math kernels ship under the BIT-IDENTITY
   contract with NO `_indicator_version` change, re-keying via
   `code_commit_hash` per commit. This conversion keeps that posture
   (§13 pins "no `_indicator_version` change") BECAUSE byte-identity is
@@ -5302,7 +5307,7 @@ update (PR #1336).
 | C23 | MANDATORY, Slice-0 | §6 Slice 0 gains the ORDER-SENSITIVITY DIFFERENTIAL GATE: hypothesis `combine(fold(trades)) ≡ _compute_metrics_impl(trades)` (compute.py:569; Welford/Pébay per compute.py:32-33/:121-122) at struct.pack byte equality, over adversarial orderings + splits at every boundary + single-element folds + negative/zero/denormal classes; lands BEFORE the Slice-0 PR opens; joined to the Slice-0 gates list. Mirrored to the running Slice-0 workflow's scratchpad copy immediately after the edit. |
 | C3 (+C9) | MAJOR | §12 MASK-SERIALIZER LAW re-scoped (no NEW bare-int surface; shipping bytes FROZEN incl. the bare-int `combo_digest`/WF sites — sweep_cache.py:389-391, sweep_driver.py:977+; the self-contradiction with corpus (e) removed) + the §7.1 corpus-(e) golden re-specified implementably ("the exact shipping digest bytes reproduce", not hex-everywhere). |
 | C5 | MAJOR | §3 kill−9 bullet corrected: `load_or_create_store` PRE-LOADS (sweep_orchestrator.py:737-758), so a divergent-build redo hits the LOUD same-run_id append-conflict abort (results_store.py:487-490 — the F2 law, the DESIGNED behavior); the false "starts empty / cannot trip" claim removed. |
-| C6 | MAJOR | §3 kernel-panic bullet re-routed off "#1295's crash-loop breaker" (the G12 checkpoint-CORRUPTION counter — blind to panics; #1295 UNMERGED) onto the mechanisms that ACTUALLY fire: parallel-lane `BrokenProcessPool` quarantine + `SweepComboError`→TUPLE_FAILED (sweep_parallel.py:891-897/:1340-1343/:1585-1596), daemon-lane supervisor restart-cap → GAVE_UP + CRITICAL alert (orchestrator/supervisor.py:295/:530-575, telegram.py:161); remediation lever #1 re-homed to those runbooks; the (c) supervised-daemon wording updated. |
+| C6 | MAJOR | §3 kernel-panic bullet re-routed off "#1295's crash-loop breaker" (the G12 checkpoint-CORRUPTION counter [independently verified TRUE by Verifier B at 871b3129 — sweep_quarantine.py:84/:113] — blind to panics; #1295 UNMERGED) onto the mechanisms that ACTUALLY fire: parallel-lane `BrokenProcessPool` quarantine + `SweepComboError`→TUPLE_FAILED (sweep_parallel.py:891-897/:1340-1343/:1585-1596), daemon-lane supervisor restart-cap → GAVE_UP + CRITICAL alert (orchestrator/supervisor.py:295/:530-575, telegram.py:161); remediation lever #1 re-homed to those runbooks; the (c) supervised-daemon wording updated. |
 | C1 | MAJOR | §12.1: WHEEL-PROVENANCE law (wheel sha256 + build flags + `__source_digest__` recorded; import-fallback = refusal), DIRTY-TREE law (porcelain-empty precondition; ordinary runs honestly unchanged), OUTPUT-ROOT WIPE instruction (proving period), DEC-ID DEFERRAL named deliberate; the §B.4 question pasted VERBATIM + answered — with the transmitted answer-(a) premise CORRECTED against the repo (`_indicator_version()` = brutex+trading_core ONLY, cli.py:6159-6166; fno-math is NOT in the string — the forward rule mandates joining a version signal only with a future sanctioned byte-moving change, under its own DEC). |
 | C2 | MAJOR | §12.2 ENV-FLAG census: the six NEW conversion flags/knobs (two arm flags + belt + three numeric knobs) each classed with junk policy + eager validation point; Verifier B's existing-flag defect census adopted + repo-verified (BAD_TICK_SCREEN silent-ON bad_tick.py:291-309; LOOKAHEAD_GUARD silent-OFF sweep_lookahead.py:146-157; LAKE_HEAL silent-auto lake_heal.py:177-198; MEM_BUDGET/BOUNDED_RANK mid-run sweep_run.py:1349-1350; MAX_BLOOM_BYTES import-raw bloom.py:243; PER_TUPLE_SECONDS the exemplar cli.py:6564-6570; RUST_METRICS warn-once disclosed); pre-existing defects NAMED as out-of-scope observations for the coordinator. |
 | C42 | MINOR→FAIL 7 | NEW §3.1 AUDIT section: buffer-and-replay (BufferedAuditCollector audit.py:683; parent replays in enumeration order, sweep_parallel.py:1578-1580), core returns counters/events only — Python owns the JSONL chain at the 3-lines/tuple cadence; allow_nan=False law (audit.py:176-203); SHA-256 chain (audit.py:19-22/:270-283) vs blake3 run-identity — both algorithms + separate purposes stated. |
