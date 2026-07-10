@@ -46,10 +46,27 @@ four MANDATED classes:
 The oracle arm is the frozen test-local copy in
 ``tests/golden/test_compute_fold_combine_parity.py`` (imported, never
 re-minted — CLAUDE.md §11 COMMON), captured VERBATIM from origin/main
-``95955a71`` so the comparison is never decomposition-vs-itself. This gate is
-the Slice-0 instance of the design §7 O2 cross-arm oracle discipline — the
-Slice-2 Rust ``fold_block`` arm re-verifies against the SAME oracle through
-the §5 burn-in.
+``95955a71`` so the comparison is never decomposition-vs-itself.
+
+INDEPENDENCE SCOPE (Verifier B Slice-0 re-pin, 2026-07-10): that oracle is
+independent at the BODY level ONLY — it imports the untouched leaf helpers
+(``_accumulate_moments`` / ``_skewness`` / ``_excess_kurtosis`` /
+``_percentile`` / ``_safe_ratio`` / ``_consecutive_runs``) from LIVE
+``compute.py``, so a defect INSIDE a shared leaf hits both arms identically
+and is invisible to this differential. Measured blindness example: an
+injected Pébay-m3 delta-sign mutant in ``_accumulate_moments`` passed all
+4 properties here, killed only by the golden suite's ``float.fromhex``
+exact-value pins. Correct AND disclosed for Slice-0 (the leaf helpers were
+not moved; these gates verify the SPLIT) — but NOT fully independent.
+
+This gate is the Slice-0 instance of the design §7 O2 cross-arm oracle
+discipline; the Slice-2 Rust ``fold_block`` arm must therefore verify
+against a GENUINELY independent oracle (frozen-bytes golden corpus or a
+hand-rolled reference implementation — the design §6 Slice-2
+Definition-of-Ready mandate on ``claude/rust-sweep-core``), never one
+importing leaf helpers from live ``compute.py``, and never the "SAME
+oracle through the §5 burn-in" shortcut this docstring previously
+described.
 """
 
 # pyright: reportPrivateUsage=none
