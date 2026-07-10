@@ -4863,11 +4863,15 @@ hostile-review pass._
 
 ## 4. Coding Standards (when code phase starts)
 
-- **Language:** Rust-first for engine/hot-path kernels (operator decree
-  2026-07-10, DEC-RUST-FIRST-MANDATE-001, MIGRATION.md #1713); Python 3.12
-  for display/orchestration/glue; Python on hot paths only as thin FFI
-  bindings + independent test oracles — no Python-then-port; no other
-  languages without ADR.
+- **Language:** Rust for ALL new work (operator decree 2026-07-10,
+  amended same day — DEC-RUST-FIRST-MANDATE-001, MIGRATION.md #1713);
+  exemptions: the Groww pull/fetch surface (Python vendor SDK) +
+  independent Python test oracles (bit-identity proof apparatus);
+  additions to an existing Python surface follow that surface until the
+  surface itself is replaced; new standalone modules/services/kernels
+  are Rust — no Python-then-port; no other languages without ADR.
+  Python 3.12 remains the language of the existing Python surfaces (the
+  formatter/type-check/linter bullets below still govern them).
 - **Formatters:** `ruff format` (not black); `ruff check --fix`.
 - **Types:** `mypy --strict` AND `pyright` both must pass.
 - **Linters:** `ruff`, `pylint` (warnings-as-errors), `bandit` (security).
