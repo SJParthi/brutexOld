@@ -60,6 +60,7 @@ paths = [
   '''^tests/''',
   '''^docs/groww/''',
   '''^docs/MIGRATION\.md$''',
+  '''^brutex/dashboard/static/''',
 ]
 
 [[rules]]
