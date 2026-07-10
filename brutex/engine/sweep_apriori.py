@@ -313,7 +313,11 @@ def effective_max_combos(
       ``max(requested, max_k C(n_unique, k))`` so every requested ``k`` is
       admitted while the breaker bounds the actual candidate·bar work; a raise
       emits ONE counts-only ``sweep.apriori.max_combos_raised`` structlog (an
-      already-sufficient default logs nothing).
+      already-sufficient default logs nothing). An out-of-range ``k``
+      (``k > n_unique`` or ``k < 0``) contributes NOTHING to the raise — it is
+      filtered out (``count_combos`` would raise for it) and DEFERRED to the
+      downstream ``SweepGridConfig`` validation, which refuses it with a clean
+      ``CliUserError`` (never a raw ``ValueError`` here, never an auto-raise).
 
     Parameters
     ----------
@@ -344,8 +348,13 @@ def effective_max_combos(
         # auto-raised — even if the guard then refuses a too-large k.
         return requested_max_combos
     # DEFAULT cap only: raise to the largest raw C(n, k) any requested k enumerates
-    # so Apriori's breaker (not raw C(n,k)) becomes the guardrail.
-    needed = max((count_combos(k, n_unique) for k in k_values), default=0)
+    # so Apriori's breaker (not raw C(n,k)) becomes the guardrail. An out-of-range
+    # k (k > n_unique or k < 0) is FILTERED here — ``count_combos`` raises for it,
+    # and it is refused cleanly downstream by ``SweepGridConfig`` regardless of
+    # ``max_combos``, so we never crash with a raw ``ValueError`` (flag-OFF hygiene
+    # parity: ALL k out of range → generator empty → ``needed = 0`` → the requested
+    # cap is returned unchanged, deferring to that downstream config validation).
+    needed = max((count_combos(k, n_unique) for k in k_values if 0 <= k <= n_unique), default=0)
     effective = max(requested_max_combos, needed)
     if effective > requested_max_combos:
         _LOG.info(
@@ -454,7 +463,13 @@ def _all_subsets_frequent(
     subsets are frequent (anti-monotone downward closure).
     """
     for drop in range(len(candidate)):
-        subset = candidate[:drop] + candidate[drop + 1 :]
+        # ``# pragma: no mutate``: mutmut 2.5.1 materialises a no-op artifact for this
+        # slice-concat that is BYTE-IDENTICAL to the source (``mutmut apply`` yields an
+        # empty diff), so it mis-reports SURVIVED and reddens the wired zero-survivor
+        # gate. The line IS genuinely exercised — a real ``+``→``-`` substitution fails
+        # 22 tests (tuples reject ``-``), so this is the equivalent-artifact class, not
+        # a coverage gap.
+        subset = candidate[:drop] + candidate[drop + 1 :]  # pragma: no mutate
         if not _in_sorted(frontier_masks, _mask_of(subset)):
             return False
     return True

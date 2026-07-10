@@ -1277,6 +1277,45 @@ def test_effective_max_combos_default_already_sufficient_no_raise() -> None:
     assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
 
 
+def test_effective_max_combos_empty_kvalues_zero_request_default_sentinel() -> None:
+    # Pins the ``max(..., default=0)`` SENTINEL (kills mutant 18: default=0 → 1). An
+    # empty k_values generator with a zero requested cap must return EXACTLY 0 with NO
+    # raise log — a default of 1 would return max(0, 1) == 1 and fail this equality.
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=True,
+            k_values=[],
+            n_unique=60,
+            requested_max_combos=0,
+            requested_is_explicit=False,
+        )
+    assert out == 0
+    assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
+
+
+def test_effective_max_combos_all_k_out_of_range_defers_no_crash() -> None:
+    # FIX 1 (flag-ON hygiene parity): every requested k is out of range (k=4 > n=3),
+    # so the C(n,k) generator is EMPTY (each k filtered before ``count_combos``) →
+    # needed=0 → the requested cap is returned UNCHANGED, with NO raw ValueError and
+    # NO max_combos_raised log. Deferred to the downstream SweepGridConfig validation,
+    # exactly as the flag-OFF path does. (Fails-before: unfiltered code raised
+    # ValueError on ``count_combos(4, 3)``.)
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=True,
+            k_values=[4],
+            n_unique=3,
+            requested_max_combos=100_000,
+            requested_is_explicit=False,
+        )
+    assert out == 100_000
+    assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
+
+
 def test_effective_max_combos_grid_guard_interaction() -> None:
     # (e) The load-bearing interaction: the guards' LOGIC is byte-unchanged — we only
     # FEED them a value. With n_unique = 60, C(60, 4) = 487_635 > the default 100k,
