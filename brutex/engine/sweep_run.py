@@ -85,6 +85,7 @@ memory in bounded mode is O(kept), NOT O(1).
 from __future__ import annotations
 
 import hashlib
+import struct
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -106,9 +107,35 @@ from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_core import (
+    FOLD_FLAG_PYTHON_REQUIRED as _FLAG_PYREQ,
+)
+from brutex.engine.sweep_core import (
+    FOLD_FLAG_ZERO_TRADE as _FLAG_ZERO,
+)
+from brutex.engine.sweep_core import (
+    SWEEP_CORE_SPOT_CHECK,
+    CoreDecodeRefused,
+    CoreFoldContext,
     EnumOutcome,
+    _oracle_metrics_pure,
+    consume_fold_burnin,
     core_enumerate_kept,
+    core_fold_context,
+    decode_fold_block,
+    disambiguate_core_mismatch,
+    fold_burnin_open,
+    fold_latch_reason,
+    fold_row_metrics,
+    is_kernel_panic,
+    latch_fold_kernel,
+    mask_hex,
+    metrics_equal,
+    resolve_sweep_rust_core_plan,
     resolve_sweep_rust_enum_plan,
+    spot_check_candidates,
+    warn_belt_preexisting,
+    warn_core_refusal,
+    zero_trade_metrics,
 )
 from brutex.engine.sweep_driver import (
     DEFAULT_MAX_COMBOS,
@@ -129,7 +156,12 @@ from brutex.engine.sweep_stream import (
     SurvivorColumns,
     rank_survivor_columns,
 )
-from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trade_sim import (
+    DEFAULT_FILL_POLICY,
+    LevelFill,
+    SameBarTie,
+    simulate_trades,
+)
 from brutex.engine.trial_stats import (
     TrialStatsError,
     read_tuple_trial_stats,
@@ -147,7 +179,14 @@ from brutex.engine.tuple_complete import (
 from brutex.metrics.compute import ResultMetrics
 from brutex.models import BruteXError
 from brutex.money import round_money
-from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
+from brutex.ranking import (
+    MIN_TRADES,
+    OverfitGateConfig,
+    RankedCombo,
+    composite_term_inputs,
+    passes_gates,
+    rank_combos,
+)
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.types import FibAnchorKind, Side
 from brutex.vocabulary import ProximityParams, has_conflict
@@ -1109,6 +1148,8 @@ def _rebuild_bounded_finalists(
     cfg: SweepRunConfig,
     direction_label: str,
     run_id_of: Callable[[int], str],
+    *,
+    core_ctx: CoreFoldContext | None = None,
 ) -> list[RankedCombo]:
     """Recompute the bounded finalists' full ``ResultMetrics`` — O(top_k), same spine.
 
@@ -1134,10 +1175,30 @@ def _rebuild_bounded_finalists(
             f"masks — a wiring bug)"
         )
     finalist_masks = [finalist.mask for finalist in selected.finalists]
+    # Rust sweep-core Slice 2 (§1.4): on a CLEANLY core-served pass the
+    # rebuild is injected the SAME core-backed generator (a latched width
+    # demotes to the spine — both engines are bit-identical, order positional).
+    if core_ctx is not None and fold_latch_reason(core_ctx.width) is None:
+        rebuild_iter = _iter_mask_metrics_core(
+            core_ctx,
+            sim,
+            finalist_masks,
+            bars,
+            bar_bits,
+            cfg,
+            direction_label,
+            run_id_of,
+            retained={},
+            candidates=frozenset(),
+        )
+    else:
+        rebuild_iter = _iter_mask_metrics(
+            sim, finalist_masks, bars, bar_bits, cfg, direction_label, run_id_of
+        )
     rebuilt: list[RankedCombo] = []
     for finalist, (mask, metrics) in zip(
         selected.finalists,
-        _iter_mask_metrics(sim, finalist_masks, bars, bar_bits, cfg, direction_label, run_id_of),
+        rebuild_iter,
         strict=True,
     ):
         # _iter_mask_metrics preserves input order, so the pairing is positional;
@@ -1157,6 +1218,471 @@ def _rebuild_bounded_finalists(
             )
         )
     return rebuilt
+
+
+class _CoreTupleRestart(Exception):
+    """Internal: a CORE-DEFECT verdict — restart this tuple on the Python spine.
+
+    Raised by the Slice-2 fold seam (a decode refusal, a belt / spot-check /
+    serve-reconciliation core-defect verdict, or an in-core fold refusal) and
+    caught ONLY by :func:`run_persisted_sweep`'s tuple-pass driver, which
+    discards the pass's tuple-scoped state WHOLESALE and re-runs the inner
+    body once with the engine forced to the Python spine (re-entry strictly
+    BELOW the SWEEP_START emission — the tuple still emits exactly 3 audit
+    lines and its tallies are the restarted run's, byte-equal to a
+    pure-Python run; DESIGN_FINAL_RUST_SWEEP_CORE.md §5 restart semantics).
+    Termination is structural: the restarted pass is spine-served and the
+    belt/spot-check are core-arm-only, so a second raise is impossible.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class _TuplePassState:
+    """One tuple pass's TUPLE-SCOPED outputs (fresh per call — §5 restart law).
+
+    Everything the persist/flush/sidecar/sentinel epilogue reads; the burn-in
+    latches + counters are deliberately NOT here (process-global single
+    cells — the #1531 precedent, normative per the §5 round-2 resolution).
+    """
+
+    enumerated: int
+    conflict_pruned: int
+    skipped_dedup: int
+    evaluated: int
+    n_kept: int
+    finalists: list[RankedCombo]
+    n_ranked: int
+    backtested: int
+    sidecar_sharpes: list[float | None]
+    run_id_of: Callable[[int], str]
+    survivor_run_ids: list[str]
+    core_active: bool
+    core_chunks: int
+    spot_check_sampled: int
+
+
+def _spine_metrics_one(
+    sim: ResidentTradeSim,
+    mask: int,
+    bars: Sequence[CandleBar],
+    cfg: SweepRunConfig,
+) -> ResultMetrics:
+    """Today's shipping OFF-arm for ONE mask (burn-in arm (b) / the belt's
+    disambiguation recompute / the ``python_required`` serve) — the exact
+    ``simulate_masks_with_exit_indices`` + ``metrics_from_trades`` chain
+    :func:`_iter_mask_metrics` runs, single-mask."""
+    chunk_pairs = sim.simulate_masks_with_exit_indices(
+        [mask],
+        direction=cfg.direction,
+        stop_loss_paisa=cfg.sl_paisa,
+        take_profit_paisa=cfg.tp_paisa,
+    )
+    trades, exit_indices = chunk_pairs[0]
+    return metrics_from_trades(
+        bars,
+        trades,
+        start_equity_paisa=cfg.start_equity_paisa,
+        tf_minutes=cfg.tf_minutes,
+        exit_indices=exit_indices,
+    )
+
+
+def _pure_oracle_one(
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    mask: int,
+    cfg: SweepRunConfig,
+) -> ResultMetrics:
+    """The §5 mechanised-pure oracle for ONE mask (burn-in arm (a))."""
+    return _oracle_metrics_pure(
+        bars,
+        bar_bits,
+        mask,
+        direction=cfg.direction,
+        tf_minutes=cfg.tf_minutes,
+        stop_loss_paisa=cfg.sl_paisa,
+        take_profit_paisa=cfg.tp_paisa,
+        start_equity_paisa=cfg.start_equity_paisa,
+    )
+
+
+def _burnin_disagreement_error(
+    mask: int, cfg: SweepRunConfig, direction_label: str, verdict: str
+) -> SweepComboError:
+    """The §5 burn-in class-(1)/(3) abort: ``burnin_oracle_disagreement``.
+
+    The two oracle arms do not both indict the kernel — a harness /
+    environment defect (a pre-existing spine bug, a poisoned wheel, a broken
+    oracle). No value ships for the mask, NO autorevert latch; the tuple
+    fails loudly onto the #1291 TUPLE_FAILED skip path.
+    """
+    return SweepComboError(
+        f"combo 0x{mask:032x} in {cfg.instrument}/{cfg.tf}/{direction_label} "
+        f"k={cfg.k}: burnin_oracle_disagreement ({verdict}) — the mechanised-pure "
+        f"oracle and the shipping OFF-arm spine disagree, so the fold kernel is "
+        f"not evidence about either; no value is shipped and the tuple is skipped "
+        f"for a deterministic redo (DESIGN_FINAL_RUST_SWEEP_CORE.md §5 burn-in "
+        f"class (1)/(3))"
+    )
+
+
+def _core_burnin_compare(
+    ctx: CoreFoldContext,
+    sim: ResidentTradeSim,
+    mask: int,
+    served: ResultMetrics,
+    *,
+    plain: bool,
+    python_required: bool,
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    cfg: SweepRunConfig,
+    direction_label: str,
+    run_id_of: Callable[[int], str],
+) -> ResultMetrics:
+    """One §5 dual-oracle burn-in compare; returns the metrics to SHIP.
+
+    Class (2) (kernel vs BOTH agreeing oracles) latches the fold kernel and
+    ships the agreed oracle value — the caller then continues the tuple's
+    remainder on the spine (the latch flips :func:`fold_latch_reason`).
+    Classes (1)/(3) raise :func:`_burnin_disagreement_error`. A compare-arm
+    computation failure rides the standard ``_combo_error`` fingerprint;
+    ``MemoryError`` re-raises bare.
+    """
+    try:
+        # For a python_required row the served value IS the OFF-arm spine
+        # (same computation) — the compare is vacuous by construction (§5
+        # honest note); the pure-vs-off leg still runs as the tripwire.
+        off_arm = served if python_required else _spine_metrics_one(sim, mask, bars, cfg)
+        pure = _pure_oracle_one(bars, bar_bits, mask, cfg)
+    except MemoryError:
+        raise
+    except Exception as exc:
+        raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+    consume_fold_burnin(ctx.width, plain=plain)
+    verdict = disambiguate_core_mismatch(served, off_arm, pure)
+    if verdict == "clean":
+        return served
+    if verdict == "core_defect":
+        latch_fold_kernel(ctx.width, "self_check_mismatch", mask=mask_hex(mask))
+        return off_arm
+    raise _burnin_disagreement_error(mask, cfg, direction_label, verdict)
+
+
+def _iter_mask_metrics_core(
+    ctx: CoreFoldContext,
+    sim: ResidentTradeSim,
+    masks: Sequence[int],
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    cfg: SweepRunConfig,
+    direction_label: str,
+    run_id_of: Callable[[int], str],
+    *,
+    retained: dict[int, ResultMetrics],
+    candidates: frozenset[int],
+) -> Iterator[tuple[int, ResultMetrics]]:
+    """The core-backed twin of :func:`_iter_mask_metrics` (§1.4) — SAME contract.
+
+    Input-order yield, ``_combo_error`` fingerprints, ``MemoryError`` bare.
+    Chunked ``fold_block`` calls (driver-sized, §3 guaranteed-progress law);
+    per row: ``python_required`` → today's spine, ``zero_trade`` → the
+    literal shipping zero-trade call, else the Python combine over the fold
+    row. While the width's §5 burn-in window is open every core-served row
+    is dual-oracle bit-compared; a class-(2) latch continues the REMAINDER
+    of the tuple on the spine (the MID-TUPLE CONTINUATION — order and bytes
+    preserved because both engines are bit-identical and yield order is
+    positional). A decode refusal / in-core fold refusal raises
+    :class:`_CoreTupleRestart` (whole-tuple fallback); a caught pyo3
+    ``PanicException`` maps to the per-tuple ``kernel_panic_exception``
+    ``SweepComboError``. The served ``ResultMetrics`` for the ≤16 spot-check
+    ``candidates`` are RETAINED into *retained* (O(16) objects — the §5
+    constant additive term beside the ``owned_nbytes`` watermark).
+    """
+    policy = DEFAULT_FILL_POLICY
+    sl_next_open = policy.stop_loss is LevelFill.NEXT_OPEN
+    tp_next_open = policy.take_profit is LevelFill.NEXT_OPEN
+    tp_first = policy.same_bar is SameBarTie.TP_FIRST
+    is_buy = cfg.direction is Side.BUY
+    position = 0
+    while position < len(masks):
+        if fold_latch_reason(ctx.width) is not None:
+            # MID-TUPLE CONTINUATION (§5): the remainder rides today's spine.
+            yield from _iter_mask_metrics(
+                sim, masks[position:], bars, bar_bits, cfg, direction_label, run_id_of
+            )
+            return
+        chunk = list(masks[position : position + ctx.chunk_masks])
+        try:
+            block = ctx.core.fold_block(
+                chunk,
+                is_buy,
+                cfg.sl_paisa,
+                cfg.tp_paisa,
+                sl_next_open,
+                tp_next_open,
+                tp_first,
+                cfg.start_equity_paisa,
+            )
+            decoded = decode_fold_block(block, len(chunk))
+        except MemoryError:
+            raise
+        except CoreDecodeRefused as exc:
+            warn_core_refusal("kernel_result_refused", refusal=exc.reason, detail=str(exc))
+            raise _CoreTupleRestart(f"kernel_result_refused:{exc.reason}") from exc
+        except (ValueError, TypeError, OverflowError) as exc:
+            reason = "fold_work_ceiling" if "fold_work_ceiling" in str(exc) else "kernel_error"
+            warn_core_refusal(reason, stage="fold_block", error=repr(exc))
+            raise _CoreTupleRestart(reason) from exc
+        except BaseException as exc:
+            if is_kernel_panic(exc):
+                # §3: a panic surfacing as a caught exception rides the
+                # per-tuple SweepComboError catch → TUPLE_FAILED skip.
+                raise SweepComboError(
+                    f"fold_block chunk of {len(chunk)} masks in "
+                    f"{cfg.instrument}/{cfg.tf}/{direction_label} k={cfg.k}: "
+                    f"kernel_panic_exception — the fold kernel panicked ({exc}); "
+                    f"the tuple is skipped for a deterministic redo"
+                ) from exc
+            raise
+        for offset, mask in enumerate(chunk):
+            flag = decoded.flags[offset]
+            python_required = bool(flag & _FLAG_PYREQ)
+            zero_trade = bool(flag & _FLAG_ZERO)
+            try:
+                if python_required:
+                    metrics = _spine_metrics_one(sim, mask, bars, cfg)
+                elif zero_trade:
+                    metrics = zero_trade_metrics(
+                        total_bars=ctx.n_bars,
+                        start_equity_paisa=cfg.start_equity_paisa,
+                        span_years=ctx.span_years,
+                    )
+                else:
+                    metrics = fold_row_metrics(
+                        decoded,
+                        offset,
+                        total_bars=ctx.n_bars,
+                        start_equity_paisa=cfg.start_equity_paisa,
+                        span_years=ctx.span_years,
+                    )
+            except MemoryError:
+                raise
+            except Exception as exc:
+                raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+            if fold_burnin_open(ctx.width):
+                metrics = _core_burnin_compare(
+                    ctx,
+                    sim,
+                    mask,
+                    metrics,
+                    plain=not (python_required or zero_trade),
+                    python_required=python_required,
+                    bars=bars,
+                    bar_bits=bar_bits,
+                    cfg=cfg,
+                    direction_label=direction_label,
+                    run_id_of=run_id_of,
+                )
+            if mask in candidates:
+                retained[mask] = metrics
+            yield mask, metrics
+            if fold_latch_reason(ctx.width) is not None:
+                # A class-(2) burn-in latch mid-chunk: the agreed oracle value
+                # was just yielded for THIS mask; the tuple's REMAINDER —
+                # including this chunk's tail — rides the while-top MID-TUPLE
+                # CONTINUATION (§5), never the already-decoded poisoned rows.
+                position += offset + 1
+                break
+        else:
+            position += len(chunk)
+
+
+def _core_defect_restart(ctx: CoreFoldContext, reason: str, **context: object) -> NoReturn:
+    """Latch the fold kernel + raise the §5 tuple restart (belt semantics)."""
+    latch_fold_kernel(ctx.width, reason, **context)
+    raise _CoreTupleRestart(reason)
+
+
+def _belt_disambiguate(
+    ctx: CoreFoldContext,
+    sim: ResidentTradeSim,
+    mask: int,
+    served: ResultMetrics,
+    pure: ResultMetrics,
+    *,
+    bars: Sequence[CandleBar],
+    cfg: SweepRunConfig,
+    direction_label: str,
+    run_id_of: Callable[[int], str],
+    site: str,
+) -> None:
+    """The §5 belt/spot-check three-way mismatch semantics for ONE mask.
+
+    Called AFTER ``served != pure`` was observed: recompute the mask ONCE via
+    the shipping OFF-arm; OFF == served ⇒ PRE-EXISTING divergence (one
+    ``belt_preexisting_divergence`` ERROR per process, the served values
+    ship); OFF == pure ⇒ core defect (latch + tuple restart); three-way ⇒
+    ``belt_threeway_divergence`` (latch + restart).
+    """
+    try:
+        off_arm = _spine_metrics_one(sim, mask, bars, cfg)
+    except MemoryError:
+        raise
+    except Exception as exc:
+        raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+    verdict = disambiguate_core_mismatch(served, off_arm, pure)
+    if verdict == "preexisting":
+        warn_belt_preexisting(mask=mask_hex(mask), site=site)
+        return
+    if verdict == "core_defect":
+        _core_defect_restart(ctx, "belt_mismatch", mask=mask_hex(mask), site=site)
+    _core_defect_restart(ctx, "belt_threeway_divergence", mask=mask_hex(mask), site=site)
+
+
+def _optional_float_key(value: float | None) -> bytes | None:
+    """Bit-key one ``float | None`` column cell (struct-packed; None exact)."""
+    return None if value is None else struct.pack("<d", value)
+
+
+def _core_belt_pre_pass(
+    ctx: CoreFoldContext,
+    sim: ResidentTradeSim,
+    finalists: Sequence[RankedCombo],
+    *,
+    bounded: BoundedRankResult | None,
+    columns: SurvivorColumns | None,
+    retained: dict[int, ResultMetrics],
+    candidates: Sequence[int],
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    cfg: SweepRunConfig,
+    direction_label: str,
+    run_id_of: Callable[[int], str],
+) -> int:
+    """The §5 FINALIST BELT pre-pass + serve reconciliation + spot-check.
+
+    Runs ONLY on a core-served pass with the belt flag ON, BEFORE any store
+    append (the restart is append-free by construction). Returns
+    ``spot_check_sampled``. Any core-defect verdict latches + raises
+    :class:`_CoreTupleRestart`; a pre-existing spine-vs-oracle divergence
+    warns once per process and SHIPS (no restart — the core reproduced
+    today's shipping bytes).
+    """
+    finalist_masks = {rc.mask for rc in finalists}
+    # BOUNDED-ARM SERVE RECONCILIATION (§5 round-4/round-5, via the POSITION
+    # CARRY): clauses (1) rank-column reconciliation + the positional
+    # mask-equality belt; (2) gate re-verdict. On the batch arm the ranked
+    # object IS the served object, so (1) is an identity and (2) still runs
+    # as a belt-internal assertion.
+    if bounded is not None and columns is not None:
+        for bf, rc in zip(bounded.finalists, finalists, strict=True):
+            if columns.mask_at(bf.position) != bf.mask:
+                _core_defect_restart(
+                    ctx,
+                    "stream_rebuild_divergence",
+                    mask=mask_hex(bf.mask),
+                    site="position_carry",
+                )
+            rebuilt_terms = composite_term_inputs(rc.metrics)
+            stored_terms = [
+                columns.term_column(term, (bf.position,))[0] for term in range(len(rebuilt_terms))
+            ]
+            stream_clean = (
+                columns.gate_passed(bf.position) == passes_gates(rc.metrics)
+                and _optional_float_key(columns.sharpe_at(bf.position))
+                == _optional_float_key(rc.metrics.sharpe_ratio)
+                and all(
+                    struct.pack("<d", stored) == struct.pack("<d", rebuilt)
+                    for stored, rebuilt in zip(stored_terms, rebuilt_terms, strict=True)
+                )
+            )
+            if stream_clean and columns.with_overfit:
+                stream_clean = (
+                    columns.trades_at(bf.position) == rc.metrics.total_trades
+                    and _optional_float_key(columns.skew_at(bf.position))
+                    == _optional_float_key(rc.metrics.skewness)
+                    and _optional_float_key(columns.kurt_at(bf.position))
+                    == _optional_float_key(rc.metrics.kurtosis)
+                )
+            if not stream_clean:
+                _core_defect_restart(
+                    ctx,
+                    "stream_rebuild_divergence",
+                    mask=mask_hex(bf.mask),
+                    site="rank_columns",
+                )
+    for rc in finalists:
+        # (2) gate re-verdict — every ranked finalist's metrics must pass the
+        # literal shared gates (the streamed pass admitted it).
+        if not passes_gates(rc.metrics):
+            _core_defect_restart(
+                ctx, "stream_rebuild_divergence", mask=mask_hex(rc.mask), site="gate_verdict"
+            )
+        # The belt proper: every finalist recomputed via the mechanised-pure
+        # oracle and bit-compared before ANY row is appended.
+        try:
+            pure = _pure_oracle_one(bars, bar_bits, rc.mask, cfg)
+        except MemoryError:
+            raise
+        except Exception as exc:
+            raise _combo_error(rc.mask, run_id_of(rc.mask), cfg, direction_label, exc) from exc
+        if not metrics_equal(rc.metrics, pure):
+            _belt_disambiguate(
+                ctx,
+                sim,
+                rc.mask,
+                rc.metrics,
+                pure,
+                bars=bars,
+                cfg=cfg,
+                direction_label=direction_label,
+                run_id_of=run_id_of,
+                site="belt",
+            )
+        # (3) candidate-finalist serve compare: a retained candidate that IS
+        # a finalist bit-compares SERVED vs the (re)built rc.metrics.
+        if rc.mask in retained and not metrics_equal(retained[rc.mask], rc.metrics):
+            _core_defect_restart(
+                ctx,
+                "stream_rebuild_divergence",
+                mask=mask_hex(rc.mask),
+                site="candidate_finalist",
+            )
+    # SAMPLED POPULATION SPOT-CHECK: the first SWEEP_CORE_SPOT_CHECK
+    # non-finalist candidates, served-object vs pure oracle.
+    sampled = 0
+    for mask in candidates:
+        if sampled >= SWEEP_CORE_SPOT_CHECK:
+            break
+        if mask in finalist_masks or mask not in retained:
+            continue
+        served = retained[mask]
+        try:
+            pure = _pure_oracle_one(bars, bar_bits, mask, cfg)
+        except MemoryError:
+            raise
+        except Exception as exc:
+            raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+        sampled += 1
+        if not metrics_equal(served, pure):
+            _belt_disambiguate(
+                ctx,
+                sim,
+                mask,
+                served,
+                pure,
+                bars=bars,
+                cfg=cfg,
+                direction_label=direction_label,
+                run_id_of=run_id_of,
+                site="spot_check",
+            )
+    return sampled
 
 
 def run_persisted_sweep(
@@ -1305,6 +1831,10 @@ def run_persisted_sweep(
     # the §12.2 exemplar rule; the knob is only parsed when the flag is ON,
     # so the default-OFF path is byte-identical to today).
     enum_plan = resolve_sweep_rust_enum_plan()
+    # Rust sweep-core Slice 2 (§5/§12.2): the fold arm's flag + belt +
+    # knobs, resolved ONCE per invocation, eagerly (junk knobs fail loud
+    # here; the default-OFF path parses nothing and is byte-identical).
+    core_plan = resolve_sweep_rust_core_plan()
     direction_label = _direction_label(cfg.direction)
 
     n_unique = len(set(cfg.condition_bits))
@@ -1424,9 +1954,6 @@ def run_persisted_sweep(
     # BYPASSED: the FULL population re-runs and every artifact rewrites
     # byte-identically. Only legacy no-digest callers consult the probes.
     bypass_dedup = trial_stats_digest is not None
-    enumerated = 0
-    conflict_pruned = 0
-    skipped_dedup = 0
 
     def _lazy_run_id(mask: int) -> str:
         """Recompute one mask's run-identity on demand (:func:`mask_run_id` is pure)."""
@@ -1442,159 +1969,266 @@ def run_persisted_sweep(
             code_commit_sha=cfg.code_commit_sha,
         )
 
-    survivors: list[int] = []
-    #: Legacy no-digest arm ONLY — the probe-time run_ids, parallel to
-    #: ``survivors`` (consumed by ``mark_many`` + reused for finalists/errors).
-    survivor_run_ids: list[str] = []
-    # Rust sweep-core Slice 1 (DESIGN_FINAL_RUST_SWEEP_CORE.md §1.4/§6): when
-    # the enum arm engages (digest path + every §5 ENUM-column condition),
-    # the enumeration + conflict prune + Stage-1B min-hits prefilter run
-    # fused in `fno_math.enumerate_prefilter` — counters EXACT and the kept
-    # list byte-identical (POSITION-LEX order) vs the loop below; ANY refusal
-    # returns None (warned once per tuple+reason) and today's spine serves.
-    # `survivors` stays empty on the core arm — its only consumers here are
-    # `evaluated` (carried by the outcome) and the LEGACY dedup machinery,
-    # which the digest-path engagement condition structurally excludes.
-    enum_outcome: EnumOutcome | None = None
-    if enum_plan.requested:
-        enum_outcome = core_enumerate_kept(
-            bars=bars,
-            bar_bits=bar_bits,
-            condition_bits=cfg.condition_bits,
-            k=cfg.k,
-            min_hits=cfg.min_hits,
-            tf_minutes=cfg.tf_minutes,
-            n_masks=n_masks,
-            digest_path=bypass_dedup,
-            plan=enum_plan,
-        )
-    if enum_outcome is not None:
-        enumerated = enum_outcome.enumerated
-        conflict_pruned = enum_outcome.conflict_pruned
-        kept = enum_outcome.kept
-        evaluated = enum_outcome.evaluated
-    else:
-        for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
-            enumerated += 1
-            if has_conflict(mask):
-                conflict_pruned += 1
-                continue
-            if bypass_dedup:
-                # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
-                # path the dedup probes are BYPASSED (sentinel-authoritative redo,
-                # above) and ``mark_many`` is SKIPPED (below), so a survivor's
-                # run_id has exactly TWO consumers — the SweepComboError
-                # fingerprint and the finalist rows — both recomputed on demand
-                # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
-                # canonical inputs, Golden Rule #4: same bytes, computed later).
-                # Skipping the eager per-enumerated-mask hash deletes O(survivors)
-                # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
-                survivors.append(mask)
-                continue
-            run_id = _lazy_run_id(mask)
-            if dedup.seen(run_id):
-                skipped_dedup += 1
-                continue
-            survivors.append(mask)
-            survivor_run_ids.append(run_id)
+    def _tuple_pass(force_python: bool) -> _TuplePassState:
+        """One TUPLE-SCOPED enumerate→eval→rank→belt pass (§5 restart law).
 
-        # Stage-1B coarse pre-filter — drop survivors that can never reach the
-        # trade-count gate (still "evaluated": we decided their fate + mark them seen).
-        kept = survivors
-        if cfg.min_hits > 0 and survivors:
-            # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
-            # are bit-identical (same SUPERSET kernel) so the kept set never differs.
-            hits = (
-                kernel.count_hits(survivors)
-                if kernel is not None
-                else count_supermasks(bar_bits, survivors)
+        Every tally / accumulator / kept list / spot-check sample is FRESH
+        per call; the burn-in latches + counters are process-global (the
+        #1531 single-cell precedent — normative per §5 round-2). On a
+        core-defect verdict the caller discards this state WHOLESALE and
+        calls again with ``force_python=True`` (the spine pass — the belt
+        and spot-check are core-arm-only, so termination is structural).
+        """
+        enumerated = 0
+        conflict_pruned = 0
+        skipped_dedup = 0
+        survivors: list[int] = []
+        #: Legacy no-digest arm ONLY — the probe-time run_ids, parallel to
+        #: ``survivors`` (consumed by ``mark_many`` + reused for finalists/errors).
+        survivor_run_ids: list[str] = []
+        # Rust sweep-core Slice 1 (DESIGN_FINAL_RUST_SWEEP_CORE.md §1.4/§6): when
+        # the enum arm engages (digest path + every §5 ENUM-column condition),
+        # the enumeration + conflict prune + Stage-1B min-hits prefilter run
+        # fused in `fno_math.enumerate_prefilter` — counters EXACT and the kept
+        # list byte-identical (POSITION-LEX order) vs the loop below; ANY refusal
+        # returns None (warned once per tuple+reason) and today's spine serves.
+        # `survivors` stays empty on the core arm — its only consumers here are
+        # `evaluated` (carried by the outcome) and the LEGACY dedup machinery,
+        # which the digest-path engagement condition structurally excludes.
+        enum_outcome: EnumOutcome | None = None
+        if enum_plan.requested and not force_python:
+            enum_outcome = core_enumerate_kept(
+                bars=bars,
+                bar_bits=bar_bits,
+                condition_bits=cfg.condition_bits,
+                k=cfg.k,
+                min_hits=cfg.min_hits,
+                tf_minutes=cfg.tf_minutes,
+                n_masks=n_masks,
+                digest_path=bypass_dedup,
+                plan=enum_plan,
             )
-            kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
-        evaluated = len(survivors)
+        if enum_outcome is not None:
+            enumerated = enum_outcome.enumerated
+            conflict_pruned = enum_outcome.conflict_pruned
+            kept = enum_outcome.kept
+            evaluated = enum_outcome.evaluated
+        else:
+            for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
+                enumerated += 1
+                if has_conflict(mask):
+                    conflict_pruned += 1
+                    continue
+                if bypass_dedup:
+                    # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
+                    # path the dedup probes are BYPASSED (sentinel-authoritative redo,
+                    # above) and ``mark_many`` is SKIPPED (below), so a survivor's
+                    # run_id has exactly TWO consumers — the SweepComboError
+                    # fingerprint and the finalist rows — both recomputed on demand
+                    # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
+                    # canonical inputs, Golden Rule #4: same bytes, computed later).
+                    # Skipping the eager per-enumerated-mask hash deletes O(survivors)
+                    # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
+                    survivors.append(mask)
+                    continue
+                run_id = _lazy_run_id(mask)
+                if dedup.seen(run_id):
+                    skipped_dedup += 1
+                    continue
+                survivors.append(mask)
+                survivor_run_ids.append(run_id)
 
-    # ONE run-identity resolver for every downstream consumer (finalist rows +
-    # the SweepComboError fingerprints): the digest path recomputes lazily
-    # (O(finalists + errors) BLAKE3 instead of O(survivors)); the legacy path
-    # reuses the exact probe-time values already paid for above (eager
-    # semantics untouched — the dedup probe genuinely needs them).
-    run_id_of: Callable[[int], str]
-    if bypass_dedup:
-        run_id_of = _lazy_run_id
-    else:
-        run_id_of = dict(zip(survivors, survivor_run_ids, strict=True)).__getitem__
-    # Combo evaluation — the wired resident Rust trade-sim
-    # (DEC-SWEEP-RUST-TRADESIM-WIRE-001, wiring the bit-identity-proven
-    # DEC-SWEEP-RUST-TRADESIM-001 kernel): one ResidentTradeSim per tuple (built
-    # under `_build_trade_sim`'s tuple-skip contract), the kept masks
-    # batch-simulated in bounded CHUNKS, each mask's trades fed through the SAME
-    # `metrics_from_trades` tail `metrics_for_mask` uses — byte-identical pairs
-    # in the SAME order as the pre-wiring per-mask loop (the wired-vs-unwired
-    # store-hash golden + chunk-invariance tests enforce it).
-    #
-    # Fail-loud-with-fingerprint is PRESERVED: a per-mask metrics-tail raise is
-    # re-thrown as a `SweepComboError` naming the exact offending combo (mask
-    # hex + run-id + tuple coordinate, `_combo_error`); a CHUNK failure loses
-    # per-mask attribution, so `_reattribute_chunk_failure` re-runs that chunk
-    # one mask at a time through the `metrics_for_mask` ORACLE to name the
-    # culprit — and if none re-raises (a batch/kernel-level failure) it fails
-    # LOUD naming the chunk, NEVER silently adopting the oracle's results. Per
-    # "Resilient: skip + continue", the grid drivers catch SweepComboError and
-    # skip the WHOLE tuple — treated CONSERVATIVELY as tuple-wide (the safe
-    # redo-everything choice); the tuple is left un-sentineled / un-cached so it
-    # redoes next run. A MemoryError is re-raised bare at EVERY level — the
-    # chunk call, the metrics tail, the re-attribution — BEFORE any wrap or
-    # oracle re-run (OOM is a GLOBAL stop, DEC-LAKE-WRITE-HALT-001, never a
-    # per-tuple skip and never a retry under memory pressure).
-    # The chunked simulate→metrics spine itself is the SHARED `_iter_mask_metrics`
-    # generator (one spine for the batch accumulation, the bounded columnar
-    # accumulation, and the bounded finalist recompute — COMMON). The BATCH arm
-    # collects `pairs` exactly as before (byte-identical below budget); the
-    # BOUNDED arm (DEC-SWEEP-STREAMING-RANK-001 part 2) appends each kept mask's
-    # ranking columns to `SurvivorColumns` and DROPS the ResultMetrics — O(kept)
-    # columnar payload (~80-105 B/kept) instead of O(kept) rich objects — under
-    # an EXACT owned-bytes watermark that degrades gracefully to a
-    # SweepMemoryBudgetError tuple-skip if even the columns outgrow the budget.
-    pairs: list[tuple[int, ResultMetrics]] = []
-    columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
-    sim: ResidentTradeSim | None = None
-    if kept:
-        sim = _build_trade_sim(bars, bar_bits, cfg, direction_label)
-        for mask, metrics in _iter_mask_metrics(
-            sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
-        ):
-            if columns is None:
-                pairs.append((mask, metrics))
-                continue
-            columns.append(mask, metrics)
-            if columns.owned_nbytes() > plan.budget_bytes:
-                raise SweepMemoryBudgetError(
-                    f"{subject}: "
-                    + watermark_message(
-                        owned_bytes=columns.owned_nbytes(),
-                        budget_bytes=plan.budget_bytes,
-                        n_kept=columns.n_kept,
-                    )
+            # Stage-1B coarse pre-filter — drop survivors that can never reach the
+            # trade-count gate (still "evaluated": we decided their fate + mark them seen).
+            kept = survivors
+            if cfg.min_hits > 0 and survivors:
+                # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
+                # are bit-identical (same SUPERSET kernel) so the kept set never differs.
+                hits = (
+                    kernel.count_hits(survivors)
+                    if kernel is not None
+                    else count_supermasks(bar_bits, survivors)
                 )
-    if columns is None:
-        ranked = rank_combos(pairs, overfit=cfg.overfit)
-        finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
-        n_ranked = len(ranked)
-        backtested = len(pairs)
-        sidecar_sharpes = [metrics.sharpe_ratio for _, metrics in pairs]
-    else:
-        # Bounded rank: the SAME shared ranking internals over the columns
-        # (bit-identical to `rank_combos(pairs)[:top_k]` — property-pinned),
-        # then the finalists' full metrics recomputed O(top_k) via the SAME
-        # eval spine (the V16 re-simulation precedent).
-        selected = rank_survivor_columns(
-            columns, overfit=cfg.overfit, top_k=plan.require_bounded_top_k()
+                kept = [
+                    mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits
+                ]
+            evaluated = len(survivors)
+
+        # ONE run-identity resolver for every downstream consumer (finalist rows +
+        # the SweepComboError fingerprints): the digest path recomputes lazily
+        # (O(finalists + errors) BLAKE3 instead of O(survivors)); the legacy path
+        # reuses the exact probe-time values already paid for above (eager
+        # semantics untouched — the dedup probe genuinely needs them).
+        run_id_of: Callable[[int], str]
+        if bypass_dedup:
+            run_id_of = _lazy_run_id
+        else:
+            run_id_of = dict(zip(survivors, survivor_run_ids, strict=True)).__getitem__
+        # Rust sweep-core Slice 2 (§1.4/§5): the fold-arm engagement — every
+        # CORE-column condition in precedence order, warned once per
+        # (tuple, reason); ANY refusal serves today's spine byte-identically.
+        core_ctx: CoreFoldContext | None = None
+        candidates: list[int] = []
+        retained: dict[int, ResultMetrics] = {}
+        if kept and core_plan.requested and not force_python and trial_stats_digest is not None:
+            core_ctx = core_fold_context(
+                bars=bars,
+                bar_bits=bar_bits,
+                condition_bits=cfg.condition_bits,
+                tf_minutes=cfg.tf_minutes,
+                n_masks=n_masks,
+                digest_path=bypass_dedup,
+                top_k=cfg.top_k,
+                plan=core_plan,
+            )
+            if core_ctx is not None:
+                # §5 spot-check: the ≤16 deterministic candidates, drawn from
+                # the FULL kept list BEFORE ranking (flag-served included).
+                candidates = spot_check_candidates(kept, trial_stats_digest)
+        # Combo evaluation — the wired resident Rust trade-sim spine, or (core
+        # arm) the fold_block-backed twin generator with the SAME contract
+        # (input-order yield, _combo_error fingerprints, MemoryError bare).
+        pairs: list[tuple[int, ResultMetrics]] = []
+        columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
+        sim: ResidentTradeSim | None = None
+        core_chunks = 0
+        if kept:
+            sim = _build_trade_sim(bars, bar_bits, cfg, direction_label)
+            if core_ctx is not None:
+                core_chunks = -(-len(kept) // core_ctx.chunk_masks)
+                metrics_iter = _iter_mask_metrics_core(
+                    core_ctx,
+                    sim,
+                    kept,
+                    bars,
+                    bar_bits,
+                    cfg,
+                    direction_label,
+                    run_id_of,
+                    retained=retained,
+                    candidates=frozenset(candidates),
+                )
+            else:
+                metrics_iter = _iter_mask_metrics(
+                    sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
+                )
+            for mask, metrics in metrics_iter:
+                if columns is None:
+                    pairs.append((mask, metrics))
+                    continue
+                columns.append(mask, metrics)
+                if columns.owned_nbytes() > plan.budget_bytes:
+                    raise SweepMemoryBudgetError(
+                        f"{subject}: "
+                        + watermark_message(
+                            owned_bytes=columns.owned_nbytes(),
+                            budget_bytes=plan.budget_bytes,
+                            n_kept=columns.n_kept,
+                        )
+                    )
+        selected: BoundedRankResult | None = None
+        if columns is None:
+            ranked = rank_combos(pairs, overfit=cfg.overfit)
+            finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
+            n_ranked = len(ranked)
+            backtested = len(pairs)
+            sidecar_sharpes: list[float | None] = [metrics.sharpe_ratio for _, metrics in pairs]
+        else:
+            # Bounded rank: the SAME shared ranking internals over the columns
+            # (bit-identical to `rank_combos(pairs)[:top_k]` — property-pinned),
+            # then the finalists' full metrics recomputed O(top_k) via the SAME
+            # eval spine (the V16 re-simulation precedent) — the core-backed
+            # generator when the core arm served this pass (§1.4).
+            selected = rank_survivor_columns(
+                columns, overfit=cfg.overfit, top_k=plan.require_bounded_top_k()
+            )
+            finalists = _rebuild_bounded_finalists(
+                selected,
+                sim,
+                bars,
+                bar_bits,
+                cfg,
+                direction_label,
+                run_id_of,
+                core_ctx=core_ctx,
+            )
+            n_ranked = selected.n_ranked
+            backtested = columns.n_kept
+            sidecar_sharpes = columns.sharpe_values()
+        # §5 belt/spot-check ARM SCOPING — CORE-ARM-ONLY: they run only on a
+        # pass whose masks the CORE served CLEANLY (no mid-tuple latch); every
+        # other pass emits one `belt_skipped_non_core` INFO per tuple.
+        spot_check_sampled = 0
+        core_served_clean = core_ctx is not None and fold_latch_reason(core_ctx.width) is None
+        if core_served_clean and core_ctx is not None and core_ctx.plan.belt and sim is not None:
+            spot_check_sampled = _core_belt_pre_pass(
+                core_ctx,
+                sim,
+                finalists,
+                bounded=selected,
+                columns=columns,
+                retained=retained,
+                candidates=candidates,
+                bars=bars,
+                bar_bits=bar_bits,
+                cfg=cfg,
+                direction_label=direction_label,
+                run_id_of=run_id_of,
+            )
+        else:
+            _LOG.info("sweep_run.belt_skipped_non_core", subject=subject)
+        return _TuplePassState(
+            enumerated=enumerated,
+            conflict_pruned=conflict_pruned,
+            skipped_dedup=skipped_dedup,
+            evaluated=evaluated,
+            n_kept=len(kept),
+            finalists=finalists,
+            n_ranked=n_ranked,
+            backtested=backtested,
+            sidecar_sharpes=sidecar_sharpes,
+            run_id_of=run_id_of,
+            survivor_run_ids=survivor_run_ids,
+            core_active=core_served_clean,
+            core_chunks=core_chunks,
+            spot_check_sampled=spot_check_sampled,
         )
-        finalists = _rebuild_bounded_finalists(
-            selected, sim, bars, bar_bits, cfg, direction_label, run_id_of
-        )
-        n_ranked = selected.n_ranked
-        backtested = columns.n_kept
-        sidecar_sharpes = columns.sharpe_values()
+
+    # §5 restart driver: a core-defect verdict discards the first pass's
+    # tuple-scoped state WHOLESALE and re-runs the body once on the Python
+    # spine (re-entry strictly BELOW the SWEEP_START emission — 3 audit lines,
+    # tallies byte-equal to a pure-Python run of the same tuple). Termination
+    # is structural: the restarted pass is spine-served and the belt is
+    # core-arm-only, so a second _CoreTupleRestart is impossible.
+    restarted = False
+    try:
+        state = _tuple_pass(force_python=False)
+    except _CoreTupleRestart as restart_exc:
+        _LOG.warning("sweep_rust_core.tuple_restart", subject=subject, reason=restart_exc.reason)
+        restarted = True
+        state = _tuple_pass(force_python=True)
+    _LOG.info(
+        "sweep_run.sweep_core_path",
+        subject=subject,
+        core_active=state.core_active,
+        n_bars=len(bars),
+        kept=state.n_kept,
+        chunks=state.core_chunks,
+        belt=core_plan.belt if core_plan.requested else False,
+        spot_check_sampled=state.spot_check_sampled,
+        restart=restarted,
+    )
+    enumerated = state.enumerated
+    conflict_pruned = state.conflict_pruned
+    skipped_dedup = state.skipped_dedup
+    evaluated = state.evaluated
+    finalists = state.finalists
+    n_ranked = state.n_ranked
+    backtested = state.backtested
+    sidecar_sharpes = state.sidecar_sharpes
+    run_id_of = state.run_id_of
+    survivor_run_ids = state.survivor_run_ids
+    minhits_dropped = evaluated - state.n_kept
 
     persisted = 0
     for rc in finalists:
@@ -1632,7 +2266,7 @@ def run_persisted_sweep(
             sidecar_sharpes,
             n_enumerated=enumerated,
             n_conflict_pruned=conflict_pruned,
-            n_minhits_dropped=evaluated - len(kept),
+            n_minhits_dropped=minhits_dropped,
             tuple_digest=trial_stats_digest,
             store_content_hash=flush.content_hash,
         )
@@ -1677,7 +2311,7 @@ def run_persisted_sweep(
         # Additive trial-stats tallies (DEC-TRIAL-STATS-WRITE-001) — the
         # hash-chain is per-line, so new payload keys are chain-safe.
         "backtested": backtested,
-        "minhits_dropped": evaluated - len(kept),
+        "minhits_dropped": minhits_dropped,
         "trial_n_finite": trial_n_finite,
         "trial_sidecar_written": sidecar_written,
         # Additive sentinel tally (DEC-MARK-MANY-SENTINEL-001) — chain-safe.
@@ -1700,7 +2334,7 @@ def run_persisted_sweep(
         persisted=persisted,
         store_content_hash=flush.content_hash,
         backtested=backtested,
-        minhits_dropped=evaluated - len(kept),
+        minhits_dropped=minhits_dropped,
         trial_n_finite=trial_n_finite,
         trial_sum_sharpe=trial_sum_sharpe,
         trial_sum_sharpe_sq=trial_sum_sharpe_sq,

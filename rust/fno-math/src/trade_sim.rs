@@ -182,7 +182,11 @@ fn check_price_column(label: &str, name: &str, column: &[i64]) -> Result<(), Str
 /// `None` (leg disabled) is always valid. Pure — see [`check_price_column`];
 /// same shared-`label` convention (the u64 message stays byte-identical via
 /// the [`check_level_distance`] delegator the existing suite pins).
-fn check_level_distance_for(label: &str, name: &str, distance: Option<i64>) -> Result<(), String> {
+pub(crate) fn check_level_distance_for(
+    label: &str,
+    name: &str,
+    distance: Option<i64>,
+) -> Result<(), String> {
     if let Some(d) = distance {
         if !(0..=MAX_PRICE_PAISA).contains(&d) {
             return Err(format!(
@@ -510,7 +514,15 @@ fn holding_bars(entry_idx: usize, exit_idx: usize) -> u64 {
 }
 
 /// Build the policy from the three boolean flags shared by the batch methods.
-fn policy_from_flags(sl_next_open: bool, tp_next_open: bool, tp_first: bool) -> FillPolicy {
+/// (`pub(crate)` for the Slice-2 `sweep_core::fold_block` consumer — a
+/// compiler-forced consequence of the §11 visibility grant, exactly like the
+/// Slice-1 `FillPolicy` promotion: the fold entry takes the same flag triple
+/// and `FillPolicy`'s fields are module-private by design.)
+pub(crate) fn policy_from_flags(
+    sl_next_open: bool,
+    tp_next_open: bool,
+    tp_first: bool,
+) -> FillPolicy {
     FillPolicy {
         stop_loss: if sl_next_open {
             LevelFill::NextOpen

@@ -153,6 +153,18 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sweep_core::ResidentSweepCore>()?;
     m.add_class::<sweep_core::ResidentSweepCoreU128>()?;
     m.add("SWEEP_CORE_ABI_VERSION", sweep_core::SWEEP_CORE_ABI_VERSION)?;
+    // Sweep-core Slice 2 (§1.1/§1.3): the fold_block buffer-layout law
+    // EXPORTED as Python tuples so the seam's layout golden can do a literal
+    // tuple == tuple compare against the Rust consts (round-4 — the export
+    // IS the mechanism).
+    m.add(
+        "SWEEP_CORE_FOLD_INT_FIELDS",
+        pyo3::types::PyTuple::new(m.py(), sweep_core::SWEEP_CORE_FOLD_INT_FIELDS)?,
+    )?;
+    m.add(
+        "SWEEP_CORE_FOLD_FLOAT_FIELDS",
+        pyo3::types::PyTuple::new(m.py(), sweep_core::SWEEP_CORE_FOLD_FLOAT_FIELDS)?,
+    )?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())

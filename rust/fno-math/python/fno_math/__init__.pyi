@@ -151,6 +151,14 @@ The Python seam (`brutex.engine.sweep_core`) refuses engagement unless this
 matches its `EXPECTED_SWEEP_CORE_ABI_VERSION` (`abi_version_mismatch`).
 """
 
+SWEEP_CORE_FOLD_INT_FIELDS: tuple[str, ...]
+"""The fold_block i64 row layout (stride 15) — the ONE layout law's Rust side
+(sweep-core Slice 2, §1.3); the seam's layout golden pins it equal to the
+Python `FOLD_INT_FIELDS` tuple."""
+
+SWEEP_CORE_FOLD_FLOAT_FIELDS: tuple[str, ...]
+"""The fold_block f64 row layout (stride 9) — same ONE layout law."""
+
 class ResidentSweepCore:
     """Resident sweep core over a u64 `bar_bits` window (sweep-core Slice 1).
 
@@ -187,6 +195,20 @@ class ResidentSweepCore:
         """One rank range → `(enumerated_in_range, conflict_pruned_in_range,
         next_rank, exhausted, hits_counted_in_range, kept_masks)`."""
         ...
+    def fold_block(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+        sl_next_open: bool,
+        tp_next_open: bool,
+        tp_first: bool,
+        start_equity_paisa: int,
+    ) -> tuple[int, int, bytes, bytes, bytes]:
+        """One chunk of kept masks → `(SWEEP_CORE_ABI_VERSION, scans_run,
+        ints_le, floats_le, flags)` — the §1.3 columnar fold ABI."""
+        ...
 
 class ResidentSweepCoreU128:
     """Resident sweep core over a u128 `bar_bits` window — the [64, 128)-bit
@@ -214,6 +236,20 @@ class ResidentSweepCoreU128:
         max_work_cells: int,
     ) -> tuple[int, int, int, bool, int, list[int]]:
         """One rank range (u128 masks) — same contract as `ResidentSweepCore`."""
+        ...
+    def fold_block(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+        sl_next_open: bool,
+        tp_next_open: bool,
+        tp_first: bool,
+        start_equity_paisa: int,
+    ) -> tuple[int, int, bytes, bytes, bytes]:
+        """One chunk of kept masks → `(SWEEP_CORE_ABI_VERSION, scans_run,
+        ints_le, floats_le, flags)` — the §1.3 columnar fold ABI."""
         ...
 
 class ResidentSweepSim:

@@ -17,7 +17,7 @@ build-backend = "maturin"
 
 [project]
 name = "fno-math"
-version = "0.3.1"
+version = "0.3.2"
 description = "BruteX Rust hot kernel — PyO3 bridge for the L1 dedup + future Stage 1B AND-mask kernel."
 readme = "README.md"
 license = { text = "Proprietary" }

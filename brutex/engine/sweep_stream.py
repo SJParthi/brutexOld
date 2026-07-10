@@ -275,11 +275,22 @@ class BoundedFinalist:
     The bounded twin of a :class:`~brutex.ranking.RankedCombo` MINUS the full
     ``metrics`` (which the runner recomputes O(top_k) via the same sim path —
     the established finalist re-simulation precedent, spec V16).
+
+    ``position`` is the finalist's :class:`SurvivorColumns` kept-order index
+    (``positions[survivor]`` at the construction site — previously discarded),
+    the DESIGN_FINAL_RUST_SWEEP_CORE.md §5 round-5 POSITION CARRY: it makes
+    the Slice-2 bounded-arm serve reconciliation O(top_k) (each finalist's
+    streamed rank columns read back via the existing O(1) accessors at this
+    index) instead of an O(kept) reverse scan. ADDITIVE + write-only for
+    ranking — rank order, scores, and every byte artifact are unchanged
+    (§7.4 pins the byte-neutrality and ``mask_at(position) == mask``);
+    ``-1`` = "not carried" for legacy constructions.
     """
 
     mask: int
     composite_score: float
     deflated_sharpe: float | None
+    position: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +402,7 @@ def rank_survivor_columns(
             mask=masks[survivor],
             composite_score=composites[survivor],
             deflated_sharpe=None if dsr_by_survivor is None else dsr_by_survivor[survivor],
+            position=positions[survivor],
         )
         for survivor in selected
     )

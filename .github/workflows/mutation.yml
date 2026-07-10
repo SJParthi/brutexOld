@@ -443,7 +443,14 @@ jobs:
           # against tests/unit/test_metrics_compute.py alone (spot-verified;
           # MIGRATION.md #1685) — and the golden/differential suites still run
           # on every push via ci.yml's normal test tiers.
+          # RECORDED DECISION (DEC-SWEEP-RUST-CORE-001, Slice 2): the
+          # engine/sweep_core.py pair drives the single-file AGGREGATOR
+          # tests/unit/test_engine_sweep_core_all.py (star-imports the
+          # Slice-1 enum suite + the Slice-2 fold suite — the pair grammar
+          # is single-file, and the module carries BOTH arms; the aggregator
+          # measures ~1.2 s locally, well inside the (1.2, 20) s regime).
           for pair in \
+            "brutex/engine/sweep_core.py:tests/unit/test_engine_sweep_core_all.py:" \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
             "brutex/orchestrator/retry.py:tests/unit/test_orchestrator_retry.py:" \

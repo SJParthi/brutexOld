@@ -86,6 +86,32 @@ pub fn drawdown_stats_checked(
     start_equity_paisa: i64,
     exits: &[(usize, i64)],
 ) -> Result<(i64, f64, i64, f64), String> {
+    // Thin allocating wrapper over the scratch seam (Slice 2,
+    // DESIGN_FINAL_RUST_SWEEP_CORE.md §2 row "Drawdown family + ulcer"):
+    // semantics, messages and every existing test/golden/mutant stay
+    // UNMODIFIED — the seam exists so the in-crate `fold_block` consumer can
+    // reuse ONE scratch buffer per block (allocation change only; the buffer
+    // is fully re-zeroed per call, so the fold order and every value are
+    // byte-identical regardless of reuse).
+    let mut scratch: Vec<i64> = Vec::new();
+    drawdown_stats_into(n_bars, start_equity_paisa, exits, &mut scratch)
+}
+
+/// The scratch-buffer core of [`drawdown_stats_checked`] (Slice 2 — the
+/// `drawdown_stats_into` seam of DESIGN_FINAL_RUST_SWEEP_CORE.md §6).
+///
+/// Identical validation + fold, but the per-call `vec![0i64; n_bars]`
+/// scatter buffer is the caller's `scratch` (cleared + re-zeroed to
+/// `n_bars` HERE, every call — full re-zero, NOT touched-index reset, so
+/// reuse across masks is provably value-identical to a fresh allocation;
+/// the touched-index optimisation is the named Slice-3 lever, deliberately
+/// NOT taken).
+pub fn drawdown_stats_into(
+    n_bars: usize,
+    start_equity_paisa: i64,
+    exits: &[(usize, i64)],
+    scratch: &mut Vec<i64>,
+) -> Result<(i64, f64, i64, f64), String> {
     if n_bars == 0 {
         return Err("sweep_drawdown_stats: n_bars must be >= 1".to_string());
     }
@@ -119,8 +145,14 @@ pub fn drawdown_stats_checked(
 
     // Scatter the per-exit P&L onto its bar (integer addition — order-free;
     // partial sums are bounded by Σ|pnl| ≤ 2⁵², so the += cannot overflow).
-    let mut realized = vec![0i64; n_bars];
+    // The scatter buffer is the caller's scratch, fully re-zeroed here (a
+    // fresh `vec![0i64; n_bars]` equivalent — see the seam docstring).
+    scratch.clear();
+    scratch.resize(n_bars, 0i64);
+    let realized: &mut [i64] = scratch.as_mut_slice();
     for &(idx, pnl) in exits {
+        // `idx < n_bars` was validated above — direct indexing keeps the
+        // original token shape (this module carries no indexing lint).
         realized[idx] += pnl;
     }
 
@@ -145,7 +177,7 @@ pub fn drawdown_stats_checked(
     // tie-equivalent `>`→`>=` cargo-mutants class structurally
     // (DEC-MUTATION-RUNTIME-003; proven bitwise by the two-pass-oracle
     // proptest below + the Python↔Rust byte-parity suites).
-    for &delta in &realized {
+    for &delta in realized.iter() {
         running += delta;
         let value = running;
         peak = peak.max(value);
@@ -442,6 +474,42 @@ mod tests {
     }
 
     // ── proptest: fused == two-pass over random windows ─────────────────
+
+    // ── Slice 2: the `drawdown_stats_into` scratch seam ────────────────
+
+    #[test]
+    fn scratch_seam_reuse_is_bitwise_identical_to_fresh_allocation() {
+        // The seam fully re-zeroes the caller's scratch every call, so
+        // reusing ONE buffer across DIFFERENT (n_bars, exits) shapes is
+        // value-identical to `drawdown_stats_checked`'s fresh vec — incl.
+        // shrinking n_bars (stale tail bytes must never leak).
+        let mut scratch: Vec<i64> = Vec::new();
+        let shapes: Vec<(usize, i64, Vec<(usize, i64)>)> = vec![
+            (7, 10_000_000, vec![(2, -5_000), (3, 5_000), (6, -1)]),
+            (2, 1_000, vec![(1, -30), (1, -20)]),
+            (5, 100, vec![(0, -101), (4, 300)]),
+            (1, 1, vec![]),
+        ];
+        for (n_bars, start, exits) in shapes {
+            let fresh = drawdown_stats_checked(n_bars, start, &exits).expect("ok");
+            let reused = drawdown_stats_into(n_bars, start, &exits, &mut scratch).expect("ok");
+            assert_eq!(fresh.0, reused.0);
+            assert_eq!(bits(fresh.1), bits(reused.1));
+            assert_eq!(fresh.2, reused.2);
+            assert_eq!(bits(fresh.3), bits(reused.3));
+        }
+    }
+
+    #[test]
+    fn scratch_seam_validation_errors_match_the_checked_wrapper() {
+        let mut scratch: Vec<i64> = Vec::new();
+        let a = drawdown_stats_checked(0, 1_000, &[]).unwrap_err();
+        let b = drawdown_stats_into(0, 1_000, &[], &mut scratch).unwrap_err();
+        assert_eq!(a, b);
+        let a = drawdown_stats_checked(3, 1_000, &[(3usize, 1i64)]).unwrap_err();
+        let b = drawdown_stats_into(3, 1_000, &[(3usize, 1i64)], &mut scratch).unwrap_err();
+        assert_eq!(a, b);
+    }
 
     use proptest::prelude::*;
 

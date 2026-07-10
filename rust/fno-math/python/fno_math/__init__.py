@@ -67,6 +67,8 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "SWEEP_CORE_ABI_VERSION",
+    "SWEEP_CORE_FOLD_FLOAT_FIELDS",
+    "SWEEP_CORE_FOLD_INT_FIELDS",
     "__version__",
     "add_u64",
     "bitand_count_u64s",
@@ -113,6 +115,8 @@ _assert_compiled_surface(_compiled)
 # wheel raises the actionable message, not a bare from-import failure.
 from ._fno_math import (  # noqa: E402
     SWEEP_CORE_ABI_VERSION,
+    SWEEP_CORE_FOLD_FLOAT_FIELDS,
+    SWEEP_CORE_FOLD_INT_FIELDS,
     ResidentBars,
     ResidentSweepCore,
     ResidentSweepCoreU128,
@@ -147,6 +151,8 @@ __build_crate_version__: str = __version__
 
 __all__ = [
     "SWEEP_CORE_ABI_VERSION",
+    "SWEEP_CORE_FOLD_FLOAT_FIELDS",
+    "SWEEP_CORE_FOLD_INT_FIELDS",
     "ResidentBars",
     "ResidentSweepCore",
     "ResidentSweepCoreU128",
