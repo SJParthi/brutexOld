@@ -401,6 +401,91 @@ class TestDropWarnEpochThrottle:
         assert beats == [1]
 
 
+class TestMaintenanceChannels:
+    """``register_progress_beat(..., maintenance=True)`` — review F4 minors 6/22:
+    a maintenance registration (the L3 lake-heal sweep's no-op absorber) never
+    flips the foreign-drop gate. While ONLY maintenance channels are registered,
+    an unroutable beat stays silent exactly as with an empty registry; beside a
+    LIVE run channel the drop+WARN semantics are byte-identical to no-maintenance."""
+
+    def test_ambient_unkeyed_beat_is_silent_with_only_maintenance_registered(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        """The leg-(a) core: pre-fix this dropped + WARNed (the registry was
+        non-empty); the maintenance flag restores the empty-registry silence."""
+        beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="lake-heal-sweep", maintenance=True)
+        emit_progress_beat()  # ambient "" — no legacy registrant
+        assert beats == []  # never routed into the maintenance channel
+        assert _drop_warns(warn_capture) == []  # SILENT — empty-registry parity
+
+    def test_foreign_keyed_beat_is_silent_with_only_maintenance_registered(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        """A foreign RUN-id beat during a maintenance-only window is equally
+        silent (pre-registration an empty registry never warned for it either)."""
+        beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="lake-heal-sweep", maintenance=True)
+        with pull_id_scope("feedfacef00d"):
+            emit_progress_beat()
+        assert beats == []
+        assert _drop_warns(warn_capture) == []
+
+    def test_maintenance_channel_still_receives_its_own_scoped_beats(self) -> None:
+        """The flag changes only the drop gate — routing/delivery is untouched
+        (the sweep's own scoped beats still land on its channel)."""
+        beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="lake-heal-sweep", maintenance=True)
+        with pull_id_scope("lake-heal-sweep"):
+            emit_progress_beat()
+        assert beats == [1]
+
+    def test_live_pull_drop_semantics_unchanged_beside_a_maintenance_channel(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        """The leg-(b) core: with a LIVE keyed pull AND the maintenance channel
+        both registered, an ambient unkeyed beat is dropped + WARNed once per
+        epoch and never delivered — the drop semantics are owned by the pull's
+        channel exactly as without the maintenance registration."""
+        register_progress_beat(lambda: None, pull_id="lake-heal-sweep", maintenance=True)
+        pull_beats, pull_beat = _counting_beat()
+        register_progress_beat(pull_beat, pull_id="abc123def456")
+        emit_progress_beat()  # ambient "" → dropped + WARNed
+        emit_progress_beat()  # same epoch → suppressed (identical throttle)
+        assert pull_beats == []  # anti-masking preserved
+        assert len(_drop_warns(warn_capture)) == 1
+
+    def test_unregister_clears_the_maintenance_flag(self) -> None:
+        """A popped maintenance channel leaves no stale flag behind (the set
+        mirrors the registry — never a leak that could silence a later LIVE
+        run registered under the same id)."""
+        _beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="lake-heal-sweep", maintenance=True)
+        unregister_progress_beat(pull_id="lake-heal-sweep", beat=beat)
+        assert "lake-heal-sweep" not in pb._MAINTENANCE  # pyright: ignore[reportPrivateUsage]
+        assert "lake-heal-sweep" not in pb._BEATS  # pyright: ignore[reportPrivateUsage]
+
+    def test_reregistering_without_the_flag_promotes_to_a_live_channel(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        """Registering the SAME channel without ``maintenance`` clears the
+        marking — the drop gate then arms exactly as for any live run channel."""
+        _beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="lake-heal-sweep", maintenance=True)
+        register_progress_beat(beat, pull_id="lake-heal-sweep")  # promotion
+        assert "lake-heal-sweep" not in pb._MAINTENANCE  # pyright: ignore[reportPrivateUsage]
+        emit_progress_beat()  # ambient "" → now a REAL drop
+        assert len(_drop_warns(warn_capture)) == 1
+
+    def test_reset_clears_the_maintenance_set(self) -> None:
+        """The sanctioned test reset seam clears the flag set alongside the
+        registry (no cross-test bleed)."""
+        register_progress_beat(lambda: None, pull_id="lake-heal-sweep", maintenance=True)
+        reset_progress_beats()
+        assert set() == pb._MAINTENANCE  # pyright: ignore[reportPrivateUsage]
+        assert pb._BEATS == {}  # pyright: ignore[reportPrivateUsage]
+
+
 class TestResetSeam:
     """``reset_progress_beats`` — THE sanctioned cross-test isolation seam."""
 

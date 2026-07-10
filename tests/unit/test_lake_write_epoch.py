@@ -4,8 +4,10 @@ The O(1) cheap gate the L3 startup sweep consults before the O(files)
 ``lake_content_token`` walk: a lake-root-sibling marker refreshed to a fresh
 opaque token on every content mutation. Pins: pure path helper, a bump moves the
 value + is best-effort (an unwritable sidecar WARNs, never raises), a read fails
-to ``None`` on missing/empty/unreadable, and the non-fsync atomic replace's
-cleanup finally.
+to ``None`` on missing/empty/unreadable — INCLUDING non-UTF-8 marker bytes
+(review MINOR 1: ``UnicodeDecodeError`` escaped the contract pre-fix), the
+non-fsync atomic replace's cleanup finally, and the ``bump_failed`` per-root
+per-outage WARN throttle (review MINOR 21 — the #1630 log-volume class).
 """
 
 from __future__ import annotations
@@ -59,6 +61,18 @@ class TestReadWriteEpoch:
         dest.mkdir(parents=True, exist_ok=True)
         assert read_write_epoch(tmp_path) is None
 
+    def test_non_utf8_marker_reads_none(self, tmp_path: Path) -> None:
+        """Review MINOR 1: NON-UTF-8 marker bytes are "unreadable" per the
+        documented contract — ``UnicodeDecodeError`` is a ``ValueError``, NOT an
+        ``OSError``, so pre-fix it ESCAPED ``read_write_epoch`` and crashed the
+        L3 sweep's boot body on every boot (permanently inert healing) instead
+        of the honest ``None`` fallthrough to the full token. Verified raising
+        pre-fix."""
+        dest = epoch_marker_path(tmp_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"\xff\xfe\x9c junk \x80")  # 0xff is never valid UTF-8
+        assert read_write_epoch(tmp_path) is None
+
 
 class TestBumpWriteEpoch:
     def test_each_bump_moves_the_value(self, tmp_path: Path) -> None:
@@ -94,3 +108,54 @@ class TestBumpWriteEpoch:
         assert warn["log_level"] == "warning"
         leftover = [p for p in marker.parent.iterdir() if p.name.startswith(".write_epoch-")]
         assert leftover == []  # the finally unlinked the temp
+
+
+class TestBumpFailedThrottle:
+    """Review MINOR 21 (the #1630 log-volume class): ``bump_failed`` WARNs once
+    per process per lake root per outage — a persistently-unwritable sidecar on
+    the ~10⁵–10⁶-write prebuild path must not stream one WARN per write."""
+
+    def test_bump_failed_warns_once_per_process_per_lake_root(self, tmp_path: Path) -> None:
+        """Three failing bumps on ONE root → exactly ONE WARN (pre-fix: three).
+        Verified failing pre-fix."""
+        (tmp_path / ".lake_heal").write_text("not a dir", encoding="utf-8")
+        with capture_logs() as logs:
+            bump_write_epoch(tmp_path)
+            bump_write_epoch(tmp_path)
+            bump_write_epoch(tmp_path)
+        assert len(_events(logs, "lake_write_epoch.bump_failed")) == 1
+
+    def test_bump_failed_warn_is_keyed_per_lake_root(self, tmp_path: Path) -> None:
+        """Two DISTINCT failing roots each get their own single WARN — the
+        throttle key is the lake root, never a process-wide mute."""
+        root_a = tmp_path / "a"
+        root_b = tmp_path / "b"
+        for root in (root_a, root_b):
+            root.mkdir()
+            (root / ".lake_heal").write_text("not a dir", encoding="utf-8")
+        with capture_logs() as logs:
+            bump_write_epoch(root_a)
+            bump_write_epoch(root_b)
+        assert len(_events(logs, "lake_write_epoch.bump_failed")) == 2
+
+    def test_successful_bump_rearms_the_throttle_for_a_later_outage(self, tmp_path: Path) -> None:
+        """A SUCCESS between two outages re-arms the root: the second, distinct
+        outage WARNs again (once) instead of hiding behind the first WARN — a
+        long-lived dashboard process never goes permanently silent on a
+        recurring sidecar fault."""
+        blocker = tmp_path / ".lake_heal"
+        blocker.write_text("not a dir", encoding="utf-8")
+        with capture_logs() as logs_outage_one:
+            bump_write_epoch(tmp_path)
+        assert len(_events(logs_outage_one, "lake_write_epoch.bump_failed")) == 1
+        blocker.unlink()  # outage one over
+        bump_write_epoch(tmp_path)  # success → re-arms the throttle
+        assert read_write_epoch(tmp_path) is not None
+        # Outage two: a DIRECTORY planted at the marker path (os.replace fails).
+        marker = epoch_marker_path(tmp_path)
+        marker.unlink()
+        marker.mkdir()
+        with capture_logs() as logs_outage_two:
+            bump_write_epoch(tmp_path)
+            bump_write_epoch(tmp_path)  # still throttled WITHIN outage two
+        assert len(_events(logs_outage_two, "lake_write_epoch.bump_failed")) == 1

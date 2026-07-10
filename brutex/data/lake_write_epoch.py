@@ -3,9 +3,11 @@
 A single lake-root-sibling marker (``<lake_root>/.lake_heal/write_epoch``) whose value is
 REFRESHED to a fresh opaque token on every ``bars/``/``options/`` content mutation.
 :func:`~brutex.data.lake_heal.run_startup_sweep` compares it against the value recorded in
-the last-sweep sentinel: an unchanged value ⇒ the lake is provably unchanged since the last
-clean sweep ⇒ an O(1) SKIP (no O(files) :func:`~brutex.data.lake_heal.lake_content_token`
-walk, which over a ~2M-file lake cost ~27 min on EVERY boot even for a no-op sentinel match).
+the last-sweep sentinel: an unchanged value ⇒ no in-band write RECORDED a bump since the
+last clean sweep ⇒ an O(1) SKIP (no O(files) :func:`~brutex.data.lake_heal.lake_content_token`
+walk, which over a ~2M-file lake cost ~27 min on EVERY boot even for a no-op sentinel
+match). The epoch is a freshness HINT with honestly-bounded blind spots (below), never
+proof — the full token stays the authority behind it.
 
 **Bump enumeration (soundness input).** The marker is refreshed at the SAME set of
 content-mutation chokepoints DEC-LAKE-STATS-MANIFEST-001 already instruments — the fresh /
@@ -33,11 +35,24 @@ untenable full walk on every boot.
 The token is a FRESH-per-bump opaque value (``time_ns`` + ``pid`` + an in-process counter),
 not a read-modify-write counter, so it sidesteps the lost-increment race entirely: the only
 requirement is "differs from any previously-recorded value". The write is a NON-fsync atomic
-replace deliberately (cost honesty): the epoch is a freshness HINT, never data — a crash
-that loses the write leaves the marker stale/absent ⇒ the next boot reads a ≠-value (or
-``None``) ⇒ falls through to the authoritative full token ⇒ sound. So the bump must NOT
+replace deliberately (cost honesty): the epoch is a freshness HINT, never proof — a crash
+that loses the write leaves the marker at its PRIOR value. USUALLY that prior value already
+differs from the sentinel's recorded epoch (⇒ the next boot falls through to the
+authoritative full token — sound), but NOT always: when the crash-lost bump was the FIRST
+write after a clean-sweep stamp, the marker still EQUALS the stamped epoch and the next boot
+Tier-1-skips over the changed bytes until any LATER successful bump or the max-age valve
+(default 7 days) forces the full token. Likewise a PERSISTENTLY failing bump (an unwritable
+sidecar dir) freezes the marker, degrading the fast path to at-most-valve-age staleness —
+surfaced by the ``lake_write_epoch.bump_failed`` WARN (throttled to once per process per
+lake root per outage — the #1630 log-volume discipline — never per write, never silent).
+Both windows are BOUNDED by the valve plus the token fallback on any epoch
+mismatch/absence; neither is claimed impossible (Golden Rule #10). So the bump must NOT
 ``fsync`` (the ``atomic_io`` helpers do, and are too heavy for the ~10⁵–10⁶ prebuild writes);
-``os.replace`` still gives readers atomicity (old-or-new, never torn).
+``os.replace`` still gives readers atomicity (old-or-new, never torn). Per-write cost
+honesty: one small temp-file write + ``os.replace`` (non-fsync) per RENDERED partition
+write — O(1), unconditional at the writer chokepoints; a skipped / no-op write (nothing
+rendered) bumps NOTHING (call-count pinned by the epoch-bump test suite, not a wall-clock
+bench).
 
 NEVER part of run identity (blake3) / partition bytes / ``data_snapshot_hash`` — a
 results-safe accelerator (the Bloom precedent). WHEEL-FREE (stdlib + ``structlog`` only) so
@@ -76,6 +91,15 @@ EPOCH_RELPATH: Final[str] = ".lake_heal/write_epoch"
 #: on a coarse clock). ``itertools.count`` is thread-safe for ``next()`` (a single
 #: bytecode-atomic op in CPython).
 _COUNTER = itertools.count()
+
+#: Lake roots (``str(lake_root)``) whose bump failure already WARNed this process — the
+#: ``bump_failed`` throttle (the #1630 log-volume discipline: the prebuild fires
+#: ~10⁵–10⁶ bumps, so an unwritable sidecar must WARN once per process per lake root
+#: per OUTAGE, never per write). A SUCCESSFUL bump RE-ARMS its root (discard), so a
+#: later, distinct outage WARNs again instead of staying silent forever. Deliberately
+#: lock-free (a plain set): a rare concurrent duplicate WARN is benign, and a raced
+#: re-arm merely delays the next outage's single WARN — never a raise into a write path.
+_BUMP_FAILED_WARNED: set[str] = set()
 
 
 def epoch_marker_path(lake_root: Path) -> Path:
@@ -116,16 +140,26 @@ def bump_write_epoch(lake_root: Path) -> None:
     docstring). The token is ``<time_ns>-<pid>-<counter>`` in hex — unique per bump within
     and across processes, so ANY bump moves the value away from the sentinel's recorded
     epoch. BEST-EFFORT: an :class:`OSError` (an unwritable sidecar dir, a stray non-directory
-    file at the path) logs ONE ``lake_write_epoch.bump_failed`` WARN (path repr()'d — the
-    calling site's ``dest`` is vendor-influenceable) and returns; it NEVER raises into a
-    write path (a lost bump falls through to the authoritative full token — sound).
+    file at the path) logs a ``lake_write_epoch.bump_failed`` WARN (path repr()'d — the
+    calling site's ``dest`` is vendor-influenceable) THROTTLED to once per process per lake
+    root per outage via :data:`_BUMP_FAILED_WARNED` (a success re-arms the root), and
+    returns; it NEVER raises into a write path. HONEST: a persistently-failing bump freezes
+    the marker — the fast path degrades to at-most-valve-age staleness (module docstring),
+    which is exactly why the outage must stay VISIBLE, once, not silenced by volume.
     """
     dest = epoch_marker_path(lake_root)
     token = f"{time.time_ns():x}-{os.getpid():x}-{next(_COUNTER):x}"
+    key = str(lake_root)
     try:
         _replace_write(dest, token.encode("utf-8"))
     except OSError as exc:
-        _LOG.warning("lake_write_epoch.bump_failed", path=repr(str(dest)), error=repr(str(exc)))
+        if key not in _BUMP_FAILED_WARNED:
+            _BUMP_FAILED_WARNED.add(key)
+            _LOG.warning("lake_write_epoch.bump_failed", path=repr(str(dest)), error=repr(str(exc)))
+        return
+    # A successful bump RE-ARMS the throttle for this root: a later, DISTINCT
+    # outage WARNs again (once), instead of hiding behind the first outage's WARN.
+    _BUMP_FAILED_WARNED.discard(key)
 
 
 def read_write_epoch(lake_root: Path) -> str | None:
@@ -133,11 +167,14 @@ def read_write_epoch(lake_root: Path) -> str | None:
 
     Fails to "unknown" (``None``) so an absent / unreadable / empty marker makes the L3
     fast-path SKIP the epoch short-circuit and fall through to the authoritative full
-    token — never a skip on uncertainty (Golden Rule #1).
+    token — never a skip on uncertainty (Golden Rule #1). "Unreadable" includes
+    NON-UTF-8 marker bytes (:class:`UnicodeDecodeError` is a :class:`ValueError`, NOT an
+    :class:`OSError` — an escape here would crash the L3 sweep's blanket-guarded boot
+    body into permanent inertness instead of the honest ``None`` fallthrough).
     """
     dest = epoch_marker_path(lake_root)
     try:
         text = dest.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return text or None

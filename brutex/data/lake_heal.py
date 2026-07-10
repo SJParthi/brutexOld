@@ -2204,6 +2204,9 @@ def run_startup_sweep(
       full stat walk the old change-detector paid unconditionally.
     * **Tier 2 — authoritative full token (computed AT MOST ONCE).** Reached on
       a force / no-sentinel / epoch-unavailable / epoch-changed / too-old miss.
+      An ABSENT epoch marker is SEEDED first (bump → read-back → only then the
+      token walk — so an idle / read-only lake stops paying the full walk on
+      every boot; the seed precedes the walk per the pairing rule below).
       The full :func:`lake_content_token` runs ONCE; a token match is still a
       no-op (``lake_heal.sweep_skip_token_match``, and the sentinel is
       re-stamped to v2 with the current epoch so the NEXT boot is Tier-1 O(1)).
@@ -2216,9 +2219,13 @@ def run_startup_sweep(
     :func:`~brutex.data.lake_invariants.scan_lake_invariants` (throttled by
     *per_file_pause*, default ``time.sleep(resolve_sweep_throttle_s())``), one
     :func:`heal_findings` batch, and stamps :data:`SENTINEL_RELPATH` (v2, with
-    ``write_epoch``) with the POST-heal recomputed token — computed AT MOST ONCE
-    MORE and ONLY when a heal actually rewrote files (nothing healed ⇒ no
-    bars/options file moved ⇒ the pre-scan token is reused). The sentinel is
+    ``write_epoch``) under the PAIRING RULE: the stamped epoch ALWAYS predates
+    the walk/scan that produced the stamped token, so a concurrent write landing
+    during OR after that walk moves the live marker past the recorded epoch and
+    the next boot re-checks (never an O(1) skip over a stale pair). Nothing
+    healed ⇒ the pre-scan token is reused, paired with the PRE-walk epoch read;
+    a heal that rewrote files ⇒ the post-heal epoch is read FIRST, then the
+    token recomputed AT MOST ONCE MORE. The sentinel is
     stamped ONLY when the sweep genuinely completed its job — ``mode == "auto"``,
     not mass-heal-refused, zero ``errors``, and ``healed == findings`` (a
     zero-finding clean sweep also stamps). A refused / observe-mode / errored /
@@ -2246,6 +2253,9 @@ def run_startup_sweep(
     """
     now_fn = _utc_now if now is None else now
     sentinel = load_last_sweep(lake_root)  # O(1)
+    # Read ONCE, BEFORE any walk: ``epoch_now`` is both the Tier-1 comparand and
+    # the epoch a nothing-healed sweep STAMPS (the pairing rule below — the
+    # stamped epoch must predate the walk that produced the stamped token).
     epoch_now = read_write_epoch(lake_root)  # O(1)
 
     # ── TIER 1: O(1) epoch fast-path skip (the common unchanged-lake boot) ──
@@ -2264,11 +2274,24 @@ def run_startup_sweep(
         return StartupSweepResult(ran=False, token=str(stored_token), scan=None, report=None)
 
     # ── TIER 2: authoritative full token (computed ONCE — the ONLY pre-walk) ──
+    if epoch_now is None:
+        # SEED the absent marker (an idle / read-only / never-written-by-a-writer
+        # lake has no marker, so it paid the full O(files) walk on EVERY boot —
+        # the exact class the fast path exists to close). Sequenced SOUNDLY:
+        # bump FIRST, read the seeded value back as ``epoch_now``, and only THEN
+        # compute the token — the stamped epoch must ALWAYS predate the walk that
+        # produced the stamped token (the soundness rule below); a seed AFTER the
+        # walk would absorb a write landing mid-walk. Best-effort: a failed seed
+        # leaves ``epoch_now`` ``None`` → the sentinel records an absent epoch →
+        # the next boot honestly falls through to Tier 2 again (never a skip).
+        bump_write_epoch(lake_root)
+        epoch_now = read_write_epoch(lake_root)
     token = lake_content_token(lake_root)
     if not force and sentinel is not None and sentinel.get("lake_token") == token:
         # Bytes unchanged despite an epoch move (spurious / crash-lost epoch, or
-        # a first boot off a v1 sentinel): RE-STAMP to v2 + the current epoch so
-        # the next boot is O(1) again (epoch_now may be None → stored absent).
+        # a first boot off a v1 sentinel / a just-seeded marker): RE-STAMP to v2
+        # + the current epoch so the next boot is O(1) again (epoch_now is None
+        # only when the seed above FAILED → stored absent → honest re-check).
         _restamp_sentinel(
             lake_root, sentinel, lake_token=token, write_epoch=epoch_now, now_fn=now_fn
         )
@@ -2295,20 +2318,35 @@ def run_startup_sweep(
         on_healed=on_healed,
         now=now,
     )
-    # Read the epoch AFTER heal_findings (the heal's own writes bumped it) and
-    # BEFORE pairing it with post_token — so any EXTERNAL write landing after
-    # this read moves the epoch and forces a full re-check next boot (never an
-    # O(1) skip over a stale pair). This ordering is the soundness pin.
-    post_epoch = read_write_epoch(lake_root)
-    # Compute the post-heal token AT MOST ONCE, and only when a heal actually
-    # rewrote files. Nothing healed ⇒ no bars/options file changed ⇒ reuse token.
-    post_token = token if report.healed == 0 else lake_content_token(lake_root)
+    # SOUNDNESS RULE (the pin): the sentinel pairs {token, epoch}, and the
+    # stamped epoch must ALWAYS predate the walk/scan that produced the stamped
+    # token — any write landing DURING or AFTER that walk then moves the live
+    # marker past the recorded epoch, so the next boot takes Tier 2 (never an
+    # O(1) skip over a stale pair). Per arm:
+    #   * healed == 0 → the stamped token is the PRE-scan ``token``, so the
+    #     stamped epoch is ``epoch_now`` (read BEFORE that walk began). Reading
+    #     the epoch HERE instead would ABSORB a concurrent writer's bump landing
+    #     during the token walk + the O(files) scan (tens of minutes on the
+    #     production lake — and the F3 auto-resume pull runs CONCURRENTLY with
+    #     this L3 sweep at boot by design), letting the next boot O(1)-skip a
+    #     genuinely-changed lake.
+    #   * healed > 0 → the token is RECOMPUTED post-heal, so the post-heal epoch
+    #     (the heal's own writes bumped it) is read FIRST, THEN the token walk
+    #     runs — same rule, one walk later.
+    # Nothing healed ⇒ no bars/options file changed by US ⇒ reuse the pre-scan
+    # token (the AT-MOST-ONCE-more cost contract).
+    if report.healed == 0:
+        post_token = token
+        stamp_epoch = epoch_now
+    else:
+        stamp_epoch = read_write_epoch(lake_root)
+        post_token = lake_content_token(lake_root)
     skip_reason = _sentinel_skip_reason(report)
     if skip_reason is None:
         _stamp_sentinel(
             lake_root,
             lake_token=post_token,
-            write_epoch=post_epoch,
+            write_epoch=stamp_epoch,
             files_scanned=files_scanned,
             findings=len(scan.findings),
             healed=report.healed,
@@ -2408,7 +2446,13 @@ def open_lake_catalog(lake_root: Path) -> Catalog | None:
 #: ``progress_beat.foreign_beat_dropped`` WARN against a concurrent live pull's
 #: keyed registry. A dedicated key (not :data:`~brutex.observability.progress_beat.LEGACY_CHANNEL`)
 #: confines the absorption to the sweep's OWN beats — a real pull's keyed-MISS
-#: outward fallback + any other foreign unkeyed beat are untouched (anti-masking).
+#: outward fallback is untouched, and because the registration is flagged
+#: ``maintenance=True`` it never flips the foreign-drop gate for OTHER threads'
+#: beats either: an ambient unkeyed beat (e.g. a discovery-walk beat with no
+#: live pull) stays SILENT during a sweep-only window exactly as with an empty
+#: registry, while during a live pull the drop semantics are owned by the
+#: pull's own channel (identical with or without the sweep) — anti-masking
+#: preserved in both directions.
 LAKE_HEAL_SWEEP_PULL_ID: Final[str] = "lake-heal-sweep"
 
 
@@ -2417,8 +2461,18 @@ def _sweep_noop_beat() -> None:
 
     The L3 sweep has no watchdog of its own; this only ABSORBS its own unscoped
     beats so they never DROP into a live pull's keyed registry. A module
-    singleton so a re-register (overlapping sweeps — precluded by the token/epoch
-    gate) finds ``_BEATS[id] is beat`` and never WARNs a channel collision.
+    singleton so a re-register by an OVERLAPPING sweep finds ``_BEATS[id] is
+    beat`` and never WARNs a channel collision. HONEST: nothing serialises
+    overlapping sweeps — the token/epoch gate deduplicates WORK across boots,
+    it does not mutually exclude two concurrent sweeps (production constructs
+    one :class:`StartupSweeper` per boot, but that is convention, not a lock).
+    Overlap is benign for this channel precisely BECAUSE it is a shared no-op
+    singleton: both registrations install the same callback, and the first
+    finisher's unregister merely drops the shared channel early — the still-
+    running sweep's remaining beats then go unroutable, which is silent under
+    the maintenance gate when no pull is live and at worst a loud
+    ``foreign_beat_dropped`` beside a live pull (never a masked stall — the
+    channel carries no watchdog).
     """
 
 
@@ -2473,11 +2527,18 @@ class StartupSweeper:
             # beat emitted on THIS daemon thread (the per-finding heal beat +
             # the writer lock-wait beat) resolves to that channel and fires
             # harmlessly — never a foreign_beat_dropped WARN against a
-            # concurrent live pull's keyed registry. Sits INSIDE the blanket
-            # boot guard (boot never crashes) and does NOT touch L1/L2 heal
-            # beats (they run on the pull worker under its own pull_id_scope).
+            # concurrent live pull's keyed registry. ``maintenance=True`` keeps
+            # the registration from flipping the foreign-drop gate for OTHER
+            # threads' beats: an ambient unkeyed beat during a sweep-only
+            # window stays silent exactly as pre-registration, and beside a
+            # live pull the drop semantics stay the pull channel's own. Sits
+            # INSIDE the blanket boot guard (boot never crashes) and does NOT
+            # touch L1/L2 heal beats (they run on the pull worker under its
+            # own pull_id_scope).
             with pull_id_scope(LAKE_HEAL_SWEEP_PULL_ID):
-                register_progress_beat(_sweep_noop_beat, pull_id=LAKE_HEAL_SWEEP_PULL_ID)
+                register_progress_beat(
+                    _sweep_noop_beat, pull_id=LAKE_HEAL_SWEEP_PULL_ID, maintenance=True
+                )
                 try:
                     with lake_heal_audit(self._lake_root) as audit:
                         catalog = (

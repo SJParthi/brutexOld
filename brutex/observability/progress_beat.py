@@ -37,7 +37,12 @@ Design (COMMON · decoupled · best-effort · O(1)):
   (never the reverse — the anti-masking invariant: nothing ever routes INTO a keyed
   channel it was not addressed to). A beat during a keyed run that matches NO channel is
   DROPPED + WARNed once per register-epoch (``progress_beat.foreign_beat_dropped`` —
-  Golden Rule #10 diagnosability for an unattributed emitter). Standing discipline: any
+  Golden Rule #10 diagnosability for an unattributed emitter). A channel registered with
+  ``maintenance=True`` (the L3 lake-heal sweep's no-op self-absorber) is EXEMPT from
+  arming that drop gate: while only maintenance channels are registered, an unroutable
+  beat stays silent exactly as with an empty registry — the drop+WARN semantics belong
+  to live RUN channels, so a maintenance window never converts previously-silent ambient
+  beats into WARNs. Standing discipline: any
   NEW emit site running on a pool / consumer thread must copy the canonical
   capture-then-rebind pattern (``run_ingest.py`` ``_run_pair`` — capture
   ``current_pull_id()`` on the driver, re-bind ``pull_id_scope`` on the worker) or its
@@ -74,6 +79,16 @@ LEGACY_CHANNEL: Final[str] = ""
 #: The registered beats, keyed by run ``pull_id`` (:data:`LEGACY_CHANNEL` = the unkeyed
 #: slot). Guarded by :data:`_BEAT_LOCK`; last write wins WITHIN a channel.
 _BEATS: dict[str, ProgressBeat] = {}
+
+#: Channels registered with ``maintenance=True`` — self-absorbing channels bound by
+#: maintenance work (the L3 lake-heal sweep's no-op absorber) whose only job is routing
+#: their OWN scoped beats harmlessly. A maintenance channel never counts toward the
+#: foreign-drop gate: while EVERY registered channel is maintenance, an unroutable beat
+#: stays SILENT exactly as with an empty registry (pre-registration parity — a
+#: maintenance window must not convert previously-silent ambient beats into drop+WARNs);
+#: the drop+WARN semantics belong to LIVE run channels only. Guarded by
+#: :data:`_BEAT_LOCK`.
+_MAINTENANCE: set[str] = set()
 
 #: Register-epoch counter — bumped on every register / unregister / reset so the
 #: foreign-beat drop WARN fires at most once per epoch (a new registration re-arms it).
@@ -124,7 +139,9 @@ def _log_drop_summary(dropped: int) -> None:
         )
 
 
-def register_progress_beat(beat: ProgressBeat, *, pull_id: str = LEGACY_CHANNEL) -> None:
+def register_progress_beat(
+    beat: ProgressBeat, *, pull_id: str = LEGACY_CHANNEL, maintenance: bool = False
+) -> None:
     """Register *beat* on the *pull_id* channel (last write wins per channel). O(1).
 
     The dashboard pull worker registers its watchdog's beat KEYED on its own run id for
@@ -132,6 +149,13 @@ def register_progress_beat(beat: ProgressBeat, *, pull_id: str = LEGACY_CHANNEL)
     worker thread carrying the run's re-bound ``pull_id``) keep the heartbeat alive —
     and a foreign thread's beat can never reach it. The zero-arg call registers on the
     :data:`LEGACY_CHANNEL` with the exact pre-keyed semantics (back-compat).
+
+    *maintenance* (additive, default ``False`` — every existing caller byte-identical)
+    marks the channel as a maintenance-work self-absorber (see :data:`_MAINTENANCE`):
+    its own scoped beats route to it exactly like any channel, but it does NOT flip the
+    foreign-drop gate — while ONLY maintenance channels are registered, an unroutable
+    beat stays silent exactly as with an empty registry. Registering a channel WITHOUT
+    the flag clears any prior maintenance marking (a promotion to a live run channel).
 
     A LIVE-channel collision — overwriting a DIFFERENT callback already registered on
     the same channel — is always a caller bug (two live runs sharing one ``pull_id``:
@@ -143,6 +167,10 @@ def register_progress_beat(beat: ProgressBeat, *, pull_id: str = LEGACY_CHANNEL)
     with _BEAT_LOCK:
         collided = pull_id in _BEATS and _BEATS[pull_id] is not beat
         _BEATS[pull_id] = beat
+        if maintenance:
+            _MAINTENANCE.add(pull_id)
+        else:
+            _MAINTENANCE.discard(pull_id)
         dropped = _close_epoch_locked()
     _log_drop_summary(dropped)
     if collided:
@@ -177,6 +205,7 @@ def unregister_progress_beat(
         if current is None or (beat is not None and current is not beat):
             return  # nothing popped — no channel change, no epoch bump
         del _BEATS[pull_id]
+        _MAINTENANCE.discard(pull_id)
         dropped = _close_epoch_locked()
     _log_drop_summary(dropped)
 
@@ -192,6 +221,7 @@ def reset_progress_beats() -> None:
     """
     with _BEAT_LOCK:
         _BEATS.clear()
+        _MAINTENANCE.clear()
         dropped = _close_epoch_locked()
         _WARN_THROTTLE["warned_epoch"] = -1
     _log_drop_summary(dropped)
@@ -212,8 +242,10 @@ def emit_progress_beat(pull_id: str | None = None) -> None:
     :func:`~brutex.observability.correlation.current_pull_id`. An exact keyed hit fires
     that run's beat; a keyed MISS falls back OUTWARD to the :data:`LEGACY_CHANNEL`
     registrant (never into another keyed channel — the anti-masking invariant). With an
-    EMPTY registry this is a silent cheap no-op (every non-dashboard caller); with a
-    non-empty registry an unroutable beat is DROPPED + counted, WARNed once per
+    EMPTY registry this is a silent cheap no-op (every non-dashboard caller) — and so is
+    an unroutable beat while ONLY :data:`_MAINTENANCE` channels are registered (a
+    maintenance window keeps the empty-registry silence for foreign beats); with a LIVE
+    run channel registered an unroutable beat is DROPPED + counted, WARNed once per
     register-epoch (a foreign thread can never mask a real stall — it can only be
     loud; the closed epoch's drop tally is debug-flushed on the next
     register/unregister/reset). A raising beat is swallowed + logged so it can never
@@ -242,6 +274,15 @@ def emit_progress_beat(pull_id: str | None = None) -> None:
         if beat is None:
             if not _BEATS:
                 return  # empty registry — the explicit-pull_id silent no-op (no warn)
+            if _MAINTENANCE.issuperset(_BEATS):
+                # ONLY maintenance channels are registered (e.g. the L3 lake-heal
+                # sweep with no live pull): an unroutable beat stays SILENT — the
+                # exact pre-registration behaviour of the empty registry. A
+                # maintenance window must never convert previously-silent ambient
+                # beats into drop+WARNs; the drop semantics below are owned by
+                # LIVE run channels (with one registered, this gate is inert and
+                # the drop+WARN arm engages exactly as without maintenance).
+                return
             _DROPPED_IN_EPOCH += 1
             dropped_so_far = _DROPPED_IN_EPOCH
             warn = _WARN_THROTTLE["warned_epoch"] != _EPOCH

@@ -71,6 +71,7 @@ from brutex.data.lake_invariants import (
     scan_lake_invariants,
 )
 from brutex.data.lake_write_epoch import (
+    EPOCH_RELPATH,
     epoch_marker_path,
     read_write_epoch,
 )
@@ -4085,7 +4086,13 @@ class TestRunStartupSweep:
         assert result.report is not None
         assert result.report.refused_mass_heal is True  # mutant: heals instead
         assert result.report.healed == 0
-        assert _tree_state(lake) == before  # not one byte moved
+        after = _tree_state(lake)
+        # The Tier-2 epoch-marker SEED (a `.lake_heal/` SIDECAR — never lake
+        # content, holds no `*.parquet`) legitimately lands even on a refused
+        # sweep (it precedes the scan by the pairing rule); exclude it from the
+        # byte pin — every LAKE byte must be untouched.
+        assert after.pop(EPOCH_RELPATH, None) is not None  # the seed landed
+        assert after == before  # not one lake byte moved
         assert load_last_sweep(lake) is None  # a refused sweep never stamps
         (refusal,) = _events(logs, "lake_heal.mass_heal_refused")
         assert refusal["files_scanned"] == 21  # bars 0 + options 21
@@ -4808,7 +4815,8 @@ class TestStartupSweepEpochGate:
     def test_no_epoch_marker_falls_through_to_full_token(self, tmp_path: Path) -> None:
         """Cheap-signal unavailable (marker absent): Tier 1 is bypassed, the full
         token is computed EXACTLY once, and a token match still yields a skip
-        (Tier 2) that re-stamps a v2 sentinel."""
+        (Tier 2) that re-stamps a v2 sentinel (and SEEDS the marker — the
+        MINOR-20 sibling tests below pin the seed's second-boot payoff)."""
         lake = tmp_path / "lake"
         _stamp_clean(lake)
         epoch_marker_path(lake).unlink()  # remove the cheap signal
@@ -4821,6 +4829,55 @@ class TestStartupSweepEpochGate:
         assert len(_events(logs, "lake_heal.content_token_walk_begin")) == 1
         assert len(_events(logs, "lake_heal.sweep_skip_token_match")) == 1
         assert _events(logs, "lake_heal.sweep_skip_epoch_match") == []
+
+    def test_tier2_token_match_seeds_the_absent_marker_so_next_boot_is_o1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review MINOR 20: an idle / read-only lake (writers never ran, marker
+        never created) previously paid the full O(files) walk on EVERY boot —
+        the exact class the fast path claimed to fix. The Tier-2 arm now SEEDS
+        the marker soundly (bump FIRST → read it back as ``epoch_now`` → THEN
+        the token walk → stamp {token, epoch_now}), so the SECOND boot is the
+        Tier-1 O(1) skip with ZERO token walks. Verified failing on the
+        un-fixed code (second boot re-walked, no epoch-match skip)."""
+        lake = tmp_path / "lake"
+        _stamp_clean(lake)
+        epoch_marker_path(lake).unlink()  # the idle/read-only shape: no marker
+        assert read_write_epoch(lake) is None
+        first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.ran is False  # Tier-2 token match
+        seeded = read_write_epoch(lake)
+        assert seeded is not None  # the marker was SEEDED
+        stamped = load_last_sweep(lake)
+        assert stamped is not None and stamped["write_epoch"] == seeded
+        calls: list[int] = []
+        monkeypatch.setattr(
+            lake_heal,
+            "lake_content_token",
+            lambda root: calls.append(1) or "x" * 64,  # type: ignore[func-returns-value]
+        )
+        with capture_logs() as logs:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        assert calls == []  # Tier-1 O(1): NO token walk on the second boot
+        assert len(_events(logs, "lake_heal.sweep_skip_epoch_match")) == 1
+
+    def test_clean_sweep_seeds_the_absent_marker_so_next_boot_is_o1(self, tmp_path: Path) -> None:
+        """Review MINOR 20, the full-sweep arm: a marker-less lake (raw files
+        only — no writer ever ran, the CLI-era shape) sweeps once (clean) with
+        the marker seeded BEFORE the walk and stamped into the sentinel — the
+        second boot is the Tier-1 O(1) epoch-match skip."""
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10)])  # clean raw file, NO marker
+        assert read_write_epoch(lake) is None
+        first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.ran is True
+        assert first.report is not None and first.report.healed == 0
+        assert read_write_epoch(lake) is not None  # seeded
+        with capture_logs() as logs:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        assert len(_events(logs, "lake_heal.sweep_skip_epoch_match")) == 1
 
     def test_v1_sentinel_migrates_via_token_match_then_tier1(self, tmp_path: Path) -> None:
         """A v1 sentinel (no ``write_epoch``) → first boot Tier-2 token match →
@@ -4882,7 +4939,15 @@ class TestStartupSweepEpochGate:
 
 class TestStartupSweepEpochBumps:
     """Each content-mutation site bumps the write epoch → the next boot re-checks
-    (the mutant-killers for a forgotten ``bump_write_epoch``)."""
+    (the mutant-killers for a forgotten ``bump_write_epoch`` — one REAL killer per
+    enumerated site). Review-round-1 honesty (MAJOR 1.2): the original
+    ``_quarantine_move`` "killer" (the 1minute-drift fixture below) was empirically
+    MASKED — ``_heal_drift`` merges a 1minute file through ``ParquetWriter.write``,
+    whose OWN bump moves the epoch regardless, so deleting the ``_quarantine_move``
+    bump passed the whole class. The derived-TF-only drift test further below is
+    the true teeth for that site (mutant re-applied + verified killed by exactly
+    that test); the 1minute fixture is KEPT as the merged-drift integration pin,
+    not claimed as the ``_quarantine_move`` killer."""
 
     def test_fresh_write_bumps_epoch(self, tmp_path: Path) -> None:
         lake = tmp_path / "lake"
@@ -4962,7 +5027,11 @@ class TestStartupSweepEpochBumps:
     def test_quarantine_move_bumps_epoch_across_a_legacy_drift_heal(self, tmp_path: Path) -> None:
         """A LegacyKeyDrift heal quarantine-MOVES the drifted dir's files through
         ``_quarantine_move`` (the lake_heal chokepoint) — the epoch moves across
-        the healing sweep, so a re-pull that later drifts a dir cannot O(1)-skip."""
+        the healing sweep, so a re-pull that later drifts a dir cannot O(1)-skip.
+        HONEST (review round 1, MAJOR 1.2): this 1minute fixture does NOT kill the
+        ``_quarantine_move`` bump mutant — the merge leg's ``ParquetWriter.write``
+        bumps regardless. The derived-TF-only sibling below is that killer; this
+        stays as the merged-drift epoch integration pin."""
         lake = tmp_path / "lake"
         # A clean canonical + a raw drifted-key dir → the scanner flags drift.
         _write_spot(lake, [_bar(_ts(0))], symbol="M&M", segment="CASH")
@@ -4973,6 +5042,58 @@ class TestStartupSweepEpochBumps:
         assert result.report is not None and result.report.healed == 1
         post = read_write_epoch(lake)
         assert post is not None and post != pre  # the heal moved the epoch
+
+    def test_quarantine_move_is_the_sole_epoch_mover_on_a_derived_tf_only_drift(
+        self, tmp_path: Path
+    ) -> None:
+        """The TRUE ``_quarantine_move`` bump mutant killer (review round 1,
+        MAJOR 1.2): a drifted dir carrying ONLY a derived-TF (``5minute``) file
+        heals by quarantine-MOVE alone — ``_heal_drift`` merges nothing
+        (``5minute`` is not a ``_MERGE_INTERVALS`` member) and
+        ``canonical_minute_months`` stays empty so the recall rebuild never
+        fires — so NO ``ParquetWriter.write`` masks the bump:
+        ``_quarantine_move``'s own ``bump_write_epoch`` is the ONLY epoch mover
+        of the whole heal. Deleting that bump line (lake_heal chokepoint) fails
+        EXACTLY this test (mutant applied + verified) while every sibling in
+        this class stays green under it."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))], symbol="M&M", segment="CASH")  # canonical
+        drifted = lake / "bars" / "NSE" / "CASH" / "NSE-M&M" / "5minute" / "2024" / "06.parquet"
+        _poison(drifted, [(_ts(5), 100.0, 10)])
+        pre = read_write_epoch(lake)
+        assert pre is not None  # the canonical writer write created the marker
+        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.report is not None and result.report.healed == 1
+        assert not drifted.exists()  # quarantine-MOVED — the only lake mutation
+        post = read_write_epoch(lake)
+        assert post is not None and post != pre  # _quarantine_move's OWN bump
+
+    def test_exactly_one_bump_per_rendered_write_and_zero_on_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The per-write epoch-bump COST pin (review MINOR 4 — a call-count pin,
+        deliberately not a wall-clock bench): a RENDERED spot write calls
+        ``bump_write_epoch`` EXACTLY once (fresh and merge renders alike); a
+        no-op re-pull (nothing rendered) calls it ZERO times — the prebuild hot
+        path pays one O(1) non-fsync marker replace per rendered write, never
+        more, never on a skip."""
+        from brutex.data import parquet_writer as pw_module
+
+        calls: list[int] = []
+        real = pw_module.bump_write_epoch
+
+        def _counting(root: Path) -> None:
+            calls.append(1)
+            real(root)
+
+        monkeypatch.setattr(pw_module, "bump_write_epoch", _counting)
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])  # fresh render
+        assert calls == [1]
+        _write_spot(lake, [_bar(_ts(1))])  # merge render (a genuinely-new bar)
+        assert calls == [1, 1]
+        _write_spot(lake, [_bar(_ts(1))])  # pure re-pull → nothing rendered
+        assert calls == [1, 1]  # ZERO bumps on the no-op write
 
     def test_external_write_after_stamp_forces_full_recheck(self, tmp_path: Path) -> None:
         """The soundness pin: a write landing AFTER a clean stamp moves the epoch,
@@ -4991,21 +5112,84 @@ class TestStartupSweepEpochBumps:
         assert _events(logs, "lake_heal.sweep_skip_epoch_match") == []
 
     def test_post_epoch_read_after_heal_writes(self, tmp_path: Path) -> None:
-        """The stamped ``write_epoch`` reflects the HEAL's own bump (read AFTER
-        heal_findings) — if it were read pre-heal the next boot could skip past a
-        stale pair."""
+        """The SOUND pairing on the healed>0 arm (review round 1, MAJOR 1.1 —
+        this test previously pinned ``stamped == read_write_epoch(lake)``, the
+        ABSORBING assertion that reads true even when a concurrent writer's
+        bump was folded into the stamp): the stamped ``write_epoch`` must
+        (a) reflect the HEAL's own bump (read AFTER ``heal_findings``) and
+        (b) PREDATE the post-heal token walk — a concurrent write landing
+        during that walk is NOT absorbed (the live marker moves PAST the
+        stamped epoch) and the next boot re-checks instead of O(1)-skipping.
+        Kills the order-swap mutant (post-token walk before the epoch read),
+        verified by applying it."""
         lake = tmp_path / "lake"
         _write_spot(lake, [_bar(_ts(0))])
         pre_sweep_epoch = read_write_epoch(lake)
         _poison(_dest(lake, month=7), [(_ts(0, month=7), 100.0, 10), (_ts(0, month=7), 9.0, 11)])
-        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        real = lake_heal.lake_content_token
+        walk_calls: list[int] = []
+
+        def _post_walk_with_concurrent_write(root: Path) -> str:
+            walk_calls.append(1)
+            token = real(root)
+            if len(walk_calls) == 2:
+                # A concurrent writer lands DURING the POST-heal walk (after the
+                # walk's enumeration — the bytes it wrote are NOT in `token`).
+                _write_spot(lake, [_bar(_ts(30, month=8))])
+            return token
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(lake_heal, "lake_content_token", _post_walk_with_concurrent_write)
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert walk_calls == [1, 1]  # pre-scan + the post-heal recompute
         assert result.report is not None and result.report.healed == 1
         stamped = load_last_sweep(lake)
         assert stamped is not None
-        # The stamped epoch is the heal's bump (moved past the pre-sweep value)
-        # and equals the current marker — proving post_epoch is read post-heal.
+        # (a) the heal's own bump is reflected (moved past the pre-sweep value)…
         assert stamped["write_epoch"] != pre_sweep_epoch
-        assert stamped["write_epoch"] == read_write_epoch(lake)
+        # …and (b) the stamped epoch PREDATES the walk: the mid-walk concurrent
+        # write moved the live marker PAST it — never absorbed into the stamp.
+        assert stamped["write_epoch"] != read_write_epoch(lake)
+        with capture_logs() as logs:
+            again = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert _events(logs, "lake_heal.sweep_skip_epoch_match") == []  # re-checked
+        assert again.ran is True  # the missed August bytes force a real re-sweep
+
+    def test_concurrent_write_during_clean_scan_is_not_absorbed(self, tmp_path: Path) -> None:
+        """MAJOR 1.1 (review round 1) — the F1 TOCTOU regression, deterministic:
+        a CLEAN-lake sweep (healed==0 — the common healthy-lake boot) whose scan
+        window absorbs a concurrent REAL ``ParquetWriter`` write (injected via
+        ``per_file_pause``, exactly the F3 auto-resume-pull-at-boot shape) must
+        NOT stamp {pre-scan token, post-scan epoch}: pre-fix the stamped pair
+        absorbed the mid-scan bump and the SECOND boot O(1)-skipped
+        (``sweep_skip_epoch_match``) over a lake that provably differs from the
+        stamped token. Post-fix the healed==0 arm stamps ``epoch_now`` (read
+        BEFORE the token walk), so the second boot re-checks and re-sweeps.
+        Verified failing on the un-fixed code."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])  # a clean lake; the marker exists
+        wrote = {"done": False}
+
+        def _pause_with_concurrent_write() -> None:
+            if not wrote["done"]:
+                wrote["done"] = True
+                # A REAL writer write (a concurrent pull / prebuild) lands
+                # DURING the scan — after the pre-scan token walk enumerated.
+                _write_spot(lake, [_bar(_ts(45, month=9))])
+
+        first = run_startup_sweep(lake, per_file_pause=_pause_with_concurrent_write, now=_now)
+        assert first.ran is True
+        assert first.report is not None and first.report.healed == 0
+        assert wrote["done"] is True  # the concurrent write genuinely landed
+        stamped = load_last_sweep(lake)
+        assert stamped is not None
+        # The stamped epoch PREDATES the scan — the mid-scan bump is NOT absorbed.
+        assert stamped["write_epoch"] != read_write_epoch(lake)
+        with capture_logs() as logs:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        # Pre-fix: Tier-1 O(1) skip over the never-scanned September bytes.
+        assert _events(logs, "lake_heal.sweep_skip_epoch_match") == []
+        assert second.ran is True  # the full token caught the changed lake
 
 
 class TestStartupSweepBeatChannel:
@@ -5098,6 +5282,101 @@ class TestStartupSweepBeatChannel:
         # (the sweep's beats rode the dedicated LAKE_HEAL_SWEEP_PULL_ID channel).
         assert self._drop_warns(caplog) == []
         assert keyed_beats == []
+
+    def test_ambient_unkeyed_beat_during_sweep_only_window_is_silent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review F4 minors 6/22 — leg (a): with the sweep's channel registered
+        and NO live pull, an ambient UNKEYED beat from ANOTHER thread (the
+        db_view discovery-walk shape — no ``pull_id_scope``, so channel ``""``)
+        stays SILENT, exactly the pre-pack empty-registry behaviour. Pre-fix
+        the sweep's registration made the registry non-empty, converting every
+        such previously-silent beat into ``foreign_beat_dropped`` WARNs for the
+        sweep's whole (tens-of-minutes) duration. Verified failing pre-fix."""
+        import logging
+
+        from brutex.observability.progress_beat import emit_progress_beat
+
+        caplog.set_level(logging.WARNING, logger="brutex.observability.progress_beat")
+        emitted = threading.Event()
+
+        def _sweep_with_ambient_emitter(lake_root: Path, **kwargs: Any) -> None:
+            # A fresh thread carries NO contextvars pull scope → ambient "".
+            thread = threading.Thread(target=lambda: (emit_progress_beat(), emitted.set()))
+            thread.start()
+            thread.join()
+
+        monkeypatch.setattr(lake_heal, "run_startup_sweep", _sweep_with_ambient_emitter)
+        StartupSweeper(tmp_path / "lake").run_sync()
+        assert emitted.is_set()  # the ambient beat genuinely fired mid-sweep
+        assert self._drop_warns(caplog) == []  # silent — pre-pack parity
+
+    def test_ambient_beat_during_sweep_plus_live_pull_matches_pull_only_semantics(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review F4 minors 6/22 — leg (b): beside a LIVE keyed pull the sweep's
+        maintenance channel changes NOTHING: an ambient unkeyed beat is dropped
+        + WARNed once per register-epoch and never delivered — identical to a
+        live pull WITHOUT the sweep (the drop semantics are owned by the pull's
+        channel, not the sweep's)."""
+        import logging
+
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+            reset_progress_beats,
+        )
+
+        caplog.set_level(logging.WARNING, logger="brutex.observability.progress_beat")
+        pull_beats: list[int] = []
+
+        def _ambient_emit_twice_from_foreign_thread() -> None:
+            thread = threading.Thread(target=lambda: (emit_progress_beat(), emit_progress_beat()))
+            thread.start()
+            thread.join()
+
+        # Baseline: a live keyed pull WITHOUT the sweep.
+        register_progress_beat(lambda: pull_beats.append(1), pull_id="deadbeef0001")
+        _ambient_emit_twice_from_foreign_thread()
+        assert pull_beats == []  # never routed into the keyed run (anti-masking)
+        assert len(self._drop_warns(caplog)) == 1  # dropped, WARNed once/epoch
+        reset_progress_beats()
+
+        # The SAME live pull WITH the sweep's maintenance registration live.
+        register_progress_beat(lambda: pull_beats.append(1), pull_id="deadbeef0001")
+
+        def _sweep_with_ambient_emitter(lake_root: Path, **kwargs: Any) -> None:
+            _ambient_emit_twice_from_foreign_thread()
+
+        monkeypatch.setattr(lake_heal, "run_startup_sweep", _sweep_with_ambient_emitter)
+        StartupSweeper(tmp_path / "lake").run_sync()
+        assert pull_beats == []  # still never delivered into the pull's channel
+        # Identical semantics: exactly ONE more WARN (once per epoch) — the
+        # sweep's channel neither added drops of its own nor silenced the pull's.
+        assert len(self._drop_warns(caplog)) == 2
+
+    def test_run_sync_unregisters_the_sweep_channel_on_success_and_on_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review F4 minor 7 — the delete-the-unregister mutant killer: after
+        ``run_sync`` returns (the clean path AND the blanket-guarded raise
+        path) the dedicated channel is GONE from the registry — a leaked
+        ``lake-heal-sweep`` channel would silently outlive every sweep.
+        Deleting the ``unregister_progress_beat`` call in ``run_sync`` fails
+        exactly this test (mutant applied + verified)."""
+        from brutex.observability import progress_beat as pb
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        assert StartupSweeper(lake).run_sync() is not None
+        assert LAKE_HEAL_SWEEP_PULL_ID not in pb._BEATS  # pyright: ignore[reportPrivateUsage]
+
+        def _boom(lake_root: Path, **kwargs: Any) -> None:
+            raise RuntimeError("mid-sweep failure")
+
+        monkeypatch.setattr(lake_heal, "run_startup_sweep", _boom)
+        assert StartupSweeper(lake).run_sync() is None  # blanket guard, no raise
+        assert LAKE_HEAL_SWEEP_PULL_ID not in pb._BEATS  # pyright: ignore[reportPrivateUsage]
 
 
 class TestAutoResumedPullBeatsFlow:
