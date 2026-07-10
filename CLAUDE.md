@@ -18,7 +18,28 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-10 (DEC-ONECLICK-PERF-CLUB-001,
+_Last updated: 2026-07-10 (DEC-LAKE-HEAL-STARTUP-EPOCH-001 +
+DEC-AUTO-RESUME-ZERO-SURPRISES-001, MIGRATION.md #1699a/#1699b — the
+dashboard-startup slowness pack on `claude/dashboard-startup-slowness`:
+(#1699a) the L3 startup-sweep O(1) write-epoch gate — an UNCHANGED lake
+no longer re-pays the ~27-minute boot lstat walk (NEW
+`brutex/data/lake_write_epoch.py` hint bumped at every in-band writer
+chokepoint; Tier-1 epoch match within a 7-day valve ⇒ O(1) skip, any
+doubt ⇒ the full authoritative `lake_content_token`, semantics
+unchanged; boot-phase `_boot_mark` instrumentation; the sweep daemon's
+dedicated maintenance beat channel closes the boot-time `channel ''`
+WARN class); (#1699b) the zero-surprises auto-resume pack —
+announce-on-launch (amber notice, FIRED gated on a genuinely-STARTED
+launch), announce-on-failure (CRITICAL banner + best-effort Telegram),
+the durable `failed_streak`→terminal-SKIPPED `fetch_exhausted` verdict
+(K=5, local-deferral classes exempt, 25/pull mass rail), and the
+cooperative `POST /api/v1/pull/stop` control — composing ADDITIVELY
+beneath main's `BRUTEX_AUTO_RESUME` master gate (#1698). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change; the per-item record lives in the §1 Active-branch blurb +
+MIGRATION.md #1699a/#1699b — this header carries pointers, never
+narration.)
+Earlier: 2026-07-10 (DEC-ONECLICK-PERF-CLUB-001,
 MIGRATION.md #1711 — coordinator-ASSIGNED from the reservation map
 (next free above the #1264 reservation tail #1710; live-main max #1665
 at assignment — gaps are legal; renumbered from the interim provisional
@@ -1947,7 +1968,53 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/oneclick-perf-club` (**DEC-ONECLICK-PERF-CLUB-001,
+- **Active branch:** `claude/dashboard-startup-slowness`
+  (**DEC-LAKE-HEAL-STARTUP-EPOCH-001 + DEC-AUTO-RESUME-ZERO-SURPRISES-001,
+  MIGRATION.md #1699a/#1699b** — the dashboard-startup slowness pack, the
+  #1699a/#1699b suffix pair per the 613a/613b convention: (#1699a) the L3
+  startup-sweep O(1) write-epoch gate — the boot change-detector
+  `lake_content_token` (an lstat walk of every lake parquet, ~2.14M files
+  ≈ 27 min) ran UNCONDITIONALLY before the sentinel compare; NEW
+  `brutex/data/lake_write_epoch.py` (an O(1) hint file at
+  `<lake_root>/.lake_heal/write_epoch` bumped at every in-band writer
+  chokepoint — both parquet writers' render/heal arms +
+  `lake_heal._quarantine_move`; the Greeks overlay rides ParquetWriter
+  transitively) + the Tier-1 gate in `run_startup_sweep` (epoch match within
+  a 7-day max-age valve ⇒ O(1) skip + ONE INFO; ANY doubt ⇒ the full
+  authoritative token, semantics unchanged); sentinel v2; marker seeded on a
+  Tier-2 pass so idle lakes skip next boot; TOCTOU-sound stamp pairing (the
+  stamped epoch always predates the walk/scan that produced the stamped
+  token — review-round fold); HONEST: in-band-only detection, out-of-band
+  writes bounded by the valve + token fallback; F2 boot-phase
+  instrumentation (`_boot_mark` stderr markers + atexit shutdown marker +
+  walk attribution); F4 the sweep daemon runs on a dedicated maintenance
+  beat channel (additive `maintenance=True` in progress_beat) so its heal
+  beats never emit foreign_beat_dropped nor mask ambient-beat semantics —
+  the operator's boot-time `channel ''` WARN class CLOSED. (#1699b) the
+  zero-surprises auto-resume pack: announce-on-launch (amber notice banner +
+  honest count headline; FIRED + notice gated on a genuinely-STARTED
+  launch — a refused start reads an honest refusal banner, never
+  "LAUNCHED"), announce-on-failure (CRITICAL banner + best-effort Telegram
+  via the additive on_error/launch_alert hooks), the durable
+  `failed_streak`→terminal-SKIPPED `fetch_exhausted` verdict (K=5
+  consecutive genuine-FAILED records; the local-deferral classes
+  PartitionLockTimeout/WriteDeadlineExceeded EXEMPT per the #999 re-pull
+  contract; MAX_EXHAUSTED_SETTLES_PER_PULL=25 mass rail; causal
+  `error_type` stamped; the `newly_exhausted_failed` tally wired into both
+  production verdict builders), and the honest-minimum cooperative STOP
+  (`POST /api/v1/pull/stop`: intent-clear + a linearized stop Event
+  consulted at pipeline phase boundaries; the stop-vs-start race closed by
+  clearing the event inside start()'s locked claim; all five stop surfaces
+  name the legacy-arm exception honestly) — composing ADDITIVELY beneath
+  main's `BRUTEX_AUTO_RESUME` master gate (DEC-AUTO-RESUME-DEFAULT-OFF-001
+  #1698). SANCTIONED: repeatedly-failing non-empty windows now settle
+  SKIPPED (recoverable via reopen-skipped); the stop route + button are NEW
+  surfaces. HONEST: an in-flight phase finishes (restart = the hard stop);
+  the notice banner retires when the announced run ends. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the
+  touched leaves 100% line+branch on their gating suites; full details in
+  MIGRATION.md #1699a/#1699b.)
+  Earlier: `claude/oneclick-perf-club` (**DEC-ONECLICK-PERF-CLUB-001,
   MIGRATION.md #1711** — the entry number is coordinator-ASSIGNED from the
   reservation map (2026-07-10 — the next free number above the #1264
   reservation tail #1710; live-main max #1665 at assignment, live-max+1
@@ -5037,7 +5104,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/oneclick-perf-club`
+- **Active feature branch:** `claude/dashboard-startup-slowness`
+  (DEC-LAKE-HEAL-STARTUP-EPOCH-001 + DEC-AUTO-RESUME-ZERO-SURPRISES-001,
+  MIGRATION.md #1699a/#1699b — the dashboard-startup slowness pack:
+  (#1699a) the L3 startup-sweep O(1) write-epoch gate — an UNCHANGED lake
+  no longer re-pays the ~27-minute boot lstat walk (NEW
+  `brutex/data/lake_write_epoch.py` hint file + the Tier-1 gate in
+  `run_startup_sweep`, 7-day valve, any doubt ⇒ the full authoritative
+  `lake_content_token`; F2 `_boot_mark` boot-phase instrumentation; F4 the
+  sweep daemon's dedicated maintenance beat channel); (#1699b) the
+  zero-surprises auto-resume pack — announce-on-launch (started-gated amber
+  notice), announce-on-failure (CRITICAL banner + Telegram), the durable
+  `fetch_exhausted` terminal verdict (K=5, exempt local-deferral classes,
+  25/pull mass rail), and the cooperative `POST /api/v1/pull/stop` control —
+  composing additively beneath main's `BRUTEX_AUTO_RESUME` master gate
+  (#1698); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch
+  for the full blurb)
+  Earlier: `claude/oneclick-perf-club`
   (DEC-ONECLICK-PERF-CLUB-001, MIGRATION.md #1711 — coordinator-assigned from
   the reservation map (next free above the #1264 reservation tail #1710;
   live-main max #1665 at assignment — gaps are legal; renumbered from the
@@ -5436,7 +5519,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4804-4805` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:991-992`; `cli.py:4896-4897` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
