@@ -98,7 +98,7 @@ with the real paths and complete the item list from the files themselves.
 
 ## Round 4 — Coordinator/session-management batch (2026-07-10)
 
-**Status:** final — 7 items, awaiting operator send. (The interim v1
+**Status:** sent 2026-07-10 — 7 items. (The interim v1
 9-item, 7-item v2, and v3 copies were superseded in-place by v4 on
 2026-07-10: v2 dropped the two model-mapping complaints after the
 double-canary experiment showed model-default propagation working — the
