@@ -424,13 +424,26 @@ jobs:
           else
             echo "(brutex.costs test files not present yet — gate inactive)"
           fi
+          # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1678): the
+          # whole-package --cov=brutex.engine gate must also run the
+          # losing-streak resilience suites — brutex/engine/resilience_streaks.py
+          # is stem-matched by tests/unit/test_resilience_streaks.py and the new
+          # brutex/engine/results_depth_pass.py adoption-backfill + resilience
+          # fence branches are covered by tests/unit/test_resilience_sidecar.py
+          # + the integration tests/integration/test_resilience_end_to_end.py,
+          # none of which the test_engine_*.py glob collects (the same
+          # static-list addition precedent as the costs/pull_jobs gates, PRs
+          # #1248/#1542, and the brutex.data.catalog integration-test gate).
           if compgen -G "tests/unit/test_engine_*.py" > /dev/null; then
             pytest \
               --cov=brutex.engine \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_engine_*.py
+              tests/unit/test_engine_*.py \
+              tests/unit/test_resilience_streaks.py \
+              tests/unit/test_resilience_sidecar.py \
+              tests/integration/test_resilience_end_to_end.py
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
