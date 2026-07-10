@@ -1382,7 +1382,6 @@ class TestOptionForeignScan:
         keeps the repr()'d ``error=`` for a genuinely unreadable file."""
         import pyarrow as pa
         import pyarrow.parquet as pq
-
         from brutex.data.lake_invariants import SchemaAlienFile
 
         bad = tmp_path / "options" / "SER\x1b\nIES" / "2024-06.parquet"
@@ -1435,7 +1434,6 @@ class TestOptionForeignScan:
         quarantines)."""
         import pyarrow as pa
         import pyarrow.parquet as pq
-
         from brutex.data.lake_invariants import SchemaAlienFile
 
         series = tmp_path / "options" / "SER\x1b\nIES2"
