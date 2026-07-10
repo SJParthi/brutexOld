@@ -716,7 +716,7 @@ def test_accumulation_regime_warm_poll_bounded(tmp_path: Path) -> None:
         f"warm-poll ratio {ratio:.2f}× (400 vs 50 pending deltas) exceeds the ceiling — "
         f"the within-stamp poll may have regressed past the O(deltas) stamp probe. "
         f"t_50={t50 / 1e6:.2f}ms, t_400={t400 / 1e6:.2f}ms."
-)
+    )
 
 
 def test_fresh_fold_at_production_scale_is_bounded_and_not_flat(tmp_path: Path) -> None:
