@@ -565,10 +565,19 @@ class TestVerifyPollFlatVsManifestSize:
         run_dir: Path,
         compute: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
-        """One verify poll exactly like the route: 3 stats + chain peek + serve."""
+        """One verify poll exactly like the route: 3 stats (siblings through
+        the r1 MINOR-1 outage-doctrine gate) + chain peek + serve."""
         probe = oca.artifact_probe(run_dir / oca.MANIFEST_FILENAME)
-        ev_rev = oca.artifact_revision(run_dir / oca.EVENTS_FILENAME)
-        top_rev = oca.artifact_revision(run_dir / oca.TOP100_FILENAME)
+        ev_rev = oca.sibling_key_token(
+            gate,
+            coordinate=f"oc_verify|{_RID}|sib=events|fx=False",
+            probe=oca.artifact_probe(run_dir / oca.EVENTS_FILENAME),
+        )
+        top_rev = oca.sibling_key_token(
+            gate,
+            coordinate=f"oc_verify|{_RID}|sib=top100|fx=False",
+            probe=oca.artifact_probe(run_dir / oca.TOP100_FILENAME),
+        )
         with contextlib.suppress(oca.ChainNotVerifiedError):
             cache.get_or_compute(
                 f"oc_chain|{_RID}|rev={ev_rev}",
@@ -596,9 +605,10 @@ class TestVerifyPollFlatVsManifestSize:
         events, top100, chain-state) revision pays the O(manifest) parse +
         funnel reconcile + the one-row trades probe — stated in the route
         docstring, deliberately outside the timed loop; each timed poll pays
-        three ``os.stat`` tokens, one raising chain cache-peek, and one cache
-        hit. Ceiling: ``ratio_ceiling(8.0)`` (file-stat I/O noise class — the
-        B-6 precedent).
+        three ``os.stat`` tokens (+ O(1) outage-gate bookkeeping on the two
+        sibling probes — r1 MINOR-1), one raising chain cache-peek, and one
+        cache hit. Ceiling: ``ratio_ceiling(8.0)`` (file-stat I/O noise
+        class — the B-6 precedent).
         """
         cache_s, gate_s, dir_s = self._primed_verify(tmp_path / "small" / "sweeps", doors=4)
         cache_l, gate_l, dir_l = self._primed_verify(tmp_path / "big" / "sweeps", doors=4000)

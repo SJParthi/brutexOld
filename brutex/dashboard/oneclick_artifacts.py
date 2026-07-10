@@ -132,6 +132,7 @@ __all__ = [
     "runs_revision_probe",
     "runs_root",
     "serve_revision_cached",
+    "sibling_key_token",
     "sidecar_paths_from_ref",
     "tail_events",
     "trades_path",
@@ -361,7 +362,10 @@ class OutageGate:
 
     Thread-safe; every call is O(1) dict/OrderedDict work; both maps are
     LRU-bounded at *capacity* (an evicted coordinate merely re-logs / falls
-    back to the honest fresh compute — bounded, disclosed).
+    back to the honest fresh compute — bounded, disclosed). A serve from
+    last-known REFRESHES the coordinate's LRU recency (r1 MINOR-3), so a
+    long outage under multi-coordinate cache pressure keeps its last-known
+    key instead of degrading to a per-poll fresh recompute mid-outage.
 
     Parameters
     ----------
@@ -397,7 +401,7 @@ class OutageGate:
             if recovered:
                 del self._in_outage[coordinate]
         if recovered:
-            _LOG.info("oneclick.probe_recovered", coordinate=coordinate)
+            _LOG.info("oneclick.probe_recovered", coordinate=coordinate, resolution="healthy")
 
     def absent(self, coordinate: str) -> None:
         """The artifact is genuinely GONE — forget the last-known key.
@@ -418,7 +422,9 @@ class OutageGate:
             if recovered:
                 del self._in_outage[coordinate]
         if recovered:
-            _LOG.info("oneclick.probe_recovered", coordinate=coordinate)
+            # "recovered" here means the PROBE answered definitively again —
+            # the artifact itself is gone (r1 NIT: a resolution, not health).
+            _LOG.info("oneclick.probe_recovered", coordinate=coordinate, resolution="absent")
 
     def outage_key(self, coordinate: str) -> str | None:
         """Return *coordinate*'s last-known cache key (or ``None``); WARN once.
@@ -445,6 +451,12 @@ class OutageGate:
                 while len(self._in_outage) > self._capacity:
                     self._in_outage.popitem(last=False)
             key = self._last_key.get(coordinate)
+            if key is not None:
+                # r1 MINOR-3: a serve-last-known refreshes LRU recency so a
+                # prolonged outage cannot be evicted mid-outage by healthy
+                # coordinate churn (which would degrade every later outage
+                # poll to the uncached fresh recompute C-r2-5 exists to end).
+                self._last_key.move_to_end(coordinate)
         if first:
             _LOG.warning(
                 "oneclick.probe_outage",
@@ -504,8 +516,11 @@ def serve_revision_cached(
         The revision-INDEPENDENT logical coordinate (route + run + page
         params + fixture flag) keying the gate's bookkeeping.
     probe
-        The PRIMARY artifact's :class:`ArtifactProbe` (routes that fold
-        sibling revisions into *key* still gate on their primary artifact).
+        The PRIMARY artifact's :class:`ArtifactProbe`. Routes that fold
+        sibling revisions into *key* resolve each sibling through
+        :func:`sibling_key_token` FIRST (r1 MINOR-1), so a sibling stat
+        outage holds the folded key steady (⇒ the cached payload keeps
+        serving) instead of flapping the key and degrading the content.
     key
         The full revision-keyed cache key, or ``None`` when the probe found
         no token (a non-``None`` *key* with a ``None`` token is treated as
@@ -532,6 +547,52 @@ def serve_revision_cached(
     value = cache.get_or_compute(key, generation=0, compute=compute)
     gate.healthy(coordinate, key)
     return value
+
+
+def sibling_key_token(gate: OutageGate, *, coordinate: str, probe: ArtifactProbe) -> str | None:
+    """Resolve a SIBLING artifact's cache-key token under the outage doctrine.
+
+    r1 MINOR-1 (DEC-ONECLICK-PERF-CLUB-001 fold): the verify/manifest keys
+    fold SIBLING revisions (events/top100) beside their primary probe, and
+    the outage-blind ``artifact_revision`` mapped ANY sibling stat error to
+    ``None`` (≡ absent) — a transient events-stat flap during a
+    manifest-healthy poll flapped the key (``ev=None``), recomputed, and
+    momentarily degraded the chain row to "awaiting". This helper is the
+    sibling arm of the SAME doctrine through the SAME :class:`OutageGate`
+    (never a second copy): the gate's per-coordinate map stores the sibling
+    TOKEN instead of a full cache key —
+
+    * probe **OUTAGE** → the last-known token (or ``None`` when never seen /
+      evicted) with the gate's one-``oneclick.probe_outage``-WARN-per-outage
+      discipline — the folded key holds steady, so the route's healthy
+      primary serve stays a cache HIT on the pre-flap payload;
+    * **ABSENT** → ``None``, the last-known token FORGOTTEN (a deleted
+      sibling is genuine — the key honestly reads the sibling as gone);
+    * **HEALTHY** → the fresh token, remembered (+ the recovery INFO when a
+      sibling outage ends).
+
+    Parameters
+    ----------
+    gate
+        The shared :class:`OutageGate`.
+    coordinate
+        The sibling's OWN revision-independent coordinate (route coordinate
+        + a ``|sib=<artifact>`` discriminator — never the route's own).
+    probe
+        The sibling artifact's :class:`ArtifactProbe`.
+
+    Returns
+    -------
+    str or None
+        The token to fold into the route's cache key.
+    """
+    if probe.outage:
+        return gate.outage_key(coordinate)
+    if probe.token is None:
+        gate.absent(coordinate)
+        return None
+    gate.healthy(coordinate, probe.token)
+    return probe.token
 
 
 # ── Result types (split per artifact — the isinstance narrowing happens ONCE here) ──
@@ -811,10 +872,15 @@ def runs_revision(results_root: Path) -> str | None:
     syscalls than today's N manifest stats, so the full walk IS the cheaper
     honest option; the O(run dirs) scaling is disclosed here and in the
     ``test_oneclick_o1.py`` B-2 bench docstring instead. Remaining bound
-    (Golden Rule #10): an in-place rewrite of
-    ``top100.json``/``events.jsonl`` still does not move this token — the
-    listing carries only their PRESENCE, which cannot change without the
-    directory mtime moving, so nothing served from the listing goes stale.
+    (Golden Rule #10, r1 MINOR-2 honesty reword): the token folds ONLY the
+    ``sweep_runs/`` dir token + the per-run ``manifest.json`` tokens — a
+    ``top100.json``/``events.jsonl`` LANDING (or in-place rewrite) inside an
+    EXISTING run dir moves the RUN dir's mtime, which is NOT folded, so the
+    listing's ``has_top100``/``has_events`` presence flags CAN lag a cached
+    listing until a manifest token or the ``sweep_runs/`` dir token moves
+    (a manifest rewrite / a new run) — the pre-existing #1631 envelope:
+    cosmetic presence dots on the index only, while the manifest / top100 /
+    verify routes key on their own per-artifact tokens, which DO move.
 
     Parameters
     ----------

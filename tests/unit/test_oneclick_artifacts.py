@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -1067,6 +1068,8 @@ class TestOutageGate:
         events = [entry["event"] for entry in logs]
         assert events.count("oneclick.probe_outage") == 2
         assert events.count("oneclick.probe_recovered") == 1
+        recovered = next(e for e in logs if e["event"] == "oneclick.probe_recovered")
+        assert recovered["resolution"] == "healthy"  # r1 NIT: the resolution is named
         # the recovery updated the last-known key
         assert gate.outage_key("coord") == "key-2"
 
@@ -1093,6 +1096,8 @@ class TestOutageGate:
         with structlog.testing.capture_logs() as logs:
             gate.absent("coord")
         assert [entry["event"] for entry in logs] == ["oneclick.probe_recovered"]
+        # r1 NIT: the outage RESOLVED TO ABSENCE — named, never implied healthy.
+        assert logs[0]["resolution"] == "absent"
 
     def test_absent_without_prior_state_logs_nothing(self) -> None:
         gate = oc.OutageGate()
@@ -1118,6 +1123,137 @@ class TestOutageGate:
             gate.outage_key("a")  # re-logs (bounded, disclosed)
         outages = [entry for entry in logs if entry["event"] == "oneclick.probe_outage"]
         assert len(outages) == 3
+
+    def test_outage_serve_refreshes_lru_recency_so_a_long_outage_survives_churn(self) -> None:
+        """r1 MINOR-3: serving last-known refreshes the coordinate's LRU slot.
+
+        Fill the last-known map PAST capacity with healthy churn WHILE one
+        coordinate is continuously served from last-known — its key must
+        survive (pre-fix, ``outage_key`` never moved it to the LRU end, so
+        the churn evicted the in-outage coordinate and every later outage
+        poll degraded to the uncached fresh recompute).
+        """
+        gate = oc.OutageGate(capacity=2)
+        gate.healthy("out", "k-out")
+        assert gate.outage_key("out") == "k-out"  # outage begins (refreshes recency)
+        gate.healthy("h1", "k-1")  # map: [out, h1]
+        assert gate.outage_key("out") == "k-out"  # serve refreshes → [h1, out]
+        gate.healthy("h2", "k-2")  # evicts h1, NOT the in-outage coordinate
+        assert gate.outage_key("out") == "k-out"  # survived the churn past capacity
+
+
+class TestOutageGateConcurrency:
+    """Teeth for the class docstring's "Thread-safe" claim (r1 gates MINOR).
+
+    Barrier-driven, the partition_lock/governor concurrency-test precedent:
+    the routes call the ONE shared gate from the AnyIO threadpool, so the
+    exactly-one-WARN-per-outage latch and the last-known map must hold under
+    real thread interleaving, not just by construction.
+    """
+
+    def test_concurrent_outage_polls_warn_once_and_never_lose_the_last_key(self) -> None:
+        gate = oc.OutageGate()
+        gate.healthy("out", "k-out")
+        n_threads = 8
+        rounds = 25
+        barrier = threading.Barrier(n_threads)
+        served: list[str | None] = []
+        errors: list[BaseException] = []
+
+        def _hammer(worker: int) -> None:
+            try:
+                barrier.wait(timeout=10)
+                for i in range(rounds):
+                    # the shared coordinate is ONLY ever outage-polled here…
+                    served.append(gate.outage_key("out"))
+                    # …while sibling coordinates churn healthy/absent through
+                    # the same lock (bounded well under capacity — recency
+                    # eviction is the separate MINOR-3 test's concern).
+                    gate.healthy(f"churn-{worker}-{i % 4}", f"k-{i}")
+                    gate.absent(f"churn-{worker}-{i % 4}")
+            except BaseException as exc:  # surfaced to the assert below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_hammer, args=(w,)) for w in range(n_threads)]
+        with structlog.testing.capture_logs() as logs:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        # no lost last_key: EVERY concurrent outage poll served the seeded key
+        assert served == ["k-out"] * (n_threads * rounds)
+        outages = [
+            e for e in logs if e["event"] == "oneclick.probe_outage" and e["coordinate"] == "out"
+        ]
+        assert len(outages) == 1  # exactly one WARN per outage across all threads
+        assert outages[0]["last_known"] is True
+
+
+class TestSiblingKeyToken:
+    """The sibling arm of the outage doctrine (r1 MINOR-1) — same gate, no copy."""
+
+    def test_healthy_returns_and_remembers_the_token(self) -> None:
+        gate = oc.OutageGate()
+        probe = oc.ArtifactProbe("7:9", False)
+        with structlog.testing.capture_logs() as logs:
+            token = oc.sibling_key_token(gate, coordinate="c|sib=events", probe=probe)
+        assert token == "7:9"
+        assert logs == []
+        # the token was remembered for a later outage
+        assert gate.outage_key("c|sib=events") == "7:9"
+
+    def test_outage_holds_the_last_known_token_with_one_warn(self) -> None:
+        gate = oc.OutageGate()
+        oc.sibling_key_token(gate, coordinate="c|sib=events", probe=oc.ArtifactProbe("7:9", False))
+        outage = oc.ArtifactProbe(None, True)
+        with structlog.testing.capture_logs() as logs:
+            first = oc.sibling_key_token(gate, coordinate="c|sib=events", probe=outage)
+            second = oc.sibling_key_token(gate, coordinate="c|sib=events", probe=outage)
+        assert first == second == "7:9"  # the folded key holds steady through the flap
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1  # once per sibling outage, never per poll
+        assert outages[0]["coordinate"] == "c|sib=events"
+
+    def test_cold_outage_reads_none_with_a_warn(self) -> None:
+        gate = oc.OutageGate()
+        with structlog.testing.capture_logs() as logs:
+            token = oc.sibling_key_token(
+                gate, coordinate="cold|sib=top100", probe=oc.ArtifactProbe(None, True)
+            )
+        assert token is None
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1
+        assert outages[0]["last_known"] is False
+
+    def test_absent_forgets_so_a_deleted_sibling_is_never_resurrected(self) -> None:
+        gate = oc.OutageGate()
+        oc.sibling_key_token(gate, coordinate="c|sib=events", probe=oc.ArtifactProbe("7:9", False))
+        assert (
+            oc.sibling_key_token(
+                gate, coordinate="c|sib=events", probe=oc.ArtifactProbe(None, False)
+            )
+            is None
+        )
+        # a LATER outage cannot resurrect the pre-delete token
+        assert (
+            oc.sibling_key_token(
+                gate, coordinate="c|sib=events", probe=oc.ArtifactProbe(None, True)
+            )
+            is None
+        )
+
+    def test_recovery_after_a_sibling_outage_logs_and_rekeys(self) -> None:
+        gate = oc.OutageGate()
+        oc.sibling_key_token(gate, coordinate="c|sib=events", probe=oc.ArtifactProbe("7:9", False))
+        oc.sibling_key_token(gate, coordinate="c|sib=events", probe=oc.ArtifactProbe(None, True))
+        with structlog.testing.capture_logs() as logs:
+            token = oc.sibling_key_token(
+                gate, coordinate="c|sib=events", probe=oc.ArtifactProbe("8:1", False)
+            )
+        assert token == "8:1"
+        assert [e["event"] for e in logs] == ["oneclick.probe_recovered"]
 
 
 class _FakeCache:

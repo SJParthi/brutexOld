@@ -1865,7 +1865,9 @@ def build_app(
     # the LAST-KNOWN payload through `_oneclick_outages` with one loud WARN per
     # outage instead of a silent uncached O(artifact) re-parse per poll
     # (C-r2-5, DEC-ONECLICK-PERF-CLUB-001 — the serve-last-known doctrine; the
-    # gate + chokepoint live in `oneclick_artifacts.serve_revision_cached`).
+    # gate + chokepoint live in `oneclick_artifacts.serve_revision_cached`;
+    # SIBLING stats folded into the verify/manifest keys ride the SAME gate
+    # via `sibling_key_token` — r1 MINOR-1 fold).
     # HONEST envelope (Golden Rule #10): the FIRST read per revision pays the
     # O(artifact) parse; the cached hit is O(1) vs run count / artifact size.
     # REUSES the COMMON `MoversSnapshotCache`.
@@ -7056,12 +7058,23 @@ def build_app(
             # refreshes when top100.json / events.jsonl land without a
             # manifest rewrite; the manifest PARSE (incl. the pill probe)
             # stays inside the cached compute — parse once per revision.
-            has_top100 = (
-                oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.TOP100_FILENAME)
-                is not None
+            # r1 MINOR-1: the sibling stats ride the SAME outage doctrine via
+            # sibling_key_token — a transient sibling stat flap holds the
+            # last-known token (one WARN) instead of flapping the key.
+            top100_tok = oneclick_artifacts.sibling_key_token(
+                _oneclick_outages,
+                coordinate=f"oc_manifest|{rid}|sib=top100|fx={fixture_active}",
+                probe=oneclick_artifacts.artifact_probe(
+                    run_dir / oneclick_artifacts.TOP100_FILENAME
+                ),
             )
-            events_rev = oneclick_artifacts.artifact_revision(
-                run_dir / oneclick_artifacts.EVENTS_FILENAME
+            has_top100 = top100_tok is not None
+            events_rev = oneclick_artifacts.sibling_key_token(
+                _oneclick_outages,
+                coordinate=f"oc_manifest|{rid}|sib=events|fx={fixture_active}",
+                probe=oneclick_artifacts.artifact_probe(
+                    run_dir / oneclick_artifacts.EVENTS_FILENAME
+                ),
             )
             has_events = events_rev is not None
 
@@ -7351,11 +7364,23 @@ def build_app(
             probe = oneclick_artifacts.artifact_probe(
                 run_dir / oneclick_artifacts.MANIFEST_FILENAME
             )
-            events_rev = oneclick_artifacts.artifact_revision(
-                run_dir / oneclick_artifacts.EVENTS_FILENAME
+            # r1 MINOR-1: sibling stats ride the outage doctrine too — a
+            # transient events/top100 stat flap during a manifest-healthy
+            # poll keeps the last-known sibling token in the key (one WARN),
+            # so the chain row never momentarily degrades to "awaiting".
+            events_rev = oneclick_artifacts.sibling_key_token(
+                _oneclick_outages,
+                coordinate=f"oc_verify|{rid}|sib=events|fx={fixture_active}",
+                probe=oneclick_artifacts.artifact_probe(
+                    run_dir / oneclick_artifacts.EVENTS_FILENAME
+                ),
             )
-            top100_rev = oneclick_artifacts.artifact_revision(
-                run_dir / oneclick_artifacts.TOP100_FILENAME
+            top100_rev = oneclick_artifacts.sibling_key_token(
+                _oneclick_outages,
+                coordinate=f"oc_verify|{rid}|sib=top100|fx={fixture_active}",
+                probe=oneclick_artifacts.artifact_probe(
+                    run_dir / oneclick_artifacts.TOP100_FILENAME
+                ),
             )
             chain: tuple[bool, int, int | None, str] | None = None
             if events_rev is not None:

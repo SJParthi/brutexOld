@@ -241,6 +241,39 @@ class TestManifestRoute:
         second = client.get(f"/api/v1/oneclick/manifest?run_id={RUN_ID}").json()
         assert second == first
 
+    def test_sibling_stat_flap_holds_the_key_and_the_pill(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """r1 MINOR-1 (manifest twin): a top100/events stat flap during a
+        manifest-healthy poll holds the last-known sibling tokens — the
+        primed payload (pill + chain links intact) keeps serving with one
+        WARN per sibling outage, never a key flap / degraded recompute."""
+        client = _client(_lake_with_corpus(tmp_path))
+        first = client.get(f"/api/v1/oneclick/manifest?run_id={RUN_ID}").json()
+        real_probe = oc.artifact_probe
+
+        def _flaky(path: Path) -> oc.ArtifactProbe:
+            if path.name in (oc.EVENTS_FILENAME, oc.TOP100_FILENAME):
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _flaky)
+
+        def _must_not_run(_run_dir: Path) -> Any:
+            raise AssertionError("a sibling stat flap must never flap the key / re-parse")
+
+        monkeypatch.setattr(oc, "load_manifest", _must_not_run)
+        with structlog.testing.capture_logs() as logs:
+            second = client.get(f"/api/v1/oneclick/manifest?run_id={RUN_ID}").json()
+            third = client.get(f"/api/v1/oneclick/manifest?run_id={RUN_ID}").json()
+        assert second == first
+        assert third == first
+        coords = [e["coordinate"] for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert sorted(coords) == [
+            f"oc_manifest|{RUN_ID}|sib=events|fx=False",
+            f"oc_manifest|{RUN_ID}|sib=top100|fx=False",
+        ]
+
 
 # ── /api/v1/oneclick/top100 ─────────────────────────────────────────────
 
@@ -582,8 +615,49 @@ class TestVerifyRoute:
             third = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
         assert second == first
         assert third == first
-        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
-        assert len(outages) == 1
+        # ONE warn per COORDINATE per outage (the primary + the two sibling
+        # probes latch independently — r1 MINOR-1), never one per poll.
+        coords = [e["coordinate"] for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(coords) == 3
+        assert len(set(coords)) == 3
+        assert sum("|sib=" in c for c in coords) == 2
+
+    def test_sibling_stat_flap_holds_the_key_and_the_chain_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """r1 MINOR-1: a transient events/top100 stat flap during a
+        manifest-HEALTHY poll keeps the last-known sibling tokens in the key
+        — the primed (chain-verified) payload keeps serving, the chain row
+        never momentarily degrades to awaiting, and each sibling outage
+        warns exactly once (pre-fix: the outage-blind ``artifact_revision``
+        read the flap as ``ev=None`` — a key flap + a degraded recompute)."""
+        client = _client(_lake_with_corpus(tmp_path))
+        first = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}&check=chain").json()
+        chain_row = {check["id"]: check for check in first["checks"]}[2]
+        assert chain_row["state"] == "pass"  # the primed verdict the flap must hold
+        real_probe = oc.artifact_probe
+
+        def _flaky(path: Path) -> oc.ArtifactProbe:
+            if path.name in (oc.EVENTS_FILENAME, oc.TOP100_FILENAME):
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _flaky)
+
+        def _must_not_run(_run_dir: Path) -> Any:
+            raise AssertionError("a sibling stat flap must never flap the key / re-parse")
+
+        monkeypatch.setattr(oc, "load_manifest", _must_not_run)
+        with structlog.testing.capture_logs() as logs:
+            second = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+            third = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+        assert second == first
+        assert third == first
+        coords = [e["coordinate"] for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert sorted(coords) == [
+            f"oc_verify|{RUN_ID}|sib=events|fx=False",
+            f"oc_verify|{RUN_ID}|sib=top100|fx=False",
+        ]
 
     def test_manifestless_run_computes_fresh_per_poll(self, tmp_path: Path) -> None:
         """The ABSENT arm: a manifest-less run is honest awaiting, fresh per
