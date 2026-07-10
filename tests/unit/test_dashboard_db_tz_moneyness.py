@@ -94,36 +94,39 @@ def _write(
     )
 
 
+def _eq_row(symbol: str) -> Any:
+    """A minimal NSE cash-equity master row (the ``test_spot_drift._eq`` pattern)."""
+    from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
 def _seed_master(lake: Path, *symbols: str) -> None:
     """Write a REAL DuckDB instrument master at ``<lake>/instruments.duckdb``
     (the ``test_spot_drift._seed_master`` fixture pattern)."""
     from brutex.data.instrument_store import InstrumentStore
-    from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
     lake.mkdir(parents=True, exist_ok=True)
     with InstrumentStore.open(lake / "instruments.duckdb") as store:
         store.upsert_many(
-            [
-                Instrument(
-                    exch_id=Exchange.NSE,
-                    security_id=abs(hash(s)) % 100_000,
-                    symbol_name=s,
-                    display_name=s,
-                    instrument=InstrumentType.EQ,
-                    segment=Segment.CASH,
-                    series="EQ",
-                    isin=None,
-                    underlying_symbol=None,
-                    underlying_security_id=None,
-                    lot_size=1,
-                    tick_size=Decimal("0.05"),
-                    sm_freeze_qty=None,
-                    sm_expiry_date=None,
-                    strike_price=None,
-                    asm_gsm_flag=False,
-                )
-                for s in symbols
-            ],
+            [_eq_row(s) for s in symbols],
             snapshot_date=date(2024, 1, 1),
             run_id="test-db-tz-moneyness",
             csv_source_sha256="0" * 64,
@@ -416,9 +419,14 @@ class TestMoneynessStockDrift:
     def test_route_wires_composite_memoised_loader(self, tmp_path: Path) -> None:
         """The REAL `/api/v1/db/candles` route classifies the drifted stock lake
         AND memoises the drift-map load behind the composite
-        ``(generation, master_revision)`` token — two paging clicks, ONE
-        ``load_stock_drift_map`` scan (the #1482-prescribed memo law)."""
+        ``(generation, master_revision)`` token: two paging clicks cost ONE
+        ``load_stock_drift_map`` scan, and a KEYLESS load-instruments — which
+        moves ``master_revision`` (fresh count/fetched_at) WITHOUT a
+        write-generation bump, the #933 trap the composite key exists for —
+        forces a SECOND scan on the next click (a generation-only-keyed mutant
+        would serve the stale map and fail here)."""
         pytest.importorskip("fastapi")
+        from datetime import date as _date
         from unittest import mock
 
         from brutex.dashboard.app import DashboardState, build_app
@@ -434,19 +442,33 @@ class TestMoneynessStockDrift:
 
         with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
             client = TestClient(build_app(DashboardState(), instrument_store=store))
+            url = (
+                "/api/v1/db/candles?exchange=NSE&segment=FNO"
+                f"&symbol={_OPT}&interval=1minute&limit=1"
+            )
             # String-form patch of app.py's imported name — the route lambda
             # resolves it through the app module namespace at call time.
             with mock.patch("brutex.dashboard.app.load_stock_drift_map", _counting_load):
-                url = (
-                    "/api/v1/db/candles?exchange=NSE&segment=FNO"
-                    f"&symbol={_OPT}&interval=1minute&limit=1"
-                )
                 first = client.get(url)
                 second = client.get(url + "&offset=1")
+                assert len(calls) == 1  # composite memo: ONE scan for two clicks
+                # The master_revision arm (reviewer MINOR, round 1): upsert a NEW
+                # row through the app's OWN held store — a keyless
+                # load-instruments equivalent (count + max(fetched_at) move; the
+                # write generation does NOT) — then click again: the composite
+                # key must re-scan, never serve the stale drift map.
+                store.upsert_many(
+                    [_eq_row("RELIANCE")],
+                    snapshot_date=_date(2024, 1, 2),
+                    run_id="test-db-tz-moneyness-2",
+                    csv_source_sha256="1" * 64,
+                )
+                third = client.get(url)
+                assert len(calls) == 2  # master move → new key → second scan
             assert first.status_code == 200 and second.status_code == 200
-            for resp in (first, second):
+            assert third.status_code == 200
+            for resp in (first, second, third):
                 payload = resp.json()
                 m_i = payload["columns"].index("moneyness")
                 labels = {row[m_i] for row in payload["rows"]}
                 assert labels and "?" not in labels  # classified, never UNKNOWN
-            assert len(calls) == 1  # composite-token memo: ONE scan, not per click
