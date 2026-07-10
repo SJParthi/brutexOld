@@ -154,7 +154,7 @@ class TestResilienceCellsLive:
         assert out["badgeLevel"] == "ok"
         assert out["worstMonth"] == "2024-03 (6 losses)"
         assert out["worstMonthSub"] == "worst week 2024-W10"
-        assert out["winSpread"] == "swing 0.15"
+        assert out["winSpread"] == "15.00pp"
         assert out["guide"].startswith(
             "Inside its envelope: cold streaks typically run 2, 95% stay at or under 4"
         )

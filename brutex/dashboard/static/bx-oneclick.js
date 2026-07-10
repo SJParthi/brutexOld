@@ -209,6 +209,28 @@ function bxResPct(pct) {
 }
 
 /**
+ * The ONE shared win-rate-year-spread display law (broker-grade, cross-surface
+ * consistent — every surface that shows the spread agrees byte-for-byte). The
+ * spread is a ratio in [0,1] (max−min of the per-year wins/total win rate); it
+ * is a DESCRIPTIVE stability figure, NOT a true statistical metric (CLAUDE.md
+ * §4 protects Sharpe/DSR/p-values/iv — a win-rate spread is not in that list),
+ * so it is rendered — NOT the stored value, which is untouched — as PERCENTAGE
+ * POINTS at a fixed 2dp through the shared ROUND_HALF_UP ``bxFixed2`` law, never
+ * a raw 17-digit IEEE fraction ("0.15000000000000002"). "—" for a null/undefined
+ * spread (< 2 qualifying years), never a fabricated 0pp.
+ *
+ * @param {*} spread - win_rate_year_spread (a [0,1] ratio, or null).
+ * @returns {string} e.g. 0.15000000000000002 -> "15.00pp"; "—" when null.
+ */
+function bxWinRateSpread(spread) {
+  if (spread === null || spread === undefined) {
+    return "—";
+  }
+  var pp = Number(spread) * 100;
+  return (bxFmt2 ? bxFmt2(pp) : String(pp)) + "pp";
+}
+
+/**
  * ISO-8601 UTC → "YYYY-MM-DD HH:MM IST" (pure epoch arithmetic — the fixed
  * +05:30 IST offset, TZ-invariant like bx-chart's bxIstDateOfEpoch); "—" for
  * a null/unparseable input (never a NaN string).
@@ -327,10 +349,7 @@ function bxResilienceCells(row, fmtMoney) {
       r.worst_loss_week === null || r.worst_loss_week === undefined
         ? ""
         : "worst week " + String(r.worst_loss_week),
-    winSpread:
-      r.win_rate_year_spread === null || r.win_rate_year_spread === undefined
-        ? "—"
-        : "swing " + String(r.win_rate_year_spread),
+    winSpread: bxWinRateSpread(r.win_rate_year_spread),
     guide: bxResilienceGuide(r)
   };
 }
@@ -1351,6 +1370,7 @@ function bxFunnelProvenance(source, runId) {
     funnelProvenance: bxFunnelProvenance,
     vixBandText: bxVixBandText,
     vixBandCellText: bxVixBandCellText,
+    winRateSpreadText: bxWinRateSpread,
     resilienceCells: bxResilienceCells,
     resilienceRankOneCells: bxResilienceRankOneCells,
     resilienceSelfLocate: bxResilienceSelfLocate,
@@ -1391,6 +1411,7 @@ if (typeof module !== "undefined" && module.exports) {
     bxFunnelProvenance: bxFunnelProvenance,
     bxVixBandText: bxVixBandText,
     bxVixBandCellText: bxVixBandCellText,
+    bxWinRateSpread: bxWinRateSpread,
     bxResilienceCells: bxResilienceCells,
     bxResilienceRankOneCells: bxResilienceRankOneCells,
     bxResilienceSelfLocate: bxResilienceSelfLocate,

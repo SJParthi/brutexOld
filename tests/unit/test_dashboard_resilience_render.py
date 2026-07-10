@@ -166,6 +166,7 @@ const BXOneclick = {
   resilienceGuide: OC.bxResilienceGuide,
   vixBandText: OC.bxVixBandText,
   vixBandCellText: OC.bxVixBandCellText,
+  winRateSpreadText: OC.bxWinRateSpread,
   istDateTime: OC.bxIstDateTime,
   RESILIENCE_UNAVAILABLE: OC.BX_RESILIENCE_UNAVAILABLE,
   VIX_BAND_NOT_STAMPED: OC.BX_VIX_BAND_NOT_STAMPED,
@@ -268,7 +269,7 @@ class TestStrategyPanelDomRender:
         assert out["underwaterBadge"] == "● recovered"
         assert "badge-ok" in out["badgeClass"]  # coloured status (FIX 5)
         assert out["worstMonth"] == "2024-03 (6 losses)"
-        assert out["winSpread"] == "swing 0.15"
+        assert out["winSpread"] == "15.00pp"
 
     def test_null_row_renders_every_cell_as_dash(self, tmp_path: Path) -> None:
         out = _render("strategy", _null_row(), tmp_path)
@@ -316,7 +317,7 @@ class TestScreenerCellDomRender:
         assert cells["worst_streak_pnl"] == "−₹1250.00"
         assert cells["losing_streak_p95"] == "4"
         assert cells["longest_underwater"] == "30"
-        assert cells["win_rate_year_spread"] == "0.15"
+        assert cells["win_rate_year_spread"] == "15.00pp"
         # The MAX cold streak reads from metrics (no rival resilience column).
         assert cells["max_consecutive_losses"] == "5"
 
@@ -344,3 +345,54 @@ class TestScreenerCellDomRender:
             "win_rate_year_spread",
         ):
             assert cells[explain] == "—", explain
+
+
+class TestWinRateSpreadBrokerGradeDisplay:
+    """The win-rate-year-spread renders broker-grade on EVERY surface that shows
+    it (the /strategy panel + the /screener column) via the ONE shared
+    ``BXOneclick.winRateSpreadText`` law: percentage points at a fixed 2dp,
+    NEVER a raw 17-digit IEEE fraction, and byte-for-byte identical across
+    surfaces.  Fails-before: the pre-fix ``"swing " + String(v)`` panel path and
+    the ``String(v)`` screener path rendered the raw IEEE float
+    (``"swing 0.15000000000000002"`` / ``"0.15000000000000002"``).
+    """
+
+    #: 0.15000000000000002 == the IEEE double nearest 0.15 — the literal
+    #: 17-digit tail round-6 flagged on the live surfaces.
+    _IEEE_TAIL = 0.15000000000000002
+
+    def _row_with_spread(self, spread: float) -> dict[str, Any]:
+        return {
+            "rank": 1,
+            "metrics": {"max_consecutive_losses": 5},
+            "resilience": {**_LIVE_RESILIENCE, "win_rate_year_spread": spread},
+        }
+
+    def test_no_raw_ieee_tail_rendered_on_either_surface(self, tmp_path: Path) -> None:
+        row = self._row_with_spread(self._IEEE_TAIL)
+        panel = _render("strategy", row, tmp_path)["winSpread"]
+        cell = _render("screener", row, tmp_path)["cells"]["win_rate_year_spread"]
+        # (a) NO raw IEEE tail on either surface — the pre-fix path leaked
+        # "0.15000000000000002"; the shared law renders clean percentage points.
+        for shown in (panel, cell):
+            assert "0000000" not in shown, shown
+            assert shown == "15.00pp", shown
+
+    def test_both_surfaces_agree_byte_for_byte(self, tmp_path: Path) -> None:
+        # (b) EVERY surface showing the spread agrees byte-for-byte on the
+        # formatted string — one shared law, no per-surface divergence.
+        for spread in (self._IEEE_TAIL, 0.023, 0.3333333333333333, 1.0):
+            row = self._row_with_spread(spread)
+            panel = _render("strategy", row, tmp_path)["winSpread"]
+            cell = _render("screener", row, tmp_path)["cells"]["win_rate_year_spread"]
+            assert panel == cell, (spread, panel, cell)
+
+    def test_null_spread_still_abstains_to_dash_on_both(self, tmp_path: Path) -> None:
+        row = {
+            "rank": 1,
+            "metrics": {"max_consecutive_losses": 5},
+            "resilience": {**_LIVE_RESILIENCE, "win_rate_year_spread": None},
+        }
+        panel = _render("strategy", row, tmp_path)["winSpread"]
+        cell = _render("screener", row, tmp_path)["cells"]["win_rate_year_spread"]
+        assert panel == "—" and cell == "—"  # never a fabricated 0pp
