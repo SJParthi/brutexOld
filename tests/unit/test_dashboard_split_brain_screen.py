@@ -204,7 +204,15 @@ class TestMoversFuturesSplitBrain:
     def test_options_arm_forced_off_even_with_switch_on(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`bad_tick=False` (options) forces the arm OFF regardless of the env switch."""
+        """`bad_tick=False` (options) forces the arm OFF regardless of the env switch.
+
+        HONEST TEETH NOTE (round-3 refuter NIT 2b): this is a GENERAL behavioral
+        guard on the options posture — it does NOT distinguish the round-2
+        `None if bad_tick else False` delta from the reverted
+        `bad_tick_enabled=bad_tick` (both pass False for `bad_tick=False`); the
+        round-2 reversion teeth live in
+        `test_futures_defers_to_env_options_force_off_distinction` below.
+        """
         from brutex.dashboard.movers_futures import _read_future_session
 
         monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "1")  # explicitly ON
@@ -225,6 +233,51 @@ class TestMoversFuturesSplitBrain:
         # ±0.5 so per-bar HLC3 == close: (1.00 + 5.00 + 1.00) × vol 10 = ₹70.
         assert read[2] == 7000  # paisa
         assert str(read[0]) == "1.00"
+
+    def test_futures_defers_to_env_options_force_off_distinction(self, tmp_path: Path) -> None:
+        """ROUND-2-DELTA REVERSION TEETH (round-3 refuter NIT 2b): the futures
+        arm passes `bad_tick_enabled=None` (DEFER to the env kill switch),
+        NEVER a hard `True` — while options pass `False` — in ONE spy test.
+
+        Under the reverted `screen_frame(..., bad_tick_enabled=bad_tick)` the
+        futures call records `True` (a forced override that ignores
+        BRUTEX_BAD_TICK_SCREEN) and this test FAILS — the teeth the behavioral
+        guard above cannot provide (there both shapes pass `False`).
+        """
+        import brutex.dashboard.movers_futures as mf
+
+        recorded: list[object] = []
+        real_screen_frame = mf.screen_frame
+
+        def _spy(df: object, **kwargs: object) -> object:
+            recorded.append(kwargs.get("bad_tick_enabled", "MISSING"))
+            return real_screen_frame(df, **kwargs)  # type: ignore[arg-type]
+
+        fut = "NSE-NIFTY-28Mar24-FUT"
+        opt = "NSE-NIFTY-28Mar24-17500-CE"
+        _write_fno(tmp_path, _GOOD_CLOSES, symbol=fut)
+        _fno_premium(tmp_path, opt)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mf, "screen_frame", _spy)
+            mf._read_future_session(
+                tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol=fut,
+                day=_DAY,
+                cutoff_min=None,
+                bad_tick=True,  # the futures posture
+            )
+            mf._read_future_session(
+                tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol=opt,
+                day=_DAY,
+                cutoff_min=None,
+                bad_tick=False,  # the options posture
+            )
+        assert recorded == [None, False]  # DEFER-to-env vs forced-OFF — never True
 
 
 # ── /db ─────────────────────────────────────────────────────────────────────

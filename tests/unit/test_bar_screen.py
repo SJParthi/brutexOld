@@ -36,6 +36,7 @@ from brutex.data.bar_screen import (
 from brutex.feed.replay import arrow_table_to_bars
 from hypothesis import given
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
 
 _DAY = date(2024, 1, 2)
 # 09:15 IST == 03:45 UTC.
@@ -294,23 +295,50 @@ class TestScreenRows:
         desc_kept = {r[4] for r in screen_rows([r_high, r_low], cols)}
         assert asc_kept == desc_kept
 
-    def test_mixed_naive_aware_ts_served_raw_never_raises(self) -> None:
-        """Mixed naive+aware timestamps (round-2 refuter NIT-1): served RAW, no 500."""
+    def test_mixed_naive_aware_ts_skips_bad_tick_arm_never_raises(self) -> None:
+        """Mixed naive+aware timestamps (round-2 refuter NIT-1): no 500; the
+        order-dependent bad-tick arm is SKIPPED (the sane spike is served), the
+        SAME object returned when nothing is insane."""
         cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
         rows = [
             (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None),  # aware
             (
                 _OPEN_UTC.replace(tzinfo=None) + timedelta(minutes=1),
-                999.0,
-                1002.0,
-                998.0,
+                9999.0,
+                10002.0,
+                9998.0,
                 10000.0,
                 10,
                 None,
-            ),  # naive spike
+            ),  # naive spike — SANE (self-consistent scaled bar); only the ×4 arm would drop it
         ]
-        out = screen_rows(rows, cols)
-        assert out is rows  # served raw wholesale — incomparable sort, never a raise
+        with capture_logs() as logs:
+            out = screen_rows(rows, cols)
+        assert out is rows  # incomparable sort → bad-tick arm skipped, never a raise
+        assert any(log["event"] == "bar_screen.unsortable_page_bad_tick_skipped" for log in logs)
+
+    def test_mixed_naive_aware_ts_still_drops_insane_rows(self) -> None:
+        """Round-3 refuter NIT (2a): the unsortable-page fallback must NOT bypass
+        the UNIVERSAL insane arm — per-row positivity/ordering drops are
+        order-independent, so they still apply while only the cross-row bad-tick
+        arm is skipped (symmetric with the non-datetime-ts per-row skip)."""
+        cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
+        aware_ok = (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None)
+        naive_insane = (
+            _OPEN_UTC.replace(tzinfo=None) + timedelta(minutes=1),
+            999.0,
+            990.0,  # high < low — positivity/ordering-impossible
+            998.0,
+            1000.0,
+            10,
+            None,
+        )
+        aware_spike = (_OPEN_UTC + timedelta(minutes=2), 9999.0, 10002.0, 9998.0, 10000.0, 10, None)
+        with capture_logs() as logs:
+            out = screen_rows([aware_ok, naive_insane, aware_spike], cols)
+        # Insane dropped; the sane ×4 spike SERVED (bad-tick arm skipped on this page).
+        assert out == [aware_ok, aware_spike]
+        assert any(log["event"] == "bar_screen.unsortable_page_bad_tick_skipped" for log in logs)
 
     def test_nan_close_dropped_and_never_advances_baseline(self) -> None:
         """NaN arm (round-2 refuter MINOR-1): a NaN bar drops + never poisons the baseline."""

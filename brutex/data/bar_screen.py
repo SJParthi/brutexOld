@@ -277,8 +277,10 @@ def screen_rows(
     (never sorted, never classified, never dropped) — matching the seed helper's
     ``isinstance`` guard; the datetime rows around it are still screened. A page
     mixing NAIVE + AWARE timestamps (incomparable — ``sorted`` raises
-    ``TypeError``) is served RAW wholesale with one
-    ``bar_screen.unsortable_page_served_raw`` WARN, never a 500. Duplicate-ts
+    ``TypeError``) SKIPS only the order-dependent cross-row bad-tick arm with one
+    ``bar_screen.unsortable_page_bad_tick_skipped`` WARN — the order-INDEPENDENT
+    per-row insane arm still drops positivity/ordering-impossible rows (the
+    universal guard is never bypassed), never a 500. Duplicate-ts
     rows are screened in a CANONICAL order (ts, then the price cells as
     tie-break), so an ASC and a DESC page of the same data classify an
     equal-timestamp pair identically.
@@ -327,13 +329,26 @@ def screen_rows(
         order = sorted(screenable, key=_canonical_key)
     except TypeError:
         # Mixed naive/aware timestamps are incomparable (round-2 refuter NIT-1):
-        # serve the page RAW rather than 500 — the never-500 posture. One WARN.
+        # never a 500 — the never-500 posture. The CROSS-ROW bad-tick arm needs
+        # a total chronological order, so it is SKIPPED for this page — but the
+        # per-row INSANE arm is order-INDEPENDENT and stays ON (round-3 refuter
+        # NIT: the earlier raw-wholesale fallback bypassed the UNIVERSAL
+        # positivity/ordering guard on exactly the page shape an attacker-ish
+        # junk parquet produces), symmetric with the per-row non-datetime-ts
+        # skip above. One WARN either way.
         _LOG.warning(
-            "bar_screen.unsortable_page_served_raw",
+            "bar_screen.unsortable_page_bad_tick_skipped",
             source=source,
             rows=len(rows),
         )
-        return rows
+        insane = {
+            i
+            for i in screenable
+            if price_row_insane(rows[i][o_idx], rows[i][h_idx], rows[i][l_idx], rows[i][c_idx])
+        }
+        if not insane:
+            return rows
+        return [row for i, row in enumerate(rows) if i not in insane]
     dropped: set[int] = set()
     for i in order:
         row = rows[i]
