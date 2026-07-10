@@ -113,6 +113,8 @@ def oos_section(
     proximity: ProximityParams | None,
     prior_n: int,
     train_frac: float = 0.7,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> str:
     """Render the out-of-sample (train → unseen) verdict for each ranked combo.
@@ -140,6 +142,8 @@ def oos_section(
                 train_frac=train_frac,
                 proximity=proximity,
                 prior_n=prior_n,
+                roll_schedule=roll_schedule,
+                apply_1day_mask=apply_1day_mask,
                 reference_stamper=reference_stamper,
             )
         except ValueError as exc:
@@ -162,6 +166,8 @@ def filter_oos_held(
     proximity: ProximityParams | None,
     prior_n: int,
     train_frac: float = 0.7,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[RankedCombo]:
     """Keep only combos whose edge HELD out-of-sample — the no-illusion filter.
@@ -186,6 +192,8 @@ def filter_oos_held(
             train_frac=train_frac,
             proximity=proximity,
             prior_n=prior_n,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
             reference_stamper=reference_stamper,
         ).held_up
     ]
@@ -211,6 +219,8 @@ def sweep_report(
     sort_by: str = "composite",
     validate_oos: bool = False,
     oos_only: bool = False,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> str:
     """Run the funnel over *bars* and render the ranked top-combo table as text.
@@ -251,6 +261,11 @@ def sweep_report(
         (:func:`filter_oos_held`) before rendering — so only the genuinely-robust
         combos are shown. The header reports ``oos-only=<held>/<gate survivors>``.
         Needs ``>= 2`` IST trading days (else a clear ``ValueError``).
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
+        ``cmd_sweep`` threads ``resolution.roll_schedule`` +
+        :func:`~brutex.engine.stage1a.apply_1day_mask_for` for the
+        NIFTY-futures series alias; defaults are the byte-identical spot path.
     reference_stamper
         Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) threaded to every
         trade sim behind the sweep + the OOS re-simulations. REFERENCE ONLY —
@@ -286,6 +301,8 @@ def sweep_report(
         prior_n=prior_n,
         max_combos=max_combos,
         min_hits=min_hits,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
         reference_stamper=reference_stamper,
     )
     ranked = sort_ranked(ranked, sort_by)
@@ -302,6 +319,8 @@ def sweep_report(
             start_equity_paisa=start_equity_paisa,
             proximity=proximity,
             prior_n=prior_n,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
             reference_stamper=reference_stamper,
         )
         oos_only_note = f"  oos-only={len(ranked)}/{n_gate} held"
@@ -326,6 +345,8 @@ def sweep_report(
             start_equity_paisa=start_equity_paisa,
             proximity=proximity,
             prior_n=prior_n,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
             reference_stamper=reference_stamper,
         )
         report = f"{report}\n\n{section}"

@@ -6604,7 +6604,7 @@ def build_app(
         return _render_results_html()
 
     @app.post("/api/v1/cascade/run")
-    async def api_cascade_run() -> JSONResponse:  # pragma: no cover — live lake + DuckDB replay
+    async def api_cascade_run() -> JSONResponse:
         """POST /api/v1/cascade/run — re-run the Stage-4 cascade on the latest sweep.
 
         The dashboard "Run cascade" button (DEC-CASCADE-WIRE-001): reloads the
@@ -6624,6 +6624,7 @@ def build_app(
 
         def _run() -> tuple[int, dict[str, object]]:
             """Replay the cascade off the event loop (threadpool worker)."""
+            from brutex.data.futures_series import FuturesSeriesError
             from brutex.engine.cascade_wire import (
                 CascadeWireError,
                 load_bars_for_manifest,
@@ -6635,13 +6636,21 @@ def build_app(
                 manifest = load_manifest(root)
             except CascadeWireError as exc:
                 return 400, {"ok": False, "error": str(exc)}
-            bars_for = load_bars_for_manifest(manifest, lake_root=lake)
+            # The dashboard twin of cmd_cascade's user-error net (review
+            # round-2 findings 10/12): the replay's frozen-vs-re-derived
+            # roll-schedule cross-check refusal + a futures-series resolution
+            # refusal (interior hole appeared since launch) are operator-
+            # remediable lake states — a clear 400, never a 500 traceback.
             # NO VIX stamper build here (DEC-VIX-STAMP-WIRE-001 round-6): the
             # replayed candidates' trades are DISCARDED streams (report bytes
             # identical either way), so the old per-click
             # vix_stamper_for_manifest build paid a full window-bounded VIX
             # lake read for zero observable output.
-            report = run_and_write_from_manifest(root, bars_for=bars_for)
+            try:
+                bars_for = load_bars_for_manifest(manifest, lake_root=lake)
+                report = run_and_write_from_manifest(root, bars_for=bars_for)
+            except (CascadeWireError, FuturesSeriesError) as exc:
+                return 400, {"ok": False, "error": str(exc)}
             return 200, {
                 "ok": True,
                 "sweep_id": manifest.sweep_id,

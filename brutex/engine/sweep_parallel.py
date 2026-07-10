@@ -150,7 +150,7 @@ import heapq
 import multiprocessing
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED as _FIRST_COMPLETED
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
@@ -819,6 +819,11 @@ class _WorkerContext:
 
     grid: SweepGridConfig
     root: Path
+    #: ADR-0012 futures roll schedules keyed by instrument symbol
+    #: (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — a picklable plain dict, threaded
+    #: into every worker's ``run_one_tuple`` (identity-safe argument plumbing;
+    #: ``None`` — every spot grid — is the byte-identical pre-launch path).
+    roll_schedule_by_instrument: dict[str, tuple[int, ...]] | None = None
     reference_stamper: TradeReferenceStamper | None = None
 
 
@@ -899,6 +904,7 @@ def _run_tuple_in_worker(
             dedup=_NoDedup(),
             audit=collector,
             skip_empty=True,
+            roll_schedule_by_instrument=ctx.roll_schedule_by_instrument,
             # The pool-wide stamper (DEC-VIX-STAMP-WIRE-001): every worker
             # binds the SAME pickled stamper, so parallel == sequential.
             reference_stamper=ctx.reference_stamper,
@@ -1045,6 +1051,7 @@ class ParallelGridDriver:
         "_next_apply",
         "_quarantined",
         "_reference_stamper",
+        "_roll_schedule_by_instrument",
         "_root",
         "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
@@ -1064,6 +1071,7 @@ class ParallelGridDriver:
         stall_seconds: float | None = None,
         stall_min_mask_bars_per_sec: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
         reference_stamper: TradeReferenceStamper | None = None,
     ) -> None:
         """Build a driver for one grid run.
@@ -1100,6 +1108,12 @@ class ParallelGridDriver:
             environment via :func:`resolve_stall_min_mask_bars_per_sec`.
         monotonic
             Injected monotonic clock (tests drive the stall watchdog with a fake).
+        roll_schedule_by_instrument
+            ADR-0012 futures roll schedules keyed by instrument symbol
+            (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — marshalled to every worker
+            via the pool context (identity-safe argument plumbing; see
+            :func:`~brutex.engine.sweep_orchestrator.run_sweep_grid`). ``None``
+            (the default) is the byte-identical spot path.
         reference_stamper
             Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) carried into
             the picklable :class:`_WorkerContext` so EVERY spawn worker binds
@@ -1146,6 +1160,9 @@ class ParallelGridDriver:
         #: mask count — the heavy-grid work estimate (DEC-SWEEP-STALL-OOM-GUARDS-001).
         self._n_unique = len(set(grid.condition_bits))
         self._monotonic = monotonic
+        self._roll_schedule_by_instrument = (
+            dict(roll_schedule_by_instrument) if roll_schedule_by_instrument is not None else None
+        )
         self._reference_stamper = reference_stamper
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
@@ -1203,7 +1220,10 @@ class ParallelGridDriver:
         max_inflight = pool_size * _INFLIGHT_MULTIPLIER
         heap_cap = pool_size * _HEAP_CAP_MULTIPLIER
         ctx = _WorkerContext(
-            grid=self._grid, root=self._root, reference_stamper=self._reference_stamper
+            grid=self._grid,
+            root=self._root,
+            roll_schedule_by_instrument=self._roll_schedule_by_instrument,
+            reference_stamper=self._reference_stamper,
         )
         try:
             with ProcessPoolExecutor(
@@ -1933,6 +1953,7 @@ def run_parallel_grid(
     stall_seconds: float | None = None,
     stall_min_mask_bars_per_sec: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
@@ -1970,6 +1991,7 @@ def run_parallel_grid(
         stall_seconds=stall_seconds,
         stall_min_mask_bars_per_sec=stall_min_mask_bars_per_sec,
         monotonic=monotonic,
+        roll_schedule_by_instrument=roll_schedule_by_instrument,
         reference_stamper=reference_stamper,
     )
     return driver.run()

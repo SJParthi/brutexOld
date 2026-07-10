@@ -173,6 +173,8 @@ def validate_out_of_sample(
     train_frac: float = 0.7,
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> OOSValidation:
     """Measure one combo on a train period vs the unseen test period that follows.
@@ -196,6 +198,11 @@ def validate_out_of_sample(
     train_frac
         Fraction of distinct trading days in the train period (``0 < train_frac <
         1``); the remainder is the held-out test period. Defaults to 0.7.
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs into
+        :func:`~brutex.engine.stage1a.build_bar_bits`
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001); defaults are the byte-identical
+        spot path.
     reference_stamper
         Optional India-VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
@@ -220,7 +227,13 @@ def validate_out_of_sample(
     split_index, train_days, test_days = _day_split(bars, train_frac)
     # Build once over the FULL stream → the test period's first-day anchors are its
     # real prior (train) day, not cleared. Then slice the trade-sim at the boundary.
-    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    bar_bits = build_bar_bits(
+        bars,
+        proximity=proximity,
+        prior_n=prior_n,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
+    )
     train_metrics = metrics_for_mask(
         bars[:split_index],
         bar_bits[:split_index],

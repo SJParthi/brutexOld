@@ -74,7 +74,7 @@ from brutex.engine.cascade_wire import (
 )
 from brutex.engine.combo_mask import popcount
 from brutex.engine.results_store import ResultRow, ResultsStore, VixTrioConflictError
-from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.stage3_refine import (
     Evaluator,
     RefineBudget,
@@ -323,7 +323,10 @@ def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
 
 
 def recover_survivor_cell(
-    row: ResultRow, grid: SweepGridConfig
+    row: ResultRow,
+    grid: SweepGridConfig,
+    *,
+    roll_schedule: tuple[int, ...] | None = None,
 ) -> tuple[int, int, ProximityParams | None, FibAnchorKind]:
     """Recover *row*'s grid cell ``(sl_paisa, tp_paisa, proximity, fib_anchor)`` by identity match.
 
@@ -345,6 +348,13 @@ def recover_survivor_cell(
         The persisted Stage-2 survivor row.
     grid
         The grid it was swept under (axes + shared identity context).
+    roll_schedule
+        ADR-0012 futures roll schedule for the row's instrument
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — a futures row's ``run_id``
+        folds ``roll_schedule`` into ``canonical_trade_params``, so the
+        re-derivation must carry the SAME schedule or no cell reproduces.
+        ``None`` (every spot row) is byte-identical to the pre-launch
+        derivation.
 
     Returns
     -------
@@ -369,6 +379,7 @@ def recover_survivor_cell(
             proximity=proximity,
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
+            roll_schedule=roll_schedule,
         )
         candidate = mask_run_id(
             mask=row.mask_bits,
@@ -581,6 +592,7 @@ def run_stage3_pass(
     segment: str,
     start: str,
     end: str,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     stamper_for: Callable[[], TradeReferenceStamper | None] | None = None,
 ) -> Stage3PassReport:
     """Run the Stage-3 refinement post-pass over a persisted grid — single-threaded.
@@ -630,6 +642,13 @@ def run_stage3_pass(
     exchange, segment, start, end
         The data-scope labels the launcher hashed its full window with —
         reused verbatim for the train-slice hash derivation.
+    roll_schedule_by_instrument
+        ADR-0012 futures roll schedules keyed by instrument symbol
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — threaded into the survivor-cell
+        run_id re-derivation, the refined-row identities AND the train-slice
+        ``bar_bits`` memo (the recovered survivor cells must re-derive against
+        the SAME schedule the sweep built with). ``None`` (the default) is the
+        byte-identical spot path.
     stamper_for
         Optional ZERO-ARG provider of the run's India-VIX stamper
         (DEC-VIX-STAMP-WIRE-001). The production launchers (``cmd_sweep_all``
@@ -715,24 +734,40 @@ def run_stage3_pass(
     skipped_empty_train = 0
     cell_rows: dict[SweepTuple, list[ResultRow]] = {}
     cell_sharpes: dict[SweepTuple, dict[str, float | None]] = {}
-    bits_memo: dict[tuple[str, str, ProximityParams | None, FibAnchorKind], Sequence[int]] = {}
+    bits_memo: dict[
+        tuple[str, str, ProximityParams | None, FibAnchorKind, tuple[int, ...] | None],
+        Sequence[int],
+    ] = {}
     for key, survivors in leaderboards.items():
         train_bars = train_slices.get((key.instrument, key.tf), ())
         if not train_bars:
             skipped_empty_train += 1
             continue
         tf = _timeframe_for_label(key.tf, grid)
+        roll_schedule = (
+            roll_schedule_by_instrument.get(key.instrument)
+            if roll_schedule_by_instrument is not None
+            else None
+        )
         for row in survivors:
             side = _side_for_direction(row.direction)
-            start_sl, start_tp, proximity, fib_anchor = recover_survivor_cell(row, grid)
-            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001),
-            # so the memo key + the build carry the recovered anchor — a survivor is
-            # refined against ITS OWN anchor's Group-4 Fib levels, never a stale one.
-            memo_key = (key.instrument, key.tf, proximity, fib_anchor)
+            start_sl, start_tp, proximity, fib_anchor = recover_survivor_cell(
+                row, grid, roll_schedule=roll_schedule
+            )
+            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001)
+            # AND roll-schedule-specific (DEC-STAGE1A-ROLL-RESET-001), so the memo
+            # key + the build carry both — a survivor is refined against ITS OWN
+            # anchor's Group-4 Fib levels + ITS OWN roll boundaries, never stale ones.
+            memo_key = (key.instrument, key.tf, proximity, fib_anchor, roll_schedule)
             bar_bits = bits_memo.get(memo_key)
             if bar_bits is None:
                 bar_bits = build_bar_bits(
-                    train_bars, proximity=proximity, prior_n=grid.prior_n, fib_anchor=fib_anchor
+                    train_bars,
+                    proximity=proximity,
+                    prior_n=grid.prior_n,
+                    fib_anchor=fib_anchor,
+                    roll_schedule=roll_schedule,
+                    apply_1day_mask=apply_1day_mask_for(key.instrument, key.tf),
                 )
                 bits_memo[memo_key] = bar_bits
             report = refine_mask(
@@ -768,6 +803,7 @@ def run_stage3_pass(
                         proximity=proximity,
                         start_equity_paisa=grid.start_equity_paisa,
                         fib_anchor=fib_anchor,
+                        roll_schedule=roll_schedule,
                     ),
                     data_snapshot_hash=train_hash,
                     indicator_version=grid.indicator_version,

@@ -101,6 +101,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import structlog
 
+from brutex.data.futures_series import is_futures_series_symbol
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
@@ -112,13 +113,14 @@ from brutex.strategies.types import FibAnchorKind
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from datetime import datetime
     from pathlib import Path
 
     import numpy as np
     import numpy.typing as npt
 
+    from brutex.data.catalog_reconcile import ReconcileResult
     from brutex.data.models import CandleBar
     from brutex.engine.results_store import ResultRow
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
@@ -427,6 +429,17 @@ class CascadeManifest:
         (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1) — built once from
         the sidecars by the AUTOMATIC path; the slice-4 consumer reads ONLY
         these. ``None`` for pre-freeze manifests (backward-compatible parse).
+    roll_schedules
+        Optional ADR-0012 futures roll-schedule carriage
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001, review round-1): sorted
+        ``(instrument, (expiry_ordinal, ...))`` pairs recorded by the
+        AUTOMATIC path from the launch's resolved
+        ``roll_schedule_by_instrument``, so the MANUAL replay rebuilds a
+        futures winner's ``bar_bits`` with the SAME per-contract hard resets
+        the sweep ranked it under (D11 — never schedule-blind). ``None`` for
+        spot-only manifests AND for pre-carriage manifests
+        (backward-compatible parse; a futures pool replayed without a
+        schedule is loudly SKIPPED, see :func:`run_cascade_over_specs`).
     """
 
     version: int
@@ -436,6 +449,7 @@ class CascadeManifest:
     specs: tuple[CascadeTupleSpec, ...]
     stage3: Stage3ManifestRecord | None = None
     leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None
+    roll_schedules: tuple[tuple[str, tuple[int, ...]], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,6 +843,7 @@ def candidates_for_spec(
     *,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+    roll_schedule: tuple[int, ...] | None = None,
 ) -> list[CandidateInput]:
     """Re-build every winner of *spec* into a :class:`CandidateInput` over *bars*.
 
@@ -836,8 +851,14 @@ def candidates_for_spec(
     projects each winning mask through :func:`build_candidate_input`. The lockbox
     window params are threaded through unchanged (see
     :func:`build_candidate_input` — they MUST match the cascade config's).
+    ``roll_schedule`` is the ADR-0012 futures pass-through (default ``None`` —
+    byte-identical for every spot spec); :func:`run_cascade_over_specs`
+    threads each pool's schedule in and the manifest carries it for the
+    MANUAL replay (``CascadeManifest.roll_schedules``), so a futures winner
+    is re-scored under the SAME per-contract hard resets the sweep ranked it
+    with (DEC-STAGE1A-ROLL-RESET-001 D11 — review round-1).
     """
-    from brutex.engine.stage1a import build_bar_bits
+    from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
     from brutex.vocabulary import ProximityParams
 
     proximity = (
@@ -850,7 +871,12 @@ def candidates_for_spec(
         )
     )
     bar_bits = build_bar_bits(
-        bars, proximity=proximity, prior_n=spec.prior_n, fib_anchor=spec.fib_anchor
+        bars,
+        proximity=proximity,
+        prior_n=spec.prior_n,
+        fib_anchor=spec.fib_anchor,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask_for(spec.instrument, spec.tf_label),
     )
     return [
         build_candidate_input(
@@ -880,6 +906,7 @@ def run_cascade_over_specs(
     config: CascadeConfig,
     sweep_id: str,
     leaderboard_trials: Sequence[LeaderboardTrialsRecord] | None = None,
+    roll_schedules: Mapping[str, tuple[int, ...]] | None = None,
 ) -> CascadeWireReport:
     """Run the Stage-4 cascade per ``(instrument, tf)`` pool → one aggregate report.
 
@@ -898,6 +925,21 @@ def run_cascade_over_specs(
         The :class:`CascadeConfig` (shared across pools — same seed + thresholds).
     sweep_id
         The grid identity stamped on the report.
+    leaderboard_trials
+        Optional FROZEN per-leaderboard deflation inputs (ADR-0008 cond. 6).
+    roll_schedules
+        Optional per-instrument ADR-0012 futures roll schedules
+        (``instrument -> (expiry_ordinal, ...)``) — the launch's resolved
+        ``roll_schedule_by_instrument`` on the AUTOMATIC path, the manifest's
+        recorded ``roll_schedules`` on the MANUAL replay. A pool whose
+        instrument is the NIFTY-futures series alias with NO schedule
+        available (a pre-carriage manifest) is loudly SKIPPED — re-scoring
+        it schedule-blind would silently violate the D11 roll-reset law
+        (Golden Rule #1; review round-1). Spot pools ignore this (``None``
+        schedule is the byte-identical spot path); a schedule entry for a
+        NON-alias pool is REFUSED (:class:`CascadeWireError` — the positive
+        direction of the presence ⟺ alias invariant, review round-3
+        finding 2).
 
     Returns
     -------
@@ -951,6 +993,39 @@ def run_cascade_over_specs(
         bars = bars_for(instrument, tf_label)
         if not bars:
             continue
+        roll_schedule = None if roll_schedules is None else roll_schedules.get(instrument)
+        if roll_schedule is not None and not is_futures_series_symbol(instrument):
+            # The POSITIVE direction of the presence ⟺ alias invariant
+            # (review round-3 finding 2): a schedule entry for a SPOT
+            # instrument would rebuild the pool's bar_bits WITH per-contract
+            # hard resets — silently breaking the replay's "byte-identical to
+            # the sweep's report" contract, then (for a schedule ending before
+            # the window's last bar day) dying on Stage-1A's raw
+            # beyond-schedule ValueError misattributed as a code bug. Refuse
+            # loudly instead; every other consumer already enforces both
+            # directions (SweepRunConfig.__post_init__).
+            raise CascadeWireError(
+                f"roll_schedules carries an entry for non-futures instrument "
+                f"{instrument!r} — only the NIFTY-futures series alias may carry a "
+                "roll schedule (presence ⟺ alias); the manifest/mapping is corrupt — "
+                "re-run `brutex sweep-all` to mint a fresh one"
+            )
+        if roll_schedule is None and is_futures_series_symbol(instrument):
+            # A futures pool with NO schedule (a pre-carriage manifest replay)
+            # must never be re-scored schedule-blind: the bar_bits would cross
+            # every roll basis gap (the exact D11 violation the sweep's hard
+            # resets prevent) and the report's verdicts would silently diverge
+            # from the sweep that minted the winners. Skip LOUDLY instead
+            # (honest degradation — Golden Rule #1; re-run `brutex sweep-all`
+            # to mint a schedule-carrying manifest).
+            _LOG.warning(
+                "cascade_wire.futures_pool_skipped_no_roll_schedule",
+                instrument=instrument,
+                tf=tf_label,
+                n_specs=len(grouped[(instrument, tf_label)]),
+                remedy="re-run `brutex sweep-all` to record roll_schedules in the manifest",
+            )
+            continue
         candidates: list[CandidateInput] = []
         for spec in grouped[(instrument, tf_label)]:
             candidates.extend(
@@ -963,6 +1038,8 @@ def run_cascade_over_specs(
                     # config would otherwise silently mismatch them.
                     lockbox_default_window_days=config.lockbox_default_window_days,
                     lockbox_min_trades=config.lockbox_min_trades,
+                    # ADR-0012: the pool's OWN roll schedule (None = spot path).
+                    roll_schedule=roll_schedule,
                 )
             )
         if not candidates:
@@ -1415,6 +1492,80 @@ def _lbt_from_dict(data: dict[str, object]) -> LeaderboardTrialsRecord:
         raise CascadeWireError(f"invalid leaderboard_trials record in manifest: {exc}") from exc
 
 
+def _roll_schedules_from_payload(
+    raw: object,
+) -> tuple[tuple[str, tuple[int, ...]], ...] | None:
+    """Parse the additive ``roll_schedules`` manifest key (absent/None → None).
+
+    The manifest carries no integrity digest, so a hand-edited/corrupted file
+    is otherwise trusted verbatim — the presence ⟺ alias invariant
+    (``SweepRunConfig.__post_init__``) and the schedule SHAPE law (non-empty,
+    strictly increasing, non-negative ordinals) are therefore enforced HERE at
+    the parse boundary (review round-3 finding 2): a ``roll_schedules`` entry
+    for a SPOT instrument would silently rebuild that pool's ``bar_bits`` with
+    per-contract hard resets, breaking the replay's byte-identity contract.
+
+    Raises
+    ------
+    CascadeWireError
+        On a malformed entry (non-pair rows, non-int ordinals, …), a
+        DUPLICATE instrument (two contradictory schedules — ``dict()`` would
+        silently last-win; review round-7 finding 8), an entry whose
+        instrument is not the NIFTY-futures series alias, or a schedule
+        violating the shape law.
+    """
+    if raw is None:
+        return None
+
+    def _strict_ordinal(ordinal: object) -> int:
+        # Strict int-not-bool (review round-4 finding 2, mirroring the audit
+        # reader `_schedules_from_entries`): a bare `int()` silently accepted
+        # `true` (→1) and truncated `739000.9` (→739000) — a malformed
+        # hand-edited manifest must REFUSE, never coerce.
+        if not isinstance(ordinal, int) or isinstance(ordinal, bool):
+            raise ValueError(f"non-int roll_schedule ordinal {ordinal!r}")
+        return ordinal
+
+    try:
+        parsed = tuple(
+            (str(instrument), tuple(_strict_ordinal(ordinal) for ordinal in schedule))
+            for instrument, schedule in cast("Sequence[Any]", raw)
+        )
+    except (TypeError, ValueError) as exc:
+        raise CascadeWireError(f"invalid roll_schedules in manifest: {exc}") from exc
+    seen: set[str] = set()
+    for instrument, schedule in parsed:
+        # Duplicate-instrument refusal (review round-7 finding 8): both
+        # `dict(manifest.roll_schedules)` consumers silently adopt the LAST
+        # entry, so an internally contradictory hand-edited manifest carrying
+        # two schedules for one instrument replayed under whichever sorted
+        # last — while the audit twin `_schedules_from_entries` refuses the
+        # same per-instrument disagreement. Refuse identically HERE, at the
+        # parse boundary this docstring claims owns the enforcement.
+        if instrument in seen:
+            raise CascadeWireError(
+                f"invalid roll_schedules in manifest: duplicate entry for instrument "
+                f"{instrument!r} — an internally contradictory manifest cannot pick a "
+                "schedule (dict() would silently adopt the last); the manifest is "
+                "corrupt — re-run `brutex sweep-all` to mint a fresh one"
+            )
+        seen.add(instrument)
+        if not is_futures_series_symbol(instrument):
+            raise CascadeWireError(
+                f"invalid roll_schedules in manifest: instrument {instrument!r} is not "
+                "the NIFTY-futures series alias — a roll schedule may exist for (and "
+                "only for) the futures alias (presence ⟺ alias); the manifest is "
+                "corrupt — re-run `brutex sweep-all` to mint a fresh one"
+            )
+        if not schedule or list(schedule) != sorted(set(schedule)) or schedule[0] < 0:
+            raise CascadeWireError(
+                f"invalid roll_schedules in manifest: schedule for {instrument!r} must "
+                "be a non-empty strictly increasing tuple of non-negative day "
+                f"ordinals, got {list(schedule)}"
+            )
+    return parsed
+
+
 def manifest_to_json(manifest: CascadeManifest) -> bytes:
     """Return the deterministic JSON bytes of *manifest* (sorted keys)."""
     payload = {
@@ -1433,6 +1584,11 @@ def manifest_to_json(manifest: CascadeManifest) -> bytes:
             None
             if manifest.leaderboard_trials is None
             else [_lbt_to_dict(record) for record in manifest.leaderboard_trials]
+        ),
+        "roll_schedules": (
+            None
+            if manifest.roll_schedules is None
+            else [[instrument, list(schedule)] for instrument, schedule in manifest.roll_schedules]
         ),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
@@ -1484,6 +1640,9 @@ def manifest_from_json(data: bytes) -> CascadeManifest:
             leaderboard_trials=(
                 None if lbt_raw is None else tuple(_lbt_from_dict(item) for item in lbt_raw)
             ),
+            # `roll_schedules` is absent from pre-carriage manifests → None
+            # (the same additive-at-version-1 pattern as stage3).
+            roll_schedules=_roll_schedules_from_payload(payload.get("roll_schedules")),
         )
     except (KeyError, TypeError) as exc:
         raise CascadeWireError(f"cascade manifest missing/invalid field: {exc}") from exc
@@ -1686,6 +1845,7 @@ def run_and_write_from_specs(
     cascade_config: CascadeConfig,
     stage3: Stage3ManifestRecord | None = None,
     leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
 ) -> CascadeWireReport:
     """AUTOMATIC path: run the cascade + write the manifest AND the report.
 
@@ -1695,6 +1855,17 @@ def run_and_write_from_specs(
     *results_root*. When the sweep ran the Stage-3 refinement pass
     (DEC-STAGE3-WIRE-001), its :class:`Stage3ManifestRecord` is recorded in the
     manifest so refined-cell specs stay distinguishable from grid-cell specs.
+    ``roll_schedule_by_instrument`` is the launch's resolved ADR-0012 futures
+    roll-schedule map (the SAME object ``cmd_sweep_all`` threads into the
+    grid): it drives the futures pools' Stage-1A hard resets here AND is
+    recorded in the manifest (``roll_schedules``) so the MANUAL replay uses
+    the identical schedule (review round-1 — never a schedule-blind
+    re-score). Replay caveat: the manifest schedule is the FROZEN launch
+    truth; a lake whose futures contract set changed since the sweep is
+    REFUSED by the replay's schedule cross-check
+    (:func:`check_replay_roll_schedule`, review round-2 findings 1/4/9 —
+    enforced in :func:`load_bars_for_manifest`, never a silent re-resolve
+    under the frozen resets).
     The candidate re-simulations are DISCARDED trade streams and stay
     deliberately unstamped (DEC-VIX-STAMP-WIRE-001 round-6 — see
     :func:`build_candidate_input`); no stamper seam exists here.
@@ -1712,6 +1883,16 @@ def run_and_write_from_specs(
         specs=tuple(specs),
         stage3=stage3,
         leaderboard_trials=leaderboard_trials,
+        roll_schedules=(
+            None
+            if roll_schedule_by_instrument is None
+            else tuple(
+                sorted(
+                    (instrument, tuple(schedule))
+                    for instrument, schedule in roll_schedule_by_instrument.items()
+                )
+            )
+        ),
     )
     report = run_cascade_over_specs(
         specs,
@@ -1719,6 +1900,7 @@ def run_and_write_from_specs(
         config=cascade_config,
         sweep_id=sweep_id,
         leaderboard_trials=leaderboard_trials,
+        roll_schedules=roll_schedule_by_instrument,
     )
     write_manifest(results_root, manifest)
     write_report(results_root, report)
@@ -1760,9 +1942,68 @@ def run_and_write_from_manifest(
         # The FROZEN numbers — the manifest is the only replay-time source
         # (ADR-0008 condition 1; sidecars are never re-read here).
         leaderboard_trials=manifest.leaderboard_trials,
+        # The FROZEN ADR-0012 futures roll schedules the launch recorded —
+        # a futures pool replays under the SAME per-contract hard resets
+        # (a pre-carriage manifest carries None → that pool skips loudly).
+        roll_schedules=(None if manifest.roll_schedules is None else dict(manifest.roll_schedules)),
     )
     write_report(results_root, report)
     return report
+
+
+def check_replay_roll_schedule(
+    *,
+    instrument: str,
+    frozen_schedules: Mapping[str, tuple[int, ...]] | None,
+    fresh_schedule: tuple[int, ...],
+) -> None:
+    """Refuse a manifest replay whose lake re-derivation drifted from the frozen schedule.
+
+    ADR-0012 replay-consistency law (review round-2 findings 1/4/9): the MANUAL
+    ``brutex cascade`` replay loads bars from the CURRENT lake but re-scores
+    under the manifest's FROZEN ``roll_schedules``. If the lake's futures
+    contract set changed since the sweep (a head contract backfilled after the
+    launch's ``head_unowned`` WARN, the next front month pulled, a contract
+    quarantined), the freshly stitched bars would silently desync from the
+    frozen Stage-1A hard resets — either a silent D11 violation (indicators
+    crossing a roll basis gap the frozen schedule never keys) or a
+    misattributed "genuine bug" desync raise. Compare the two schedules and
+    refuse LOUDLY naming both instead.
+
+    Parameters
+    ----------
+    instrument
+        The futures series alias instrument being replayed.
+    frozen_schedules
+        The manifest's recorded ``roll_schedules`` as a mapping (``None`` for
+        a pre-carriage manifest — that pool is loudly SKIPPED by
+        :func:`run_cascade_over_specs`, so no comparison exists to enforce).
+    fresh_schedule
+        The roll schedule re-derived from the CURRENT lake
+        (:func:`~brutex.data.futures_series.resolve_futures_series`).
+
+    Raises
+    ------
+    CascadeWireError
+        When the manifest names *instrument* and its frozen schedule differs
+        from *fresh_schedule* — the message names BOTH schedules and the
+        remediation (re-run ``brutex sweep-all``).
+    """
+    frozen = None if frozen_schedules is None else frozen_schedules.get(instrument)
+    if frozen is None:
+        # Pre-carriage manifest (or an unnamed instrument): there is no frozen
+        # schedule to enforce — run_cascade_over_specs owns the loud pool skip.
+        return
+    if frozen != fresh_schedule:
+        raise CascadeWireError(
+            f"cascade replay REFUSED for {instrument}: the manifest's FROZEN "
+            f"roll_schedule {list(frozen)} does not match the schedule re-derived "
+            f"from the current lake {list(fresh_schedule)} — the lake's futures "
+            "contract set changed since the sweep (a contract was pulled, "
+            "backfilled or removed), so a replay under the frozen resets would "
+            "silently diverge from the stitched bars (ADR-0012 D11); re-run "
+            "`brutex sweep-all` to mint a manifest for the current lake"
+        )
 
 
 def _manifest_window_dt(value: str) -> datetime:
@@ -1787,21 +2028,26 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     """Build a ``bars_for`` over the lake for the MANUAL replay (live-lake adapter).
 
     Reloads each ``(instrument, tf_label)`` slice the manifest references from the
-    Parquet lake via the ONE COMMON slice-read law
-    (:func:`brutex.engine.lake_slice.load_lake_slice` — the SAME ``Catalog`` /
-    ``ReplayFeed`` path the sweep used, reconciling the catalog from on-disk
-    Parquet first, mirroring ``brutex sweep-all``), keyed by the manifest's
-    :class:`BarsContext` window. Marked ``no cover``: it opens DuckDB + reads
-    the real lake (the pure cascade core + the manifest round-trip are fully
-    tested with injected bars; the L1 heal wiring inside ``load_lake_slice`` is
-    exercised end-to-end by ``tests/integration/test_cascade_reconcile_heal.py``).
+    Parquet lake via the SAME ``Catalog`` / ``ReplayFeed`` path the sweep used
+    (reconciling the catalog from on-disk Parquet first, mirroring
+    ``brutex sweep-all``), keyed by the manifest's :class:`BarsContext` window.
+    Marked ``no cover``: it opens DuckDB + reads the real lake (the pure cascade
+    core + the manifest round-trip are fully tested with injected bars; the L1
+    heal wiring below is exercised end-to-end by
+    ``tests/integration/test_cascade_reconcile_heal.py``; the FUTURES replay
+    branch below — the once-per-replay ``resolve_futures_series`` +
+    :func:`check_replay_roll_schedule` cross-check + the per-slice
+    ``resolution=`` threading — is exercised end-to-end, with negative
+    assertions, by ``tests/integration/test_sweep_all_futures_launch.py``'s
+    ``test_manual_cascade_replays_then_refuses_a_drifted_lake``,
+    ``test_dashboard_cascade_route_400s_a_drifted_lake`` and
+    ``test_manual_cascade_interior_hole_is_a_clean_user_error``).
 
     DEC-LAKE-HEAL-001 (L1): the reconcile's free invariant piggyback returns
     any poisoned-partition findings on ``ReconcileResult.findings``; ONE
-    :func:`~brutex.data.lake_heal.heal_after_reconcile` call (inside
-    ``load_lake_slice``) heals them BEFORE the feed consumes the slice (auto
-    mode; ``BRUTEX_LAKE_HEAL=observe`` logs only). ``LakeWriteHalt`` propagates
-    to the CLI top-level halt handling.
+    :func:`~brutex.data.lake_heal.heal_after_reconcile` call heals them BEFORE
+    the feed consumes the slice (auto mode; ``BRUTEX_LAKE_HEAL=observe`` logs
+    only). ``LakeWriteHalt`` propagates to the CLI top-level halt handling.
 
     Parameters
     ----------
@@ -1816,30 +2062,96 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     -------
     Callable[[str, str], list[CandleBar]]
         A ``(instrument, tf_label) -> bars`` closure over the loaded slices.
+
+    Raises
+    ------
+    CascadeWireError
+        When the manifest carries a frozen ``roll_schedules`` entry for a
+        futures instrument and the CURRENT lake re-derives a DIFFERENT
+        schedule (:func:`check_replay_roll_schedule` — the lake's contract
+        set changed since the sweep; both schedules are named).
+    FuturesSeriesError
+        Futures alias only: a resolution refusal from the current lake
+        (interior hole, empty series, …) or a per-contract empty owned
+        window — the same loud-refusal law as the launch mouth.
     """
+    from brutex.calendars.nse import IST
     from brutex.data.catalog import Catalog
-    from brutex.engine.lake_slice import load_lake_slice
+    from brutex.data.futures_series import FuturesSeriesResolution, resolve_futures_series
+    from brutex.data.lake_heal import heal_after_reconcile, lake_heal_audit
+    from brutex.data.lake_read import dedup_bars
+    from brutex.feed.series_load import load_sweep_slice
+    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
 
     ctx = manifest.bars_context
     catalog = catalog_path if catalog_path is not None else lake_root / "catalog.duckdb"
     coords = {(spec.instrument, spec.tf_label) for spec in manifest.specs}
+    # ADR-0012 replay-consistency gate (review round-2 findings 1/4/9): resolve
+    # the futures alias ONCE over the manifest's window, REFUSE loudly when the
+    # re-derived schedule drifted from the manifest's FROZEN one, and pass the
+    # validated resolution into every slice load — so the loader's ownership
+    # cut and the replay's frozen Stage-1A resets provably share ONE schedule
+    # (and the replay never repeats the O(FNO dirs) scan per (instrument, tf)).
+    futures_instruments = sorted({i for i, _tf in coords if is_futures_series_symbol(i)})
+    resolution: FuturesSeriesResolution | None = None
+    if futures_instruments:
+        resolution = resolve_futures_series(
+            lake_root,
+            start=_manifest_window_dt(ctx.start).astimezone(IST).date(),
+            end=_manifest_window_dt(ctx.end).astimezone(IST).date(),
+        )
+        frozen_map = None if manifest.roll_schedules is None else dict(manifest.roll_schedules)
+        for fut_instrument in futures_instruments:
+            check_replay_roll_schedule(
+                instrument=fut_instrument,
+                frozen_schedules=frozen_map,
+                fresh_schedule=resolution.roll_schedule,
+            )
     slices: dict[tuple[str, str], list[CandleBar]] = {}
     with Catalog.open(catalog) as cat:
+
+        def _heal_on_reconcile(result: ReconcileResult) -> None:
+            if result.findings:
+                # DEC-LAKE-HEAL-001 L1: heal what the reconcile detected for
+                # free, so the sweep/replay reads clean bars. The audit sink is
+                # opened lazily (findings-gated — a clean lake writes nothing).
+                with lake_heal_audit(lake_root) as audit:
+                    heal_after_reconcile(
+                        result,
+                        lake_root=lake_root,
+                        catalog=cat,
+                        audit=audit,
+                        on_report=lambda r: emit_lake_heal_alert(r, scope="reconcile"),
+                    )
+
         for instrument, tf_label in coords:
-            # The ONE COMMON slice-read law (reconcile → L1 heal → feed →
-            # keep-FIRST dedup); the dedup-source label keeps the historical
-            # ``cascade_wire:<instrument>/<tf>`` log bytes unchanged.
-            slices[(instrument, tf_label)] = load_lake_slice(
+            # The ONE alias-aware slice loader (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
+            # spot/verbatim dirs take the moved reconcile + ReplayFeed block
+            # byte-identically (the resolution param is never read on that
+            # path); the NIFTY-futures series alias is roll-stitched from the
+            # VALIDATED resolution above — never a fresh per-slice re-resolve.
+            # The L1 heal hook rides the loader's on_reconcile seam.
+            loaded = load_sweep_slice(
+                cat=cat,
                 lake_root=lake_root,
-                catalog=cat,
                 exchange=ctx.exchange,
                 segment=ctx.segment,
                 symbol=instrument,
                 interval=tf_label,
                 start=_manifest_window_dt(ctx.start),
                 end=_manifest_window_dt(ctx.end),
-                dedup_source=f"cascade_wire:{instrument}/{tf_label}",
+                resolution=resolution,
+                on_reconcile=_heal_on_reconcile,
             )
+            # Belt-and-braces read gate (DEC-LAKE-READ-UNIQUE-001): the feed's
+            # Catalog.get_bars already collapses stored duplicates keep-FIRST;
+            # this idempotent second pass pins the invariant at the cascade's
+            # own input mouth (a clean stream passes through byte-identically).
+            clean_bars, _dropped = dedup_bars(
+                loaded,
+                source=f"cascade_wire:{instrument}/{tf_label}",
+            )
+            slices[(instrument, tf_label)] = clean_bars
 
     def bars_for(instrument: str, tf_label: str) -> list[CandleBar]:
         return slices.get((instrument, tf_label), [])
@@ -1867,6 +2179,7 @@ __all__ = [
     "cascade_config_for_sweep",
     "cascade_config_from_dict",
     "cascade_config_to_dict",
+    "check_replay_roll_schedule",
     "load_bars_for_manifest",
     "load_manifest",
     "manifest_from_json",
