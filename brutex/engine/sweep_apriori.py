@@ -317,7 +317,8 @@ def effective_max_combos(
       (``k > n_unique`` or ``k < 0``) contributes NOTHING to the raise — it is
       filtered out (``count_combos`` would raise for it) and DEFERRED to the
       downstream ``SweepGridConfig`` validation, which refuses it with a clean
-      ``CliUserError`` (never a raw ``ValueError`` here, never an auto-raise).
+      ``EXIT_USER_ERROR`` (its ``ValueError`` caught at the CLI build sites, no
+      traceback; never a raw ``ValueError`` here, never an auto-raise).
 
     Parameters
     ----------
@@ -463,13 +464,7 @@ def _all_subsets_frequent(
     subsets are frequent (anti-monotone downward closure).
     """
     for drop in range(len(candidate)):
-        # ``# pragma: no mutate``: mutmut 2.5.1 materialises a no-op artifact for this
-        # slice-concat that is BYTE-IDENTICAL to the source (``mutmut apply`` yields an
-        # empty diff), so it mis-reports SURVIVED and reddens the wired zero-survivor
-        # gate. The line IS genuinely exercised — a real ``+``→``-`` substitution fails
-        # 22 tests (tuples reject ``-``), so this is the equivalent-artifact class, not
-        # a coverage gap.
-        subset = candidate[:drop] + candidate[drop + 1 :]  # pragma: no mutate
+        subset = candidate[:drop] + candidate[drop + 1 :]
         if not _in_sorted(frontier_masks, _mask_of(subset)):
             return False
     return True

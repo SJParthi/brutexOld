@@ -1316,6 +1316,47 @@ def test_effective_max_combos_all_k_out_of_range_defers_no_crash() -> None:
     assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
 
 
+def test_effective_max_combos_k_zero_in_range_counted() -> None:
+    # Kills mutants 18/19: ``0 <= k`` → ``1 <= k`` and ``0 <= k`` → ``0 < k`` both drop
+    # the in-range k=0 case (``C(n, 0) == 1``, legitimately in count_combos's domain
+    # ``0 <= k <= n``), so the raise generator would go empty → needed=0 → return the
+    # requested 0 unchanged with NO raise log. In-range k=0 must contribute C(n,0)=1.
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=True,
+            k_values=[0],
+            n_unique=60,
+            requested_max_combos=0,
+            requested_is_explicit=False,
+        )
+    assert out == 1
+    raised = [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"]
+    assert len(raised) == 1
+
+
+def test_effective_max_combos_k_equals_n_unique_in_range_counted() -> None:
+    # Kills mutant 20: ``k <= n_unique`` → ``k < n_unique`` drops the in-range
+    # k=n_unique case (``C(n, n) == 1``, legitimately in count_combos's domain
+    # ``0 <= k <= n``), so the raise generator would go empty → needed=0 → return the
+    # requested 0 unchanged with NO raise log. In-range k=n_unique must contribute
+    # C(n,n)=1.
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=True,
+            k_values=[60],
+            n_unique=60,
+            requested_max_combos=0,
+            requested_is_explicit=False,
+        )
+    assert out == 1
+    raised = [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"]
+    assert len(raised) == 1
+
+
 def test_effective_max_combos_grid_guard_interaction() -> None:
     # (e) The load-bearing interaction: the guards' LOGIC is byte-unchanged — we only
     # FEED them a value. With n_unique = 60, C(60, 4) = 487_635 > the default 100k,
