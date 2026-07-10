@@ -4592,6 +4592,7 @@ def build_app(
         # synchronous DuckDB reads that sat ON the event loop); the ValueError → 400
         # mapping stays OUTSIDE the offload (the #1622 api_universe_instruments idiom).
         def _resolve_targets() -> tuple[list[Instrument], str]:
+            """Resolve the retry-failed selection to instruments OFF the event loop."""
             return resolve_pull_targets(
                 symbols=symbols,
                 symbol=symbol,
@@ -6761,6 +6762,7 @@ def build_app(
             return 0
 
         def _on_success() -> None:
+            """Bump the write-generation iff the sweep genuinely succeeded (rounds 5-8 law)."""
             if sweep_succeeded:
                 _summary_cache.mark_dirty()
 
@@ -7096,6 +7098,7 @@ def build_app(
             return 0
 
         def _on_success() -> None:
+            """Bump the write-generation iff at least ONE exchange group succeeded."""
             if any_group_succeeded:
                 _summary_cache.mark_dirty()
 
