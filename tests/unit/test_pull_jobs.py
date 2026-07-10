@@ -1657,3 +1657,56 @@ class TestRunningJobKind:
         )
         captured[0]()
         assert job.running_job_kind is None
+
+
+# ── Cooperative stop flag (DEC-AUTO-RESUME-ZERO-SURPRISES-001) ───────────────
+
+
+class TestCooperativeStop:
+    """request_stop / stop_requested — advisory, per-run reset, never a halt."""
+
+    def test_flag_starts_clear_and_request_sets_it(self) -> None:
+        job = _job()
+        assert job.stop_requested is False
+        assert job.request_stop() is False, "no run live — the route must SAY so"
+        assert job.stop_requested is True
+
+    def test_request_during_run_reports_live_and_work_sees_it(self) -> None:
+        job = _job()
+        observed: list[bool] = []
+
+        def work(_hook: object) -> None:
+            # The work body consults the flag mid-run (the run_full_pipeline
+            # should_stop binding) — request_stop from another thread would be
+            # identical; the sync spawner makes this deterministic.
+            observed.append(job.stop_requested)
+            assert job.request_stop() is True, "a live run reports pull_running"
+            observed.append(job.stop_requested)
+
+        assert job.start(work, total=1) is True
+        assert observed == [False, True]
+
+    def test_next_start_clears_a_stale_request(self) -> None:
+        # A stale stop request from a finished (or never-started) run must
+        # never stop the NEXT run: start() clears the flag per run.
+        job = _job()
+        job.request_stop()
+        assert job.stop_requested is True
+        seen: list[bool] = []
+
+        def work(_hook: object) -> None:
+            seen.append(job.stop_requested)
+
+        assert job.start(work, total=1) is True
+        assert seen == [False]
+
+    def test_refused_start_does_not_clear_a_live_runs_flag(self) -> None:
+        # In-process single-flight refusal happens BEFORE the per-run clear, so
+        # a second click can never wipe the running pull's stop request.
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()), spawn=lambda fn: None
+        )
+        assert job.start(lambda _h: None, total=1) is True  # worker never runs (no spawn)
+        job.request_stop()
+        assert job.start(lambda _h: None, total=1) is False  # refused — already running
+        assert job.stop_requested is True

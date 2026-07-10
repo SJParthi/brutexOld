@@ -19,6 +19,7 @@ from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_pull import (
     MAX_QUARANTINED_NAMES,
+    PHASE_HISTORICAL,
     PHASE_METADATA,
     PHASE_PREBUILD,
     PHASE_SPOT,
@@ -1917,3 +1918,122 @@ class TestStrictGateSequencer:
             assert report.post_steps_strict_skipped is False
             assert "post-steps SKIPPED" not in report.note
         assert f"quarantined: {quarantined_name}" in report.note  # headlined either way
+
+
+# ── Cooperative operator STOP (DEC-AUTO-RESUME-ZERO-SURPRISES-001) ───────────
+
+
+class TestShouldStop:
+    """The phase-boundary stop probe — graceful, honest, default byte-identical."""
+
+    def test_unwired_should_stop_is_byte_identical(self) -> None:
+        # The default (None) never consults anything — a clean run completes.
+        spot = _Spy(_spot())
+        meta = _Spy(_metadata())
+        hist = _Spy(_composite(historical=_historical_inner()))
+        report = run_full_pipeline(run_spot=spot, run_metadata=meta, run_historical=hist)
+        assert report.stopped_after is None
+        assert meta.called is True and hist.called is True
+
+    def test_false_probe_never_stops(self) -> None:
+        probes: list[bool] = []
+
+        def _probe() -> bool:
+            probes.append(True)
+            return False
+
+        spot = _Spy(_spot())
+        meta = _Spy(_metadata())
+        hist = _Spy(_composite(historical=_historical_inner()))
+        prebuild = _PrebuildSpy(_outcome())
+        report = run_full_pipeline(
+            run_spot=spot,
+            run_metadata=meta,
+            run_historical=hist,
+            run_prebuild=prebuild,
+            should_stop=_probe,
+        )
+        assert report.stopped_after is None
+        assert prebuild.called is True
+        # Consulted at each of the three phase boundaries.
+        assert len(probes) == 3
+
+    def test_stop_after_spot_boundary(self) -> None:
+        spot = _Spy(_spot())
+        meta = _Spy(_metadata())
+        hist = _Spy(_composite(historical=_historical_inner()))
+        report = run_full_pipeline(
+            run_spot=spot, run_metadata=meta, run_historical=hist, should_stop=lambda: True
+        )
+        assert report.stopped_after == PHASE_SPOT
+        assert report.metadata is None and report.historical is None
+        assert report.ok is False
+        assert meta.called is False and hist.called is False
+        assert "stopped by operator request after spot" in report.note
+        # HONESTY: nothing is fabricated as complete by stopping.
+        assert "nothing" in report.note
+
+    def test_stop_after_metadata_boundary(self) -> None:
+        # The flag flips DURING the metadata phase: spot's boundary read False,
+        # metadata's reads True — later phases never start.
+        answers = iter([False, True])
+        spot = _Spy(_spot())
+        meta = _Spy(_metadata())
+        hist = _Spy(_composite(historical=_historical_inner()))
+        report = run_full_pipeline(
+            run_spot=spot,
+            run_metadata=meta,
+            run_historical=hist,
+            should_stop=lambda: next(answers),
+        )
+        assert report.stopped_after == PHASE_METADATA
+        assert report.metadata is not None and report.historical is None
+        assert meta.called is True and hist.called is False
+        assert "stopped by operator request after metadata" in report.note
+
+    def test_stop_after_historical_skips_post_steps(self) -> None:
+        # The flag flips during the historical phase: the fetches complete but
+        # the heavy prebuild + the movers warm are SKIPPED (nothing lost — the
+        # next pull re-derives; the strict-barrier guarantee).
+        answers = iter([False, False, True])
+        warmed: list[str] = []
+
+        def _warm() -> MoversWarmResult:
+            warmed.append("spot")
+            return MoversWarmResult(warmed=1, failed=0, total=1)
+
+        spot = _Spy(_spot())
+        meta = _Spy(_metadata())
+        hist = _Spy(_composite(historical=_historical_inner()))
+        prebuild = _PrebuildSpy(_outcome())
+        report = run_full_pipeline(
+            run_spot=spot,
+            run_metadata=meta,
+            run_historical=hist,
+            warm_spot_movers=_warm,
+            run_prebuild=prebuild,
+            should_stop=lambda: next(answers),
+        )
+        assert report.stopped_after == PHASE_HISTORICAL
+        assert report.historical is not None
+        assert prebuild.called is False
+        assert warmed == []
+        assert report.prebuild_built is None
+        assert report.movers_warmed is None
+        assert "stopped by operator request after historical" in report.note
+        assert "prebuild + movers NOT run" in report.note
+        assert report.ok is False
+
+    def test_stop_after_historical_still_names_quarantined_symbols(self) -> None:
+        # The stop arm keeps the chunk-3 headline honesty: a quarantined symbol
+        # is still NAMED on the stopped report (never hidden by the stop).
+        spot = _spot()
+        spot.symbols.append(SymbolPullResult(symbol="POISON", completed=0, failed=1, no_data=0))
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+            should_stop=iter([False, False, True]).__next__,
+        )
+        assert report.stopped_after == PHASE_HISTORICAL
+        assert "POISON" in report.quarantined_symbols

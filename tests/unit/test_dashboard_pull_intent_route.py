@@ -429,7 +429,15 @@ def test_resume_refires_the_same_quadruple_and_clears_on_completion(
     assert spot_calls[0]["dry_run"] is False
     # The resumed run's completion cleared the intent (on_finally).
     _wait_for(lambda: not intent_store.path.exists())
-    assert intent_store.banner.snapshot() is None
+    # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): a successful
+    # resume is no longer silent — the NON-critical notice banner names the
+    # launch, and it SURVIVES the launch's own clear_banner_after_start
+    # (ordering pin: start → clear → set-notice). Supersedes the pre-fix
+    # "no banner on success" assertion.
+    banner = intent_store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == "notice"
+    assert "intent resume" in banner["message"]
 
 
 def test_resume_stale_selection_clears_intent_and_raises_banner(
@@ -548,7 +556,14 @@ def test_legacy_seam_fires_whole_universe_pull_and_clears_on_completion(
     assert spot_calls[0]["dry_run"] is False
     # The resumed run's completion cleared the synthesized intent (on_finally).
     _wait_for(lambda: not intent_store.path.exists())
-    assert intent_store.banner.snapshot() is None
+    # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the legacy
+    # WHOLE-UNIVERSE re-fire — the loudest surprise — now names itself on the
+    # notice banner (supersedes the pre-fix "no banner on success" pin).
+    banner = intent_store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == "notice"
+    assert "whole-universe resume" in banner["message"]
+    assert "WHOLE admitted universe" in banner["message"]
 
 
 def test_legacy_seam_peer_held_flock_skips_quietly(

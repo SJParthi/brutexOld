@@ -12,12 +12,14 @@ from __future__ import annotations
 import threading
 from datetime import UTC, date, datetime
 
+import structlog.testing
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
     DEMOTED_SETTLE_REASONS,
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
     FAILED,
+    FAILED_TERMINAL_THRESHOLD,
     PLANNED,
     REOPENED_MARKER,
     SETTLED_STATUSES,
@@ -26,7 +28,9 @@ from brutex.data.window_ledger import (
     LedgerProgress,
     WindowLedger,
     expired_window_settle_reason,
+    fetch_exhausted_settle_reason,
     is_expired_window_settle_reason,
+    is_fetch_exhausted_settle_reason,
 )
 
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
@@ -663,6 +667,7 @@ class TestPruneSuperseded:
                     None,
                     None,
                     None,
+                    0,
                 )
             ]
         )
@@ -2089,14 +2094,17 @@ class TestLedgerRecordRow:
         records = ledger.records()
         assert ledger.to_rows() == [ledger_record_row(r) for r in records]
         row = ledger_record_row(records[0])
-        assert len(row) == 16
+        assert len(row) == 17
         assert row[0] == records[0].market
         assert row[13] == 3  # bars_net_new (back-compat append order)
-        # empty_retries / transient_retries are the LAST two fields
-        # (DEC-RETRY-COUNTER-SPLIT-001 append-LAST back-compat order); this
-        # caller did not observe the fetch ladder, so both read honest None.
+        # empty_retries / transient_retries follow (DEC-RETRY-COUNTER-SPLIT-001
+        # append-LAST back-compat order); this caller did not observe the fetch
+        # ladder, so both read honest None.
         assert row[14] is None
         assert row[15] is None
+        # failed_streak is the LAST field (DEC-AUTO-RESUME-ZERO-SURPRISES-001
+        # append-LAST back-compat order) — a SUCCESS record reads 0.
+        assert row[16] == 0
 
 
 class TestRetryCounterSplit:
@@ -2226,3 +2234,250 @@ class TestRetryCounterSplit:
         assert by_symbol["NIFTY"].transient_retries == 1
         assert by_symbol["SENSEX"].empty_retries is None
         assert by_symbol["SENSEX"].transient_retries is None
+
+
+# ── Fetch-exhausted terminal settle (DEC-AUTO-RESUME-ZERO-SURPRISES-001) ─────
+
+
+class TestFetchExhaustedReason:
+    """The distinct reason stamp + its predicate — pure helpers."""
+
+    def test_reason_round_trips_predicate(self) -> None:
+        reason = fetch_exhausted_settle_reason(5)
+        assert reason == "repeated fetch failure (5 failed attempt(s), exhausted)"
+        assert is_fetch_exhausted_settle_reason(reason) is True
+
+    def test_predicate_rejects_none_and_foreign_reasons(self) -> None:
+        assert is_fetch_exhausted_settle_reason(None) is False
+        assert is_fetch_exhausted_settle_reason("GrowwServerError") is False
+        # The EMPTY settle stamps must never key the exhausted label.
+        assert is_fetch_exhausted_settle_reason(expired_window_settle_reason(1)) is False
+        # Prefix without the suffix (and vice versa) does not match.
+        assert is_fetch_exhausted_settle_reason("repeated fetch failure (5") is False
+        assert is_fetch_exhausted_settle_reason("x, exhausted)") is False
+
+
+def _fail(ledger: WindowLedger, *, times: int = 1, **kwargs: object) -> str:
+    """Record `times` consecutive FAILED outcomes for the default key."""
+    status = ""
+    for _ in range(times):
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type="GrowwServerError",
+            bars_appended=0,
+            now=_NOW,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    return status
+
+
+class TestFetchExhaustedSettle:
+    """failed_streak → terminal SKIPPED at FAILED_TERMINAL_THRESHOLD."""
+
+    def test_k_minus_one_failures_stay_failed(self) -> None:
+        # The below-threshold golden: byte-identical re-pullable FAILED.
+        ledger = WindowLedger()
+        assert _fail(ledger, times=FAILED_TERMINAL_THRESHOLD - 1) == FAILED
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.failed_streak == FAILED_TERMINAL_THRESHOLD - 1
+        assert rec.last_error == "GrowwServerError"
+        assert ledger.is_skippable(_key()) is False
+        assert ledger.newly_exhausted_failed == 0
+
+    def test_k_failures_settle_skipped_with_distinct_stamp_and_warn(self) -> None:
+        ledger = WindowLedger()
+        with structlog.testing.capture_logs() as logs:
+            assert _fail(ledger, times=FAILED_TERMINAL_THRESHOLD) == SKIPPED
+        rec = ledger.records()[0]
+        assert rec.status == SKIPPED
+        assert is_fetch_exhausted_settle_reason(rec.last_error)
+        assert rec.last_error == fetch_exhausted_settle_reason(FAILED_TERMINAL_THRESHOLD)
+        assert rec.failed_streak == FAILED_TERMINAL_THRESHOLD
+        assert ledger.is_skippable(_key()) is True
+        # The distinct verdict tally + the generic one both count it.
+        assert ledger.newly_exhausted_failed == 1
+        assert ledger.newly_settled_skipped == 1
+        # ONE loud WARN naming the window + the recovery lever.
+        warns = [e for e in logs if e["event"] == "window_ledger.fetch_exhausted_settled"]
+        assert len(warns) == 1
+        assert warns[0]["log_level"] == "warning"
+        assert warns[0]["security_id"] == "NIFTY"
+        assert warns[0]["failed_streak"] == FAILED_TERMINAL_THRESHOLD
+        assert "reopen-skipped" in warns[0]["remediation"]
+
+    def test_success_resets_the_failure_run(self) -> None:
+        ledger = WindowLedger()
+        _fail(ledger, times=FAILED_TERMINAL_THRESHOLD - 1)
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.records()[0].failed_streak == 0
+        # The full budget is regained: K-1 more failures stay FAILED.
+        assert _fail(ledger, times=FAILED_TERMINAL_THRESHOLD - 1) == FAILED
+        assert ledger.records()[0].failed_streak == FAILED_TERMINAL_THRESHOLD - 1
+
+    def test_empty_resets_the_failure_run(self) -> None:
+        # A clean 200 (even with zero bars) breaks the failure run — the fetch
+        # WORKED; empty_streak is the independent no-data machinery.
+        ledger = WindowLedger()
+        _fail(ledger, times=FAILED_TERMINAL_THRESHOLD - 1)
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        rec = ledger.records()[0]
+        assert rec.status == EMPTY
+        assert rec.failed_streak == 0
+        assert rec.empty_streak == 1  # the EMPTY machinery is untouched
+
+    def test_suppressed_empty_still_resets_failed_streak(self) -> None:
+        # suppress_settle marks the no-data EVIDENCE untrusted; the vendor
+        # still ANSWERED, so the fetch-failure run is honestly broken.
+        ledger = WindowLedger()
+        _fail(ledger, times=2)
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, suppress_settle=True
+        )
+        rec = ledger.records()[0]
+        assert rec.failed_streak == 0
+        assert rec.empty_streak == 0  # preserved (not bumped) by the breaker law
+
+    def test_suppress_settle_gates_the_exhausted_settle_off(self) -> None:
+        # A throttle storm must not cement windows: the Kth FAILED recorded
+        # while the breaker is tripped counts the streak but NEVER settles.
+        ledger = WindowLedger()
+        _fail(ledger, times=FAILED_TERMINAL_THRESHOLD - 1)
+        assert _fail(ledger, times=1, suppress_settle=True) == FAILED
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.failed_streak == FAILED_TERMINAL_THRESHOLD
+        assert ledger.newly_exhausted_failed == 0
+        # The next UNsuppressed failure settles honestly (streak 6 named).
+        assert _fail(ledger, times=1) == SKIPPED
+        assert ledger.records()[0].last_error == fetch_exhausted_settle_reason(
+            FAILED_TERMINAL_THRESHOLD + 1
+        )
+
+    def test_degraded_demotion_never_bumps_or_settles_the_failure_run(self) -> None:
+        # A completeness demotion is a returned-bars fetch — NOT a fetch
+        # failure: the streak is preserved (never bumped), and the exhausted
+        # arm is unreachable for it even with a pre-existing streak ≥ K.
+        ledger = WindowLedger()
+        _fail(ledger, times=FAILED_TERMINAL_THRESHOLD - 1)
+        status = ledger.record(
+            _key(),
+            raw_bars=10,
+            error_type=None,
+            bars_appended=10,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        rec = ledger.records()[0]
+        assert status == FAILED  # the demotion, not an exhausted settle
+        assert rec.failed_streak == FAILED_TERMINAL_THRESHOLD - 1  # preserved
+        assert not is_fetch_exhausted_settle_reason(rec.last_error)
+        assert ledger.newly_exhausted_failed == 0
+
+    def test_degraded_accept_gap_settle_resets_failed_streak(self) -> None:
+        # The accept-gap SKIPPED settle is a definitive answer — the failure
+        # run ends with it (the non-exhausted-settle reset arm).
+        ledger = WindowLedger()
+        _fail(ledger, times=2)
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(
+                _key(),
+                raw_bars=10,
+                error_type=None,
+                bars_appended=10,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="INTERIOR_GAP",
+            )
+        rec = ledger.records()[0]
+        assert rec.status == SKIPPED
+        assert rec.last_error == "INTERIOR_GAP"
+        assert rec.failed_streak == 0
+
+    def test_reopen_skipped_reopens_exhausted_row_with_full_budget(self) -> None:
+        # (ii) of the design: recovery machinery inherits UNCHANGED — the
+        # operator re-open matches the exhausted row regardless of reason and
+        # resets BOTH streaks.
+        ledger = WindowLedger()
+        _fail(ledger, times=FAILED_TERMINAL_THRESHOLD)
+        assert ledger.records()[0].status == SKIPPED
+        assert ledger.reopen_skipped() == 1
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == REOPENED_MARKER
+        assert rec.failed_streak == 0
+        assert rec.empty_streak == 0
+        assert ledger.is_skippable(_key()) is False
+        # The regained budget is the FULL K again.
+        assert _fail(ledger, times=FAILED_TERMINAL_THRESHOLD - 1) == FAILED
+
+    def test_audit_reopen_round_robin_includes_exhausted_rows(self) -> None:
+        # The 25-per-pull mechanized audit re-opens SKIPPED rows regardless of
+        # settle reason — the exhausted settle is never permanently blind.
+        ledger = WindowLedger()
+        _fail(ledger, times=FAILED_TERMINAL_THRESHOLD)
+        reopened, cursor = ledger.audit_reopen_skipped(start_after=None)
+        assert reopened == 1
+        assert cursor is not None
+        assert ledger.records()[0].status == FAILED
+
+    def test_exhausted_settle_excluded_from_outstanding_counts(self) -> None:
+        # (i) of the design: the settled window stops counting as outstanding
+        # work — progress reads settled, not failed (detect_incomplete_pull
+        # reads planned+failed off this same fold).
+        ledger = WindowLedger()
+        _fail(ledger, times=FAILED_TERMINAL_THRESHOLD)
+        counts = ledger.progress_counts()
+        assert counts.failed == 0
+        assert counts.planned == 0
+        assert counts.settled == 1
+
+    def test_settle_known_gap_resets_failed_streak(self) -> None:
+        ledger = WindowLedger()
+        _fail(ledger, times=3)
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        assert ledger.records()[0].failed_streak == 0
+
+    def test_round_trip_preserves_failed_streak(self) -> None:
+        ledger = WindowLedger()
+        _fail(ledger, times=2)
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.to_rows() == ledger.to_rows()
+        assert restored.records()[0].failed_streak == 2
+
+    def test_from_rows_threshold_failed_kwarg_mirrors_threshold(self) -> None:
+        # The additive threshold_failed kwarg (the empty twin's shape): a
+        # restored ledger with K'=2 settles on the second failure.
+        ledger = WindowLedger()
+        _fail(ledger, times=1)
+        restored = WindowLedger.from_rows(ledger.to_rows(), threshold_failed=2)
+        status = restored.record(
+            _key(), raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=_NOW
+        )
+        assert status == SKIPPED
+        assert restored.records()[0].last_error == fetch_exhausted_settle_reason(2)
+
+    def test_plan_and_seed_rows_start_with_zero_failed_streak(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key("A"), now=_NOW)
+        ledger.seed_lake_success(_key("B"), bars=10, now=_NOW)
+        by_symbol = {r.security_id: r for r in ledger.records()}
+        assert by_symbol["A"].failed_streak == 0
+        assert by_symbol["B"].failed_streak == 0
+
+    def test_empty_settle_path_unregressed_beside_failures(self) -> None:
+        # The EMPTY→SKIPPED machinery is byte-identical: interleaved FAILED
+        # records preserve the empty streak, and the threshold settle stamps
+        # the EMPTY wording (never the exhausted one).
+        ledger = WindowLedger()
+        for _ in range(EMPTY_TERMINAL_THRESHOLD - 1):
+            ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+            _fail(ledger, times=1)
+        status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        rec = ledger.records()[0]
+        assert status == SKIPPED
+        assert rec.empty_streak == EMPTY_TERMINAL_THRESHOLD
+        assert not is_fetch_exhausted_settle_reason(rec.last_error)
+        assert rec.failed_streak == 0

@@ -595,7 +595,7 @@
 
   <div id="pullpanel">
     <div class="beam"></div>
-    <div class="title"><b id="pulltitle">Pulling…</b><span class="chip stall" id="stallchip"></span><span class="counter" id="counter">0</span><span class="sub">units</span><span class="sub" id="subunit"></span><span class="chip stale" id="feedage"></span></div>
+    <div class="title"><b id="pulltitle">Pulling…</b><span class="chip stall" id="stallchip"></span><span class="counter" id="counter">0</span><span class="sub">units</span><span class="sub" id="subunit"></span><span class="chip stale" id="feedage"></span><button type="button" id="pullStopBtn" title="Cooperative stop (DEC-AUTO-RESUME-ZERO-SURPRISES-001): clears the durable resume intent (no auto-resume on the next boot) and asks the running pipeline to stop at its next phase boundary — the in-flight phase finishes; a process restart is the hard stop." style="margin-left:auto;background:transparent;color:var(--red,#FF5C5C);border:1px solid var(--red,#FF5C5C);border-radius:6px;padding:2px 10px;font:inherit;font-size:12px;cursor:pointer;">⏹ stop</button><span class="sub" id="pullStopMsg"></span></div>
     <div class="tfgrid" id="tfgrid"></div>
     <!-- DEC-PROGRESS-WINDOW-UNITS-001: the card counts COARSE units (spot:
          symbol×interval chunks; options: all-or-nothing SERIES of ~dozens of
@@ -1526,6 +1526,38 @@ if (PIPELINE_BTN) {
       startAndPoll(
         url,
         "EVERYTHING — spot → expiries + contracts → historical → pre-build");
+    }
+  };
+}
+
+/* ── STOP control (DEC-AUTO-RESUME-ZERO-SURPRISES-001, honest minimum):
+   ⏹ posts /api/v1/pull/stop — ONE action that clears the durable resume
+   intent (kills the boot re-loop) + sets the cooperative stop flag (the
+   pipeline observes it at phase boundaries only; in-flight windows finish;
+   a process restart remains the hard stop). The verdict renders via
+   textContent ONLY (CodeQL XSS guard); confirm() gates the click. ── */
+const PULL_STOP_BTN = document.getElementById("pullStopBtn");
+if (PULL_STOP_BTN) {
+  PULL_STOP_BTN.onclick = async () => {
+    if (!confirm(
+      "Stop the pull?\n\nThis clears the resume intent (no auto-resume on the " +
+      "next boot) and asks the running pipeline to stop at its NEXT phase " +
+      "boundary — the in-flight phase finishes first; a process restart is " +
+      "the hard stop."
+    )) return;
+    const msg = document.getElementById("pullStopMsg");
+    try {
+      const r = await fetch("/api/v1/pull/stop", { method: "POST" });
+      const body = await r.json();
+      if (msg) {
+        msg.textContent = body.pull_running
+          ? "stop requested — stops at the next phase boundary" +
+            (body.intent_cleared ? "; intent cleared" : "")
+          : "no pull running" + (body.intent_cleared
+              ? " — stale resume intent cleared (no auto-resume next boot)" : "");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "stop request failed — retry";
     }
   };
 }

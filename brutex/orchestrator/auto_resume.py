@@ -267,6 +267,7 @@ def maybe_resume_on_boot(
     enabled: bool | None = None,
     intent_present: Callable[[], bool] | None = None,
     resume_intent: Callable[[], None] | None = None,
+    on_error: Callable[[Exception], None] | None = None,
 ) -> ResumeVerdict:
     """Resume an in-progress pull at boot iff the flag is ON + work is outstanding — **never raises**.
 
@@ -300,7 +301,16 @@ def maybe_resume_on_boot(
     4. **Guard.** ANY exception from *load_ledger* / *detect* / *resume* is
        CAUGHT, logged (``auto_resume.error``), and returned as
        :attr:`ResumeVerdict.ERROR` — a boot can NEVER be crashed or blocked by
-       the resume attempt (Golden Rule #10); the next boot re-tries.
+       the resume attempt (Golden Rule #10); the next boot re-tries. When
+       *on_error* is wired (DEC-AUTO-RESUME-ZERO-SURPRISES-001,
+       announce-on-failure) the guard ALSO fires it with the caught exception
+       — the dashboard binds
+       :func:`~brutex.dashboard.pull_intent.build_resume_error_hook` (red
+       banner when a store exists + the CRITICAL Telegram alert), so a resume
+       that cannot even launch is never log-only. The SAME hook fires from the
+       intent-arm's own error branch (step 0). Best-effort: a raising
+       *on_error* is caught + logged (``auto_resume.on_error_failed``) and the
+       verdict is unchanged — the hook can never crash the boot thread either.
 
     Best-effort + observable: each outcome emits ONE structured log line so the
     operator sees on boot whether a resume fired, was skipped, or errored. O(1)
@@ -308,6 +318,26 @@ def maybe_resume_on_boot(
     idempotence (re-pulling a settled window is a no-op; only unsettled windows
     re-pull), so this helper is purely the DECISION.
     """
+
+    def _fire_on_error(exc: Exception) -> None:
+        """Announce-on-failure hook dispatch — best-effort, never raises.
+
+        DEC-AUTO-RESUME-ZERO-SURPRISES-001: the log-only ``auto_resume.error``
+        guard gains an operator-facing surface (banner + Telegram via the
+        injected hook). Its own failure is caught here so the verdict path
+        stays exactly the pre-hook behaviour.
+        """
+        if on_error is None:
+            return
+        try:
+            on_error(exc)
+        except Exception as hook_exc:  # pylint: disable=broad-exception-caught — best-effort, never crash boot
+            _LOG.warning(
+                "auto_resume.on_error_failed",
+                error=str(hook_exc),
+                error_type=type(hook_exc).__name__,
+            )
+
     if intent_present is not None and resume_intent is not None:
         try:
             has_intent = intent_present()
@@ -329,6 +359,7 @@ def maybe_resume_on_boot(
                 # NOT spawned this boot (it would race the pipeline resume's
                 # flock on the next attempt); the next boot re-tries.
                 _LOG.warning("auto_resume.error", error=str(exc), error_type=type(exc).__name__)
+                _fire_on_error(exc)
                 return ResumeVerdict.ERROR
             return ResumeVerdict.INTENT_RESUMED
     active = resolve_auto_resume_on_boot() if enabled is None else enabled
@@ -353,7 +384,10 @@ def maybe_resume_on_boot(
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never crash boot
         # Reliability over everything: a boot MUST NOT be blocked or crashed by a
         # failed resume trigger (an unreadable ledger, a resume action that raises).
-        # Log it and return ERROR; the next boot re-tries idempotently.
+        # Log it and return ERROR; the next boot re-tries idempotently. The
+        # injected on_error hook (banner + alert) makes the failure VISIBLE —
+        # previously this guard was log-only (DEC-AUTO-RESUME-ZERO-SURPRISES-001).
         _LOG.warning("auto_resume.error", error=str(exc), error_type=type(exc).__name__)
+        _fire_on_error(exc)
         return ResumeVerdict.ERROR
     return ResumeVerdict.RESUMED

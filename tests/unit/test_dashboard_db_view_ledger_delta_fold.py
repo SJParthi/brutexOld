@@ -30,7 +30,7 @@ so demotions survive). This suite pins:
 * a hypothesis parity oracle: random upsert sequences across base + N deltas →
   SQL fold ≡ the reference Python dict fold, record-for-record;
 * drift pins: ``_WINDOW_KEY_COLUMNS == window_ledger_store._COLUMNS[:5]`` and
-  ``append_ledger_delta`` writing the full 16-column schema (the base-less
+  ``append_ledger_delta`` writing the full 17-column schema (the base-less
   probe-skip's safety precondition).
 
 Tests MAY import ``window_ledger_store`` (the module itself must not — the
@@ -95,11 +95,13 @@ def _row(
     bars: int = 0,
     attempts: int = 1,
 ) -> tuple[Any, ...]:
-    """One 16-field ledger row tuple (the exact ``_COLUMNS`` shape).
+    """One 17-field ledger row tuple (the exact ``_COLUMNS`` shape).
 
-    The trailing ``empty_retries``/``transient_retries`` pair is ``None`` — the
+    The ``empty_retries``/``transient_retries`` pair is ``None`` — the
     honest-unknown optional-column default (DEC-RETRY-COUNTER-SPLIT-001,
-    MIGRATION.md #1585), exactly what a pre-split ledger row loads as.
+    MIGRATION.md #1585), exactly what a pre-split ledger row loads as. The
+    trailing ``failed_streak`` is the honest running-counter ``0`` a legacy
+    row loads as (DEC-AUTO-RESUME-ZERO-SURPRISES-001).
     """
     return (
         "groww",
@@ -118,6 +120,7 @@ def _row(
         None,
         None,
         None,
+        0,
     )
 
 

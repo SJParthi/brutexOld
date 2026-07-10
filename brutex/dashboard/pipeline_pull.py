@@ -890,8 +890,23 @@ def run_full_pipeline(
     warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
     strict_gate: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
+
+    **Cooperative operator STOP (DEC-AUTO-RESUME-ZERO-SURPRISES-001):** when
+    *should_stop* is wired (the route binds the
+    :class:`~brutex.dashboard.pull_jobs.BackgroundPullJob` stop flag the
+    ``POST /api/v1/pull/stop`` route sets) it is consulted at the PHASE
+    boundaries ONLY — after the spot phase, after the metadata phase, and
+    after the historical phase (skipping prebuild + movers). HONEST envelope
+    (Golden Rule #10): the stop is GRACEFUL, not a kill — the in-flight phase
+    (including every window already dispatched inside it) runs to completion
+    and only the NEXT boundary observes the flag; a process restart remains
+    the hard stop. A stop-observed run returns the honest ``stopped_after``
+    report (``ok`` False; nothing is marked SUCCESS that did not genuinely
+    settle — the durable ledger keeps every outstanding window re-pullable).
+    ``None`` (the default — every pre-existing caller) is byte-identical.
 
     Calls ``run_spot`` first; if :func:`spot_phase_ok` fails the chain STOPS (no
     vendor call for the later phases) and the report carries ``stopped_after =
@@ -1005,12 +1020,22 @@ def run_full_pipeline(
         (DEC-PULL-SIX-STEP-ORDER-001). ``True`` makes the post-step barrier
         literal all-or-nothing (see above); ``False`` (default) keeps the
         cleanset path byte-identical.
+    should_stop
+        OPTIONAL zero-arg cooperative stop probe
+        (DEC-AUTO-RESUME-ZERO-SURPRISES-001) consulted at the phase
+        boundaries — see the STOP section above. ``None`` (default) never
+        stops (byte-identical).
 
     Returns
     -------
     PipelinePullReport
         The combined, auditable outcome of every phase that ran.
     """
+
+    def _stop_requested() -> bool:
+        """The cooperative stop probe — ``False`` when unwired (byte-identical)."""
+        return should_stop is not None and should_stop()
+
     spot = run_spot()
     if not spot_phase_ok(spot):
         quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
@@ -1020,6 +1045,24 @@ def run_full_pipeline(
             historical=None,
             stopped_after=PHASE_SPOT,
             note=_spot_stop_note(spot),
+            quarantined_symbols=quarantined,
+            quarantined_count=quarantined_count,
+        )
+    if _stop_requested():
+        # Operator STOP observed at the spot→metadata boundary
+        # (DEC-AUTO-RESUME-ZERO-SURPRISES-001): no further vendor call.
+        _LOG.info("pipeline.stop_requested", boundary=PHASE_SPOT)
+        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+        return PipelinePullReport(
+            spot=spot,
+            metadata=None,
+            historical=None,
+            stopped_after=PHASE_SPOT,
+            note=(
+                "stopped by operator request after spot (graceful stop at the "
+                "phase boundary) — metadata + historical NOT started; nothing "
+                "was marked complete that did not settle"
+            ),
             quarantined_symbols=quarantined,
             quarantined_count=quarantined_count,
         )
@@ -1036,6 +1079,23 @@ def run_full_pipeline(
             quarantined_symbols=quarantined,
             quarantined_count=quarantined_count,
         )
+    if _stop_requested():
+        # Operator STOP observed at the metadata→historical boundary.
+        _LOG.info("pipeline.stop_requested", boundary=PHASE_METADATA)
+        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+        return PipelinePullReport(
+            spot=spot,
+            metadata=metadata,
+            historical=None,
+            stopped_after=PHASE_METADATA,
+            note=(
+                "stopped by operator request after metadata (graceful stop at "
+                "the phase boundary) — historical NOT started; nothing was "
+                "marked complete that did not settle"
+            ),
+            quarantined_symbols=quarantined,
+            quarantined_count=quarantined_count,
+        )
 
     # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
     # cleanliness threaded INTO the historical phase (the Greeks seam at the
@@ -1048,6 +1108,28 @@ def run_full_pipeline(
         strict=strict_gate,
     )
     historical = run_historical(prior)
+    if _stop_requested():
+        # Operator STOP observed at the historical→post-steps boundary: the
+        # heavy prebuild (O(symbols × bars), possibly tens of minutes) + the
+        # movers warm are SKIPPED — nothing is lost, the next pull re-derives
+        # (the same guarantee the strict barrier gives its skipped post-steps).
+        _LOG.info("pipeline.stop_requested", boundary=PHASE_HISTORICAL)
+        quarantined, quarantined_count = _cap_quarantined(
+            derive_quarantined_name_set(spot, historical)
+        )
+        return PipelinePullReport(
+            spot=spot,
+            metadata=metadata,
+            historical=historical,
+            stopped_after=PHASE_HISTORICAL,
+            note=(
+                "stopped by operator request after historical (graceful stop at "
+                "the phase boundary) — prebuild + movers NOT run; nothing lost, "
+                "the next pull re-derives"
+            ),
+            quarantined_symbols=quarantined,
+            quarantined_count=quarantined_count,
+        )
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of

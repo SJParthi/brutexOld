@@ -20,6 +20,8 @@ import pytest
 from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
 from brutex.dashboard import pull_intent as pull_intent_module
 from brutex.dashboard.pull_intent import (
+    BANNER_LEVEL_CRITICAL,
+    BANNER_LEVEL_NOTICE,
     MAX_AUTO_RESTARTS,
     PULL_INTENT_FILENAME,
     PULL_INTENT_RESUME_ENV,
@@ -27,13 +29,16 @@ from brutex.dashboard.pull_intent import (
     PullIntentStore,
     ResumeAction,
     ResumeBanner,
+    build_resume_error_hook,
     clear_banner_after_start,
     emit_restart_cap_alert,
+    emit_resume_launch_failed_alert,
     persist_intent_for_launch,
     probe_pull_singleflight,
     pull_intent_resume_active,
     resolve_pull_intent_resume,
     restart_cap_message,
+    resume_launch_message,
     run_auto_resume,
     run_legacy_resume,
     synthesize_legacy_intent,
@@ -588,7 +593,13 @@ def test_run_fire_bumps_before_launch_and_threads_count(tmp_path: Path) -> None:
     assert action is ResumeAction.FIRED
     assert [i.restarts for i in launched] == [1]
     assert seen_on_disk == [1], "the token is burnt (persisted) BEFORE the launch"
-    assert store.banner.snapshot() is None
+    # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the FIRED tail
+    # is no longer silent — the NON-critical notice banner names the launch
+    # (this supersedes the pre-fix "no banner on success" pin).
+    assert store.banner.snapshot() == {
+        "level": BANNER_LEVEL_NOTICE,
+        "message": resume_launch_message(launched[0]),
+    }
 
 
 def test_run_cap_boundary_second_restart_allowed_third_refused(tmp_path: Path) -> None:
@@ -930,3 +941,195 @@ def test_legacy_resume_transient_launch_error_keeps_intent(tmp_path: Path) -> No
     assert persisted is not None
     assert persisted.restarts == 1, "the intent survives (token burnt) — retried ≤ cap"
     assert store.banner.snapshot() is not None
+
+
+# ── DEC-AUTO-RESUME-ZERO-SURPRISES-001: announce-on-launch / announce-on-failure ──
+
+
+def test_resume_launch_message_names_whole_universe_mode() -> None:
+    msg = resume_launch_message(
+        _intent(symbols=None, symbol=None, from_date=None, to_date=None, restarts=1)
+    )
+    assert "whole-universe resume" in msg
+    assert "WHOLE admitted universe" in msg
+    assert "from: default, to: default" in msg
+    assert f"restart 1 of {MAX_AUTO_RESTARTS}" in msg
+    assert "/api/v1/pull/stop" in msg  # the stop lever is NAMED
+
+
+def test_resume_launch_message_names_selection_modes() -> None:
+    multi = resume_launch_message(_intent(restarts=1))
+    assert "intent resume" in multi
+    assert "NIFTY,BANKNIFTY" in multi
+    assert "2024-01-01" in multi
+    single = resume_launch_message(_intent(symbols=None, symbol="SENSEX"))
+    assert "intent resume" in single
+    assert "SENSEX" in single
+
+
+def test_run_fire_notice_survives_clear_banner_after_start(tmp_path: Path) -> None:
+    # ORDERING PIN (the design's clear-vs-notice interaction): the production
+    # launch runs clear_banner_after_start INSIDE launch() (after
+    # BackgroundPullJob.start); the notice is set strictly AFTER launch()
+    # returns, so it must survive that clear.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level=BANNER_LEVEL_CRITICAL, message="stale crash-loop banner")
+    store.write(_intent())
+
+    def _launch(intent: PullIntent) -> None:
+        cleared = clear_banner_after_start(store, dry_run=False, started=True)
+        assert cleared is True  # the stale critical banner was retired in-launch
+
+    action = run_auto_resume(store, launch=_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.FIRED
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == BANNER_LEVEL_NOTICE
+
+
+def test_legacy_resume_fired_sets_whole_universe_notice(tmp_path: Path) -> None:
+    # The loudest surprise — the legacy whole-universe re-fire — announces
+    # itself through the SAME notice (run_legacy_resume delegates verbatim).
+    store = PullIntentStore(tmp_path)
+    action = run_legacy_resume(store, launch=lambda _i: None, probe_singleflight=lambda: True)
+    assert action is ResumeAction.FIRED
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == BANNER_LEVEL_NOTICE
+    assert "whole-universe resume" in banner["message"]
+
+
+def test_launch_failed_valueerror_fires_launch_alert_and_clears(tmp_path: Path) -> None:
+    store = PullIntentStore(tmp_path)
+    store.write(_intent())
+    alerted: list[Exception] = []
+
+    def _launch(_i: PullIntent) -> None:
+        raise ValueError("stale selection")
+
+    action = run_auto_resume(
+        store, launch=_launch, probe_singleflight=lambda: True, launch_alert=alerted.append
+    )
+    assert action is ResumeAction.LAUNCH_FAILED
+    assert len(alerted) == 1 and isinstance(alerted[0], ValueError)
+    assert store.load() is None  # the deterministic refusal still clears
+    banner = store.banner.snapshot()
+    assert banner is not None and banner["level"] == BANNER_LEVEL_CRITICAL
+
+
+def test_launch_failed_runtime_fires_launch_alert_and_keeps_intent(tmp_path: Path) -> None:
+    store = PullIntentStore(tmp_path)
+    store.write(_intent())
+    alerted: list[Exception] = []
+
+    def _launch(_i: PullIntent) -> None:
+        raise RuntimeError("credentials not yet fixed")
+
+    action = run_auto_resume(
+        store, launch=_launch, probe_singleflight=lambda: True, launch_alert=alerted.append
+    )
+    assert action is ResumeAction.LAUNCH_FAILED
+    assert len(alerted) == 1 and isinstance(alerted[0], RuntimeError)
+    assert store.load() is not None  # the transient failure keeps the intent
+    banner = store.banner.snapshot()
+    assert banner is not None and banner["level"] == BANNER_LEVEL_CRITICAL
+
+
+def test_launch_alert_raising_never_masks_the_refusal(tmp_path: Path) -> None:
+    store = PullIntentStore(tmp_path)
+    store.write(_intent())
+
+    def _boom_alert(_exc: Exception) -> None:
+        raise RuntimeError("telegram exploded")
+
+    def _launch(_i: PullIntent) -> None:
+        raise RuntimeError("launch died")
+
+    action = run_auto_resume(
+        store, launch=_launch, probe_singleflight=lambda: True, launch_alert=_boom_alert
+    )
+    assert action is ResumeAction.LAUNCH_FAILED  # never a raise out of the boot thread
+
+
+def test_launch_alert_default_binds_emit_resume_launch_failed_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # launch_alert=None binds the module-level default (the Telegram surface).
+    fired: list[Exception] = []
+    monkeypatch.setattr(pull_intent_module, "emit_resume_launch_failed_alert", fired.append)
+    store = PullIntentStore(tmp_path)
+    store.write(_intent())
+
+    def _launch(_i: PullIntent) -> None:
+        raise RuntimeError("boom")
+
+    action = run_auto_resume(store, launch=_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.LAUNCH_FAILED
+    assert len(fired) == 1
+
+
+def test_emit_resume_launch_failed_alert_fires_pull_halted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from brutex.notifications import sweep_alerts
+
+    _SpyAlerter.reasons = []
+    monkeypatch.setattr(sweep_alerts, "SweepAlerter", _SpyAlerter)
+    emit_resume_launch_failed_alert(RuntimeError("boom"))
+    assert _SpyAlerter.reasons == ["pull_resume_launch_failed"]
+
+
+def test_emit_resume_launch_failed_alert_swallows_alerter_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from brutex.notifications import sweep_alerts
+
+    monkeypatch.setattr(sweep_alerts, "SweepAlerter", _BoomAlerter)
+    emit_resume_launch_failed_alert(RuntimeError("boom"))  # must not raise
+
+
+# ── build_resume_error_hook (the maybe_resume_on_boot on_error binding) ──────
+
+
+def test_error_hook_with_store_sets_critical_banner_and_alerts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fired: list[Exception] = []
+    monkeypatch.setattr(pull_intent_module, "emit_resume_launch_failed_alert", fired.append)
+    store = PullIntentStore(tmp_path)
+    hook = build_resume_error_hook(store)
+    exc = RuntimeError("resume seam unwired")
+    hook(exc)
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == BANNER_LEVEL_CRITICAL
+    assert "RuntimeError: resume seam unwired" in banner["message"]
+    assert fired == [exc]
+
+
+def test_error_hook_without_store_alerts_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The HONEST LIMIT arm (design + Golden Rule #10): the unwired-legacy-seam
+    # case coincides with store is None — no banner surface exists there; the
+    # improvement is the ALERT (never a faked banner).
+    fired: list[Exception] = []
+    monkeypatch.setattr(pull_intent_module, "emit_resume_launch_failed_alert", fired.append)
+    hook = build_resume_error_hook(None)
+    exc = RuntimeError("no store at all")
+    hook(exc)
+    assert fired == [exc]
+
+
+def test_error_hook_banner_failure_still_alerts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fired: list[Exception] = []
+    monkeypatch.setattr(pull_intent_module, "emit_resume_launch_failed_alert", fired.append)
+    store = PullIntentStore(tmp_path)
+
+    def _boom_set(*, level: str, message: str) -> None:
+        raise RuntimeError("banner lock wedged")
+
+    monkeypatch.setattr(store.banner, "set", _boom_set)
+    hook = build_resume_error_hook(store)
+    hook(RuntimeError("resume died"))  # must not raise
+    assert len(fired) == 1  # the alert leg is independent of the banner leg

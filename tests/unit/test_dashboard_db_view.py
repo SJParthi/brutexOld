@@ -1492,6 +1492,21 @@ class TestWindowStatusLabel:
             "vendor confirmed no trades (2 clean attempts, expired window) — settled"
         )
 
+    def test_skipped_with_fetch_exhausted_stamp_reads_permanently_failed(self) -> None:
+        """DEC-AUTO-RESUME-ZERO-SURPRISES-001: a SKIPPED row the ledger settled
+        because it FAILED K separate pulls for a NON-empty reason must NOT read
+        "vendor confirmed no trades" (a lie — every fetch ERRORED); the label
+        names the permanent failure + the reopen-skipped recovery lever."""
+        from brutex.data.window_ledger import fetch_exhausted_settle_reason
+
+        stamp = fetch_exhausted_settle_reason(5)
+        label = window_status_label("SKIPPED", 0, stamp)
+        assert label == (
+            "permanently FAILED — repeated fetch failure (5 failed attempt(s), "
+            "exhausted); inspect, then re-open via `brutex reopen-skipped`"
+        )
+        assert "vendor confirmed no trades" not in label
+
     def test_skipped_with_unrelated_last_error_keeps_streak_label(self) -> None:
         """A non-stamp last_error (e.g. REOPENED) keeps the streak-derived label."""
         assert window_status_label("SKIPPED", 2, "REOPENED") == (

@@ -73,6 +73,8 @@ from brutex.adapters.groww.pull_singleflight import (
 from brutex.data.atomic_io import atomic_write_simple
 
 __all__ = [
+    "BANNER_LEVEL_CRITICAL",
+    "BANNER_LEVEL_NOTICE",
     "MAX_AUTO_RESTARTS",
     "PULL_INTENT_FILENAME",
     "PULL_INTENT_RESUME_ENV",
@@ -80,13 +82,16 @@ __all__ = [
     "PullIntentStore",
     "ResumeAction",
     "ResumeBanner",
+    "build_resume_error_hook",
     "clear_banner_after_start",
     "emit_restart_cap_alert",
+    "emit_resume_launch_failed_alert",
     "persist_intent_for_launch",
     "probe_pull_singleflight",
     "pull_intent_resume_active",
     "resolve_pull_intent_resume",
     "restart_cap_message",
+    "resume_launch_message",
     "run_auto_resume",
     "run_legacy_resume",
     "synthesize_legacy_intent",
@@ -120,6 +125,14 @@ _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 #: The intent payload's schema version (forward-compat marker; unknown extra
 #: keys are ignored on load, a wrong SHAPE is corrupt).
 _INTENT_VERSION: Final[int] = 1
+
+#: The two :class:`ResumeBanner` levels (DEC-AUTO-RESUME-ZERO-SURPRISES-001 —
+#: ONE spelling each, CLAUDE.md §11 COMMON). ``critical`` renders as the RED
+#: top banner (over-cap refusal / failed launch — operator action needed);
+#: ``notice`` renders as the NON-critical AMBER strip (announce-on-launch /
+#: stop-requested — informational, dismissible, never an alarm).
+BANNER_LEVEL_CRITICAL: Final[str] = "critical"
+BANNER_LEVEL_NOTICE: Final[str] = "notice"
 
 
 def resolve_pull_intent_resume(env: Mapping[str, str] | None = None) -> bool:
@@ -514,6 +527,39 @@ def restart_cap_message(intent: PullIntent, max_restarts: int) -> str:
     )
 
 
+def resume_launch_message(intent: PullIntent) -> str:
+    """The operator-facing ANNOUNCE-ON-LAUNCH message for a fired resume — pure.
+
+    DEC-AUTO-RESUME-ZERO-SURPRISES-001 (the operator's zero-surprises
+    directive): a successful boot auto-resume previously launched a full
+    pipeline pull — the LEGACY arm a WHOLE-universe (~776-target) one —
+    with NO operator-facing surface at all (only structlog), so the PULL RATE
+    widget lit up with unexplained activity. This message rides the
+    :data:`BANNER_LEVEL_NOTICE` banner so the launch DECISION is visible on
+    every page while the resumed pull runs. It names the MODE (intent resume =
+    replaying a persisted operator click vs the legacy whole-universe
+    ledger-triggered resume) and the target scope; the exact resolved target
+    COUNT is logged by the app binding (``auto_resume.launch_announced``),
+    which is the layer that has it — this pure core never fabricates a number
+    (Golden Rule #1).
+    """
+    if intent.symbols or intent.symbol:
+        mode = "intent resume (replaying the crashed pull's own selection)"
+        scope = intent.symbols or intent.symbol
+    else:
+        mode = "whole-universe resume"
+        scope = "the WHOLE admitted universe (every underlying + indices + India VIX)"
+    return (
+        f"pull auto-resume LAUNCHED [{mode}]: re-firing the full pipeline "
+        f"(spot → metadata → historical → prebuild → movers) over {scope} "
+        f"(from: {intent.from_date or 'default'}, to: {intent.to_date or 'default'}, "
+        f"restart {intent.restarts} of {MAX_AUTO_RESTARTS}). This completes a pull "
+        "that died mid-flight; it is idempotent (already-stored bars are untouched). "
+        "Watch the PULL RATE widget, or stop it via POST /api/v1/pull/stop "
+        "(the ⏹ button on /universe)."
+    )
+
+
 def emit_restart_cap_alert(intent: PullIntent) -> None:
     """Fire the ONE CRITICAL over-cap Telegram alert — best-effort, never raises.
 
@@ -536,6 +582,78 @@ def emit_restart_cap_alert(intent: PullIntent) -> None:
         symbols=intent.symbols,
         symbol=intent.symbol,
     )
+
+
+def emit_resume_launch_failed_alert(exc: Exception) -> None:
+    """Fire the CRITICAL resume-launch-FAILED Telegram alert — best-effort, never raises.
+
+    DEC-AUTO-RESUME-ZERO-SURPRISES-001 (announce-on-failure): a boot
+    auto-resume that cannot even LAUNCH was previously banner-only (the two
+    LAUNCH_FAILED arms) or log-only (the unwired-seam ``auto_resume.error``
+    guard) — no phone ever rang. Mirrors :func:`emit_restart_cap_alert`
+    exactly: the existing public
+    :meth:`~brutex.notifications.sweep_alerts.SweepAlerter.pull_halted`
+    surface (CRITICAL, MarkdownV2-escaped by the notifier, silent no-op when
+    Telegram is disabled) with the reason token ``"pull_resume_launch_failed"``
+    — its reason-scoped dedupe coalesces a repeat failure of the same cause.
+    An unexpected alerter error is logged + swallowed so the boot thread never
+    dies. The exception DETAIL stays in the log line (never interpolated into
+    the alert reason — the reason is a stable dedupe token, not a payload).
+    """
+    from brutex.notifications import sweep_alerts
+
+    try:
+        sweep_alerts.SweepAlerter().pull_halted(reason="pull_resume_launch_failed")
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort alert, never crash boot
+        _LOG.exception("pull_intent.resume_launch_failed_alert_failed; the refusal is unaffected")
+    _LOG.warning(
+        "pull_intent.resume_launch_failed_alerted",
+        error=str(exc),
+        error_type=type(exc).__name__,
+    )
+
+
+def build_resume_error_hook(
+    store: PullIntentStore | None,
+) -> Callable[[Exception], None]:
+    """Build the boot resume's ``on_error`` hook — banner (when possible) + alert.
+
+    DEC-AUTO-RESUME-ZERO-SURPRISES-001 (announce-on-failure, the
+    :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot` ``on_error``
+    binding): the guard's ``auto_resume.error`` was LOG-ONLY, so a resume that
+    raised (the unwired legacy seam's ``RuntimeError``, a failed synthesized-
+    intent persist) stranded the outstanding windows silently. The returned
+    hook sets a CRITICAL :class:`ResumeBanner` payload (when *store* is not
+    ``None``) and fires :func:`emit_resume_launch_failed_alert`; it NEVER
+    raises (each leg is independently guarded — a failed banner set still
+    alerts).
+
+    HONEST LIMIT (Golden Rule #10, stated per the design instead of faking a
+    banner): the unwired-legacy-seam case (``resume_legacy is None`` in
+    ``cli._start_auto_resume_on_boot``) coincides with the intent-store build
+    having FAILED at boot — ``app.build_app`` guards the whole resume-seam
+    block on ``pull_intent_store is not None`` — so in exactly that case
+    *store* is ``None`` and there is NO banner surface to hang the message on;
+    the honest improvement there is the Telegram ALERT + the louder log, not
+    a banner.
+    """
+
+    def _on_error(exc: Exception) -> None:
+        if store is not None:
+            try:
+                store.banner.set(
+                    level=BANNER_LEVEL_CRITICAL,
+                    message=(
+                        f"pull auto-resume FAILED to launch: {type(exc).__name__}: {exc} — "
+                        "no resume fired this boot. Investigate, then start the pull "
+                        "manually from /universe (the next boot re-tries)."
+                    ),
+                )
+            except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash boot
+                _LOG.exception("pull_intent.resume_error_banner_failed; the alert still fires")
+        emit_resume_launch_failed_alert(exc)
+
+    return _on_error
 
 
 class ResumeAction(Enum):
@@ -563,6 +681,7 @@ def run_auto_resume(
     launch: Callable[[PullIntent], None],
     probe_singleflight: Callable[[], bool] | None = None,
     alert: Callable[[PullIntent], None] | None = None,
+    launch_alert: Callable[[Exception], None] | None = None,
     max_restarts: int = MAX_AUTO_RESTARTS,
 ) -> ResumeAction:
     """The whole boot-time intent-resume decision + dispatch — **never raises**.
@@ -583,11 +702,31 @@ def run_auto_resume(
        resume that itself dies still counted). A bump that finds the intent
        gone (raced away) ⇒ :attr:`ResumeAction.NO_INTENT`.
     5. **Launch.** Fire *launch* with the bumped intent ⇒
-       :attr:`ResumeAction.FIRED`. A ``ValueError`` (a deterministic validation
+       :attr:`ResumeAction.FIRED` — and ANNOUNCE it loudly
+       (DEC-AUTO-RESUME-ZERO-SURPRISES-001): a :data:`BANNER_LEVEL_NOTICE`
+       banner (:func:`resume_launch_message` — the amber, non-critical strip
+       ``bx-liveproof.js`` renders) so the launch decision is visible on every
+       page while the resumed pull runs. DECISION (recorded per the operator's
+       zero-surprises directive): a LOUD ANNOUNCE, deliberately NOT a
+       confirm-gate — the resume fires on a boot DAEMON thread with no
+       operator present (a gate would stall it indefinitely, re-introducing
+       the exact "operator had to re-click" problem the resume exists to
+       solve); the re-fire is idempotent (keep-first sink), single-flight-
+       guarded and rate-capped, and the separate default-OFF master gates
+       (``BRUTEX_AUTO_RESUME`` / ``BRUTEX_AUTO_RESUME_ON_BOOT`` /
+       ``BRUTEX_PULL_INTENT_RESUME``) supply the CONSENT side. The notice is
+       set strictly AFTER *launch* returns — ``BackgroundPullJob.start``'s
+       :func:`clear_banner_after_start` already ran inside it, so the fresh
+       notice survives (ordering test-pinned); it is retired by the NEXT real
+       pull launch's banner auto-clear or superseded by a newer payload.
+       A ``ValueError`` (a deterministic validation
        refusal — stale selection, bad dates) CLEARS the intent + banners; any
        other exception keeps the intent (the next boot re-tries, bounded by the
-       cap) + banners — either way :attr:`ResumeAction.LAUNCH_FAILED`, never a
-       raise out of the boot thread.
+       cap) + banners — either way the failure is ALSO alerted through
+       *launch_alert* (announce-on-failure — default
+       :func:`emit_resume_launch_failed_alert`, the CRITICAL Telegram surface)
+       and :attr:`ResumeAction.LAUNCH_FAILED` returns, never a raise out of
+       the boot thread.
 
     Parameters
     ----------
@@ -603,6 +742,12 @@ def run_auto_resume(
         :func:`probe_pull_singleflight` on ``store.lake_root``.
     alert
         Over-cap CRITICAL alert hook; ``None`` binds :func:`emit_restart_cap_alert`.
+    launch_alert
+        Launch-FAILED CRITICAL alert hook (announce-on-failure,
+        DEC-AUTO-RESUME-ZERO-SURPRISES-001) — fired once on EITHER
+        LAUNCH_FAILED arm, alongside the red banner; ``None`` binds
+        :func:`emit_resume_launch_failed_alert`. Best-effort: a raising hook
+        is logged + swallowed, the refusal semantics are unaffected.
     max_restarts
         The automatic-restart cap (default :data:`MAX_AUTO_RESTARTS`).
     """
@@ -623,7 +768,9 @@ def run_auto_resume(
         )
         return ResumeAction.PEER_ACTIVE
     if intent.restarts >= max_restarts:
-        store.banner.set(level="critical", message=restart_cap_message(intent, max_restarts))
+        store.banner.set(
+            level=BANNER_LEVEL_CRITICAL, message=restart_cap_message(intent, max_restarts)
+        )
         alert_fn = alert if alert is not None else emit_restart_cap_alert
         try:
             alert_fn(intent)
@@ -634,6 +781,15 @@ def run_auto_resume(
     if bumped is None:
         _LOG.warning("pull_intent.bump_lost", path=str(store.path))
         return ResumeAction.NO_INTENT
+    launch_alert_fn = launch_alert if launch_alert is not None else emit_resume_launch_failed_alert
+
+    def _fire_launch_alert(exc: Exception) -> None:
+        """Announce-on-failure (best-effort — a raising hook never masks the refusal)."""
+        try:
+            launch_alert_fn(exc)
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort alert, never crash boot
+            _LOG.exception("pull_intent.launch_alert_failed; the launch refusal is unaffected")
+
     try:
         launch(bumped)
     except ValueError as exc:
@@ -641,12 +797,13 @@ def run_auto_resume(
         # SAME intent can never launch, so clear it — re-firing would loop.
         store.clear()
         store.banner.set(
-            level="critical",
+            level=BANNER_LEVEL_CRITICAL,
             message=(
                 f"pull auto-resume refused: {exc} — the saved pull selection no longer "
                 "resolves; intent cleared. Start the pull manually from /universe."
             ),
         )
+        _fire_launch_alert(exc)
         _LOG.warning("pull_intent.launch_refused", error=str(exc))
         return ResumeAction.LAUNCH_FAILED
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort boot, never crash
@@ -654,14 +811,25 @@ def run_auto_resume(
         # KEEP the intent — the next boot re-tries, bounded by the cap (the
         # token for THIS attempt is already burnt above).
         store.banner.set(
-            level="critical",
+            level=BANNER_LEVEL_CRITICAL,
             message=(
                 f"pull auto-resume launch failed: {type(exc).__name__}: {exc} — will "
                 f"retry on the next restart (at most {max_restarts} automatic restarts)."
             ),
         )
+        _fire_launch_alert(exc)
         _LOG.warning("pull_intent.launch_failed", error=str(exc), error_type=type(exc).__name__)
         return ResumeAction.LAUNCH_FAILED
+    # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the successful
+    # FIRED tail was SILENT (structlog only) — a whole-universe legacy re-fire
+    # showed the operator nothing but unexplained PULL RATE activity. Set the
+    # NON-critical notice banner AFTER launch() returned cleanly: the launch's
+    # own clear_banner_after_start (inside BackgroundPullJob.start) already
+    # ran, so the fresh notice survives (ordering pinned). LOUD ANNOUNCE, not
+    # confirm-gate — see the docstring's recorded decision (boot daemon, no
+    # operator present; idempotent + single-flight + rate-capped; the
+    # default-OFF master gates carry the consent side).
+    store.banner.set(level=BANNER_LEVEL_NOTICE, message=resume_launch_message(bumped))
     _LOG.info(
         "pull_intent.resumed",
         restarts=bumped.restarts,

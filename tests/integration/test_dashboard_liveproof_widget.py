@@ -192,3 +192,49 @@ def test_poll_fetch_is_bounded_single_flight_and_ordered() -> None:
     assert "fetch(ENDPOINT" not in js  # the old bare fetch is GONE
     assert "fetchJson(ENDPOINT" in js
     assert "The last real VERDICT is retained" in js
+
+
+def test_widget_renders_notice_level_as_amber_strip() -> None:
+    """DEC-AUTO-RESUME-ZERO-SURPRISES-001: the SERVED bx-liveproof.js carries the
+    NON-critical amber NOTICE strip for a resume payload whose level is
+    "notice" (announce-on-launch of a boot auto-resume / a pull stop request):
+    a dedicated strip element, its own dismiss signature (the ✕ hides only the
+    exact current message; a new message re-opens), rendering when live-proof
+    is NOT wired (like the critical arm), and textContent-only DOM. HONEST
+    envelope (Golden Rule #10): substring pins over the served source — the
+    repo's JS convention — not a browser execution."""
+    with TestClient(build_app(DashboardState())) as client:
+        js = client.get("/static/bx-liveproof.js")
+    assert js.status_code == 200
+    # The strip exists as its own element + id, with the amber styling hook.
+    assert 'NOTICE_ID = "bxLiveProofNotice"' in js.text
+    assert "bxlpNoticeBody" in js.text
+    assert "bxlp-nhead" in js.text
+    # Level routing: "notice" drives the strip; the critical banner still keys
+    # strictly on "critical" (the two are mutually exclusive payloads).
+    assert 'data.resume.level === "notice"' in js.text
+    assert 'data.resume.level === "critical"' in js.text
+    assert "renderNotice(data)" in js.text
+    # The not-wired guard renders a notice too (resumeVisible extends the
+    # critical-only arm) — a notice can never be swallowed by present:false.
+    assert "resumeCritical || resumeNotice" in js.text
+    # Dismiss semantics: its OWN signature pair (never the red banner's).
+    assert "dismissedNoticeSignature" in js.text
+    assert "lastNoticeSignature" in js.text
+    # XSS discipline holds file-wide (re-pinned beside the new DOM).
+    assert "innerHTML" not in js.text
+
+
+def test_universe_template_carries_the_stop_button() -> None:
+    """The STOP control's minimal UI (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the
+    /universe pull panel carries the ⏹ button wired to POST /api/v1/pull/stop
+    behind a confirm(), with the honest phase-boundary wording, and renders its
+    verdict via textContent only."""
+    with TestClient(build_app(DashboardState())) as client:
+        uni = client.get("/universe")
+    assert uni.status_code == 200
+    assert 'id="pullStopBtn"' in uni.text
+    assert "/api/v1/pull/stop" in uni.text
+    assert "confirm(" in uni.text
+    assert "phase boundary" in uni.text
+    assert 'id="pullStopMsg"' in uni.text

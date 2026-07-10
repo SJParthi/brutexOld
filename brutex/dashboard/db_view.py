@@ -124,6 +124,7 @@ from brutex.data.window_ledger import (
     DEMOTED_SETTLE_REASONS,
     EMPTY_TERMINAL_THRESHOLD,
     is_expired_window_settle_reason,
+    is_fetch_exhausted_settle_reason,
 )
 from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
@@ -4780,6 +4781,15 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       the row's genuine clean-empty streak, floored at 1 (a legacy record with
       no streak column still had at least the one clean attempt that classified
       it EMPTY).
+    * ``SKIPPED`` carrying a FETCH-EXHAUSTED settle stamp
+      (DEC-AUTO-RESUME-ZERO-SURPRISES-001 — the ledger settled a window that
+      FAILED :data:`~brutex.data.window_ledger.FAILED_TERMINAL_THRESHOLD`
+      separate pulls for a NON-empty reason, stamping
+      :func:`~brutex.data.window_ledger.fetch_exhausted_settle_reason` as
+      ``last_error``) → ``"permanently FAILED — <stamp>; inspect, then
+      re-open via `brutex reopen-skipped`"``: the "vendor confirmed no
+      trades" wording would be a LIE (every fetch ERRORED — the vendor never
+      confirmed anything), and the label must name the recovery lever.
     * ``SKIPPED`` carrying a data-completeness DEMOTION reason
       (:data:`~brutex.data.window_ledger.DEMOTED_SETTLE_REASONS` —
       ``ALL_FILTERED`` / ``INTERIOR_GAP`` / ``SUSPECTED_PARTIAL`` plus the
@@ -4806,6 +4816,11 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
     if status == "EMPTY":
         return f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s))"
     if status == "SKIPPED":
+        if is_fetch_exhausted_settle_reason(last_error):
+            return (
+                f"permanently FAILED — {last_error}; "
+                "inspect, then re-open via `brutex reopen-skipped`"
+            )
         if is_expired_window_settle_reason(last_error):
             return f"{last_error} — settled"
         if last_error in DEMOTED_SETTLE_REASONS:

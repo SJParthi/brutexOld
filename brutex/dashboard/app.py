@@ -210,6 +210,7 @@ from brutex.dashboard.pull_controller import (
     resolve_pull_targets,
 )
 from brutex.dashboard.pull_intent import (
+    BANNER_LEVEL_NOTICE,
     PullIntent,
     PullIntentStore,
     clear_banner_after_start,
@@ -2660,6 +2661,11 @@ def build_app(
         on_run_end=_session_rate.clear_meter,
         lake_root_resolver=_job_lake_root_resolver(instrument_store),
     )
+    # Exposed for the STOP-control tests + external orchestration probes
+    # (DEC-AUTO-RESUME-ZERO-SURPRISES-001 — the same app.state seam family as
+    # brutex_resume_pipeline): the cooperative stop flag the
+    # POST /api/v1/pull/stop route sets lives on this job.
+    app.state.brutex_pull_job = _pull_job
 
     # The bulk Greeks v1→v2 backfill job (DEC-GREEKS-BULK-REENRICH-001) — a
     # SEPARATE BackgroundPullJob so its progress feed never collides with a
@@ -4308,6 +4314,12 @@ def build_app(
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                         strict_gate=strict_gate,
+                        # Cooperative operator STOP (DEC-AUTO-RESUME-ZERO-
+                        # SURPRISES-001): POST /api/v1/pull/stop sets the job's
+                        # advisory flag; the sequencer consults it at the phase
+                        # boundaries only (graceful — the in-flight phase
+                        # finishes; a restart remains the hard stop).
+                        should_stop=lambda: _pull_job.stop_requested,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -4471,7 +4483,7 @@ def build_app(
             next boot, bounded by the cap).
             """
             try:
-                _launch_pipeline(
+                payload = _launch_pipeline(
                     symbols=intent.symbols,
                     symbol=intent.symbol,
                     from_date=intent.from_date,
@@ -4483,6 +4495,20 @@ def build_app(
                 if exc.status_code < _SERVER_ERROR_FLOOR:
                     raise ValueError(str(exc.detail)) from exc
                 raise RuntimeError(str(exc.detail)) from exc
+            # ONE announce-on-launch headline WITH the resolved target count
+            # (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the 100%-tested resume core
+            # sets the operator-facing notice banner but cannot know the count
+            # (its `launch` returns None by contract) — THIS binding has the
+            # launch payload, so the machine count lives here (the banner
+            # carries the human scope; decoupled, never a fabricated number).
+            _LOG.info(
+                "auto_resume.launch_announced",
+                targets=payload.get("targets"),
+                started=payload.get("started"),
+                symbols=intent.symbols,
+                symbol=intent.symbol,
+                restarts=intent.restarts,
+            )
 
         _probe_job_singleflight = _resume_singleflight_probe(
             _job_lake_root_resolver(instrument_store)
@@ -4536,6 +4562,83 @@ def build_app(
             )
 
         app.state.brutex_resume_legacy = _resume_legacy_pull
+
+    @app.post("/api/v1/pull/stop")
+    async def api_pull_stop() -> JSONResponse:
+        """POST /api/v1/pull/stop — kill the auto-resume re-loop + best-effort graceful stop.
+
+        DEC-AUTO-RESUME-ZERO-SURPRISES-001 (the honest-minimum STOP control —
+        there was previously NO stop mechanism at all: no job cancel, no
+        route). ONE action does three things and returns an HONEST verdict
+        naming exactly what it did and what it could NOT do:
+
+        1. **Clears the durable pull intent** (``<lake>/.pull_intent.json``
+           via the existing :meth:`PullIntentStore.clear`) so a subsequent
+           kill / restart does NOT auto-resume the pull (the re-loop is dead
+           even if the process is then hard-killed).
+        2. **Sets the cooperative stop flag**
+           (:meth:`BackgroundPullJob.request_stop`) — ADVISORY: only the
+           full-PIPELINE pull consults it (``run_full_pipeline``'s phase
+           boundaries: after spot, after metadata, after historical —
+           prebuild + movers skipped). The in-flight phase (and every window
+           already dispatched inside it) finishes first; other job kinds
+           (sweep, single-symbol pulls, retry-failed) do NOT observe the
+           flag; a process restart remains the only hard stop. Nothing is
+           ever marked SUCCESS by stopping — the durable ledger keeps every
+           outstanding window re-pullable.
+        3. **Raises a NOTICE banner** (the amber ``bx-liveproof.js`` strip)
+           so the stop request is visible on every page.
+
+        Deliberately NOT touching the halt-exception machinery
+        (``_GLOBAL_STOP_ERRORS`` / ``LakeWriteHalt``) — those are error paths,
+        not an operator lever. Offloaded via the lake threadpool (the intent
+        clear + banner are file/lock I/O adjacent).
+        """
+
+        def _stop() -> dict[str, Any]:
+            pull_running = _pull_job.running
+            _pull_job.request_stop()
+            intent_present = False
+            intent_cleared = False
+            banner_set = False
+            if pull_intent_store is not None:
+                intent_present = pull_intent_store.load() is not None
+                if intent_present:
+                    pull_intent_store.clear()
+                    intent_cleared = True
+                pull_intent_store.banner.set(
+                    level=BANNER_LEVEL_NOTICE,
+                    message=(
+                        "pull stop requested — the running pipeline stops at the next "
+                        "phase boundary (in-flight windows finish; a process restart is "
+                        "the hard stop); the durable pull intent was cleared, so the "
+                        "next boot will NOT auto-resume this pull."
+                    ),
+                )
+                banner_set = True
+            _LOG.info(
+                "pull.stop_route",
+                pull_running=pull_running,
+                intent_present=intent_present,
+                intent_cleared=intent_cleared,
+            )
+            return {
+                "stop_requested": True,
+                "pull_running": pull_running,
+                "intent_present": intent_present,
+                "intent_cleared": intent_cleared,
+                "banner_set": banner_set,
+                "note": (
+                    "cooperative stop: only the full-pipeline pull observes the flag, at "
+                    "its phase boundaries (after spot / after metadata / after historical "
+                    "— prebuild + movers skipped); the in-flight phase finishes first; "
+                    "other job kinds (sweep, single-symbol, retry-failed) are NOT "
+                    "stopped; a process restart remains the hard stop. Intent cleared ⇒ "
+                    "no auto-resume on the next boot. Nothing was marked complete."
+                ),
+            }
+
+        return JSONResponse(await _run_lake(_stop))
 
     @app.post("/api/v1/universe/retry-failed")
     async def api_universe_retry_failed(  # pragma: no cover — thin route over the 100%-tested core
@@ -7794,6 +7897,10 @@ def build_app(
             "bars_net_new",
             "empty_retries",
             "transient_retries",
+            # DEC-AUTO-RESUME-ZERO-SURPRISES-001: the consecutive NON-empty
+            # failure counter behind the fetch-exhausted terminal settle
+            # (appended LAST — the ledger_record_row shape).
+            "failed_streak",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)

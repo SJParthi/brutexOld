@@ -526,6 +526,18 @@ class BackgroundPullJob:
         #: 0 = silent) so drift toward systematically-unattributed direct emitters
         #: stays VISIBLE. Reset on every :meth:`start`; guarded by :attr:`_lock`.
         self._empty_ambient_beats = 0
+        #: COOPERATIVE stop flag (DEC-AUTO-RESUME-ZERO-SURPRISES-001 — the
+        #: honest-minimum STOP control): set by :meth:`request_stop` (the
+        #: ``POST /api/v1/pull/stop`` route), read via :attr:`stop_requested`
+        #: by work bodies that OPT IN to consulting it (today: the pipeline
+        #: pull's ``run_full_pipeline(should_stop=…)`` phase boundaries).
+        #: CLEARED on every genuinely-starting :meth:`start` (a stale request
+        #: never poisons the next run). HONEST envelope (Golden Rule #10):
+        #: this is ADVISORY — a work body that never consults it is unaffected
+        #: (the sweep, single-symbol pulls, retry-failed), in-flight windows
+        #: finish, and a process restart remains the only hard stop. It NEVER
+        #: touches the halt-exception machinery (`_GLOBAL_STOP_ERRORS`).
+        self._stop_event = threading.Event()
 
     def start(
         self,
@@ -697,6 +709,11 @@ class BackgroundPullJob:
             self._account_singleflight = None
         self._ledger_synced = ledger_synced
         self._pair_progress = False  # per-run reset; a phase opts in via set_phase
+        # Per-run reset of the cooperative stop flag (DEC-AUTO-RESUME-ZERO-
+        # SURPRISES-001): cleared HERE — strictly after every refusal path
+        # above — so only a genuinely-starting run resets it and a stale
+        # request_stop() from a prior run can never stop the fresh one.
+        self._stop_event.clear()
         self._progress.start(total=total, detail=detail)
         # Wire the HUNG→HEALTHY recovery edge so a heartbeat landing after a HUNG
         # declaration clears the stalled-suspect marker (DEC-PIPELINE-STALL-HEARTBEAT-001).
@@ -1429,6 +1446,33 @@ class BackgroundPullJob:
         """``True`` while a pull is in flight — O(1)."""
         with self._lock:
             return self._running
+
+    def request_stop(self) -> bool:
+        """Set the cooperative stop flag; return whether a run is LIVE to observe it.
+
+        DEC-AUTO-RESUME-ZERO-SURPRISES-001 (the honest-minimum STOP control —
+        there was previously NO stop mechanism at all). Setting the flag is
+        ADVISORY: only a work body that consults :attr:`stop_requested` (the
+        pipeline pull's ``run_full_pipeline(should_stop=…)`` phase boundaries)
+        reacts, the in-flight phase finishes first, and a process restart
+        remains the only hard stop — the ``False`` return tells the route to
+        SAY when no run was live (the flag is still set, but the next
+        :meth:`start` clears it, so it stops nothing). Never touches the
+        halt-exception machinery. O(1), idempotent, logged once per call.
+        """
+        self._stop_event.set()
+        live = self.running
+        _LOG.info("pull_job.stop_requested", pull_running=live)
+        return live
+
+    @property
+    def stop_requested(self) -> bool:
+        """``True`` once :meth:`request_stop` fired for the CURRENT run — O(1).
+
+        Cleared by the next genuinely-starting :meth:`start` (see the per-run
+        reset there), so a stale request can never stop a fresh run.
+        """
+        return self._stop_event.is_set()
 
     @property
     def running_job_kind(self) -> str | None:

@@ -133,7 +133,15 @@ def test_sigkill_survivor_intent_resumes_full_pipeline_on_fresh_app(
         assert spot_calls[0]["dry_run"] is False
         # The completed resume cleared the durable intent.
         _wait_for(lambda: not intent_store.path.exists())
-        assert intent_store.banner.snapshot() is None
+        # ANNOUNCE-ON-LAUNCH (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the
+        # successful resume is no longer silent — the NON-critical amber
+        # notice names the launch (supersedes the pre-fix "no banner on
+        # success" pin; the next real pull's clear_banner_after_start or a
+        # newer payload retires it).
+        banner = intent_store.banner.snapshot()
+        assert banner is not None
+        assert banner["level"] == "notice"
+        assert "pull auto-resume LAUNCHED" in banner["message"]
 
 
 def test_peer_running_pull_defers_resume_then_completion_clears_the_intent(

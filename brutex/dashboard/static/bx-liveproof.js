@@ -90,6 +90,12 @@
   var AGE_TICK_MS = 1000;      // the ~1 s client staleness ticker
   var WIDGET_ID = "bxLiveProof";
   var BANNER_ID = "bxLiveProofBanner";
+  // The NON-critical amber NOTICE strip (DEC-AUTO-RESUME-ZERO-SURPRISES-001):
+  // renders a resume payload whose level is "notice" (announce-on-launch of a
+  // boot auto-resume / a pull stop request) as a dismissible amber top strip —
+  // informational, never the red critical banner. The backend banner holds ONE
+  // payload, so "notice" and "critical" are mutually exclusive by construction.
+  var NOTICE_ID = "bxLiveProofNotice";
   var DETAIL_ID = "bxLiveProofDetail";
 
   // Idempotent guard: if two copies somehow load, only one widget is built.
@@ -242,6 +248,20 @@
       "#" + BANNER_ID + " .bxlp-line{white-space:pre-wrap;line-height:1.55;}" +
       "#" + BANNER_ID + " .bxlp-close{position:absolute;top:6px;right:12px;cursor:pointer;" +
       "background:none;border:none;color:#FFD7D7;font-size:20px;line-height:1;}" +
+      // Amber NOTICE strip (DEC-AUTO-RESUME-ZERO-SURPRISES-001) — the same
+      // top-strip pattern as the red banner, informational colours. z-index
+      // one below the red banner (the two are mutually exclusive anyway —
+      // the backend holds ONE resume payload).
+      "#" + NOTICE_ID + "{position:fixed;top:0;left:0;right:0;z-index:9190;display:none;" +
+      "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;" +
+      "background:#2A2412;color:#FFE9C2;border-bottom:2px solid var(--yellow,#FFB74D);" +
+      "padding:10px 44px 10px 16px;max-height:35vh;overflow:auto;}" +
+      "#" + NOTICE_ID + ".open{display:block;}" +
+      "#" + NOTICE_ID + " .bxlp-nhead{font-weight:700;color:var(--yellow,#FFB74D);" +
+      "margin-bottom:6px;}" +
+      "#" + NOTICE_ID + " .bxlp-line{white-space:pre-wrap;line-height:1.55;}" +
+      "#" + NOTICE_ID + " .bxlp-close{position:absolute;top:6px;right:12px;cursor:pointer;" +
+      "background:none;border:none;color:#FFE9C2;font-size:20px;line-height:1;}" +
       "#" + DETAIL_ID + "{position:fixed;inset:0;z-index:9100;display:none;align-items:center;" +
       "justify-content:center;background:rgba(0,0,0,.55);" +
       "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}" +
@@ -318,6 +338,25 @@
     banner.appendChild(body);
     document.body.appendChild(banner);
 
+    // Amber NOTICE strip (DEC-AUTO-RESUME-ZERO-SURPRISES-001) — the same
+    // build/collapse pattern as the red banner above; the ✕ dismisses only
+    // the CURRENT notice message (a changed message re-opens).
+    var notice = el("div", null, null);
+    notice.id = NOTICE_ID;
+    var nClose = el("button", "bxlp-close", "×");
+    nClose.setAttribute("type", "button");
+    nClose.setAttribute("aria-label", "Dismiss this notice");
+    nClose.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      dismissedNoticeSignature = lastNoticeSignature;
+      notice.classList.remove("open");
+    });
+    notice.appendChild(nClose);
+    var nBody = el("div", null, null);
+    nBody.id = "bxlpNoticeBody";
+    notice.appendChild(nBody);
+    document.body.appendChild(notice);
+
     var detail = el("div", null, null);
     detail.id = DETAIL_ID;
     var card = el("div", "bxlp-card", null);
@@ -385,6 +424,11 @@
   var lastData = null;
   var lastFailSignature = "";
   var dismissedSignature = "";
+  // Amber notice dismiss state (DEC-AUTO-RESUME-ZERO-SURPRISES-001) — the
+  // notice twin of the failSignature/dismissedSignature pair: the ✕ hides
+  // only the EXACT current message; a NEW notice message re-opens the strip.
+  var lastNoticeSignature = "";
+  var dismissedNoticeSignature = "";
   // Never-occlude collapse state (DEC-UNIVERSE-UI-POLISH-002).
   var minTimer = null;
   var minimizedSignature = "";
@@ -490,6 +534,33 @@
     }
   }
 
+  function renderNotice(data) {
+    // The NON-critical amber strip (DEC-AUTO-RESUME-ZERO-SURPRISES-001):
+    // a resume payload with level "notice" (a boot auto-resume LAUNCH
+    // announce / a pull stop request) opens it; anything else closes it.
+    // textContent-only rendering — the backend message is NEVER markup
+    // (the same XSS discipline as every other line in this widget).
+    var strip = document.getElementById(NOTICE_ID);
+    var body = document.getElementById("bxlpNoticeBody");
+    if (!strip || !body) {
+      return;
+    }
+    var isNotice = !!(data && data.resume && data.resume.level === "notice");
+    lastNoticeSignature = isNotice ? "resume-notice@" + data.resume.message : "";
+    if (!lastNoticeSignature) {
+      strip.classList.remove("open");
+      return;
+    }
+    while (body.firstChild) {
+      body.removeChild(body.firstChild);
+    }
+    body.appendChild(el("div", "bxlp-nhead", "pull pipeline — notice"));
+    body.appendChild(el("div", "bxlp-line", data.resume.message));
+    if (lastNoticeSignature !== dismissedNoticeSignature) {
+      strip.classList.add("open");
+    }
+  }
+
   function renderDetailBlock(body, label, block, pendingLabel) {
     body.appendChild(el("h3", null, label));
     var v = block && block.verdict;
@@ -532,21 +603,31 @@
       return;
     }
     var resumeCritical = !!(data && data.resume && data.resume.level === "critical");
-    if (!data || ((data.present !== true || data.enabled === false) && !resumeCritical)) {
+    // A "notice"-level resume payload (announce-on-launch / stop request —
+    // DEC-AUTO-RESUME-ZERO-SURPRISES-001) must ALSO render when live-proof is
+    // not wired, exactly like the critical arm below.
+    var resumeNotice = !!(data && data.resume && data.resume.level === "notice");
+    var resumeVisible = resumeCritical || resumeNotice;
+    if (!data || ((data.present !== true || data.enabled === false) && !resumeVisible)) {
       // Not wired / escape hatch off → no invented state, no widget.
       pill.classList.remove("shown");
       var banner = document.getElementById(BANNER_ID);
       if (banner) {
         banner.classList.remove("open");
       }
+      var noticeStrip = document.getElementById(NOTICE_ID);
+      if (noticeStrip) {
+        noticeStrip.classList.remove("open");
+      }
       return;
     }
     if (data.present !== true || data.enabled === false) {
-      // Live-proof not wired but a CRITICAL pull auto-resume payload exists
-      // (DEC-PULL-INTENT-RESUME-001): render ONLY the red banner — no invented
-      // live-proof pill state.
+      // Live-proof not wired but a pull auto-resume payload exists
+      // (DEC-PULL-INTENT-RESUME-001 critical / the zero-surprises notice):
+      // render ONLY the banner strip(s) — no invented live-proof pill state.
       pill.classList.remove("shown");
       renderBanner(data);
+      renderNotice(data);
       return;
     }
     pill.classList.add("shown");
@@ -578,6 +659,7 @@
         : probes.text;
     }
     renderBanner(data);
+    renderNotice(data);
     // Never-occlude collapse (DEC-UNIVERSE-UI-POLISH-002): auto-shrink the pill
     // to the dot badge after AUTO_MIN_MS; a NEW verdict re-expands + restarts.
     scheduleMinimize(pill, verdictSignature(data));

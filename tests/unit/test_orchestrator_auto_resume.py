@@ -329,3 +329,138 @@ def test_raising_resume_intent_is_error_and_legacy_still_not_spawned() -> None:
     )
     assert verdict is ResumeVerdict.ERROR
     assert legacy == []
+
+
+# ── on_error announce hook (DEC-AUTO-RESUME-ZERO-SURPRISES-001) ──────────────
+
+
+def test_on_error_fires_on_raising_legacy_resume() -> None:
+    """The legacy-arm guard is no longer log-only: the injected hook receives
+    the exact caught exception (banner + Telegram live in the binding)."""
+    seen: list[Exception] = []
+
+    def _boom(_incomplete: IncompletePull) -> None:
+        raise RuntimeError("legacy resume exploded")
+
+    verdict = maybe_resume_on_boot(
+        load_ledger=lambda: _FakeLedger(_Counts(total=3, planned=3, failed=0, settled=0)),
+        resume=_boom,
+        enabled=True,
+        on_error=seen.append,
+    )
+    assert verdict is ResumeVerdict.ERROR
+    assert len(seen) == 1
+    assert isinstance(seen[0], RuntimeError)
+    assert str(seen[0]) == "legacy resume exploded"
+
+
+def test_on_error_fires_on_raising_intent_resume() -> None:
+    """The intent-arm error branch fires the SAME hook (exclusivity holds)."""
+    seen: list[Exception] = []
+
+    def _boom() -> None:
+        raise RuntimeError("pipeline resume exploded")
+
+    verdict = maybe_resume_on_boot(
+        load_ledger=lambda: _FakeLedger(_Counts(total=1, planned=1, failed=0, settled=0)),
+        resume=lambda _i: pytest.fail("legacy must not fire — intent exclusivity"),
+        enabled=True,
+        intent_present=lambda: True,
+        resume_intent=_boom,
+        on_error=seen.append,
+    )
+    assert verdict is ResumeVerdict.ERROR
+    assert len(seen) == 1
+
+
+def test_on_error_fires_on_raising_ledger_load() -> None:
+    """A load failure (unreadable ledger) also announces — the guard is one."""
+    seen: list[Exception] = []
+    verdict = maybe_resume_on_boot(
+        load_ledger=_RaisingLedger().progress_counts,  # type: ignore[arg-type]
+        resume=lambda _i: None,
+        enabled=True,
+        on_error=seen.append,
+    )
+    assert verdict is ResumeVerdict.ERROR
+    assert len(seen) == 1
+
+
+def test_on_error_raising_is_swallowed_and_verdict_unchanged() -> None:
+    """A raising hook can never crash the boot thread nor mask the verdict."""
+
+    def _boom_resume(_incomplete: IncompletePull) -> None:
+        raise RuntimeError("resume exploded")
+
+    def _boom_hook(_exc: Exception) -> None:
+        raise OSError("banner volume wedged")
+
+    verdict = maybe_resume_on_boot(
+        load_ledger=lambda: _FakeLedger(_Counts(total=1, planned=1, failed=0, settled=0)),
+        resume=_boom_resume,
+        enabled=True,
+        on_error=_boom_hook,
+    )
+    assert verdict is ResumeVerdict.ERROR
+
+
+def test_on_error_never_fires_on_success_paths() -> None:
+    """The hook is failure-only: DISABLED / NOTHING_TO_RESUME / RESUMED fire nothing."""
+    seen: list[Exception] = []
+    assert (
+        maybe_resume_on_boot(
+            load_ledger=lambda: _FakeLedger(_Counts(total=0, planned=0, failed=0, settled=0)),
+            resume=lambda _i: None,
+            enabled=False,
+            on_error=seen.append,
+        )
+        is ResumeVerdict.DISABLED
+    )
+    assert (
+        maybe_resume_on_boot(
+            load_ledger=lambda: _FakeLedger(_Counts(total=2, planned=0, failed=0, settled=2)),
+            resume=lambda _i: None,
+            enabled=True,
+            on_error=seen.append,
+        )
+        is ResumeVerdict.NOTHING_TO_RESUME
+    )
+    assert (
+        maybe_resume_on_boot(
+            load_ledger=lambda: _FakeLedger(_Counts(total=2, planned=1, failed=0, settled=1)),
+            resume=lambda _i: None,
+            enabled=True,
+            on_error=seen.append,
+        )
+        is ResumeVerdict.RESUMED
+    )
+    assert seen == []
+
+
+def test_detect_excludes_fetch_exhausted_settled_windows() -> None:
+    """(i) of the durable-verdict design: a window the ledger terminally
+    settled SKIPPED via the fetch-exhausted arm no longer counts as
+    outstanding work — a ledger holding ONLY exhausted windows is a clean
+    boot (None), so the whole-universe re-fire storm converges."""
+    from datetime import UTC, date, datetime
+
+    from brutex.data.fetch_coverage import WindowKey
+    from brutex.data.window_ledger import (
+        FAILED_TERMINAL_THRESHOLD,
+        WindowLedger,
+    )
+
+    ledger = WindowLedger()
+    key = WindowKey(
+        market="groww",
+        security_id="NIFTY",
+        interval="1minute",
+        start=date(2021, 1, 1),
+        end=date(2021, 4, 1),
+    )
+    now = datetime(2026, 7, 9, tzinfo=UTC)
+    for _ in range(FAILED_TERMINAL_THRESHOLD - 1):
+        ledger.record(key, raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=now)
+    assert detect_incomplete_pull(ledger) is not None, "below K the window is outstanding"
+    ledger.record(key, raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=now)
+    assert detect_incomplete_pull(ledger) is None, "the exhausted settle ends the re-fire loop"

@@ -601,7 +601,17 @@ class TestGroupScopedUntilClean:
     def test_stuck_stock_group_self_terminates_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Belt-and-suspenders envelope: a stuck group stops after +1 no-progress round."""
+        """Belt-and-suspenders envelope: a stuck group converges BOUNDED — now in round 1.
+
+        DEC-AUTO-RESUME-ZERO-SURPRISES-001 SUPERSEDES the prior pin (stop after
+        one extra no-progress round): the stuck window's in-pull retry ladder
+        records FAILED ``FAILED_TERMINAL_THRESHOLD`` consecutive times, so the
+        ledger terminally settles it SKIPPED with the honest fetch-exhausted
+        stamp + ONE loud WARN — the group loop then exits ``stop_clean`` in
+        round 1 instead of churning a no-progress round (and the next BOOT
+        reads no outstanding work: the re-fire storm converges). Recovery is
+        unchanged: `brutex reopen-skipped` + the 25/pull round-robin audit.
+        """
         # Kill the real inter-round / retry backoff sleeps (bounded but seconds-scale).
         monkeypatch.setattr("brutex.adapters.ingest_common._time_sleep", lambda _s: None)
         # Synchronous write path for deterministic round accounting (see above).
@@ -623,12 +633,25 @@ class TestGroupScopedUntilClean:
             )
         done = _events(logs, "until_clean.done")
         assert len(done) == 2
-        # Indices group: clean on round 1. Stock group: stuck → self-terminates
-        # after ONE extra no-progress round, never churning to the 10-round cap.
+        # Indices group: clean on round 1. Stock group: the stuck window's
+        # retry ladder exhausts the K-attempt failure budget IN round 1 — the
+        # ledger settles it SKIPPED (fetch-exhausted, loud WARN) and the loop
+        # exits clean, never churning toward the 10-round cap.
         assert done[0]["verdict"] == "stop_clean"
-        assert done[1]["verdict"] == "stop_no_progress"
-        assert done[1]["rounds"] == 2
+        assert done[1]["verdict"] == "stop_clean"
+        assert done[1]["rounds"] == 1
+        exhausted = _events(logs, "window_ledger.fetch_exhausted_settled")
+        assert len(exhausted) == 1
+        assert exhausted[0]["security_id"] == "ADANIENT"
+        # The pull report still counts the failing fetches honestly.
         assert report.still_failed_windows > 0
+        # The durable record carries the distinct terminal stamp (recoverable).
+        from brutex.data.window_ledger import is_fetch_exhausted_settle_reason
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        rec = next(r for r in load_window_ledger(tmp_path).records() if r.security_id == "ADANIENT")
+        assert rec.status == "SKIPPED"
+        assert is_fetch_exhausted_settle_reason(rec.last_error)
 
 
 class TestDualIntervalPhaseRestart:

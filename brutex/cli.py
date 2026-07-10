@@ -3160,12 +3160,26 @@ def _start_auto_resume_on_boot(
         )
         resume_legacy()
 
+    # Announce-on-failure (DEC-AUTO-RESUME-ZERO-SURPRISES-001): the guard's
+    # log-only `auto_resume.error` gains a red ResumeBanner (when the intent
+    # store exists) + the CRITICAL Telegram alert. The hook body is the
+    # 100%-tested `pull_intent.build_resume_error_hook`; this launcher only
+    # BINDS it (additive — composes with the BRUTEX_AUTO_RESUME master gate of
+    # the fast-track branch, which decides whether this launcher runs at all).
+    # HONEST LIMIT (stated in the hook's docstring): when `intent_store` is
+    # None — which coincides with the unwired-legacy-seam RuntimeError case —
+    # there is no banner surface; the improvement there is the ALERT.
+    from brutex.dashboard.pull_intent import build_resume_error_hook
+
+    on_error = build_resume_error_hook(intent_store)
+
     def _run() -> None:
         verdict = maybe_resume_on_boot(
             load_ledger=lambda: load_window_ledger(lake_root),
             resume=_resume_in_process,
             intent_present=intent_present,
             resume_intent=resume_pipeline,
+            on_error=on_error,
         )
         log.info("auto_resume.verdict", verdict=verdict.value, lake_root=str(lake_root))
 

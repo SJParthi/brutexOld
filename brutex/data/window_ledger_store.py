@@ -75,6 +75,7 @@ from brutex.data.window_ledger import (
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
     FAILED,
+    FAILED_TERMINAL_THRESHOLD,
     PLANNED,
     SKIPPED,
     SKIPPED_AUDIT_PER_PULL,
@@ -171,6 +172,7 @@ _COLUMNS: tuple[str, ...] = (
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "failed_streak",
 )
 
 
@@ -268,8 +270,24 @@ def _derive_retry_count() -> int | None:
     return None
 
 
+def _derive_failed_streak() -> int:
+    """Honest ``failed_streak`` for a LEGACY row that predates the column: ``0``.
+
+    DEC-AUTO-RESUME-ZERO-SURPRISES-001, the optional-column template — but
+    deliberately ``0``, NOT ``None`` (the :func:`_derive_bars_net_new` honest
+    unknown), mirroring ``empty_streak``: ``failed_streak`` is a RUNNING
+    counter, not an observation the ledger may have missed — a legacy row has
+    made exactly ZERO tracked failed-streak observations under the new
+    machinery, so ``0`` is the true count and can never fabricate exhaustion
+    (a legacy long-failing window simply starts its K-attempt budget fresh —
+    the conservative direction, Golden Rule #1). The helper exists so the
+    optional-column template stays uniform with ONE documented home per column.
+    """
+    return 0
+
+
 def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
-    """Coerce raw rows to the exact 16-field tuple :meth:`WindowLedger.from_rows` expects.
+    """Coerce raw rows to the exact 17-field tuple :meth:`WindowLedger.from_rows` expects.
 
     Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1)
     plus ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) plus ``bars_net_new``
@@ -281,7 +299,9 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
     ``bars_net_new`` stays an honest ``None`` via :func:`_derive_bars_net_new`;
     ``empty_retries`` / ``transient_retries`` stay an honest ``None`` via
     :func:`_derive_retry_count` (a NULL cell in a NEW file — e.g. a lake
-    cold-start seed — reads ``None`` the same way). A wrong arity / non-coercible
+    cold-start seed — reads ``None`` the same way); ``failed_streak``
+    (DEC-AUTO-RESUME-ZERO-SURPRISES-001) reads the honest running-counter ``0``
+    via :func:`_derive_failed_streak`. A wrong arity / non-coercible
     element raises here (``ValueError`` / ``TypeError``) and is caught by the
     caller, degrading to an empty ledger.
     """
@@ -303,6 +323,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         bars_net_new,
         empty_retries,
         transient_retries,
+        failed_streak,
     ) in rows:
         status_s = str(status)
         attempts_i = int(attempts)
@@ -317,6 +338,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         net_new = _derive_bars_net_new() if bars_net_new is None else int(bars_net_new)
         empties = _derive_retry_count() if empty_retries is None else int(empty_retries)
         transients = _derive_retry_count() if transient_retries is None else int(transient_retries)
+        failed_run = _derive_failed_streak() if failed_streak is None else int(failed_streak)
         coerced.append(
             (
                 str(market),
@@ -335,6 +357,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
                 net_new,
                 empties,
                 transients,
+                failed_run,
             )
         )
     return coerced
@@ -353,16 +376,18 @@ _LEDGER_READ_ERRORS: tuple[type[BaseException], ...] = (
 
 
 def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
-    """Read ONE ledger-shaped Parquet into the coerced 16-field row tuples.
+    """Read ONE ledger-shaped Parquet into the coerced 17-field row tuples.
 
     The single per-file read (CLAUDE.md §11 COMMON) shared by the BASE load and
     the per-DELTA fold. The core 11 columns are REQUIRED — a missing one raises
     ``KeyError`` (the wrong-shape guard the caller degrades on). ``empty_streak``
     + ``in_pull_fetches`` + ``bars_net_new`` + ``empty_retries`` +
-    ``transient_retries`` are OPTIONAL (a legacy file lacks one or more) and
-    derived per-row by :func:`_rows_to_records` (an absent ``bars_net_new`` /
-    ``empty_retries`` / ``transient_retries`` stays an honest ``None`` —
-    DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001). Raises any
+    ``transient_retries`` + ``failed_streak`` are OPTIONAL (a legacy file lacks
+    one or more) and derived per-row by :func:`_rows_to_records` (an absent
+    ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` stays an honest
+    ``None`` — DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001;
+    an absent ``failed_streak`` reads the honest running-counter ``0`` —
+    DEC-AUTO-RESUME-ZERO-SURPRISES-001). Raises any
     of :data:`_LEDGER_READ_ERRORS` on a malformed / unreadable file — the CALLER
     decides the degrade (base → empty + ``load_failed``; delta → skip that one
     file).
@@ -383,6 +408,7 @@ def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
     net_new = _optional("bars_net_new")
     empties = _optional("empty_retries")
     transients = _optional("transient_retries")
+    failed_runs = _optional("failed_streak")
     rows = zip(
         *(columns[name] for name in _CORE_COLUMNS),
         streaks,
@@ -390,15 +416,23 @@ def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
         net_new,
         empties,
         transients,
+        failed_runs,
         strict=True,
     )
     return _rows_to_records(rows)
 
 
 def load_window_ledger(
-    lake_root: Path, *, threshold: int = EMPTY_TERMINAL_THRESHOLD
+    lake_root: Path,
+    *,
+    threshold: int = EMPTY_TERMINAL_THRESHOLD,
+    threshold_failed: int = FAILED_TERMINAL_THRESHOLD,
 ) -> WindowLedger:
     """Load the persisted ledger (base **+ delta fold**), or an EMPTY one if unavailable.
+
+    *threshold_failed* (DEC-AUTO-RESUME-ZERO-SURPRISES-001) mirrors *threshold*
+    for the fetch-exhausted ``FAILED`` → ``SKIPPED`` settle — an additive
+    keyword, default byte-identical for every existing caller.
 
     **Never raises** (reliability): a missing base file is a clean empty ledger; a
     malformed / wrong-shaped / unreadable base Parquet logs a WARNING and degrades
@@ -437,7 +471,7 @@ def load_window_ledger(
             # still folded below — better a partial rescue than none.
             load_failed = True
     elif not delta_files:
-        return WindowLedger(_threshold=threshold)
+        return WindowLedger(_threshold=threshold, _threshold_failed=threshold_failed)
     folded: dict[tuple[str, str, str, str, str], tuple[Any, ...]] = {
         (row[0], row[1], row[2], row[3], row[4]): row for row in base_rows
     }
@@ -452,18 +486,21 @@ def load_window_ledger(
     ledger = WindowLedger.from_rows(
         (folded[key] for key in sorted(folded)),
         threshold=threshold,
+        threshold_failed=threshold_failed,
     )
     ledger.load_failed = load_failed
     return ledger
 
 
-#: One serialised ledger row — EXACTLY the 16-field tuple :meth:`WindowLedger.to_rows`
+#: One serialised ledger row — EXACTLY the 17-field tuple :meth:`WindowLedger.to_rows`
 #: emits (and :meth:`WindowLedger.from_rows` restores); the ONE spelling lives on the
 #: ledger module as :data:`~brutex.data.window_ledger.LedgerRowTuple` (CLAUDE.md §11
 #: COMMON) and this store-side name aliases it. The merge-on-save operates on this
-#: shape directly so the conflict rule below is pure + unit-testable. The trailing
-#: ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` are ``int | None``
-#: (``None`` = honest unknown for a legacy row).
+#: shape directly so the conflict rule below is pure + unit-testable. The
+#: ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` fields are
+#: ``int | None`` (``None`` = honest unknown for a legacy row); the trailing
+#: ``failed_streak`` is a plain ``int`` running counter (a legacy row loads ``0``
+#: — DEC-AUTO-RESUME-ZERO-SURPRISES-001).
 LedgerRow = LedgerRowTuple
 
 #: The window identity — the leading 5 fields of a :data:`LedgerRow` (the same 5-tuple
@@ -613,6 +650,10 @@ def _rows_to_table(rows: Sequence[LedgerRow]) -> Any:
             # unknown ``None`` (DEC-RETRY-COUNTER-SPLIT-001).
             ("empty_retries", pa.int64()),
             ("transient_retries", pa.int64()),
+            # A running counter, always written as a real int (a LEGACY file
+            # simply lacks the column and loads ``0`` per row —
+            # DEC-AUTO-RESUME-ZERO-SURPRISES-001).
+            ("failed_streak", pa.int64()),
         ]
     )
     return pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
@@ -957,6 +998,9 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 # retries — honest unknown (DEC-RETRY-COUNTER-SPLIT-001).
                 empty_retries=_derive_retry_count(),
                 transient_retries=_derive_retry_count(),
+                # ... and zero tracked failed-streak observations — the honest
+                # running-counter 0 (DEC-AUTO-RESUME-ZERO-SURPRISES-001).
+                failed_streak=_derive_failed_streak(),
             )
         )
 
@@ -979,6 +1023,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 r.bars_net_new,
                 r.empty_retries,
                 r.transient_retries,
+                r.failed_streak,
             )
             for r in by_window.values()
         ),

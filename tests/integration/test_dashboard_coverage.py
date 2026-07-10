@@ -1214,6 +1214,7 @@ _LEDGER_COLS = [
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "failed_streak",
 ]
 
 
@@ -1274,10 +1275,13 @@ class TestWindowLedgerApi:
         # keep-first-DEDUPED net-new count, persisted + surfaced on /db.
         assert row[13] == 4
         # empty_retries / transient_retries (idx 14/15, DEC-RETRY-COUNTER-SPLIT-001):
-        # the LAST two columns — this record call did not observe the fetch
-        # ladder, so both surface the honest unknown (JSON null), never 0.
+        # this record call did not observe the fetch ladder, so both surface
+        # the honest unknown (JSON null), never 0.
         assert row[14] is None
         assert row[15] is None
+        # failed_streak (idx 16, DEC-AUTO-RESUME-ZERO-SURPRISES-001): the LAST
+        # column — a SUCCESS record reads the honest running-counter 0.
+        assert row[16] == 0
         # first_seen_at (idx 9) shown as clean IST: 2026-06-09 00:00 UTC → 05:30 IST.
         assert row[9] == "2026-06-09 05:30:00"
         assert "+00:00" not in str(row[9])  # the raw UTC offset is gone

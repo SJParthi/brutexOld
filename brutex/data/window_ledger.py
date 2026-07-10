@@ -38,6 +38,8 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import structlog
+
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP
 from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
@@ -51,6 +53,8 @@ __all__ = [
     "EMPTY_TERMINAL_THRESHOLD",
     "EXPIRED_WINDOW_SETTLE_SUFFIX",
     "FAILED",
+    "FAILED_TERMINAL_THRESHOLD",
+    "FETCH_EXHAUSTED_SETTLE_SUFFIX",
     "PLANNED",
     "REOPENED_MARKER",
     "SETTLED_STATUSES",
@@ -62,9 +66,17 @@ __all__ = [
     "WindowLedger",
     "WindowLedgerRecord",
     "expired_window_settle_reason",
+    "fetch_exhausted_settle_reason",
     "is_expired_window_settle_reason",
+    "is_fetch_exhausted_settle_reason",
     "ledger_record_row",
 ]
+
+#: Structured logger — the fetch-exhausted terminal settle WARN surfaces into
+#: ``/logs`` (DEC-AUTO-RESUME-ZERO-SURPRISES-001; the pure in-memory model is
+#: otherwise log-free — this is the ONE loud verdict a durable terminal settle
+#: must emit, never a silent status flip).
+_LOG = structlog.get_logger(__name__)
 
 #: A window the tiler will attempt this pull — upserted at pull start, no outcome
 #: yet. Never skippable (it has not been fetched), so a PLANNED-but-never-recorded
@@ -93,6 +105,35 @@ SKIPPED: str = "SKIPPED"
 #: old-gap settle path (DEC-OLD-GAP-FAST-SETTLE-001), so this never re-hammers an
 #: ancient dead window — only recent maybe-late windows get the few extra chances.
 EMPTY_TERMINAL_THRESHOLD: int = 3
+
+#: A window that FAILED this many CONSECUTIVE recorded attempts for a NON-empty
+#: reason is settled ``SKIPPED`` with the distinct
+#: :func:`fetch_exhausted_settle_reason`
+#: stamp (DEC-AUTO-RESUME-ZERO-SURPRISES-001) so it stops counting as
+#: outstanding work — the boot auto-resume's ``detect_incomplete_pull`` reads
+#: ``planned + failed`` and a window the vendor 500s indefinitely otherwise
+#: re-fires a whole-universe resume on EVERY boot, forever. K=5 is deliberately
+#: MORE conservative than the EMPTY threshold's 3: a ``FAILED`` can be a
+#: genuine transient (429 / timeout / 5xx) the pull-until-success contract
+#: wants to keep retrying, so five consecutive FAILED records must land before
+#: the ledger gives up. HONEST COUNTING ENVELOPE (Golden Rule #10): the streak
+#: counts consecutive FAILED :meth:`WindowLedger.record` calls — those
+#: accumulate ACROSS pulls (the boot-storm case) but ALSO WITHIN one pull's
+#: bounded retry ladder (``retry_failed_windows`` / an until-clean round
+#: re-records a still-failing window), so a window that fails its WHOLE
+#: in-pull ladder can settle in ONE pull. That in-pull convergence is
+#: DELIBERATE (test-pinned): the stuck group's until-clean loop then exits
+#: clean with the poison window terminally settled + WARNed instead of
+#: churning no-progress rounds. SAFETY NET: the settle reuses ``SKIPPED``, so the
+#: 25-per-pull round-robin audit (:meth:`WindowLedger.audit_reopen_skipped`,
+#: DEC-SKIPPED-AUDIT-ROUNDROBIN-001) still auto re-verifies it over subsequent
+#: pulls — the terminal settle stops the boot re-fire storm and the false
+#: "outstanding" count, but is NEVER permanently blind; ``brutex
+#: reopen-skipped`` is the immediate manual recovery. Mirrors
+#: :data:`EMPTY_TERMINAL_THRESHOLD` exactly — a plain module constant with the
+#: ``threshold_failed`` load/restore parameter, NO env override (the empty
+#: twin has none either; CLAUDE.md §11 COMMON).
+FAILED_TERMINAL_THRESHOLD: int = 5
 
 #: Minimum CLEAN-EMPTY confirmations an old empty window needs before its empty is
 #: trusted as "confirmed" for the in-pull OLD-gap fast-settle HINT computed by the
@@ -160,6 +201,41 @@ def is_expired_window_settle_reason(reason: str | None) -> bool:
         reason is not None
         and reason.startswith("vendor confirmed no trades (")
         and reason.endswith(EXPIRED_WINDOW_SETTLE_SUFFIX)
+    )
+
+
+#: The recognisable tail of a fetch-exhausted settle reason
+#: (:func:`fetch_exhausted_settle_reason`) — the ONE marker
+#: ``brutex.dashboard.db_view.window_status_label`` keys the honest
+#: "permanently FAILED" UI label on (DEC-AUTO-RESUME-ZERO-SURPRISES-001;
+#: CLAUDE.md §11 COMMON — no second spelling; the
+#: :data:`EXPIRED_WINDOW_SETTLE_SUFFIX` template).
+FETCH_EXHAUSTED_SETTLE_SUFFIX: str = ", exhausted)"
+
+#: The recognisable head of a fetch-exhausted settle reason — kept as ONE
+#: module constant so :func:`fetch_exhausted_settle_reason` and its predicate
+#: can never drift onto two spellings.
+_FETCH_EXHAUSTED_SETTLE_PREFIX: str = "repeated fetch failure ("
+
+
+def fetch_exhausted_settle_reason(attempts: int) -> str:
+    """The honest ``last_error`` stamped on a fetch-exhausted terminal settle — pure.
+
+    DEC-AUTO-RESUME-ZERO-SURPRISES-001: a window settled ``SKIPPED`` because it
+    FAILED :data:`FAILED_TERMINAL_THRESHOLD` separate pulls for a NON-empty
+    reason must SAY so distinctly — the generic "vendor confirmed no trades"
+    wording would be a lie (the vendor never confirmed anything; every fetch
+    ERRORED). *attempts* is the genuine failed-streak count at the settle.
+    """
+    return f"{_FETCH_EXHAUSTED_SETTLE_PREFIX}{attempts} failed attempt(s){FETCH_EXHAUSTED_SETTLE_SUFFIX}"
+
+
+def is_fetch_exhausted_settle_reason(reason: str | None) -> bool:
+    """``True`` iff *reason* is a :func:`fetch_exhausted_settle_reason` stamp — pure, O(1)."""
+    return (
+        reason is not None
+        and reason.startswith(_FETCH_EXHAUSTED_SETTLE_PREFIX)
+        and reason.endswith(FETCH_EXHAUSTED_SETTLE_SUFFIX)
     )
 
 
@@ -334,15 +410,36 @@ class WindowLedgerRecord:
     #: stands). Same ``None`` = honest-unknown / overwrite-per-pull contract as
     #: :attr:`empty_retries`.
     transient_retries: int | None = None
+    #: Consecutive NON-empty ``FAILED`` recorded outcomes (across pulls AND
+    #: across one pull's bounded retry re-records — see the honest counting
+    #: envelope on :data:`FAILED_TERMINAL_THRESHOLD`) — the
+    #: independent failure twin of :attr:`empty_streak`
+    #: (DEC-AUTO-RESUME-ZERO-SURPRISES-001). Bumped on a genuine ``FAILED``
+    #: (an errored fetch — NEVER a ``degraded`` data-completeness demotion,
+    #: which is a returned-bars fetch with its own ``empty_streak`` bound);
+    #: RESET to 0 by a ``SUCCESS`` / ``EMPTY`` (the fetch WORKED — the failure
+    #: run is broken) and by any NON-exhausted ``SKIPPED`` settle or operator
+    #: re-open. At :data:`FAILED_TERMINAL_THRESHOLD` the window settles
+    #: ``SKIPPED`` with the :func:`fetch_exhausted_settle_reason` stamp.
+    #: DELIBERATELY ``int = 0``, NOT ``Optional[None]``, mirroring
+    #: :attr:`empty_streak` (a RUNNING counter, not an observation the ledger
+    #: may not have witnessed — unlike :attr:`bars_net_new`): a legacy
+    #: pre-column row has made 0 tracked failed-streak observations under this
+    #: machinery, so ``0`` is the honest load default and can never fabricate
+    #: exhaustion (Golden Rule #1).
+    failed_streak: int = 0
 
 
-#: One serialised ledger row — the canonical 16-field tuple
+#: One serialised ledger row — the canonical 17-field tuple
 #: :func:`ledger_record_row` emits and :meth:`WindowLedger.from_rows` restores.
 #: THE single row-shape spelling (CLAUDE.md §11 COMMON): the durable store's
 #: ``LedgerRow`` aliases it, so the two can never drift. ``empty_retries`` +
-#: ``transient_retries`` (DEC-RETRY-COUNTER-SPLIT-001) were appended LAST —
-#: after ``bars_net_new`` exactly as that column was — for legacy-file
-#: back-compat (an absent column loads ``None`` = honest unknown).
+#: ``transient_retries`` (DEC-RETRY-COUNTER-SPLIT-001) then ``failed_streak``
+#: (DEC-AUTO-RESUME-ZERO-SURPRISES-001) were each appended LAST — after
+#: ``bars_net_new`` exactly as that column was — for legacy-file back-compat
+#: (an absent optional column loads ``None`` = honest unknown for the
+#: observation columns, ``0`` for the ``failed_streak`` running counter — see
+#: the field docstring's int-0-vs-None rationale).
 LedgerRowTuple = tuple[
     str,
     str,
@@ -360,11 +457,12 @@ LedgerRowTuple = tuple[
     int | None,
     int | None,
     int | None,
+    int,
 ]
 
 
 def ledger_record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
-    """Serialise ONE record to the canonical 16-field ledger row tuple.
+    """Serialise ONE record to the canonical 17-field ledger row tuple.
 
     The single source of the row shape (CLAUDE.md §11 COMMON —
     DEC-SUSPICION-SWEEP-FIXES-001): :meth:`WindowLedger.to_rows` delegates here,
@@ -373,7 +471,8 @@ def ledger_record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
     mtime-cached records, so the two can never drift. Field order matches the
     durable store's :data:`~brutex.data.window_ledger_store.LedgerRow` —
     ``in_pull_fetches`` then ``bars_net_new`` then the ``empty_retries`` /
-    ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) each appended LAST
+    ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) then
+    ``failed_streak`` (DEC-AUTO-RESUME-ZERO-SURPRISES-001) each appended LAST
     for legacy-file back-compat (see :meth:`WindowLedger.to_rows`).
     """
     return (
@@ -393,6 +492,7 @@ def ledger_record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
         r.bars_net_new,
         r.empty_retries,
         r.transient_retries,
+        r.failed_streak,
     )
 
 
@@ -495,6 +595,16 @@ class WindowLedger:
     _degraded: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )
+    #: The fetch-exhausted terminal threshold (DEC-AUTO-RESUME-ZERO-SURPRISES-001)
+    #: — the ``failed_streak`` twin of :attr:`_threshold`, defaulting to
+    #: :data:`FAILED_TERMINAL_THRESHOLD`. Appended LAST (after ``_degraded``)
+    #: so any positional construction of the dataclass stays byte-compatible.
+    _threshold_failed: int = FAILED_TERMINAL_THRESHOLD
+    #: Windows NEWLY settled ``SKIPPED`` by the FETCH-EXHAUSTED arm specifically
+    #: (a strict subset of :attr:`_settled_skipped_count` — the distinct
+    #: "permanently failed" verdict count vs the generic "no trades" settles).
+    #: NOT serialised (a per-run tally, not history).
+    _settled_exhausted_count: int = field(default=0, repr=False)
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
@@ -539,6 +649,7 @@ class WindowLedger:
                 # halves (DEC-RETRY-COUNTER-SPLIT-001 — mirrors in_pull_fetches=0).
                 empty_retries=0,
                 transient_retries=0,
+                failed_streak=0,  # never fetched — no failure run yet
             )
             self._dirty.add(wk)
 
@@ -579,6 +690,7 @@ class WindowLedger:
                 # honest unknown, never fabricated (DEC-RETRY-COUNTER-SPLIT-001).
                 empty_retries=None,
                 transient_retries=None,
+                failed_streak=0,  # the lake proves a working fetch — no failure run
             )
             self._dirty.add(wk)
             return True
@@ -771,8 +883,30 @@ class WindowLedger:
         its ``empty_streak`` is PRESERVED (not bumped — a suspect empty must not step
         the window toward the across-pull ``SKIPPED`` promotion) and it can NEVER
         settle ``SKIPPED`` on this record (both the fast-settle and the streak
-        promotion are gated off). IGNORED for ``SUCCESS`` / ``FAILED`` / degraded
-        outcomes; the default ``False`` is byte-identical to the prior behaviour.
+        promotion are gated off). IGNORED for ``SUCCESS`` / degraded outcomes and
+        for a ``FAILED``'s STREAK accounting; since
+        DEC-AUTO-RESUME-ZERO-SURPRISES-001 it ALSO gates OFF the fetch-exhausted
+        ``FAILED`` → ``SKIPPED`` settle below (a throttle storm must not cement
+        windows — parity with the EMPTY settle arms); the default ``False`` is
+        byte-identical to the prior behaviour.
+
+        **Fetch-exhausted terminal settle (DEC-AUTO-RESUME-ZERO-SURPRISES-001):**
+        an INDEPENDENT ``failed_streak`` counter mirrors the ``empty_streak``
+        machinery for NON-empty failures — bumped on a genuine ``FAILED`` (an
+        errored fetch; NEVER a *degraded* completeness demotion, which is a
+        returned-bars fetch with its own ``empty_streak`` bound), reset to 0 by
+        a ``SUCCESS`` / ``EMPTY`` (the fetch worked) and by any NON-exhausted
+        ``SKIPPED`` settle. At :data:`FAILED_TERMINAL_THRESHOLD` consecutive
+        failed records (across pulls AND across one pull's bounded retry
+        re-records — the honest counting envelope documented on the
+        threshold constant) the window settles ``SKIPPED`` with the DISTINCT
+        :func:`fetch_exhausted_settle_reason` stamp and ONE
+        ``window_ledger.fetch_exhausted_settled`` WARNING naming the window —
+        so a window the vendor 500s indefinitely stops counting as outstanding
+        work (``detect_incomplete_pull`` goes quiet; the boot auto-resume
+        re-fire storm converges) while staying RECOVERABLE: the settle reuses
+        ``SKIPPED``, so :meth:`reopen_skipped` / the
+        :meth:`audit_reopen_skipped` round-robin re-open it unchanged.
 
         *bars_net_new* (DEC-INGEST-BOUNDARY-INTEGRITY-001) is the sink's
         keep-first-DEDUPED net-new bar count for this append
@@ -817,6 +951,26 @@ class WindowLedger:
             #     EMPTY-below-threshold are never skippable) until it returns bars; we
             #     only ever settle a window seen genuinely EMPTY ``_threshold`` times.
             prior_streak = prior.empty_streak if prior is not None else 0
+            # FAILED-streak transitions (DEC-AUTO-RESUME-ZERO-SURPRISES-001) — the
+            # INDEPENDENT failure twin of the empty_streak block below, so the
+            # default (below-threshold) behaviour of every existing path is
+            # byte-identical:
+            #   * genuine FAILED (an errored fetch) → bump (one more failed pull).
+            #   * SUCCESS / EMPTY → reset to 0 (the fetch WORKED — a clean 200,
+            #     with or without bars, breaks the failure run; a
+            #     breaker-suppressed EMPTY still RESETS — the untrusted part is
+            #     its no-data EVIDENCE, not the fact the vendor answered).
+            #   * degraded_success (a completeness demotion — classified FAILED
+            #     but the vendor RETURNED bars) → PRESERVE: not a fetch failure,
+            #     so it neither bumps toward exhaustion nor breaks a real run.
+            prior_failed = prior.failed_streak if prior is not None else 0
+            if classified == FAILED and not degraded_success:
+                failed_streak = prior_failed + 1
+            elif classified in (SUCCESS, EMPTY):
+                failed_streak = 0
+            else:  # degraded_success — a returned-bars demotion, not a fetch failure
+                failed_streak = prior_failed
+            exhausted_settle = False
             if classified == EMPTY:
                 # An UNTRUSTED empty (the pull's mass-empty breaker is tripped —
                 # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) preserves the streak: a
@@ -867,6 +1021,34 @@ class WindowLedger:
                 error_type = expired_window_settle_reason(prior_streak + 1)
             elif classified == EMPTY and not suppress_settle and empty_streak >= self._threshold:
                 status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
+            elif (
+                classified == FAILED
+                and not degraded_success
+                and not suppress_settle
+                and failed_streak >= self._threshold_failed
+            ):
+                # FETCH-EXHAUSTED terminal settle (DEC-AUTO-RESUME-ZERO-SURPRISES-001):
+                # the window FAILED on `_threshold_failed` SEPARATE pulls for a
+                # NON-empty reason (vendor 500s forever, an unreachable partition)
+                # — the ledger's ONLY terminal path for such a window was
+                # previously none, so `detect_incomplete_pull` read it
+                # "outstanding" on EVERY boot and the auto-resume re-fired a
+                # whole-universe pull forever. Settle it SKIPPED with the
+                # DISTINCT honest stamp (never the "vendor confirmed no trades"
+                # lie — every fetch ERRORED). Gated OFF while the mass-empty
+                # breaker is tripped (`suppress_settle` — a throttle storm must
+                # not cement windows, parity with the EMPTY arms) and for a
+                # degraded demotion (its own accept-gap arm above governs).
+                # RECOVERY: `SKIPPED` inherits reopen_skipped +
+                # the audit_reopen_skipped round-robin unchanged — never blind.
+                status = SKIPPED
+                error_type = fetch_exhausted_settle_reason(failed_streak)
+                exhausted_settle = True
+            if status == SKIPPED and not exhausted_settle:
+                # ANY non-exhausted terminal settle (EMPTY streak / old-window /
+                # degraded accept-gap) is a definitive vendor answer — the
+                # failure run ends with it.
+                failed_streak = 0
             if degraded_success and status == FAILED:
                 # Tombstone the demotion (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001):
                 # the merge-on-save must keep this in-memory FAILED outright, or a
@@ -890,11 +1072,18 @@ class WindowLedger:
                 # SUCCESS re-mask the confirmed gap on our own save.
                 self._degraded.discard(wk)
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
-            if status == SKIPPED and (prior is None or prior.status != SKIPPED):
+            newly_skipped = status == SKIPPED and (prior is None or prior.status != SKIPPED)
+            if newly_skipped:
                 # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): count every
                 # window THIS instance newly settles SKIPPED, whatever the path (fast-settle,
                 # streak promotion, degraded accept-gap) — the verdict must SAY it.
                 self._settled_skipped_count += 1
+            newly_exhausted = exhausted_settle and newly_skipped
+            if newly_exhausted:
+                # The DISTINCT "permanently failed" tally (a strict subset of the
+                # generic SKIPPED tally above) — the verdict layer can then name
+                # exhausted windows separately from "no trades" settles.
+                self._settled_exhausted_count += 1
             self._by_window[wk] = WindowLedgerRecord(
                 market=key.market,
                 security_id=key.security_id,
@@ -912,9 +1101,27 @@ class WindowLedger:
                 bars_net_new=bars_net_new,
                 empty_retries=empty_retries,
                 transient_retries=transient_retries,
+                failed_streak=failed_streak,
             )
             self._dirty.add(wk)
-            return status
+        if newly_exhausted:
+            # The ONE loud verdict per fetch-exhausted settle
+            # (DEC-AUTO-RESUME-ZERO-SURPRISES-001) — emitted OUTSIDE the lock
+            # (the lock is held only for the O(1) dict op, never across I/O).
+            # Recovery is named so the operator acts, never guesses.
+            _LOG.warning(
+                "window_ledger.fetch_exhausted_settled",
+                market=key.market,
+                security_id=key.security_id,
+                interval=key.interval,
+                window_start=key.start.isoformat(),
+                window_end=key.end.isoformat(),
+                failed_streak=failed_streak,
+                attempts=attempts,
+                last_error=error_type,
+                remediation="inspect the failure cause, then `brutex reopen-skipped`",
+            )
+        return status
 
     def settle_known_gap(self, key: WindowKey, *, now: datetime, reason: str | None = None) -> str:
         """Settle *key* as ``SKIPPED`` — a ``DH-905`` known-gap that must NOT re-pull — **O(1)**.
@@ -959,6 +1166,10 @@ class WindowLedger:
                 # unknown, never fabricated (DEC-RETRY-COUNTER-SPLIT-001).
                 empty_retries=None,
                 transient_retries=None,
+                # A DEFINITIVE vendor no-data answer ends any failure run
+                # (DEC-AUTO-RESUME-ZERO-SURPRISES-001 — mirrors the
+                # non-exhausted-settle reset in :meth:`record`).
+                failed_streak=0,
             )
             self._dirty.add(wk)
             return SKIPPED
@@ -975,6 +1186,20 @@ class WindowLedger:
         """
         with self._lock:
             return self._settled_skipped_count
+
+    @property
+    def newly_exhausted_failed(self) -> int:
+        """Windows newly settled ``SKIPPED`` by the FETCH-EXHAUSTED arm (per-pull) — **O(1)**.
+
+        DEC-AUTO-RESUME-ZERO-SURPRISES-001: the DISTINCT "permanently FAILED
+        after :data:`FAILED_TERMINAL_THRESHOLD` attempts" verdict count — a
+        strict SUBSET of :attr:`newly_settled_skipped` (which folds every
+        settle path), so a verdict surface can name exhausted windows
+        separately from honest "no trades" settles. Same per-instance
+        (per-pull) lifetime + transition-only counting as its parent tally.
+        """
+        with self._lock:
+            return self._settled_exhausted_count
 
     def reopen_skipped(
         self,
@@ -1061,6 +1286,10 @@ class WindowLedger:
                 bars_net_new=row.bars_net_new,  # no fetch here — preserved
                 empty_retries=row.empty_retries,  # no fetch here — preserved
                 transient_retries=row.transient_retries,
+                # A re-open regains the FULL failure budget too
+                # (DEC-AUTO-RESUME-ZERO-SURPRISES-001 — mirrors empty_streak=0
+                # above, so a reopened exhausted window gets K fresh attempts).
+                failed_streak=0,
             )
         self._reopened.update(doomed)
         self._dirty.update(doomed)
@@ -1426,12 +1655,15 @@ class WindowLedger:
 
         ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) then ``bars_net_new``
         (DEC-INGEST-BOUNDARY-INTEGRITY-001) then the ``empty_retries`` /
-        ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) were each
+        ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) then
+        ``failed_streak`` (DEC-AUTO-RESUME-ZERO-SURPRISES-001) were each
         appended LAST — after ``empty_streak`` exactly as that column was — so a
-        legacy 12/13/14-tuple Parquet (written before any of them existed) still
-        loads (the store fills the missing column per-row; an absent
+        legacy 12/13/14/16-tuple Parquet (written before any of them existed)
+        still loads (the store fills the missing column per-row; an absent
         ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` reads
-        ``None``).
+        ``None``; an absent ``failed_streak`` reads the honest ``0`` — a
+        running counter with zero tracked observations, never a fabricated
+        exhaustion).
 
         Delegates per-record to the module-level :func:`ledger_record_row` (ONE
         source of the row shape — the ``/db`` grid's cached projection reuses it,
@@ -1445,9 +1677,15 @@ class WindowLedger:
         rows: Iterable[LedgerRowTuple],
         *,
         threshold: int = EMPTY_TERMINAL_THRESHOLD,
+        threshold_failed: int = FAILED_TERMINAL_THRESHOLD,
     ) -> WindowLedger:
-        """Restore from :meth:`to_rows` output (round-trips exactly)."""
-        ledger = cls(_threshold=threshold)
+        """Restore from :meth:`to_rows` output (round-trips exactly).
+
+        *threshold_failed* mirrors *threshold* for the fetch-exhausted settle
+        (DEC-AUTO-RESUME-ZERO-SURPRISES-001) — the same additive-kwarg shape,
+        default byte-identical.
+        """
+        ledger = cls(_threshold=threshold, _threshold_failed=threshold_failed)
         for (
             market,
             security_id,
@@ -1465,6 +1703,7 @@ class WindowLedger:
             bars_net_new,
             empty_retries,
             transient_retries,
+            failed_streak,
         ) in rows:
             ledger._by_window[(market, security_id, interval, window_start, window_end)] = (
                 WindowLedgerRecord(
@@ -1484,6 +1723,7 @@ class WindowLedger:
                     bars_net_new=bars_net_new,
                     empty_retries=empty_retries,
                     transient_retries=transient_retries,
+                    failed_streak=failed_streak,
                 )
             )
         return ledger

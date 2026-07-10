@@ -1585,8 +1585,9 @@ def _row(
     last_error: str | None = None,
     empty_retries: int | None = None,
     transient_retries: int | None = None,
+    failed_streak: int = 0,
 ) -> LedgerRow:
-    """One serialised ledger row (the exact 16-field ``to_rows`` shape)."""
+    """One serialised ledger row (the exact 17-field ``to_rows`` shape)."""
     return (
         "dhan",
         security,
@@ -1604,6 +1605,7 @@ def _row(
         bars_net_new,
         empty_retries,
         transient_retries,
+        failed_streak,
     )
 
 
@@ -2745,6 +2747,7 @@ class TestBarsNetNewBackwardCompat:
             "bars_net_new",
             "empty_retries",
             "transient_retries",
+            "failed_streak",
         ]
 
     def test_merge_rows_prefer_by_leading_fields_regardless_of_net_new(self) -> None:
@@ -2870,3 +2873,90 @@ class TestRetrySplitBackwardCompat:
         newer = _row(last_attempt="2026-06-08T13:00:00+00:00", empty_retries=2, transient_retries=1)
         assert merge_ledger_rows([older], [newer]) == [newer]
         assert merge_ledger_rows([newer], [older]) == [newer]
+
+
+class TestFailedStreakBackwardCompat:
+    """DEC-AUTO-RESUME-ZERO-SURPRISES-001: ``failed_streak`` follows the exact
+    optional-column template — appended LAST; an ABSENT column loads as the
+    honest running-counter ``0`` (NOT ``None`` — a legacy row has made zero
+    tracked observations, never a fabricated exhaustion), new files round-trip
+    the int, and the delta stream carries the column."""
+
+    def test_old_format_parquet_loads_failed_streak_zero(self, tmp_path: Path) -> None:
+        # A pre-column file (16 columns — everything but failed_streak) MUST
+        # load; the absent counter reads 0 (fresh K-attempt budget), never None.
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["NIFTY"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": ["FAILED"],
+                "bars": [0],
+                "attempts": [7],
+                "last_error": ["GrowwServerError"],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+                "empty_streak": [0],
+                "in_pull_fetches": [1],
+                "bars_net_new": [None],
+                "empty_retries": [None],
+                "transient_retries": [None],
+            },
+        )
+        ledger = load_window_ledger(tmp_path)
+        rec = ledger.records()[0]
+        assert ledger.count == 1  # loaded, NOT degraded to empty
+        assert rec.failed_streak == 0
+        assert rec.attempts == 7  # every other column intact
+        assert ledger.is_skippable(_key()) is False  # a FAILED row stays re-pullable
+
+    def test_new_round_trip_carries_the_counter(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        for _ in range(2):
+            ledger.record(
+                _key(), raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=_NOW
+            )
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.to_rows() == ledger.to_rows()
+        assert restored.records()[0].failed_streak == 2
+
+    def test_delta_append_carries_failed_streak(self, tmp_path: Path) -> None:
+        # The mid-pull delta stream writes the SAME 17-column schema, so a
+        # crash-recovered delta-only lake restores the counter.
+        import pyarrow.parquet as pq
+
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        (delta,) = list_ledger_deltas(tmp_path)
+        table = pq.read_table(delta)
+        assert "failed_streak" in table.schema.names
+        assert table.column("failed_streak").to_pylist() == [1]
+        restored = load_window_ledger(tmp_path)  # base-less delta-only load
+        assert restored.records()[0].failed_streak == 1
+
+    def test_load_threads_threshold_failed(self, tmp_path: Path) -> None:
+        # The additive threshold_failed kwarg reaches the restored ledger: a
+        # K'=2 load settles the second consecutive failure (mirrors the
+        # `threshold` kwarg's contract exactly).
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=_NOW)
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path, threshold_failed=2)
+        status = restored.record(
+            _key(), raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=_NOW
+        )
+        assert status == "SKIPPED"
+
+    def test_empty_lake_load_threads_threshold_failed(self, tmp_path: Path) -> None:
+        # The no-base/no-delta arm builds the fresh ledger with the SAME
+        # threshold pair (never the default when overridden).
+        restored = load_window_ledger(tmp_path, threshold_failed=1)
+        status = restored.record(
+            _key(), raw_bars=0, error_type="GrowwServerError", bars_appended=0, now=_NOW
+        )
+        assert status == "SKIPPED"
