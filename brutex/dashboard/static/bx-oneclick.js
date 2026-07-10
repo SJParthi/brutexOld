@@ -179,6 +179,18 @@ function bxResDash(value) {
 }
 
 /**
+ * A signed percent string with the page's minus convention (U+2212, matching
+ * the money() ₹ formatter) — never a mix of ASCII "-" and U+2212 in one panel.
+ * "—" for a null/undefined pct (never a fabricated 0%).
+ *
+ * @param {*} pct - worst_streak_pnl_pct (a signed float, ≤ 0 for live records).
+ * @returns {string} e.g. -12.5 -> "−12.5%"; "—" when null.
+ */
+function bxResPct(pct) {
+  return pct === null || pct === undefined ? "—" : (String(pct) + "%").replace(/^-/, "−");
+}
+
+/**
  * ISO-8601 UTC → "YYYY-MM-DD HH:MM IST" (pure epoch arithmetic — the fixed
  * +05:30 IST offset, TZ-invariant like bx-chart's bxIstDateOfEpoch); "—" for
  * a null/unparseable input (never a NaN string).
@@ -265,8 +277,7 @@ function bxResilienceCells(row, fmtMoney) {
     };
   }
   var hasWorst = r.worst_streak_pnl_paisa !== null && r.worst_streak_pnl_paisa !== undefined;
-  var pct = r.worst_streak_pnl_pct;
-  var pctText = pct === null || pct === undefined ? "—" : String(pct) + "%";
+  var pctText = bxResPct(r.worst_streak_pnl_pct);
   var hasLen = r.worst_streak_len !== null && r.worst_streak_len !== undefined;
   // A missing/failed money formatter reads a clean "—" (never "— (pct%)").
   var costMoney = hasWorst ? money(r.worst_streak_pnl_paisa) : "—";
@@ -365,10 +376,9 @@ function bxResilienceRankOneCells(row) {
   if (!r || r.stats_live !== true) {
     return { worstStreakPct: "—", uwDays: "—" };
   }
-  var pct = r.worst_streak_pnl_pct;
   var days = r.longest_underwater_days;
   return {
-    worstStreakPct: pct === null || pct === undefined ? "—" : String(pct) + "%",
+    worstStreakPct: bxResPct(r.worst_streak_pnl_pct),
     uwDays: days === null || days === undefined ? "—" : String(days)
   };
 }

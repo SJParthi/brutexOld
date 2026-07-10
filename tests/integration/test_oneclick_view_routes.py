@@ -516,6 +516,14 @@ class TestStrategyPage:
         assert "window.BXOneclick.resilienceSelfLocate(Number(raw), state.resilienceRow)" in html
         # The honest signal-only / gross / per-unit caveat is on the panel.
         assert "gross of brokerage &amp; taxes · per-unit (no sizing)" in html
+        # MINOR-1 (display honesty): the two cost/streak cells are DISTINCT runs
+        # — the by-COUNT cell keeps "Worst cold streak", the by-₹ cell is
+        # relabeled "Worst streak (by ₹)" (matching the CLI fix). The old
+        # anaphoric "That streak cost" header (which implied the longest-by-count
+        # streak cost the worst ₹) is GONE from every surface.
+        assert "Worst cold streak" in html
+        assert "Worst streak (by ₹)" in html
+        assert "That streak cost" not in html
         # data-explain hooks so every cell hovers to its R27 line.
         for key in (
             "max_consecutive_losses",

@@ -142,7 +142,9 @@ class TestResilienceCellsLive:
         assert out["live"] is True
         assert out["worstStreak"] == "5 in a row"
         assert out["worstStreakSub"] == "typical 2 · P95 4"
-        assert out["cost"] == "−₹1250.00 (-12.5%)"
+        # Consistent minus glyph: the pct uses the page's U+2212 (matching the
+        # ₹ formatter), never a mixed ASCII "-" / U+2212 in one cell.
+        assert out["cost"] == "−₹1250.00 (−12.5%)"
         # UTC 04:15 + 05:30 = 09:45 IST; 09:20 + 05:30 = 14:50 IST.
         assert out["costSub"] == "4 losses · 2024-03-01 09:45 IST → 2024-03-05 14:50 IST"
         assert out["underwater"] == "7 trades · 30 days"
@@ -216,7 +218,8 @@ class TestResilienceRankOneCells:
 
     def test_live_row_renders_pct_and_days(self) -> None:
         out = _node_call("O.bxResilienceRankOneCells(ARGS[0])", json.dumps(_LIVE_ROW))
-        assert out["worstStreakPct"] == "-12.5%"
+        # Consistent minus glyph (U+2212), matching the panel + the ₹ formatter.
+        assert out["worstStreakPct"] == "−12.5%"
         assert out["uwDays"] == "30"
 
     def test_null_row_gates_both_hooks_to_dash(self) -> None:

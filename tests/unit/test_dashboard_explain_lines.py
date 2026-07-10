@@ -127,6 +127,12 @@ class TestExplainLookup:
         # R27 no-hallucination: the worst-streak line names the exact honest scope.
         worst = _node_call('E.explain("worst_streak_pnl")')
         assert "gross of" in worst and "per-unit (no position sizing)" in worst
+        # MINOR-1 (display honesty): both lines DISTINGUISH the longest streak
+        # BY COUNT from the worst streak BY ₹ (a shorter run of bigger losses can
+        # cost more) — the round-1 conflation is gone from the tooltips too.
+        assert "BY ₹" in worst and "NOT necessarily the longest streak by count" in worst
+        longest = _node_call('E.explain("max_consecutive_losses")')
+        assert "BY COUNT" in longest and "worst streak BY ₹ can be a shorter run" in longest
         # The win-rate-swing line names the ≥20-trade floor + the <2-year "—" rule.
         swing = _node_call('E.explain("win_rate_year_spread")')
         assert "at least 20 trades" in swing and "fewer than two" in swing
