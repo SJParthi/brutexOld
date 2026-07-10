@@ -221,11 +221,13 @@ resolution: this branch's blurbs stay newest in CLAUDE.md's three regions,
 main's #1631 entry demoted to the next `Earlier:` slot; `docs/MIGRATION.md`
 auto-merged (no numbering collision — ours #1625/#1626, main's #1631). The new
 ledger entries took the interim **#1632/#1633** (next free above the then-live
-main max #1631) — RENUMBERED to **#1655/#1656** at fixer round 1 (below): live
+main max #1631) — RENUMBERED to **#1655/#1656** at fixer round 1 (below), then to
+**#1687/#1688** at PR prep 2026-07-10 (live main's PR #1343 took #1655 —
+DEC-AUTO-RESUME-INPROCESS-001; #1687/#1688 coordinator-granted): live
 main advanced to #1654 max and PR #1354 took #1632, so the interim numbers
 collided on the merged tree.
 
-### Addition B — DEC-BADTICK-HILO-SCREEN-001 (MIGRATION.md #1655; interim #1632)
+### Addition B — DEC-BADTICK-HILO-SCREEN-001 (MIGRATION.md #1687; interim #1632)
 
 `BadTickScreen.screen_mask` gains OPTIONAL keyword-only `highs` / `lows`
 (each independently optional; omitted = close-only, byte-identical — the
@@ -257,7 +259,7 @@ lows-only supply · exact-4× boundary · mixed-reason one-WARN breakdown ·
 legit reopen gap must-NOT-trip · omitted-kwargs byte-identity · end-to-end
 replay drops with `skip_reasons` on the wire WARN.
 
-### Addition C — DEC-READ-BOUNDARY-FINITE-001 (MIGRATION.md #1656; interim #1633)
+### Addition C — DEC-READ-BOUNDARY-FINITE-001 (MIGRATION.md #1688; interim #1633)
 
 NEW `brutex/data/bad_tick.py::non_finite_keep_mask` + NEW event constant
 `NON_FINITE_SKIP_EVENT = "feed.non_finite_bar_skipped"` (a DISTINCT event
@@ -269,7 +271,7 @@ the bad-tick WARN). Wired in `arrow_table_to_bars` as the FIRST screen:
   BEFORE the positivity raise; one WARN per affected session (fields: source,
   session, skipped, first_field in pinned open→high→low→close order,
   first_value as a repr STRING — inf/nan are not JSON numbers);
-- SANCTIONED CHANGE (documented in code + #1656): `-inf` moves from
+- SANCTIONED CHANGE (documented in code + #1688): `-inf` moves from
   raise-class (positivity ValueError, the pre-change whole-table crash) to
   skip-class; the positivity raise stays reserved for FINITE non-positive
   prices, byte-unchanged;
@@ -283,7 +285,15 @@ the bad-tick WARN). Wired in `arrow_table_to_bars` as the FIRST screen:
   for forensic replay of raw stored bytes"; a separate finite-only switch
   would mint a mixed mode with no operator story. OFF restores the pre-#1616
   envelope for non-finite values too (`-inf` raises at positivity again —
-  pinned; NaN/+inf flow raw, the pre-existing disclosed envelope).
+  pinned; ~~NaN/+inf flow raw, the pre-existing disclosed envelope~~
+  [CORRECTED at PR prep 2026-07-10 — that clause was FALSE per field and
+  had been left standing HERE after fixer round 1 corrected every other
+  claim site (see this file's own "MINOR — kill-switch-OFF envelope claim
+  imprecise" round-1 section below, which measured it): with the screen
+  OFF, NaN in ANY OHLC field raises an UNWRAPPED
+  `decimal.InvalidOperation`; `+inf` in open/low/close raises the wrapped
+  corrupt-bar ValueError; ONLY `+inf`-in-HIGH flows raw — all arms
+  probe-verified + pinned, byte-identical to main]).
 - NaN-compares-false trap cases pinned explicitly: `nan <= 0` is False,
   `is_bad_tick(nan, x)` / `is_bad_tick(x, nan)` are False.
 
@@ -292,7 +302,7 @@ the bad-tick WARN). Wired in `arrow_table_to_bars` as the FIRST screen:
 1. **Head escape band disclosure** — already landed in rounds 2/3 (module
    docstring names `[max_ratio * min(other head closes), max_ratio * median)`
    + the ledger #1625 carries it); verified present at this HEAD, no change
-   needed beyond the #1655 restatement.
+   needed beyond the #1687 restatement.
 2. **Majority-collapse WARN doc precision** — already landed in round 2 (the
    event's doc + `_flush` comment state it cannot fire on the minimal 2-of-3 /
    2v2 shapes and over-fires on a healthy-median short session; strict gate +
@@ -323,7 +333,7 @@ the bad-tick WARN). Wired in `arrow_table_to_bars` as the FIRST screen:
   is computed over the LOADED bar list — `cli.py` `cmd_sweep_all` loads
   `slices[(symbol, interval)] = [event.bar for event in feed]` (ReplayFeed →
   `Catalog.get_bars` → `arrow_table_to_bars`, `brutex/feed/replay.py:246-255`)
-  and hashes those slices (`brutex/cli.py:6496`). A kept-set change under the
+  and hashes those slices (`brutex/cli.py:6496` at authoring; `brutex/cli.py:6373` on the PR-prep merged tree — main's auto-resume refactor moved it). A kept-set change under the
   screen therefore SELF-RE-KEYS. Now ALSO test-pinned:
   `test_screen_then_hash_kept_set_change_self_rekeys` (same table, screen ON
   vs OFF → different snapshot hash).
@@ -391,8 +401,9 @@ auto-merged).
   red at the required gate.
 - Fixed by the P-1 rule + the #1546–#1550/#1580 renumber precedent:
   DEC-BADTICK-HILO-SCREEN-001 #1632 → **#1655**, DEC-READ-BOUNDARY-FINITE-001
-  #1633 → **#1656** (= live-main max #1654 + 1/+2; the validator allows
-  gaps), with in-entry renumber notes, the #1656 "Builds on"/next-free
+  #1633 → **#1656** (= then-live-main max #1654 + 1/+2; renumbered AGAIN to
+  #1687/#1688 at PR prep — see the PR-prep renumber note; the validator allows
+  gaps), with in-entry renumber notes, the #1688 "Builds on"/next-free
   cross-refs repointed, and every cross-reference swept: CLAUDE.md top blurb
   + §1 + §3 (with renumber parentheticals), this file's five refs. No
   brutex/ source or test file referenced the numbers (grep-verified — DEC
@@ -405,11 +416,11 @@ auto-merged).
   close-only screen and hit the DEC-STORED-DATA-VALIDATION-001 ordering
   ValueError (loud whole-table refusal); the hi/lo arm now skips it silently
   — a real loud→quiet contract change with no SANCTIONED CHANGE record (the
-  `-inf` twin in #1656 got one), a stale `replay.py` docstring ("an ordering
+  `-inf` twin in #1688 got one), a stale `replay.py` docstring ("an ordering
   violation raises a LOUD ValueError"), and no test pin.
 - Fixed as DISCLOSURE + pins (the behavior stands on the merits — the bar is
   corrupt either way and both outcomes refuse to serve it): a SANCTIONED
-  CHANGE record in #1655; the `replay.py::arrow_table_to_bars` docstring
+  CHANGE record in #1687; the `replay.py::arrow_table_to_bars` docstring
   scoped ("FINITE non-positive price"; the ordering raise's scope with the
   screens ON stated); module-docstring disclosure in `bad_tick.py`; three
   new integration pins — `test_misordered_out_of_band_low_skipped_not_raised`
@@ -419,15 +430,17 @@ auto-merged).
 ### MAJOR/MINOR (×4 lenses) — the never-emptied head-vote claim falsified
 
 - The invariant is CLOSE-vote-only: `_judge(median, i)` also tests the
-  median-close bar's OWN high/low, so the median bar can drop and a ≤3-bar
-  session whose every head bar carries an out-of-band high/low is fully
+  median-close bar's OWN high/low, so the median bar can drop and an
+  EXACTLY-3-bar session (the head-resolving shape; 1-/2-bar sessions are
+  KEPT — the head never resolves) whose every head bar carries an
+  out-of-band high/low is fully
   EMPTIED (kept=0; reproduced) — production `arrow_table_to_bars` always
   supplies highs/lows. Stale at `_resolve_head`'s docstring, MIGRATION.md
-  #1625, and #1655's "carried verbatim" honest-limits framing.
+  #1625, and #1687's "carried verbatim" honest-limits framing.
 - Fixed: `_resolve_head` docstring scoped to the close vote (+ the
   median-close-still-seeds-the-baseline note); #1625 corrected IN PLACE
-  (strikethrough + [CORRECTED 2026-07-09 …#1655] note, the #208 precedent);
-  #1655's honest limits gain the emptied-session shape (loud: skip WARN
+  (strikethrough + [CORRECTED 2026-07-09 …#1687] note, the #208 precedent);
+  #1687's honest limits gain the emptied-session shape (loud: skip WARN
   `skip_reasons` + majority-dropped WARN kept=0) and drop the "carried
   verbatim" wording; CLAUDE.md top + §1 blurbs updated; three new unit pins
   — `test_hilo_median_close_bar_dropped_for_its_own_high` +
@@ -443,9 +456,9 @@ auto-merged).
   in ANY OHLC field raises an UNWRAPPED `decimal.InvalidOperation` from
   CandleBar validation; `+inf` in open/low/close raises the wrapped
   corrupt-bar ValueError; ONLY `+inf`-in-HIGH flows raw; `-inf` raises at
-  positivity. The old summary contradicted #1656's own GAP passage.
+  positivity. The old summary contradicted #1688's own GAP passage.
 - Fixed (docs only, behavior unchanged): the `bad_tick.py` non-finite
-  kill-switch paragraph + the #1656 kill-switch passage + the CLAUDE.md
+  kill-switch paragraph + the #1688 kill-switch passage + the CLAUDE.md
   top/§1 blurbs now carry the per-field truth.
 
 ### MINOR — verifier-B PR-body materials not in the ledger
@@ -453,7 +466,7 @@ auto-merged).
 - The golden census (1a), the vacuous re-key note (1b), and the
   screen-then-hash ordering citation (2) lived only in this file; the
   requirement wants them in the PR body / ledger entry.
-- Fixed: all three folded into #1655 as a "PR-BODY MATERIALS" passage (the
+- Fixed: all three folded into #1687 as a "PR-BODY MATERIALS" passage (the
   renumber forced a ledger edit anyway), so the ship step can source ONE
   durable record. This file's copies stand as the working duplicates.
 
@@ -462,7 +475,7 @@ auto-merged).
 - The additions-cycle CLAUDE.md blurbs + commit message re-minted the claim
   without #1625's scoping clause. Fixed: the scoping ("they do not route
   through `arrow_table_to_bars`, so they do not certify the new screens")
-  appended at the CLAUDE.md top + §1 blurbs and in #1655's gates sentence.
+  appended at the CLAUDE.md top + §1 blurbs and in #1687's gates sentence.
 
 ### Incidental (environment-verified while gating)
 
@@ -502,12 +515,15 @@ auto-merged).
 Nine confirmed findings (1 MAJOR + 1 MINOR + 7 NIT). Verified state first:
 the MAJOR (ledger #1632/#1633 collision with live main) and the verifier-B
 ledger-arm NIT were ALREADY RESOLVED by fixer round 1 (renumber to
-#1655/#1656 + the PR-BODY MATERIALS passage folded into #1655) — the
+#1655/#1656 — since renumbered #1687/#1688 at PR prep — + the PR-BODY
+MATERIALS passage folded into #1687) — the
 round-3 evidence for those two findings predates the round-1 commit
 0d317954. Re-verified at this HEAD: live main's max ledger number is #1654
 (its new-since-merge entries are #1633–#1636/#1648/#1651 — none collide
-with the branch-only #1625/#1626/#1655/#1656), so NO further renumber was
-needed. The remaining findings were fixed here:
+with the branch-only #1625/#1626 and the then-current #1655/#1656), so NO
+further renumber was needed AT THAT TIME. [SUPERSEDED at PR prep 2026-07-10:
+live main's PR #1343 then took #1655 (DEC-AUTO-RESUME-INPROCESS-001), so the
+additions entries renumbered AGAIN to the coordinator-granted #1687/#1688.] The remaining findings were fixed here:
 
 ### Pre-ship re-merge (finding: branch behind origin/main)
 
@@ -529,7 +545,7 @@ needed. The remaining findings were fixed here:
   closes [100, 100, 100, 30, 30] + a 300 high. The escape applies at head
   AND post-head — not bounded by the `[4·min-neighbor, 4·median)` bracket.
   Reworded at every claim site: `bad_tick.py` module docstring (hi/lo
-  honest-limits bullet), MIGRATION.md #1655, CLAUDE.md header + §1 blurbs.
+  honest-limits bullet), MIGRATION.md #1687, CLAUDE.md header + §1 blurbs.
   Adversarial-synthetic only (needs a kept >= 60% one-bar move); wording
   fix + disclosure, ZERO code change.
 
@@ -542,7 +558,7 @@ needed. The remaining findings were fixed here:
   lost 5; 6 NaN + 4 finite-kept → never fires) and now disclosed at the
   claim sites (`bad_tick.py` docstring honest-limits + the
   `BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT` constant comment + MIGRATION.md
-  #1655/#1656) + integration-pinned both directions
+  #1687/#1688) + integration-pinned both directions
   (`test_majority_dropped_warn_is_finite_subset_scoped`).
 
 ### NIT — no composition pin for non-finite + positivity-refused table
@@ -561,7 +577,7 @@ needed. The remaining findings were fixed here:
   `feed.bad_tick_head_unconfirmed`; the 2-bar hi/lo escape produces ZERO
   runtime signal (the closes agree — no session signal exists) and was
   disclosed docs-only. Now disclosed AS an asymmetry at the claim sites
-  (`bad_tick.py` docstring + #1655 + CLAUDE.md), with the INTRA-bar witness
+  (`bad_tick.py` docstring + #1687 + CLAUDE.md), with the INTRA-bar witness
   (a high >= max_ratio-x / low <= 1/max_ratio-x the bar's OWN close — no
   session reference needed, no false-positive risk under the circuit-band
   physics, closes the 1-bar/2-bar hi/lo escapes) recorded as a NAMED
@@ -570,7 +586,7 @@ needed. The remaining findings were fixed here:
 
 ### NIT — ledger commit-type token `fix(data)` vs the real `feat(data)`
 
-- #1655/#1656 recorded `fix(data)` while the additions commit (and the
+- #1687/#1688 recorded `fix(data)` while the additions commit (and the
   correct squash type — two NEW guards + a sanctioned behavior change) is
   `feat(data)`. Both entries corrected in place with the correction noted
   (the #1616 token-matches-squash precedent).
@@ -591,7 +607,7 @@ needed. The remaining findings were fixed here:
 
 ### Verifier-B obligations (re-checked, no change needed)
 
-- Req 1a/1b/2 material lives durably in MIGRATION.md #1655 (PR-BODY
+- Req 1a/1b/2 material lives durably in MIGRATION.md #1687 (PR-BODY
   MATERIALS passage, folded at fixer round 1) AND in this file's
   "PR-body obligations carried forward" section — the disjunctive
   requirement's LEDGER arm is satisfied; the ship step should still

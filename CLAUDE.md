@@ -19,9 +19,9 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-09 (DEC-BADTICK-HILO-SCREEN-001 +
-DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1655–#1656 — renumbered from
-the interim #1632–#1633 at the fixer round-1 merge reconcile (main's PR
-#1354 took #1632; live-main max #1654 + 1, the P-1 rule) —
+DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1687–#1688 — renumbered from
+the interim #1632–#1633, then from #1655–#1656 at PR prep 2026-07-10 (main's PR
+#1354 took #1632, then PR #1343 took #1655; #1687/#1688 coordinator-granted) —
 the data-edge-guard ADDITIONS cycle on the same branch:
 (1) DEC-BADTICK-HILO-SCREEN-001 — the bad-tick screen gains the HIGH/LOW arm:
 `BadTickScreen.screen_mask` grows OPTIONAL keyword-only `highs`/`lows`
@@ -50,10 +50,12 @@ PLUS a hi/lo-ONLY kept-close escape window (fixer round 3, superseding
 round 1's "x10 always caught" hi/lo wording: the arm judges the corrupt
 field vs the SESSION reference, so a x10 HIGH / ÷10 LOW on a bar whose own
 close is kept at (0.25, 0.4)x / (2.5, 4)x the reference is SERVED —
-adversarial-synthetic only, needs a kept >= 60% one-bar move; #1655) —
+adversarial-synthetic only, needs a kept >= 60% one-bar move; #1687) —
 but the #1625 "a session can never be emptied by its own head vote"
 invariant is CLOSE-vote-ONLY (fixer round 1): the arm judges the
-median-close bar's OWN high/low, so a ≤3-bar session whose every head bar
+median-close bar's OWN high/low, so an EXACTLY-3-bar session (the
+head-resolving shape — 1-/2-bar sessions are KEPT, the head never
+resolves) whose every head bar
 carries an out-of-band high/low is fully EMPTIED (kept=0, skip WARN +
 majority-dropped WARN both fire; the dropped median's CLOSE still seeds the
 baseline; #1625 corrected in place, pinned). SANCTIONED CHANGE (fixer
@@ -61,7 +63,7 @@ round 1): a MIS-ORDERED stored bar whose corrupt field is ratio-out-of-band
 is now SKIPPED by the arm BEFORE the DEC-STORED-DATA-VALIDATION-001
 ordering ValueError — a disclosed loud→quiet narrowing for that class
 (in-band mis-ordered bars still raise; screen OFF restores the raise for
-every mis-ordered bar — both pinned, #1655). The audit-3 permutation suite is pinned: HIGH-only
+every mis-ordered bar — both pinned, #1687). The audit-3 permutation suite is pinned: HIGH-only
 x10 / LOW-only ÷10 / both-scaled fat-range, poison at position {0,1,last},
 head permutations, hi/lo-skip-never-advances-baseline, legit reopen gap
 must-not-trip, omitted-kwargs byte-identity.
@@ -83,7 +85,7 @@ family) — OFF = the exact pre-#1616 raw read path for forensic replay
 (`-inf` then raises at positivity again, pinned; the rest of the OFF
 envelope measured per field, fixer round 1: NaN raises an UNWRAPPED
 `decimal.InvalidOperation`, `+inf` in open/low/close the wrapped corrupt-bar
-ValueError, ONLY `+inf`-in-HIGH flows raw — byte-identical to main, #1656);
+ValueError, ONLY `+inf`-in-HIGH flows raw — byte-identical to main, #1688);
 no second env knob.
 PLUS the fix-forward completeness items: the first-day-Muhurat abstain WARN
 is now test-pinned as stream-START across ALL SIX real Muhurat dates
@@ -104,7 +106,7 @@ route through `arrow_table_to_bars`, so they do not certify the new
 screens); ruff/ruff-format clean, `mypy
 --strict` clean, pyright at the merged-main baseline. Any
 per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
-#1655–#1656 — this header carries outcome summaries, never the
+#1687–#1688 — this header carries outcome summaries, never the
 round-by-round story.)
 Earlier: 2026-07-09 (DEC-BADTICK-HEAD-SEED-001 +
 DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001, MIGRATION.md #1625 —
@@ -1999,9 +2001,9 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/data-edge-guard-fixes` (**DEC-BADTICK-HILO-SCREEN-001 +
-  DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1655–#1656** (renumbered from the
-  interim #1632–#1633 at the fixer round-1 merge reconcile — main's PR #1354
-  took #1632) — the ADDITIONS cycle
+  DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1687–#1688** (renumbered from the
+  interim #1632–#1633, then from #1655–#1656 at PR prep — main's PR #1354
+  took #1632, then PR #1343 took #1655; #1687/#1688 coordinator-granted) — the ADDITIONS cycle
   on the same branch: (1) the bad-tick screen's HIGH/LOW arm — `screen_mask`
   gains OPTIONAL keyword-only `highs`/`lows` (omitted = close-only,
   byte-identical); a bar whose high OR low is out-of-band vs the session's
@@ -2018,11 +2020,13 @@ hostile-review pass._
   `[4·min-neighbor, 4·median)` head escape band applies identically, PLUS
   the hi/lo-ONLY kept-close escape window (fixer round 3 — a x10 high/÷10
   low on a bar whose own close is kept at (0.25, 0.4)x/(2.5, 4)x the
-  session reference is SERVED; adversarial-synthetic only, #1655) — but
+  session reference is SERVED; adversarial-synthetic only, #1687) — but
   the #1625 never-emptied-by-its-own-head-vote
   invariant is CLOSE-vote-ONLY (fixer round 1): the arm can drop the
-  median-close bar for its own out-of-band high/low, so a ≤3-bar session
-  whose every head bar carries one is fully EMPTIED (kept=0, both WARNs
+  median-close bar for its own out-of-band high/low, so an EXACTLY-3-bar
+  session (the head-resolving shape; 1-/2-bar sessions are KEPT — the head
+  never resolves) whose every head bar carries one is fully EMPTIED
+  (kept=0, both WARNs
   fire; #1625 corrected in place, pinned); and SANCTIONED (fixer round 1): a
   mis-ordered stored bar whose corrupt field is ratio-out-of-band is skipped
   by the arm BEFORE the DEC-STORED-DATA-VALIDATION-001 ordering ValueError —
@@ -2037,7 +2041,7 @@ hostile-review pass._
   pre-#1616 raw read path, `-inf` then raises again, pinned; the OFF envelope
   measured per field, fixer round 1: NaN raises an unwrapped
   `decimal.InvalidOperation`, `+inf` in open/low/close the wrapped
-  corrupt-bar ValueError, only `+inf`-in-HIGH flows raw — #1656). Plus the
+  corrupt-bar ValueError, only `+inf`-in-HIGH flows raw — #1688). Plus the
   fix-forward completeness items: first-day-Muhurat abstain WARN pinned as
   stream-START across ALL SIX Muhurat dates × both weekly anchors; the
   resident-KERNEL bar_bits path (`ResidentSweepKernel`/`ResidentKernelCache.get`
@@ -5048,8 +5052,8 @@ hostile-review pass._
 
 - **Active feature branch:** `claude/data-edge-guard-fixes`
   (DEC-BADTICK-HILO-SCREEN-001 + DEC-READ-BOUNDARY-FINITE-001,
-  MIGRATION.md #1655–#1656 (renumbered from the interim #1632–#1633; main's
-  PR #1354 took #1632) — the additions cycle: (1) the bad-tick screen's
+  MIGRATION.md #1687–#1688 (renumbered from the interim #1632–#1633, then
+  from #1655–#1656; main's PR #1354 took #1632, PR #1343 took #1655) — the additions cycle: (1) the bad-tick screen's
   HIGH/LOW arm (optional keyword-only `highs`/`lows` on `screen_mask`; an
   out-of-band high/low skips the whole bar even with a sane close — the
   DATA-3b PDH-poison class; additive `skip_reasons`/`first_reason` WARN

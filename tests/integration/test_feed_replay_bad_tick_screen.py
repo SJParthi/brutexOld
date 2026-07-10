@@ -456,7 +456,7 @@ def test_screen_then_hash_kept_set_change_self_rekeys(
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Fixer round 1 — the mis-ordered raise→skip SANCTIONED-change pins (#1655):
+# Fixer round 1 — the mis-ordered raise→skip SANCTIONED-change pins (#1687):
 # the hi/lo arm skips a mis-ordered bar whose corrupt field is ALSO
 # ratio-out-of-band BEFORE the CandleBar ordering ValueError can fire — a
 # disclosed loud→quiet narrowing, bounded (in-band mis-ordered bars still

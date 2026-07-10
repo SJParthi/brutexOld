@@ -209,7 +209,9 @@ bounded-multiple law (boundary = bad):
 * ONE head-seed invariant does NOT carry over: the ``DEC-BADTICK-HEAD-SEED-001``
   "a session can never be emptied by its own head screen" guarantee is
   CLOSE-vote-ONLY — the hi/lo arm additionally judges the median-close bar's
-  OWN high/low, so a ≤3-bar session whose EVERY head bar carries an
+  OWN high/low, so an EXACTLY-3-bar session (the head-resolving shape — a
+  1-/2-bar session's head never resolves and is KEPT per the limits above)
+  whose EVERY head bar carries an
   out-of-band high/low is fully EMPTIED (kept=0; loud, never silent: the
   skip WARN's ``skip_reasons`` breakdown + the majority-dropped WARN with
   ``kept=0`` both fire, and each dropped bar independently carries a field
@@ -658,10 +660,11 @@ class BadTickScreen:
             guarantee is CLOSE-vote-ONLY: with the high/low arm supplied
             (``DEC-BADTICK-HILO-SCREEN-001`` — production always supplies
             it), ``_judge`` also tests the median bar's OWN high/low against
-            the median close, so the median bar can itself be dropped and a
-            ≤3-bar session whose every head bar carries an out-of-band
-            high/low is fully emptied (module docstring, honest limits;
-            test-pinned). The post-head baseline SEEDS from
+            the median close, so the median bar can itself be dropped and an
+            EXACTLY-3-bar session (the head-resolving shape — a 1-/2-bar
+            session's head never resolves and is KEPT) whose every head bar
+            carries an out-of-band high/low is fully emptied (module
+            docstring, honest limits; test-pinned). The post-head baseline SEEDS from
             the head MEDIAN — the evidence-confirmed center — never blindly
             the LAST kept head bar (round-3 review): pre-round-3 a kept
             escape-band spike at head position 3 seated the baseline and
