@@ -96,6 +96,11 @@
   .plain-eng { display:none; }
   body.share-mode .jargon { display:none; }
   body.share-mode .plain-eng { display:inline; }
+  /* Block-level Beginner/Pro twins (the deep-stats grid) — same law. */
+  .jargon-block { display:block; }
+  .plain-eng-block { display:none; }
+  body.share-mode .jargon-block { display:none; }
+  body.share-mode .plain-eng-block { display:block; }
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
 <link rel="stylesheet" href="/static/bx-design.css">
@@ -117,8 +122,11 @@
       <a href="/universe">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy" aria-current="page">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
     <a href="/screener" style="color:var(--yellow); font-size:13px; text-decoration:none;">🏆 Winners</a>
@@ -130,7 +138,8 @@
 
   <section id="stHeadCard">
     <h3><span id="stRank">—</span> · <span id="stName">awaiting real run artifact</span></h3>
-    <div class="note">run <code id="stRunId">—</code> · TF <span id="stTf">—</span> ·
+    <div class="note">run <code id="stRunId">—</code> ·
+      instrument <span id="stInstr" data-explain="instrument">—</span> · TF <span id="stTf">—</span> ·
       direction <span id="stDir">—</span> · SL/TP arm <span id="stArm">—</span> ·
       mask <code id="stMask">—</code> · family <span id="stFamily">—</span></div>
   </section>
@@ -146,7 +155,12 @@
   </section>
 
   <section aria-label="Equity curve">
-    <h3>📉 Equity curve <span class="note" style="display:inline">per-trade close equity — minute-path equity lands with P3</span></h3>
+    <h3>📉 Equity curve <span class="note" style="display:inline" id="stEquityLabel">awaiting real run artifact</span></h3>
+    <!-- DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (item 4C — the #48 overlap):
+         the stored minute-path equity SERIES (/api/v1/oneclick/equity, the
+         entry's equity_ref sidecar) renders when it exists; the per-trade
+         close cumsum stays the HONEST fallback, relabeled so the two can
+         never be confused. -->
     <div class="equity-host" id="stEquityHost">
       <div class="note">no trades yet — awaiting real run artifact</div>
     </div>
@@ -173,8 +187,12 @@
 
   <section aria-label="Combo story card">
     <h3>🧾 Combo story — Edge · Risk · Consistency · Real-or-Fluke</h3>
-    <div class="story-grid">
-      <div class="story-cell"><div class="k">Edge — net P&amp;L</div><div class="v" id="stNet" data-explain="net_pnl_paisa">—</div></div>
+    <!-- HIGH #12 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the persistent
+         signal-only honesty chip — Track 1 never trades, so the P&L is the
+         GROSS signal figure, never a costed "net". -->
+    <div class="vixband" id="stSignalOnly">signal-only — costs modeled in the options-translation track</div>
+    <div class="story-grid" style="margin-top:10px">
+      <div class="story-cell"><div class="k">Edge — gross signal P&amp;L</div><div class="v" id="stNet" data-explain="gross_signal_pnl">—</div></div>
       <div class="story-cell"><div class="k">Risk — max drawdown</div><div class="v" id="stMaxDd" data-explain="max_dd_paisa">—</div></div>
       <div class="story-cell"><div class="k">Consistency — Sharpe</div><div class="v" id="stSharpe" data-explain="sharpe">—</div></div>
       <div class="story-cell"><div class="k">Real-or-Fluke — DSR</div><div class="v" id="stDsr" data-explain="dsr">—</div></div>
@@ -185,8 +203,46 @@
     </div>
     <!-- R31: the per-combo VIX regime band, rendered on the card -->
     <div class="vixband" id="stVixBand" data-explain="vix_band">no VIX band</div>
-    <div class="note">regime breakdown + family drill-down land with the P3 data they visualize (R46/R34 — named out of scope this PR). Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
     <div class="note" id="stArith"></div>
+  </section>
+
+  <!-- HIGH #14 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the SHIPPED
+       results-depth aggregates the card previously omitted — rendered
+       verbatim from entry.metrics (top100_artifact._metrics_payload keys),
+       honest "—" for anything the artifact does not carry. Pro mode shows
+       the numbers; Beginner sees the fixed plain-English summary (the
+       jargon/plain-eng block convention). -->
+  <section aria-label="Deep stats — stored results-depth aggregates">
+    <h3>🔬 <span class="jargon">Deep stats — stored results-depth aggregates</span><span class="plain-eng">How rough was the ride?</span></h3>
+    <div class="plain-eng-block">
+      <div class="note">Worst days, losing streaks, adverse moves and how trades ended — from the stored run. Switch to Pro for the numbers.</div>
+    </div>
+    <div class="jargon-block">
+      <div class="story-grid">
+        <div class="story-cell"><div class="k">Expectancy / trade</div><div class="v" id="stExpectancy" data-explain="expectancy_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Recovery factor</div><div class="v" id="stRecovery" data-explain="recovery_factor">—</div></div>
+        <div class="story-cell"><div class="k">Max consecutive losses</div><div class="v" id="stLossStreak" data-explain="max_consecutive_losses">—</div></div>
+        <div class="story-cell"><div class="k">MAE (tf)</div><div class="v" id="stMae" data-explain="mae_avg_paisa">—</div></div>
+        <div class="story-cell"><div class="k">MFE (tf)</div><div class="v" id="stMfe" data-explain="mfe_avg_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Minute-path max DD</div><div class="v" id="stMinuteDd" data-explain="max_dd_minute_path_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Exit mix</div><div class="v" id="stExitMix" data-explain="exit_mix" style="font-size:13px">—</div></div>
+        <div class="story-cell"><div class="k">Worst 5 days</div><div class="v" id="stWorst5" data-explain="worst5_days" style="font-size:13px">—</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown
+       from entry.regime (one_regime_wonder + axis + by_trend) — the card
+       previously read only vix_band; the stale "lands with the P3 data"
+       deferral note is DELETED (the data ships in the artifact). Family
+       drill-down (R34) stays a named later PR. -->
+  <section aria-label="Regime breakdown">
+    <h3>🌦 Regime breakdown</h3>
+    <div class="story-grid">
+      <div class="story-cell"><div class="k">P&amp;L by trend regime</div><div class="v" id="stTrendSplit" data-explain="by_trend" style="font-size:13px">—</div></div>
+      <div class="story-cell"><div class="k">Regime concentration</div><div class="v" id="stRegimeWonder" data-explain="one_regime_wonder" style="font-size:13px">—</div></div>
+    </div>
+    <div class="note">family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
   </section>
 
   <div id="bxTip" hidden></div>
@@ -210,7 +266,12 @@
     symbol: null,
     interval: null,
     trades: [],
-    candles: []
+    candles: [],
+    equity: [], // stored minute-path points (item 4C — empty ⇒ per-trade fallback)
+    equityTotal: null,
+    // ok-verdict-but-zero-rows sidecar (hostile-round fold): distinguishes
+    // "series EMPTY for this run" from "sidecar unavailable" in the label.
+    equityOkEmpty: false
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -334,6 +395,12 @@
           'candle payload is missing the "' + mapped.missing + '" column — cannot chart';
         return;
       }
+      /* Honest skip count: an unreadable row (unparseable ts / corrupt OHLC)
+         is COUNTED, never silently dropped — the ONE shared note builder. */
+      var skippedNote = window.BXChart.skippedRowsNote(mapped.skipped);
+      if (skippedNote !== '') {
+        byId('stChartCoords').textContent += ' · ' + skippedNote;
+      }
       state.candles = mapped.rows;
       renderChart();
     });
@@ -385,10 +452,43 @@
     }
   }
 
+  function setEquityLabel(text) {
+    var label = byId('stEquityLabel');
+    if (label) { label.textContent = text; }
+  }
+
   function renderEquity() {
     var host = byId('stEquityHost');
     if (!host || !window.BXChart || !window.BXUI) { return; }
     window.BXUI.clear(host);
+    /* Item 4C (the #48 overlap): the STORED minute-path series wins when the
+       equity_ref sidecar served points; the per-trade close cumsum is the
+       honest fallback, relabeled so the two can never be confused. */
+    if (state.equity.length) {
+      var mp = window.BXChart.minutePathSeries(state.equity);
+      if (!mp.empty) {
+        setEquityLabel('minute-path equity — the stored real series (R27)');
+        var mpSvg = window.BXChart.svgEl('svg', { viewBox: '0 0 1000 220', preserveAspectRatio: 'none' });
+        var mpPath = window.BXChart.equityPathNode(mp, 1000, 220, 8);
+        if (mpPath) { mpSvg.appendChild(mpPath); }
+        host.appendChild(mpSvg);
+        var mpBits = ['minute-path equity from the results-depth sidecar'];
+        if (mp.invalid_rows) { mpBits.push(String(mp.invalid_rows) + ' invalid point(s) skipped'); }
+        if (state.equityTotal !== null && state.equity.length < state.equityTotal) {
+          mpBits.push('first ' + String(state.equity.length) + ' of ' + String(state.equityTotal) + ' sessions shown');
+        }
+        mpBits.push('final ' + money(mp.final_paisa));
+        host.appendChild(window.BXUI.el('div', 'note', mpBits.join(' · ')));
+        renderArith();
+        return;
+      }
+    }
+    // An ok-verdict sidecar that served ZERO rows is its own honest state —
+    // the series is EMPTY for this run, not unavailable (hostile-round fold).
+    var fallbackLabel = state.equityOkEmpty
+      ? 'per-trade close equity (minute-path series empty for this run)'
+      : 'per-trade close equity (minute-path unavailable for this run)';
+    setEquityLabel(fallbackLabel);
     var series = window.BXChart.equitySeries(state.trades);
     if (series.empty) {
       host.appendChild(window.BXUI.el('div', 'note', 'no trades yet — awaiting real run artifact'));
@@ -398,7 +498,7 @@
     var path = window.BXChart.equityPathNode(series, 1000, 220, 8);
     if (path) { svg.appendChild(path); }
     host.appendChild(svg);
-    var bits = ['per-trade close equity — minute-path equity lands with P3'];
+    var bits = [fallbackLabel];
     if (series.overflow) { bits.push('OVERFLOW: curve truncated at the safe-integer wall'); }
     if (series.invalid_rows) { bits.push(String(series.invalid_rows) + ' invalid row(s) skipped'); }
     // [W2-4] Ruling-18 null costs: counted at ₹0 — the curve is honestly
@@ -406,14 +506,50 @@
     if (series.null_cost_rows) {
       bits.push(String(series.null_cost_rows) + ' row(s) carry null costs (by design until P5) — curve is gross of those costs');
     }
-    bits.push('net ' + money(series.final_paisa));
+    // #12 vocabulary (audit re-break MINOR): the per-trade curve total is the
+    // GROSS signal figure — never "net" while costs are structurally absent.
+    bits.push('gross signal ' + money(series.final_paisa));
     host.appendChild(window.BXUI.el('div', 'note', bits.join(' · ')));
+    renderArith();
+  }
+
+  function renderArith() {
     // R44 #4: the plain-English claim decomposes to line-by-line arithmetic
     // over the trades LOADED on this page (self-scoping — C-M4b).
     if (window.BXExplain) {
       var arith = window.BXExplain.tradeArithmetic(state.trades);
       byId('stArith').textContent = arith.lines.join(' · ');
     }
+  }
+
+  function loadEquity() {
+    // The stored minute-path series (GET /api/v1/oneclick/equity — the
+    // entry's equity_ref sidecar). Any non-ok verdict (awaiting/corrupt) or
+    // fetch failure keeps the honest per-trade fallback — never a blank
+    // chart, never a fabricated curve.
+    var url = '/api/v1/oneclick/equity' +
+      '?run_id=' + encodeURIComponent(state.runId) +
+      '&rank=' + encodeURIComponent(String(state.rank));
+    window.BXPoll.fetchJson(url, 12000)
+      .then(function (payload) {
+        if (payload && typeof payload === 'object' &&
+            (payload.status === 'ok' || payload.status === 'partial')) {
+          state.equity = payload.rows || [];
+          state.equityTotal = payload.total === undefined ? null : payload.total;
+          state.equityOkEmpty = state.equity.length === 0;
+        } else {
+          state.equity = [];
+          state.equityTotal = null;
+          state.equityOkEmpty = false;
+        }
+        renderEquity();
+      })
+      .catch(function () {
+        state.equity = [];
+        state.equityTotal = null;
+        state.equityOkEmpty = false;
+        renderEquity();
+      });
   }
 
   function loadTrades() {
@@ -469,6 +605,10 @@
         var m = row.metrics && typeof row.metrics === 'object' ? row.metrics : {};
         byId('stRank').textContent = '#' + String(row.rank);
         byId('stName').textContent = Array.isArray(row.conditions) ? row.conditions.join(' × ') : '—';
+        /* The winner's OWN market (the writer's additive `instrument` key) —
+           the ONE shared builder; a pre-instrument artifact reads the honest
+           "—" (DEC-ONECLICK-INSTRUMENT-DISPLAY-001). */
+        byId('stInstr').textContent = window.BXOneclick.instrumentText(row.instrument);
         byId('stTf').textContent = String(row.tf);
         byId('stDir').textContent = String(row.direction);
         byId('stArm').textContent = String(row.arm);
@@ -485,8 +625,28 @@
         /* [W3-R4]: the ONE shared band builder — a null-lo/hi writer band
            reads the honest not-stamped copy, never "between null–null". */
         byId('stVixBand').textContent = window.BXOneclick.vixBandText(row.vix_band);
+        /* HIGH #14 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the SHIPPED
+           results-depth aggregates, straight from entry.metrics — the pure
+           BXOneclick builders format composites, money via the house
+           formatter; anything absent reads the honest "—". */
+        byId('stExpectancy').textContent = m.expectancy_paisa === undefined || m.expectancy_paisa === null ? '—' : money(m.expectancy_paisa);
+        byId('stRecovery').textContent = m.recovery_factor === undefined || m.recovery_factor === null ? '—' : String(m.recovery_factor);
+        byId('stLossStreak').textContent = m.max_consecutive_losses === undefined || m.max_consecutive_losses === null ? '—' : String(m.max_consecutive_losses);
+        byId('stMae').textContent = window.BXOneclick.avgExtremeText(m.mae_avg_paisa, m.mae_worst_paisa, 'worst', money);
+        byId('stMfe').textContent = window.BXOneclick.avgExtremeText(m.mfe_avg_paisa, m.mfe_best_paisa, 'best', money);
+        byId('stMinuteDd').textContent = window.BXOneclick.minutePathDdText(m.max_dd_minute_path_paisa, m.max_dd_minute_path_pct, money);
+        byId('stExitMix').textContent = window.BXOneclick.exitMixText(m.exits);
+        /* worst5_days is a METRICS key (top100_artifact.py:468 — NOT under
+           regime; the audit's part-1 refinement). */
+        byId('stWorst5').textContent = window.BXOneclick.worst5DaysText(m.worst5_days, money);
+        /* HIGH #13: the regime breakdown from entry.regime — the stale
+           "lands with the P3 data" deferral is dead; the data ships. */
+        var reg = row.regime && typeof row.regime === 'object' ? row.regime : {};
+        byId('stTrendSplit').textContent = window.BXOneclick.trendSplitText(reg.by_trend, money);
+        byId('stRegimeWonder').textContent = window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis);
         state.interval = tfToInterval(row.tf);
         loadTrades();
+        loadEquity();
       }
     );
   }
