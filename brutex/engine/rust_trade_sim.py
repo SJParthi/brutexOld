@@ -137,7 +137,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     # numpy-load-once guard).
     from brutex.metrics.types import ClosedTrade
 
-__all__ = ["ResidentTradeSim"]
+__all__ = ["ResidentTradeSim", "derive_kernel_inputs"]
 
 _LOG = structlog.get_logger("brutex.engine.rust_trade_sim")
 
@@ -251,6 +251,43 @@ def _width_offender_fields(values: Sequence[int]) -> dict[str, str | int | None]
         "offending_value": hex(offender),
         "offending_bit": offender.bit_length() - 1 if offender > _U128_MASK else None,
     }
+
+
+def derive_kernel_inputs(
+    bars: Sequence[CandleBar],
+    tf_minutes: int,
+) -> tuple[list[int], list[int], list[int], list[int], list[bool], list[int]]:
+    """Derive the resident kernels' per-bar input columns from ``bars``.
+
+    Returns ``(open_p, high_p, low_p, close_p, forced, session_days)`` — the
+    ONE canonical Python derivation of the paisa price columns, the
+    SESSION-AWARE forced-exit flags, and the per-bar IST session ordinals
+    (see :meth:`ResidentTradeSim._derive_kernel_inputs`, which delegates here,
+    for the full semantics + provenance notes). Exported module-level so the
+    sweep-core seam (:mod:`brutex.engine.sweep_core`) constructs
+    ``fno_math.ResidentSweepCore`` from the SAME single-source columns
+    (DESIGN_FINAL_RUST_SWEEP_CORE.md §1.2 / §11 — paisa/forced/session columns
+    stay Python-single-source; CLAUDE.md §11 COMMON). Pure function of its
+    arguments; ``O(N_bars)``.
+    """
+    forced: list[bool] = []
+    session_days: list[int] = []
+    cache_date: date | None = None
+    cache_seconds: int | None = None
+    for bar in bars:
+        ts_ist = bar.timestamp.astimezone(IST)
+        bar_day = ts_ist.date()
+        if bar_day != cache_date:
+            session = get_session_checked(bar_day)
+            cache_date = bar_day
+            cache_seconds = None if session is None else forced_exit_seconds_for_session(session)
+        forced.append(is_forced_exit_bar(ts_ist.time(), tf_minutes, cache_seconds))
+        session_days.append(bar_day.toordinal())
+    open_p = [_price_to_paisa(bar.open) for bar in bars]
+    high_p = [_price_to_paisa(bar.high) for bar in bars]
+    low_p = [_price_to_paisa(bar.low) for bar in bars]
+    close_p = [_price_to_paisa(bar.close) for bar in bars]
+    return open_p, high_p, low_p, close_p, forced, session_days
 
 
 class ResidentTradeSim:
@@ -439,27 +476,13 @@ class ResidentTradeSim:
         walker's ``_pending_entry_day`` gate bit-for-bit). Bar ``i``'s session
         derives from bar ``i``'s own timestamp — knowable at bar ``i`` (P-06:
         no look-ahead).
+
+        The body lives in the module-level :func:`derive_kernel_inputs` (the
+        ONE Python-single-source column derivation, exported for the sweep-core
+        seam per DESIGN_FINAL_RUST_SWEEP_CORE.md §1.2 — CLAUDE.md §11 COMMON);
+        this method is a thin delegator over the instance's immutable inputs.
         """
-        forced: list[bool] = []
-        session_days: list[int] = []
-        cache_date: date | None = None
-        cache_seconds: int | None = None
-        for bar in self._bars:
-            ts_ist = bar.timestamp.astimezone(IST)
-            bar_day = ts_ist.date()
-            if bar_day != cache_date:
-                session = get_session_checked(bar_day)
-                cache_date = bar_day
-                cache_seconds = (
-                    None if session is None else forced_exit_seconds_for_session(session)
-                )
-            forced.append(is_forced_exit_bar(ts_ist.time(), self._tf_minutes, cache_seconds))
-            session_days.append(bar_day.toordinal())
-        open_p = [_price_to_paisa(bar.open) for bar in self._bars]
-        high_p = [_price_to_paisa(bar.high) for bar in self._bars]
-        low_p = [_price_to_paisa(bar.low) for bar in self._bars]
-        close_p = [_price_to_paisa(bar.close) for bar in self._bars]
-        return open_p, high_p, low_p, close_p, forced, session_days
+        return derive_kernel_inputs(self._bars, self._tf_minutes)
 
     def _promote_wide_kernel(self) -> object | None:
         """Build (at most once) the u128 sibling kernel for >64-bit mask batches.

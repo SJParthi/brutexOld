@@ -36,8 +36,14 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
     {
         # fno_math (rust/fno-math)
         "ResidentBars",
+        # Sweep-core Slice 1 (DESIGN_FINAL_RUST_SWEEP_CORE.md §1.1 — the
+        # deliberate, reviewed surface change: the two resident cores + the
+        # in-band ABI version int, all in the one-commit symbol update).
+        "ResidentSweepCore",
+        "ResidentSweepCoreU128",
         "ResidentSweepSim",
         "ResidentSweepSimU128",
+        "SWEEP_CORE_ABI_VERSION",
         "add_u64",
         "bitand_count_u64s",
         "bitcount_u64s",

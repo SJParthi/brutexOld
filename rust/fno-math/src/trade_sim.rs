@@ -92,7 +92,7 @@ enum SameBarTie {
 
 /// The configurable spot-fill conventions (mirrors `FillPolicy`).
 #[derive(Clone, Copy, Debug)]
-struct FillPolicy {
+pub(crate) struct FillPolicy {
     stop_loss: LevelFill,
     take_profit: LevelFill,
     same_bar: SameBarTie,
@@ -541,7 +541,7 @@ fn policy_from_flags(sl_next_open: bool, tp_next_open: bool, tp_first: bool) -> 
 /// `#[cfg(test)]` suite passing UNMODIFIED is the frozen-behaviour gate).
 /// For `W = u128` the compiler's two-limb lowering of the 128-bit `&`/`==`
 /// is the "two-limb" evaluation — no hand-rolled limb pairs needed.
-trait MaskWord: Copy + Send + Sync {
+pub(crate) trait MaskWord: Copy + Send + Sync {
     /// True iff `bar` is a SUPERSET of `mask` — `(bar & mask) == mask`.
     fn is_superset(bar: Self, mask: Self) -> bool;
 }
@@ -563,7 +563,7 @@ impl MaskWord for u128 {
 /// The width-INDEPENDENT resident columns — OHLC paisa + forced flags + the
 /// per-bar session ordinals. Shared verbatim by both kernel widths; only the
 /// `bar_bits` vector (held next to this struct in each pyclass) is width-typed.
-struct SweepColumns {
+pub(crate) struct SweepColumns {
     open: Vec<i64>,
     high: Vec<i64>,
     low: Vec<i64>,
@@ -581,7 +581,7 @@ struct SweepColumns {
 /// length (validated here so the mismatch message stays complete, the vector
 /// itself stays with the caller). The u64 path's messages are byte-identical
 /// to the pre-generic kernel's.
-fn build_columns(
+pub(crate) fn build_columns(
     label: &str,
     open: Vec<i64>,
     high: Vec<i64>,
@@ -641,7 +641,7 @@ fn build_columns(
 // columns + the width-typed bar_bits); a 7-way iterator zip would obscure the
 // walk, so the index form is kept deliberately.
 #[allow(clippy::needless_range_loop)]
-fn simulate_one_core<W: MaskWord>(
+pub(crate) fn simulate_one_core<W: MaskWord>(
     cols: &SweepColumns,
     bar_bits: &[W],
     mask: W,

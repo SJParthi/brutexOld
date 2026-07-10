@@ -105,6 +105,11 @@ from brutex.engine.combo_mask import (
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.sweep_core import (
+    EnumOutcome,
+    core_enumerate_kept,
+    resolve_sweep_rust_enum_plan,
+)
 from brutex.engine.sweep_driver import (
     DEFAULT_MAX_COMBOS,
     DEFAULT_START_EQUITY_PAISA,
@@ -1294,6 +1299,12 @@ def run_persisted_sweep(
     # the forward consumption front (see brutex.engine.sweep_lookahead for
     # the honest envelope of what it catches vs. the property gates).
     bars = maybe_guard_bars(bars)
+    # Rust sweep-core Slice 1 (DESIGN_FINAL_RUST_SWEEP_CORE.md §5/§6): the
+    # BRUTEX_SWEEP_RUST_ENUM arm flag + its work-cells knob are resolved ONCE
+    # per invocation, EAGERLY (a junk knob fails loud here, never mid-tuple —
+    # the §12.2 exemplar rule; the knob is only parsed when the flag is ON,
+    # so the default-OFF path is byte-identical to today).
+    enum_plan = resolve_sweep_rust_enum_plan()
     direction_label = _direction_label(cfg.direction)
 
     n_unique = len(set(cfg.condition_bits))
@@ -1435,43 +1446,71 @@ def run_persisted_sweep(
     #: Legacy no-digest arm ONLY — the probe-time run_ids, parallel to
     #: ``survivors`` (consumed by ``mark_many`` + reused for finalists/errors).
     survivor_run_ids: list[str] = []
-    for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
-        enumerated += 1
-        if has_conflict(mask):
-            conflict_pruned += 1
-            continue
-        if bypass_dedup:
-            # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
-            # path the dedup probes are BYPASSED (sentinel-authoritative redo,
-            # above) and ``mark_many`` is SKIPPED (below), so a survivor's
-            # run_id has exactly TWO consumers — the SweepComboError
-            # fingerprint and the finalist rows — both recomputed on demand
-            # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
-            # canonical inputs, Golden Rule #4: same bytes, computed later).
-            # Skipping the eager per-enumerated-mask hash deletes O(survivors)
-            # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
-            survivors.append(mask)
-            continue
-        run_id = _lazy_run_id(mask)
-        if dedup.seen(run_id):
-            skipped_dedup += 1
-            continue
-        survivors.append(mask)
-        survivor_run_ids.append(run_id)
-
-    # Stage-1B coarse pre-filter — drop survivors that can never reach the
-    # trade-count gate (still "evaluated": we decided their fate + mark them seen).
-    kept = survivors
-    if cfg.min_hits > 0 and survivors:
-        # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
-        # are bit-identical (same SUPERSET kernel) so the kept set never differs.
-        hits = (
-            kernel.count_hits(survivors)
-            if kernel is not None
-            else count_supermasks(bar_bits, survivors)
+    # Rust sweep-core Slice 1 (DESIGN_FINAL_RUST_SWEEP_CORE.md §1.4/§6): when
+    # the enum arm engages (digest path + every §5 ENUM-column condition),
+    # the enumeration + conflict prune + Stage-1B min-hits prefilter run
+    # fused in `fno_math.enumerate_prefilter` — counters EXACT and the kept
+    # list byte-identical (POSITION-LEX order) vs the loop below; ANY refusal
+    # returns None (warned once per tuple+reason) and today's spine serves.
+    # `survivors` stays empty on the core arm — its only consumers here are
+    # `evaluated` (carried by the outcome) and the LEGACY dedup machinery,
+    # which the digest-path engagement condition structurally excludes.
+    enum_outcome: EnumOutcome | None = None
+    if enum_plan.requested:
+        enum_outcome = core_enumerate_kept(
+            bars=bars,
+            bar_bits=bar_bits,
+            condition_bits=cfg.condition_bits,
+            k=cfg.k,
+            min_hits=cfg.min_hits,
+            tf_minutes=cfg.tf_minutes,
+            n_masks=n_masks,
+            digest_path=bypass_dedup,
+            plan=enum_plan,
         )
-        kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
-    evaluated = len(survivors)
+    if enum_outcome is not None:
+        enumerated = enum_outcome.enumerated
+        conflict_pruned = enum_outcome.conflict_pruned
+        kept = enum_outcome.kept
+        evaluated = enum_outcome.evaluated
+    else:
+        for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
+            enumerated += 1
+            if has_conflict(mask):
+                conflict_pruned += 1
+                continue
+            if bypass_dedup:
+                # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
+                # path the dedup probes are BYPASSED (sentinel-authoritative redo,
+                # above) and ``mark_many`` is SKIPPED (below), so a survivor's
+                # run_id has exactly TWO consumers — the SweepComboError
+                # fingerprint and the finalist rows — both recomputed on demand
+                # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
+                # canonical inputs, Golden Rule #4: same bytes, computed later).
+                # Skipping the eager per-enumerated-mask hash deletes O(survivors)
+                # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
+                survivors.append(mask)
+                continue
+            run_id = _lazy_run_id(mask)
+            if dedup.seen(run_id):
+                skipped_dedup += 1
+                continue
+            survivors.append(mask)
+            survivor_run_ids.append(run_id)
+
+        # Stage-1B coarse pre-filter — drop survivors that can never reach the
+        # trade-count gate (still "evaluated": we decided their fate + mark them seen).
+        kept = survivors
+        if cfg.min_hits > 0 and survivors:
+            # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
+            # are bit-identical (same SUPERSET kernel) so the kept set never differs.
+            hits = (
+                kernel.count_hits(survivors)
+                if kernel is not None
+                else count_supermasks(bar_bits, survivors)
+            )
+            kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
+        evaluated = len(survivors)
 
     # ONE run-identity resolver for every downstream consumer (finalist rows +
     # the SweepComboError fingerprints): the digest path recomputes lazily

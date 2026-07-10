@@ -72,6 +72,12 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+/// Rust sweep-core conversion Slice 1 (DESIGN_FINAL_RUST_SWEEP_CORE.md §6):
+/// the resident enumeration + conflict-prune + Stage-1B prefilter kernel —
+/// LEX-RANK CNS unranking in `iter_masks_k_of_bits`' POSITION-LEX order,
+/// integer-only, stateless, dual-work-bounded.
+pub mod sweep_core;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -140,6 +146,13 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<python::ResidentBars>()?;
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
+    // Sweep-core Slice 1 (DESIGN_FINAL_RUST_SWEEP_CORE.md §1.1): NEW symbols
+    // (not new methods on existing classes) so the module-level freshness
+    // handshake genuinely covers wheel staleness; the in-band ABI version int
+    // is the second belt.
+    m.add_class::<sweep_core::ResidentSweepCore>()?;
+    m.add_class::<sweep_core::ResidentSweepCoreU128>()?;
+    m.add("SWEEP_CORE_ABI_VERSION", sweep_core::SWEEP_CORE_ABI_VERSION)?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())

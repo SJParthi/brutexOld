@@ -62,8 +62,11 @@ from collections.abc import Sequence
 #: list; a test pins the two equal so they cannot drift.
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "ResidentBars",
+    "ResidentSweepCore",
+    "ResidentSweepCoreU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
+    "SWEEP_CORE_ABI_VERSION",
     "__version__",
     "add_u64",
     "bitand_count_u64s",
@@ -109,7 +112,10 @@ _assert_compiled_surface(_compiled)
 # The freshness handshake above MUST run before this re-export so a stale
 # wheel raises the actionable message, not a bare from-import failure.
 from ._fno_math import (  # noqa: E402
+    SWEEP_CORE_ABI_VERSION,
     ResidentBars,
+    ResidentSweepCore,
+    ResidentSweepCoreU128,
     ResidentSweepSim,
     ResidentSweepSimU128,
     __version__,
@@ -140,7 +146,10 @@ from ._fno_math import (  # noqa: E402
 __build_crate_version__: str = __version__
 
 __all__ = [
+    "SWEEP_CORE_ABI_VERSION",
     "ResidentBars",
+    "ResidentSweepCore",
+    "ResidentSweepCoreU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",

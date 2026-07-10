@@ -21,8 +21,11 @@ from collections.abc import Sequence
 
 __all__ = [
     "ResidentBars",
+    "ResidentSweepCore",
+    "ResidentSweepCoreU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
+    "SWEEP_CORE_ABI_VERSION",
     "__version__",
     "add_u64",
     "bitand_count_u64s",
@@ -140,6 +143,78 @@ class ResidentBars:
     def n_bars(self) -> int: ...
     def count_supermasks(self, masks: list[int]) -> list[int]: ...
     def count_supermask(self, mask: int) -> int: ...
+
+SWEEP_CORE_ABI_VERSION: int
+"""In-band ABI version of the sweep-core surface (DESIGN_FINAL_RUST_SWEEP_CORE.md §1.3).
+
+The Python seam (`brutex.engine.sweep_core`) refuses engagement unless this
+matches its `EXPECTED_SWEEP_CORE_ABI_VERSION` (`abi_version_mismatch`).
+"""
+
+class ResidentSweepCore:
+    """Resident sweep core over a u64 `bar_bits` window (sweep-core Slice 1).
+
+    DESIGN_FINAL_RUST_SWEEP_CORE.md §1.3: identical column validation to
+    `ResidentSweepSim.__init__` (unequal lengths / out-of-envelope paisa raise
+    `ValueError`). Slice 1 exposes `n_bars` + `enumerate_prefilter` — the
+    LEX-RANK (POSITION-LEX / itertools.combinations order) CNS enumeration,
+    conflict prune against the injected pairs, and the fused Stage-1B
+    min-hits count. Stateless across calls; every domain violation is a clean
+    `ValueError`, never a process abort.
+    """
+
+    def __init__(
+        self,
+        open: list[int],
+        high: list[int],
+        low: list[int],
+        close: list[int],
+        is_forced: list[bool],
+        session_idx: list[int],
+        bar_bits: list[int],
+    ) -> None: ...
+    def n_bars(self) -> int: ...
+    def enumerate_prefilter(
+        self,
+        condition_bits: list[int],
+        k: int,
+        conflict_pairs: list[tuple[int, int]],
+        min_hits: int,
+        start_rank: int,
+        max_enumerated: int,
+        max_work_cells: int,
+    ) -> tuple[int, int, int, bool, int, list[int]]:
+        """One rank range → `(enumerated_in_range, conflict_pruned_in_range,
+        next_rank, exhausted, hits_counted_in_range, kept_masks)`."""
+        ...
+
+class ResidentSweepCoreU128:
+    """Resident sweep core over a u128 `bar_bits` window — the [64, 128)-bit
+    headroom twin of `ResidentSweepCore` (same contract, u128 masks)."""
+
+    def __init__(
+        self,
+        open: list[int],
+        high: list[int],
+        low: list[int],
+        close: list[int],
+        is_forced: list[bool],
+        session_idx: list[int],
+        bar_bits: list[int],
+    ) -> None: ...
+    def n_bars(self) -> int: ...
+    def enumerate_prefilter(
+        self,
+        condition_bits: list[int],
+        k: int,
+        conflict_pairs: list[tuple[int, int]],
+        min_hits: int,
+        start_rank: int,
+        max_enumerated: int,
+        max_work_cells: int,
+    ) -> tuple[int, int, int, bool, int, list[int]]:
+        """One rank range (u128 masks) — same contract as `ResidentSweepCore`."""
+        ...
 
 class ResidentSweepSim:
     """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + sessions + bar_bits.
