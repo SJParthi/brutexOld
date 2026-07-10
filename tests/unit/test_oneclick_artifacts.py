@@ -159,6 +159,65 @@ class TestArtifactRevision:
         (tmp_path / "sweep_runs").mkdir()
         assert oc.runs_revision(results_root) is not None
 
+    def test_runs_revision_moves_on_an_in_place_manifest_rewrite(self, tmp_path: Path) -> None:
+        """Fold [12] (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): rewriting an
+        EXISTING manifest in place (suspect flip) moves the token even though
+        the sweep_runs directory mtime is byte-identical — the cached runs
+        listing's suspect badge can no longer go stale."""
+        results_root = tmp_path / "sweeps"
+        runs = tmp_path / "sweep_runs"
+        manifest = runs / "r-x" / oc.MANIFEST_FILENAME
+        _write(manifest, json.dumps(_valid_manifest("r-x", suspect=False)))
+        # Pin the directory mtimes so ONLY the manifest file token can move.
+        os.utime(runs, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(runs / "r-x", ns=(1_000_000_000, 1_000_000_000))
+        before = oc.runs_revision(results_root)
+        manifest.write_text(json.dumps(_valid_manifest("r-x", suspect=True)), encoding="utf-8")
+        os.utime(runs, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(runs / "r-x", ns=(1_000_000_000, 1_000_000_000))
+        after = oc.runs_revision(results_root)
+        assert before is not None and after is not None
+        assert before.split(":m")[0] == after.split(":m")[0]  # dir token unchanged
+        assert before != after  # the manifest fold moved the key
+
+    def test_runs_revision_unlistable_tree_degrades_to_the_dir_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "sweep_runs").mkdir()
+
+        def _boom(_path: Any) -> Any:
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(oc.os, "scandir", _boom)
+        token = oc.runs_revision(tmp_path / "sweeps")
+        assert token is not None
+        assert ":m" not in token  # the bare directory stat token
+
+    def test_runs_revision_skips_files_and_unstattable_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runs = tmp_path / "sweep_runs"
+        (runs / "r-x").mkdir(parents=True)
+        (runs / "stray.txt").write_text("not a run dir", encoding="utf-8")
+        real_scandir = os.scandir
+
+        class _EvilEntry:
+            name = "evil"
+
+            @staticmethod
+            def is_dir() -> bool:
+                raise OSError("gone mid-scan")
+
+        def _with_evil(path: Any) -> Any:
+            entries: list[Any] = list(real_scandir(path))
+            entries.append(_EvilEntry())
+            return entries
+
+        monkeypatch.setattr(oc.os, "scandir", _with_evil)
+        token = oc.runs_revision(tmp_path / "sweeps")
+        assert token is not None
+        assert ":m" in token  # folded, with the file + evil entries skipped
+
 
 # ── discovery ───────────────────────────────────────────────────────────
 
@@ -336,66 +395,267 @@ def _top100_row(rank: int = 1, **overrides: Any) -> dict[str, Any]:
     return row
 
 
+def _top100_doc(rows: list[Any], **root_overrides: Any) -> dict[str, Any]:
+    """The WRITER's object root (DEC-ONECLICK-TOP100-OBJECT-ROOT-001 shape law)."""
+    doc: dict[str, Any] = {
+        "schema_version": oc.TOP100_SCHEMA_VERSION,
+        "run_id": "r-unit01",
+        "preset": "min_dd_first",
+        "source": {"pool": len(rows)},
+        "baselines": {},
+        "entries": rows,
+    }
+    doc.update(root_overrides)
+    return doc
+
+
+def _write_top100(run_dir: Path, rows: list[Any], **root_overrides: Any) -> None:
+    _write(run_dir / oc.TOP100_FILENAME, json.dumps(_top100_doc(rows, **root_overrides)))
+
+
 class TestLoadTop100:
     def test_missing_is_awaiting(self, tmp_path: Path) -> None:
         result = oc.load_top100(tmp_path)
         assert result.status == "awaiting"
         assert result.rows == ()
         assert result.revision is None
+        assert result.preset is None
 
     def test_unreadable_is_corrupt(self, tmp_path: Path) -> None:
         (tmp_path / oc.TOP100_FILENAME).mkdir()
         assert oc.load_top100(tmp_path).status == "corrupt"
 
     def test_bad_json_is_corrupt(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, '[{"rank": 1')
+        _write(tmp_path / oc.TOP100_FILENAME, '{"entries": [{"rank": 1')
         result = oc.load_top100(tmp_path)
         assert result.status == "corrupt"
         assert "not valid JSON" in result.detail
 
-    def test_non_array_is_corrupt(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, '{"rows": []}')
+    def test_bare_array_is_corrupt_naming_the_retired_form(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the pre-#1621 fixture-only bare
+        array is RETIRED — a NAMED corrupt, never a silent second dialect."""
+        _write(tmp_path / oc.TOP100_FILENAME, json.dumps([_top100_row(1)]))
         result = oc.load_top100(tmp_path)
         assert result.status == "corrupt"
-        assert "not a JSON array" in result.detail
+        assert result.rows == ()
+        assert "bare JSON array" in result.detail
+        assert "pre-#1621" in result.detail
 
-    def test_valid_empty_list_is_ok(self, tmp_path: Path) -> None:
+    def test_non_object_scalar_root_is_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, '"junk"')
+        result = oc.load_top100(tmp_path)
+        assert result.status == "corrupt"
+        assert "not the writer's JSON object root" in result.detail
+
+    def test_oversized_entries_capped_at_the_contract_100(self, tmp_path: Path) -> None:
+        """Hostile-round F2a (defense-in-depth): the writer's ≤100 contract
+        is enforced reader-side too — a 150-row out-of-band artifact parses
+        exactly TOP100_ROW_CAP rows and reads a NAMED partial counting the
+        dropped overflow, never an O(entries) parse or a silent overflow."""
+        _write_top100(tmp_path, [_top100_row(i + 1) for i in range(150)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        assert len(result.rows) == oc.TOP100_ROW_CAP == 100
+        assert [row["rank"] for row in result.rows] == list(range(1, 101))
+        assert "150 entries" in result.detail
+        assert "first 100 kept, 50 dropped" in result.detail
+        assert result.preset == "min_dd_first"
+
+    def test_unknown_future_schema_version_is_named_corrupt(self, tmp_path: Path) -> None:
+        """An unknown FUTURE schema_version degrades LOUDLY — never a crash."""
+        _write_top100(tmp_path, [_top100_row(1)], schema_version=oc.TOP100_SCHEMA_VERSION + 1)
+        result = oc.load_top100(tmp_path)
+        assert result.status == "corrupt"
+        assert f"schema_version {oc.TOP100_SCHEMA_VERSION + 1!r}" in result.detail
+        assert "upgrade the display reader" in result.detail
+
+    def test_missing_schema_version_key_is_tolerated(self, tmp_path: Path) -> None:
+        """schema_version is validated only when PRESENT (lenient absent-key law)."""
+        doc = _top100_doc([_top100_row(1)])
+        del doc["schema_version"]
+        _write(tmp_path / oc.TOP100_FILENAME, json.dumps(doc))
+        assert oc.load_top100(tmp_path).status == "ok"
+
+    @pytest.mark.parametrize("pun", [True, 1.0, "1"])
+    def test_schema_version_type_puns_are_named_corrupt(self, tmp_path: Path, pun: Any) -> None:
+        """Hostile-round finder (b): a JSON ``true`` (``True == 1``), float
+        ``1.0`` or string ``"1"`` must NOT pass the version equality — the
+        version is a GENUINE int or the artifact names itself corrupt."""
+        _write_top100(tmp_path, [_top100_row(1)], schema_version=pun)
+        result = oc.load_top100(tmp_path)
+        assert result.status == "corrupt"
+        assert result.rows == ()
+        assert f"schema_version {pun!r}" in result.detail
+
+    def test_object_root_without_entries_array_is_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"schema_version": 1, "rows": []}))
+        result = oc.load_top100(tmp_path)
+        assert result.status == "corrupt"
+        assert "no entries array" in result.detail
+
+    def test_valid_empty_entries_is_ok(self, tmp_path: Path) -> None:
         """T-M2 status law: a VALID EMPTY artifact EXISTS — status ok, 0 rows."""
-        _write(tmp_path / oc.TOP100_FILENAME, "[]")
+        _write_top100(tmp_path, [])
         result = oc.load_top100(tmp_path)
         assert result.status == "ok"
         assert result.rows == ()
+        assert result.preset == "min_dd_first"
 
-    def test_short_list_is_ok_with_true_row_count(self, tmp_path: Path) -> None:
-        rows = [_top100_row(rank) for rank in range(1, 18)]
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps(rows))
+    def test_short_entries_is_ok_with_true_row_count(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(rank) for rank in range(1, 18)])
         result = oc.load_top100(tmp_path)
         assert result.status == "ok"
         assert len(result.rows) == 17  # never assumed 100
 
+    def test_non_string_or_blank_preset_reads_none(self, tmp_path: Path) -> None:
+        for bad_preset in (7, ""):
+            _write_top100(tmp_path, [_top100_row(1)], preset=bad_preset)
+            result = oc.load_top100(tmp_path)
+            assert result.status == "ok"
+            assert result.preset is None
+
     def test_non_dict_row_is_partial_keeping_prefix(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps([_top100_row(1), "junk"]))
+        _write_top100(tmp_path, [_top100_row(1), "junk"])
         result = oc.load_top100(tmp_path)
         assert result.status == "partial"
         assert len(result.rows) == 1
         assert "row 1" in result.detail
+        assert result.preset == "min_dd_first"  # the root parsed — preset kept
 
     def test_row_missing_keys_is_partial_naming_them(self, tmp_path: Path) -> None:
         bad = _top100_row(2)
         del bad["metrics"], bad["vix_band"]
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps([_top100_row(1), bad]))
+        _write_top100(tmp_path, [_top100_row(1), bad])
         result = oc.load_top100(tmp_path)
         assert result.status == "partial"
         assert len(result.rows) == 1
         assert "metrics" in result.detail
         assert "vix_band" in result.detail
 
+    @pytest.mark.parametrize(
+        ("overrides", "named"),
+        [
+            ({"rank": True}, "non-integer rank"),
+            ({"rank": "1"}, "non-integer rank"),
+            ({"conditions": "PDH_CROSS_UP"}, "conditions is not an array"),
+            ({"metrics": [1, 2]}, "metrics is not an object"),
+            ({"regime": "trending"}, "regime is not an object"),
+            ({"vix_band": 12.5}, "vix_band is neither an object nor null"),
+        ],
+    )
+    def test_inner_shape_defects_are_partial_named(
+        self, tmp_path: Path, overrides: dict[str, Any], named: str
+    ) -> None:
+        """Sub-key validation: a required key with an unusable SHAPE degrades
+        to partial with the defect NAMED, rows kept up to it."""
+        bad = _top100_row(2)
+        bad.update(overrides)
+        _write_top100(tmp_path, [_top100_row(1), bad])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        assert len(result.rows) == 1
+        assert "row 1" in result.detail
+        assert named in result.detail
+
+    def test_vix_band_object_passes_the_shape_gate(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1, vix_band={"lo": 11.0, "hi": 17.5})])
+        assert oc.load_top100(tmp_path).status == "ok"
+
     def test_full_precision_metrics_pass_through_untouched(self, tmp_path: Path) -> None:
         row = _top100_row(1)
         row["metrics"]["sharpe"] = 1.0000000000000002
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps([row]))
+        _write_top100(tmp_path, [row])
         result = oc.load_top100(tmp_path)
         assert result.rows[0]["metrics"]["sharpe"] == 1.0000000000000002
+
+
+class TestTop100MetricKeyMap:
+    """The ONE reader-boundary metric mapping (DEC-ONECLICK-TOP100-OBJECT-ROOT-001)."""
+
+    def test_engine_names_gain_the_display_aliases_additively(self, tmp_path: Path) -> None:
+        """Every writer metric name maps to its display twin — engine keys kept."""
+        engine_metrics = {
+            "max_drawdown_paisa": -158_117,
+            "sharpe_ratio": 3.2000000000000002,
+            "deflated_sharpe": 0.93,
+            "total_trades": 187,
+            "net_pnl_paisa": 8_962_469,  # unmapped — passes through verbatim
+        }
+        _write_top100(tmp_path, [_top100_row(1, metrics=dict(engine_metrics))])
+        metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
+        assert metrics["max_dd_paisa"] == -158_117
+        assert metrics["sharpe"] == 3.2000000000000002  # full precision
+        assert metrics["dsr"] == 0.93
+        assert metrics["trades"] == 187
+        for engine_key, value in engine_metrics.items():
+            assert metrics[engine_key] == value  # additive — nothing removed
+
+    def test_absent_cpcv_stays_absent_never_a_fabricated_zero(self, tmp_path: Path) -> None:
+        """The writer emits no cpcv_pass_pct — the reader must NOT invent one."""
+        _write_top100(tmp_path, [_top100_row(1, metrics={"sharpe_ratio": 1.0})])
+        metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
+        assert "cpcv_pass_pct" not in metrics
+
+    def test_existing_display_key_is_never_overwritten(self, tmp_path: Path) -> None:
+        """An artifact already carrying the display name wins over the alias."""
+        _write_top100(
+            tmp_path,
+            [_top100_row(1, metrics={"sharpe_ratio": 9.9, "sharpe": 1.1})],
+        )
+        metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
+        assert metrics["sharpe"] == 1.1
+        assert metrics["sharpe_ratio"] == 9.9
+
+    def test_row_without_mapped_keys_is_returned_unchanged(self, tmp_path: Path) -> None:
+        """The no-alias fast path: no engine key present ⇒ the SAME row object."""
+        _write_top100(tmp_path, [_top100_row(1)])
+        metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
+        assert metrics == {"sharpe": 1.2345678901}
+
+
+class TestTop100ArmBridge:
+    """The reader-boundary arm dict → display string bridge (hostile-round F1).
+
+    The SHIPPED writer emits ``arm`` as ``{"sl_paisa", "tp_paisa"}`` while
+    every display site ``String()``s the field — an unbridged dict rendered
+    ``"[object Object]"`` on every real sweep card.
+    """
+
+    def test_writer_arm_dict_bridges_to_the_house_money_string(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1, arm={"sl_paisa": 8_000, "tp_paisa": 5_000})])
+        row = oc.load_top100(tmp_path).rows[0]
+        assert row["arm"] == "SL ₹80.00 · TP ₹50.00"  # format_inr — paisa→₹ 2dp
+        assert row["arm_raw"] == {"sl_paisa": 8_000, "tp_paisa": 5_000}  # additive
+
+    def test_grouped_amounts_ride_the_house_formatter(self, tmp_path: Path) -> None:
+        """format_inr grouping — the display never re-invents money format."""
+        _write_top100(tmp_path, [_top100_row(1, arm={"sl_paisa": 123_456, "tp_paisa": 5})])
+        assert oc.load_top100(tmp_path).rows[0]["arm"] == "SL ₹1,234.56 · TP ₹0.05"
+
+    def test_none_legs_read_the_honest_dash_never_a_fabrication(self, tmp_path: Path) -> None:
+        """The writer's honest ``None`` legs (a store row without a tuple arm)."""
+        _write_top100(tmp_path, [_top100_row(1, arm={"sl_paisa": None, "tp_paisa": None})])
+        assert oc.load_top100(tmp_path).rows[0]["arm"] == "SL — · TP —"
+
+    def test_junk_and_missing_legs_read_the_dash_segment(self, tmp_path: Path) -> None:
+        """A hand-edited non-int leg (bool/str) or an absent key reads "—"."""
+        _write_top100(tmp_path, [_top100_row(1, arm={"sl_paisa": True})])
+        assert oc.load_top100(tmp_path).rows[0]["arm"] == "SL — · TP —"
+
+    def test_string_arm_passes_through_untouched(self, tmp_path: Path) -> None:
+        """A non-dict arm (legacy display string) is NOT bridged, no arm_raw."""
+        _write_top100(tmp_path, [_top100_row(1)])  # arm is the string default
+        loaded = oc.load_top100(tmp_path).rows[0]
+        assert loaded["arm"] == "SL1.0_TP2.0"
+        assert "arm_raw" not in loaded
+
+    def test_preexisting_arm_raw_is_never_overwritten(self, tmp_path: Path) -> None:
+        """Additive law: an artifact already carrying arm_raw keeps its value."""
+        row = _top100_row(1, arm={"sl_paisa": 100, "tp_paisa": 200}, arm_raw="keep-me")
+        _write_top100(tmp_path, [row])
+        loaded = oc.load_top100(tmp_path).rows[0]
+        assert loaded["arm"] == "SL ₹1.00 · TP ₹2.00"
+        assert loaded["arm_raw"] == "keep-me"
 
 
 # ── preflight fixture loader ────────────────────────────────────────────
@@ -516,6 +776,36 @@ class TestTailEvents:
         assert len(page.records) == 2
         # next_offset stays at the partial line's start — re-read once complete.
         assert page.next_offset == page.total_bytes - len('{"ts_utc":"2026-07-07T0')
+
+    def test_single_line_larger_than_window_is_bounded_not_oom(self, tmp_path: Path) -> None:
+        """Hostile-round F3: a no-newline line larger than the 1 MiB window
+        is NEVER materialised whole (the prior unbounded readline() peaked
+        at the full line size BEFORE any cap check) — the page degrades
+        honestly: records before the giant line served, truncated flagged,
+        the over-window line NAMED, cursor left at its start."""
+        lines = _chained_lines(_event_bodies(1))
+        giant = '{"pad":"' + "x" * (oc._EVENTS_BYTES_CAP + 4096) + '"'  # no newline
+        _write(tmp_path / oc.EVENTS_FILENAME, lines[0] + "\n" + giant)
+        page = oc.tail_events(tmp_path, offset=0, limit=10)
+        assert page.status == "ok"
+        assert len(page.records) == 1  # the good record before the giant line
+        assert page.truncated_tail is True
+        assert f"exceeds the {oc._EVENTS_BYTES_CAP}-byte read window" in page.detail
+        assert page.next_offset == len(lines[0]) + 1  # at the giant line's start
+
+    def test_tail_anchor_window_without_record_boundary_is_named_corrupt(
+        self, tmp_path: Path
+    ) -> None:
+        """Hostile-round F3 (tail-anchor arm): a tail window living entirely
+        inside one giant line holds NO record boundary — a NAMED corrupt
+        (the bounded skip read), never an unbounded in-memory line."""
+        giant = '{"pad":"' + "x" * (oc._EVENTS_BYTES_CAP + 4096) + '"'  # no newline anywhere
+        _write(tmp_path / oc.EVENTS_FILENAME, giant)
+        page = oc.tail_events(tmp_path, offset=-1, limit=10)
+        assert page.status == "corrupt"
+        assert page.records == ()
+        assert page.truncated_tail is True
+        assert "no record boundary" in page.detail
 
     def test_blank_lines_are_skipped(self, tmp_path: Path) -> None:
         lines = _chained_lines(_event_bodies(2))
@@ -882,6 +1172,20 @@ def _captured_trade(seq: int, *, status_name: str = "OK") -> Any:
     )
 
 
+def _equity_point(day: int, *, close: int, low: int | None = None) -> Any:
+    """One REAL SessionEquityPoint (the engine's own dataclass, never forged)."""
+    from datetime import date
+
+    from brutex.engine.minute_path import SessionEquityPoint
+
+    return SessionEquityPoint(
+        session_date=date(2026, 7, day),
+        equity_close_paisa=close,
+        equity_intraday_low_paisa=low,
+        trades_closed=1,
+    )
+
+
 def _write_sidecars(
     run_dir: Path,
     *,
@@ -889,6 +1193,7 @@ def _write_sidecars(
     combo: str = _COMBO,
     n_trades: int = 3,
     statuses: tuple[str, ...] = (),
+    equity: tuple[Any, ...] = (),
 ) -> None:
     """Write a REAL results-depth trio via trade_store's OWN public writer."""
     from brutex.engine.minute_path import PathStatus
@@ -901,7 +1206,7 @@ def _write_sidecars(
     capture = ComboCapture(
         run_id=combo,
         trades=tuple(_captured_trade(i, status_name=kind) for i, kind in enumerate(kinds)),
-        equity=(),
+        equity=equity,
         equity_status=PathStatus.OK,
         vix_missing_trades=0,
         parity_ok=True,
@@ -921,7 +1226,7 @@ def _rebind_run(tmp_path: Path, run_id: str = "r-x", **row_kwargs: Any) -> Path:
             tuple_ref=row_kwargs.pop("tuple_ref", {"tuple": _TUPLE_REF, "sidecar": "equity"}),
         )
     ]
-    _write(run_dir / oc.TOP100_FILENAME, json.dumps(rows))
+    _write(run_dir / oc.TOP100_FILENAME, json.dumps(_top100_doc(rows, run_id=run_id)))
     return results_root
 
 
@@ -1067,11 +1372,16 @@ class TestTradeStoreReader:
         _write(
             run_dir / oc.TOP100_FILENAME,
             json.dumps(
-                [
-                    _rebind_top100_row(
-                        1, combo="combo-ghost", tuple_ref={"tuple": _TUPLE_REF, "sidecar": "equity"}
-                    )
-                ]
+                _top100_doc(
+                    [
+                        _rebind_top100_row(
+                            1,
+                            combo="combo-ghost",
+                            tuple_ref={"tuple": _TUPLE_REF, "sidecar": "equity"},
+                        )
+                    ],
+                    run_id="r-x",
+                )
             ),
         )
         ghost = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)
@@ -1123,3 +1433,160 @@ class TestTradeStoreReader:
         assert reader.parse_count == 1
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2  # nothing was cached
+
+
+_EQUITY_POINTS = (
+    _equity_point(1, close=1_000, low=900),
+    _equity_point(2, close=1_500, low=None),  # honest None low (no-1m session)
+    _equity_point(3, close=1_200, low=1_100),
+)
+
+
+class TestEquityPage:
+    """The equity-series page (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item 4C)."""
+
+    def test_awaiting_reader_equity_is_awaiting(self) -> None:
+        page = oc.AwaitingTradesReader().equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "awaiting"
+        assert page.total is None
+        assert "equity series" in page.detail
+
+    def test_fixture_reader_equity_is_awaiting_never_synthesized(self, tmp_path: Path) -> None:
+        page = oc.FixtureTradesReader(tmp_path).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "awaiting"
+        assert page.rows == ()
+        assert "no results-depth" in page.detail
+
+    def test_shared_resolution_degrades_match_the_trades_page(self, tmp_path: Path) -> None:
+        """The ONE _resolve_sidecars chain: every trades degrade fires on the
+        equity page with the SAME status/detail (unsafe id · absent top100 ·
+        rank miss · absent sidecars)."""
+        reader = oc.TradeStoreReader(tmp_path / "sweeps")
+        assert reader.equity_page("../evil", 1, offset=0, limit=10).status == "awaiting"
+        assert reader.equity_page("r-x", 0, offset=0, limit=10).status == "awaiting"
+        results_root = _rebind_run(tmp_path)
+        reader = oc.TradeStoreReader(results_root)
+        miss = reader.equity_page("r-x", 42, offset=0, limit=10)
+        assert miss.status == "awaiting"
+        assert "rank 42" in miss.detail
+        absent = reader.equity_page("r-x", 1, offset=0, limit=10)
+        assert absent.status == "awaiting"
+        assert "sidecars absent" in absent.detail
+
+    def test_real_sidecars_serve_the_stored_series(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "ok"
+        assert page.source == "results_store"
+        assert page.total == 3
+        assert [row["session_date"] for row in page.rows] == [
+            "2026-07-01",
+            "2026-07-02",
+            "2026-07-03",
+        ]
+        assert [row["equity_close_paisa"] for row in page.rows] == [1_000, 1_500, 1_200]
+        # The honest None low passes through — never a fabricated 0 (R31 law).
+        assert page.rows[1]["equity_intraday_low_paisa"] is None
+        assert page.rows[0]["equity_intraday_low_paisa"] == 900
+        assert all(row["trades_closed"] == 1 for row in page.rows)
+
+    def test_offset_and_negative_offset_page_the_series(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)
+        reader = oc.TradeStoreReader(results_root)
+        page = reader.equity_page("r-x", 1, offset=1, limit=1)
+        assert [row["session_date"] for row in page.rows] == ["2026-07-02"]
+        assert page.total == 3
+        clamped = reader.equity_page("r-x", 1, offset=-5, limit=100)
+        assert len(clamped.rows) == 3  # negative offset clamps to 0
+
+    def test_limit_beyond_the_equity_cap_is_clamped_and_named(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=999_999)
+        assert page.status == "ok"
+        assert page.detail == "limit clamped to 5000 (equity page law)"
+
+    def test_unknown_combo_serves_an_honest_empty_series(self, tmp_path: Path) -> None:
+        """A combo with no equity rows (present sidecars, foreign run_id
+        filter) pages total=0 — never an invented curve."""
+        results_root = _rebind_run(tmp_path, combo="beefbeef" + "0" * 56)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", combo=_COMBO, equity=_EQUITY_POINTS)
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "ok"
+        assert page.rows == ()
+        assert page.total == 0
+
+    def test_unreadable_equity_sidecar_is_named_corrupt(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        paths = oc.sidecar_paths_from_ref(run_dir, _TUPLE_REF)
+        assert paths is not None
+        paths.equity.write_bytes(b"{not parquet")
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "corrupt"
+        assert "equity sidecar read failed" in page.detail
+
+    def test_polars_unavailable_is_named_corrupt_never_a_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The [data]-extra-absent arm: ImportError maps to the SAME corrupt
+        degrade (the route can never 500 over a missing dependency)."""
+        import sys
+
+        results_root = _rebind_run(tmp_path)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)
+        monkeypatch.setitem(sys.modules, "polars", None)
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "corrupt"
+        assert "polars is required" in page.detail
+
+    def test_series_memo_reads_once_per_revision_per_combo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        results_root = _rebind_run(tmp_path)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)
+        reader = oc.TradeStoreReader(results_root)
+        calls = {"n": 0}
+        real = oc._load_equity_records
+
+        def _spy(path: Path, combo: str) -> tuple[dict[str, Any], ...]:
+            calls["n"] += 1
+            return real(path, combo)
+
+        monkeypatch.setattr(oc, "_load_equity_records", _spy)
+        for _ in range(3):
+            page = reader.equity_page("r-x", 1, offset=0, limit=2)
+            assert page.status == "ok"
+        assert calls["n"] == 1  # one filtered read; repeat pages slice the memo
+
+    def test_unstattable_equity_reads_fresh_and_caches_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A None equity revision computes fresh and caches NOTHING."""
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        paths = oc.sidecar_paths_from_ref(run_dir, _TUPLE_REF)
+        assert paths is not None
+        reader = oc.TradeStoreReader(results_root)
+        real = oc.artifact_revision
+        monkeypatch.setattr(
+            oc,
+            "artifact_revision",
+            lambda path: None if path == paths.equity else real(path),
+        )
+        calls = {"n": 0}
+        real_load = oc._load_equity_records
+
+        def _spy(path: Path, combo: str) -> tuple[dict[str, Any], ...]:
+            calls["n"] += 1
+            return real_load(path, combo)
+
+        monkeypatch.setattr(oc, "_load_equity_records", _spy)
+        assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
+        assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
+        assert calls["n"] == 2  # nothing was cached (lake_revision doctrine)

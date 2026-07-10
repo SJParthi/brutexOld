@@ -1208,6 +1208,33 @@ class TestRunPersistedSweep:
         ):
             run_persisted_sweep(_trending_bars(), cfg, store=store, dedup=_dedup(), audit=audit)
 
+    def test_apriori_enabled_enumeration_source_is_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SWEEP-APRIORI-TUPLE-001: with ``BRUTEX_SWEEP_APRIORI`` set the
+        enumeration source becomes the Apriori pruned generator — exercising
+        ``run_persisted_sweep``'s ``if apriori_enabled():`` arm (the lazy
+        ``generate_apriori_candidates`` import + call) — and the persisted
+        leaderboard stays byte-identical to the brute-force OFF path.
+
+        The byte-parity golden proves the same equality, but its file stem is
+        not attributed to ``sweep_run`` by the touched-module coverage gate, so
+        this focused test scopes that arm's coverage to sweep_run's OWN
+        per-module 100% gate.
+        """
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        off = _run_sweep(tmp_path, "off", bars, cfg)
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        on = _run_sweep(tmp_path, "on", bars, cfg)
+
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+        assert on.persisted == off.persisted
+
     def test_happy_path_persists_and_audits_three_lines(self, tmp_path: Path) -> None:
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")

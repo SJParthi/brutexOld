@@ -112,6 +112,8 @@
   .col { font-size:11px; color:var(--muted); background:var(--surface-3);
     border:1px solid var(--border); border-radius:6px; padding:3px 9px; font-family:ui-monospace,monospace; }
   .note { font-size:12px; color:var(--muted); margin-top:14px; line-height:1.5; }
+  .basisnote { font-size:12px; color:var(--yellow); margin-top:8px; line-height:1.5; }
+  .basisnote:empty { display:none; }
   .note b { color:var(--text); }
   #msg { font-size:13px; color:var(--yellow); margin-top:12px; min-height:18px; }
   .empty { color:var(--muted); font-size:13px; padding:14px 0; }
@@ -177,8 +179,11 @@
       <a href="/universe">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports" aria-current="page">Reports</a>
     </nav>
   </header>
@@ -232,6 +237,11 @@
         </label>
         <button class="go" id="download">⬇ Download .zip</button>
       </div>
+      <!-- 1day-basis freshness note (DEC-STALENESS-CACHE-TRUTH-001): the 1day
+           partitions are written only by the pipeline prebuild, so the day basis
+           can lag the 1-minute truth — say when it was last (re)built, or that no
+           prebuild was ever observed. textContent-only; hidden on the minute basis. -->
+      <div class="basisnote" id="basisnote"></div>
 
       <div class="toolbar">
         <button id="all">Select all</button>
@@ -328,6 +338,12 @@ async function loadSymbols() {
     const r = await fetch("/api/v1/reports/preopen/symbols");
     const j = await r.json();
     allSymbols = j.symbols || [];
+    /* 1day-basis freshness (DEC-STALENESS-CACHE-TRUTH-001): remember when the
+       derived 1day partitions were last observed prebuilt (null = never) so the
+       basis note can render honestly on every basis switch. */
+    derivedLastBuilt = ("derived_last_built" in j) ? j.derived_last_built : null;
+    derivedKnown = ("derived_last_built" in j);
+    renderBasisNote();
     selected = new Set(allSymbols.map(s => s.symbol)); // default: all
     renderChips(); refreshCount();
   } catch (e) {
@@ -400,10 +416,30 @@ function currentBasis() {
   const checked = document.querySelector('input[name="basis"]:checked');
   return checked ? checked.value : "day";
 }
+/* ── 1-day basis freshness note (DEC-STALENESS-CACHE-TRUTH-001) ──
+   The 1day partitions the day basis reads are written ONLY by the pipeline
+   prebuild, so a CLI-pulled / mid-pull lake serves a 1day basis that lags the
+   1-minute truth. `derived_last_built` (from /api/v1/reports/preopen/symbols)
+   is the last successful prebuild OBSERVATION (lake-wide, not per-symbol);
+   null = never observed on this lake. textContent-only (no innerHTML). */
+let derivedLastBuilt = null;
+let derivedKnown = false;
+const basisNoteEl = document.getElementById("basisnote");
+function renderBasisNote() {
+  if (currentBasis() !== "day" || !derivedKnown) {
+    basisNoteEl.textContent = "";
+    return;
+  }
+  basisNoteEl.textContent = derivedLastBuilt
+    ? ("1-day basis is pipeline-derived — last prebuilt " + derivedLastBuilt)
+    : ("1-day basis is pipeline-derived — no prebuild observed on this lake "
+       + "(may lag the 1-minute data; prefer the minute basis or run a pipeline pull)");
+}
 function syncBasisUI() {
   const basis = currentBasis();
   document.getElementById("basis-day").classList.toggle("on", basis === "day");
   document.getElementById("basis-min").classList.toggle("on", basis === "minute");
+  renderBasisNote();
 }
 for (const r of document.querySelectorAll('input[name="basis"]')) {
   r.onchange = syncBasisUI;

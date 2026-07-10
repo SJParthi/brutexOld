@@ -259,6 +259,42 @@ class TestReconcile:
         assert len(skips) == 1
         assert "BANKNIFTY" in skips[0]["path"]
 
+    def test_out_of_range_timestamp_partition_is_skipped_others_reconcile(
+        self, tmp_path: Path
+    ) -> None:
+        """Round-18 fold (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): a hand-planted
+        Datetime column holding an out-of-``datetime``-range i64 (2**62 µs)
+        made ``timestamps.min()`` raise ``OverflowError`` — NOT a
+        ``parquet_read_skip_errors`` member — crashing the WHOLE reconcile
+        (which runs at the start of every sweep load). Now skipped + counted
+        under the COMMON ``datetime_out_of_range_errors`` fault set, the good
+        partition still reconciles."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from structlog.testing import capture_logs
+
+        _write_partition(tmp_path, symbol="NIFTY", n=4)  # one GOOD partition
+        bad = tmp_path / "bars" / "NSE" / "INDEX" / "BANKNIFTY" / "1minute" / "2021" / "01.parquet"
+        bad.parent.mkdir(parents=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array([2**62], type=pa.int64()).cast(
+                        pa.timestamp("us", tz="UTC")
+                    ),
+                }
+            ),
+            bad,
+        )
+        with _open(tmp_path) as cat, capture_logs() as logs:
+            result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+            # pre-fix: OverflowError propagated out of the call above
+            assert result == ReconcileResult(partitions_reconciled=1, bars_total=4, skipped=1)
+        skips = [e for e in logs if e["event"] == "catalog.reconcile.parquet_skip"]
+        assert len(skips) == 1
+        assert "BANKNIFTY" in skips[0]["path"]
+        assert "out of range" in str(skips[0]["error"])
+
     def test_reconciled_partition_is_get_bars_readable(self, tmp_path: Path) -> None:
         # The whole point: after reconcile, get_bars (the sweep read path) returns bars.
         _write_partition(tmp_path, n=6)

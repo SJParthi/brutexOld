@@ -39,6 +39,7 @@ from brutex.dashboard.oneclick_artifacts import (
 
 __all__ = [
     "CHAIN_STAGES",
+    "build_equity_payload",
     "build_events_payload",
     "build_manifest_payload",
     "build_runs_payload",
@@ -227,8 +228,10 @@ def build_top100_payload(
     Returns
     -------
     dict
-        ``{status, run_id, rows[], row_count, empty_note, detail, revision,
-        fixture_root_active}``.
+        ``{status, run_id, rows[], row_count, preset, empty_note, detail,
+        revision, fixture_root_active}`` — ``preset`` is the artifact's R30
+        ranking token (the client's sort-basis label source; ``null`` until
+        the object root parsed — the label then falls back honestly).
     """
     empty_note = (
         "0 winners stored for this run" if top100.status == "ok" and not top100.rows else None
@@ -238,6 +241,7 @@ def build_top100_payload(
         "run_id": run_id,
         "rows": list(top100.rows),
         "row_count": len(top100.rows),
+        "preset": top100.preset,
         "empty_note": empty_note,
         "detail": top100.detail,
         "revision": top100.revision,
@@ -329,6 +333,45 @@ def build_trades_payload(
         "detail": page.detail,
         "fixture_root_active": fixture_root_active,
     }
+
+
+def build_equity_payload(
+    run_id: str,
+    rank: int,
+    page: TradesResult,
+    *,
+    offset: int,
+    limit: int,
+    fixture_root_active: bool,
+) -> dict[str, Any]:
+    """Project one equity-series page into the ``GET /api/v1/oneclick/equity`` payload.
+
+    DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (audit item 4C): the SAME page wire
+    shape + honesty laws as the trades payload (``total`` stays ``None`` when
+    unknown — never a fabricated 0; ``source`` is a visible badge), over rows
+    that are the stored ``{session_date, equity_close_paisa,
+    equity_intraday_low_paisa, trades_closed}`` points — so this DELEGATES to
+    the ONE page projector rather than growing a second copy (§11 COMMON).
+
+    Parameters
+    ----------
+    run_id, rank
+        The requested coordinates (echoed).
+    page
+        The reader's equity page verdict.
+    offset, limit
+        The requested page window (echoed).
+    fixture_root_active
+        Stamped into the payload (C-MINOR-1).
+
+    Returns
+    -------
+    dict
+        The :func:`build_trades_payload` shape over equity points.
+    """
+    return build_trades_payload(
+        run_id, rank, page, offset=offset, limit=limit, fixture_root_active=fixture_root_active
+    )
 
 
 # ── R41 chain map ───────────────────────────────────────────────────────

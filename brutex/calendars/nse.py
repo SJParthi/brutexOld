@@ -47,7 +47,11 @@ now ADDED (DEC-CALENDAR-2020-DATA-001) so 2020 — the data-pull floor year — 
 fully covered and the loud-guard now applies to pre-2020 (2019 and earlier)
 weekdays. The remaining unguarded production consumers were made LOUD by the
 calendar-correctness pack: the dashboard pre-open report + the doctor probe-day
-walk catch-and-degrade honestly (one ``calendar.coverage_exhausted`` warning),
+walk catch-and-degrade honestly (the pre-open report now rides
+:func:`previous_trading_session`'s ONE
+``calendar.previous_session_coverage_exhausted`` warning —
+DEC-PREOPEN-PREVDAY-COMMON-002; the doctor walk keeps its own
+``calendar.coverage_exhausted`` twin),
 the engine trade-sim walkers + the bar-metadata stamper refuse an
 out-of-coverage weekday via the checked variants, and the synthetic generator
 (unguarded by design — it fabricates data) warns once per out-of-coverage call.
@@ -55,6 +59,7 @@ out-of-coverage weekday via the checked variants, and the synthetic generator
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
@@ -991,7 +996,9 @@ def trading_days_between_checked(
     return days
 
 
-def previous_trading_session(d: date, *, exchange: str | None = None) -> date | None:
+def previous_trading_session(
+    d: date, *, exchange: str | None = None, observed: AbstractSet[date] = frozenset()
+) -> date | None:
     """Return the trading session immediately preceding *d*, or ``None`` (abstain).
 
     DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — the ONE COMMON "which session should a
@@ -1000,6 +1007,19 @@ def previous_trading_session(d: date, *, exchange: str | None = None) -> date | 
     :func:`is_trading_day_checked` confirms as a trading day — stepping over
     weekends and every listed holiday, and honouring the special-weekend Budget
     sessions (:data:`SPECIAL_WEEKEND_TRADING_SESSIONS`).
+
+    *observed* (DEC-PREOPEN-PREVDAY-COMMON-002) is the REMOVE-ONLY
+    observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): the walk
+    predicate is ``is_trading_day_checked(probe) AND probe not in observed``,
+    so an overlay member can only flip a session verdict ``True -> False``
+    (an observably-untraded day is stepped over exactly like a holiday) —
+    never ``False -> True``. The overlay is plain DATA (a set of dates), so
+    this module never imports the overlay loader (no package cycle). The
+    default ``frozenset()`` keeps every existing caller byte-identical
+    (parity-pinned). Termination is unaffected: the overlay is a FINITE set
+    (detector-capped at 8 days/year; a hand-edited sidecar still loads a
+    finite set), and the checked variant's raise at the coverage floor still
+    bounds the walk.
 
     ABSTAIN, never guess (Golden Rule #1): when the back-walk crosses the
     published-holiday coverage floor before finding a session (the strict
@@ -1027,6 +1047,9 @@ def previous_trading_session(d: date, *, exchange: str | None = None) -> date | 
         see :func:`is_holiday` (DEC-CALENDAR-EXCHANGE-SPLIT-001). The two sets
         are identical for every covered year, so today the argument is inert
         parity plumbing.
+    observed
+        Dates the observed-sessions overlay flags as NOT traded (remove-only;
+        default empty = the plain derived calendar, byte-identical back-compat).
 
     Raises
     ------
@@ -1038,7 +1061,7 @@ def previous_trading_session(d: date, *, exchange: str | None = None) -> date | 
     probe = d - timedelta(days=1)
     while True:
         try:
-            if is_trading_day_checked(probe, exchange=exchange):
+            if is_trading_day_checked(probe, exchange=exchange) and probe not in observed:
                 return probe
         except HolidayDataUnavailableError:
             _LOG.warning(

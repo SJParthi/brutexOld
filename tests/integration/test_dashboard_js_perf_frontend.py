@@ -7,9 +7,10 @@ STRUCTURE (DOM-structure / template-string assertions, the
 ``test_dashboard_pull_rate_monitor.py`` every-template idiom) that the JS
 perf fixes rely on:
 
-(a) each of the four 4 s-poller pages (``coverage.html`` /
+(a) each of the five 4 s-poller pages (``coverage.html`` /
     ``fetch_windows.html`` / ``expired_options.html`` /
-    ``spot_coverage.html``) carries its CLIENT-side
+    ``spot_coverage.html`` / ``completeness.html`` — the last added by
+    DEC-DASHBOARD-POLL-HYGIENE-001) carries its CLIENT-side
     skip-render-when-unchanged guard (raw response-text memo compare — the
     backend payloads are frozen, no generation/etag field exists on the
     wire) AND still polls on the 4 s ``setInterval`` cadence;
@@ -98,6 +99,13 @@ _POLLER_GUARDS: dict[str, tuple[str, ...]] = {
         "let lastPayloadTxt = null;",
         'let lastLiveLine = "";',
         "if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return; }",
+    ),
+    # completeness.html gained the raw-text memo in DEC-DASHBOARD-POLL-HYGIENE-001
+    # (the ~750-row options table was rebuilt every 4 s with no diff gate).
+    "completeness.html": (
+        "let lastBoardTxt = null;",
+        'let lastLiveLine = "";',
+        "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return; }",
     ),
 }
 
@@ -235,12 +243,14 @@ def test_v29_filter_column_indices_match_the_combos_thead() -> None:
 def test_db_ships_the_in_place_tbody_patch() -> None:
     html = _template("db.html")
     # The guard that authorizes a rows-only swap (any false → full rebuild).
-    assert "function patchGridRows(grid, cols, rows, total, off)" in html
+    # `spotJoinMark` (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9 review fold) is an
+    # optional trailing flag — every non-candle caller passes nothing → inert.
+    assert "function patchGridRows(grid, cols, rows, total, off, spotJoinMark)" in html
     # The ONE sanctioned narrower innerHTML target: the SAME esc()'d builder
     # strings the full rebuild uses, written to tbody instead of the grid.
-    assert "tbody.innerHTML = gridRowsHtml(cols, rows);" in html
+    assert "tbody.innerHTML = gridRowsHtml(cols, rows, spotJoinMark);" in html
     # The rows builder is shared by BOTH the full build and the patch.
-    assert "function gridRowsHtml(cols, rows)" in html
+    assert "function gridRowsHtml(cols, rows, spotJoinMark)" in html
 
 
 def test_db_ships_the_delegated_pager_handler() -> None:
@@ -349,12 +359,17 @@ _BASELINE_INNERHTML_SINKS: dict[str, int] = {
 }
 
 # db.html carries EXACTLY ONE sanctioned extra sink over baseline:
-# `tbody.innerHTML = gridRowsHtml(cols, rows);` — the SAME already-esc()'d
+# `tbody.innerHTML = gridRowsHtml(cols, rows, spotJoinMark);` — the SAME already-esc()'d
 # builder strings the pre-existing full rebuild writes, against a NARROWER
 # target (tbody instead of the whole grid). Explicitly allowed by the
 # DEC-DASHBOARD-JS-PERF-001 security invariant; pinned verbatim in
 # test_db_ships_the_in_place_tbody_patch above.
-_SANCTIONED_EXTRA_SINKS: dict[str, int] = {"db.html": 1}
+# fetch_windows.html carries the SAME sanctioned pattern since
+# DEC-WINDOWS-COUNTS-ONLY-001: `tbody.innerHTML = windowsRowsHtml(rows);` — the
+# SAME already-esc()'d row-string builder the pre-existing full rebuild writes,
+# against the narrower tbody target (pinned verbatim in
+# test_fetch_windows_ships_the_in_place_tbody_patch below).
+_SANCTIONED_EXTRA_SINKS: dict[str, int] = {"db.html": 1, "fetch_windows.html": 1}
 
 
 @pytest.mark.parametrize("name", sorted(_BASELINE_INNERHTML_SINKS))
@@ -368,3 +383,70 @@ def test_no_new_innerhtml_sink_vs_baseline(name: str) -> None:
         f"+ sanctioned {_SANCTIONED_EXTRA_SINKS.get(name, 0)}) — "
         "a NEW innerHTML sink is forbidden (keep esc()/createElement+textContent)"
     )
+
+
+# ---------------------------------------------------------------------------
+# (f) The /coverage/windows payload diet (DEC-WINDOWS-COUNTS-ONLY-001).
+#     HONESTY ENVELOPE: source-string pins only — the inline JS is NOT
+#     browser-executed here (no JS harness exists in this repo).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["coverage.html", "universe.html"])
+def test_counts_only_consumers_request_limit_0(name: str) -> None:
+    """The two counts-only consumers append ``?limit=0`` to their windows poll.
+
+    coverage.html's windows KPI card renders ONE integer (``b.count``) and
+    universe.html's all-segments line reads ONLY ``.counts`` — before this fix
+    each poll downloaded the 20k-row default row list (~294 B/row ⇒ ~5.9 MB
+    mid-pull) it never read. Source-pinned, not browser-executed.
+    """
+    html = _template(name)
+    assert "/api/v1/coverage/windows?limit=0" in html, (
+        f"{name}: the counts-only poll must request ?limit=0"
+    )
+
+
+def test_fetch_windows_requests_a_sane_page() -> None:
+    """fetch_windows.html pages its rows (&limit=&offset=) instead of the 20k default.
+
+    The pager state + querystring wiring + the filter-flip page-1 reset + the
+    payload-key fold (a page flip can never be skip-rendered as unchanged).
+    Source-pinned, not browser-executed.
+    """
+    html = _template("fetch_windows.html")
+    # The page window drives the querystring.
+    assert 'qs.set("limit", String(winLimit()));' in html
+    assert 'qs.set("offset", String(winOffset));' in html
+    # Static pager DOM patched via textContent/disabled only.
+    assert 'id="winpager"' in html
+    assert 'id="winprev"' in html
+    assert 'id="winnext"' in html
+    assert 'id="winpagesize"' in html
+    assert "winRange.textContent" in html
+    # A filter flip resets to page 1; the memo key folds the page window.
+    assert "winOffset = 0; // a fresh filter selection starts at page 1" in html
+    assert (
+        'marketFilter + "|" + statusFilter + "|" + winLimit() + "|" + winOffset + "|" + txt' in html
+    )
+    # Stranded-offset snap-back is bounded (re-poll only from a non-zero offset).
+    assert "if (!rows.length && winOffset > 0 && (body.matched || 0) > 0) {" in html
+
+
+def test_fetch_windows_ships_the_in_place_tbody_patch() -> None:
+    """fetch_windows.html swaps ONLY the tbody on a changed payload (db.html idiom).
+
+    The ONE sanctioned extra innerHTML sink: the SAME esc()'d row-string builder
+    the full rebuild writes (``windowsRowsHtml``), against the narrower tbody
+    target — the table shell / sticky header / scroll position survive a poll.
+    Source-pinned, not browser-executed.
+    """
+    html = _template("fetch_windows.html")
+    assert "function windowsRowsHtml(rows)" in html
+    assert 'panel.querySelector("table > tbody")' in html
+    assert "tbody.innerHTML = windowsRowsHtml(rows);" in html
+    # The full-rebuild path writes the SAME builder strings.
+    assert '"</tr></thead><tbody>" + windowsRowsHtml(rows) + "</tbody></table>"' in html
+    # esc() discipline intact on every payload value in the row builder.
+    assert "esc(r.symbol)" in html
+    assert 'esc(r.last_error || "")' in html

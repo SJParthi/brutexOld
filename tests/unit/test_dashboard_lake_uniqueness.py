@@ -1,26 +1,32 @@
 """``GET /api/v1/universe/lake-uniqueness`` + the ``/universe`` chip (DEC-LAKE-HEAL-001).
 
-The census route rides the ``SummaryCache`` ADAPTIVE-TTL-FLOOR path (the #920
-machinery ``/coverage/spot`` uses — the hostile-review MAJOR fold; NOT a
-generation-KEYED memo, which a pull's per-write-tick generation bumps would
-re-key on every 15 s chip poll into back-to-back whole-lake scans), so:
+Since DEC-LAKE-CENSUS-NONBLOCKING-001 the census route rides the
+``LakeCensusHolder`` (a dedicated daemon scan thread + an O(1) last-known
+verdict snapshot — the superseded ``SummaryCache`` cold single-flight parked
+every stacked 15 s poller in an unbounded wait ON a threadpool worker and
+starved the shared AnyIO limiter for the whole production scan). The
+FRESHNESS law is byte-compatible with the pre-fix wiring:
 
-* a repeat 15 s chip poll is an O(1) HIT (the O(files) scanner runs exactly
-  once — spy-pinned),
+* a repeat 15 s chip poll is an O(1) snapshot (the O(files) scanner runs
+  exactly once — spy-pinned),
 * a write-tick STORM of ``mark_dirty`` bumps yields at most ONE scan per
   adaptive floor window — ``max(2 s, the scan's own duration)`` capped 120 s
-  (the fails-before pin: the old generation-keyed memo re-scanned per poll),
-* a dirty entry past the floor recomputes (a pull / the L3 sweeper's
+  (the #920 law, preserved verbatim by the holder),
+* a dirty holder past the floor rescans (a pull / the L3 sweeper's
   ``on_healed`` is served fresh within one bounded floor window — never
   indefinitely stale),
-* an instrument-master change is NOT a lake-bytes signal → clean HIT.
+* an instrument-master change is NOT a lake-bytes signal → no rescan.
 
-Plus the payload shape (clean + engine-poisoned), the honest
+Plus the payload shape (clean + engine-poisoned — the pre-fix verdict keys
+byte-compatible, the four additive scan-state keys stamped on top), the honest
 ``{"present": false}`` no-lake-root gate, the 503 no-store contract, and the
-``universe.html`` chip markers (textContent-only JS — the CodeQL XSS rule).
+``universe.html`` chip markers (textContent-only JS — the CodeQL XSS rule)
+including the new honest warming arm.
 
 Lakes are REAL Parquet trees under ``tmp_path``; poison is planted with raw
-pyarrow (the fixed writer refuses duplicates).
+pyarrow (the fixed writer refuses duplicates). Tests inject a SYNCHRONOUS
+``census_spawn`` (build_app's holder test seam) so the daemon-thread scan runs
+inline + deterministic under coverage.
 """
 
 # pyright: reportPrivateUsage=none
@@ -142,10 +148,24 @@ def _bump_master(store: InstrumentStore) -> None:
     )
 
 
-def _make_client(store: InstrumentStore | None, cache: SummaryCache) -> TestClient:
+def _sync_spawn(body: Callable[[], None]) -> None:
+    """Run the census check/scan inline — the deterministic holder test seam."""
+    body()
+
+
+def _make_client(
+    store: InstrumentStore | None,
+    cache: SummaryCache,
+    *,
+    census_clock: Callable[[], float] | None = None,
+) -> TestClient:
     return TestClient(
         app_module.build_app(
-            app_module.DashboardState(), instrument_store=store, summary_cache=cache
+            app_module.DashboardState(),
+            instrument_store=store,
+            summary_cache=cache,
+            census_spawn=_sync_spawn,
+            census_clock=census_clock,
         ),
         raise_server_exceptions=False,
     )
@@ -195,6 +215,18 @@ class TestLakeUniquenessRoute:
         }
         assert payload["healed_total"] == 0
         assert payload["last_sweep_utc"] is None
+        # DEC-LAKE-CENSUS-NONBLOCKING-001: the ADDITIVE scan-state keys
+        # (every verdict key above is byte-compatible with the pre-fix payload).
+        assert payload["scan_in_progress"] is False
+        assert payload["scan_stalled"] is False
+        assert payload["refresh_probe_wedged"] is False
+        assert payload["refresh_probe_wedged_s"] is None
+        assert payload["scan_error"] is None
+        assert isinstance(payload["as_of_utc"], str)
+        progress = payload["scan_progress"]
+        assert progress["files_scanned"] == 1  # one bar file → one progress tick
+        assert progress["files_total_estimate"] is None  # first-ever — no L3 sentinel
+        assert isinstance(progress["started_utc"], str)
 
     def test_engine_poisoned_verdict(self, store: InstrumentStore) -> None:
         """A poisoned NIFTY partition flips ``engine_clean`` — the chip's headline answer."""
@@ -205,6 +237,50 @@ class TestLakeUniquenessRoute:
         assert payload["engine_clean"] is False
         assert payload["findings_total"] == 1
         assert "dup bars/NSE/INDEX/NIFTY/1minute/2025/10.parquet" in payload["engine_detail"]
+
+    def test_options_foreign_overlap_real_numbers(self, store: InstrumentStore) -> None:
+        """The chip payload carries REAL OPTIONS foreign/overlap counts
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 — no shape change, real values)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        series = store.path.parent / "options" / "NSE-NIFTY-2025-09"
+        series.mkdir(parents=True, exist_ok=True)
+        sep_ts = datetime(2025, 9, 1, 4, 0, tzinfo=UTC)
+        oct_ts = datetime(2025, 10, 1, 4, 0, tzinfo=UTC)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE"]),
+                    "timestamp": pa.array([sep_ts], type=pa.timestamp("us", tz="UTC")),
+                }
+            ),
+            series / "2025-09.parquet",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", "CE"]),
+                    "timestamp": pa.array([oct_ts, sep_ts], type=pa.timestamp("us", tz="UTC")),
+                }
+            ),
+            series / "2025-10.parquet",
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["engine_clean"] is True  # options never touch the engine verdict
+        assert payload["findings_total"] == 1
+        options_row = next(row for row in payload["segments"] if row["segment"] == "OPTIONS")
+        assert options_row == {
+            "segment": "OPTIONS",
+            "files": 2,
+            "clean": 1,
+            "dup_files": 0,
+            "foreign_files": 1,
+            "overlap_files": 1,
+            "drift_dirs": 0,
+            "price_files": 0,
+        }
 
     def test_present_false_when_lake_root_unresolved(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
@@ -224,7 +300,8 @@ class TestLakeUniquenessRoute:
 
 
 class TestLakeUniquenessCache:
-    """The generation-stamped O(1) repeat-poll contract (DEC-LAKE-HEAL-001)."""
+    """The O(1) repeat-poll + adaptive-floor contract (DEC-LAKE-HEAL-001 law,
+    served by the DEC-LAKE-CENSUS-NONBLOCKING-001 holder)."""
 
     def test_repeat_poll_hits_then_dirty_past_floor_rescans_master_is_irrelevant(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
@@ -240,7 +317,7 @@ class TestLakeUniquenessCache:
 
         clock = _FakeClock()
         cache = SummaryCache(clock=clock)
-        client = _make_client(store, cache)
+        client = _make_client(store, cache, census_clock=clock)
 
         first = client.get("/api/v1/universe/lake-uniqueness")
         assert first.status_code == 200
@@ -272,13 +349,15 @@ class TestLakeUniquenessCache:
         """THE hostile-review MAJOR pin (the #920 regression class) — fails before.
 
         During a pull, ``pull_jobs`` bumps the write generation on EVERY
-        per-pair write tick, so the PRE-FIX generation-KEYED
+        per-pair write tick, so the PRE-#1074 generation-KEYED
         ``MoversSnapshotCache`` memo re-keyed on every bump and re-ran the
-        whole-lake O(files) scan on every 15 s chip poll — on the OLD wiring
-        this test fails with ``calls == 5``. Through the ``SummaryCache``
-        adaptive TTL floor, an expensive scan (30 s on the fake clock) sets
-        its OWN refresh floor: five dirty polls inside that window pay ONE
-        scan, and a poll past the window re-scans (a floor, never a freeze).
+        whole-lake O(files) scan on every 15 s chip poll — on that wiring
+        this test fails with ``calls == 5``. The ``LakeCensusHolder`` keeps
+        the SummaryCache-era adaptive TTL floor verbatim
+        (DEC-LAKE-CENSUS-NONBLOCKING-001): an expensive scan (30 s on the
+        fake clock) sets its OWN refresh floor — five dirty polls inside that
+        window pay ONE scan, and a poll past the window re-scans (a floor,
+        never a freeze).
         """
         calls = {"n": 0}
         clock = _FakeClock()
@@ -291,7 +370,7 @@ class TestLakeUniquenessCache:
 
         monkeypatch.setattr(app_module, "scan_lake_invariants", _slow_scan)
         cache = SummaryCache(clock=clock)
-        client = _make_client(store, cache)
+        client = _make_client(store, cache, census_clock=clock)
 
         for _ in range(5):  # five chip polls, each preceded by a pull write tick
             cache.mark_dirty()  # pull_jobs' per-pair generation bump
@@ -330,7 +409,7 @@ class TestStartupSweepChipFreshness:
         _poison_engine_partition(lake_root)
         clock = _FakeClock()
         cache = SummaryCache(clock=clock)
-        client = _make_client(store, cache)
+        client = _make_client(store, cache, census_clock=clock)
 
         before = client.get("/api/v1/universe/lake-uniqueness").json()
         assert before["engine_clean"] is False
@@ -360,6 +439,189 @@ class TestStartupSweepChipFreshness:
         assert after["findings_total"] == 0
         assert after["healed_total"] >= 1
         assert after["last_sweep_utc"] is not None
+        # The L3 sweep sentinel now exists → the census progress denominator is
+        # its honest ``files_scanned`` (DEC-LAKE-CENSUS-NONBLOCKING-001's
+        # estimate seam; the pre-sweep polls read the first-ever ``None``).
+        estimate = after["scan_progress"]["files_total_estimate"]
+        assert isinstance(estimate, int) and estimate >= 1
+
+
+class TestCensusEstimateSeam:
+    """The L3-sentinel progress-denominator honesty arms (route estimate seam)."""
+
+    @pytest.mark.parametrize("junk", [True, -5, "12"])
+    def test_foreign_shaped_sentinel_reads_null_estimate_never_a_crash(
+        self, store: InstrumentStore, junk: object
+    ) -> None:
+        """A junk ``files_scanned`` (bool / negative / non-int) degrades to null."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": junk, "duration_ms": junk}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0  # the scan itself still landed
+        assert payload["scan_progress"]["files_total_estimate"] is None
+
+    @pytest.mark.parametrize("junk_ms", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_sentinel_duration_falls_to_the_files_arm(
+        self, store: InstrumentStore, junk_ms: float
+    ) -> None:
+        """Round-1 refuter (route arm): ``Infinity`` IS valid input to
+        Python's tolerant JSON decoder and passed the ``> 0`` gate — the
+        hint would have seeded an INFINITE stall bound. The ``math.isfinite``
+        guard rejects it and the hint falls to the ``files_scanned``
+        derivation; the route serves the verdict + the honest estimate
+        normally. (A FINITE huge duration is a DIFFERENT case — accepted
+        here and clamped by the holder, round-3 law; see the sibling test.)"""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": junk_ms}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert payload["scan_stalled"] is False
+        assert payload["refresh_probe_wedged"] is False
+
+    def test_huge_finite_sentinel_duration_is_accepted_and_holder_clamps(
+        self, store: InstrumentStore
+    ) -> None:
+        """Round-3 refuter (route arm): a FINITE positive ``duration_ms`` of
+        ANY magnitude (here the round-2 corrupt-sentinel repro ``1e308`` ms)
+        is ACCEPTED by the hint helper — never rejected to the files arm /
+        floor — and BOUNDED by the holder's single 24 h clamp site (the
+        bound teeth live in the holder suite; behaviourally the route
+        serves the verdict + estimate normally)."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": 1e308}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert payload["scan_stalled"] is False
+
+    def test_absurd_magnitude_files_scanned_hint_degrades_never_a_crash(
+        self, store: InstrumentStore
+    ) -> None:
+        """A ``files_scanned`` int too large for float conversion raises
+        ``OverflowError`` in the per-file hint derivation — mapped to ``None``
+        (bare-floor bound); the estimate itself (a plain int) still serves."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(_json.dumps({"files_scanned": 10**400}), encoding="utf-8")
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 10**400
+        assert payload["scan_stalled"] is False
+
+    @pytest.mark.parametrize("huge_ms", [10**309, 10**400])
+    def test_huge_int_sentinel_duration_saturates_never_fails_the_hint(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, huge_ms: int
+    ) -> None:
+        """Round-4 refuter: a JSON *int* ``duration_ms`` beyond float range
+        made ``math.isfinite(duration_ms)`` raise ``OverflowError`` — the
+        whole hint callable failed (a repeating
+        ``lake_census.first_scan_bound_hint_failed`` WARN each check cycle)
+        and the bound collapsed to the bare floor: the round-3
+        never-a-floor-collapse doctrine violated through the INT shape. The
+        local conversion guard now SATURATES a positive-huge int to a huge
+        finite float, riding the same finite-positive → holder-clamp path as
+        its 1e308 float twin (the clamp teeth live in the holder suite)."""
+        import json as _json
+
+        import brutex.dashboard.lake_census_holder as holder_module
+
+        class _Rec:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+
+            def warning(self, event: str, **kw: object) -> None:
+                self.events.append(event)
+
+        rec = _Rec()
+        monkeypatch.setattr(holder_module, "_LOG", rec)
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": huge_ms}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert payload["scan_stalled"] is False
+        # Pre-fix teeth: math.isfinite(10**309) RAISED — the hint callable
+        # failed with exactly this WARN; the guarded conversion never does.
+        assert "lake_census.first_scan_bound_hint_failed" not in rec.events
+
+    def test_negative_huge_int_duration_falls_to_the_files_arm(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The negative-huge INT twin is unusable (like any non-positive
+        value) — it falls through to the ``files_scanned`` arm without ever
+        failing the hint callable."""
+        import json as _json
+
+        import brutex.dashboard.lake_census_holder as holder_module
+
+        class _Rec:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+
+            def warning(self, event: str, **kw: object) -> None:
+                self.events.append(event)
+
+        rec = _Rec()
+        monkeypatch.setattr(holder_module, "_LOG", rec)
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": -(10**400)}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert "lake_census.first_scan_bound_hint_failed" not in rec.events
+
+    def test_sentinel_duration_ms_arm_serves_normally(self, store: InstrumentStore) -> None:
+        """A sentinel carrying a recorded duration exercises the duration-first
+        bound-hint arm — the route serves the verdict identically."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": 1560000}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert payload["scan_stalled"] is False
 
 
 class TestUniverseChipMarkers:
@@ -383,3 +645,220 @@ class TestUniverseChipMarkers:
         assert "textContent" in body
         assert "innerHTML" not in body
         assert "engine indexes POISONED" in body
+        # DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review BLOCKER): the verdict
+        # CONSUMES the skip signals — the CLEAN branch is gated on zero skips and
+        # a skip paints a distinct UNREADABLE red (never silent-green ✅).
+        assert "m.findings_total === 0 && (m.files_skipped || 0) === 0" in body
+        assert "(m.engine_files_skipped || 0) > 0" in body
+        assert "engine indexes UNREADABLE" in body
+        assert "scan incomplete" in body
+        # DEC-LAKE-CENSUS-NONBLOCKING-001: the honest warming/rescan arms —
+        # no-verdict-yet renders live progress instead of a fabricated verdict,
+        # a rescan alongside a verdict is called out, a failed scan is visible,
+        # and the 15 s cadence is unchanged (no unguarded faster poll — the
+        # single setInterval pin above stays the ONLY census poll).
+        assert "census scanning…" in body
+        assert "(rescanning…" in body
+        assert "census scan failed" in body
+        assert "census scan stalled" in body  # the ADD-3 loud-staleness arm
+        # The refresh-probe-wedge note (round-1 refuter FINDING 1) renders
+        # beside the served verdict — distinct from a stalled scan.
+        assert "refresh probe wedged" in body
+        assert "refresh_probe_wedged" in body
+        assert "refresh_probe_wedged_s" in body
+        assert "scan_in_progress" in body
+        assert "scan_stalled" in body
+        assert text.count("setInterval(loadLakeUniqueness") == 1
+
+
+class TestUniverseChipVerdictExecuted:
+    """Node-executed proof the chip verdict CONSUMES ``engine_files_skipped`` /
+    ``files_skipped`` — a skipped file is NEVER painted silent-green ✅
+    (DEC-AUDIT-CENSUS-HONESTY-001, hostile-review BLOCKER). Skipped where node
+    is absent; the ``TestUniverseChipMarkers`` string pins still gate."""
+
+    _UNIVERSE = (
+        Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates" / "universe.html"
+    )
+
+    def _decide(self, payload: dict[str, object]) -> str:
+        """Run the REAL verdict-decision block from universe.html on *payload*."""
+        import json
+        import shutil
+        import subprocess  # nosec B404 — fixed-argv node invocation, test-only
+
+        if shutil.which("node") is None:  # pragma: no cover - environment-dependent
+            pytest.skip("node not installed")
+        text = self._UNIVERSE.read_text(encoding="utf-8")
+        start = text.index("if (m.findings_total === 0 && (m.files_skipped")
+        end = text.index("const segs", start)
+        block = text[start:end]
+        script = (
+            "const m = JSON.parse(process.argv[1]);"
+            "const verdict = { style: {}, textContent: '' };"
+            f"{block}"
+            "console.log(verdict.textContent);"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script, json.dumps(payload)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return proc.stdout.strip()
+
+    def test_clean_payload_paints_green_clean(self) -> None:
+        out = self._decide({"findings_total": 0, "files_skipped": 0, "engine_files_skipped": 0})
+        assert "CLEAN" in out and "❌" not in out
+
+    def test_engine_skip_is_never_silent_green(self) -> None:
+        # The BLOCKER: 0 findings but an UNREADABLE engine file → NOT ✅ CLEAN.
+        out = self._decide(
+            {
+                "findings_total": 0,
+                "files_skipped": 1,
+                "engine_files_skipped": 1,
+                "engine_clean": False,
+            }
+        )
+        assert "CLEAN" not in out.split("verified")[0]  # not the top-line "✅ CLEAN"
+        assert "UNREADABLE" in out
+        assert "❌" in out
+
+    def test_reference_only_skip_is_non_clean_but_engine_clean(self) -> None:
+        out = self._decide(
+            {
+                "findings_total": 0,
+                "files_skipped": 1,
+                "engine_files_skipped": 0,
+                "engine_clean": True,
+            }
+        )
+        assert "scan incomplete" in out
+        assert "ENGINE indexes verified CLEAN" in out
+        assert "❌" in out
+
+    def test_engine_poison_paints_poisoned(self) -> None:
+        out = self._decide(
+            {
+                "findings_total": 2,
+                "files_skipped": 0,
+                "engine_files_skipped": 0,
+                "engine_clean": False,
+            }
+        )
+        assert "poisoned" in out and "engine indexes POISONED" in out
+
+    def test_non_engine_poison_paints_poisoned_count(self) -> None:
+        out = self._decide(
+            {
+                "findings_total": 3,
+                "files_skipped": 0,
+                "engine_files_skipped": 0,
+                "engine_clean": True,
+            }
+        )
+        assert "3 poisoned" in out and "POISONED" not in out
+
+
+class TestExtremePermutations:
+    """ADD-4 permutation arms at the ROUTE level (holder arms live in the
+    holder suite; single-flight/crash/estimate arms are pinned there)."""
+
+    def test_empty_lake_zero_files_serves_a_zero_verdict(self, tmp_path: Path) -> None:
+        """A 0-file lake lands an honest zero census — never a crash/blank."""
+        lake_root = tmp_path / "lake"
+        lake_root.mkdir()
+        with InstrumentStore.open(lake_root / "instruments.duckdb") as s:
+            client = _make_client(s, SummaryCache())
+            payload = client.get("/api/v1/universe/lake-uniqueness").json()
+            assert payload["present"] is True
+            assert payload["findings_total"] == 0
+            assert payload["files_scanned"] == 0
+            assert payload["scan_progress"]["files_scanned"] == 0
+
+    def test_corrupt_file_mid_scan_rides_the_scanner_skip_semantics(
+        self, store: InstrumentStore
+    ) -> None:
+        """A garbage Parquet is SKIPPED (the scanner's existing
+        `parquet_read_skip_errors` discipline) — the census still lands."""
+        lake_root = store.path.parent
+        junk = lake_root / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2025" / "10.parquet"
+        junk.parent.mkdir(parents=True, exist_ok=True)
+        junk.write_bytes(b"this is not a parquet file")
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["present"] is True
+        assert payload["files_scanned"] == 1  # the clean bar file; junk skipped
+        assert payload["findings_total"] == 0
+        # Progress ticked for the skipped file too (per_file_pause fires on
+        # skips — the scanner's documented seam contract).
+        assert payload["scan_progress"]["files_scanned"] == 2
+
+    def test_store_path_vanishing_mid_flight_hits_the_daemon_thread_belts(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The route gates ``path`` per REQUEST, but the estimate / bound-hint /
+        scan-builder reads happen LATER on the daemon thread — a store whose
+        path degrades between arming and the scan rides each helper's own
+        not-a-Path belt (null estimate, bare-floor hint, the builder's honest
+        ``{"present": false}``) — never a crash, never a fabricated verdict."""
+        real_path = store.path
+        flip = {"gone": False}
+        monkeypatch.setattr(
+            InstrumentStore,
+            "path",
+            property(lambda self: "gone-mid-flight" if flip["gone"] else real_path),
+        )
+        bodies: list[Callable[[], None]] = []
+        client = TestClient(
+            app_module.build_app(
+                app_module.DashboardState(),
+                instrument_store=store,
+                summary_cache=SummaryCache(),
+                census_spawn=bodies.append,
+            ),
+            raise_server_exceptions=False,
+        )
+        first = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert first["scan_in_progress"] is True  # armed; the body is queued
+        assert "findings_total" not in first
+        flip["gone"] = True
+        bodies.pop()()  # the daemon body runs AFTER the path vanished
+        flip["gone"] = False
+        snap = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert snap["present"] is False  # the builder's own honest gate landed
+        assert snap["scan_progress"]["files_total_estimate"] is None
+        assert snap["scan_error"] is None
+        assert snap["scan_stalled"] is False
+
+    def test_scan_crash_route_keeps_serving_the_last_verdict(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising rescan (disk vanished) never blanks the route: the
+        last-known verdict serves with `scan_error` stamped, 200 always."""
+        clock = _FakeClock()
+        cache = SummaryCache(clock=clock)
+        client = _make_client(store, cache, census_clock=clock)
+        first = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert first["findings_total"] == 0 and first["scan_error"] is None
+
+        def _vanished(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("[Errno 5] Input/output error: lake volume vanished")
+
+        monkeypatch.setattr(app_module, "scan_lake_invariants", _vanished)
+        cache.mark_dirty()
+        clock.advance(3.0)
+        resp = client.get("/api/v1/universe/lake-uniqueness")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["findings_total"] == 0  # last-known verdict still serves
+        # SECURITY (the store_error_payload stance): the served scan_error is
+        # the STABLE sanitised token + class name — the raw OSError text (which
+        # carried path-like detail) never reaches the route/DOM.
+        assert payload["scan_error"] == (
+            "census scan failed (OSError) — see server log (lake_census.scan_failed)"
+        )
+        assert "vanished" not in payload["scan_error"]
+        assert payload["scan_stalled"] is False
+        assert payload["refresh_probe_wedged"] is False

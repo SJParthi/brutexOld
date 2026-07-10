@@ -137,9 +137,15 @@
       <span class="sep">·</span>
       <a href="/coverage" aria-current="page">Coverage</a>
       <span class="sep">·</span>
+      <a href="/completeness">Completeness</a>
+      <span class="sep">·</span>
       <a href="/movers">Movers</a>
       <span class="sep">·</span>
       <a href="/results">Results</a>
+      <span class="sep">·</span>
+      <a href="/screener">Screener</a>
+      <span class="sep">·</span>
+      <a href="/strategy">Strategy</a>
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
@@ -296,10 +302,15 @@ async function pollSpot() {
     const txt = await r.text();
     if (txt !== lastPayload.spot) {
       lastPayload.spot = txt;
-      const h = JSON.parse(txt).headline || {};
+      const body = JSON.parse(txt);
+      const h = body.headline || {};
       cSpot.classList.remove("err");
       setKpi(spotdsEl, num(h.datasets));
-      setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars");
+      /* Floor-stale suffix (DEC-STALENESS-CACHE-TRUTH-001): the payload's own
+         duty_degraded honesty field (SummaryCache.stamp_freshness) — a
+         pull-held stale snapshot is marked, never silently served as live. */
+      setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars"
+        + (body.duty_degraded === true ? " · stale" : ""));
     }
     return true;
   } catch (e) {
@@ -311,7 +322,10 @@ async function pollSpot() {
 
 async function pollWindows() {
   try {
-    const r = await doFetch("/api/v1/coverage/windows");
+    /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this card renders ONE integer
+       (b.count) — ?limit=0 keeps the identical counts/meta while dropping the
+       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
+    const r = await doFetch("/api/v1/coverage/windows?limit=0");
     if (!r.ok) {
       lastPayload.win = null;
       statError(cWin, [wincEl], "error " + r.status + " · retrying");
@@ -362,6 +376,12 @@ async function pollCompleteness() {
 }
 
 async function poll() {
+  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001, the bx-liveproof / v29.html
+     pattern): a background tab fires ZERO fetches — the 4 s interval keeps ticking
+     (a hidden tick is free) and the visibilitychange listener below fires an
+     immediate catch-up poll() on return, so a returning operator is never stale
+     beyond one RTT (Golden Rule #1). */
+  if (document.hidden) return;
   /* Parallel fan-out: one slow endpoint no longer stalls the other three
      (the old serial awaits froze the whole tick behind the slowest call). */
   const settled = await Promise.allSettled(
@@ -378,6 +398,12 @@ async function poll() {
 
 poll();
 setInterval(poll, 4000);
+/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001): the hidden
+   guard in poll() suppresses background fetches, so re-poll NOW on becoming
+   visible instead of waiting out the interval. */
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden) poll();
+});
 /* Deferred bx-ui.js is guaranteed executed by DOMContentLoaded: pause every
    ambient animation while the tab is hidden (richer feel, lower cost). */
 document.addEventListener("DOMContentLoaded", function () {

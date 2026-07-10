@@ -195,6 +195,22 @@ class TestBuildTop100Payload:
         assert payload["empty_note"] is None
         assert payload["detail"] == "bad"
 
+    def test_preset_passes_through_for_the_sort_basis_label(self) -> None:
+        """DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the artifact's R30 preset token
+        reaches the payload so the pages can LABEL the sort basis honestly."""
+        payload = ov.build_top100_payload(
+            "r-x",
+            Top100Result("ok", (), "", "1:1", "min_dd_first"),
+            fixture_root_active=False,
+        )
+        assert payload["preset"] == "min_dd_first"
+
+    def test_preset_defaults_to_none_when_the_root_never_parsed(self) -> None:
+        payload = ov.build_top100_payload(
+            "r-x", Top100Result("awaiting", (), "", None), fixture_root_active=False
+        )
+        assert payload["preset"] is None  # honest — the label falls back client-side
+
 
 class TestBuildEventsPayload:
     def test_passthrough_and_window_filter_flag(self) -> None:
@@ -237,6 +253,40 @@ class TestBuildTradesPayload:
         assert payload["total"] == 412
         assert payload["source"] == "fixture"
         assert payload["fixture_root_active"] is True
+
+
+class TestBuildEquityPayload:
+    """DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item 4C — the equity route projector."""
+
+    def test_delegates_to_the_one_page_projector_byte_identically(self) -> None:
+        """§11 COMMON: the equity payload IS the trades page shape over the
+        stored series points — the delegation can never fork the wire."""
+        rows = (
+            {
+                "session_date": "2026-07-01",
+                "equity_close_paisa": 1_000,
+                "equity_intraday_low_paisa": None,  # honest None low
+                "trades_closed": 1,
+            },
+        )
+        page = TradesResult("ok", rows, 3, "results_store", "")
+        equity = ov.build_equity_payload(
+            "r-x", 2, page, offset=0, limit=5000, fixture_root_active=False
+        )
+        trades = ov.build_trades_payload(
+            "r-x", 2, page, offset=0, limit=5000, fixture_root_active=False
+        )
+        assert equity == trades
+        assert equity["rows"][0]["equity_intraday_low_paisa"] is None
+        assert equity["total"] == 3
+
+    def test_awaiting_series_keeps_total_null(self) -> None:
+        page = TradesResult("awaiting", (), None, "none", "awaiting real run artifact — x")
+        payload = ov.build_equity_payload(
+            "r-x", 1, page, offset=0, limit=100, fixture_root_active=False
+        )
+        assert payload["status"] == "awaiting"
+        assert payload["total"] is None  # never a fabricated 0
 
 
 # ── chain map ───────────────────────────────────────────────────────────

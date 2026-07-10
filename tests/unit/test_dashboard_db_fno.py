@@ -120,8 +120,17 @@ class TestFnoCandleLakeSchema:
             "intrinsic",
             "time_value",
             "days_to_expiry",
+            # READ-time derived decoded Greeks status (DEC-DB-FNO-DISPLAY-TRUTH-001).
+            "greeks_status",
         ]
         # each entry is a flat JSON-friendly dict
         assert all({"name", "dtype", "source", "nullable", "doc"} == set(c) for c in schema)
         derived = {c["name"]: c for c in schema if c["source"] == "derived"}
-        assert set(derived) == {"moneyness", "spot", "intrinsic", "time_value", "days_to_expiry"}
+        assert set(derived) == {
+            "moneyness",
+            "spot",
+            "intrinsic",
+            "time_value",
+            "days_to_expiry",
+            "greeks_status",
+        }

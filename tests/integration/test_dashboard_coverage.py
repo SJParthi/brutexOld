@@ -724,6 +724,22 @@ class TestWindowStatusApi:
         assert "counts_since_pull_start" not in body
         assert "pull_start_utc" not in body
 
+        # Counts-only mode (DEC-WINDOWS-COUNTS-ONLY-001): ?limit=0 ships the
+        # IDENTICAL counts/meta with rows=[] — the mode the coverage.html KPI +
+        # universe.html all-segments consumers poll (they never read rows, so
+        # the ~5.9 MB default row list stops shipping). The default (no-limit)
+        # response above is the existing-caller byte-parity witness: it stayed
+        # rowful and shape-identical through this change.
+        counts_only = client.get("/api/v1/coverage/windows?limit=0").json()
+        assert counts_only == {
+            **body,
+            "windows": [],
+            "returned": 0,
+            "capped": True,  # matching rows exist, none shipped — honest
+        }
+        # ge=0: a negative limit is still refused at validation (422), never a 500.
+        assert client.get("/api/v1/coverage/windows?limit=-1").status_code == 422
+
     def test_windows_per_run_counts_from_pull_journal(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
@@ -889,6 +905,35 @@ class TestCoverageFreshnessStamps:
         pull_on["v"] = False
         third = client.get("/api/v1/coverage/spot").json()
         assert third["duty_degraded"] is False
+
+    def test_spot_coverage_page_renders_the_floor_stale_badge(self, store: Any) -> None:
+        """Item pin (DEC-STALENESS-CACHE-TRUTH-001): the /coverage/spot page RENDERS
+        the payload's own duty_degraded/snapshot_age_s honesty fields — an amber
+        badge, textContent-only, shown ONLY when the payload says so. Substring
+        presence (the accepted #1529/#1530 no-headless-JS-runner envelope);
+        fails before: no template consumed either field."""
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        page = client.get("/coverage/spot").text
+        # The badge element + its style hook.
+        assert 'id="stalechip"' in page
+        assert ".stalechip" in page
+        # The render logic keys on the payload's OWN honesty fields.
+        assert "duty_degraded === true" in page
+        assert "snapshot_age_s" in page
+        # The badge copy (age + throttle explanation + the documented worst case).
+        assert "refresh throttled during the pull" in page
+        assert "chips may lag up to ~4 min" in page
+        # textContent-only DOM writes for the badge (never innerHTML).
+        assert "staleChip.textContent" in page
+
+    def test_coverage_hub_spot_card_renders_the_stale_suffix(self, store: Any) -> None:
+        """Item pin (DEC-STALENESS-CACHE-TRUTH-001): the /coverage hub's spot card
+        appends an honest "· stale" suffix when the payload says duty_degraded.
+        Substring presence only (the #1529/#1530 envelope)."""
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        page = client.get("/coverage").text
+        assert "duty_degraded === true" in page
+        assert '" · stale"' in page
 
 
 class TestCompletenessScoreboard:

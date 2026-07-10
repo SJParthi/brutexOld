@@ -39,7 +39,7 @@ _EXPECTED_SHA256: dict[str, str] = {
         "344184a57b869707f2497d8a4a78687c051da7a9c8dca6191c18a0f010cb4a7a"
     ),
     "sweep_runs/r-20260707-fixt01/top100.json": (
-        "85c6bf848afd8c89ebf32b0c0bd674d6dbbe59d785eee92e1adbe0da2f0b0e69"
+        "a48ea333dd5b668100a4b0ed63fda0e0e56c045f208b50208bce8aeb6d842791"
     ),
     "sweep_runs/r-20260707-fixt01/trades/rank-0001.json": (
         "3b2c4ce7d42ff046c27e6a262128f1fd2273f51ef78932ac6d9f4c1edf977386"
@@ -48,10 +48,10 @@ _EXPECTED_SHA256: dict[str, str] = {
         "98d5bf94846e2a31a9251c5bef552346de8c9b8a9e485a79dd88338d29b134f5"
     ),
     "sweep_runs/r-corrupt01/top100.json": (
-        "cb42f6c86411c80e6987d6de8c79e00a67eb5199ab8d6e13b18843f2ff0ac544"
+        "60b258070fe9172e5784287c7ec6be6b3a87af82a616325058790dbdafe07f0d"
     ),
     "sweep_runs/r-empty01/top100.json": (
-        "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        "0fbd1222ef9b776468c540ed50d90c2fe346d052469a12b4cc806e8ae11af6ba"
     ),
     "sweep_runs/r-hostile01/events.jsonl": (
         "c8150cf2c68dfd432632e96c6fed3221caa8e524bd9849458ba7a59c1c3b5ba9"
@@ -60,10 +60,10 @@ _EXPECTED_SHA256: dict[str, str] = {
         "cdcabe6fdd16bf59275c8c2bc3b9470e0f07830f17714bd381d06c456b4a7422"
     ),
     "sweep_runs/r-hostile01/top100.json": (
-        "08aa0ac074cf5408adc83351d4d4fdbbcfda39723fa1b7ecc6d9b4ea93dc59db"
+        "7df84ef8bbd1e785f85200899fc2046428e7e5fed6b849e7f53836b624fd0645"
     ),
     "sweep_runs/r-short01/top100.json": (
-        "9bfd33205aeefd7db6278858c9e9a0160128d6a0098864912f386ef4e669678b"
+        "ceb4a881c523fdfd5b1634c446dd295072e24a0f91d7a2442c20bccf1d698bab"
     ),
 }
 
@@ -72,10 +72,16 @@ class TestCorpusPinned:
     def test_sha256_manifest_matches_the_committed_corpus(self) -> None:
         # The corpus proper is the ``sweep_runs/`` tree the generator owns
         # (migrated from ``runs/`` under Ruling 4 /
-        # DEC-ONECLICK-SWEEP-RUNS-REBIND-001 — bytes unchanged, only the tree
-        # name moved, so the per-file SHAs are the pre-migration values). The
-        # old sibling ``.gitignore`` re-include is GONE: the root .gitignore
-        # ignores ``runs/`` dirs, not ``sweep_runs/``.
+        # DEC-ONECLICK-SWEEP-RUNS-REBIND-001; every ``top100.json`` then
+        # migrated to the WRITER's object root + engine metric names under
+        # DEC-ONECLICK-TOP100-OBJECT-ROOT-001 — those five SHAs moved with
+        # that deliberate regeneration; the hostile-round F1/F2 fold then
+        # regenerated the four row-carrying twins onto the writer's per-entry
+        # dialect — dict arm / no-0x mask / writer regime + vix_band key sets
+        # / provider keys — the empty twin's bytes were already exact).
+        # The old sibling ``.gitignore``
+        # re-include is GONE: the root .gitignore ignores ``runs/`` dirs,
+        # not ``sweep_runs/``.
         actual = {
             path.relative_to(_FIXTURE_ROOT).as_posix(): hashlib.sha256(
                 path.read_bytes()
@@ -100,10 +106,46 @@ class TestMainRunRoundTrips:
         verdict = ov.reconcile_funnel(manifest)
         assert verdict["ok"] is True  # hand-derived arithmetic, to the digit
 
+    def test_top100_committed_bytes_are_the_writer_object_root(self) -> None:
+        """DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the fixture matches the WRITER's
+        root shape + ENGINE metric names — never the retired bare array."""
+        committed = json.loads((_RUNS / gen.RUN_ID / "top100.json").read_text(encoding="utf-8"))
+        assert isinstance(committed, dict)
+        assert committed["schema_version"] == oc.TOP100_SCHEMA_VERSION
+        assert committed["run_id"] == gen.RUN_ID
+        assert committed["preset"] == "min_dd_first"
+        assert isinstance(committed["entries"], list)
+        first = committed["entries"][0]
+        raw_metrics = first["metrics"]
+        assert "sharpe_ratio" in raw_metrics  # engine names on disk
+        assert "sharpe" not in raw_metrics  # the alias is READER-added only
+        assert "cpcv_pass_pct" not in raw_metrics  # the writer emits none
+        # Hostile-round F1/F2: the writer's per-entry dialect on disk — the
+        # arm DICT (a string arm masked the "[object Object]" render bug),
+        # the 32-hex no-0x mask, the writer's regime/vix_band key sets, and
+        # the always-emitted provider keys (honest null — unwired).
+        assert set(first["arm"]) == {"sl_paisa", "tp_paisa"}
+        assert len(first["mask_hex"]) == 32 and not first["mask_hex"].startswith("0x")
+        assert set(first["regime"]) == {
+            "by_year",
+            "by_trend",
+            "one_regime_wonder",
+            "regime_wonder_axis",
+            "entry_hour_hist",
+            "event_days",
+        }
+        assert set(first["vix_band"]) == {"lo", "hi", "stamped", "missing", "win", "loss"}
+        assert first["instrument"] == "NSE-NIFTY"
+        assert first["reasons"] is None and first["margin_roi"] is None
+        assert isinstance(first["family_members"], list)
+        # The DOCUMENTED remaining omissions: the #1275 additive keys only.
+        assert "run_id" not in first and "equity_ref" not in first
+
     def test_top100_loads_ok_with_100_rows_and_edge_classes(self) -> None:
         top100 = oc.load_top100(_RUNS / gen.RUN_ID)
         assert top100.status == "ok"
         assert len(top100.rows) == 100
+        assert top100.preset == "min_dd_first"
         by_rank = {row["rank"]: row for row in top100.rows}
         assert by_rank[gen.ZERO_TRADES_RANK]["metrics"]["trades"] == 0
         assert by_rank[gen.NEGATIVE_PF_RANK]["metrics"]["profit_factor"] == -0.5
@@ -111,6 +153,12 @@ class TestMainRunRoundTrips:
         assert by_rank[gen.NULL_VIX_RANK]["vix_band"] is None
         tie_a, tie_b = gen.TIE_RANKS
         assert by_rank[tie_a]["metrics"]["sharpe"] == by_rank[tie_b]["metrics"]["sharpe"]
+        # Hostile-round F1: the reader bridged the writer's arm dict to the
+        # display string (rank 1: sl 2×2575 / tp 3×3125 paisa) and kept the
+        # raw dict additively; the null-arm edge reads the honest "—" legs.
+        assert by_rank[1]["arm"] == "SL ₹51.50 · TP ₹93.75"
+        assert by_rank[1]["arm_raw"] == {"sl_paisa": 5_150, "tp_paisa": 9_375}
+        assert by_rank[gen.NULL_ARM_RANK]["arm"] == "SL — · TP —"
 
     def test_events_chain_verifies_end_to_end(self) -> None:
         """Self-consistency ONLY: generator and verifier share ONE chain_hash."""

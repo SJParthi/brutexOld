@@ -59,6 +59,16 @@ class TestParseFutureSymbol:
     def test_stock_future(self) -> None:
         assert parse_future_symbol("NSE-RELIANCE-25Jun26-FUT") == ("RELIANCE", date(2026, 6, 25))
 
+    def test_hyphenated_underlying_preserved_intact(self) -> None:
+        # Review round 1 (DEC-MOVERS-UNDERLYING-CLASS-001 fix round): the parse is
+        # right-ANCHORED, mirroring the canonical parse_fno_symbol — the prior
+        # parts[1] read TRUNCATED a hyphenated underlying to "BAJAJ", mis-keying
+        # the grouping / display / spot probe / class lookup.
+        assert parse_future_symbol("NSE-BAJAJ-AUTO-30Sep25-FUT") == (
+            "BAJAJ-AUTO",
+            date(2025, 9, 30),
+        )
+
     def test_option_symbol_is_none(self) -> None:
         # An option ends -CE / -PE (last part is not FUT) → not a future.
         assert parse_future_symbol("NSE-NIFTY-30Sep25-24000-CE") is None
@@ -892,6 +902,7 @@ class TestResolvePrevOi:
         assert prev_baseline_provenance(got.found_date, date(2025, 9, 29), exchange="NSE") == (
             "2025-09-24",
             False,
+            False,
         )
 
     def test_noncontiguous_minute_arm_judged_false(self, tmp_path: Path) -> None:
@@ -910,6 +921,7 @@ class TestResolvePrevOi:
         assert got == PrevOiBaseline(value=555, found_date=date(2025, 9, 25))
         assert prev_baseline_provenance(got.found_date, date(2025, 9, 29), exchange="NSE") == (
             "2025-09-25",
+            False,
             False,
         )
 

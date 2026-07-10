@@ -131,6 +131,31 @@ code_commit_hash)`. A re-run with the same bars + code is byte-identical.
 
 ---
 
+## 3b. Multi-day sweep logging (disk headroom — `nohup`, NOT `tee`)
+
+Run a multi-day sweep under `nohup` with log-file headroom — do **NOT** pipe
+through `tee`:
+
+```bash
+nohup .venv/bin/python -m brutex sweep-all … > sweep.log 2>&1 &
+```
+
+Two measured reasons (guarantee-audit evidence, phase3/W12):
+
+- **DEBUG stdout is a 2–40 GB flood on a multi-day run.** This is bounded by
+  DEC-SWEEP-LOG-VOLUME-GUARD-001 (MIGRATION.md #1630): the sweep CLI now
+  configures structlog at **INFO by default** (override with
+  `BRUTEX_LOG_LEVEL=DEBUG` only when you explicitly want the per-trade stream
+  and have re-accepted the disk cost). Still provision adequate disk for
+  `sweep.log` — a disk-full mid-sweep is a `LakeWriteHalt` run-killer.
+- **A `tee` process death kills the sweep in 0.19 s.** If the `tee` in a
+  `… | tee sweep.log` pipeline dies (OOM, terminal close, disk-full on the
+  tee side), the sweep receives `SIGPIPE`/`EPIPE` and dies almost instantly —
+  measured 0.19 s. `nohup … > sweep.log 2>&1 &` writes directly to the file
+  with no fragile pipe in the middle and survives a detached terminal.
+
+---
+
 ## 4. Honest envelope (Golden Rule #10)
 
 | Reality | Implication |

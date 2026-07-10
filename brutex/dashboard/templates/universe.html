@@ -484,8 +484,11 @@
       <a href="/universe" aria-current="page">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
     <div class="badge" id="previewBadge">● PREVIEW · synthetic data</div>
@@ -766,7 +769,19 @@ let fnoOnly = false;
 
 function buildTabs(summary) {
   tabsEl.innerHTML = "";
-  const counts = {index: summary.index_count, stock: summary.stock_count};
+  /* Badge label truth (DEC-LABEL-TRUTH-001): the Stocks badge counts the SAME
+     population the Stocks tab LISTS — stock_count_total (the full held universe,
+     reference-only rows included) — with the F&O subset labelled beside it
+     ("Stocks · M F&O", M = stock_count_total − reference_stock_count) so the
+     ~212-F&O figure is never lost. `!= null` fallbacks keep the page working
+     against a stale cached payload that predates the additive keys. */
+  const stockTotal = summary.stock_count_total != null
+    ? summary.stock_count_total : summary.stock_count;
+  const refStocks = summary.reference_stock_count;
+  const fnoStocks = (typeof stockTotal === "number" && isFinite(stockTotal)
+    && typeof refStocks === "number" && isFinite(refStocks))
+    ? (stockTotal - refStocks) : null;
+  const counts = {index: summary.index_count, stock: stockTotal};
   TABS.forEach(([k,lbl,c]) => {
     const t = document.createElement("div");
     t.className = "tab" + (k === filter ? " active" : "");
@@ -774,6 +789,12 @@ function buildTabs(summary) {
     t.innerHTML = `<span class="dot" style="background:${c}"></span>`
       + `<div><div class="n" data-target="${counts[k] || 0}">0</div>`
       + `<div class="lbl">${lbl}</div></div>`;
+    if (k === "stock" && fnoStocks !== null) {
+      // textContent-only: the F&O split rides the label, never markup.
+      t.querySelector(".lbl").textContent = lbl + " · " + fnoStocks + " F&O";
+      t.title = fnoStocks + " F&O + " + refStocks
+        + " reference-only — the badge counts the full held universe the list shows";
+    }
     t.onclick = () => {
       filter = k;
       document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.k === k));
@@ -886,8 +907,17 @@ async function loadInstrumentMaster(msgId) {
       throw new Error(detail);
     }
     if (msg) {
+      /* Label truth (DEC-LABEL-TRUTH-001): show the LIST's stock population
+         (stock_count_total) with the F&O subset beside it, mirroring the badge.
+         Falls back to the legacy undifferentiated count on a payload that
+         predates the additive keys. */
+      const msgTotal = body.stock_count_total != null ? body.stock_count_total : body.stock_count;
+      const msgFno = (typeof body.stock_count_total === "number"
+        && typeof body.reference_stock_count === "number")
+        ? ` — ${body.stock_count_total - body.reference_stock_count} F&O`
+        : "";
       msg.textContent = `Loaded ${body.total} instruments `
-        + `(${body.index_count} indices · ${body.stock_count} stocks).`;
+        + `(${body.index_count} indices · ${msgTotal} stocks${msgFno}).`;
     }
     // The master changed → every tab's cache is stale; bump the epoch (so any
     // in-flight pre-reload fetch aborts instead of re-pinning stale data) and drop
@@ -1049,6 +1079,7 @@ function covStrip(i) {
 }
 
 async function loadCompleteness() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: fetch the per-symbol completeness map + re-render the list ONLY when it
      actually changed (a pull landed) — keeps the strip live without churning 750 rows. */
   try {
@@ -1063,6 +1094,7 @@ async function loadCompleteness() {
 }
 
 async function loadMappingIntegrity() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the green/red spot↔options mapping verdict (DEC-MAPPING-INTEGRITY-RECONCILE-001).
      VERIFIED when every options-eligible spot that was ATTEMPTED pulled >=1 expiry; RED lists
      only the ATTEMPTED-and-ZERO spots (e.g. M&M, the special-char options-fetch bug). A spot
@@ -1096,6 +1128,7 @@ async function loadMappingIntegrity() {
 }
 
 async function loadMasterIntegrity() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the green/red leg↔spot structural mapping verdict
      (DEC-INSTRUMENT-MASTER-INTEGRITY-001). VERIFIED when every FUT/CE/PE leg maps to exactly
      one IDX/EQ spot (by symbol AND token); RED counts orphan/ambiguous/disagreement/empty
@@ -1126,6 +1159,7 @@ async function loadMasterIntegrity() {
 }
 
 async function loadEconomicsIntegrity() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the green/red lot-economics verdict (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
      VERIFIED when lot_size is uniform per (underlying, expiry); RED counts within-expiry
      mismatches. Cross-expiry lot revisions (legit NSE quarterly) are shown informational,
@@ -1155,6 +1189,7 @@ async function loadEconomicsIntegrity() {
 }
 
 async function loadParseSkips() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the green/red master parse-skip verdict (DEC-PARSE-SKIP-REPORT-001).
      GREEN when the skipped-and-counted malformed in-scope rows
      (DEC-INSTRUMENT-SKIP-NO-GSYM-001) are within max(10, 0.1% of in-scope rows);
@@ -1186,11 +1221,17 @@ async function loadParseSkips() {
 }
 
 async function loadLakeUniqueness() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: the lake duplicate-census verdict (DEC-LAKE-HEAL-001). CLEAN when the
      bounded scan found zero findings; otherwise the poisoned finding count, with the
      ENGINE-index (NIFTY/BANKNIFTY/SENSEX) verdict called out — the operator's headline
-     answer. Built with textContent ONLY (the universe.html CodeQL XSS guard).
-     Never throws — keeps the last shown verdict on a transient fetch error. */
+     answer. Since DEC-LAKE-CENSUS-NONBLOCKING-001 the route is an O(1) snapshot: the
+     scan runs on a dedicated backend daemon thread, so before the FIRST scan lands
+     this renders the honest warming state ("census scanning… X / ~Y files"), and a
+     rescan alongside a last-known verdict appends "(rescanning…)". The 15 s poll
+     cadence is DELIBERATELY unchanged (no unguarded faster poll). Built with
+     textContent ONLY (the universe.html CodeQL XSS guard). Never throws — keeps the
+     last shown verdict on a transient fetch error. */
   try {
     const r = await fetch("/api/v1/universe/lake-uniqueness");
     if (!r.ok) return;
@@ -1200,15 +1241,71 @@ async function loadLakeUniqueness() {
     const detail = document.getElementById("lakedetail");
     if (!panel || !m.present) return;
     panel.style.display = "block";
-    if (m.findings_total === 0) {
+    const hasVerdict = (typeof m.findings_total === "number");
+    const p = m.scan_progress || {};
+    const startedAgo = (function () {
+      /* "started X ago" from the server's started_utc — approximate (client
+         clock vs server wall clock); NaN/absent degrades to omission. */
+      const t = Date.parse(p.started_utc || "");
+      if (!isFinite(t)) return "";
+      const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+      return " — started " + mins + " min ago";
+    })();
+    if (!hasVerdict) {
+      /* The honest no-verdict-yet arm — never a fabricated CLEAN/poisoned. */
+      if (m.scan_stalled) {
+        verdict.textContent = " ⚠️ census scan stalled" + startedAgo;
+        verdict.style.color = "#f87171";
+        detail.textContent = " · " + (p.files_scanned || 0) + " files scanned so far";
+      } else if (m.scan_in_progress) {
+        const est = (p.files_total_estimate == null) ? "?" : String(p.files_total_estimate);
+        verdict.textContent = " ⏳ census scanning… " + (p.files_scanned || 0) +
+          " / ~" + est + " files";
+        verdict.style.color = "#facc15";
+        detail.textContent = m.scan_error ? (" · previous scan failed: " + m.scan_error) : "";
+      } else if (m.scan_error) {
+        verdict.textContent = " ⚠ census scan failed — retries on the next poll";
+        verdict.style.color = "#f87171";
+        detail.textContent = " · " + m.scan_error;
+      }
+      return;
+    }
+    /* DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review BLOCKER): a skipped/unreadable
+       file is NEVER classified, so "0 findings" alone can NOT certify clean — the
+       CLEAN branch is gated on zero findings AND zero skips, and a skip paints a
+       distinct UNREADABLE red (engine vs reference-only, mirroring the CLI
+       disambiguation). Runs in the verdict-present path regardless of any
+       rescanning state so a skip is never silent-green. */
+    if (m.findings_total === 0 && (m.files_skipped || 0) === 0) {
       verdict.textContent = " ✅ CLEAN";
       verdict.style.color = "#4ade80";
+    } else if ((m.engine_files_skipped || 0) > 0) {
+      verdict.textContent = " ❌ engine indexes UNREADABLE — census incomplete, cannot certify clean";
+      verdict.style.color = "#f87171";
+    } else if ((m.files_skipped || 0) > 0) {
+      verdict.textContent = " ❌ scan incomplete — reference/non-engine file unreadable; ENGINE indexes verified CLEAN";
+      verdict.style.color = "#f87171";
     } else if (m.engine_clean) {
       verdict.textContent = " ❌ " + m.findings_total + " poisoned";
       verdict.style.color = "#f87171";
     } else {
       verdict.textContent = " ❌ " + m.findings_total + " poisoned · engine indexes POISONED";
       verdict.style.color = "#f87171";
+    }
+    if (m.scan_stalled) {
+      verdict.textContent += " ⚠️ (census scan stalled" + startedAgo + ")";
+    } else if (m.refresh_probe_wedged) {
+      /* The refresh PROBE wedged behind this served verdict (distinct from a
+         stalled scan — the verdict stands, only its freshness check is stuck;
+         judged server-side from the probe's OWN arming stamp, never the old
+         scan's started_utc). Minutes from refresh_probe_wedged_s; a missing/
+         non-numeric value degrades to omission of the count. */
+      const ws = m.refresh_probe_wedged_s;
+      const mins = (typeof ws === "number" && isFinite(ws))
+        ? " (" + Math.max(0, Math.round(ws / 60)) + "m)" : "";
+      verdict.textContent += " ⚠️ refresh probe wedged" + mins;
+    } else if (m.scan_in_progress) {
+      verdict.textContent += " (rescanning… " + (p.files_scanned || 0) + " files)";
     }
     const segs = (m.segments || []).map(s => s.segment + " " + s.clean + "/" + s.files)
       .join(" · ");
@@ -1708,9 +1805,13 @@ function windowBucketTallies(c) {
   return {noData, resolved, pending, failed, total: resolved + pending + failed};
 }
 async function refreshWindowsLine() {
+  if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   if (!pullStarted) return;
   try {
-    const r = await fetch('/api/v1/coverage/windows');
+    /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this line reads ONLY .counts —
+       ?limit=0 keeps the identical counts payload while dropping the
+       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
+    const r = await fetch('/api/v1/coverage/windows?limit=0');
     if (!r.ok) return;
     const counts = (await r.json()).counts || {};
     const grand = {noData: 0, resolved: 0, pending: 0, failed: 0, total: 0};
@@ -1742,6 +1843,10 @@ async function startAndPoll(path, label) {
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
   pullStarted = true;   // DEC-UNIVERSE-WINDOW-SEGMENTS-001: gate the all-segments line on a started pull
+                        // — armed for the WHOLE watch (incl. the pre-POST paint below) and cleared in
+                        // finishLive after one final refresh (DEC-LATENCY-HONESTY-BATCH-001), so a
+                        // refused/failed start (catch → finishLive) can never leave the 5 s poller
+                        // armed forever.
   pollFeedRetries = 0; lastProgressOkMs = null; lastProgressOkWallMs = null; hadProgressSuccess = false; lastPollLabel = null; resetSubUnit();   // a new watch starts clean
   watchActive = true;   // opens the visibility re-poll gate for the whole watch (cleared in finishLive)
   // Refuter-confirmed fix: start the staleness ticker BEFORE the start POST, so a
@@ -2010,6 +2115,14 @@ document.addEventListener('visibilitychange', () => {
   // recovery for a poll wedged mid-flight); the pollGen token makes a re-poll
   // during an in-flight fetch safe — the hung straggler drops on its gen check.
   if (!document.hidden && watchActive && lastPollLabel !== null) pollProgress(lastPollLabel);
+  // Integrity/windows catch-up (DEC-DASHBOARD-POLL-HYGIENE-001): the 5 s windows
+  // line + the six 15 s integrity loaders skip their fetch while hidden — on tab
+  // return, refresh them NOW so a returning operator never waits out an interval.
+  if (!document.hidden) {
+    refreshWindowsLine();
+    loadCompleteness(); loadMappingIntegrity(); loadMasterIntegrity();
+    loadEconomicsIntegrity(); loadParseSkips(); loadLakeUniqueness();
+  }
 });
 
 /* Per-expiry sub-unit progress (DEC-PULL-HEADER-SUBUNIT-001): one giant unit (a whole
@@ -2143,6 +2256,15 @@ function finishLive() {
   const suEl = document.getElementById('subunit');
   if (suEl) suEl.textContent = '';
   updateStallChip(null);  // a settled run is never stalled-suspect — hide the chip (DEC-PULL-STALL-CHIP-001)
+  // DEC-LATENCY-HONESTY-BATCH-001: disarm the all-segments windows poller when the
+  // watch settles. pullStarted was set true at startAndPoll and NEVER cleared, so
+  // ONE pull click — even a REFUSED start (the catch path lands here too) — armed
+  // the 5 s full-payload /coverage/windows poll FOREVER. One final refresh paints
+  // the settled counts (it reads the still-armed flag synchronously at entry),
+  // then the flag drops and the interval's guard goes back to a no-op until the
+  // next startAndPoll arms it.
+  refreshWindowsLine();
+  pullStarted = false;
   setBulkDisabled(false);
   // Restore the ONE pull button to its selection-driven label/enabled state
   // (the pipeline button is re-enabled by setBulkDisabled(false); the manual

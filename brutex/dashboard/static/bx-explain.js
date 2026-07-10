@@ -49,8 +49,20 @@ var BX_EXPLAIN = {
   conditions: "The exact market conditions this strategy waits for before it takes a trade.",
   tf: "The candle size the strategy watches — 15m means each candle covers 15 minutes.",
   direction: "long bets the market goes up; short bets it goes down.",
+  instrument: "The index this strategy trades — e.g. NSE-NIFTY (the winner's own market, not the run's whole selection).",
   arm: "The stop-loss / take-profit pair this strategy uses to exit its trades.",
-  net_pnl_paisa: "Every trade's profit and loss added up, after costs (shown in rupees).",
+  net_pnl_paisa: "Every trade's profit and loss added up (shown in rupees; signal-only — no costs are subtracted, they are modeled in the options-translation track).",
+  gross_signal_pnl: "Signal-only profit — every trade's P&L added up with NO brokerage or taxes subtracted (Track 1 never trades; costs are modeled in the options-translation track).",
+  expectancy_paisa: "The average rupees earned per trade — what one typical trade was worth.",
+  recovery_factor: "Net profit divided by the worst drawdown — how strongly gains out-earned the deepest dip.",
+  max_consecutive_losses: "The longest losing streak — how many trades in a row lost.",
+  mae_avg_paisa: "How far trades typically moved AGAINST you before closing (average and worst adverse excursion, rupees).",
+  mfe_avg_paisa: "How far trades typically moved FOR you before closing (average and best favorable excursion, rupees).",
+  max_dd_minute_path_paisa: "The worst drawdown measured on the minute-by-minute equity path — not just at trade closes.",
+  exit_mix: "How the trades ended — stop-loss, take-profit, signal flip, the 15:20 forced exit, or end of data.",
+  worst5_days: "The five worst trading days by P&L — the days that hurt most.",
+  by_trend: "Profit split by market trend regime — did it earn only in trends, or in sideways markets too?",
+  one_regime_wonder: "Flags a strategy whose profits concentrate in a single year or regime — fragile if that regime ends.",
   sharpe: "Reward earned per unit of risk taken — higher means steadier gains for the same bumps.",
   profit_factor: "Rupees won for every rupee lost — above 1 means winners outweigh losers.",
   win_rate: "How often trades ended in profit — 0.61 means 61 of every 100 trades won.",
@@ -121,20 +133,34 @@ function bxPaisaToRupees(paisa) {
  * C-M4b), so a partially-loaded list can never read as a whole-run claim.
  *
  * @param {object[]} rows - contract trade rows ({pnl_paisa, costs_paisa}).
- * @returns {object} {ok, rows_counted, invalid_rows, gross_pnl_paisa,
- *          total_costs_paisa, net_paisa, lines: string[]}.
+ * @returns {object} {ok, rows_counted, invalid_rows, null_cost_rows,
+ *          gross_pnl_paisa, total_costs_paisa, net_paisa, lines: string[]}.
  */
 function bxTradeArithmetic(rows) {
   var gross = 0;
   var costs = 0;
   var counted = 0;
   var invalid = 0;
+  var nullCosts = 0;
   for (var i = 0; i < (rows ? rows.length : 0); i++) {
     var p = rows[i].pnl_paisa;
     var c = rows[i].costs_paisa;
+    /* Ruling-18 NULL-BY-DESIGN costs ([W2-4] DEC-ONECLICK-TOP100-OBJECT-
+       ROOT-001): production trade rows carry costs_paisa:null until P5 —
+       folding null into the non-integer bucket excluded EVERY real trade
+       ("net ₹0.00 across 0 trades"). A null cost is a KNOWN-unverified
+       cost, never a corrupt number: it contributes ₹0 and is COUNTED
+       (null_cost_rows) with its own honest caveat line. */
+    var nullCost = c === null || c === undefined;
+    if (nullCost) {
+      c = 0;
+    }
     if (!Number.isSafeInteger(p) || !Number.isSafeInteger(c)) {
       invalid += 1; // counted, never coerced (R27)
       continue;
+    }
+    if (nullCost) {
+      nullCosts += 1;
     }
     gross += p;
     costs += c;
@@ -146,6 +172,12 @@ function bxTradeArithmetic(rows) {
     "− Σ costs = ₹" + bxPaisaToRupees(costs),
     "= net ₹" + bxPaisaToRupees(net) + " — sum of the " + counted + " trades loaded below"
   ];
+  if (nullCosts > 0) {
+    lines.push(
+      nullCosts +
+        " row(s) carry null costs (by design until P5) — counted at ₹0.00, so the net is GROSS of those costs"
+    );
+  }
   if (invalid > 0) {
     lines.push(invalid + " row(s) had non-integer paisa values and were EXCLUDED from the sum");
   }
@@ -153,6 +185,7 @@ function bxTradeArithmetic(rows) {
     ok: invalid === 0,
     rows_counted: counted,
     invalid_rows: invalid,
+    null_cost_rows: nullCosts,
     gross_pnl_paisa: gross,
     total_costs_paisa: costs,
     net_paisa: net,

@@ -108,8 +108,11 @@
       <a href="/universe">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener" aria-current="page">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
     <button id="bxModeToggle" class="mode-btn" type="button" title="Beginner = plain English · Pro = technical (R33 toggle — one shared mechanism)">Pro ✓</button>
@@ -129,6 +132,8 @@
       <select id="scTf"><option value="">All</option></select></div>
     <div class="ctl"><label for="scDir">Direction</label>
       <select id="scDir"><option value="">All</option></select></div>
+    <div class="ctl"><label for="scInstrument">Instrument</label>
+      <select id="scInstrument"><option value="">All</option></select></div>
     <div class="ctl"><label for="scMinWin">Min win %</label>
       <input id="scMinWin" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scMinPf">Min PF</label>
@@ -142,6 +147,11 @@
   </div>
 
   <div class="count" id="scCount">no rows loaded yet — awaiting real run artifact</div>
+  <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+       the artifact order is its R30 preset (default min_dd_first), which
+       deliberately DIFFERS from /results (Rank-by metric, descending);
+       loadRows fills the live preset via textContent — no sort is changed. -->
+  <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
 
   <div id="scPanel"></div>
   <div class="tablewrap">
@@ -192,9 +202,9 @@
       return Array.isArray(v) ? v.join(' × ') : '—';
     }
     if (col.type === 'vix') {
-      return v && typeof v === 'object' && v.lo !== undefined
-        ? String(v.lo) + '–' + String(v.hi)
-        : 'null'; // R31 honest NULL — never a silent zero
+      /* [W3-R4]: the ONE shared compact band cell — a null-lo/hi writer band
+         reads "not stamped" (R31 honest NULL), never "null–null". */
+      return window.BXOneclick.vixBandCellText(v);
     }
     if (v === null || v === undefined) { return '—'; }
     if (col.money) { return money(v); }
@@ -226,6 +236,8 @@
     if (tf) { filters.tf = [tf]; }
     var dir = byId('scDir').value;
     if (dir) { filters.direction = dir; }
+    var inst = byId('scInstrument').value;
+    if (inst) { filters.instrument = inst; }
     var minWin = num('scMinWin');
     if (minWin !== null) { filters.min_win_rate = minWin; }
     var minPf = num('scMinPf');
@@ -269,9 +281,15 @@
     var wrap = byId('scShowAllWrap');
     wrap.hidden = state.showAll || sorted.length <= RENDER_CAP;
     // Count line: the DENOMINATOR is the payload's row_count — never an
-    // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3).
+    // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3);
+    // the NUMERATOR is the count actually RENDERED — when the render cap
+    // truncated the table it says so ([W2-5] DEC-ONECLICK-TOP100-OBJECT-
+    // ROOT-001: "500 of 500 shown" over a 200-row table was a lie).
     var total = state.rowCount === null ? '?' : String(state.rowCount);
-    var line = String(sorted.length) + ' of ' + total + ' shown';
+    var line = String(cap) + ' of ' + total + ' shown';
+    if (cap < sorted.length) {
+      line += ' (render cap ' + String(RENDER_CAP) + ' — use Show all)';
+    }
     if (applied.null_vix_excluded > 0) {
       line += ' ' + window.BXScreener.nullVixNote(applied.null_vix_excluded);
     }
@@ -281,11 +299,18 @@
   function fillFilterOptions() {
     var tfSeen = {};
     var dirSeen = {};
+    var instSeen = {};
     var tfSel = byId('scTf');
     var dirSel = byId('scDir');
+    var instSel = byId('scInstrument');
     for (var i = 0; i < state.rows.length; i++) {
       tfSeen[String(state.rows[i].tf)] = true;
       dirSeen[String(state.rows[i].direction)] = true;
+      /* Instrument options come ONLY from rows that CARRY the additive key —
+         a pre-instrument artifact offers no option, so the exact-match
+         filter can never go active against rows that cannot say. */
+      var inst = state.rows[i].instrument;
+      if (typeof inst === 'string' && inst !== '') { instSeen[inst] = true; }
     }
     function fill(sel, seen) {
       while (sel.childNodes.length > 1) { sel.removeChild(sel.lastChild); }
@@ -299,6 +324,7 @@
     }
     fill(tfSel, tfSeen);
     fill(dirSel, dirSeen);
+    fill(instSel, instSeen);
   }
 
   function loadRows(runId) {
@@ -313,6 +339,14 @@
         if (payload.status === 'ok' || payload.status === 'partial') {
           state.rows = payload.rows || [];
           state.rowCount = payload.row_count === undefined ? null : payload.row_count;
+          // [11] sort-basis label: name the ACTUAL artifact preset (fallback
+          // to the default name when the payload carries none) — label only.
+          byId('scSortBasis').textContent =
+            'sort basis: artifact preset '
+            + (typeof payload.preset === 'string' && payload.preset
+              ? payload.preset : 'min_dd_first (default)')
+            + ' — differs from /results (Rank-by metric, descending);'
+            + ' column clicks re-sort this page only';
           byId('scDetail').textContent =
             payload.status === 'partial'
               ? 'PARTIAL artifact: ' + String(payload.detail)
@@ -351,7 +385,7 @@
         '/strategy?run_id=' + encodeURIComponent(state.runId) +
         '&rank=' + encodeURIComponent(tr.getAttribute('data-rank') || '1');
     });
-    ['scTf', 'scDir', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+    ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
       byId(id).addEventListener('input', render);
     });
     byId('scShowAll').addEventListener('click', function () {

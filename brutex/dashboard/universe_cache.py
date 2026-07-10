@@ -83,7 +83,7 @@ from typing import Any, Final
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.models import Exchange, Instrument
 
-__all__ = ["UniverseSnapshotCache", "master_revision"]
+__all__ = ["UniverseSnapshotCache", "coverage_revision", "master_revision"]
 
 #: The content-revision probe: the row-count + newest write time over the
 #: ``instruments`` table — the exact table the cached reads project from. A COUNT +
@@ -122,7 +122,65 @@ def master_revision(store: Any) -> tuple[int, str]:
     tuple[int, str]
         ``(count, str(max_fetched_at))``; ``(0, "")`` for an empty / never-loaded store.
     """
-    row = store.connection.execute(_REVISION_SQL).fetchone()
+    return _revision_token(store, _REVISION_SQL)
+
+
+#: The coverage-ledger content-revision probe — the ``master_revision`` twin over
+#: the ``coverage_ledger`` table (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md
+#: #1660). Content-exact for the same reason: every ``upsert_coverage`` writes a
+#: fresh ``last_fetched_at`` on the cell it replaces, so any coverage write moves
+#: ``max(last_fetched_at)`` and/or ``count(*)``. A COUNT + MAX aggregate over the
+#: PK-indexed ~universe×years table (at most a few thousand rows) — strictly
+#: lighter than the coverage/mapping-integrity projections it guards.
+_COVERAGE_REVISION_SQL: Final[str] = "SELECT count(*), max(last_fetched_at) FROM coverage_ledger"
+
+
+def coverage_revision(store: Any) -> tuple[int, str]:
+    """Probe the coverage-ledger's content-revision token — ``(count, str(max_last_fetched_at))``.
+
+    The exact :func:`master_revision` TWIN over the ``coverage_ledger`` table
+    (DEC-STALENESS-CACHE-TRUTH-001): the row-count + newest ``last_fetched_at``
+    over the table :meth:`~brutex.data.instrument_store.InstrumentStore.upsert_coverage`
+    writes. An empty ledger normalises to the stable ``(0, "")`` token, exactly
+    like an empty master. Read on the store's READ cursor (``store.connection``) —
+    DuckDB MVCC keeps it consistent with the writer's committed snapshot, so the
+    token advances right after a committed ``upsert_coverage``, INCLUDING one from
+    another process sharing the same ``instruments.duckdb`` (the cross-process
+    freshness signal a ``mark_dirty`` hook can never provide — the #1149
+    content-token doctrine).
+
+    A metadata (expiries/contracts) pull writes coverage cells WITHOUT bumping the
+    dashboard write-generation and WITHOUT touching the ``instruments`` table or
+    the window-ledger Parquet, so any cache whose payload depends on the coverage
+    ledger (the ``/coverage`` grid, the ``/universe`` completeness +
+    mapping-integrity reports) MUST fold this token into its key alongside the
+    generation + :func:`master_revision` — the ``_nav_latency_key`` 4th component
+    (DEC-STALENESS-CACHE-TRUTH-001, closing the mid-metadata-phase +
+    out-of-process stale-serve gap of DEC-DASHBOARD-NAV-LATENCY-001).
+
+    Parameters
+    ----------
+    store
+        Anything exposing a DuckDB-style ``connection`` with ``execute(...).fetchone()``.
+
+    Returns
+    -------
+    tuple[int, str]
+        ``(count, str(max_last_fetched_at))``; ``(0, "")`` for an empty ledger.
+    """
+    return _revision_token(store, _COVERAGE_REVISION_SQL)
+
+
+def _revision_token(store: Any, sql: str) -> tuple[int, str]:
+    """Run one ``(COUNT, MAX)`` revision probe and normalise it to ``(int, str)``.
+
+    The ONE shared normalisation (CLAUDE.md §11 COMMON) behind
+    :func:`master_revision` and :func:`coverage_revision`: an empty table (or a
+    paranoid ``None`` row) keys at the stable ``(0, "")``; the timestamp is
+    stringified so the token is hashable + comparable independent of the DuckDB
+    row type.
+    """
+    row = store.connection.execute(sql).fetchone()
     if row is None:  # defensive: COUNT(*) always returns a row, but never trust it.
         return (0, "")
     count = int(row[0]) if row[0] is not None else 0
@@ -161,13 +219,21 @@ class UniverseSnapshotCache:
     every later poll of the same revision is an O(1) hit.
 
     Concurrency (mirrors
-    :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache`): all bookkeeping
+    :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` /
+    :meth:`~brutex.dashboard.summary_cache.SummaryCache._plan`): all bookkeeping
     is serialised by one :class:`threading.Lock`; the bounded base reads and the
     classification run OUTSIDE the lock so a slow read never blocks a concurrent
-    hit. Two concurrent cold misses each recompute independently and the last store
-    wins — the reads are a deterministic function of the revision (idempotent,
-    Golden Rule #7), so the duplicate work is harmless. A ``compute`` that raises
-    (e.g. a bad ``kind``) propagates cleanly and nothing is stored.
+    hit. Cold misses are SINGLE-FLIGHTED per revision
+    (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002): exactly ONE reader computes a given
+    revision's three base reads while every concurrent cold reader WAITS on its
+    event and then serves the published snapshot, so N simultaneous cold pollers
+    pay ONE scan instead of N (the ``summary``/``instruments`` reads run on a
+    threadpool worker, so a stalled lake volume can pin a worker but never the
+    event loop). The reads are a deterministic function of the revision
+    (idempotent, Golden Rule #7). A ``compute`` that raises (e.g. a broken store)
+    releases the single-flight event and propagates cleanly — nothing is stored
+    and no waiter is left hanging; a bad ``kind`` (a pure post-``_current``
+    classifier error) likewise propagates and nothing is cached.
 
     Returns are READ-ONLY: :meth:`summary` / :meth:`instruments` hand back the LIVE
     memoised dict / list (no defensive copy — mirrors ``MoversSnapshotCache`` /
@@ -179,6 +245,13 @@ class UniverseSnapshotCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._snapshot: _Snapshot | None = None
+        #: In-flight base-read events keyed by the revision being computed
+        #: (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002 single-flight). The FIRST cold
+        #: miss for a revision registers its event + computes the three base
+        #: reads; concurrent cold misses for the SAME revision wait on it, then
+        #: serve the published snapshot, so N cold pollers pay ONE scan. The
+        #: entry is popped by the leader on both the success and the failure path.
+        self._refreshing: dict[tuple[int, str], threading.Event] = {}
 
     def size(self) -> int:
         """``1`` if a revision is currently resident, else ``0`` — O(1)."""
@@ -198,43 +271,89 @@ class UniverseSnapshotCache:
     def _current(self, store: Any) -> _Snapshot:
         """Return the snapshot for the store's current revision, rebuilding on a miss.
 
-        The three base reads run OUTSIDE the lock; the resident snapshot is then
-        swapped in under the lock (last-write-wins on a concurrent miss).
+        The cheap revision token is probed once (outside the lock); on a miss the
+        three base reads run OUTSIDE the lock behind a per-revision single-flight
+        (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002): exactly ONE cold reader computes a
+        given revision while concurrent cold readers WAIT on its event and then
+        serve the published snapshot, so N simultaneous cold pollers pay ONE scan
+        instead of N (mirrors :meth:`SummaryCache._plan`'s cold single-flight). A
+        ``compute`` that raises (e.g. a broken store) releases the event and
+        propagates cleanly — nothing is stored and no waiter is left hanging.
         """
         revision = self._revision(store)
-        with self._lock:
-            snap = self._snapshot
-            if snap is not None and snap.revision == revision:
-                return snap
-        # Miss (no snapshot, or the master moved): rebuild the base reads. These
-        # are the three lean projections — never the option/future legs.
-        rebuilt = _Snapshot(
-            revision=revision,
-            eligible=store.fno_eligible_underlyings(),
-            candidates=store.list_index_equity_instruments(),
-            reference=store.reference_only_security_ids(),
-        )
-        with self._lock:
-            # Re-check under the lock: only adopt `rebuilt` if no concurrent miss
-            # already installed THIS revision (keep its memoised payloads then).
-            snap = self._snapshot
-            if snap is not None and snap.revision == revision:
-                return snap
-            self._snapshot = rebuilt
-            return rebuilt
+        while True:
+            with self._lock:
+                snap = self._snapshot
+                if snap is not None and snap.revision == revision:
+                    # Hit — also the wake path for a follower once the leader
+                    # published THIS revision. An O(1) dict handoff.
+                    return snap
+                event = self._refreshing.get(revision)
+                if event is None:
+                    # We are the cold leader for this revision: register the event
+                    # (so concurrent readers wait) and compute below.
+                    event = threading.Event()
+                    self._refreshing[revision] = event
+                    leader = True
+                else:
+                    leader = False
+            if not leader:
+                # Cold follower: another reader is already computing THIS revision.
+                # Wait for it, then re-loop to serve its published snapshot (the hit
+                # branch above); a mid-flight revision change re-elects a leader.
+                event.wait()
+                continue
+            # Cold leader: rebuild the three lean base reads OUTSIDE the lock (never
+            # the option/future legs), publish under the lock, and ALWAYS release the
+            # single-flight event so waiters wake — on success (they then serve the
+            # fresh snapshot) or on failure (they retry).
+            published = False
+            try:
+                rebuilt = _Snapshot(
+                    revision=revision,
+                    eligible=store.fno_eligible_underlyings(),
+                    candidates=store.list_index_equity_instruments(),
+                    reference=store.reference_only_security_ids(),
+                )
+                with self._lock:
+                    # Re-check under the lock: only adopt `rebuilt` if no concurrent
+                    # miss already installed THIS revision (keep its memoised payloads
+                    # then — belt-and-suspenders beside the single-flight).
+                    snap = self._snapshot
+                    if snap is not None and snap.revision == revision:
+                        self._refreshing.pop(revision, None)
+                        published = True
+                        return snap
+                    self._snapshot = rebuilt
+                    self._refreshing.pop(revision, None)
+                published = True
+                return rebuilt
+            finally:
+                if not published:
+                    # The compute raised — drop the registration so a waiter (or the
+                    # next caller) can retry this revision instead of hanging.
+                    with self._lock:
+                        self._refreshing.pop(revision, None)
+                event.set()
 
     def summary(self, store: Any) -> dict[str, int]:
         """Return ``/api/v1/universe/summary``'s payload, cached per revision.
 
         On a hit the memoised dict is returned directly; on a miss the KPI counts
         are computed via :func:`~brutex.dashboard.universe_query.universe_summary`
-        over the snapshot's candidates + eligible set and memoised.
+        over the snapshot's candidates + eligible set and memoised. The snapshot's
+        already-read ``reference`` id set is threaded so the payload carries the
+        ADDITIVE ``reference_stock_count`` / ``stock_count_total`` keys the Stocks
+        badge splits on (DEC-LABEL-TRUTH-001) — no extra store query, and every
+        legacy key stays byte-identical.
         """
         snap = self._current(store)
         with self._lock:
             if snap.summary is not None:
                 return snap.summary
-        value = universe_summary(snap.candidates, fno_eligible=snap.eligible)
+        value = universe_summary(
+            snap.candidates, fno_eligible=snap.eligible, reference_only_ids=snap.reference
+        )
         with self._lock:
             if snap.summary is None:
                 snap.summary = value

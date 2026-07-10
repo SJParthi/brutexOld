@@ -154,6 +154,13 @@ class TestStoredGreeksOverlayColumns:
     def test_cheap_family_stays_derived(self) -> None:
         # The COST-CLASS hybrid (ADR-0015 D10): moneyness/spot/intrinsic/
         # time_value/days_to_expiry remain read-time derived, never stored.
-        for name in ("moneyness", "spot", "intrinsic", "time_value", "days_to_expiry"):
+        for name in (
+            "moneyness",
+            "spot",
+            "intrinsic",
+            "time_value",
+            "days_to_expiry",
+            "greeks_status",
+        ):
             col = next(c for c in FNO_CANDLE_COLUMNS if c.name == name)
             assert col.source == "derived"

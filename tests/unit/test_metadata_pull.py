@@ -1678,11 +1678,22 @@ class _DeferringCoverageSink:
         return self.inner.list_coverage()
 
 
+#: The shrunken store-write deadline for the WEDGE phase only. 2.0 s keeps the
+#: run-1 breach fast while giving a ~10x margin over the worst OBSERVED healthy
+#: DuckDB write latency on a loaded shared CI runner (run 28972139338 breached a
+#: healthy ``upsert_expiries`` at the previous 0.2 s shrink — scheduler
+#: starvation, not a wedge). HEALTHY writes that share the wedge window (the
+#: phase-2 test's run-1 expiry batch) ride this margin; the healed RECOVERY pull
+#: never runs under the shrink at all (``_wait_registry_healed`` restores the
+#: real deadline).
+_WEDGE_DEADLINE_S = 2.0
+
+
 def _wedge_registry(
     registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, *, hang_on: str
 ) -> _RegistryGateConn:
-    """Swap the registry's conn for a gate proxy + shrink the deadline to 0.2 s."""
-    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+    """Swap the registry's conn for a gate proxy + shrink the deadline (wedge phase)."""
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", str(_WEDGE_DEADLINE_S))
     proxy = _RegistryGateConn(registry._conn, hang_on=hang_on)
     registry._conn = proxy
     return proxy
@@ -1691,25 +1702,28 @@ def _wedge_registry(
 def _wait_registry_healed(
     registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, *, timeout: float = 10.0
 ) -> None:
-    """Poll the wedge latch until the zombie completes, then restore the deadline.
+    """Poll the wedge latch until the zombie completes, then RESTORE the real deadline.
 
-    The ``_wedge_registry`` 0.2 s deadline shrink exists ONLY to trip the wedge
-    deterministically in the test's FIRST phase. The guard re-reads the env on
-    EVERY write batch (``resolve_store_write_deadline_seconds``), so leaving the
-    shrink in force for the RECOVERY pull lets a healthy-but-contended DuckDB
-    write (> 0.2 s on a loaded 2-core shared CI runner) fabricate a genuine
-    deferral in run 2 and fail the ``store_write_deferrals == 0`` recovery pin —
-    the 2026-07-08 CI flake (run 28924020943). Restoring the generous 90 s
-    default keeps every tooth: all wedge/defer assertions already ran under
-    0.2 s, and the recovery pin now asserts the PRODUCTION posture (a healed
-    volume defers nothing) instead of racing an artificial micro-deadline.
+    The shrink exists ONLY to make the run-1 wedge breach fast (the guard
+    re-reads the env on EVERY write batch via
+    ``resolve_store_write_deadline_seconds``). Leaving it active for the healed
+    recovery pull turns every healthy DuckDB write into a load-timing hazard —
+    hit TWICE on the loaded 2-core shared runners: CI run 28924020943 and CI run
+    28972139338 (job 85970218005), where a healthy ``upsert_expiries`` in the
+    recovery pull breached the then-0.2 s shrink (``latched=False`` — a genuine
+    wall-clock breach, not the latch), latched the store, and the two rebuilt
+    contract jobs fail-fasted → ``store_write_deferrals == 3`` where the test
+    asserts 0. "Healed" therefore implies "back on the real 90 s default": every
+    wedge/defer tooth already ran under the shrink, and the recovery pin asserts
+    the PRODUCTION posture (a healed volume defers nothing) instead of racing an
+    artificial micro-deadline.
     """
     deadline_at = time.monotonic() + timeout
     while registry._write_guard.wedged:
         if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang
             pytest.fail("registry did not self-heal within the watchdog bound")
         time.sleep(0.005)
-    monkeypatch.delenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S")
+    monkeypatch.delenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", raising=False)
 
 
 def test_phase1_expiry_write_defer_completes_pull_and_defers_cell(
@@ -1767,7 +1781,7 @@ def test_phase1_expiry_write_defer_completes_pull_and_defers_cell(
         assert deferred[0]["underlying"] == "NIFTY"
         assert deferred[0]["year"] == 2026
         assert deferred[0]["error_type"] == "StoreWriteDeadlineExceeded"
-        assert deferred[0]["defer_seconds"] == 0.2
+        assert deferred[0]["defer_seconds"] == _WEDGE_DEADLINE_S
         assert deferred[0]["latched"] is False
     finally:
         proxy.gate.set()
@@ -1827,7 +1841,7 @@ def test_phase2_contract_write_defer_fails_job_latches_sibling_and_repulls(
                 run_id="r-p2",
             )
         assert time.monotonic() - start < 10.0  # ONE deadline, not one per job
-        # Both jobs deferred: the first burned the 0.2 s deadline, the second hit
+        # Both jobs deferred: the first burned the shrunken deadline, the second hit
         # the wedge latch instantly.
         assert report.contract_failures == 2
         assert report.store_write_deferrals == 2
@@ -1859,6 +1873,89 @@ def test_phase2_contract_write_defer_fails_job_latches_sibling_and_repulls(
     assert report2.store_write_deferrals == 0
     assert report2.contract_failures == 0
     assert registry.count_contracts() == 2  # both legs present after recovery
+    registry.close()
+
+
+class _SlowExecuteConn:
+    """Proxy that makes a HEALTHY matching statement slow-but-bounded (never hangs).
+
+    The deterministic stand-in for a loaded shared CI runner: the statement
+    genuinely completes, just later than a shrunken test deadline would allow.
+    """
+
+    def __init__(self, real: object, *, slow_on: str, seconds: float) -> None:
+        self._real = real
+        self._slow_on = slow_on
+        self._seconds = seconds
+        self.engaged = threading.Event()
+
+    def execute(self, sql: str, params: list[object] | None = None) -> object:
+        if self._slow_on in sql:
+            self.engaged.set()
+            time.sleep(self._seconds)
+        real: Any = self._real
+        if params is None:
+            return real.execute(sql)
+        return real.execute(sql, params)
+
+    def close(self) -> None:
+        real: Any = self._real
+        real.close()
+
+
+def test_healed_recovery_pull_with_slow_healthy_write_never_defers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAILS-BEFORE regression — CI run 28972139338 (job 85970218005, 2026-07-08).
+
+    The wedge helpers shrink the store-write deadline so the RUN-1 breach is
+    fast; pre-fix the shrink stayed active for the HEALED recovery pull, so a
+    healthy-but-slow DuckDB write on a loaded runner breached it
+    (``store.write_deadline_exceeded deadline_seconds=0.2 op=upsert_expiries``,
+    ``latched=False``), latched the store, and the two rebuilt contract jobs
+    fail-fasted — ``store_write_deferrals == 3`` where the test asserts 0.
+
+    Deterministic repro: shrink the deadline exactly as the wedge tests do, heal
+    (``_wait_registry_healed`` — the fix point: it restores the REAL deadline),
+    then make the recovery pull's expiry write take 0.5 s (far over the old
+    0.2 s shrink, far under the 90 s default). WITHOUT the restore this fails
+    with the exact CI signature (3 deferrals, 0 contracts persisted); WITH it
+    the slow-but-healthy write lands and nothing defers.
+    """
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25", "2026-07-30"]},
+        contracts={
+            ("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24000-CE"],
+            ("NSE", "NIFTY", "2026-07-30"): ["NSE-NIFTY-30Jul26-24500-PE"],
+        },
+    )
+    registry = _registry(tmp_path)
+    wedge = _wedge_registry(registry, monkeypatch, hang_on="\x00-never-matches-\x00")
+    # Tighten to the exact pre-fix CI shrink so the 0.5 s slow write stays a
+    # fast repro of the observed breach.
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+    _wait_registry_healed(registry, monkeypatch)  # nothing wedged; restores the deadline
+    slow = _SlowExecuteConn(registry._conn, slow_on="INSERT OR REPLACE INTO expiries", seconds=0.5)
+    registry._conn = slow
+    report = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-slow-healthy",
+    )
+    assert not wedge.entered.is_set()  # the never-matching wedge never engaged
+    assert slow.engaged.is_set()  # the slow healthy write genuinely ran slow
+    assert report.store_write_deferrals == 0
+    assert report.expiry_failures == 0
+    assert report.contract_failures == 0
+    assert report.expiries_persisted == 2
+    assert report.contracts_persisted == 2
     registry.close()
 
 
