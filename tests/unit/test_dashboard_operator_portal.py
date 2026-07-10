@@ -790,7 +790,7 @@ class TestPortalWiring:
     def test_pushstate_exactly_on_the_drawer_open_arm(self) -> None:
         js = _js(_PORTAL_JS)
         assert js.count("history.pushState(") == 1  # drawer open — the ONLY push
-        assert 'writeUrl({ winners: true, rank: rank }, true); // the ONLY pushState arm' in js
+        assert "writeUrl({ winners: true, rank: rank }, true); // the ONLY pushState arm" in js
         assert js.count("history.replaceState(") == 1  # the one shared write funnel
 
     def test_close_never_navigates(self) -> None:
@@ -876,7 +876,10 @@ class TestPortalWiring:
         assert "state.winnersMounted = true; // lazy: first expand pays the mount" in js
         assert "window.BXScreenerPanel.mount({" in js
         assert "window.BXStrategyPanel.mount({ animate: true });" in js
-        assert "window.BXStrategyPanel.update({ runId: state.runId, rank: rank, tradeIdx: null });" in js
+        assert (
+            "window.BXStrategyPanel.update({ runId: state.runId, rank: rank, tradeIdx: null });"
+            in js
+        )
 
     def test_combos_intercept_leaves_modified_clicks_to_the_real_href(self) -> None:
         js = _js(_PORTAL_JS)
@@ -944,7 +947,14 @@ class TestMotionCovenants:
 
     def test_new_keyframes_exist_and_are_one_shot(self) -> None:
         css = _js(_PANELS_CSS)
-        for name in ("bxdChartIn", "bxdArrowDrop", "bxdDraw", "bxdSwap", "bxdSwapRev", "bxdGlowRing"):
+        for name in (
+            "bxdChartIn",
+            "bxdArrowDrop",
+            "bxdDraw",
+            "bxdSwap",
+            "bxdSwapRev",
+            "bxdGlowRing",
+        ):
             assert f"@keyframes {name}" in css, name
 
     def test_grid_rows_honesty_comment_lives_beside_the_unfold(self) -> None:
@@ -991,7 +1001,9 @@ def _degrade_client(tmp_path: Path) -> Any:
 
     lake = tmp_path / "lake"
     (lake / "sweeps").mkdir(parents=True)
-    fixture_runs = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "oneclick" / "sweep_runs"
+    fixture_runs = (
+        Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "oneclick" / "sweep_runs"
+    )
     _shutil.copytree(fixture_runs, lake / "sweep_runs")
     store = SimpleNamespace(path=lake / "instruments.duckdb")
     return TestClient(build_app(DashboardState(), instrument_store=store)), lake

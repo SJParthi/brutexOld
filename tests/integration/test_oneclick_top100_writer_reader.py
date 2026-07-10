@@ -488,11 +488,7 @@ class TestEngineWriterThroughRoutes:
         # the SAME BXPortalState.strategyHref (DEC-OPERATOR-PAGE-
         # CONSOLIDATE-001 — one href law, three consumers).
         v29 = (
-            Path(__file__).resolve().parents[2]
-            / "brutex"
-            / "dashboard"
-            / "templates"
-            / "v29.html"
+            Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates" / "v29.html"
         ).read_text(encoding="utf-8")
         assert 'id="ocDrawerOpenFull"' in v29
         portal = (static / "bx-operator-portal.js").read_text(encoding="utf-8")
