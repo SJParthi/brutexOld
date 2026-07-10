@@ -866,6 +866,132 @@ def test_build_minute_basis_contiguous_uses_prior_session(tmp_path: Path) -> Non
     assert rows[0].chng == Decimal("1.05")
 
 
+# ── DEC-PREOPEN-PREVDAY-COMMON-002 — minute basis cross-checks the NSE calendar ──
+# The minute basis used the symbol's OWN 1-day series as its calendar, so a real
+# NSE session absent from BOTH the 1-day AND 1-minute series (a genuine lake hole,
+# not a holiday) was silently BRIDGED onto a stale earlier session → a fake %CHNG.
+# It now mirrors the daily basis: the latest available prior 1-day date must EQUAL
+# the NSE calendar's true prior session (`_previous_trading_day`), else the row is
+# skipped (correct-or-absent). These tests fail against the OLD self-referential
+# calendar and pass against the calendar cross-check.
+
+
+def test_minute_prev_close_contiguous_bridges_hole_before_fix_after_skips() -> None:
+    # Real NSE sessions Wed/Thu/Fri (2024-07-03/04/05) are all trading days. The
+    # symbol's series is missing Thu 07-04 from BOTH partitions (a lake hole), so
+    # for Fri 07-05 the latest prior 1-day date is Wed 07-03 — NOT the calendar's
+    # true prior session Thu 07-04. OLD code: `trading_dates[idx-1]` == Wed → it
+    # anchored on Wed's stale close (a fake %CHNG bridging the missing Thu). NEW
+    # code: the calendar names Thu, Wed != Thu → None (skip).
+    wed, fri = date(2024, 7, 3), date(2024, 7, 5)
+    trading_dates = [wed, fri]  # Thu 07-04 absent from the symbol's own series
+    minute_last = {wed: Decimal("630")}
+    assert _minute_prev_close_contiguous(minute_last, trading_dates, fri) is None
+
+
+def test_minute_prev_close_contiguous_holiday_gap_still_resolves() -> None:
+    # Guard against OVER-refusal: 2024-08-15 is a REAL NSE holiday (Independence
+    # Day), so the calendar steps over it — the prior session of Fri 08-16 IS
+    # Wed 08-14. A series holding Wed 08-14 + Fri 08-16 is CONTIGUOUS (the holiday
+    # is not a hole), so the Fri row must resolve on Wed's close, not be skipped.
+    wed, fri = date(2024, 8, 14), date(2024, 8, 16)
+    trading_dates = [wed, fri]
+    minute_last = {wed: Decimal("500.25")}
+    assert _minute_prev_close_contiguous(minute_last, trading_dates, fri) == Decimal("500.25")
+
+
+def test_minute_prev_close_contiguous_coverage_floor_abstains() -> None:
+    # Past the published-holiday coverage floor the calendar back-walk raises →
+    # `_previous_trading_day` LOUD-abstains (None), so the anchor is honestly
+    # ABSENT (never a guessed session). 2020-01-01 walks into out-of-coverage 2019.
+    floor_edge, prior = date(2020, 1, 1), date(2019, 12, 31)
+    trading_dates = [prior, floor_edge]
+    minute_last = {prior: Decimal("100")}
+    with capture_logs() as logs:
+        assert _minute_prev_close_contiguous(minute_last, trading_dates, floor_edge) is None
+    assert any(e["event"] == "calendar.coverage_exhausted" for e in logs)
+
+
+def test_build_minute_basis_skips_row_on_session_hole_in_both_series(tmp_path: Path) -> None:
+    # END-TO-END minute-basis defect: SESAHOLE has 1-day + 1-minute bars for
+    # Mon 07-01, Tue 07-02 and Thu 07-04, but Wed 07-03 — a REAL NSE trading
+    # session — is missing from BOTH series (a genuine lake hole). Requesting
+    # basis="minute" for Thu 07-04, the OLD code anchored PREV. CLOSE on Tue
+    # 07-02's last 1-minute close (bridging the missing Wed) → a fake %CHNG row.
+    # The calendar cross-check names Wed 07-03 as the true prior session, so the
+    # latest available prior date (Tue) != Wed → the Thu row is SKIPPED.
+    _write(
+        tmp_path,
+        "SESAHOLE",
+        "1day",
+        [
+            _bar(datetime(2024, 7, 1, 3, 45, tzinfo=UTC), open_="100", close="101"),
+            _bar(datetime(2024, 7, 2, 3, 45, tzinfo=UTC), open_="101", close="102"),
+            _bar(datetime(2024, 7, 4, 3, 45, tzinfo=UTC), open_="110", close="111"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "SESAHOLE",
+        "1minute",
+        [
+            _bar(datetime(2024, 7, 1, 3, 45, tzinfo=UTC), open_="100", close="100.5"),
+            _bar(datetime(2024, 7, 1, 9, 44, tzinfo=UTC), open_="100.5", close="101"),
+            _bar(datetime(2024, 7, 2, 3, 45, tzinfo=UTC), open_="101", close="101.5"),
+            _bar(datetime(2024, 7, 2, 9, 44, tzinfo=UTC), open_="101.5", close="102"),  # Tue last
+            _bar(datetime(2024, 7, 4, 3, 45, tzinfo=UTC), open_="110", close="110.5"),  # Thu 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "SESAHOLE")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        basis="minute",
+    )
+    # Mon → skipped (first session); Tue → prior Mon present + calendar-adjacent →
+    # emitted; Thu → SKIPPED (Wed hole; no stale Tue-anchored fake %CHNG).
+    assert [r.day for r in rows] == [date(2024, 7, 2)]
+    assert rows[0].prev_close == Decimal("101")  # Mon's last 1-minute close, not bridged
+
+
+def test_build_minute_basis_holiday_gap_emits_row(tmp_path: Path) -> None:
+    # Guard end-to-end: Wed 08-14 + Fri 08-16 flank the REAL NSE holiday Thu
+    # 08-15. The series is contiguous across the holiday, so the Fri row resolves
+    # on Wed's last 1-minute close (the holiday is not a hole) — never over-refused.
+    _write(
+        tmp_path,
+        "SESAHOL2",
+        "1day",
+        [
+            _bar(datetime(2024, 8, 14, 3, 45, tzinfo=UTC), open_="200", close="201"),
+            _bar(datetime(2024, 8, 16, 3, 45, tzinfo=UTC), open_="210", close="211"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "SESAHOL2",
+        "1minute",
+        [
+            _bar(datetime(2024, 8, 14, 3, 45, tzinfo=UTC), open_="200", close="200.5"),
+            _bar(datetime(2024, 8, 14, 9, 44, tzinfo=UTC), open_="200.5", close="201"),  # Wed last
+            _bar(datetime(2024, 8, 16, 3, 45, tzinfo=UTC), open_="210", close="210.5"),  # Fri 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "SESAHOL2")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        basis="minute",
+    )
+    assert [r.day for r in rows] == [date(2024, 8, 16)]
+    assert rows[0].prev_close == Decimal("201")  # Wed's last 1-minute close, holiday stepped over
+    assert rows[0].iep == Decimal("210")
+
+
 # ── DEC-PREOPEN-PREVCLOSE-CONTIGUITY-DAILY-001 — daily basis: no jump over a hole ─
 
 
@@ -908,7 +1034,7 @@ def test_previous_trading_day_coverage_exhausted_warns_and_returns_none() -> Non
     # published holiday span), which the unguarded calendar silently read as a
     # trading day. The walk uses the STRICT is_trading_day_checked, emits ONE
     # warning, and returns None (prev-close honestly ABSENT — never a guessed
-    # session, never a crash). DEC-PREOPEN-PREVDAY-COMMON-001 reconcile: the
+    # session, never a crash). DEC-PREOPEN-PREVDAY-COMMON-002 reconcile: the
     # delegator now rides the COMMON nse.previous_trading_session primitive, so
     # the warning is the COMMON calendar.previous_session_coverage_exhausted
     # event (the legacy module-local calendar.coverage_exhausted is RETIRED —
@@ -1442,7 +1568,7 @@ def test_build_daily_basis_overlay_recovers_row(tmp_path: Path) -> None:
     assert with_overlay[0].prev_close == Decimal("110")
 
 
-# ── DEC-PREOPEN-PREVDAY-COMMON-001 — minute basis checked against the REAL calendar ─
+# ── DEC-PREOPEN-PREVDAY-COMMON-002 — minute basis checked against the REAL calendar ─
 #
 # The confirmed defect (independently reproduced on origin/main 63ab35f): the
 # minute-basis guard anchored on trading_dates[idx-1] — the symbol's OWN 1-day
@@ -1750,7 +1876,7 @@ def test_minute_guard_contiguous_property_new_equals_old(start: date, length: in
 
 
 def _old_previous_trading_day(day: date, *, observed: frozenset[date] = frozenset()) -> date | None:
-    # VERBATIM copy of the pre-DEC-PREOPEN-PREVDAY-COMMON-001 private walk
+    # VERBATIM copy of the pre-DEC-PREOPEN-PREVDAY-COMMON-002 private walk
     # (origin/main 63ab35f preopen_report.py::_previous_trading_day), with the
     # abstain-path structlog warning elided — the equivalence pin is the VALUE.
     probe = day - timedelta(days=1)

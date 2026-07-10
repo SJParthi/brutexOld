@@ -1,4 +1,4 @@
-"""Generate the frozen preopen prev-day goldens (DEC-PREOPEN-PREVDAY-COMMON-001).
+"""Generate the frozen preopen prev-day goldens (DEC-PREOPEN-PREVDAY-COMMON-002).
 
 Run ONCE from the repo root on the PRE-change tree (origin/main 63ab35f):
 
@@ -15,7 +15,7 @@ shared ``tests/golden/_preopen_prevday_harness.py`` (imported by BOTH sides,
 so the generator never imports the test module — the CodeQL
 ``py/cyclic-import`` break, alerts 887 + 888). Never regenerate these on the post-fix
 tree; the pre-fix capture IS the oracle (Golden Rule #1) — and the refusal is
-now MECHANICAL (the DEC-PREOPEN-PREVDAY-COMMON-001 hostile-review fold): when
+now MECHANICAL (the DEC-PREOPEN-PREVDAY-COMMON-002 hostile-review fold): when
 any fixture already exists, :func:`main` raises ``SystemExit`` instead of
 silently overwriting the oracle, unless the explicit escape hatch
 ``BRUTEX_REGEN_PREOPEN_GOLDEN=1`` is set (a deliberate, ledger-worthy act,

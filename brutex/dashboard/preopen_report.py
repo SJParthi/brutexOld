@@ -169,7 +169,7 @@ REPORT_BASES: Final[tuple[ReportBasis, ...]] = ("day", "minute")
 REPORT_EXCLUDED_SEGMENTS: Final[frozenset[str]] = frozenset({FNO_CANDLE_LAKE_SEGMENT})
 
 #: Cap on ``preopen.prev_close_noncontiguous`` WARNs emitted per report build
-#: (DEC-PREOPEN-PREVDAY-COMMON-001) — deduped per ``(exchange, segment,
+#: (DEC-PREOPEN-PREVDAY-COMMON-002) — deduped per ``(exchange, segment,
 #: symbol)`` dataset triple (a bare-symbol key would silence a dual-listed
 #: symbol's second exchange — the hostile-review fold); everything past the
 #: cap rolls into ONE ``preopen.prev_close_noncontiguous_suppressed`` summary
@@ -178,7 +178,7 @@ _HOLE_WARN_CAP: Final[int] = 20
 
 #: The reproduced shapes a VERIFIED prev-close hole takes — the machine
 #: ``hole_shape`` field on the ``preopen.prev_close_noncontiguous`` WARN
-#: (DEC-PREOPEN-PREVDAY-COMMON-001 hostile-review fold: the original one-line
+#: (DEC-PREOPEN-PREVDAY-COMMON-002 hostile-review fold: the original one-line
 #: detail unconditionally advised a re-pull, which is WRONG remediation for
 #: most of the shapes; DEC-PREVSESSION-MUHURAT-COHERENCE-001 split the
 #: calendar-confirmed Muhurat boundary — a HEALTHY lake — out of the
@@ -248,7 +248,7 @@ def resolve_report_datasets(
 def _previous_trading_day(day: date, *, observed: AbstractSet[date] = frozenset()) -> date | None:
     """The NSE trading session immediately before *day* (per the shared calendar).
 
-    DEC-PREOPEN-PREVDAY-COMMON-001: a THIN delegator over the ONE COMMON
+    DEC-PREOPEN-PREVDAY-COMMON-002: a THIN delegator over the ONE COMMON
     :func:`brutex.calendars.nse.previous_trading_session` primitive (CLAUDE.md
     §11 COMMON — the #1535/#1539-named follow-up, now CLOSED; the private walk
     this module used to carry is DELETED). Name + signature are KEPT so every
@@ -318,7 +318,7 @@ def _daily_prev_close_contiguous(
     1-day series is filled by re-pulling (DEC-DHAN-429-RETRY-001 #466) + the
     windows table (#465) + the auto-retry layer (DEC-INGEST-AUTO-RETRY-001).
 
-    Seams (DEC-PREOPEN-PREVDAY-COMMON-001, shared with the minute mirror):
+    Seams (DEC-PREOPEN-PREVDAY-COMMON-002, shared with the minute mirror):
     *expected_session* is the Ellipsis-sentinel prior-session seam — the
     default ``...`` computes :func:`_previous_trading_day(day, observed=…)`
     internally (the historical behaviour), while a caller holding a memoised
@@ -376,7 +376,7 @@ def _minute_prev_close_contiguous(
     session's** last 1-minute close — and the authority on WHICH session that
     is, is the SHARED checked NSE calendar (:func:`_previous_trading_day`),
     exactly like the daily mirror :func:`_daily_prev_close_contiguous`
-    (DEC-PREOPEN-PREVDAY-COMMON-001). The symbol's own **1-day** series
+    (DEC-PREOPEN-PREVDAY-COMMON-002). The symbol's own **1-day** series
     (*trading_dates*, sorted) is only the LAKE's evidence of which sessions it
     holds; it is NOT its own calendar — the pre-fix rule anchored on
     ``trading_dates[idx − 1]`` with zero real-calendar check, so a real NSE
@@ -441,7 +441,7 @@ def _hole_shape(
 ) -> _HoleShape:
     """Classify a VERIFIED prev-close hole into its reproduced remediation shape.
 
-    DIAGNOSTIC ONLY (the hostile-review fold on DEC-PREOPEN-PREVDAY-COMMON-001):
+    DIAGNOSTIC ONLY (the hostile-review fold on DEC-PREOPEN-PREVDAY-COMMON-002):
     the refusal itself stands in EVERY shape — the correct-or-absent contract is
     untouched, and in particular the guard is never re-anchored on
     ``minute_evidence[expected]``: 1-minute PRESENCE for the expected session
@@ -559,7 +559,7 @@ def build_preopen_rows(
     Per-symbol reads are wrapped so one un-queryable symbol can NEVER 500 the
     export (DEC-PREOPEN-SPACE-SYMBOL-001). Rows sorted by ``(day, symbol)``.
 
-    DEC-PREOPEN-PREVDAY-COMMON-001: BOTH calendar-verified bases (the daily
+    DEC-PREOPEN-PREVDAY-COMMON-002: BOTH calendar-verified bases (the daily
     guard AND the minute guard — the minute basis was calendar-blind before)
     share ONE function-local prior-session memo, so the calendar back-walk runs
     O(unique report days) per build (never O(rows); no globals — NOT an
@@ -661,7 +661,7 @@ def build_preopen_rows(
                 # calendar is the authority on the prior session, so PREV. CLOSE
                 # never anchors across a data hole — a missing prior-day 1-minute
                 # window (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001) OR a real NSE
-                # session absent from BOTH series (DEC-PREOPEN-PREVDAY-COMMON-001).
+                # session absent from BOTH series (DEC-PREOPEN-PREVDAY-COMMON-002).
                 # When a symbol has NO 1-day partition at all we keep the
                 # DEC-PREOPEN-MINUTE-BASIS-001 fallback (the previous AVAILABLE
                 # minute session) — the documented calendar-blind honest limit.

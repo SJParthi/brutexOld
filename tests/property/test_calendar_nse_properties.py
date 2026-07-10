@@ -128,7 +128,7 @@ def test_previous_trading_session_is_a_strictly_prior_trading_day(d: date) -> No
 
 @given(_DATES)
 def test_previous_trading_session_empty_observed_is_identity(d: date) -> None:
-    # DEC-PREOPEN-PREVDAY-COMMON-001 parity law: the new remove-only
+    # DEC-PREOPEN-PREVDAY-COMMON-002 parity law: the new remove-only
     # ``observed`` kwarg's default frozenset() is byte-identical back-compat —
     # explicit-empty == omitted for EVERY date (incl. abstains).
     assert previous_trading_session(d, observed=frozenset()) == previous_trading_session(d)

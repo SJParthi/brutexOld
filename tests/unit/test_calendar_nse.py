@@ -1489,7 +1489,7 @@ class TestPreviousTradingSession:
         with pytest.raises(ValueError, match="unknown exchange"):
             previous_trading_session(date(2024, 7, 10), exchange="LSE")
 
-    # ── observed-sessions overlay kwarg (DEC-PREOPEN-PREVDAY-COMMON-001) ──
+    # ── observed-sessions overlay kwarg (DEC-PREOPEN-PREVDAY-COMMON-002) ──
 
     def test_observed_default_is_byte_identical_parity(self) -> None:
         # The new kwarg's default frozenset() keeps every existing caller

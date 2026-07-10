@@ -134,7 +134,7 @@ class TestHeaderRoundNarrationRetired:
     The header now carries a stale-proof POINTER to the two authoritative
     per-round records instead; these pins keep the narration from returning.
 
-    2026-07-09 merge-reconcile (DEC-PREOPEN-PREVDAY-COMMON-001 landing on
+    2026-07-09 merge-reconcile (DEC-PREOPEN-PREVDAY-COMMON-002 — renamed from -001 — landing on
     top): a NEWER decision now heads the ``_Last updated:`` region and the
     DEC-LAKE-STATS-MANIFEST-001 blurb was demoted verbatim to the header
     chain's first ``Earlier:`` slot — so the pin anchors on THAT blurb's own

@@ -1,6 +1,6 @@
 """Shared fixture-lake harness for the preopen prev-day goldens.
 
-DEC-PREOPEN-PREVDAY-COMMON-001 — the ONE source of truth (CLAUDE.md §11
+DEC-PREOPEN-PREVDAY-COMMON-002 (renamed from -001 at the 2026-07-10 merge-reconcile; main's #1634 claimed -001) — the ONE source of truth (CLAUDE.md §11
 COMMON) for the contiguous weekend + Holi-2024 + Budget-Saturday golden lake,
 its row builder, and the three frozen artifact renders. Imported by BOTH the
 consuming test (``tests/golden/test_preopen_prevday_golden.py``) and the
@@ -145,6 +145,10 @@ def golden_artifacts(lake: Path) -> dict[str, bytes]:
     """Render the three frozen artifacts from a freshly-built golden lake."""
     rows = golden_rows(lake)
     return {
+        # The rendered TITLE deliberately keeps the pre-rename "-001" token: it is
+        # part of the FROZEN fixture bytes captured before the -001/-002 split
+        # (main #1634 claimed -001; this branch's work is -002) — renaming it here
+        # would change the workbook bytes and break the golden oracle.
         "day": render_xlsx(rows["day"], title="DEC-PREOPEN-PREVDAY-COMMON-001 golden"),
         "minute": render_xlsx(rows["minute"], title="DEC-PREOPEN-PREVDAY-COMMON-001 golden"),
         "zip": render_report_zip(rows["day"], mode="all", min_pct=Decimal("0"), now=ZIP_NOW),

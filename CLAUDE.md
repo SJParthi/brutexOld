@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1649a —
+_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a — renamed from -001 at the 2026-07-10 merge-reconcile (main's #1634/PR #1323 claimed -001 for the minute-basis calendar-cross-check ADVANCE; -002 is the COMMON-ization remainder + hole-shape observability + the #1649b Muhurat pack) —
 renumbered #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took
 #1623 for DEC-DASHBOARD-POLL-HYGIENE-001, then #1631/#1632 for
 DEC-ONECLICK-TOP100-OBJECT-ROOT-001 + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the
@@ -1122,7 +1122,8 @@ the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
 HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
 the missing session does; `preopen_report._previous_trading_day` was NOT
 refactored there (named follow-up DEC-PREOPEN-PREVDAY-COMMON-001 — since
-CLOSED by MIGRATION.md #1649a). READ-ONLY dashboard — ENGINE
+ADVANCED by main's #1634 and CLOSED by MIGRATION.md #1649a,
+DEC-PREOPEN-PREVDAY-COMMON-002). READ-ONLY dashboard — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
 MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
@@ -1872,7 +1873,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1649a** — renumbered
+- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a** — RENAMED from -001 at the 2026-07-10 merge-reconcile: main's #1634 (PR #1323) claimed -001 for the minute-basis calendar-cross-check ADVANCE while this branch was in flight; -002 delivers #1634's named OPEN work (the observed-overlay COMMON-ization + thin delegator) + the hole-shape WARN observability + the #1649b Muhurat coherence pack — renumbered
   #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335),
   then #1631/#1632 for DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (PR #1352) + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the coordinator
   slot is #1649, and the 613a/613b both-suffixed pair convention — a bare number may not coexist with suffixed forms —
@@ -3108,8 +3109,8 @@ hostile-review pass._
   " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
   makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
   session does; no bar is ever fabricated); `preopen_report._previous_trading_day` was deliberately NOT refactored
-  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since CLOSED by MIGRATION.md #1649a (the thin-delegator
-  consolidation). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since ADVANCED by main's #1634 and CLOSED by
+  MIGRATION.md #1649a, DEC-PREOPEN-PREVDAY-COMMON-002 (the thin-delegator consolidation). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
   line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
   Earlier (same branch): (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538**
@@ -4831,7 +4832,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/preopen-prevday-common`
-  (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1649a — renumbered
+  (DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a — renamed from -001 (main's #1634/PR #1323 claimed -001 for the minute-basis cross-check ADVANCE; -002 = the COMMON-ization remainder + observability + the #1649b Muhurat pack); renumbered
   #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623
   for DEC-DASHBOARD-POLL-HYGIENE-001, then #1631/#1632 for
   DEC-ONECLICK-TOP100-OBJECT-ROOT-001 + DEC-DASHBOARD-VISUAL-OVERHAUL-001;

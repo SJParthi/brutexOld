@@ -1,4 +1,4 @@
-"""Golden byte-identity net for DEC-PREOPEN-PREVDAY-COMMON-001.
+"""Golden byte-identity net for DEC-PREOPEN-PREVDAY-COMMON-002.
 
 The /reports preopen minute-basis calendar-contiguity fix must be a pure
 GUARD: on a CONTIGUOUS lake (every real NSE session between the fixture's

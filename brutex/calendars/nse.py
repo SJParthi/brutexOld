@@ -50,7 +50,7 @@ calendar-correctness pack: the dashboard pre-open report + the doctor probe-day
 walk catch-and-degrade honestly (the pre-open report now rides
 :func:`previous_trading_session`'s ONE
 ``calendar.previous_session_coverage_exhausted`` warning —
-DEC-PREOPEN-PREVDAY-COMMON-001; the doctor walk keeps its own
+DEC-PREOPEN-PREVDAY-COMMON-002; the doctor walk keeps its own
 ``calendar.coverage_exhausted`` twin),
 the engine trade-sim walkers + the bar-metadata stamper refuse an
 out-of-coverage weekday via the checked variants, and the synthetic generator
@@ -1008,7 +1008,7 @@ def previous_trading_session(
     weekends and every listed holiday, and honouring the special-weekend Budget
     sessions (:data:`SPECIAL_WEEKEND_TRADING_SESSIONS`).
 
-    *observed* (DEC-PREOPEN-PREVDAY-COMMON-001) is the REMOVE-ONLY
+    *observed* (DEC-PREOPEN-PREVDAY-COMMON-002) is the REMOVE-ONLY
     observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): the walk
     predicate is ``is_trading_day_checked(probe) AND probe not in observed``,
     so an overlay member can only flip a session verdict ``True -> False``

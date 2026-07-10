@@ -603,6 +603,44 @@ class TestMoversApi:
         assert body["instrument_count"] == 0
         assert "Spot" in body["note"]
 
+    def test_daily_interval_nulls_echoed_asof_time(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-MOVERS-DAILY-ASOF-ECHO-HONEST-001 (Defect 3c): a 1day request with an
+        # explicit ?time= must NOT echo an as-of the served whole-day close never
+        # honours. The route nulls `time` for a non-intraday interval, so
+        # payload["time"] is None and the note reads "(daily)", NOT "11:00" — while
+        # the ranked whole-day values are byte-identical to a no-time request.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"interval": "1day", "date": "2024-06-13", "time": "11:00"},
+        ).json()
+        assert body["time"] is None
+        assert "(daily)" in body["note"]
+        assert "11:00" not in body["note"]
+        # value unchanged: the whole-day close is served regardless of the time echo.
+        assert [r["symbol"] for r in body["price_gainers"]] == ["NIFTY"]
+        no_time = client.get(
+            "/api/v1/movers", params={"interval": "1day", "date": "2024-06-13"}
+        ).json()
+        assert body["price_gainers"] == no_time["price_gainers"]
+
+    def test_intraday_interval_keeps_echoed_asof_time(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Guard: a genuine intraday interval STILL echoes its explicit as-of time
+        # (is_intraday_interval True → `time` untouched) — byte-identical to before.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"interval": "5minute", "date": "2024-06-13", "time": "11:00"},
+        ).json()
+        assert body["time"] == "11:00"
+        assert "11:00" in body["note"]
+
     def test_reflected_asset_note_carries_no_unescaped_tag(self, store: InstrumentStore) -> None:
         # DEC-DASHBOARD-XSS-HARDENING-001 (GAP B, server defense-in-depth): the
         # unknown-asset note echoes the raw ?asset= query param. A reflected
