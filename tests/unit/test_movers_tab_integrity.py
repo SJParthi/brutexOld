@@ -420,26 +420,31 @@ class TestResolvePrevClose:
 
 class TestPrevBaselineProvenance:
     def test_no_baseline_is_none_none(self) -> None:
-        assert prev_baseline_provenance(None, date(2025, 9, 29), exchange="NSE") == (None, None)
+        # Byte-unchanged arm apart from the widened 3-tuple: no muhurat flag.
+        assert prev_baseline_provenance(None, date(2025, 9, 29), exchange="NSE") == (
+            None,
+            None,
+            False,
+        )
 
     def test_contiguous_true_across_a_weekend(self) -> None:
         # Snapshot Mon 2025-09-29; found Fri 2025-09-26 = the immediately-preceding
         # NSE session → True.
         got = prev_baseline_provenance(date(2025, 9, 26), date(2025, 9, 29), exchange="NSE")
-        assert got == ("2025-09-26", True)
+        assert got == ("2025-09-26", True, False)
 
     def test_noncontiguous_false_on_a_lake_hole(self) -> None:
         # The confirmed-defect repro geometry: found Thu 2025-09-25 while the
-        # calendar expects Fri 2025-09-26 → strictly False.
+        # calendar expects Fri 2025-09-26 → strictly False, no muhurat flag.
         got = prev_baseline_provenance(date(2025, 9, 25), date(2025, 9, 29), exchange="NSE")
-        assert got == ("2025-09-25", False)
+        assert got == ("2025-09-25", False, False)
 
     def test_out_of_coverage_abstains_to_null_verdict(self) -> None:
         # A pre-2020 snapshot day: previous_trading_session abstains (None) →
         # the session is still reported, contiguity honestly UNKNOWN (None) —
-        # the value keeps being served, no False, no marker.
+        # the value keeps being served, no False, no marker, no muhurat flag.
         got = prev_baseline_provenance(date(2019, 5, 31), date(2019, 6, 3), exchange=None)
-        assert got == ("2019-05-31", None)
+        assert got == ("2019-05-31", None, False)
 
     def test_hoisted_expected_session_matches_internal_compute(self) -> None:
         # The per-build perf seam (kw-only expected_session): passing the
@@ -449,10 +454,10 @@ class TestPrevBaselineProvenance:
         hoisted = date(2025, 9, 26)
         assert prev_baseline_provenance(
             date(2025, 9, 26), day, exchange="NSE", expected_session=hoisted
-        ) == ("2025-09-26", True)
+        ) == ("2025-09-26", True, False)
         assert prev_baseline_provenance(
             date(2025, 9, 25), day, exchange="NSE", expected_session=hoisted
-        ) == ("2025-09-25", False)
+        ) == ("2025-09-25", False, False)
 
     def test_hoisted_none_expected_session_abstains_never_recomputes(self) -> None:
         # ``None`` is a VALID hoisted value (the calendar's abstain) — NOT the
@@ -462,7 +467,105 @@ class TestPrevBaselineProvenance:
         got = prev_baseline_provenance(
             date(2025, 9, 26), date(2025, 9, 29), exchange="NSE", expected_session=None
         )
-        assert got == ("2025-09-26", None)
+        assert got == ("2025-09-26", None, False)
+
+
+class TestPrevBaselineMuhuratVerdict:
+    """DEC-PREVSESSION-MUHURAT-COHERENCE-001 — the Muhurat display-baseline arm.
+
+    A found baseline sitting AFTER the calendar's prior REGULAR session AND
+    calendar-confirmed a Diwali Muhurat session is a HEALTHY lake serving the
+    Muhurat close (contiguous ``True`` + ``muhurat_baseline True``), never a
+    false lake hole. Any other stray/misordered bar stays a genuine ``False``.
+    """
+
+    def test_w23_repro_triple(self) -> None:
+        # The confirmed W2-3 repro: day-after-Diwali Mon 2024-11-04 baselines
+        # on the Fri 2024-11-01 Muhurat 1-day close → (iso, True, True).
+        got = prev_baseline_provenance(date(2024, 11, 1), date(2024, 11, 4), exchange="NSE")
+        assert got == ("2024-11-01", True, True)
+
+    def test_all_six_muhurat_boundaries_parity_enumerated(self) -> None:
+        # EVERY covered MUHURAT_SESSIONS boundary (2020-2025, six entries):
+        # snapshot = the next real trading day after the Muhurat date; the
+        # calendar's expected prior session is a REGULAR session strictly
+        # BEFORE the Muhurat date (the two-law geometry), and the verdict is
+        # (muhurat_iso, True, True) on every one — the annual false-flag class
+        # is closed for the whole covered span, not just 2024.
+        from datetime import timedelta as _td
+
+        from brutex.calendars.nse import MUHURAT_SESSIONS, is_trading_day_checked
+
+        assert len(MUHURAT_SESSIONS) == 6  # the covered 2020-2025 span
+        for muhurat_day in sorted(MUHURAT_SESSIONS):
+            snapshot = muhurat_day + _td(days=1)
+            while not is_trading_day_checked(snapshot, exchange="NSE"):
+                snapshot += _td(days=1)
+            expected = previous_trading_session(snapshot, exchange="NSE")
+            assert expected is not None, muhurat_day
+            assert expected < muhurat_day, muhurat_day  # found sits AFTER expected
+            assert prev_baseline_provenance(muhurat_day, snapshot, exchange="NSE") == (
+                muhurat_day.isoformat(),
+                True,
+                True,
+            ), muhurat_day
+
+    def test_direction_teeth_muhurat_bar_behind_expected_stays_a_hole(self) -> None:
+        # A Muhurat bar BEHIND the expected regular session is a GENUINE hole:
+        # snapshot Wed 2024-11-06 expects Tue 2024-11-05; the nearest lake bar
+        # being the 2024-11-01 Muhurat session means 11-04 + 11-05 are missing
+        # — (iso, False, False), never blessed by the muhurat arm (kills the
+        # `>` → `<` / `!=` direction mutants).
+        got = prev_baseline_provenance(
+            date(2024, 11, 1),
+            date(2024, 11, 6),
+            exchange="NSE",
+            expected_session=date(2024, 11, 5),
+        )
+        assert got == ("2024-11-01", False, False)
+
+    def test_stray_saturday_bar_after_expected_is_false_no_flag(self) -> None:
+        # A NON-Muhurat non-session bar after the expected session (a stray
+        # Saturday 2024-01-06 write) stays strictly False with NO muhurat flag
+        # — kills the has_muhurat_session-dropped (bless-any-later-bar) mutant.
+        got = prev_baseline_provenance(
+            date(2024, 1, 6),
+            date(2024, 1, 8),
+            exchange="NSE",
+            expected_session=date(2024, 1, 5),
+        )
+        assert got == ("2024-01-06", False, False)
+
+    def test_hoisted_seam_parity_on_the_muhurat_arm(self) -> None:
+        # Ellipsis-default internal compute ≡ hoisted expected_session on the
+        # NEW arm too (the #1539 seam law carried forward).
+        internal = prev_baseline_provenance(date(2024, 11, 1), date(2024, 11, 4), exchange="NSE")
+        hoisted = prev_baseline_provenance(
+            date(2024, 11, 1),
+            date(2024, 11, 4),
+            exchange="NSE",
+            expected_session=date(2024, 10, 31),
+        )
+        assert internal == hoisted == ("2024-11-01", True, True)
+
+    def test_2026_muhurat_absent_from_calendar_abstains_to_false(self) -> None:
+        # HONEST-LIMIT pin (documented abstain): Diwali 2026 (2026-11-08) has
+        # NO MUHURAT_SESSIONS entry (timings not yet notified — never
+        # fabricated), so a hypothetical 2026 boundary reads a plain False
+        # hole, NOT a muhurat baseline. Self-limiting in production: the
+        # ingest session filter keeps Muhurat bars via the SAME
+        # MUHURAT_SESSIONS table, so a lake cannot legitimately carry a 2026
+        # Muhurat bar before the entry lands — adding it flips both together.
+        from brutex.calendars.nse import has_muhurat_session
+
+        assert has_muhurat_session(date(2026, 11, 8)) is False
+        got = prev_baseline_provenance(
+            date(2026, 11, 8),
+            date(2026, 11, 9),
+            exchange="NSE",
+            expected_session=date(2026, 11, 6),
+        )
+        assert got == ("2026-11-08", False, False)
 
 
 class TestMakeExpectedSessionResolver:
