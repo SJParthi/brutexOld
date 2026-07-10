@@ -25,15 +25,22 @@ durable half:
   otherwise re-fire the SAME pipeline pull through the injected launcher.
 
 **Relation to DEC-AUTO-RESUME-ON-BOOT-001** (:mod:`brutex.orchestrator.auto_resume`):
-that legacy layer is the default-OFF, SPOT-INDEX-ONLY CLI-child resume. This
-intent-backed resume EXTENDS (never duplicates) it at the ONE decision point in
-``maybe_resume_on_boot``: when an intent file is present the pipeline resume
-runs EXCLUSIVELY and the legacy CLI child is NOT spawned that boot (the
-both-firing ``flock`` race is impossible); with no intent the legacy path is
-byte-identical. The intent resume defaults ON — the intent file is itself
-operator-click evidence (it exists only because a REAL pull was launched and
-never finished) — with :data:`PULL_INTENT_RESUME_ENV` (``=0``) as the escape
-hatch.
+that legacy layer is the default-OFF, ledger-triggered boot resume — since
+DEC-AUTO-RESUME-INPROCESS-001 routed IN-PROCESS through
+:func:`run_legacy_resume` (the historical spawned ``fetch --until-clean`` CLI
+child, which was 3-index-spot-only, is DELETED). HONEST scope note: the legacy
+boot-resume therefore re-plans the WHOLE universe (spot → metadata →
+historical → prebuild → movers), not just the unsettled windows the old child
+targeted — bounded by the idempotent keep-first sink + the unchanged pacing /
+single-flight guards, so it costs exactly what one manual pull click does.
+This intent-backed resume EXTENDS (never duplicates) it at the ONE decision
+point in ``maybe_resume_on_boot``: when an intent file is present the pipeline
+resume runs EXCLUSIVELY and the legacy in-process resume is NOT fired that
+boot (the both-firing ``flock`` race is impossible); with no intent the legacy
+path decides from the ledger exactly as before. The intent resume defaults ON
+— the intent file is itself operator-click evidence (it exists only because a
+REAL pull was launched and never finished) — with
+:data:`PULL_INTENT_RESUME_ENV` (``=0``) as the escape hatch.
 
 HONEST envelope (Golden Rule #10): the resume re-fires the FULL pipeline (spot
 → metadata → historical → prebuild → movers warm), so its success criteria are
@@ -81,6 +88,8 @@ __all__ = [
     "resolve_pull_intent_resume",
     "restart_cap_message",
     "run_auto_resume",
+    "run_legacy_resume",
+    "synthesize_legacy_intent",
 ]
 
 #: Structured logger — every resume decision surfaces into ``/logs``.
@@ -662,3 +671,120 @@ def run_auto_resume(
         to_date=bumped.to_date,
     )
     return ResumeAction.FIRED
+
+
+def synthesize_legacy_intent() -> PullIntent:
+    """The whole-universe :class:`PullIntent` for the LEGACY ledger-triggered resume.
+
+    DEC-AUTO-RESUME-INPROCESS-001: the legacy boot resume (opted in via
+    ``BRUTEX_AUTO_RESUME_ON_BOOT``) is triggered by the durable window ledger's
+    outstanding ``PLANNED`` / ``FAILED`` windows, not by a persisted operator
+    click — there is no request quadruple to replay, so the synthesized intent
+    is the whole-universe default pull (every ``None`` field re-derives inside
+    the ``/pull-pipeline`` route, exactly as a bare operator click would).
+    ``restarts=0`` — the crash-loop accounting starts fresh; the resume path's
+    bump-before-launch burns the first token. Pure beyond one clock read.
+    """
+    return PullIntent(
+        symbols=None,
+        symbol=None,
+        from_date=None,
+        to_date=None,
+        restarts=0,
+        created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+    )
+
+
+def run_legacy_resume(
+    store: PullIntentStore,
+    *,
+    launch: Callable[[PullIntent], None],
+    probe_singleflight: Callable[[], bool] | None = None,
+) -> ResumeAction:
+    """The LEGACY ledger-triggered boot resume, routed IN-PROCESS through the intent core.
+
+    DEC-AUTO-RESUME-INPROCESS-001 — replaces the deleted
+    ``brutex fetch --until-clean`` subprocess child, which was DOA on every
+    opted-in boot: BOTH DuckDB files its ``cmd_fetch`` must open are
+    exclusively locked against it — ``<lake>/catalog.duckdb`` FIRST (held by
+    the dashboard's boot-window L3 lake-heal sweeper — the incident's actual
+    first-raising site, ``catalog.py`` ``duckdb.connect``), and one step
+    later ``<lake>/instruments.duckdb``, which the dashboard holds READ-WRITE
+    for its LIFETIME — so the child exited 1 in ~0.3 s (stderr inherited,
+    never captured), stranding the outstanding windows silently. Running
+    IN-PROCESS through the dashboard's own ``/pull-pipeline`` launcher opens
+    NO second catalog/store handle, so the whole lock class is structurally
+    gone.
+
+    Persist a synthesized whole-universe intent (:func:`synthesize_legacy_intent`)
+    iff none is already on disk — a pre-existing intent (reachable here only when
+    the ``BRUTEX_PULL_INTENT_RESUME`` escape hatch disabled the intent arm) is
+    NEVER overwritten, so its request quadruple + crash-loop ``restarts`` count
+    survive — then delegate VERBATIM to :func:`run_auto_resume`. The legacy
+    resume thereby inherits the whole intent machinery: the single-flight peer
+    probe (a quiet :attr:`ResumeAction.PEER_ACTIVE` skip that burns no restart
+    token), the :data:`MAX_AUTO_RESTARTS` cap (over-cap ⇒ red
+    :class:`ResumeBanner` + ONE CRITICAL Telegram alert via
+    :func:`emit_restart_cap_alert`), bump-before-launch crash accounting, and
+    the ``ValueError``-clears / ``RuntimeError``-keeps launch-failure semantics.
+
+    A :attr:`ResumeAction.PEER_ACTIVE` skip CLEANS UP the intent iff THIS call
+    synthesized it (a pre-existing intent is left exactly as :func:`run_auto_resume`
+    left it): the peer pull's own finish settles the ledger, and the NEXT boot's
+    ledger detection re-decides the legacy resume — a lingering synthesized
+    intent would instead make the next boot's INTENT arm re-fire a
+    whole-universe pull unconditionally, ledger-blind. Ownership is RE-DERIVED
+    at cleanup time, never assumed from entry-time state: the file is deleted
+    only when the CURRENT on-disk intent still exact-equals the synthetic
+    :class:`PullIntent` instance this call wrote (frozen-dataclass field
+    equality, ``created_at`` included) — an operator who persisted a REAL
+    intent between our synthetic write and this cleanup (the boot-window race)
+    keeps their click; the mismatch is logged
+    (``pull_intent.legacy_cleanup_preserved_foreign_intent``) and nothing is
+    deleted. HONEST residual (Golden Rule #10): an operator intent that is
+    EXACT-EQUAL to our synthetic one — the whole-universe ``None`` quadruple,
+    ``restarts=0``, AND the same second's ``created_at`` — is indistinguishable
+    from ours and is cleared; the loss is only the click record (the durable
+    window ledger is untouched, so the next boot's ledger detection re-decides
+    the same whole-universe pull).
+
+    Raises :class:`RuntimeError` iff the synthesized intent could not be
+    persisted (:meth:`PullIntentStore.write` degraded ``False`` — an unwritable
+    lake volume): without the durable intent the cap accounting cannot hold, so
+    the resume is refused LOUDLY — the raise lands in
+    :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot`'s guard,
+    which logs ``auto_resume.error`` and returns the honest ``error`` verdict
+    (never a false ``resumed``; the boot itself is unaffected).
+    """
+    synthesized: PullIntent | None = None
+    if store.load() is None:
+        synthesized = synthesize_legacy_intent()
+        if not store.write(synthesized):
+            raise RuntimeError(
+                "legacy auto-resume refused: the synthesized whole-universe intent "
+                f"could not be persisted at {store.path} (unwritable lake volume?) — "
+                "without the durable intent the restart-cap accounting cannot hold"
+            )
+    _LOG.info(
+        "pull_intent.legacy_resume",
+        path=str(store.path),
+        synthesized=synthesized is not None,
+    )
+    action = run_auto_resume(store, launch=launch, probe_singleflight=probe_singleflight)
+    if synthesized is not None and action is ResumeAction.PEER_ACTIVE:
+        # The peer's finish (not this boot) owns the ledger; drop OUR synthetic
+        # intent so the next boot re-decides from the ledger, never an
+        # unconditional intent-arm whole-universe re-fire. Ownership is
+        # re-derived NOW, not carried from entry time: an operator could have
+        # persisted a REAL intent between our synthetic write and this cleanup
+        # (boot-window race) — clear only when the CURRENT on-disk intent is
+        # still exactly the instance we wrote (frozen-dataclass equality,
+        # ``created_at`` included); anything else is theirs and survives.
+        if store.load() == synthesized:
+            store.clear()
+        else:
+            _LOG.info(
+                "pull_intent.legacy_cleanup_preserved_foreign_intent",
+                path=str(store.path),
+            )
+    return action
