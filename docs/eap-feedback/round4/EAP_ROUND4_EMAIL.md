@@ -50,9 +50,8 @@ are the remaining toil and instability at that scale:
 | 7 | Actively-working sessions read "idle" — status tracks only the main conversation turn | Cannot tell working from stuck |
 
 The attached write-up (MD + HTML) has the details, suggested fixes, and
-open questions. The attached report lists the coordinator and test-session
-IDs with timestamps — directly traceable on your side; we can pin per-item
-IDs on the call. Where we could not prove a cause, we say so plainly.
+open questions. Every item is traceable on your side; we can share session IDs
+and timestamps for any of them on the call. Where we could not prove a cause, we say so plainly.
 
 I'll keep sending findings through the extended window.
 

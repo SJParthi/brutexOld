@@ -98,30 +98,4 @@ The inverse of item 6: sessions demonstrably mid-work — background workers run
 
 ---
 
-## Screenshots (attached with the email)
-
-1. **Project Settings showing Effort = Max (and model Fable 5)** (item 1) — the configured default before the first canary spawn.
-2. **The first canary's footer and effort popover reading "High" under the Max setting** (item 1) — footer "Fable 5 · High".
-3. **The settings Effort dropdown open, showing "Default (High)" and Extra selected** (item 1) — the default changed to Extra ahead of the second spawn.
-4. **The second canary's footer reading "High" under the Extra setting** (item 1) — the default is ignored regardless of its value.
-5. **The desktop app immediately after an auto-restart** (item 2) — captured right after effort changes across several sessions in quick succession.
-6. **The session list at fleet scale** (item 3) — more than 10 parallel sessions, where the create-burst errors appear.
-7. **A completed session's view/menu with no archive/close/delete affordance** (item 5).
-8. **The "needs input" badge beside the same session open with nothing pending** (item 6) — one combined side-by-side image.
-9. **The session list showing "idle" while that session's transcript shows work in progress at the same minute** (item 7) — one combined image, timestamps in both halves.
-
-Screenshots 1–4 form the item-1 evidence sequence: configured default → spawned session's actual effort, across two configured values (Max, then Extra).
-
----
-
-## Session references (for server-side traces)
-
-- **Coordinator session** `session_01KTbEzADPC97UfpmEAsDCeM` — ran the fleet orchestration, the session-deletion tool-registry sweep (item 5), and the canary experiment (item 1).
-- **Canary A** `cse_01W6BR1vLUZLFBGtZD6byCRH` — "CANARY: effort-inheritance test", created 2026-07-10T09:28:12Z.
-- **Canary B** `cse_01P2v1VCpuQj2ooAt7SpgLK3` — "CANARY 2: effort=Extra inheritance test", created 2026-07-10T09:32:25Z.
-
-Most items were observed from the coordinator session above; per-item session IDs for the remaining items can be pinned during the call.
-
----
-
 *Prepared 2026-07-10. Where we could not prove a cause, we say so plainly.*

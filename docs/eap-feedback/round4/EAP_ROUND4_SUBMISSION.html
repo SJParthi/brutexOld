@@ -112,28 +112,6 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 <p><strong>Why it matters:</strong> with item 6, the state column cannot be trusted in either direction &mdash; the operator either interrupts live work or leaves stuck sessions unattended.</p>
 <p><strong>Suggested fix:</strong> reflect background/agent activity in the state, or add a last-activity timestamp beside it.</p>
 <hr/>
-<h2>Screenshots (attached with the email)</h2>
-<ol>
-<li><strong>Project Settings showing Effort = Max (and model Fable 5)</strong> (item 1) &mdash; the configured default before the first canary spawn.</li>
-<li><strong>The first canary&rsquo;s footer and effort popover reading &ldquo;High&rdquo; under the Max setting</strong> (item 1) &mdash; footer &ldquo;Fable 5 &middot; High&rdquo;.</li>
-<li><strong>The settings Effort dropdown open, showing &ldquo;Default (High)&rdquo; and Extra selected</strong> (item 1) &mdash; the default changed to Extra ahead of the second spawn.</li>
-<li><strong>The second canary&rsquo;s footer reading &ldquo;High&rdquo; under the Extra setting</strong> (item 1) &mdash; the default is ignored regardless of its value.</li>
-<li><strong>The desktop app immediately after an auto-restart</strong> (item 2) &mdash; captured right after effort changes across several sessions in quick succession.</li>
-<li><strong>The session list at fleet scale</strong> (item 3) &mdash; more than 10 parallel sessions, where the create-burst errors appear.</li>
-<li><strong>A completed session&rsquo;s view/menu with no archive/close/delete affordance</strong> (item 5).</li>
-<li><strong>The &ldquo;needs input&rdquo; badge beside the same session open with nothing pending</strong> (item 6) &mdash; one combined side-by-side image.</li>
-<li><strong>The session list showing &ldquo;idle&rdquo; while that session&rsquo;s transcript shows work in progress at the same minute</strong> (item 7) &mdash; one combined image, timestamps in both halves.</li>
-</ol>
-<p>Screenshots 1&ndash;4 form the item-1 evidence sequence: configured default &rarr; spawned session&rsquo;s actual effort, across two configured values (Max, then Extra).</p>
-<hr/>
-<h2>Session references (for server-side traces)</h2>
-<ul>
-<li><strong>Coordinator session</strong> <code>session_01KTbEzADPC97UfpmEAsDCeM</code> &mdash; ran the fleet orchestration, the session-deletion tool-registry sweep (item 5), and the canary experiment (item 1).</li>
-<li><strong>Canary A</strong> <code>cse_01W6BR1vLUZLFBGtZD6byCRH</code> &mdash; &ldquo;CANARY: effort-inheritance test&rdquo;, created 2026-07-10T09:28:12Z.</li>
-<li><strong>Canary B</strong> <code>cse_01P2v1VCpuQj2ooAt7SpgLK3</code> &mdash; &ldquo;CANARY 2: effort=Extra inheritance test&rdquo;, created 2026-07-10T09:32:25Z.</li>
-</ul>
-<p>Most items were observed from the coordinator session above; per-item session IDs for the remaining items can be pinned during the call.</p>
-<hr/>
 <p><em>Prepared 2026-07-10. Where we could not prove a cause, we say so plainly.</em></p>
 </main>
 </body>
