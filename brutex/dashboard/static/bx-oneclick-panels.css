@@ -200,6 +200,14 @@ body.bx-drawer-open { overflow:hidden; } /* scroll lock while the drawer is open
     animation: none !important;
     transition-duration: .001ms !important;
   }
+  /* NEW-R4C-1 (fix round 3): .bxd-equity-draw is the ONE forwards-fill class
+     whose BASE rule IS the hidden state — with pathLength=1, dasharray:1
+     (dash 1 / gap 1) and offset:1 every path position p ∈ [0,1) maps to
+     dash-pattern position (p+1) mod 2 ∈ [1,2) — the GAP, zero pixels
+     painted — and visibility arrives ONLY via bxdDraw's `forwards` fill,
+     which the `animation: none` above kills. This deterministic reset keeps
+     the equity curve visible with no animation dependency. */
+  .bxd-equity-draw { stroke-dashoffset: 0 !important; }
 }
 
 /* Covenant #6: the hidden-tab pause (BXUI.initVisibilityPause stamps

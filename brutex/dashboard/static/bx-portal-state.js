@@ -195,10 +195,14 @@ function bxParseStrategyParams(search) {
 }
 
 /**
- * The ONE builder of every /strategy href in the codebase — kills the
- * inline copies (screener row-click default nav, drawer open-full link,
- * per-trade chart link). Every component rides encodeURIComponent so a
- * hostile run_id never survives raw into a URL.
+ * The ONE parameterized /strategy href builder for the consolidated
+ * surfaces — kills the inline copies (screener row-click default nav,
+ * drawer open-full link, per-trade chart link). Exactly ONE pre-existing
+ * inline copy survives: bx-oneclick.js's renderCombosRows "View" link
+ * (encodeURIComponent on both components — identical output shape; its
+ * unification is the ledgered follow-up DEC-COMBOS-TABLE-CONFIG-UNIFY-001).
+ * Every component here rides encodeURIComponent so a hostile run_id never
+ * survives raw into a URL.
  *
  * @param {string} runId - the run id (server-validated via is_safe_run_id).
  * @param {number|string} rank - the 1-based winner rank.

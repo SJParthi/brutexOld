@@ -2004,7 +2004,29 @@ hostile-review pass._
   arm gains its own per-arm gen-guard pin. REFUTED, deliberately NOT "fixed": edges F2
   (reopenReplaces across collapse/expand is correct-as-designed — the proposed clear would
   re-create the duplicate-entry accumulation) and edges F4 (a failed restore's URL rank is the
-  honest state, self-clearing). HONEST: the codec/pure helpers AND now the panel/portal
+  honest state, self-clearing).
+  ADVERSARIAL-REVIEW FIX ROUND 3 folded (the rounds-3+4 adjudication, refuter-majority-confirmed;
+  MIGRATION.md #1714 carries the full record): [MEDIUM NEW-R4C-1] the reduce block's
+  `animation: none` killed the ONLY thing (the `bxdDraw` forwards fill) that ever made
+  `.bxd-equity-draw` visible — its BASE rule IS the hidden dash state (dasharray:1 +
+  dashoffset:1 over pathLength=1 puts every path position in the dash GAP) — so
+  reduced-motion users never saw the drawer equity curve (both arms, every open); the
+  block now carries the deterministic `.bxd-equity-draw { stroke-dashoffset: 0 !important; }`
+  reset (dash-geometry-reasoned in the CSS comment) + the T-N8 source pin; the
+  popRealValues animationend-only cleanup — the file's ONE such site, stranding one
+  listener per open under reduced motion (refuter-EXECUTED: 200 opens → 200 listeners/node)
+  AND under a display:none'd-subtree quick close (R4-refuteb-1) — gains the module's own
+  bounded 500 ms one-shot fallback clearing class + listener idempotently (EXECUTED node
+  golden `TestPopStrandFallbackExecuted`, strand + fired arms, kill-proven vs the pre-fix
+  blob); prose precision — the resetPanelDom "byte-for-byte" comment scoped to the HOSTS
+  (stName/stArith/stVixBand honestly rest at '—' until their writers run, R3-edges-1) and
+  the bxStrategyHref docstring names the ONE surviving pre-existing inline copy
+  (bx-oneclick.js combos View link; its unification = the ledgered follow-up
+  DEC-COMBOS-TABLE-CONFIG-UNIFY-001). RECORD-ONLY (rounds 3+4, confirmed, deliberately
+  unchanged): the sink scan's self-disclosed completeness gaps (`.src =` property form +
+  non-literal setAttribute arms — LOW, corpus-clean) and the cold >900 ms first-expand
+  cascade skip (P-N4 ≡ R4-claims-1/R4-journey-2, cosmetic — the table renders correctly).
+  HONEST: the codec/pure helpers AND now the panel/portal
   terminal-state machines are EXECUTED under node (a DOM stub — no CSS/layout/browser-event
   semantics claimed); the remaining DOM wiring stays
   source-string-pinned (the #1557

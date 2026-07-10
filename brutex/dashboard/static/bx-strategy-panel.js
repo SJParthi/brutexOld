@@ -134,10 +134,22 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       if (!n || n.textContent === '—') { continue; } // no pop on '—' (covenant #2)
       (function (node) {
         node.classList.add('bxd-pop');
-        node.addEventListener('animationend', function onEnd() {
+        var cleared = false;
+        function clearPop() {
+          if (cleared) { return; } // idempotent — event + timer both call it
+          cleared = true;
           node.classList.remove('bxd-pop');
-          node.removeEventListener('animationend', onEnd);
-        });
+          node.removeEventListener('animationend', clearPop);
+        }
+        node.addEventListener('animationend', clearPop);
+        // Bounded one-shot fallback (fix round 3, R4-fresheyes-1 +
+        // R4-refuteb-1 — the trades-cascade house idiom below): under
+        // prefers-reduced-motion `animation: none` never fires animationend
+        // (nor does a display:none'd subtree after a quick close), so the
+        // listener-only cleanup stranded + accumulated one listener per
+        // open. 500 ms > the .45s pop; the guard above makes the late
+        // arm a no-op when the event already cleaned up.
+        setTimeout(clearPop, 500);
       })(n);
     }
   }
@@ -627,8 +639,13 @@ function bxEquityLabelText(hasSeries, okEmpty) {
      loadCandles' no-symbol/no-anchor arms and a trades-fetch failure all
      deliberately leave these hosts untouched, so a progress string here
      would read as an in-flight fetch FOREVER on exactly the honest states
-     (Golden Rule #1); the success paths overwrite them anyway. Reset state
-     ≡ the templates' fresh-load state, byte-for-byte. */
+     (Golden Rule #1); the success paths overwrite them anyway. The HOSTS
+     reset to the templates' fresh-load copy byte-for-byte; the dash fields
+     reset to the neutral '—' — three ids diverge from their template copy
+     (stName "awaiting real run artifact" · stArith "" · stVixBand "no VIX
+     band") and rest at '—' until their writers run: honest neutral
+     placeholders, never a progress or data claim (fix round 3 prose
+     precision, R3-edges-1). */
   function resetPanelDom() {
     var dashIds = [
       'stRank', 'stName', 'stInstr', 'stTf', 'stDir', 'stArm', 'stMask',

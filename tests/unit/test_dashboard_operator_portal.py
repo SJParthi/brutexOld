@@ -1474,6 +1474,24 @@ class TestMotionCovenants:
         css = _js(_PANELS_CSS)
         assert "stroke-dashoffset:1;" in css
 
+    def test_reduced_motion_block_resets_the_equity_dashoffset(self) -> None:
+        """Fix round 3 (NEW-R4C-1, MEDIUM): `.bxd-equity-draw`'s BASE rule IS
+        the hidden state — pathLength=1 + dasharray:1 + dashoffset:1 maps
+        every path position p ∈ [0,1) to dash-pattern position (p+1) mod 2
+        ∈ [1,2), the GAP, so zero pixels paint — and visibility arrives ONLY
+        via bxdDraw's `forwards` fill, which the reduce block's
+        `animation: none !important` kills. The block must therefore carry
+        the deterministic dashoffset reset, or reduced-motion users get a
+        permanently INVISIBLE drawer equity curve (both arms, every open)."""
+        css = _js(_PANELS_CSS)
+        reduce_block = css[css.index("@media (prefers-reduced-motion: reduce)") :]
+        reduce_block = reduce_block[: reduce_block.index("/* Covenant #6")]
+        assert ".bxd-equity-draw { stroke-dashoffset: 0 !important; }" in reduce_block
+        # the hazard pair the reset exists for stays true (base = hidden,
+        # visibility = the forwards fill the reduce block disables):
+        assert "animation: bxdDraw .8s var(--ease) .15s forwards;" in css
+        assert "@keyframes bxdDraw { to { stroke-dashoffset:0; } }" in css
+
     def test_honest_states_render_un_animated(self) -> None:
         js = _js(_STRATEGY_PANEL_JS)
         # The dropped-arrow note + the equity label are set outside any
@@ -1788,6 +1806,247 @@ class TestPanelTerminalHonestCopy:
         assert out["stChartCoords"] == (
             "chart unavailable — the run selection carries no mappable symbol/timeframe yet"
         )
+
+
+#: Fix round 3 (R4-fresheyes-1 + R4-refuteb-1): drives the REAL
+#: bx-strategy-panel.js pop path (argv: module path, mode, cycles) under a
+#: LISTENER-COUNTING DOM stub. Mode "strand" NEVER dispatches animationend —
+#: the prefers-reduced-motion `animation: none` semantics (and the
+#: display:none'd-subtree close variant) — so only the bounded setTimeout
+#: fallback can clean up; mode "fired" dispatches the event each cycle and
+#: then lets the late timer run, exercising the double-removal guard.
+_POP_STRAND_DRIVE_JS = r"""
+"use strict";
+var MODULE = process.argv[2];
+var MODE = process.argv[3];
+var CYCLES = parseInt(process.argv[4], 10);
+
+function makeEl(tag) {
+  var classes = {};
+  var el = {
+    tagName: String(tag || "div").toUpperCase(),
+    textContent: "",
+    children: [],
+    className: "",
+    hidden: false,
+    listeners: {},
+    appendChild: function (c) { this.children.push(c); return c; },
+    removeChild: function (c) {
+      var i = this.children.indexOf(c);
+      if (i >= 0) { this.children.splice(i, 1); }
+      return c;
+    },
+    addEventListener: function (type, fn) {
+      (this.listeners[type] = this.listeners[type] || []).push(fn);
+    },
+    removeEventListener: function (type, fn) {
+      var arr = this.listeners[type] || [];
+      var i = arr.indexOf(fn);
+      if (i >= 0) { arr.splice(i, 1); }
+    },
+    listenerCount: function (type) { return (this.listeners[type] || []).length; },
+    fire: function (type) {
+      var fns = (this.listeners[type] || []).slice();
+      for (var i = 0; i < fns.length; i++) { fns[i]({}); }
+    },
+    setAttribute: function () {},
+    removeAttribute: function () {},
+    getAttribute: function () { return null; },
+    classList: {
+      add: function (c) { classes[c] = true; },
+      remove: function (c) { delete classes[c]; },
+      contains: function (c) { return classes[c] === true; }
+    },
+    style: { setProperty: function () {} }
+  };
+  Object.defineProperty(el, "firstChild", {
+    get: function () { return this.children.length ? this.children[0] : null; }
+  });
+  return el;
+}
+
+var IDS = [
+  "stPrev", "stNext", "stRunId", "stRank", "stName", "stInstr", "stTf",
+  "stDir", "stArm", "stMask", "stFamily", "stNet", "stMaxDd", "stSharpe",
+  "stDsr", "stCpcv", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
+  "stExpectancy", "stRecovery", "stLossStreak", "stMae", "stMfe",
+  "stMinuteDd", "stExitMix", "stWorst5", "stTrendSplit", "stRegimeWonder",
+  "stTradesBody", "stTradesNote", "stChartHost", "stEquityHost",
+  "stChartCoords", "stChartError", "stTradesError", "stTradesSource",
+  "stPage", "stEquityLabel", "stArrowNote"
+];
+var reg = {};
+for (var i = 0; i < IDS.length; i++) { reg[IDS[i]] = makeEl("div"); }
+
+global.document = {
+  readyState: "complete",
+  getElementById: function (id) { return reg[id] || null; },
+  querySelector: function () { return null; },
+  querySelectorAll: function () { return []; },
+  createElement: function (tag) { return makeEl(tag); },
+  addEventListener: function () {}
+};
+
+global.window = {
+  BXPortalState: {
+    strategyHref: function () { return "/strategy?x"; },
+    parseStrategyParams: function () { return { runId: null, rank: 1, tradeIdx: null }; }
+  },
+  BXUI: {
+    clear: function (host) { host.children.length = 0; host.textContent = ""; },
+    el: function (tag, cls, text) {
+      var e = makeEl(tag);
+      e.className = cls || "";
+      e.textContent = text === undefined ? "" : text;
+      return e;
+    }
+  },
+  BXChart: {
+    parseTsIst: function () { return null; },
+    istDateOfEpoch: function () { return "2026-01-01"; },
+    candleGeom: function () { return { empty: true }; },
+    candleRowsFromDbPayload: function () { return { missing: null, skipped: 0, rows: [] }; },
+    skippedRowsNote: function () { return ""; },
+    svgEl: function (t) { return makeEl(t); },
+    candleNodes: function () { return []; },
+    tradeArrow: function () { return { dropped: true }; },
+    arrowNode: function () { return makeEl("g"); },
+    minutePathSeries: function () { return { empty: true }; },
+    equitySeries: function () { return { empty: true }; },
+    equityPathNode: function () { return null; },
+    ARROW_DROPPED_NOTE: "arrow dropped"
+  },
+  BXExplain: {
+    paisaToRupees: function (p) { return String(p); },
+    tradeArithmetic: function () { return { lines: ["arith"] }; }
+  },
+  BXPoll: {
+    fetchJson: function () {
+      return Promise.resolve({ status: "awaiting", detail: "no sidecar" });
+    }
+  },
+  BXOneclick: {
+    oneshotFetch: function (url, errHost, cb) {
+      if (url.indexOf("/api/v1/oneclick/trades") === 0) {
+        Promise.resolve().then(function () {
+          cb({ status: "ok", source: "test", rows: [], total: 0 });
+        });
+      }
+    },
+    getManifestOnce: function () { return Promise.reject(new Error("unused")); },
+    instrumentText: function (x) { return String(x || "—"); },
+    vixBandText: function () { return "—"; },
+    avgExtremeText: function () { return "—"; },
+    minutePathDdText: function () { return "—"; },
+    exitMixText: function () { return "—"; },
+    worst5DaysText: function () { return "—"; },
+    trendSplitText: function () { return "—"; },
+    regimeWonderText: function () { return "—"; }
+  },
+  location: { search: "" }
+};
+
+require(MODULE); // the DOM layer mounts against the stubs above
+
+var panel = global.window.BXStrategyPanel;
+panel.mount({
+  animate: true, // the portal's own mount shape (bx-operator-portal.js)
+  getTop100: function () {
+    // TWO real-valued pop targets (stNet '+₹1000', stSharpe '1.5'); the
+    // builder-fed cells read '—' and are covenant-#2 skipped.
+    return Promise.resolve({
+      status: "ok", row_count: 1,
+      rows: [{ rank: 5, tf: "5m", direction: "long", arm: "a", mask_hex: "0x1",
+               family_id: "f", conditions: ["c1"],
+               metrics: { net_pnl_paisa: 1000, sharpe: 1.5 }, regime: {} }]
+    });
+  },
+  getManifest: function () {
+    return { run_id: "r-1", manifest: { selection: { symbols: ["NSE-NIFTY"] } } };
+  }
+});
+
+var mid = [];
+function cycle(k) {
+  if (k >= CYCLES) {
+    console.log(JSON.stringify({
+      mode: MODE,
+      cycles: CYCLES,
+      mid: mid,
+      finalNetListeners: reg.stNet.listenerCount("animationend"),
+      finalSharpeListeners: reg.stSharpe.listenerCount("animationend"),
+      finalHasPop: reg.stNet.classList.contains("bxd-pop"),
+      stNetText: reg.stNet.textContent
+    }));
+    return;
+  }
+  panel.update({ runId: "r-1", rank: 5 });
+  setTimeout(function () {
+    // mid-pop probe (the fetch chain has settled; the 500 ms fallback has
+    // not): the pop must be ENGAGED with exactly ONE live listener — never
+    // the pre-fix k+1 accumulation.
+    mid.push({
+      listeners: reg.stNet.listenerCount("animationend"),
+      hasPop: reg.stNet.classList.contains("bxd-pop")
+    });
+    if (MODE === "fired") { reg.stNet.fire("animationend"); }
+    // past the 500 ms fallback window — in "strand" mode ONLY the timer can
+    // have cleaned up; in "fired" mode the late timer must be a guarded
+    // no-op (idempotent double removal).
+    setTimeout(function () { cycle(k + 1); }, 560);
+  }, 40);
+}
+cycle(0);
+"""
+
+
+def _run_pop_strand_drive(tmp_path: Path, mode: str, cycles: int) -> dict[str, Any]:
+    script = tmp_path / "drive-pop.js"
+    script.write_text(_POP_STRAND_DRIVE_JS, encoding="utf-8")
+    proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+        ["node", str(script), str(_STRATEGY_PANEL_JS), mode, str(cycles)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    out: dict[str, Any] = json.loads(proc.stdout)
+    return out
+
+
+@pytest.mark.skipif(_NODE is None, reason="node not installed")
+class TestPopStrandFallbackExecuted:
+    """Fix round 3 (R4-fresheyes-1 LOW + R4-refuteb-1, refuter-EXECUTED):
+    popRealValues' cleanup was the file's ONLY animationend-dependent path —
+    under prefers-reduced-motion `animation: none` (and a display:none'd
+    subtree after a quick close) the event NEVER fires, so listeners + the
+    `.bxd-pop` class stranded unboundedly (executed pre-fix: 200 opens →
+    200 listeners per popped node). The bounded 500 ms one-shot fallback
+    (the module's own trades-cascade idiom) now clears both idempotently."""
+
+    def test_strand_mode_never_accumulates_listeners_across_cycles(self, tmp_path: Path) -> None:
+        out = _run_pop_strand_drive(tmp_path, "strand", 3)
+        assert out["cycles"] == 3
+        # every cycle ENGAGED the pop (class on, exactly ONE live listener —
+        # the pre-fix blob reads k+1 here on cycle k):
+        assert out["mid"] == [{"listeners": 1, "hasPop": True}] * 3
+        # ...and with animationend NEVER fired, the fallback window cleared
+        # the class AND the listener on every popped node:
+        assert out["finalNetListeners"] == 0
+        assert out["finalSharpeListeners"] == 0
+        assert out["finalHasPop"] is False
+        assert out["stNetText"] == "+₹1000"  # the real value stays painted
+
+    def test_fired_mode_keeps_the_event_path_and_guards_the_late_timer(
+        self, tmp_path: Path
+    ) -> None:
+        """Normal motion: animationend cleans up as before; the late 500 ms
+        timer then runs against an already-cleared node and must be a
+        guarded no-op (no crash, no double removal, nothing re-added)."""
+        out = _run_pop_strand_drive(tmp_path, "fired", 2)
+        assert out["mid"] == [{"listeners": 1, "hasPop": True}] * 2
+        assert out["finalNetListeners"] == 0
+        assert out["finalSharpeListeners"] == 0
+        assert out["finalHasPop"] is False
 
 
 #: Drives the REAL bx-operator-portal.js state machine (argv: portal-state
