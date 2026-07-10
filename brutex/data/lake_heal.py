@@ -134,6 +134,7 @@ from brutex.data.timeframe_materialize import (
     PrebuildKind,
     materialize_lake_timeframes,
 )
+from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:  # pragma: no cover
     import polars as pl
@@ -1694,6 +1695,10 @@ def heal_findings(
             mode=resolved,
         )
     for finding in ordered:
+        # Liveness beat per healed finding (DEC-HEAL-SCAN-LIVENESS-BEATS-001):
+        # each heal is a quarantine-copy + partition rewrite — seconds on a big
+        # month file — and the batch runs on the beat-watched pull worker.
+        emit_progress_beat()
         try:
             did_heal = _heal_one(finding, state)
         except LakeWriteHalt:
@@ -1814,6 +1819,16 @@ def heal_after_pull(
     files_scanned = 0
     unique_targets = list(dict.fromkeys(targets))
     for exchange, segment, symbol in unique_targets:
+        # Liveness beat per considered target + per scanned file
+        # (DEC-HEAL-SCAN-LIVENESS-BEATS-001, the #1558 greeks-backfill scan
+        # precedent): this L2 scan is O(pulled files) — forensically measured
+        # 36 min over 101,682 files on the production lake — and it runs on
+        # the pull worker thread AFTER the last fetched-window heartbeat, so
+        # without beats the stall watchdog falsely fired ``stalled_suspect``
+        # on a provably-healthy run. ``emit_progress_beat`` routes by the
+        # worker's ambient pull id (the #1537 keyed channels) and is a cheap
+        # no-op for the CLI / any caller with no registered watchdog.
+        emit_progress_beat()
         scan = scan_lake_invariants(
             lake_root,
             exchange=exchange,
@@ -1821,6 +1836,7 @@ def heal_after_pull(
             symbol=symbol,
             months=months,
             include_options=False,
+            per_file_pause=emit_progress_beat,
         )
         findings.extend(scan.findings)
         files_scanned += scan.files_scanned
