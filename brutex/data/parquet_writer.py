@@ -114,6 +114,7 @@ from brutex.data.lake_stats_manifest import (
     remove_partition_stats,
     stats_manifest_enabled,
 )
+from brutex.data.lake_write_epoch import bump_write_epoch
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, CandleBar, CatalogEntry, FnoGreeksBar
 from brutex.data.partition import (
     BAR_DIR_NAME,
@@ -778,6 +779,12 @@ class ParquetWriter:
                 # The merge NO-OP fast path (``file_rewritten=False``) touches
                 # nothing: an existing shard row is still stat-valid.
                 self._record_stats_hook(dest, result)
+                # Write-epoch bump (DEC-LAKE-HEAL-STARTUP-EPOCH-001): this write
+                # RENDERED partition bytes, moving lake_content_token — refresh
+                # the O(1) cheap gate the L3 startup sweep consults so the next
+                # boot re-checks instead of an unsound O(1) skip. Unconditional
+                # (independent of the stats-manifest kill switch), best-effort.
+                bump_write_epoch(self._lake_root)
 
         # Emit the per-partition write telemetry AFTER the locks are released (the
         # log call is not itself part of the serialised critical section). One
@@ -1230,6 +1237,10 @@ class ParquetWriter:
             # whole shard — an empty dataset has no shard). Still under both
             # held partition locks.
             self._remove_stats_hook(dest)
+            # Write-epoch bump (DEC-LAKE-HEAL-STARTUP-EPOCH-001): a heal
+            # whole-file removal moves lake_content_token — refresh the L3
+            # cheap gate (unconditional, best-effort).
+            bump_write_epoch(self._lake_root)
             return PartitionHealResult(
                 path=dest,
                 changed=True,
@@ -1272,6 +1283,10 @@ class ParquetWriter:
         # therefore agree). The probe-failure ABSTAIN + unchanged branches
         # above return earlier and touch neither the file nor the shard.
         self._record_stats_hook(dest, write)
+        # Write-epoch bump (DEC-LAKE-HEAL-STARTUP-EPOCH-001): a heal rewrite
+        # rendered new bytes, moving lake_content_token — refresh the L3 cheap
+        # gate (unconditional, best-effort).
+        bump_write_epoch(self._lake_root)
         return PartitionHealResult(
             path=dest,
             changed=True,

@@ -112,6 +112,7 @@ from brutex.data.lake_invariants import (
 )
 from brutex.data.lake_manifest import invalidate_manifest
 from brutex.data.lake_stats_manifest import KIND_BARS, KIND_OPTIONS, remove_dataset_stats
+from brutex.data.lake_write_epoch import bump_write_epoch, read_write_epoch
 from brutex.data.models import CandleBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionWriterError
 from brutex.data.parquet_writer import ParquetWriter, PartitionHealResult
@@ -134,7 +135,12 @@ from brutex.data.timeframe_materialize import (
     PrebuildKind,
     materialize_lake_timeframes,
 )
-from brutex.observability.progress_beat import emit_progress_beat
+from brutex.observability.correlation import pull_id_scope
+from brutex.observability.progress_beat import (
+    emit_progress_beat,
+    register_progress_beat,
+    unregister_progress_beat,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     import polars as pl
@@ -177,6 +183,17 @@ SENTINEL_RELPATH: Final[str] = ".lake_heal/last_sweep.json"
 
 #: The cumulative heal stats sidecar, relative to the lake root.
 STATS_RELPATH: Final[str] = ".lake_heal/stats.json"
+
+#: The write-epoch max-age safety-valve env var (float seconds, > 0).
+EPOCH_MAX_AGE_ENV: Final[str] = "BRUTEX_LAKE_HEAL_EPOCH_MAX_AGE_S"
+
+#: Default max age of the last clean sweep before the O(1) write-epoch
+#: fast-path skip is BYPASSED (a full ``lake_content_token`` runs even on an
+#: epoch match) — 7 days. Bounds the damage of any hypothetical un-enumerated
+#: future writer / missed epoch bump or a purely out-of-band lake write (a
+#: manual copy / rsync restore, which the in-band epoch cannot see) to ≤ this
+#: window (DEC-LAKE-HEAL-STARTUP-EPOCH-001; Golden Rule #10 honest limit).
+EPOCH_MAX_AGE_DEFAULT_S: Final[float] = 604800.0
 
 #: Mass-heal refusal rail (the ``sweep_heal`` C7 twin): refuse a batch that
 #: would rewrite > this fraction of the scanned files …
@@ -246,6 +263,36 @@ def resolve_sweep_throttle_s() -> float:
     except ValueError:
         return DEFAULT_SWEEP_THROTTLE_S
     return max(0.0, value)
+
+
+def resolve_epoch_max_age_s() -> float:
+    """Resolve the write-epoch max-age safety valve (seconds), fail-loud.
+
+    Unset / blank → :data:`EPOCH_MAX_AGE_DEFAULT_S`. A NON-positive or
+    unparsable value falls back to the default AND logs
+    ``lake_heal.epoch_max_age_invalid`` (never SILENTLY disabled — a garbage
+    value must not be read as "infinite", which would turn the valve off; the
+    default is the safe, loud fallback). A ``+inf`` / ``nan`` is treated as
+    invalid for the same reason.
+
+    Returns
+    -------
+    float
+        The max age of the last clean sweep before the O(1) fast path is
+        bypassed, in seconds (> 0).
+    """
+    raw = os.environ.get(EPOCH_MAX_AGE_ENV, "").strip()
+    if not raw:
+        return EPOCH_MAX_AGE_DEFAULT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        _LOG.warning("lake_heal.epoch_max_age_invalid", value=raw, reason="unparsable")
+        return EPOCH_MAX_AGE_DEFAULT_S
+    if not (value > 0.0) or value == float("inf"):
+        _LOG.warning("lake_heal.epoch_max_age_invalid", value=raw, reason="non_positive_or_inf")
+        return EPOCH_MAX_AGE_DEFAULT_S
+    return value
 
 
 # ── audit seam ───────────────────────────────────────────────────────────────
@@ -604,6 +651,12 @@ def _quarantine_move(state: _BatchState, source: Path) -> Path:
     # months a delete-and-rebuild is about to replace. Best-effort +
     # idempotent; re-accretes via the writers' record hooks + read-side seed.
     _remove_dataset_stats_for(state.lake_root, source)
+    # Write-epoch bump (DEC-LAKE-HEAL-STARTUP-EPOCH-001): a quarantine-MOVE
+    # removes a stored *.parquet, moving lake_content_token — refresh the L3
+    # cheap gate so a heal that ran this boot forces a full re-check next boot
+    # (unconditional, best-effort). Covers BOTH removal routes through this ONE
+    # chokepoint (whole-file quarantine + intraday-TF delete-and-rebuild).
+    bump_write_epoch(state.lake_root)
     state.quarantined_files += 1
     _LOG.warning("lake_heal.file_quarantined", source=str(source), quarantine=str(dest))
     _audit_append(
@@ -1942,6 +1995,12 @@ def lake_content_token(lake_root: Path) -> str:
     entry embeds the vendor-influenceable series dir name, the rounds-8/9
     convention), keeping the token deterministic for identical lake content.
     """
+    # F2 boot instrumentation (DEC-LAKE-HEAL-STARTUP-EPOCH-001): bracket the
+    # O(files) walk so its cost is attributed in the boot log whenever it runs
+    # (post-F1 only on a genuine change / a fast-path miss). These two events
+    # land in the 100%-covered lake_heal module.
+    _walk_t0 = time.monotonic()
+    _LOG.info("lake_heal.content_token_walk_begin", lake_root=str(lake_root))
     lines: list[str] = []
     for tree in (BAR_DIR_NAME, OPTIONS_DIR_NAME):
         base = lake_root / tree
@@ -1966,7 +2025,13 @@ def lake_content_token(lake_root: Path) -> str:
             lines.append(
                 f"{path.relative_to(lake_root).as_posix()}|{stat.st_size}|{stat.st_mtime_ns}"
             )
-    return hashlib.sha256("\n".join(sorted(lines)).encode("utf-8")).hexdigest()
+    token = hashlib.sha256("\n".join(sorted(lines)).encode("utf-8")).hexdigest()
+    _LOG.info(
+        "lake_heal.content_token_walk_end",
+        files=len(lines),
+        duration_s=round(time.monotonic() - _walk_t0, 3),
+    )
+    return token
 
 
 @dataclass(frozen=True, slots=True)
@@ -2010,6 +2075,111 @@ def _sentinel_skip_reason(report: HealReport) -> str | None:
     return None
 
 
+def _sentinel_too_old(sentinel: Mapping[str, Any], now_fn: Callable[[], datetime]) -> bool:
+    """Whether the last clean sweep is older than the write-epoch max-age valve.
+
+    Parses the sentinel's ``completed_utc``; a missing / non-string /
+    unparsable stamp returns ``True`` (force a full token check — never trust a
+    bad stamp to keep the O(1) fast path). A naive stamp is read as UTC. A
+    negative age (clock skew: stamp in the future) is NOT "too old" (the fast
+    path is still gated by the epoch match). See :func:`resolve_epoch_max_age_s`.
+    """
+    raw = sentinel.get("completed_utc")
+    if not isinstance(raw, str):
+        return True
+    try:
+        completed = datetime.fromisoformat(raw)
+    except ValueError:
+        return True
+    if completed.tzinfo is None:
+        completed = completed.replace(tzinfo=UTC)
+    age_s = (now_fn().astimezone(UTC) - completed.astimezone(UTC)).total_seconds()
+    return age_s > resolve_epoch_max_age_s()
+
+
+def _write_sentinel(
+    lake_root: Path,
+    *,
+    lake_token: str,
+    write_epoch: str | None,
+    completed_utc: str,
+    files_scanned: object,
+    findings: object,
+    healed: object,
+    mode: object,
+) -> None:
+    """Atomically persist the v2 L3 sentinel (adds ``write_epoch`` to the v1 payload)."""
+    payload = json.dumps(
+        {
+            "version": 2,
+            "lake_token": lake_token,
+            "write_epoch": write_epoch,
+            "completed_utc": completed_utc,
+            "files_scanned": files_scanned,
+            "findings": findings,
+            "healed": healed,
+            "mode": mode,
+        },
+        sort_keys=True,
+    )
+    sentinel_path = lake_root / SENTINEL_RELPATH
+    sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_simple(sentinel_path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+
+
+def _stamp_sentinel(
+    lake_root: Path,
+    *,
+    lake_token: str,
+    write_epoch: str | None,
+    files_scanned: int,
+    findings: int,
+    healed: int,
+    mode: str,
+    now_fn: Callable[[], datetime],
+) -> None:
+    """Stamp the sentinel after a genuinely-completed clean sweep (v2 + epoch)."""
+    _write_sentinel(
+        lake_root,
+        lake_token=lake_token,
+        write_epoch=write_epoch,
+        completed_utc=now_fn().astimezone(UTC).isoformat(),
+        files_scanned=files_scanned,
+        findings=findings,
+        healed=healed,
+        mode=mode,
+    )
+
+
+def _restamp_sentinel(
+    lake_root: Path,
+    sentinel: Mapping[str, Any],
+    *,
+    lake_token: str,
+    write_epoch: str | None,
+    now_fn: Callable[[], datetime],
+) -> None:
+    """Re-align the sentinel to v2 + the current epoch after a Tier-2 token match.
+
+    The bytes are unchanged (same ``lake_token``) but the epoch had moved (a
+    spurious / crash-lost bump, or a first boot off a v1 sentinel with no
+    ``write_epoch``): re-persist so the NEXT boot is an O(1) epoch skip. The
+    provenance fields are carried through from the old sentinel verbatim;
+    ``completed_utc`` is refreshed (the token was just re-verified clean, so
+    the max-age clock legitimately restarts).
+    """
+    _write_sentinel(
+        lake_root,
+        lake_token=lake_token,
+        write_epoch=write_epoch,
+        completed_utc=now_fn().astimezone(UTC).isoformat(),
+        files_scanned=sentinel.get("files_scanned", 0),
+        findings=sentinel.get("findings", 0),
+        healed=sentinel.get("healed", 0),
+        mode=sentinel.get("mode", DEFAULT_LAKE_HEAL_MODE),
+    )
+
+
 def run_startup_sweep(
     lake_root: Path,
     *,
@@ -2023,28 +2193,46 @@ def run_startup_sweep(
 ) -> StartupSweepResult:
     """The L3 one-time whole-lake sweep: scan + heal + restamp the sentinel.
 
-    ONE-TIME semantics: when the stored sentinel's ``lake_token`` equals the
-    current :func:`lake_content_token` (and *force* is False) the sweep is a
-    no-op (``lake_heal.sweep_skip_token_match``). Otherwise it runs ONE full
+    TWO-TIER change detection (DEC-LAKE-HEAL-STARTUP-EPOCH-001):
+
+    * **Tier 1 — O(1) epoch fast-path skip.** When the stored sentinel's
+      ``write_epoch`` equals the current :func:`~brutex.data.lake_write_epoch.read_write_epoch`
+      marker (and *force* is False, and the last clean sweep is within the
+      max-age valve) the lake is provably unchanged since the last clean sweep
+      ⇒ an O(1) no-op (``lake_heal.sweep_skip_epoch_match``), NO
+      :func:`lake_content_token` walk. This closes the ~27-min-every-boot
+      full stat walk the old change-detector paid unconditionally.
+    * **Tier 2 — authoritative full token (computed AT MOST ONCE).** Reached on
+      a force / no-sentinel / epoch-unavailable / epoch-changed / too-old miss.
+      The full :func:`lake_content_token` runs ONCE; a token match is still a
+      no-op (``lake_heal.sweep_skip_token_match``, and the sentinel is
+      re-stamped to v2 with the current epoch so the NEXT boot is Tier-1 O(1)).
+      A token mismatch runs the real sweep. The full token remains the
+      AUTHORITATIVE fallback — soundness is never weaker than the pre-epoch
+      design (the epoch is a cheap short-circuit in FRONT of it, never a
+      replacement; any epoch uncertainty falls through to this tier).
+
+    The real sweep runs ONE
     :func:`~brutex.data.lake_invariants.scan_lake_invariants` (throttled by
     *per_file_pause*, default ``time.sleep(resolve_sweep_throttle_s())``), one
-    :func:`heal_findings` batch, and stamps :data:`SENTINEL_RELPATH` with the
-    POST-heal recomputed token (a heal rewrites files, so the pre-scan token is
-    stale by design). The sentinel is stamped ONLY when the sweep genuinely
-    completed its job — ``mode == "auto"``, not mass-heal-refused, zero
-    ``errors``, and ``healed == findings`` (a zero-finding clean sweep also
-    stamps). A refused / observe-mode / errored / partially-healed sweep SKIPS
-    the stamp (``lake_heal.sweep_sentinel_skipped`` with the reason) so the
-    next boot re-attempts instead of token-matching past live poison. Cost
-    honesty (Golden Rule #10): O(files) total with a per-file key-column read
-    that scales with row count — NOT O(1); paid once per lake content token.
+    :func:`heal_findings` batch, and stamps :data:`SENTINEL_RELPATH` (v2, with
+    ``write_epoch``) with the POST-heal recomputed token — computed AT MOST ONCE
+    MORE and ONLY when a heal actually rewrote files (nothing healed ⇒ no
+    bars/options file moved ⇒ the pre-scan token is reused). The sentinel is
+    stamped ONLY when the sweep genuinely completed its job — ``mode == "auto"``,
+    not mass-heal-refused, zero ``errors``, and ``healed == findings`` (a
+    zero-finding clean sweep also stamps). A refused / observe-mode / errored /
+    partially-healed sweep SKIPS the stamp (``lake_heal.sweep_sentinel_skipped``)
+    so the next boot re-attempts. Cost honesty (Golden Rule #10): the Tier-1
+    skip is O(1); a Tier-2 miss is O(files) for the token + the per-file scan —
+    paid once per genuine lake content mutation, not per boot.
 
     Parameters
     ----------
     lake_root
         The lake root.
     force
-        Sweep even when the sentinel token matches.
+        Sweep even when the sentinel token / epoch matches.
     per_file_pause
         The per-file throttle; ``None`` = sleep
         :func:`resolve_sweep_throttle_s` seconds per file.
@@ -2057,11 +2245,36 @@ def run_startup_sweep(
         ``ran=False`` + the matching token, or the scan + heal outcomes.
     """
     now_fn = _utc_now if now is None else now
+    sentinel = load_last_sweep(lake_root)  # O(1)
+    epoch_now = read_write_epoch(lake_root)  # O(1)
+
+    # ── TIER 1: O(1) epoch fast-path skip (the common unchanged-lake boot) ──
+    stored_epoch = sentinel.get("write_epoch") if sentinel is not None else None
+    stored_token = sentinel.get("lake_token") if sentinel is not None else None
+    if (
+        not force
+        and sentinel is not None
+        and epoch_now is not None
+        and stored_epoch is not None
+        and stored_epoch == epoch_now
+        and stored_token is not None
+        and not _sentinel_too_old(sentinel, now_fn)
+    ):
+        _LOG.info("lake_heal.sweep_skip_epoch_match", epoch=epoch_now, token=stored_token)
+        return StartupSweepResult(ran=False, token=str(stored_token), scan=None, report=None)
+
+    # ── TIER 2: authoritative full token (computed ONCE — the ONLY pre-walk) ──
     token = lake_content_token(lake_root)
-    sentinel = load_last_sweep(lake_root)
     if not force and sentinel is not None and sentinel.get("lake_token") == token:
-        _LOG.info("lake_heal.sweep_skip_token_match", token=token)
+        # Bytes unchanged despite an epoch move (spurious / crash-lost epoch, or
+        # a first boot off a v1 sentinel): RE-STAMP to v2 + the current epoch so
+        # the next boot is O(1) again (epoch_now may be None → stored absent).
+        _restamp_sentinel(
+            lake_root, sentinel, lake_token=token, write_epoch=epoch_now, now_fn=now_fn
+        )
+        _LOG.info("lake_heal.sweep_skip_token_match", token=token, epoch=epoch_now)
         return StartupSweepResult(ran=False, token=token, scan=None, report=None)
+
     pause = per_file_pause
     if pause is None:
         throttle = resolve_sweep_throttle_s()
@@ -2082,24 +2295,26 @@ def run_startup_sweep(
         on_healed=on_healed,
         now=now,
     )
-    post_token = lake_content_token(lake_root)
+    # Read the epoch AFTER heal_findings (the heal's own writes bumped it) and
+    # BEFORE pairing it with post_token — so any EXTERNAL write landing after
+    # this read moves the epoch and forces a full re-check next boot (never an
+    # O(1) skip over a stale pair). This ordering is the soundness pin.
+    post_epoch = read_write_epoch(lake_root)
+    # Compute the post-heal token AT MOST ONCE, and only when a heal actually
+    # rewrote files. Nothing healed ⇒ no bars/options file changed ⇒ reuse token.
+    post_token = token if report.healed == 0 else lake_content_token(lake_root)
     skip_reason = _sentinel_skip_reason(report)
     if skip_reason is None:
-        sentinel_path = lake_root / SENTINEL_RELPATH
-        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(
-            {
-                "version": 1,
-                "lake_token": post_token,
-                "completed_utc": now_fn().astimezone(UTC).isoformat(),
-                "files_scanned": files_scanned,
-                "findings": len(scan.findings),
-                "healed": report.healed,
-                "mode": report.mode,
-            },
-            sort_keys=True,
+        _stamp_sentinel(
+            lake_root,
+            lake_token=post_token,
+            write_epoch=post_epoch,
+            files_scanned=files_scanned,
+            findings=len(scan.findings),
+            healed=report.healed,
+            mode=report.mode,
+            now_fn=now_fn,
         )
-        atomic_write_simple(sentinel_path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
     else:
         # The sweep did NOT complete its job — leave the old sentinel (or none)
         # in place so the next boot's token check re-attempts the sweep.
@@ -2185,6 +2400,28 @@ def open_lake_catalog(lake_root: Path) -> Catalog | None:
         return None
 
 
+#: The DEDICATED keyed beat channel the L3 startup sweep binds
+#: (DEC-LAKE-HEAL-STARTUP-EPOCH-001 F4). A non-hex string that can NEVER collide
+#: with a run's 12-hex ``pull_id``, so the sweep's own unscoped
+#: ``emit_progress_beat()`` (per-finding + the writer lock-wait beat, both on
+#: the daemon thread) resolve to THIS channel → a benign no-op hit → never a
+#: ``progress_beat.foreign_beat_dropped`` WARN against a concurrent live pull's
+#: keyed registry. A dedicated key (not :data:`~brutex.observability.progress_beat.LEGACY_CHANNEL`)
+#: confines the absorption to the sweep's OWN beats — a real pull's keyed-MISS
+#: outward fallback + any other foreign unkeyed beat are untouched (anti-masking).
+LAKE_HEAL_SWEEP_PULL_ID: Final[str] = "lake-heal-sweep"
+
+
+def _sweep_noop_beat() -> None:
+    """No-op liveness beat for the L3 sweep's dedicated channel.
+
+    The L3 sweep has no watchdog of its own; this only ABSORBS its own unscoped
+    beats so they never DROP into a live pull's keyed registry. A module
+    singleton so a re-register (overlapping sweeps — precluded by the token/epoch
+    gate) finds ``_BEATS[id] is beat`` and never WARNs a channel collision.
+    """
+
+
 def _default_spawn(body: Callable[[], None]) -> None:
     """Run *body* on a named daemon thread (the production sweep lifecycle)."""
     threading.Thread(target=body, name="brutex-lake-heal-sweep", daemon=True).start()
@@ -2231,19 +2468,34 @@ class StartupSweeper:
         blanket guard in the healer, whose job is "boot can never crash".
         """
         try:
-            with lake_heal_audit(self._lake_root) as audit:
-                catalog = None if self._catalog_path is None else Catalog.open(self._catalog_path)
+            # F4 (DEC-LAKE-HEAL-STARTUP-EPOCH-001): bind the sweep body to a
+            # DEDICATED keyed beat channel with a no-op registrant, so EVERY
+            # beat emitted on THIS daemon thread (the per-finding heal beat +
+            # the writer lock-wait beat) resolves to that channel and fires
+            # harmlessly — never a foreign_beat_dropped WARN against a
+            # concurrent live pull's keyed registry. Sits INSIDE the blanket
+            # boot guard (boot never crashes) and does NOT touch L1/L2 heal
+            # beats (they run on the pull worker under its own pull_id_scope).
+            with pull_id_scope(LAKE_HEAL_SWEEP_PULL_ID):
+                register_progress_beat(_sweep_noop_beat, pull_id=LAKE_HEAL_SWEEP_PULL_ID)
                 try:
-                    return run_startup_sweep(
-                        self._lake_root,
-                        catalog=catalog,
-                        audit=audit,
-                        on_report=_startup_sweep_alert,
-                        on_healed=self._on_healed,
-                    )
+                    with lake_heal_audit(self._lake_root) as audit:
+                        catalog = (
+                            None if self._catalog_path is None else Catalog.open(self._catalog_path)
+                        )
+                        try:
+                            return run_startup_sweep(
+                                self._lake_root,
+                                catalog=catalog,
+                                audit=audit,
+                                on_report=_startup_sweep_alert,
+                                on_healed=self._on_healed,
+                            )
+                        finally:
+                            if catalog is not None:
+                                catalog.close()
                 finally:
-                    if catalog is not None:
-                        catalog.close()
+                    unregister_progress_beat(pull_id=LAKE_HEAL_SWEEP_PULL_ID, beat=_sweep_noop_beat)
         except _SWEEP_GUARD_ERRORS as exc:  # pylint: disable=broad-exception-caught
             # — boot never crashes (the ONE blanket guard; see the constant).
             _LOG.warning("lake_heal.sweep_failed", error=str(exc))
@@ -2279,7 +2531,10 @@ __all__ = [
     "AUDIT_HEAL_REASSIGN",
     "DEFAULT_LAKE_HEAL_MODE",
     "DEFAULT_SWEEP_THROTTLE_S",
+    "EPOCH_MAX_AGE_DEFAULT_S",
+    "EPOCH_MAX_AGE_ENV",
     "LAKE_HEAL_ENV",
+    "LAKE_HEAL_SWEEP_PULL_ID",
     "LAKE_HEAL_THROTTLE_ENV",
     "MASS_HEAL_FRACTION",
     "MASS_HEAL_MIN_FILES",
@@ -2301,6 +2556,7 @@ __all__ = [
     "load_last_sweep",
     "open_lake_catalog",
     "open_lake_heal_audit",
+    "resolve_epoch_max_age_s",
     "resolve_lake_heal_mode",
     "resolve_sweep_throttle_s",
     "run_startup_sweep",

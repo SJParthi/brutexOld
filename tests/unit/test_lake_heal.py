@@ -41,7 +41,10 @@ from brutex.data.lake_heal import (
     AUDIT_HEAL_QUARANTINE_FILE,
     AUDIT_HEAL_REASSIGN,
     DEFAULT_SWEEP_THROTTLE_S,
+    EPOCH_MAX_AGE_DEFAULT_S,
+    EPOCH_MAX_AGE_ENV,
     LAKE_HEAL_ENV,
+    LAKE_HEAL_SWEEP_PULL_ID,
     LAKE_HEAL_THROTTLE_ENV,
     HealReport,
     StartupSweeper,
@@ -52,6 +55,7 @@ from brutex.data.lake_heal import (
     load_heal_stats,
     load_last_sweep,
     open_lake_heal_audit,
+    resolve_epoch_max_age_s,
     resolve_lake_heal_mode,
     resolve_sweep_throttle_s,
     run_startup_sweep,
@@ -65,6 +69,10 @@ from brutex.data.lake_invariants import (
     PartitionCoords,
     PriceSanityRows,
     scan_lake_invariants,
+)
+from brutex.data.lake_write_epoch import (
+    epoch_marker_path,
+    read_write_epoch,
 )
 from brutex.data.models import CandleBar, OptionBar
 from brutex.data.option_parquet_writer import (
@@ -3955,7 +3963,13 @@ class TestRunStartupSweep:
         assert second.token == first.token
         assert second.scan is None
         assert second.report is None
-        assert len(_events(logs, "lake_heal.sweep_skip_token_match")) == 1
+        # DEC-LAKE-HEAL-STARTUP-EPOCH-001: the common unchanged-lake boot is now
+        # the O(1) Tier-1 epoch-match skip (NOT the Tier-2 token walk); the full
+        # `lake_content_token` is never computed on this path (see the dedicated
+        # cheapness regression `TestStartupSweepEpochGate`).
+        assert len(_events(logs, "lake_heal.sweep_skip_epoch_match")) == 1
+        assert _events(logs, "lake_heal.sweep_skip_token_match") == []
+        assert _events(logs, "lake_heal.content_token_walk_begin") == []
 
     def test_startup_sweep_restamps_post_heal_token(self, tmp_path: Path) -> None:
         """A healing sweep stamps the POST-heal token — the very next sweep is
@@ -4442,12 +4456,17 @@ class TestSentinelShape:
         _write_spot(lake, [_bar(_ts(0))])
         run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
         raw = json.loads((lake / ".lake_heal" / "last_sweep.json").read_text(encoding="utf-8"))
-        assert raw["version"] == 1
+        # v2 (DEC-LAKE-HEAL-STARTUP-EPOCH-001): adds ``write_epoch`` for the
+        # O(1) fast-path skip; the v1 payload keys are otherwise preserved.
+        assert raw["version"] == 2
         assert raw["completed_utc"] == _NOW.isoformat()
         assert raw["files_scanned"] == 1
         assert raw["findings"] == 0
         assert raw["healed"] == 0
         assert raw["mode"] == "auto"
+        # The write-epoch marker was bumped by the clean `_write_spot` write, so
+        # the sentinel records a non-null epoch → the next boot is a Tier-1 skip.
+        assert raw["write_epoch"] is not None
 
 
 # ── residual branch pins (whitebox where the design names privates) ────────
@@ -4655,3 +4674,488 @@ class TestPriceFindingsObserveOnly:
         # No observe_only detail fires for an EMPTY post-filter batch.
         assert _events(logs, "lake_heal.observe_only") == []
         assert len(_events(logs, "lake_heal.price_findings_observe_only")) == 1
+
+
+# ── L3 write-epoch cheap gate + F4 beat channel (DEC-LAKE-HEAL-STARTUP-EPOCH-001) ──
+
+
+def _future(days: int = 31) -> datetime:
+    """A clock far enough past ``_NOW`` to trip the 7-day max-age valve."""
+    from datetime import timedelta
+
+    return _NOW + timedelta(days=days)
+
+
+def _stamp_clean(lake: Path, *, months: Sequence[int] = (6,)) -> None:
+    """Seed *months* clean spot partitions (each writer bump creates the epoch
+    marker) then run ONE sweep to stamp the v2 sentinel — the post-condition
+    every fast-path test builds on."""
+    for month in months:
+        _write_spot(lake, [_bar(_ts(0, month=month))])
+    run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+
+
+class TestResolveEpochMaxAge:
+    def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(EPOCH_MAX_AGE_ENV, raising=False)
+        assert resolve_epoch_max_age_s() == EPOCH_MAX_AGE_DEFAULT_S
+
+    def test_valid_value_is_honored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(EPOCH_MAX_AGE_ENV, "3600")
+        assert resolve_epoch_max_age_s() == 3600.0
+
+    def test_unparsable_falls_back_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(EPOCH_MAX_AGE_ENV, "not-a-float")
+        with capture_logs() as logs:
+            assert resolve_epoch_max_age_s() == EPOCH_MAX_AGE_DEFAULT_S
+        (warn,) = _events(logs, "lake_heal.epoch_max_age_invalid")
+        assert warn["reason"] == "unparsable"
+
+    def test_non_positive_falls_back_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(EPOCH_MAX_AGE_ENV, "-5")
+        with capture_logs() as logs:
+            assert resolve_epoch_max_age_s() == EPOCH_MAX_AGE_DEFAULT_S
+        (warn,) = _events(logs, "lake_heal.epoch_max_age_invalid")
+        assert warn["reason"] == "non_positive_or_inf"
+
+    def test_inf_falls_back_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A garbage value must NOT be read as 'infinite' (which would disable
+        the valve silently) — it loudly falls back to the default."""
+        monkeypatch.setenv(EPOCH_MAX_AGE_ENV, "inf")
+        with capture_logs() as logs:
+            assert resolve_epoch_max_age_s() == EPOCH_MAX_AGE_DEFAULT_S
+        (warn,) = _events(logs, "lake_heal.epoch_max_age_invalid")
+        assert warn["reason"] == "non_positive_or_inf"
+
+
+class TestSentinelTooOld:
+    def test_missing_completed_utc_is_too_old(self) -> None:
+        assert lake_heal._sentinel_too_old({}, _now) is True
+
+    def test_non_string_completed_utc_is_too_old(self) -> None:
+        assert lake_heal._sentinel_too_old({"completed_utc": 123}, _now) is True
+
+    def test_unparsable_completed_utc_is_too_old(self) -> None:
+        assert lake_heal._sentinel_too_old({"completed_utc": "not-a-date"}, _now) is True
+
+    def test_naive_stamp_within_age_is_not_too_old(self) -> None:
+        """A NAIVE completed_utc is read as UTC (the replace branch); a same-day
+        stamp is within the valve."""
+        assert (
+            lake_heal._sentinel_too_old(
+                {"completed_utc": _NOW.replace(tzinfo=None).isoformat()}, _now
+            )
+            is False
+        )
+
+    def test_aware_stamp_beyond_valve_is_too_old(self) -> None:
+        assert lake_heal._sentinel_too_old({"completed_utc": _NOW.isoformat()}, _future) is True
+
+
+class TestStartupSweepEpochGate:
+    """F1 (DEC-LAKE-HEAL-STARTUP-EPOCH-001) — the O(1) Tier-1 skip + fallbacks."""
+
+    def test_tier1_skip_never_walks_the_lake(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MISSING cheapness regression: the epoch-match skip computes
+        ``lake_content_token`` ZERO times and lstats ZERO bars/options files —
+        bounded and INDEPENDENT of lake file count (the ~27-min-every-boot walk
+        the old change-detector paid)."""
+        lake = tmp_path / "lake"
+        _stamp_clean(lake, months=(4, 5, 6))  # 3 partition files
+        token_calls: list[int] = []
+        monkeypatch.setattr(
+            lake_heal,
+            "lake_content_token",
+            lambda root: token_calls.append(1) or "x" * 64,  # type: ignore[func-returns-value]
+        )
+        real_lstat = Path.lstat
+        walked: list[str] = []
+
+        def _counting_lstat(self: Path) -> Any:
+            s = self.as_posix()
+            if str(lake) in s and ("/bars/" in s or "/options/" in s):
+                walked.append(s)
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", _counting_lstat)
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is False
+        assert token_calls == []  # NO O(files) content-token walk on the skip
+        assert walked == []  # ZERO bars/options lstats on the skip
+        assert len(_events(logs, "lake_heal.sweep_skip_epoch_match")) == 1
+
+    @pytest.mark.parametrize("n_files", [1, 12])
+    def test_tier1_skip_cost_is_file_count_invariant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, n_files: int
+    ) -> None:
+        """The skip-path content-token-walk budget is identical for a 1-file and
+        a 12-file lake (0 in both) — the cheapness is provably independent of
+        file count."""
+        lake = tmp_path / "lake"
+        _stamp_clean(lake, months=tuple(range(1, n_files + 1)))
+        calls: list[int] = []
+        monkeypatch.setattr(
+            lake_heal,
+            "lake_content_token",
+            lambda root: calls.append(1) or "x" * 64,  # type: ignore[func-returns-value]
+        )
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        assert calls == []
+
+    def test_no_epoch_marker_falls_through_to_full_token(self, tmp_path: Path) -> None:
+        """Cheap-signal unavailable (marker absent): Tier 1 is bypassed, the full
+        token is computed EXACTLY once, and a token match still yields a skip
+        (Tier 2) that re-stamps a v2 sentinel."""
+        lake = tmp_path / "lake"
+        _stamp_clean(lake)
+        epoch_marker_path(lake).unlink()  # remove the cheap signal
+        assert read_write_epoch(lake) is None
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is False
+        # Tier-1 bypassed → the authoritative full token ran (the walk fired) and
+        # matched → Tier-2 token-match skip.
+        assert len(_events(logs, "lake_heal.content_token_walk_begin")) == 1
+        assert len(_events(logs, "lake_heal.sweep_skip_token_match")) == 1
+        assert _events(logs, "lake_heal.sweep_skip_epoch_match") == []
+
+    def test_v1_sentinel_migrates_via_token_match_then_tier1(self, tmp_path: Path) -> None:
+        """A v1 sentinel (no ``write_epoch``) → first boot Tier-2 token match →
+        re-stamped v2 with the current epoch → the SECOND boot is Tier-1 O(1)."""
+        lake = tmp_path / "lake"
+        _stamp_clean(lake)
+        # Downgrade the stamped sentinel to the legacy v1 shape (drop write_epoch).
+        sentinel_path = lake / ".lake_heal" / "last_sweep.json"
+        raw = json.loads(sentinel_path.read_text(encoding="utf-8"))
+        raw.pop("write_epoch")
+        raw["version"] = 1
+        sentinel_path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+        with capture_logs() as logs:
+            first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.ran is False
+        assert len(_events(logs, "lake_heal.sweep_skip_token_match")) == 1
+        migrated = load_last_sweep(lake)
+        assert migrated is not None
+        assert migrated["version"] == 2
+        assert migrated["write_epoch"] == read_write_epoch(lake)  # re-aligned
+        with capture_logs() as logs2:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        assert len(_events(logs2, "lake_heal.sweep_skip_epoch_match")) == 1
+
+    def test_max_age_valve_forces_a_full_check_despite_epoch_match(self, tmp_path: Path) -> None:
+        """A matching epoch but a last-sweep older than the 7-day valve BYPASSES
+        the O(1) skip (a full token runs) — the out-of-band-drift safety net."""
+        lake = tmp_path / "lake"
+        _stamp_clean(lake)
+        assert read_write_epoch(lake) is not None  # epoch still matches
+        with capture_logs() as logs:
+            # now = 31 days after the stamp → age > EPOCH_MAX_AGE_DEFAULT_S (7 d).
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_future)
+        assert result.ran is False
+        assert len(_events(logs, "lake_heal.content_token_walk_begin")) == 1  # full walk ran
+        assert _events(logs, "lake_heal.sweep_skip_epoch_match") == []
+
+    def test_force_computes_the_token_at_most_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``force=True`` skips Tier 1 and the Tier-2 early return; on a clean
+        (nothing-healed) lake the token is computed exactly ONCE (no post walk)."""
+        lake = tmp_path / "lake"
+        _stamp_clean(lake)
+        real = lake_heal.lake_content_token
+        calls: list[int] = []
+
+        def _spy(root: Path) -> str:
+            calls.append(1)
+            return real(root)
+
+        monkeypatch.setattr(lake_heal, "lake_content_token", _spy)
+        result = run_startup_sweep(lake, force=True, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert result.report is not None and result.report.healed == 0
+        assert calls == [1]  # pre-token only; healed==0 reuses it for post_token
+
+
+class TestStartupSweepEpochBumps:
+    """Each content-mutation site bumps the write epoch → the next boot re-checks
+    (the mutant-killers for a forgotten ``bump_write_epoch``)."""
+
+    def test_fresh_write_bumps_epoch(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        assert read_write_epoch(lake) is None
+        _write_spot(lake, [_bar(_ts(0))])
+        assert read_write_epoch(lake) is not None  # site 1 (fresh render)
+
+    def test_merge_write_bumps_but_no_op_repull_does_not(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        before = read_write_epoch(lake)
+        _write_spot(lake, [_bar(_ts(1))])  # a NEW bar into the existing partition
+        after = read_write_epoch(lake)
+        assert after is not None and after != before  # site 1 (merge render)
+        # A pure re-pull (file_rewritten=False) writes nothing → epoch UNCHANGED.
+        _write_spot(lake, [_bar(_ts(1))])
+        assert read_write_epoch(lake) == after
+
+    def test_option_write_bumps_but_no_op_repull_does_not(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL", coordinate=_OPT_COORD, bars=[_option_bar()]
+        )
+        after = read_write_epoch(lake)
+        assert after is not None  # site 4 (option render)
+        writer.write(  # pure re-pull → added==0 → no write → epoch UNCHANGED
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL", coordinate=_OPT_COORD, bars=[_option_bar()]
+        )
+        assert read_write_epoch(lake) == after
+
+    def test_spot_heal_rewrite_bumps_epoch(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        dest = _dest(lake)
+        _poison(dest, [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])  # dup
+        before = read_write_epoch(lake)  # None — poison is raw
+        quarantine = lake / ".quarantine" / "q" / dest.name
+        ParquetWriter(lake_root=lake).heal_partition(dest, quarantine_to=quarantine)
+        assert read_write_epoch(lake) != before  # site 2 (heal rewrite)
+        assert read_write_epoch(lake) is not None
+
+    def test_spot_heal_whole_file_removal_bumps_epoch(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        dest = _write_spot(lake, [_bar(_ts(0))])
+        before = read_write_epoch(lake)
+        quarantine = lake / ".quarantine" / "q" / dest.name
+        # Remove the only timestamp → wholly-foreign → quarantine-MOVE (removal).
+        ParquetWriter(lake_root=lake).heal_partition(
+            dest, remove_timestamps={_ts(0)}, quarantine_to=quarantine
+        )
+        assert read_write_epoch(lake) != before  # site 3 (heal removal)
+
+    def test_option_heal_rewrite_bumps_epoch(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        dest = _poison_option_lake(lake)  # a (side,ts) dup
+        before = read_write_epoch(lake)
+        quarantine = lake / ".quarantine" / "q" / dest.name
+        OptionParquetWriter(lake_root=lake).heal_partition(dest, quarantine_to=quarantine)
+        assert read_write_epoch(lake) != before  # site 5 (option heal rewrite)
+
+    def test_option_heal_whole_file_removal_bumps_epoch(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_option_bar(side="CE")],
+        )
+        (dest,) = (lake / "options").rglob("*.parquet")
+        before = read_write_epoch(lake)
+        quarantine = lake / ".quarantine" / "q" / dest.name
+        writer.heal_partition(
+            dest, remove_keys={("CE", _option_bar(side="CE").timestamp)}, quarantine_to=quarantine
+        )
+        assert read_write_epoch(lake) != before  # site 6 (option heal removal)
+
+    def test_quarantine_move_bumps_epoch_across_a_legacy_drift_heal(self, tmp_path: Path) -> None:
+        """A LegacyKeyDrift heal quarantine-MOVES the drifted dir's files through
+        ``_quarantine_move`` (the lake_heal chokepoint) — the epoch moves across
+        the healing sweep, so a re-pull that later drifts a dir cannot O(1)-skip."""
+        lake = tmp_path / "lake"
+        # A clean canonical + a raw drifted-key dir → the scanner flags drift.
+        _write_spot(lake, [_bar(_ts(0))], symbol="M&M", segment="CASH")
+        drift_dir = lake / "bars" / "NSE" / "CASH" / "NSE-M&M" / "1minute" / "2024" / "06.parquet"
+        _poison(drift_dir, [(_ts(5), 100.0, 10)])
+        pre = read_write_epoch(lake)
+        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.report is not None and result.report.healed == 1
+        post = read_write_epoch(lake)
+        assert post is not None and post != pre  # the heal moved the epoch
+
+    def test_external_write_after_stamp_forces_full_recheck(self, tmp_path: Path) -> None:
+        """The soundness pin: a write landing AFTER a clean stamp moves the epoch,
+        so the next boot does NOT O(1)-skip (it re-checks via the full token)."""
+        lake = tmp_path / "lake"
+        _stamp_clean(lake)
+        stamped = load_last_sweep(lake)
+        assert stamped is not None
+        # An external in-band write (a pull) lands AFTER the stamp → epoch moves.
+        _write_spot(lake, [_bar(_ts(9))])
+        assert read_write_epoch(lake) != stamped["write_epoch"]
+        with capture_logs() as logs:
+            run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        # Tier 1 was bypassed (epoch mismatch) → the full token walk ran.
+        assert len(_events(logs, "lake_heal.content_token_walk_begin")) >= 1
+        assert _events(logs, "lake_heal.sweep_skip_epoch_match") == []
+
+    def test_post_epoch_read_after_heal_writes(self, tmp_path: Path) -> None:
+        """The stamped ``write_epoch`` reflects the HEAL's own bump (read AFTER
+        heal_findings) — if it were read pre-heal the next boot could skip past a
+        stale pair."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        pre_sweep_epoch = read_write_epoch(lake)
+        _poison(_dest(lake, month=7), [(_ts(0, month=7), 100.0, 10), (_ts(0, month=7), 9.0, 11)])
+        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.report is not None and result.report.healed == 1
+        stamped = load_last_sweep(lake)
+        assert stamped is not None
+        # The stamped epoch is the heal's bump (moved past the pre-sweep value)
+        # and equals the current marker — proving post_epoch is read post-heal.
+        assert stamped["write_epoch"] != pre_sweep_epoch
+        assert stamped["write_epoch"] == read_write_epoch(lake)
+
+
+class TestStartupSweepBeatChannel:
+    """F4 (DEC-LAKE-HEAL-STARTUP-EPOCH-001) — the L3 sweep's own beats never
+    DROP into a live pull's keyed registry."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_beats(self) -> Any:
+        from brutex.observability.progress_beat import reset_progress_beats
+
+        reset_progress_beats()
+        yield
+        reset_progress_beats()
+
+    def _drop_warns(self, caplog: pytest.LogCaptureFixture) -> list[Any]:
+        return [r for r in caplog.records if "foreign_beat_dropped" in r.getMessage()]
+
+    def test_sweep_channel_id_cannot_collide_with_a_run_pull_id(self) -> None:
+        """The dedicated channel is a NON-hex string, so it can never equal a
+        run's 12-hex ``pull_id`` (never absorbs a real pull's keyed beats)."""
+        with pytest.raises(ValueError):
+            int(LAKE_HEAL_SWEEP_PULL_ID, 16)
+
+    def test_unscoped_emit_during_keyed_pull_would_drop(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The mechanism the F4 fix defeats: an UNSCOPED emit while a keyed pull
+        is registered DROPS + WARNs (this is what the old unscoped L3 sweep did)."""
+        import logging
+
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+        )
+
+        caplog.set_level(logging.WARNING, logger="brutex.observability.progress_beat")
+        register_progress_beat(lambda: None, pull_id="deadbeef0001")
+        emit_progress_beat()  # ambient channel "" — no legacy registrant → DROP
+        assert len(self._drop_warns(caplog)) == 1
+
+    def test_l3_sweep_emits_no_foreign_drop_during_a_live_keyed_pull(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The regression: an L3 heal sweep (≥1 finding → ≥1 per-finding beat)
+        run WHILE a keyed pull is registered produces ZERO ``foreign_beat_dropped``
+        after the fix, and the keyed run's OWN watchdog still beats (anti-masking
+        preserved). Drives the sweep BOTH via ``run_sync`` and via a synchronous
+        ``start`` so the fix location (``run_sync``) is exercised end-to-end."""
+        import logging
+
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+        )
+
+        caplog.set_level(logging.WARNING, logger="brutex.observability.progress_beat")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])  # ≥1 finding
+        keyed_beats: list[int] = []
+        register_progress_beat(lambda: keyed_beats.append(1), pull_id="deadbeef0001")
+        # The keyed pull's OWN beat still lands (proving the watchdog is alive).
+        emit_progress_beat("deadbeef0001")
+        assert keyed_beats == [1]
+
+        result = StartupSweeper(lake).run_sync()  # the fix location
+        assert result is not None
+        assert result.report is not None and result.report.healed == 1
+        # The sweep's per-finding beats rode the dedicated LAKE_HEAL_SWEEP_PULL_ID
+        # channel → NO drop against the keyed pull.
+        assert self._drop_warns(caplog) == []
+        # The keyed channel is untouched by the sweep (still exactly our 1 emit).
+        assert keyed_beats == [1]
+
+    def test_l3_sweep_via_synchronous_start_emits_no_foreign_drop(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The daemon-launch path (``start`` with a synchronous spawn) also binds
+        the dedicated channel — no drop against a live keyed pull."""
+        import logging
+
+        from brutex.observability.progress_beat import register_progress_beat
+
+        caplog.set_level(logging.WARNING, logger="brutex.observability.progress_beat")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        keyed_beats: list[int] = []
+        register_progress_beat(lambda: keyed_beats.append(1), pull_id="deadbeef0002")
+        StartupSweeper(lake, spawn=lambda body: body()).start()
+        # No drop against the live keyed pull, and its own channel is untouched
+        # (the sweep's beats rode the dedicated LAKE_HEAL_SWEEP_PULL_ID channel).
+        assert self._drop_warns(caplog) == []
+        assert keyed_beats == []
+
+
+class TestAutoResumedPullBeatsFlow:
+    """F4 evidence: an auto-resumed pull uses the IDENTICAL BackgroundPullJob
+    keyed-beat binding as a manual pull — it is NOT the drop source (the reader's
+    corrected diagnosis)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_beats(self) -> Any:
+        from brutex.observability.progress_beat import reset_progress_beats
+
+        reset_progress_beats()
+        yield
+        reset_progress_beats()
+
+    def test_job_run_binds_a_keyed_channel_that_receives_the_workers_beats(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Driving the REAL BackgroundPullJob (the SAME path the auto-resume
+        launch takes) — a beat emitted from the worker under its ambient pull id
+        reaches the run's keyed watchdog, and the LEGACY canary stays silent."""
+        from collections.abc import Callable
+
+        from brutex.dashboard import pull_jobs as pull_jobs_module
+        from brutex.dashboard.pull_jobs import BackgroundPullJob
+        from brutex.dashboard.pull_progress import STATE_DONE, PullProgress
+        from brutex.dashboard.pull_stall import PullWatchdog
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+        )
+        from brutex.observability.watchdog import WorkerEvent
+
+        monkeypatch.setattr(pull_jobs_module, "_default_lake_root_resolver", lambda: None)
+        legacy_beats: list[int] = []
+        register_progress_beat(lambda: legacy_beats.append(1))  # LEGACY canary
+
+        built: list[PullWatchdog] = []
+
+        def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            wd = PullWatchdog(on_hung=on_hung, timeout_seconds=600.0, spawn=lambda _fn: None)
+            built.append(wd)
+            return wd
+
+        job = BackgroundPullJob(
+            progress=PullProgress(),
+            spawn=lambda fn: fn(),  # synchronous — the test IS the worker thread
+            watchdog_factory=factory,
+        )
+        beat_seen: list[bool] = []
+
+        def work(on_progress: object) -> None:
+            wd = built[0]
+            wd.beat()  # seed liveness
+            emit_progress_beat()  # ambient run id → the run's keyed channel
+            beat_seen.append(wd.check_once() == ())  # still healthy
+
+        assert job.start(work, total=1) is True
+        assert job.snapshot().state == STATE_DONE
+        assert beat_seen == [True]  # the worker's ambient beat reached the watchdog
+        assert legacy_beats == []  # keyed routing, never the legacy fallback

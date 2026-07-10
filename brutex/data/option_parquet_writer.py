@@ -73,6 +73,7 @@ from brutex.data.lake_stats_manifest import (
     remove_partition_stats,
     stats_manifest_enabled,
 )
+from brutex.data.lake_write_epoch import bump_write_epoch
 from brutex.data.models import OptionBar
 from brutex.data.partition import option_partition_stem, partition_for_timestamp
 from brutex.data.partition_lock import BoundedLockRegistry, partition_write_lock
@@ -547,6 +548,11 @@ class OptionParquetWriter:
                 # The ``added == 0`` pure re-pull writes nothing and therefore
                 # touches no shard (the existing row stays stat-valid).
                 _record_option_stats(self._lake_root, dest=dest, frame=combined)
+                # Write-epoch bump (DEC-LAKE-HEAL-STARTUP-EPOCH-001): a render
+                # moved lake_content_token — refresh the L3 cheap gate
+                # (unconditional, best-effort). The ``added==0`` pure re-pull
+                # above writes nothing and skips this too.
+                bump_write_epoch(self._lake_root)
             return added
 
     def read_partition_frame(self, dest: Path) -> pl.DataFrame:
@@ -756,6 +762,10 @@ class OptionParquetWriter:
                 # every consult until a reseed (safe — fallback, never a
                 # wrong answer — but defeats the manifest for the series).
                 _remove_option_stats(self._lake_root, dest=dest)
+                # Write-epoch bump (DEC-LAKE-HEAL-STARTUP-EPOCH-001): a heal
+                # whole-file removal moved lake_content_token — refresh the L3
+                # cheap gate (unconditional, best-effort).
+                bump_write_epoch(self._lake_root)
                 return OptionHealResult(
                     path=dest,
                     changed=True,
@@ -770,6 +780,10 @@ class OptionParquetWriter:
             # count + fresh stat token) under the SAME held locks. The
             # unchanged branch above returns earlier and touches nothing.
             _record_option_stats(self._lake_root, dest=dest, frame=deduped)
+            # Write-epoch bump (DEC-LAKE-HEAL-STARTUP-EPOCH-001): a heal rewrite
+            # rendered new bytes, moving lake_content_token — refresh the L3
+            # cheap gate (unconditional, best-effort).
+            bump_write_epoch(self._lake_root)
             return OptionHealResult(
                 path=dest,
                 changed=True,
