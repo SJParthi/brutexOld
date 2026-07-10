@@ -90,6 +90,28 @@ def _seed_dd_rows(lake_root: Path) -> None:
     )
 
 
+class TestPresetUiExposureGuard:
+    """DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (finder insurance, 3-refuter
+    sanctioned): the ``?preset=`` API arm ranks with the WIRE-DISCLOSED inert
+    tie-break axes (``preset_inert_axes`` — #1617 Ruling 10), so the /results
+    UI must NOT expose a preset control until the Ruling-10 sidecar join
+    lands (an operator-visible preset toggle over inert axes would look like
+    the one-click Top-100 order while tie-breaking differently)."""
+
+    def test_results_template_does_not_send_a_preset_param(self) -> None:
+        html = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "templates"
+            / "results.html"
+        ).read_text(encoding="utf-8")
+        assert "?preset=" not in html
+        assert 'params.set("preset"' not in html
+        # The [11] sort-basis label IS present — a label, never a control.
+        assert "Sort basis:" in html
+
+
 class TestPresetParam:
     def test_preset_orders_and_echoes(self, client: TestClient, store: InstrumentStore) -> None:
         _seed_dd_rows(store.path.parent)

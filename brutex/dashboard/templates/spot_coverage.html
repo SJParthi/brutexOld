@@ -52,6 +52,11 @@
      live-down) drive the color from the REAL per-tick outcome; it never
      pulses green while the endpoint is down. */
   .live .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  /* Floor-stale badge (DEC-STALENESS-CACHE-TRUTH-001): amber, rendered only when
+     the payload itself says duty_degraded — never a guessed client verdict. */
+  .stalechip { color:var(--yellow); font-size:11px; border:1px solid var(--yellow);
+    border-radius:999px; padding:2px 8px; }
+  .stalechip:empty { display:none; }
 
   .subnav { display:flex; gap:10px; padding:12px 24px; border-bottom:1px solid var(--border);
     animation: fadeInDown .6s .04s ease both; flex-wrap:wrap; }
@@ -151,13 +156,19 @@
       <span class="sep">·</span>
       <a href="/coverage" aria-current="page">Coverage</a>
       <span class="sep">·</span>
+      <a href="/completeness">Completeness</a>
+      <span class="sep">·</span>
       <a href="/movers">Movers</a>
       <span class="sep">·</span>
       <a href="/results">Results</a>
       <span class="sep">·</span>
+      <a href="/screener">Screener</a>
+      <span class="sep">·</span>
+      <a href="/strategy">Strategy</a>
+      <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
-    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">polling</span></div>
+    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">polling</span><span id="stalechip" class="stalechip"></span></div>
   </header>
 
   <nav class="subnav">
@@ -367,6 +378,26 @@ function doFetch(url) {
   return window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url);
 }
 
+/* ── Floor-stale badge (DEC-STALENESS-CACHE-TRUTH-001) ──
+   The payload ALREADY carries the honesty fields (duty_degraded +
+   snapshot_age_s, stamped by SummaryCache.stamp_freshness — the #920 adaptive
+   floor) — render them: while a dashboard pull holds the snapshot back, show an
+   amber badge with the snapshot's own age; a fresh payload clears it. The body
+   text differs each degraded poll (the age ticks), so the exact-body skip-render
+   above never freezes the badge; a stale-but-un-degraded serve (e.g. a
+   cross-process CLI pull — the probe is in-process-only) stays honestly
+   unmarked, and the ~4 min figure is the documented composed worst case
+   (2 × 120 s floors), not a measurement. textContent only. */
+const staleChip = document.getElementById("stalechip");
+function renderStaleChip(body) {
+  if (body && body.duty_degraded === true) {
+    staleChip.textContent = "snapshot " + Math.round(body.snapshot_age_s || 0)
+      + "s old — refresh throttled during the pull (chips may lag up to ~4 min)";
+  } else {
+    staleChip.textContent = "";
+  }
+}
+
 async function poll() {
   /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
      ZERO fetches; the interval keeps ticking (hidden ticks are free) and the
@@ -386,6 +417,7 @@ async function poll() {
     if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return; }
     lastPayloadTxt = txt;
     const body = JSON.parse(txt);
+    renderStaleChip(body);
     const h = body.headline || {};
     setKpi(dsEl, h.datasets ?? "—");
     /* Value-aware KPI color: green only when the lake actually has datasets. */

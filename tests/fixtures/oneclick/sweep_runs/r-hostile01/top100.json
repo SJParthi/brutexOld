@@ -1,92 +1,220 @@
-[
- {
-  "arm": "SL2.0_TP3.0",
-  "conditions": [
-   "<script>alert(1)</script>",
-   "PDH_CROSS_UP"
-  ],
-  "direction": "long",
-  "family_id": "<img src=x onerror=alert(1)>",
-  "mask_hex": "0x00000000000000000000000000000005",
-  "metrics": {
-   "cpcv_pass_pct": 87.5,
-   "dsr": 0.93,
-   "max_dd_paisa": -158117,
-   "net_pnl_paisa": 8962469,
-   "profit_factor": 2.5,
-   "sharpe": 3.2,
-   "trades": 187,
-   "win_rate": 0.61
+{
+ "baselines": {},
+ "entries": [
+  {
+   "arm": {
+    "sl_paisa": 5150,
+    "tp_paisa": 9375
+   },
+   "conditions": [
+    "<script>alert(1)</script>",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "<img src=x onerror=alert(1)>",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.93,
+    "max_drawdown_paisa": -158117,
+    "net_pnl_paisa": 8962469,
+    "profit_factor": 2.5,
+    "sharpe_ratio": 3.2,
+    "total_trades": 187,
+    "win_rate": 0.61
+   },
+   "rank": 1,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2987490,
+     "trending": 5974979
+    },
+    "by_year": {
+     "2024": 5974979,
+     "2025": 2987490
+    },
+    "entry_hour_hist": {
+     "10": 83,
+     "9": 101
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "5m",
+   "vix_band": {
+    "hi": 18.0,
+    "lo": 11.75,
+    "loss": {
+     "avg": 14.375,
+     "max": 17.5,
+     "min": 11.25
+    },
+    "missing": 0,
+    "stamped": 187,
+    "win": {
+     "avg": 14.875,
+     "max": 18.0,
+     "min": 11.75
+    }
+   }
   },
-  "rank": 1,
-  "regime": {
-   "sideways_pnl_paisa": 2987490,
-   "trending_pnl_paisa": 5974979
+  {
+   "arm": {
+    "sl_paisa": 7725,
+    "tp_paisa": 12500
+   },
+   "conditions": [
+    "<svg onload=alert(1)>",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "short",
+   "family_id": "<img src=x onerror=alert(1)>",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000007",
+   "metrics": {
+    "deflated_sharpe": 0.9259,
+    "max_drawdown_paisa": -166234,
+    "net_pnl_paisa": 8924938,
+    "profit_factor": 2.4887,
+    "sharpe_ratio": 3.1827,
+    "total_trades": 194,
+    "win_rate": 0.6077
+   },
+   "rank": 2,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2974980,
+     "trending": 5949958
+    },
+    "by_year": {
+     "2024": 5949958,
+     "2025": 2974980
+    },
+    "entry_hour_hist": {
+     "10": 86,
+     "9": 102
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "15m",
+   "vix_band": {
+    "hi": 18.5,
+    "lo": 12.5,
+    "loss": {
+     "avg": 15.0,
+     "max": 18.0,
+     "min": 12.0
+    },
+    "missing": 0,
+    "stamped": 194,
+    "win": {
+     "avg": 15.5,
+     "max": 18.5,
+     "min": 12.5
+    }
+   }
   },
-  "tf": "5m",
-  "vix_band": {
-   "hi": 18.0,
-   "lo": 11.75
+  {
+   "arm": {
+    "sl_paisa": 2575,
+    "tp_paisa": 15625
+   },
+   "conditions": [
+    "x\" onerror=\"alert(1)",
+    "PDH_CROSS_UP"
+   ],
+   "direction": "long",
+   "family_id": "<img src=x onerror=alert(1)>",
+   "family_members": [
+    "fam-0001"
+   ],
+   "instrument": "NSE-NIFTY",
+   "margin_roi": null,
+   "mask_hex": "00000000000000000000000000000005",
+   "metrics": {
+    "deflated_sharpe": 0.9218,
+    "max_drawdown_paisa": -174351,
+    "net_pnl_paisa": 8887407,
+    "profit_factor": 2.4774,
+    "sharpe_ratio": 3.1654,
+    "total_trades": 201,
+    "win_rate": 0.6054
+   },
+   "rank": 3,
+   "reasons": null,
+   "regime": {
+    "by_trend": {
+     "sideways": 2962470,
+     "trending": 5924937
+    },
+    "by_year": {
+     "2024": 5924937,
+     "2025": 2962470
+    },
+    "entry_hour_hist": {
+     "10": 89,
+     "9": 103
+    },
+    "event_days": {
+     "counts": {},
+     "pnl": {}
+    },
+    "one_regime_wonder": false,
+    "regime_wonder_axis": null
+   },
+   "tf": "1h",
+   "vix_band": {
+    "hi": 19.0,
+    "lo": 13.25,
+    "loss": {
+     "avg": 15.625,
+     "max": 18.5,
+     "min": 12.75
+    },
+    "missing": 0,
+    "stamped": 201,
+    "win": {
+     "avg": 16.125,
+     "max": 19.0,
+     "min": 13.25
+    }
+   }
   }
- },
- {
-  "arm": "SL3.0_TP4.0",
-  "conditions": [
-   "<svg onload=alert(1)>",
-   "PDH_CROSS_UP"
+ ],
+ "preset": "min_dd_first",
+ "run_id": "r-hostile01",
+ "schema_version": 1,
+ "source": {
+  "data_snapshot_hashes": [
+   "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   ],
-  "direction": "short",
-  "family_id": "<img src=x onerror=alert(1)>",
-  "mask_hex": "0x00000000000000000000000000000007",
-  "metrics": {
-   "cpcv_pass_pct": 87.19,
-   "dsr": 0.9259,
-   "max_dd_paisa": -166234,
-   "net_pnl_paisa": 8924938,
-   "profit_factor": 2.4887,
-   "sharpe": 3.1827,
-   "trades": 194,
-   "win_rate": 0.6077
-  },
-  "rank": 2,
-  "regime": {
-   "sideways_pnl_paisa": 2974980,
-   "trending_pnl_paisa": 5949958
-  },
-  "tf": "15m",
-  "vix_band": {
-   "hi": 18.5,
-   "lo": 12.5
-  }
- },
- {
-  "arm": "SL1.0_TP5.0",
-  "conditions": [
-   "x\" onerror=\"alert(1)",
-   "PDH_CROSS_UP"
-  ],
-  "direction": "long",
-  "family_id": "<img src=x onerror=alert(1)>",
-  "mask_hex": "0x00000000000000000000000000000005",
-  "metrics": {
-   "cpcv_pass_pct": 86.88,
-   "dsr": 0.9218,
-   "max_dd_paisa": -174351,
-   "net_pnl_paisa": 8887407,
-   "profit_factor": 2.4774,
-   "sharpe": 3.1654,
-   "trades": 201,
-   "win_rate": 0.6054
-  },
-  "rank": 3,
-  "regime": {
-   "sideways_pnl_paisa": 2962470,
-   "trending_pnl_paisa": 5924937
-  },
-  "tf": "1h",
-  "vix_band": {
-   "hi": 19.0,
-   "lo": 13.25
-  }
+  "excluded_no_aggs": 0,
+  "families_collapsed": 0,
+  "gate_passers": 3,
+  "margin_roi_wired": false,
+  "parity_excluded": 0,
+  "pool": 3,
+  "reasons_wired": false,
+  "stores": 3,
+  "zero_trade_excluded": 0
  }
-]
+}

@@ -235,58 +235,6 @@
   }
   .shake-on-reveal { animation: cameraShake 0.5s ease-in-out 0.6s 1; }
 
-  /* v24.4 — First-frame HOOK banner (TOP) — the viral stopper */
-  .hook-banner {
-    position: relative;
-    margin: 0;
-    padding: 14px 24px;
-    background: linear-gradient(90deg,
-      rgba(255,176,122,0.18) 0%,
-      rgba(91,141,239,0.22) 50%,
-      rgba(255,200,87,0.18) 100%);
-    background-size: 250% 100%;
-    border-bottom: 1px solid rgba(91,141,239,0.3);
-    overflow: hidden;
-    animation: gradientShift 5s ease-in-out infinite;
-  }
-  .hook-banner .scroll-track {
-    display: flex;
-    gap: 32px;
-    white-space: nowrap;
-    animation: tickerScroll 30s linear infinite;
-    font-family: "SF Mono", ui-monospace, Menlo, monospace;
-    font-size: 13px;
-    font-weight: 700;
-  }
-  @keyframes tickerScroll {
-    0% { transform: translateX(0); }
-    100% { transform: translateX(-50%); }
-  }
-  .hook-banner .tick { display: inline-flex; align-items: center; gap: 6px; }
-  .hook-banner .tick.up { color: var(--green-bright); }
-  .hook-banner .tick.down { color: var(--red); }
-  .hook-banner .tick .sym { color: var(--muted); font-weight: 600; }
-  .hook-banner .live-dot {
-    width: 8px; height: 8px;
-    background: var(--green-bright);
-    border-radius: 50%;
-    box-shadow: 0 0 10px var(--green-bright);
-    animation: pulse 1.5s ease-in-out infinite;
-    flex-shrink: 0;
-  }
-  .hook-banner .live-tag {
-    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
-    z-index: 5;
-    background: var(--bg);
-    padding: 5px 10px;
-    border-radius: 5px;
-    border: 1px solid var(--green);
-    color: var(--green-bright);
-    font-size: 11px; font-weight: 900; letter-spacing: 0.1em;
-    display: inline-flex; align-items: center; gap: 6px;
-    box-shadow: 0 0 16px rgba(255,200,87,0.4);
-  }
-
   /* v24.5 — Glow ring on hero rank-pill (cumulative attention magnet) */
   .rank-pill { position: relative; }
   .rank-pill::before {
@@ -2257,29 +2205,11 @@
 </head>
 <body class="operator-mode">
 
-<!-- v24.4: First-frame HOOK — live ticker banner (the viral stopper) -->
-<div class="hook-banner">
-  <span class="live-tag"><span class="live-dot"></span>LIVE</span>
-  <div class="scroll-track" id="liveTickerTrack">
-    <span class="tick up">+1.34% <span class="sym">NIFTY · 09:35→11:48 · TP hit</span></span>
-    <span class="tick up">+0.81% <span class="sym">BANKNIFTY · 09:42→15:20 · forced 15:20</span></span>
-    <span class="tick down">−0.61% <span class="sym">NIFTY SHORT · 09:38→10:24 · SL hit</span></span>
-    <span class="tick up">+1.39% <span class="sym">SENSEX · 09:36→13:11 · TP hit</span></span>
-    <span class="tick down">−0.59% <span class="sym">NIFTY · 09:34→09:51 · SL hit</span></span>
-    <span class="tick up">+2.12% <span class="sym">BANKNIFTY · 09:31→12:04 · TP hit</span></span>
-    <span class="tick up">+0.94% <span class="sym">SENSEX · 09:38→11:22 · TP hit</span></span>
-    <span class="tick up">+1.71% <span class="sym">NIFTY · 09:33→14:11 · TP hit</span></span>
-    <!-- duplicated for seamless ticker loop -->
-    <span class="tick up">+1.34% <span class="sym">NIFTY · 09:35→11:48 · TP hit</span></span>
-    <span class="tick up">+0.81% <span class="sym">BANKNIFTY · 09:42→15:20 · forced 15:20</span></span>
-    <span class="tick down">−0.61% <span class="sym">NIFTY SHORT · 09:38→10:24 · SL hit</span></span>
-    <span class="tick up">+1.39% <span class="sym">SENSEX · 09:36→13:11 · TP hit</span></span>
-    <span class="tick down">−0.59% <span class="sym">NIFTY · 09:34→09:51 · SL hit</span></span>
-    <span class="tick up">+2.12% <span class="sym">BANKNIFTY · 09:31→12:04 · TP hit</span></span>
-    <span class="tick up">+0.94% <span class="sym">SENSEX · 09:38→11:22 · TP hit</span></span>
-    <span class="tick up">+1.71% <span class="sym">NIFTY · 09:33→14:11 · TP hit</span></span>
-  </div>
-</div>
+<!-- The v24.4 "LIVE" hook-banner ticker is REMOVED (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, coordinator ruling): its 16 trade
+     ticks were FABRICATED mockup numbers behind a LIVE tag — a Golden-Rule-#1
+     violation. An absent widget beats a lying one; the HONEST #bxTickerStrip
+     below (sweep status + latest run id from the real runs payload, awaiting
+     states) is the one ticker that stays. -->
 
 <!-- v24.2: particle burst container -->
 <div class="particle-burst" id="particleBurst"></div>
@@ -2462,7 +2392,7 @@
   <div class="picker">
     <span class="rank-pill" data-oc="r1_rank" data-explain="rank">—</span>
     <span class="strategy-name" data-oc="r1_name">— awaiting real run artifact —</span>
-    <span class="meta"><span data-oc="sel_symbols">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · <span data-oc="tested_rank_line">rank line awaits the top-100 artifact</span></span>
+    <span class="meta"><span data-oc="r1_instrument" data-explain="instrument">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · selection <span data-oc="sel_symbols">—</span> · <span data-oc="tested_rank_line">rank line awaits the top-100 artifact</span></span>
   </div>
   <div class="date-range">📅 <span data-oc="date_range">—</span></div>
   <nav class="tabs">
@@ -2483,8 +2413,9 @@
     </div>
     <div class="verdict-text">
       <span class="tldr">In plain English</span>
-      Best stored winner: <strong data-oc="r1_name">—</strong>. Net P&amp;L
-      <strong class="pos" data-oc="r1_net" data-explain="net_pnl_paisa">—</strong>
+      Best stored winner: <strong data-oc="r1_name">—</strong>. Gross signal P&amp;L
+      <strong class="pos" data-oc="r1_net" data-explain="gross_signal_pnl">—</strong>
+      <span class="dim">(signal-only — costs modeled in the options-translation track)</span>
       over <span data-oc="r1_trades" data-explain="trades">—</span> trades ·
       <span data-oc="r1_vix_band" data-explain="vix_band">no VIX band</span>.
       Every number on this card comes from the stored run artifact — nothing is invented (R27).
@@ -2497,11 +2428,11 @@
 
   <section class="hero">
     <div class="hero-cards">
-      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = net trade P&L from the stored run artifact (R27: Σ trade P&L − full costs).">
+      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = gross signal P&L from the stored run artifact (R27: Σ trade P&L; signal-only — costs modeled in the options-translation track).">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4 12l8 10 8-10L12 2z"/></svg>EDGE</div>
-        <div class="big" data-oc="r1_net" data-explain="net_pnl_paisa">—</div>
-        <div class="sub">net P&amp;L · buy-&amp;-hold baseline lands with P3</div>
+        <div class="big" data-oc="r1_net" data-explain="gross_signal_pnl">—</div>
+        <div class="sub">gross signal P&amp;L (signal-only — costs modeled in the options-translation track) · buy-&amp;-hold baseline render is a named follow-up (baseline data ships on the run artifact)</div>
       </div>
       <div class="card green anim-card" style="animation-delay: 0.35s" data-tooltip="RISK = worst drop in equity from a peak.">
         <div class="dot"></div>
@@ -2543,8 +2474,13 @@
     <summary>Standard metrics<span class="hint">— how is it making money?</span></summary>
     <div class="body">
       <div class="oc-sub" id="ocTop100Note">awaiting real run artifact — the metrics below fill from top100.json</div>
+      <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+           the Top-100 order is the ARTIFACT preset (default min_dd_first),
+           which deliberately DIFFERS from /results (Rank-by metric, desc);
+           bx-oneclick.js fills the live preset — neither sort is changed. -->
+      <div class="oc-sub" data-oc="top100_sort_basis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending)</div>
       <div class="kpi-strip">
-        <div class="kpi-cell"><div class="k">Net P&amp;L</div><div class="v" data-oc="r1_net" data-explain="net_pnl_paisa">—</div></div>
+        <div class="kpi-cell"><div class="k">Gross signal P&amp;L</div><div class="v" data-oc="r1_net" data-explain="gross_signal_pnl">—</div></div>
         <div class="kpi-cell"><div class="k">Max DD</div><div class="v" data-oc="r1_max_dd" data-explain="max_dd_paisa">—</div></div>
         <div class="kpi-cell"><div class="k">Trades</div><div class="v" data-oc="r1_trades" data-explain="trades">—</div></div>
         <div class="kpi-cell"><div class="k">% Win</div><div class="v" data-oc="r1_win_rate" data-explain="win_rate">—</div></div>
@@ -2557,10 +2493,11 @@
         <div class="panel">
           <h3>Returns</h3>
           <table>
-            <tr><td>Net P&amp;L</td><td data-oc="r1_net">—</td></tr>
+            <tr><td>Gross signal P&amp;L <span class="dim">(signal-only)</span></td><td data-oc="r1_net">—</td></tr>
+            <tr><td>Instrument</td><td data-oc="r1_instrument" data-explain="instrument">—</td></tr>
             <tr><td>Trades</td><td data-oc="r1_trades">—</td></tr>
             <tr><td>SL/TP arm</td><td data-oc="r1_arm">—</td></tr>
-            <tr><td>Buy &amp; hold baseline</td><td>— (lands with P3 — O-n)</td></tr>
+            <tr><td>Buy &amp; hold baseline</td><td>— (render is a named follow-up — baseline data ships on the run artifact)</td></tr>
           </table>
         </div>
         <div class="panel">
@@ -2571,6 +2508,13 @@
             <tr><td>CPCV pass %</td><td data-oc="r1_cpcv">—</td></tr>
             <tr><td>Max drawdown</td><td data-oc="r1_max_dd">—</td></tr>
             <tr><td>VIX band</td><td data-oc="r1_vix_band">no VIX band</td></tr>
+            <!-- Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
+                 breakdown + worst-5-days the card previously omitted —
+                 one_regime_wonder/by_trend from entry.regime; worst5_days
+                 is a METRICS key (writer truth, top100_artifact.py). -->
+            <tr><td>P&amp;L by trend regime</td><td data-oc="r1_trend_split" data-explain="by_trend">—</td></tr>
+            <tr><td>Regime concentration</td><td data-oc="r1_regime_wonder" data-explain="one_regime_wonder">—</td></tr>
+            <tr><td>Worst 5 days</td><td data-oc="r1_worst5" data-explain="worst5_days">—</td></tr>
           </table>
         </div>
       </div>
@@ -2851,7 +2795,11 @@
     <div class="filter-bar">
       <label>Filter:</label>
       <label style="margin-left:0">Instrument</label>
-      <select id="fInst"><option value="">All</option><option>NIFTY 50</option><option>BANKNIFTY</option><option>SENSEX</option></select>
+      <!-- Options carry the ENGINE instrument tokens the Inst cell now
+           renders from the artifact's per-entry `instrument` key
+           (DEC-ONECLICK-INSTRUMENT-DISPLAY-001) — the old v29-preview
+           display names ("NIFTY 50") could never match a real cell. -->
+      <select id="fInst"><option value="">All</option><option>NSE-NIFTY</option><option>NSE-BANKNIFTY</option><option>BSE-SENSEX</option></select>
       <label>TF</label>
       <select id="fTF"><option value="">All</option><option>5m</option><option>15m</option><option>30m</option><option>1h</option><option>1d</option></select>
       <label>Direction</label>
@@ -2864,6 +2812,9 @@
     </div>
 
     <!-- TABLE for ranks 4-20 -->
+    <!-- [11] sort-basis honesty label — same live-filled hook as the metrics
+         card above (setOc fills every data-oc node in one pass). -->
+    <div class="oc-sub" data-oc="top100_sort_basis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending)</div>
     <div class="combos-table-wrap">
       <table class="combos-table" id="combosTable">
         <thead>
@@ -3726,7 +3677,7 @@
       const io = new IntersectionObserver((entries) => {
         entries.forEach((en) => en.target.classList.toggle('bx-anim-off', !en.isIntersecting));
       }, { rootMargin: '80px' });
-      ['.hook-banner', '.verdict', '.equity-wrap'].forEach((sel) => {
+      ['.verdict', '.equity-wrap'].forEach((sel) => {
         const n = document.querySelector(sel);
         if (n) io.observe(n);
       });

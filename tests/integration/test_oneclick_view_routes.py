@@ -226,6 +226,45 @@ class TestMockupKilled:
 # ---------------------------------------------------------------------------
 
 
+class TestFabricatedLiveTickerKilled:
+    """Coordinator ruling (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): the v24.4
+    "LIVE" hook-banner ticker rendered 16 FABRICATED trade ticks behind a
+    LIVE tag — a Golden-Rule-#1 violation. REMOVED outright (an absent
+    widget beats a lying one); the HONEST #bxTickerStrip (sweep status +
+    latest run id from the real runs payload, awaiting states) stays."""
+
+    #: The fabricated hook-banner's distinctive literals — none may survive
+    #: in ANY template (widget markup, CSS, JS observer hook, tick strings).
+    _KILLED_TOKENS = (
+        'id="liveTickerTrack"',
+        "hook-banner .scroll-track",
+        "tickerScroll",
+        "+1.34%",
+        "09:35\u219211:48",  # the first fabricated tick's time span
+        "viral stopper",
+    )
+
+    @pytest.mark.parametrize(
+        "template", ["v29.html", "screener.html", "strategy.html", "results.html"]
+    )
+    def test_fabricated_ticker_tokens_gone_everywhere(self, template: str) -> None:
+        html = _template(template)
+        for token in self._KILLED_TOKENS:
+            literal = token.encode().decode("unicode_escape")
+            assert literal not in html, f"fabricated LIVE-ticker token survived: {token}"
+
+    def test_the_honest_ticker_strip_stays(self) -> None:
+        """The REAL-data strip (bx-oneclick.js renderTicker — sweep status +
+        latest run id, honest awaiting default) is the ONE ticker kept."""
+        for template in ("v29.html", "screener.html", "strategy.html"):
+            html = _template(template)
+            assert 'id="bxTickerStrip"' in html, template
+            assert "no runs yet — awaiting real run artifact" in html, template
+        js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert "sweep: idle" in js  # derived states, never invented trades
+        assert "latest run " in js
+
+
 class TestOneclickSections:
     def test_awaiting_banner_present_with_the_shared_wording(self) -> None:
         html = _template("v29.html")
@@ -260,6 +299,7 @@ class TestOneclickSections:
         for hook in (
             "r1_rank",
             "r1_name",
+            "r1_instrument",
             "r1_net",
             "r1_max_dd",
             "r1_sharpe",
@@ -335,6 +375,29 @@ class TestScreenerPage:
         assert "row_count" in html
         assert "' of ' + total + ' shown'" in html
 
+    def test_count_line_numerator_is_the_rendered_count_naming_the_cap(self) -> None:
+        """[W2-5] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: '500 of 500 shown' over
+        a RENDER_CAP-truncated 200-row table was a lie — the numerator is now
+        the count actually rendered and a capped table SAYS so."""
+        html = _template("screener.html")
+        assert "String(cap) + ' of ' + total + ' shown'" in html
+        assert "String(sorted.length) + ' of '" not in html  # the lying numerator is gone
+        # A-r4 (DEC-ONECLICK-PERF-CLUB-001): the cap/note math moved into the
+        # node-goldened BXScreener primitives — the page consumes them (the
+        # wording itself is pinned by test_dashboard_screener_math.py).
+        assert "window.BXScreener.renderCount(sorted.length, state.showAll)" in html
+        assert "window.BXScreener.capNote(cap, sorted.length, state.showAll)" in html
+        assert "window.BXScreener.inputCapNote(" in html
+        assert "window.BXScreener.inputCapRows(" in html
+
+    def test_sort_basis_label_names_the_artifact_preset(self) -> None:
+        """[11] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the visible sort-basis
+        label (textContent-only) names the artifact preset and the /results
+        divergence — a LABEL, neither sort is changed."""
+        html = _template("screener.html")
+        assert 'id="scSortBasis"' in html
+        assert "differs from /results (Rank-by metric, descending)" in html
+
     def test_null_vix_band_exclusion_is_counted(self) -> None:
         html = _template("screener.html")
         assert "null_vix_excluded" in html
@@ -378,6 +441,17 @@ class TestStrategyPage:
         assert 'id="ocTradesSource"' in html
         assert "source: none" in html
 
+    def test_null_cost_rows_get_the_gross_equity_caveat(self) -> None:
+        """[W2-4] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: Ruling-18 null-cost
+        rows render a LABELED gross curve on /strategy AND the operator page
+        (never an empty chart / a mislabeled non-integer error)."""
+        html = _template("strategy.html")
+        assert "series.null_cost_rows" in html
+        assert "curve is gross of those costs" in html
+        js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert "series.null_cost_rows" in js
+        assert "curve is gross of those costs" in js
+
     def test_out_of_window_trade_drops_the_arrow_loudly(self) -> None:
         """F-B1: the -1 sentinel is honored — never a snapped wrong candle."""
         html = _template("strategy.html")
@@ -392,16 +466,61 @@ class TestStrategyPage:
         assert "params.get('trade')" in html
         assert "state.tradeIdx" in html
 
-    def test_equity_curve_labeled_per_trade_close(self) -> None:
-        """C-MINOR-7: the smoother curve never masquerades as the minute path."""
+    def test_equity_curve_sources_are_honestly_labeled(self) -> None:
+        """C-MINOR-7, superseded by DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item
+        4C: the STORED minute-path series (the /api/v1/oneclick/equity route)
+        renders when the sidecar exists, and the per-trade cumsum FALLBACK is
+        relabeled so the smoother curve never masquerades as the minute path."""
         html = _template("strategy.html")
-        assert "per-trade close equity — minute-path equity lands with P3" in html
+        assert "/api/v1/oneclick/equity" in html
+        assert "minute-path equity — the stored real series (R27)" in html
+        assert "per-trade close equity (minute-path unavailable for this run)" in html
+        # The stale "lands with P3" deferral is DEAD — the route ships.
+        assert "minute-path equity lands with P3" not in html
+        # Hostile-round fold: an ok-verdict sidecar with ZERO rows reads its
+        # OWN honest label (empty-for-this-run ≠ unavailable).
+        assert "per-trade close equity (minute-path series empty for this run)" in html
+        assert "state.equityOkEmpty" in html
+        # Audit re-break MINOR: the per-trade fallback note total carries the
+        # #12 gross/signal-only vocabulary — never a bare "net" claim.
+        assert "bits.push('gross signal ' + money(series.final_paisa));" in html
+        assert "bits.push('net ' + money(series.final_paisa));" not in html  # killed
 
     def test_vix_band_on_the_story_card(self) -> None:
-        """R31 display duty."""
+        """R31 display duty — via the ONE shared builder ([W3-R4]): a
+        null-lo/hi writer band reads the honest not-stamped copy, never
+        "works when VIX between null–null"."""
         html = _template("strategy.html")
         assert 'id="stVixBand"' in html
-        assert "works when VIX between" in html
+        assert "window.BXOneclick.vixBandText(row.vix_band)" in html
+        js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert "works when VIX between" in js
+        assert "VIX band not stamped for this run" in js
+        # The old inline undefined-only gate is gone from the template.
+        assert "works when VIX between" not in html
+
+    def test_candle_mapper_reads_the_route_timestamp_column(self) -> None:
+        """[W3-R1]: the chart mapper is the ONE shared route-shape mapper —
+        the dead ``idx.ts`` read (the /api/v1/db/candles column is named
+        "timestamp") can never return; parsing + the session-day anchor are
+        TZ-safe (never a browser-local Date roundtrip)."""
+        html = _template("strategy.html")
+        assert "window.BXChart.candleRowsFromDbPayload(payload)" in html
+        assert "window.BXChart.parseTsIst(raw)" in html
+        assert "window.BXChart.istDateOfEpoch(anchor)" in html
+        # The dead indexing EXPRESSION is gone (the prose comment naming the
+        # bug deliberately remains — pin the code token, not the story).
+        assert "[idx.ts]" not in html
+        assert "toISOString().slice(0, 10)" not in html
+        js = (_STATIC / "bx-chart.js").read_text(encoding="utf-8")
+        assert '"timestamp", "open", "high", "low", "close"' in js
+        assert "+05:30" in js  # naive strings pinned to IST, never browser-local
+
+    def test_screener_band_cell_uses_the_shared_builder(self) -> None:
+        """[W3-R4] screener band column: a null-lo/hi band cell reads
+        "not stamped", never "null–null"."""
+        html = _template("screener.html")
+        assert "window.BXOneclick.vixBandCellText(v)" in html
 
     def test_beginner_pro_toggle_is_the_shared_mechanism(self) -> None:
         """C-MINOR-5: ONE mechanism — bxApplyMode over .jargon/.plain-eng."""
@@ -415,9 +534,21 @@ class TestStrategyPage:
         assert "bindExplainHover" in html
         assert "data-explain=" in html
 
-    def test_regime_family_named_out_of_scope(self) -> None:
+    def test_regime_renders_and_family_stays_named_out_of_scope(self) -> None:
+        """HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
+        breakdown RENDERS from entry.regime — the stale "lands with the P3
+        data" deferral is DELETED (the data ships in the artifact); family
+        drill-down (R34) stays a NAMED later PR."""
         html = _template("strategy.html")
-        assert "land with the P3 data they visualize" in html
+        assert "land with the P3 data they visualize" not in html  # killed token
+        assert 'id="stTrendSplit"' in html
+        assert 'id="stRegimeWonder"' in html
+        assert "window.BXOneclick.trendSplitText(reg.by_trend, money)" in html
+        assert (
+            "window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis)"
+            in html
+        )
+        assert "family drill-down (R34) is a named later PR" in html
 
     def test_ticker_strip_present(self) -> None:
         assert 'id="bxTickerStrip"' in _template("strategy.html")

@@ -14,7 +14,7 @@ institutional sweep, not the retired light-research one), the ruling-2
 SLA-acknowledge wiring, and the ruling-9 multi-symbol/SENSEX fan-out
 (one logical `sweep_run_id` wrapping N per-exchange engine runs). P1's
 ownership zone ONLY — zero P2/P3/P4/P5/P6 files touched. See
-docs/MIGRATION.md entry #1631 for full detail.
+docs/MIGRATION.md entry #1712 for full detail.
 
 **Twelve rounds of adversarial review** (a 4-agent hostile review + eleven
 further adversarial-refuter rounds) have run against this branch, each
@@ -26,7 +26,7 @@ account.
 
 ## Decision ID
 
-DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001 (docs/MIGRATION.md entry #1631).
+DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001 (docs/MIGRATION.md entry #1712).
 Builds on DEC-SWEEP-PREFLIGHT-001 (MIGRATION.md #663, the G1 gate this
 reuses), DEC-SLA-LAUNCH-GUARD-001, DEC-FUTURES-EXEC-TRANSLATION-001
 (MIGRATION.md #1543, P5's shipped preflight this calls, unedited),
@@ -56,7 +56,7 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
   job's own singleflight start/check under one lock.
 - Empty: zero required months (every 1m/invariants/freshness/futures/VIX arm
   correctly skipped, gated on `if required_months:`); zero exchange groups.
-  Full arm-by-arm detail in docs/MIGRATION.md #1631.
+  Full arm-by-arm detail in docs/MIGRATION.md #1712.
 
 ## Failure modes
 
@@ -84,7 +84,7 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
   surfaced in the finish detail by exchange + reason (capped so neither a
   verbose exception nor many failing groups can hide a sibling's identity),
   and the results cache is only invalidated when at least one group
-  genuinely succeeded. Full failure-mode detail in docs/MIGRATION.md #1631.
+  genuinely succeeded. Full failure-mode detail in docs/MIGRATION.md #1712.
 
 ## Real-run proof
 
@@ -132,7 +132,7 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
 | Demand | This PR's proof |
 |---|---|
 | 100% code coverage | `estimator_calibration.py` 61/18, `sweep_estimator.py` 53/12, `sweep_oneclick_preflight.py` 132/48, `sweep_runner.py` 196/48 stmts/branches — 0 missing, all 4, re-measured after every fix round |
-| 100% audit coverage | Every refusal/clamp carries symbol/tf/reason; ledger entry #1631 documents every arm's true Big-O cost and all 11 review rounds |
+| 100% audit coverage | Every refusal/clamp carries symbol/tf/reason; ledger entry #1712 documents every arm's true Big-O cost and all 11 review rounds |
 | 100% testing coverage | 183 tests across 6 files, including crash-regression pins, an SLA-aggregation pin, and a Mode-A-grid refusal pin |
 | 100% code checks | ruff/mypy --strict/pyright all clean |
 | 100% code performance | Disk-guard full-lake scan hoisted to ONCE per plan (not per exchange group) |
@@ -144,7 +144,7 @@ DEC-ENGINE-SCOPE-GUARD-001 (unedited, composed via the fan-out).
 | 100% bug fixing | Every confirmed finding across 11 rounds fixed and regression-pinned — see review history below |
 | 100% scenarios covering | See Scenarios covered above |
 | 100% functionalities covering | R4 preflight + R20 estimator + R5 flip + ruling-2 SLA-ack + ruling-9 fan-out, all wired end-to-end into 2 new dashboard routes |
-| 100% code review | 4-agent hostile review + 10 further adversarial-refuter rounds, all documented in ledger #1631 |
+| 100% code review | 4-agent hostile review + 10 further adversarial-refuter rounds, all documented in ledger #1712 |
 | 100% extreme check | Degenerate/adversarial inputs tested: reversed windows, oversized/non-UTF-8/deeply-nested/overflow calibration files, duplicate CSV tokens, path-traversal/injection query params, off-grid SL/TP legs, per-group crashes |
 
 ## Z+ 7-row resilience matrix
@@ -188,7 +188,7 @@ calibration reader; a multi-exchange SLA-aggregation gap (each group's own
 check could pass while the COMBINED sequential wall-clock silently blew the
 envelope); an India-VIX arm that probed the wrong exchange for BSE/SENSEX
 groups (always a false "missing" clamp); several weak/missing regression
-tests strengthened via mutation testing. Full detail in docs/MIGRATION.md #1631.
+tests strengthened via mutation testing. Full detail in docs/MIGRATION.md #1712.
 
 **Adversarial-refuter rounds 4–9:** rounds 5–8 hardened the multi-exchange
 fan-out's background-job failure reporting in `app.py` — a silently
@@ -225,10 +225,10 @@ legacy `/api/v1/sweep/run` route's background job returned the raw exit
 code with no check at all (unlike the one-click route, hardened across
 rounds 5-8), silently reporting any internal `cmd_sweep_all` failure as
 "done". Both fixed with the same 400-before-launch / named-failure
-pattern established in rounds 5-11. Full detail in docs/MIGRATION.md #1631.
+pattern established in rounds 5-11. Full detail in docs/MIGRATION.md #1712.
 
 Full detail, each round's exact findings and fixes, in docs/MIGRATION.md
-#1631.
+#1712.
 
 ## Honest envelope (Golden Rule #10)
 

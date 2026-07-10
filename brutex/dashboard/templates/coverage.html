@@ -137,9 +137,15 @@
       <span class="sep">·</span>
       <a href="/coverage" aria-current="page">Coverage</a>
       <span class="sep">·</span>
+      <a href="/completeness">Completeness</a>
+      <span class="sep">·</span>
       <a href="/movers">Movers</a>
       <span class="sep">·</span>
       <a href="/results">Results</a>
+      <span class="sep">·</span>
+      <a href="/screener">Screener</a>
+      <span class="sep">·</span>
+      <a href="/strategy">Strategy</a>
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
@@ -296,10 +302,15 @@ async function pollSpot() {
     const txt = await r.text();
     if (txt !== lastPayload.spot) {
       lastPayload.spot = txt;
-      const h = JSON.parse(txt).headline || {};
+      const body = JSON.parse(txt);
+      const h = body.headline || {};
       cSpot.classList.remove("err");
       setKpi(spotdsEl, num(h.datasets));
-      setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars");
+      /* Floor-stale suffix (DEC-STALENESS-CACHE-TRUTH-001): the payload's own
+         duty_degraded honesty field (SummaryCache.stamp_freshness) — a
+         pull-held stale snapshot is marked, never silently served as live. */
+      setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars"
+        + (body.duty_degraded === true ? " · stale" : ""));
     }
     return true;
   } catch (e) {
@@ -311,7 +322,10 @@ async function pollSpot() {
 
 async function pollWindows() {
   try {
-    const r = await doFetch("/api/v1/coverage/windows");
+    /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this card renders ONE integer
+       (b.count) — ?limit=0 keeps the identical counts/meta while dropping the
+       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
+    const r = await doFetch("/api/v1/coverage/windows?limit=0");
     if (!r.ok) {
       lastPayload.win = null;
       statError(cWin, [wincEl], "error " + r.status + " · retrying");

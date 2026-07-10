@@ -543,6 +543,8 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
         "index_count": 0,
         "stock_count": 0,
         "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
     }
 
 
@@ -626,6 +628,11 @@ def test_ntm_admits_non_fno_constituents_as_reference(tmp_path: Path) -> None:
     # Both WIPRO and the reference-only SMALLCO count toward the universe size.
     assert result["stock_count"] == 2
     assert result["total"] == 4
+    # DEC-LABEL-TRUTH-001 (fails-before: keys absent): the report names the
+    # reference subset beside the full stock population, so the /universe load
+    # message can read "2 stocks — 1 F&O" instead of an undifferentiated count.
+    assert result["reference_stock_count"] == 1
+    assert result["stock_count_total"] == 2
     ntm = result["ntm"]
     assert ntm["admitted"] is True
     assert ntm["constituents"] == 3
