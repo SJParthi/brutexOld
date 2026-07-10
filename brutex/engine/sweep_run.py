@@ -1496,8 +1496,25 @@ def run_persisted_sweep(
     mask_source: Iterable[int]
     if apriori_enabled():
         from brutex.engine.sweep_apriori import generate_apriori_candidates
+        from brutex.engine.sweep_apriori_rust import (
+            apriori_rust_enabled,
+            generate_apriori_candidates_rust,
+        )
 
-        mask_source = generate_apriori_candidates(
+        # Composed, doubly-default-OFF arm (DEC-SWEEP-APRIORI-RUST-001, Slice-1b):
+        # the outer ``apriori_enabled()`` gate (BRUTEX_SWEEP_APRIORI) is unchanged
+        # — with it off the brute-force enumeration below runs byte-identically.
+        # With BRUTEX_SWEEP_RUST_APRIORI ALSO truthy the native-Rust frontier
+        # kernel (fno_math.apriori_frontier_u64) replaces the frozen Python
+        # generator — bit-for-bit identical survivor set, emission order, census,
+        # and breaker trip; with only BRUTEX_SWEEP_APRIORI on, the frozen Python
+        # generator runs. The two are signature-identical drop-ins.
+        _apriori_gen = (
+            generate_apriori_candidates_rust
+            if apriori_rust_enabled()
+            else generate_apriori_candidates
+        )
+        mask_source = _apriori_gen(
             bar_bits,
             condition_bits=cfg.condition_bits,
             k=cfg.k,

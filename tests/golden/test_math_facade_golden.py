@@ -39,6 +39,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "ResidentSweepSim",
         "ResidentSweepSimU128",
         "add_u64",
+        "apriori_frontier_u64",
         "bitand_count_u64s",
         "bitcount_u64s",
         "blake3_hash",

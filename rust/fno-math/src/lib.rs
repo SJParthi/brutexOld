@@ -72,6 +72,15 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+/// DEC-SWEEP-APRIORI-RUST-001 (Slice-1b): native-Rust Apriori level-wise
+/// frontier kernel — join + subset-prune + conflict-prune + per-level hit-filter
+/// + the pure-integer per-level budget breaker, bit-for-bit identical to the
+/// FROZEN Python oracle `brutex.engine.sweep_apriori.generate_apriori_candidates`
+/// (DEC-SWEEP-APRIORI-TUPLE-001). A SEPARATE source file from Slice-1's
+/// `enumerate_prefilter` kernel so the two slices never collide while authored
+/// concurrently; both register under `_fno_math` here.
+pub mod sweep_apriori_core;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -141,6 +150,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        sweep_apriori_core::apriori_frontier_u64,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())
 }

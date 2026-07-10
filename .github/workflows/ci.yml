@@ -1172,6 +1172,17 @@ jobs:
           else
             echo "(brutex.engine.sweep_apriori test file not present yet — gate inactive)"
           fi
+          # 19i1a-rust · brutex.engine.sweep_apriori_rust — the native-Rust Apriori
+          # frontier SEAM (DEC-SWEEP-APRIORI-RUST-001, Slice-1b; the composed,
+          # doubly-default-OFF arm behind BRUTEX_SWEEP_APRIORI AND
+          # BRUTEX_SWEEP_RUST_APRIORI). 100% line+branch from the dedicated unit
+          # suite (the bit-for-bit parity vs the frozen oracle lives in
+          # tests/golden/test_engine_sweep_apriori_rust_parity.py).
+          if compgen -G "tests/unit/test_engine_sweep_apriori_rust.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_apriori_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_apriori_rust.py
+          else
+            echo "(brutex.engine.sweep_apriori_rust test file not present yet — gate inactive)"
+          fi
           # 19i1b · brutex.engine.stage3_refine — Stage-3 BIPOP-CMA-ES refinement
           # runner (DEC-STAGE3-REFINE-001; the A/B determinism oracle, the ≤600
           # hard budget, the run-scoped value cache — ADR-0007 conditions 4-6/8).

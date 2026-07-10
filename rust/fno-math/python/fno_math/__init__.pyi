@@ -25,6 +25,7 @@ __all__ = [
     "ResidentSweepSimU128",
     "__version__",
     "add_u64",
+    "apriori_frontier_u64",
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
@@ -57,6 +58,40 @@ def add_u64(a: int, b: int) -> int:
     """Add two `u64` values.
 
     Raises `OverflowError` if `a + b >= 2**64`.
+    """
+    ...
+
+def apriori_frontier_u64(
+    bar_bits: list[int],
+    unique_bits: list[int],
+    k: int,
+    min_hits: int,
+    n_bars: int,
+    w: int,
+    big_w: int,
+    max_mask_bars: int,
+    conflict_pair_masks: list[int],
+    budget_check_stride: int,
+) -> tuple[list[int], list[tuple[int, int, int]], int | None]:
+    """Apriori-pruned level-`k` frontier kernel (DEC-SWEEP-APRIORI-RUST-001, Slice-1b).
+
+    The native-Rust port of the FROZEN Python Apriori generator
+    `brutex.engine.sweep_apriori.generate_apriori_candidates`. Returns a 3-tuple
+    `(masks, census, budget_trip)`:
+
+    - `masks` — the pruned, shard-owned level-`k` masks in lexicographic-by-
+      position order (empty on a budget trip).
+    - `census` — `(level, candidates, frequent)` records for the seam to emit as
+      `sweep.apriori.census` events; `frequent == -1` marks the omitted case.
+    - `budget_trip` — `None` on success, else the candidate count the frozen
+      `SweepAprioriBudgetError` reports.
+
+    Inputs are the seam's validated contract: `unique_bits` sorted-unique `< 64`,
+    `0 <= k <= len(unique_bits)`, `big_w >= 1`, `0 <= w < big_w`, non-negative
+    `n_bars` / positive `max_mask_bars` fitting `u64`, the pre-packed
+    `(1<<a)|(1<<b)` `conflict_pair_masks`, and the `_BUDGET_CHECK_STRIDE`. No
+    exception is raised by the kernel — the seam
+    (`brutex.engine.sweep_apriori_rust`) raises every frozen-pinned error.
     """
     ...
 
