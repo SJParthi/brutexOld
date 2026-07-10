@@ -30,6 +30,7 @@ the ``setInterval`` cadence lines are unchanged where they existed).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -224,8 +225,9 @@ def test_v29_sweep_pollers_ride_the_common_bounded_fetch() -> None:
     headers-then-stalled-body response counts as a failure instead of hanging
     the poll forever with the Run button disabled. No bare ``fetch()`` of the
     sweep-progress endpoint remains, and no inline copy of the backoff law
-    exists (the COMMON core is guaranteed loaded — bx-poll.js is deferred, so
-    it is defined before any tick/click callback fires).
+    exists (defer guarantees BXPoll is defined before any INTERVAL tick or
+    click callback fires; the one exception — the parse-time immediate
+    kickoff — is DOMContentLoaded-guarded, pinned below).
     """
     js = _tpl("v29.html")
     call = (
@@ -240,6 +242,30 @@ def test_v29_sweep_pollers_ride_the_common_bounded_fetch() -> None:
     )
     assert "bxSweepPollBackoffMs" not in js, (
         "v29.html: the inline backoff fallback is dead code — COMMON core only"
+    )
+
+
+def test_v29_sweep_progress_immediate_kickoff_is_load_order_guarded() -> None:
+    """The parse-time first poll must NOT be a bare synchronous call.
+
+    This classic inline ``<script>`` executes DURING parsing, BEFORE the
+    deferred ``bx-poll.js`` — a bare ``pollSweepProgress();`` kickoff would
+    TypeError on ``window.BXPoll`` on every fresh load of ``/`` (and blip a
+    spurious ``__bxHbSweepErr`` heartbeat error). The kick is guarded: call
+    now when BXPoll exists, else defer to DOMContentLoaded (defer scripts
+    complete before DOMContentLoaded fires). Interval ticks + click callbacks
+    fire post-load and need no guard.
+    """
+    js = _tpl("v29.html")
+    guarded = (
+        "if (window.BXPoll) pollSweepProgress(); "
+        "else document.addEventListener('DOMContentLoaded', pollSweepProgress);"
+    )
+    assert guarded in js, "v29.html: the DOMContentLoaded-guarded kickoff is missing"
+    # No bare synchronous parse-time kick may re-drift in (the catch-up
+    # listener's post-load call rides inside a braced block, not a bare line).
+    assert re.search(r"^\s*pollSweepProgress\(\);\s*$", js, re.MULTILINE) is None, (
+        "v29.html: a bare synchronous pollSweepProgress(); kick re-drifted in"
     )
 
 

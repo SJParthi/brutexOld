@@ -3356,9 +3356,12 @@
   // BXPoll.fetchJson (the abort timer stays ARMED through the BODY read, so
   // a headers-then-stalled-body response throws instead of hanging r.json()
   // forever; a non-ok status THROWS) + BXPoll.backoffDelayMs (quick retries
-  // then 3 s→30 s capped doubling). bx-poll.js is a deferred script, so it
-  // is guaranteed defined before any poll tick or click callback can fire —
-  // no inline copy of the backoff law exists here (Golden Rule #11). NEVER
+  // then 3 s→30 s capped doubling). bx-poll.js is a deferred script:
+  // defer guarantees BXPoll is defined before any INTERVAL tick or click
+  // callback fires — the ONE exception is the parse-time immediate kickoff
+  // below (this classic inline script runs DURING parsing, BEFORE deferred
+  // scripts execute), which is therefore DOMContentLoaded-guarded. No
+  // inline copy of the backoff law exists here (Golden Rule #11). NEVER
   // a give-up: the delay is finite and the interval keeps ticking — backoff
   // is skip-N-ticks (a nextAllowedTs gate at the top of each poller), the
   // DEC-PULL-UI-STALENESS-001 posture. Each poller also carries a
@@ -3442,7 +3445,14 @@
       }
     }
     if (window.location.protocol !== 'file:') {
-      pollSweepProgress();
+      // Immediate first poll — guarded (DEC-DASHBOARD-POLL-HYGIENE-002
+      // round 2): this classic inline script executes DURING parsing,
+      // BEFORE the deferred bx-poll.js, so a bare synchronous kickoff here
+      // would TypeError on window.BXPoll (and blip a spurious
+      // __bxHbSweepErr) on every fresh load. Defer scripts complete before
+      // DOMContentLoaded, so the deferred kickoff still paints promptly;
+      // interval ticks + click callbacks fire post-load and need no guard.
+      if (window.BXPoll) pollSweepProgress(); else document.addEventListener('DOMContentLoaded', pollSweepProgress);
       setInterval(pollSweepProgress, 2000);
       // Catch-up on tab return — clears the backoff gate so the return always
       // reads fresh (DEC-DASHBOARD-POLL-HYGIENE-002).
