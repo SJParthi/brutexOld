@@ -98,14 +98,15 @@ with the real paths and complete the item list from the files themselves.
 
 ## Round 4 — Coordinator/session-management batch (2026-07-10)
 
-**Status:** final — 7 items, awaiting operator send. (The interim v1
-9-item and 7-item v2 copies were superseded in-place by v3 on 2026-07-10:
-v2 dropped the two model-mapping complaints after the double-canary
-experiment showed model-default propagation working — the defect is
-effort-only; v3 cut the submission's preamble — routing/thanks moved into
-the email cover — and tightened line by line.)
+**Status:** final — 8 items, awaiting operator send. (The interim v1
+9-item, 7-item v2, and v3 copies were superseded in-place by v4 on
+2026-07-10: v2 dropped the two model-mapping complaints after the
+double-canary experiment showed model-default propagation working — the
+defect is effort-only; v3 cut the submission's preamble — routing/thanks
+moved into the email cover — and tightened line by line; v4 sharpened
+item 5 to the delete framing and added the new merge-coordination item.)
 
-7 items (titles as in `round4/EAP_ROUND4_SUBMISSION.md`):
+8 items (titles as in `round4/EAP_ROUND4_SUBMISSION.md`):
 
 | # | Item (short title) |
 |---|---|
@@ -113,19 +114,20 @@ the email cover — and tightened line by line.)
 | 2 | Desktop app auto-restarts when correcting the effort across multiple sessions in quick succession |
 | 3 | Scale instability on session-create bursts (more than 10 parallel sessions) |
 | 4 | Cross-session messages drop mid-turn, silently |
-| 5 | No way to close or archive a session from the coordinator |
+| 5 | Sessions cannot be DELETED from the coordinator |
 | 6 | "Needs input" badge shows when nothing needs input |
 | 7 | Actively-working sessions show as "idle" |
+| 8 | Fleet merge coordination has no platform support |
 
 **Files (in repo):**
 
-- `round4/EAP_ROUND4_SUBMISSION.md` — the full round-4 dossier (7 items:
+- `round4/EAP_ROUND4_SUBMISSION.md` — the full round-4 dossier (8 items:
   issues at a glance, requests, open questions, per-item details, and the
   9-screenshot attachment list).
 - `round4/EAP_ROUND4_SUBMISSION.html` — the self-contained one-page HTML
   twin (inline CSS, house style).
 - `round4/EAP_ROUND4_EMAIL.md` — the round-4 cover email (subject, body,
-  send checklist; same 7 items).
+  send checklist; same 8 items).
 - `round4/EAP_ROUND4_SCREENSHOT_GUIDE.md` — the capture guide for the 9
   screenshots attached with the email.
 
