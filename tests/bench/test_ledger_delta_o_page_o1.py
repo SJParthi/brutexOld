@@ -29,9 +29,18 @@ ratio (B-1) routes through :func:`tests.bench._o1_tiers.cache_tier_ceiling`
 (8.0 shared / strict **3.0**, NOT 1.1 — its 10× workload legitimately scans
 10× the columnar rows, so the strict 1.1 tier is physically unsatisfiable
 there, the DEC-O1-CACHE-TIER-001 discipline); the fresh-fold delta-file growth
-pin (B-4, ``< 20.0×``) and the cold-scan bound (B-6, ``< 2 s`` mean) are
-ABSOLUTE measured-slack ceilings, deliberately not tier-routed; B-2/B-5/B-7
-are deterministic spy/sentinel pins with no timing ratio at all.
+pin (B-4, ``< 20.0×``), the cold-scan bound (B-6, ``< 2 s`` mean) and the
+production-scale fresh-fold bound (B-9, ``< 8 s`` @ ≥500k base rows,
+DEC-DB-OPAGE-HONESTY-001) are ABSOLUTE measured-slack ceilings, deliberately
+not tier-routed; B-2/B-5/B-7 are deterministic spy/sentinel pins with no timing
+ratio at all.
+
+B-9 (DEC-DB-OPAGE-HONESTY-001) is the honest production-scale companion to B-1: the fresh window-ledger
+fold GROUP BY is an **O(total physical rows)** columnar QUALIFY hash-partition,
+so at ≥500k base rows (approaching the disclosed ~841k full-universe worst case,
+DEC-SUSPICION-SWEEP-FIXES-001 #1492) it is NOT flat vs a 10k base — measured
+2026-07-08 (sandbox) 11.8 ms @ 10k vs 230.1 ms @ 500k → 19.52× for 50× the
+rows — bounded but genuinely O(rows). Golden Rule #10: the fold is never O(page).
 """
 
 from __future__ import annotations
@@ -707,6 +716,64 @@ def test_accumulation_regime_warm_poll_bounded(tmp_path: Path) -> None:
         f"warm-poll ratio {ratio:.2f}× (400 vs 50 pending deltas) exceeds the ceiling — "
         f"the within-stamp poll may have regressed past the O(deltas) stamp probe. "
         f"t_50={t50 / 1e6:.2f}ms, t_400={t400 / 1e6:.2f}ms."
+    )
+
+
+def test_fresh_fold_at_production_scale_is_bounded_and_not_flat(tmp_path: Path) -> None:
+    """B-9 (relabelled from B-8 at the club fold — main's DEC-WINDOWS-MIDPULL-FLOOR-001
+    accumulation-regime pin already holds the B-8 label): the fresh window-ledger fold
+    at ≥500k base rows is O(total rows), not O(page).
+
+    The prior B-1 flatness pin tops out at 10k base rows; the disclosed
+    full-universe worst case is ~841k ledger rows (DEC-SUSPICION-SWEEP-FIXES-001
+    #1492), so this arm exercises the fresh (uncached) fold GROUP BY at ≥500k
+    rows — two orders above B-1 — and asserts the HONEST envelope
+    (DEC-DB-OPAGE-HONESTY-001): the fold is ONE O(total physical rows) columnar
+    QUALIFY hash-partition per FRESH stamp, so (i) it stays under a generous
+    ABSOLUTE ceiling (a super-linear regression fails loudly) and (ii) it is NOT
+    flat vs a 10k base — the ``_window_counts_total`` cost genuinely grows with
+    the stored row count (a false O(page)/O(1) claim would collapse the ratio
+    toward 1×). Measured 2026-07-08 (sandbox): 11.8 ms @ 10k vs 230.1 ms @ 500k
+    → 19.52× for 50× the rows; the full first payload (fold + one 500-row page)
+    at 500k ran 562 ms. Both ≪ the 8 s ABSOLUTE ceiling.
+    """
+    small = _seeded_lake(tmp_path, depth=_LARGE, deltas=5, tag="b9_small")  # 10k rows
+    big = _seeded_lake(tmp_path, depth=500_000, deltas=5, tag="b9_big")
+    conn = duckdb.connect()
+
+    def _fresh(lake: Path) -> float:
+        source = _ledger_scan_source(wls.ledger_path(lake))
+        for _ in range(3):  # warm DuckDB + the OS page cache
+            _window_counts_total(conn, source)
+        iterations = 8
+        t0 = time.perf_counter_ns()
+        for _ in range(iterations):
+            _window_counts_total(conn, source)
+        return (time.perf_counter_ns() - t0) / iterations
+
+    # The fold really served every distinct key at production scale (not a footer
+    # illusion) — one full payload build over the 500k lake.
+    payload = build_window_payload(big, conn=conn, count_cache=MoversSnapshotCache(), generation=0)
+    assert payload["source"] == "ledger"
+    assert payload["count"] == 500_000
+
+    t_small = _fresh(small)
+    t_big = _fresh(big)
+    conn.close()
+    ratio = t_big / max(t_small, 1.0)
+
+    assert t_big < 8e9, (
+        f"fresh fold @ 500k base rows took {t_big / 1e6:.1f} ms (ceiling 8000 ms; measured "
+        f"230.1 ms on 2026-07-08) — the O(total-rows) fold may have regressed to super-linear "
+        f"work as the ledger approaches the ~841k worst case."
+    )
+    assert ratio > 1.5, (
+        f"fresh-fold latency ratio {ratio:.2f}× (500k vs 10k base rows) is unexpectedly FLAT "
+        f"— the fold is an O(total physical rows) columnar QUALIFY hash-partition, so it MUST "
+        f"scale with the stored row count (measured 19.52× on 2026-07-08). A near-1× ratio "
+        f"means the honest O(total-rows) claim silently became O(page)/O(1) (then update the "
+        f"docstrings + this pin) or the fixture failed to scale. "
+        f"t_10k={t_small / 1e6:.1f}ms, t_500k={t_big / 1e6:.1f}ms."
     )
 
 

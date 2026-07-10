@@ -6345,7 +6345,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # registered (every production ingest sink historically passed
         # catalog=None — DEC-CATALOG-RECONCILE-WIRE-001) is still sweep-able
         # with no re-pull. O(P) one-time over the requested partitions, not in
-        # the per-combo hot loop (Golden Rule #10).
+        # the per-combo hot loop (Golden Rule #10). DEC-SWEEP-RECONCILE-STATCACHE-001:
+        # stat_cache=True — a WARM (byte-unchanged) launch skips the redundant
+        # full-bytes sha256 + timestamp re-read of every partition on a stat-only
+        # (mtime_ns, size, ino) token match; the loaded bars — hence
+        # data_snapshot_hash / run identity — are byte-identical (get_bars re-reads
+        # the actual file content). The launcher discards findings + heals nothing
+        # here, so suppressing the L1 classification on an unchanged file is sound;
+        # the SHARED heal/census callers keep the default stat_cache=False.
         from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
         for symbol in symbol_list:
@@ -6357,6 +6364,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     segment=segment,
                     symbol=symbol,
                     interval=interval,
+                    stat_cache=True,
                 )
         for symbol in symbol_list:
             for interval in interval_list:

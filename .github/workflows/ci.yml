@@ -654,8 +654,12 @@ jobs:
           # edge/guard suite (test_catalog.py — closed guards, path getter,
           # upsert ROLLBACK, list_partitions None-bound partials, get_bars +
           # open() missing-dependency ImportError, open_catalog, naive-tz).
+          # The reconcile stat-cache batch (get_partition_stat_tokens /
+          # set_partition_stat + the _STAT_CACHE_DDL migration) is covered by
+          # test_catalog_statcache.py, so this scoped gate runs it too — the
+          # designated integration files alone read 88.89% on the module.
           if compgen -G "tests/integration/test_catalog.py" > /dev/null; then
-            pytest --cov=brutex.data.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_data_lake_real.py tests/integration/test_catalog.py
+            pytest --cov=brutex.data.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_data_lake_real.py tests/integration/test_catalog.py tests/unit/test_catalog_statcache.py
           else
             echo "(brutex.data.catalog edge test file not present yet — gate inactive)"
           fi
@@ -1861,8 +1865,11 @@ jobs:
           # tests/unit/test_catalog_reconcile_invariants.py suite, so this gate
           # runs BOTH files (same pattern as the pull_controller gate above) —
           # the base file alone reads 89.47% on the module.
+          # The stat-cache skip batch (the stat_cache= param + the mtime/size/ino
+          # skip-and-mark paths) is covered by test_catalog_reconcile_statcache.py,
+          # so this scoped gate runs it too — without it the module reads 81.89%.
           if compgen -G "tests/unit/test_catalog_reconcile.py" > /dev/null; then
-            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py tests/unit/test_catalog_reconcile_invariants.py
+            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py tests/unit/test_catalog_reconcile_invariants.py tests/unit/test_catalog_reconcile_statcache.py
           else
             echo "(brutex.data.catalog_reconcile test file not present yet — gate inactive)"
           fi
