@@ -78,7 +78,15 @@ _EXPECTED_RUN_ID = "f6a08f4cf381544a4eba2c5005b0fc02aef2e11e822f42d082f02ccd8db1
 
 #: The frozen end-to-end store content hash (polars/zstd-build sensitive —
 #: see the module docstring).
-_EXPECTED_STORE_HASH = "82211c97766ff818e3e7cc286cb5dd582b801ffddae8ca28736c90fd69dd19ce"
+#: Re-locked for DEC-VIX-STAMP-WIRE-001 (#1274): the persisted schema gained
+#: the three appended nullable REFERENCE-ONLY ``vix_mean``/``vix_min``/
+#: ``vix_max`` columns (all null on this UNSTAMPED futures fixture — the
+#: honest unknown), so the deterministic byte stream moved by design. The
+#: delta was PROVEN VIX-only against the pre-fold store (old file sha256 ==
+#: the prior literal ``82211c97…``): dropping the trio leaves the 4×25 frame
+#: byte-for-byte frame-equal — every non-VIX row value, every run_id, the
+#: roll_schedule / snapshot-hash / run-id literals above all unchanged.
+_EXPECTED_STORE_HASH = "27c92c83159b8cadff6e39e099d73038b3c82c055ea0ef127be52df01d3d8482"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:
