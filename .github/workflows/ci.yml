@@ -276,7 +276,13 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
-    timeout-minutes: 75
+    # 75 -> 90 (2026-07-10, run 29059772135 job 86258865417): an all-GREEN
+    # run was wall-killed at 75:14 with every executed step passing — zero
+    # real failures, pure wall-time growth as the merged tree's per-module
+    # gates + suites kept accreting. 90 restores ~20% headroom over the
+    # observed ~75m wall; wall-clock budget only — no gate is weakened.
+    # Continues the 15->25->40->60->75 ratchet.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
