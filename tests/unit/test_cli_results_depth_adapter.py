@@ -302,7 +302,7 @@ class TestResilienceLines:
 
     @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
     def test_global_stops_reraise(self, tmp_path: Path, exc_type: type[BaseException]) -> None:
-        import brutex.engine.sweep_supervisor as supervisor
+        from brutex.engine import sweep_supervisor as supervisor
 
         def _boom(_grid: Any) -> str:
             raise exc_type

@@ -38,7 +38,6 @@ pytest.importorskip("polars")
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 _HASH_A = "ab" * 32
-_HASH_B = "cd" * 32
 
 
 @dataclass(frozen=True, slots=True)

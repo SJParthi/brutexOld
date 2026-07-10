@@ -245,8 +245,6 @@ class TestClustering:
         assert r.worst_loss_month == "2024-02"
 
     def test_month_losers_sum_equals_loss_count(self) -> None:
-        import json
-
         trades = [_t(-1, 2024, 1, d) for d in (1, 2, 3)] + [_t(5, 2024, 1, 4)]
         r = _fold(trades)
         by_month = json.loads(r.losses_by_month_json)
@@ -258,8 +256,6 @@ class TestClustering:
 
 class TestWinRateStability:
     def test_by_year_wins_total(self) -> None:
-        import json
-
         trades = [_t(10, 2023, 1, 1), _t(-5, 2023, 1, 2), _t(10, 2024, 1, 1)]
         r = _fold(trades)
         assert json.loads(r.win_rate_by_year_json) == {"2023": [1, 2], "2024": [1, 1]}
@@ -282,8 +278,6 @@ class TestWinRateStability:
         assert r.win_rate_year_spread == pytest.approx(0.75)
 
     def test_scratches_count_in_the_denominator(self) -> None:
-        import json
-
         trades = [_t(10, 2024, 1, 1), _t(0, 2024, 1, 2), _t(-5, 2024, 1, 3)]
         r = _fold(trades)
         assert json.loads(r.win_rate_by_year_json) == {"2024": [1, 3]}

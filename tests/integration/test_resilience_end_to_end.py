@@ -174,7 +174,7 @@ def test_adoption_backfill_rebuilds_without_resim(
     paths.resilience_stamp.unlink()  # type: ignore[attr-defined]
 
     # Spy: capture_combo (the re-sim) must NOT run on the backfill path.
-    import brutex.engine.results_depth_pass as mod
+    mod = results_depth_pass
 
     calls = {"n": 0}
     real = mod.capture_combo
@@ -207,7 +207,7 @@ def test_resilience_failure_degrades_annotation_not_ranking(
     ``resilience=None`` (``stats_live=False``) — the airtight annotation-only
     guarantee (a resilience bug can never drop a finalist from the ranking).
     """
-    import brutex.engine.results_depth_pass as mod
+    mod = results_depth_pass
 
     def _boom(*args: object, **kwargs: object) -> object:
         raise RuntimeError("fold exploded")
@@ -247,7 +247,7 @@ def test_resilience_failure_next_run_backfills_clean(
     A failed resilience write left NO sidecar, so the trio-current re-run takes
     the adoption-backfill path (NO re-sim) and the annotation self-heals.
     """
-    import brutex.engine.results_depth_pass as mod
+    mod = results_depth_pass
 
     def _boom(*args: object, **kwargs: object) -> object:
         raise RuntimeError("fold exploded")
@@ -279,7 +279,7 @@ def test_backfill_resilience_failure_degrades_not_drops(
     paths.resilience.unlink()  # type: ignore[attr-defined]
     paths.resilience_stamp.unlink()  # type: ignore[attr-defined]
 
-    import brutex.engine.results_depth_pass as mod
+    mod = results_depth_pass
 
     def _boom(*args: object, **kwargs: object) -> object:
         raise RuntimeError("backfill fold exploded")
@@ -300,7 +300,7 @@ def test_memory_error_from_resilience_step_re_raises(
     swept: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """(d) A ``MemoryError`` from the resilience step propagates raw (global stop)."""
-    import brutex.engine.results_depth_pass as mod
+    mod = results_depth_pass
 
     def _oom(*args: object, **kwargs: object) -> object:
         raise MemoryError
