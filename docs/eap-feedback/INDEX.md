@@ -98,23 +98,33 @@ with the real paths and complete the item list from the files themselves.
 
 ## Round 4 — Coordinator/session-management batch (2026-07-10)
 
-**Status:** finalizing — files with coordinator (not yet in repo).
+**Status:** final — 9 items, awaiting operator send.
 
-8 items:
+9 items (titles as in `round4/EAP_ROUND4_SUBMISSION.md`):
 
 | # | Item (short title) |
 |---|---|
-| 1 | Coordinator-scheduled sessions don't map the selected model |
-| 2 | Project-default model set but sessions still need manual re-selection |
-| 3 | Desktop auto-restart when changing model across multiple sessions |
-| 4 | Scale instability on session-create bursts (>10 sessions) |
-| 5 | Cross-session messages dropped mid-turn |
-| 6 | No coordinator session close/archive (verified via tool-registry check) |
-| 7 | False "needs input" badge |
-| 8 | Working sessions shown "idle" |
+| 1 | The model selected at spawn time is not mapped onto the new session |
+| 2 | The Project Settings default model does not take effect: every session re-selected by hand |
+| 3 | Desktop app auto-restarts when changing the model or effort across sessions in quick succession |
+| 4 | Scale instability with more than 10 open sessions, especially on session-create bursts |
+| 5 | Cross-session messages drop mid-turn, silently |
+| 6 | No way to close or archive a session from the coordinator |
+| 7 | "Needs input" badge shows when nothing needs input |
+| 8 | Actively-working sessions show as "idle" |
+| 9 | The project-level default reasoning effort is ignored — every new session comes up at the platform default (double-canary two-spawn evidence) |
 
-**Files:** not yet committed (with coordinator). This section will gain
-file pointers when the round-4 artifacts land in `docs/eap-feedback/`.
+**Files (in repo):**
+
+- `round4/EAP_ROUND4_SUBMISSION.md` — the full round-4 dossier (9 items:
+  issues at a glance, requests, open questions, per-item details, and the
+  11-screenshot attachment list).
+- `round4/EAP_ROUND4_SUBMISSION.html` — the self-contained one-page HTML
+  twin (inline CSS, house style).
+- `round4/EAP_ROUND4_EMAIL.md` — the round-4 cover email (subject, body,
+  send checklist; same 9 items).
+- `round4/EAP_ROUND4_SCREENSHOT_GUIDE.md` — the capture guide for the 11
+  screenshots attached with the email.
 
 ---
 
