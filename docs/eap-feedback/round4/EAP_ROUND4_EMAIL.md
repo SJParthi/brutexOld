@@ -53,10 +53,9 @@ eight items are the remaining toil and instability at that scale:
 | 8 | Merge ORDER across sessions on one repo is uncontrollable — we hand-built a freeze protocol (draft-converting 51 open PRs) to land one priority fix | Hours of duplicated CI; a merge-queue / hold primitive would remove the hack |
 
 The attached write-up (MD + HTML) has the details, suggested fixes, and
-open questions. Every item carries session IDs and timestamps, so your
-team can pull the server-side traces — stronger evidence than anything we
-could show from our side. Where we could not prove a cause, we say so
-plainly.
+open questions. The attached report lists the coordinator and test-session
+IDs with timestamps — directly traceable on your side; we can pin per-item
+IDs on the call. Where we could not prove a cause, we say so plainly.
 
 I'll keep sending findings through the extended window.
 

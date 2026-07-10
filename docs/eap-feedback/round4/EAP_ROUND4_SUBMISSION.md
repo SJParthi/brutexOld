@@ -125,4 +125,14 @@ Screenshots 1–4 form the item-1 evidence sequence: configured default → spaw
 
 ---
 
+## Session references (for server-side traces)
+
+- **Coordinator session** `session_01KTbEzADPC97UfpmEAsDCeM` — ran the fleet orchestration, the session-deletion tool-registry sweep (item 5), and the canary experiment (item 1).
+- **Canary A** `cse_01W6BR1vLUZLFBGtZD6byCRH` — "CANARY: effort-inheritance test", created 2026-07-10T09:28:12Z.
+- **Canary B** `cse_01P2v1VCpuQj2ooAt7SpgLK3` — "CANARY 2: effort=Extra inheritance test", created 2026-07-10T09:32:25Z.
+
+Most items were observed from the coordinator session above; per-item session IDs for the remaining items can be pinned during the call.
+
+---
+
 *Prepared 2026-07-10. Where we could not prove a cause, we say so plainly.*

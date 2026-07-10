@@ -133,6 +133,14 @@ tbody tr:nth-child(even){background:var(--row-alt);}
 </ol>
 <p>Screenshots 1&ndash;4 form the item-1 evidence sequence: configured default &rarr; spawned session&rsquo;s actual effort, across two configured values (Max, then Extra).</p>
 <hr/>
+<h2>Session references (for server-side traces)</h2>
+<ul>
+<li><strong>Coordinator session</strong> <code>session_01KTbEzADPC97UfpmEAsDCeM</code> &mdash; ran the fleet orchestration, the session-deletion tool-registry sweep (item 5), and the canary experiment (item 1).</li>
+<li><strong>Canary A</strong> <code>cse_01W6BR1vLUZLFBGtZD6byCRH</code> &mdash; &ldquo;CANARY: effort-inheritance test&rdquo;, created 2026-07-10T09:28:12Z.</li>
+<li><strong>Canary B</strong> <code>cse_01P2v1VCpuQj2ooAt7SpgLK3</code> &mdash; &ldquo;CANARY 2: effort=Extra inheritance test&rdquo;, created 2026-07-10T09:32:25Z.</li>
+</ul>
+<p>Most items were observed from the coordinator session above; per-item session IDs for the remaining items can be pinned during the call.</p>
+<hr/>
 <p><em>Prepared 2026-07-10. Where we could not prove a cause, we say so plainly.</em></p>
 </main>
 </body>
