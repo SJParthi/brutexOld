@@ -286,7 +286,7 @@ def test_public_master_revision_is_the_shared_token_source(store: InstrumentStor
 
 
 # ── coverage_revision — the master_revision twin over coverage_ledger ───────────
-# (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1641)
+# (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660)
 
 
 def _cov_record(underlying: str, year: int, *, fetched_at_iso: str) -> Any:

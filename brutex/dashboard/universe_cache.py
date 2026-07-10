@@ -127,7 +127,7 @@ def master_revision(store: Any) -> tuple[int, str]:
 
 #: The coverage-ledger content-revision probe — the ``master_revision`` twin over
 #: the ``coverage_ledger`` table (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md
-#: #1641). Content-exact for the same reason: every ``upsert_coverage`` writes a
+#: #1660). Content-exact for the same reason: every ``upsert_coverage`` writes a
 #: fresh ``last_fetched_at`` on the cell it replaces, so any coverage write moves
 #: ``max(last_fetched_at)`` and/or ``count(*)``. A COUNT + MAX aggregate over the
 #: PK-indexed ~universe×years table (at most a few thousand rows) — strictly

@@ -350,7 +350,7 @@ def _minute_prev_close_contiguous(
     the SAME resolver the daily basis uses (:func:`_daily_prev_close_contiguous`)
     — and the anchor is served iff that EXACT session has 1-minute data in
     *minute_last*. The symbol's 1-day series is NOT consulted
-    (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1641 — supersedes-in-part the
+    (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660 — supersedes-in-part the
     #1620/#1621 shape, which required the possibly-stale 1-day series to
     CONFIRM the calendar's session): with the checked-calendar walk threaded,
     the 1-day intermediary could only ADD over-refusals (a 1-day-holed but

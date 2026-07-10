@@ -4939,7 +4939,7 @@ def build_app(
         the generation) AND the coverage-ledger content revision (:func:`coverage_revision`,
         moved by every ``upsert_coverage`` — a metadata pull, in THIS process or another one,
         writes coverage cells without moving either of the first two signals;
-        DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1641) into ONE string key, plus any
+        DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660) into ONE string key, plus any
         route-specific ``extra`` discriminants (e.g. the coverage ``years`` span). Folding ALL
         THREE freshness signals into the KEY — and passing ``generation=0`` to
         :meth:`MoversSnapshotCache.get_or_compute` — means a cache hit fires ONLY when neither
