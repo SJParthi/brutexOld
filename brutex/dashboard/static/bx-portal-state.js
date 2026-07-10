@@ -17,9 +17,11 @@
  * bxParseStrategyParams carries the PINNED /strategy deep-link contract
  * expressions VERBATIM (the ``/strategy?run_id=<id>&rank=<n>`` contract is
  * a STABLE contract consumed by /results-side link builders), and
- * bxStrategyHref is the ONE builder of every /strategy href in the
- * codebase (encodeURIComponent on every component — a hostile run_id never
- * survives raw into a URL).
+ * bxStrategyHref is the ONE builder for every /strategy href on the
+ * consolidated surfaces (encodeURIComponent on every component — a hostile
+ * run_id never survives raw into a URL); one pre-existing inline copy
+ * survives in bx-oneclick.js renderCombosRows' "View" link — the ledgered
+ * follow-up DEC-COMBOS-TABLE-CONFIG-UNIFY-001.
  *
  * Honest envelope (Golden Rule #10): bxPortalSerialize preserves FOREIGN
  * query params byte-for-byte (raw-pair passthrough — never a decode/
