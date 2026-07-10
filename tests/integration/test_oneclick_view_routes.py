@@ -382,8 +382,13 @@ class TestScreenerPage:
         html = _template("screener.html")
         assert "String(cap) + ' of ' + total + ' shown'" in html
         assert "String(sorted.length) + ' of '" not in html  # the lying numerator is gone
-        assert "render cap ' + String(RENDER_CAP)" in html
-        assert "use Show all" in html
+        # A-r4 (DEC-ONECLICK-PERF-CLUB-001): the cap/note math moved into the
+        # node-goldened BXScreener primitives — the page consumes them (the
+        # wording itself is pinned by test_dashboard_screener_math.py).
+        assert "window.BXScreener.renderCount(sorted.length, state.showAll)" in html
+        assert "window.BXScreener.capNote(cap, sorted.length, state.showAll)" in html
+        assert "window.BXScreener.inputCapNote(" in html
+        assert "window.BXScreener.inputCapRows(" in html
 
     def test_sort_basis_label_names_the_artifact_preset(self) -> None:
         """[11] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the visible sort-basis
