@@ -97,24 +97,21 @@ def _bar(ts: datetime, base: int) -> CandleBar:
 @pytest.fixture
 def client(tmp_path: Path) -> Any:
     """A real app over a lake the PRODUCTION spot writer populated."""
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    store.upsert_many(
-        [_idx_instrument()],
-        snapshot_date=date(2026, 6, 1),
-        run_id="r1",
-        csv_source_sha256="0" * 64,
-    )
-    ParquetWriter(lake_root=tmp_path).write(
-        bars=[_bar(ts, 100 + n) for n, ts in enumerate(_BAR_INSTANTS)],
-        exchange="NSE",
-        segment="INDEX",
-        symbol="NSE-NIFTY",
-        interval="1minute",
-    )
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+        store.upsert_many(
+            [_idx_instrument()],
+            snapshot_date=date(2026, 6, 1),
+            run_id="r1",
+            csv_source_sha256="0" * 64,
+        )
+        ParquetWriter(lake_root=tmp_path).write(
+            bars=[_bar(ts, 100 + n) for n, ts in enumerate(_BAR_INSTANTS)],
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+        )
         yield TestClient(build_app(DashboardState(), instrument_store=store))
-    finally:
-        store.close()
 
 
 def _node_call_tz(tz: str, expr: str, *argv: str) -> Any:
