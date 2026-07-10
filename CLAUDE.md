@@ -4863,8 +4863,11 @@ hostile-review pass._
 
 ## 4. Coding Standards (when code phase starts)
 
-- **Language:** Python 3.12 primary; Rust (PyO3) for hot kernels; no
-  other languages without ADR.
+- **Language:** Rust-first for engine/hot-path kernels (operator decree
+  2026-07-10, DEC-RUST-FIRST-MANDATE-001, MIGRATION.md #1713); Python 3.12
+  for display/orchestration/glue; Python on hot paths only as thin FFI
+  bindings + independent test oracles — no Python-then-port; no other
+  languages without ADR.
 - **Formatters:** `ruff format` (not black); `ruff check --fix`.
 - **Types:** `mypy --strict` AND `pyright` both must pass.
 - **Linters:** `ruff`, `pylint` (warnings-as-errors), `bandit` (security).
