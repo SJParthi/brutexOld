@@ -1215,22 +1215,34 @@ class TestOutageGateConcurrency:
         served: list[tuple[str | None, str | None]] = []  # (expected, got)
         errors: list[BaseException] = []
 
+        def _capture(args: threading.ExceptHookArgs) -> None:
+            # Worker escapes of ANY tier — ``Exception`` AND ``BaseException``
+            # (e.g. ``threading.BrokenBarrierError``) — land here and fail the
+            # ``assert errors == []`` below: a ``threading.excepthook``
+            # override instead of a literal ``except BaseException:`` handler
+            # in the worker (CodeQL py/catch-base-exception; the
+            # test_dashboard_rate_bridge_cache.py precedent), teeth unchanged.
+            exc = args.exc_value if args.exc_value is not None else args.exc_type()
+            errors.append(exc)
+
         def _hammer() -> None:
-            try:
-                for i, coordinate in enumerate(coordinates):
-                    # ALL threads' first outage poll of this coordinate lands
-                    # together — a genuine check-then-set race each round.
-                    barrier.wait(timeout=10)
-                    served.append((f"k-{i}", gate.outage_key(coordinate)))
-            except BaseException as exc:  # surfaced to the assert below
-                errors.append(exc)
+            for i, coordinate in enumerate(coordinates):
+                # ALL threads' first outage poll of this coordinate lands
+                # together — a genuine check-then-set race each round.
+                barrier.wait(timeout=10)
+                served.append((f"k-{i}", gate.outage_key(coordinate)))
 
         threads = [threading.Thread(target=_hammer) for _ in range(n_threads)]
-        with structlog.testing.capture_logs() as logs:
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=60)
+        original_excepthook = threading.excepthook
+        threading.excepthook = _capture
+        try:
+            with structlog.testing.capture_logs() as logs:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=60)
+        finally:
+            threading.excepthook = original_excepthook
         assert not any(thread.is_alive() for thread in threads)
         assert errors == []
         # no lost last_key: EVERY concurrent poll served its seeded key
