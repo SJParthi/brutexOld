@@ -240,7 +240,12 @@ class TestNoMaterialisedView:
         # are the write-time partition flock of DEC-LAKE-PARTITION-FLOCK-001,
         # created by the SEED writes; the ``.manifest/`` sidecar is the discovery
         # manifest above — both metadata, both excluded here.)
-        data_files = {rel for rel in after if not str(rel).startswith((".locks", ".manifest"))}
+        # ``.lake_heal/`` carries the write-epoch marker every writer mutation
+        # refreshes (DEC-LAKE-HEAL-STARTUP-EPOCH-001, commit bbd319d) —
+        # metadata like the two siblings, never a materialised view.
+        data_files = {
+            rel for rel in after if not str(rel).startswith((".locks", ".manifest", ".lake_heal"))
+        }
         assert data_files, sorted(str(r) for r in after)
         assert all("1minute" in str(rel) and rel.suffix == ".parquet" for rel in data_files), (
             sorted(str(r) for r in data_files)
