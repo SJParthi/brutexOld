@@ -56,10 +56,15 @@ regexes = [
 id = "generic-api-key"
 [[rules.allowlists]]
 description = "Audited fixture/vendored-doc/ledger-prose paths — generic-api-key only"
+# ^brutex/dashboard/static/ — the one-click UI static JS assets carry column-key
+# descriptors like `key: "resilience.losing_streak_p95"` that trip generic-api-key
+# purely on entropy (the digits), never a credential; static UI assets never hold
+# secrets (DEC-AWS-ONLY-CREDS-001 — every credential lives ONLY in AWS SSM).
 paths = [
   '''^tests/''',
   '''^docs/groww/''',
   '''^docs/MIGRATION\.md$''',
+  '''^brutex/dashboard/static/''',
 ]
 
 [[rules]]
