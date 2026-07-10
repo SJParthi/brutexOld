@@ -229,7 +229,7 @@ class TestSessionTzInvariance:
         and no executable line carries a bare ``CAST(... AS DATE)``. Heuristic
         line-scan (comments / doc markup carrying `` are exempt) — honest
         envelope: a teeth-bearing ratchet, not a full SQL parser."""
-        import brutex.dashboard.db_view as db_view_module
+        from brutex.dashboard import db_view as db_view_module
 
         source = Path(db_view_module.__file__).read_text(encoding="utf-8")
         blessed = re.compile(r"_(IST_DATE|UTC_DATE)_EXPR: Final\[str\]")
