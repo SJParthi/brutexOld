@@ -350,22 +350,23 @@ def _reduce_vwap_source_paisa(
     """
     match source:
         case PriceSource.OPEN:
-            return open_paisa
+            result = open_paisa
         case PriceSource.HIGH:
-            return high_paisa
+            result = high_paisa
         case PriceSource.LOW:
-            return low_paisa
+            result = low_paisa
         case PriceSource.CLOSE:
-            return close_paisa
+            result = close_paisa
         case PriceSource.HLC3:
             # VERBATIM the pre-axis line so the (HLC3, CLOSE) baseline is
             # byte-identical (Override 1 / the golden).
-            return _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+            result = _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
         case _:  # pragma: no cover — mypy-exhaustive over the closed 5-member enum
             # A future enum member (hl2/ohlc4/…) added WITHOUT a reduction arm fails
             # LOUDLY here (mypy errors at type-check time; this never silently
             # computes HLC3). Unreachable by construction, hence the pragma.
             assert_never(source)
+    return result
 
 
 def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
@@ -398,21 +399,22 @@ def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
     """
     match source:
         case PriceSource.OPEN:
-            return float(bar.open)
+            result = float(bar.open)
         case PriceSource.HIGH:
-            return float(bar.high)
+            result = float(bar.high)
         case PriceSource.LOW:
-            return float(bar.low)
+            result = float(bar.low)
         case PriceSource.CLOSE:
-            return float(bar.close)
+            result = float(bar.close)
         case PriceSource.HLC3:
             # Decimal-divide THEN a single float() cast (never float-add-then-divide
             # — not IEEE-754-identical). VERBATIM the pre-axis HLC3 line.
-            return float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+            result = float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
         case _:  # pragma: no cover — mypy-exhaustive over the closed 5-member enum
             # A future enum member added WITHOUT a reduction arm fails LOUDLY here
             # (mypy errors at type-check time; never silently computes HLC3).
             assert_never(source)
+    return result
 
 
 @dataclass
