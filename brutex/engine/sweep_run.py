@@ -106,6 +106,7 @@ from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.sweep_apriori import apriori_enabled
 from brutex.engine.sweep_driver import (
     DEFAULT_MAX_COMBOS,
     DEFAULT_START_EQUITY_PAISA,
@@ -214,6 +215,43 @@ class SweepComboError(BruteXError):
     mask-specific edge cannot be ruled out — skipping the whole tuple is the conservative
     response. The grid drivers SKIP the whole tuple (deterministic redo next run), never
     the one mask.
+    """
+
+
+class SweepAprioriBudgetError(SweepComboError):
+    """The Apriori pruned candidate set would exceed the per-cell mask·bar budget.
+
+    Raised by :func:`brutex.engine.sweep_apriori.generate_apriori_candidates`
+    (only when ``BRUTEX_SWEEP_APRIORI`` is enabled) when the PURE-INTEGER
+    work estimate ``len(candidates) * n_bars`` STRICTLY EXCEEDS
+    ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` (a mask·bar count — no float division,
+    no wall clock, so the trip is DETERMINISTIC and bit-identical Python↔Rust,
+    Golden Rule #7). Subclassing :class:`SweepComboError` rides the existing
+    tuple-skip contract UNCHANGED — the grid drivers count it in
+    ``tuples_failed``, emit ``TUPLE_FAILED``, leave the tuple un-sentineled for a
+    deterministic redo, and exit non-zero — a LOUD refusal of a degenerate cell
+    rather than a silent multi-day run. The message NAMES the cell, ``k``, the
+    candidate count, the ``mask·bar`` product / limit, and the remedies (raise
+    ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS``, tighten ``min_hits``, reduce ``k``, or
+    unset the flag). The wall-clock runaway backstop is the separate #1608 stall
+    watchdog (non-identity-bearing), which this deterministic breaker never
+    touches.
+    """
+
+
+class SweepAprioriUnsupportedError(SweepComboError):
+    """The Apriori frontier cannot represent a ``>= 64``-bit vocabulary — GRACEFUL refusal.
+
+    Raised by :func:`brutex.engine.sweep_apriori.generate_apriori_candidates`
+    (only when ``BRUTEX_SWEEP_APRIORI`` is enabled) when a chosen condition bit is
+    ``>= 64``: the sorted-``uint64`` frequent frontier holds each mask in a single
+    64-bit limb, so a u128 vocabulary is out of range. Subclassing
+    :class:`SweepComboError` rides the existing tuple-skip contract UNCHANGED — the
+    grid drivers count it in ``tuples_failed``, emit ``TUPLE_FAILED``, leave the
+    tuple un-sentineled for a deterministic redo, and exit non-zero — a LOUD
+    per-tuple refusal instead of a raw ``ValueError`` that would crash the WHOLE
+    grid. The remedy is to unset ``BRUTEX_SWEEP_APRIORI``: the byte-identical
+    brute-force enumeration path supports the full u128 vocabulary.
     """
 
 
@@ -1479,6 +1517,17 @@ def run_persisted_sweep(
             )
         bar_bits = kernel.bar_bits
 
+    # ONE shared superset-hit counter (CLAUDE.md §11 COMMON) — the resident
+    # kernel's buffer when reusing a pre-built kernel (no bar re-marshal), else
+    # the free ``count_supermasks``; both delegate to the SAME Rust kernel /
+    # numpy fallback, so they are bit-identical (Golden Rule #4). Consumed by BOTH
+    # the Stage-1B pre-filter below AND (when ``BRUTEX_SWEEP_APRIORI`` is on) the
+    # Apriori frequent-frontier build, so the two provably agree on frequency.
+    def _count_hits(masks: Sequence[int]) -> list[int]:
+        if kernel is not None:
+            return kernel.count_hits(masks)
+        return count_supermasks(bar_bits, masks)
+
     # Sentinel-authoritative redo (DEC-MARK-MANY-SENTINEL-001): with a digest
     # and NO paired sentinel, the marks cannot be trusted (a crash inside the
     # per-key mark loop leaves a subset — MIGRATION.md #650), so probes are
@@ -1507,7 +1556,31 @@ def run_persisted_sweep(
     #: Legacy no-digest arm ONLY — the probe-time run_ids, parallel to
     #: ``survivors`` (consumed by ``mark_many`` + reused for finalists/errors).
     survivor_run_ids: list[str] = []
-    for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
+    # Enumeration source (DEC-SWEEP-APRIORI-TUPLE-001): default is the
+    # brute-force ``iter_masks_k_of_bits`` (every C(n, k) combo). With
+    # ``BRUTEX_SWEEP_APRIORI`` enabled it is the Apriori level-wise pruned
+    # candidate list — a SUBSEQUENCE of the brute-force enumeration whose
+    # Stage-1B-kept set is provably identical (byte-identical leaderboard); only
+    # the honest ``enumerated``/``conflict_pruned`` tallies shrink. The generator
+    # is imported LAZILY here (sweep_apriori raises this module's
+    # SweepAprioriBudgetError at its breaker via a lazy import too, so neither
+    # module tops the other — no import cycle).
+    mask_source: Iterable[int]
+    if apriori_enabled():
+        from brutex.engine.sweep_apriori import generate_apriori_candidates
+
+        mask_source = generate_apriori_candidates(
+            bar_bits,
+            condition_bits=cfg.condition_bits,
+            k=cfg.k,
+            min_hits=cfg.min_hits,
+            count_hits=_count_hits,
+            n_bars=len(bar_bits),
+            cell_label=subject,
+        )
+    else:
+        mask_source = iter_masks_k_of_bits(cfg.condition_bits, cfg.k)
+    for mask in mask_source:
         enumerated += 1
         if has_conflict(mask):
             conflict_pruned += 1
@@ -1537,11 +1610,8 @@ def run_persisted_sweep(
     if cfg.min_hits > 0 and survivors:
         # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
         # are bit-identical (same SUPERSET kernel) so the kept set never differs.
-        hits = (
-            kernel.count_hits(survivors)
-            if kernel is not None
-            else count_supermasks(bar_bits, survivors)
-        )
+        # Routed through the ONE shared ``_count_hits`` the Apriori generator uses.
+        hits = _count_hits(survivors)
         kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
     evaluated = len(survivors)
 
@@ -1765,6 +1835,8 @@ def run_persisted_sweep(
 
 __all__ = [
     "ComboDedup",
+    "SweepAprioriBudgetError",
+    "SweepAprioriUnsupportedError",
     "SweepComboError",
     "SweepMemoryBudgetError",
     "SweepRunConfig",
