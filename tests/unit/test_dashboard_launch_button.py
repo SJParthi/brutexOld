@@ -26,6 +26,26 @@ from brutex.dashboard.app import DashboardState, build_app
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def hermetic_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the disk probe deterministic (DEC-LAUNCH-DISK-GATE-HERMETIC-001).
+
+    The POST gate re-checks ``disk_free >= DEFAULT_MIN_DISK_FREE_BYTES``
+    (20 GiB) against the REAL runner disk; on a CI runner with < 20 GiB free
+    that 412'd 7 tests in this file and dragged ``launch_button.py`` below
+    the 100% gate. Every test here rides a deterministic plenty-free probe
+    via the ``_default_disk_usage`` module seam; the disk-refusal arm
+    (``test_low_disk_412_nothing_spawned``) re-pins the seam to a LOW value
+    explicitly — the gate itself stays byte-identical in production.
+    """
+    plenty = 4 * lb.DEFAULT_MIN_DISK_FREE_BYTES
+
+    def _plenty_free(path: str) -> Any:
+        return SimpleNamespace(total=plenty * 2, used=plenty, free=plenty)
+
+    monkeypatch.setattr(lb, "_default_disk_usage", _plenty_free)
+
+
 @pytest.fixture
 def lake(tmp_path: Path) -> Path:
     # M4: the presence precondition covers ALL 21 interval partitions.
@@ -102,6 +122,10 @@ class TestLaunchStateRoute:
         names = {c["name"] for c in payload["preconditions"]}
         assert "nifty_interval_partitions" in names
         assert "no_active_launch" in names
+        # hermetic disk seam: the pinned plenty-free probe reads GREEN
+        # deterministically — never the real runner disk.
+        verdicts = {c["name"]: c["ok"] for c in payload["preconditions"]}
+        assert verdicts["disk_free"] is True
         assert payload["cards"]["spot"]["enabled"] is True
         # coordinator delta: base command display carries NO ack flag
         assert lb.SLA_ACK_FLAG not in payload["cards"]["spot"]["command_display"]
@@ -189,6 +213,29 @@ class TestLaunchSweepRoute:
             resp = c.post("/api/v1/launch/sweep?card=spot")
         assert resp.status_code == 412
         assert "nifty_interval_partitions" in resp.json()["detail"]
+        assert "argv" not in fake_spawner
+
+    def test_low_disk_412_nothing_spawned(
+        self, lake: Path, fake_spawner: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The disk-refusal arm, HERMETIC: an injected low probe still 412s.
+
+        DEC-LAUNCH-DISK-GATE-HERMETIC-001 teeth — the seam refactor must not
+        weaken the gate: a probe under the 20 GiB floor refuses the POST with
+        412 naming ``disk_free`` and spawns nothing, regardless of the real
+        runner disk.
+        """
+        low = lb.DEFAULT_MIN_DISK_FREE_BYTES - 1
+
+        def _low_free(path: str) -> Any:
+            return SimpleNamespace(total=low * 2, used=low, free=low)
+
+        monkeypatch.setattr(lb, "_default_disk_usage", _low_free)
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
+            resp = c.post("/api/v1/launch/sweep?card=spot")
+        assert resp.status_code == 412
+        assert "disk_free" in resp.json()["detail"]
         assert "argv" not in fake_spawner
 
     def test_failed_launch_500_with_detail(

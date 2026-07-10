@@ -82,6 +82,17 @@
   .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
   .num { font-variant-numeric:tabular-nums; }
 
+  /* Row pager (DEC-WINDOWS-COUNTS-ONLY-001 — the db.html .pager idiom). */
+  .pager { display:flex; align-items:center; gap:14px; padding:10px 24px;
+    border-top:1px solid var(--border); font-size:12px; color:var(--muted); }
+  .pager button { background:var(--surface-2); color:var(--text);
+    border:1px solid var(--border-strong); border-radius:8px; padding:6px 12px; cursor:pointer; }
+  .pager button:hover:not(:disabled) { border-color:var(--blue); }
+  .pager button:disabled { opacity:.4; cursor:not-allowed; }
+  .pager .prange { font-variant-numeric:tabular-nums; }
+  .pager select { background:var(--surface-2); color:var(--text);
+    border:1px solid var(--border-strong); border-radius:8px; padding:4px 8px; }
+
   /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-001) ── */
   a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
@@ -192,6 +203,23 @@
     <div id="panel"><div class="empty">loading…</div></div>
   </div>
 
+  <!-- Row pager (DEC-WINDOWS-COUNTS-ONLY-001): the page requests a SANE page
+       (&limit=&offset= — the route already pages severity-first, so page 1
+       always carries FAILED/EMPTY) instead of the 20k-row server default. The
+       pager is STATIC DOM patched via textContent/disabled only. -->
+  <div class="pager" id="winpager">
+    <button id="winprev" disabled>‹ Prev</button>
+    <span class="prange" id="winrange">—</span>
+    <button id="winnext" disabled>Next ›</button>
+    <label>page size
+      <select id="winpagesize">
+        <option value="200" selected>200</option>
+        <option value="500">500</option>
+        <option value="1000">1000</option>
+      </select>
+    </label>
+  </div>
+
 <script>
 /* ── BruteX fetch windows (DEC-WINDOW-LEDGER-001) ──
    Read-only: one row per fetch window the ingest recorded in the durable
@@ -275,6 +303,40 @@ function winFetches(r) {
    server; counts are always complete. */
 let marketFilter = "";
 let statusFilter = "";
+/* Client-side page window (DEC-WINDOWS-COUNTS-ONLY-001): this page genuinely
+   renders rows, so it requests a SANE page (&limit=&offset=) instead of the
+   20k-row server default (~294 B/row ⇒ ~5.9 MB per 4 s poll mid-pull). The
+   route already supports offset; severity-first ordering means page 1 always
+   carries the actionable FAILED/EMPTY rows. Pager DOM is static — patched via
+   textContent/disabled only (CodeQL XSS discipline). */
+let winOffset = 0;
+const winPrev = document.getElementById("winprev");
+const winNext = document.getElementById("winnext");
+const winRange = document.getElementById("winrange");
+const winPageSize = document.getElementById("winpagesize");
+function winLimit() { return Number(winPageSize.value) || 200; }
+function updatePager(matched, returned) {
+  const from = matched === 0 ? 0 : winOffset + 1;
+  const to = winOffset + returned;
+  winRange.textContent = num(from) + "–" + num(to) + " / " + num(matched);
+  winPrev.disabled = !(winOffset > 0);
+  winNext.disabled = !(to < matched);
+}
+winPrev.addEventListener("click", () => {
+  winOffset = Math.max(0, winOffset - winLimit());
+  lastPayloadKey = null;
+  poll();
+});
+winNext.addEventListener("click", () => {
+  winOffset += winLimit();
+  lastPayloadKey = null;
+  poll();
+});
+winPageSize.addEventListener("change", () => {
+  winOffset = 0;
+  lastPayloadKey = null;
+  poll();
+});
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): the raw response
    text LAST RENDERED, folded with the filter state that rendered it (belt-and-
    braces — a filter flip already changes the querystring, so the server text
@@ -290,6 +352,7 @@ function wireChips(boxId, key, setter) {
       ev.preventDefault();
       setter(a.dataset[key]);
       document.querySelectorAll("#" + boxId + " a").forEach(x => x.classList.toggle("active", x === a));
+      winOffset = 0; // a fresh filter selection starts at page 1
       lastPayloadKey = null; // manual filter flip: force the next render, never a stale skip
       poll();
     });
@@ -298,16 +361,11 @@ function wireChips(boxId, key, setter) {
 wireChips("mktfilter", "mkt", v => { marketFilter = v; });
 wireChips("stfilter", "st", v => { statusFilter = v; });
 
-function renderWindows(rows) {
-  if (!rows.length) {
-    panel.innerHTML = marketFilter === "options"
-      ? '<div class="empty">no OPTION windows match — option windows are PLANNED up-front (see the Planned chip) and commit ALL at once when a whole series fetches cleanly (all-or-nothing, DEC-OPTION-429-RECOVERY-001), so completed rows appear in batches as each series finishes</div>'
-      : marketFilter === "futures"
-      ? '<div class="empty">no FUTURE windows match — FUT legs are pulled AUTOMATICALLY alongside options (DEC-FUTURES-PULL-ENABLE-001): run "⛓ Pull expiries + contracts" then "⬇ Pull historical" on an F&O underlying on /universe, and each FUT contract\'s candle windows then log here under the groww-future namespace (DEC-COVERAGE-GROWW-NAMESPACE-001)</div>'
-      : '<div class="empty">no fetch windows match — pull a symbol on /universe; each fetch window then logs PLANNED / SUCCESS / EMPTY / FAILED here (DEC-WINDOW-STATUS-001)</div>';
-    return;
-  }
-  const body = rows.map(r =>
+/* One esc()'d row-string builder shared by the full rebuild AND the in-place
+   tbody patch below (the db.html gridRowsHtml split, DEC-DASHBOARD-JS-PERF-001
+   idiom) — every payload value stays escaped exactly as before. */
+function windowsRowsHtml(rows) {
+  return rows.map(r =>
     "<tr>"
     + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
     + "<td>" + esc(r.market) + "</td>"
@@ -321,6 +379,28 @@ function renderWindows(rows) {
     + "<td>" + esc(r.last_error || "") + "</td>"
     + "</tr>"
   ).join("");
+}
+
+function renderWindows(rows) {
+  if (!rows.length) {
+    panel.innerHTML = marketFilter === "options"
+      ? '<div class="empty">no OPTION windows match — option windows are PLANNED up-front (see the Planned chip) and commit ALL at once when a whole series fetches cleanly (all-or-nothing, DEC-OPTION-429-RECOVERY-001), so completed rows appear in batches as each series finishes</div>'
+      : marketFilter === "futures"
+      ? '<div class="empty">no FUTURE windows match — FUT legs are pulled AUTOMATICALLY alongside options (DEC-FUTURES-PULL-ENABLE-001): run "⛓ Pull expiries + contracts" then "⬇ Pull historical" on an F&O underlying on /universe, and each FUT contract\'s candle windows then log here under the groww-future namespace (DEC-COVERAGE-GROWW-NAMESPACE-001)</div>'
+      : '<div class="empty">no fetch windows match — pull a symbol on /universe; each fetch window then logs PLANNED / SUCCESS / EMPTY / FAILED here (DEC-WINDOW-STATUS-001)</div>';
+    return;
+  }
+  /* In-place tbody patch (DEC-WINDOWS-COUNTS-ONLY-001 — the db.html
+     patchGridRows idiom): the column set here is FIXED, so when the table
+     shell already stands, swap ONLY the tbody rows — the SAME esc()'d builder
+     strings the full rebuild writes, against a NARROWER target — instead of
+     tearing down the whole table shell + sticky header per changed payload.
+     Empty states and the first paint take the full-rebuild path below. */
+  const tbody = panel.querySelector("table > tbody");
+  if (tbody) {
+    tbody.innerHTML = windowsRowsHtml(rows);
+    return;
+  }
   panel.innerHTML =
     "<table><thead><tr>"
     + "<th>Symbol</th><th>Market</th><th>Interval</th><th>Window start</th><th>Window end</th>"
@@ -328,7 +408,7 @@ function renderWindows(rows) {
     + '<th title="number of PULLS that touched this window (one per re-pull)">Attempts</th>'
     + '<th title="in-pull re-fetch depth of the LAST pull — counts BOTH empty re-fetches AND transient (429/timeout) re-attempts of this window; &gt;1 (↻) means the loop fired (up to 3×). NOT the total vendor calls: a FAILED window also burns the deeper timeout/429 in-call retry ladder (up to 6× per fetch) across passes/rounds, which is not counted here">In-pull retries</th>'
     + "<th>Last error</th>"
-    + "</tr></thead><tbody>" + body + "</tbody></table>";
+    + "</tr></thead><tbody>" + windowsRowsHtml(rows) + "</tbody></table>";
 }
 
 /* KPI scoping (DEC-WINDOW-KPI-MARKET-SCOPE-001): the Spot/Options chip scopes
@@ -360,14 +440,26 @@ async function poll() {
     const qs = new URLSearchParams();
     if (marketFilter) qs.set("market", marketFilter);
     if (statusFilter) qs.set("status", statusFilter);
-    const r = await fetch("/api/v1/coverage/windows" + (qs.size ? "?" + qs.toString() : ""));
+    /* Sane page instead of the 20k-row server default (DEC-WINDOWS-COUNTS-ONLY-001). */
+    qs.set("limit", String(winLimit()));
+    qs.set("offset", String(winOffset));
+    const r = await fetch("/api/v1/coverage/windows?" + qs.toString());
     if (!r.ok) { lastPayloadKey = null; liveTxt.textContent = "error " + r.status; return; }
     const txt = await r.text();
-    const payloadKey = marketFilter + "|" + statusFilter + "|" + txt;
+    const payloadKey = marketFilter + "|" + statusFilter + "|" + winLimit() + "|" + winOffset + "|" + txt;
     if (payloadKey === lastPayloadKey) { liveTxt.textContent = lastLiveLine; return; }
     lastPayloadKey = payloadKey;
     const body = JSON.parse(txt);
     const rows = body.windows || [];
+    /* Page snap-back: a shrinking matched set can strand the offset past the
+       last row (empty page while rows exist) — snap to page 1 once. Bounded:
+       the re-poll runs with winOffset 0, so it can never recurse. */
+    if (!rows.length && winOffset > 0 && (body.matched || 0) > 0) {
+      winOffset = 0;
+      lastPayloadKey = null;
+      poll();
+      return;
+    }
     emptyThreshold = body.empty_threshold ?? 3;
     wincEl.textContent = num(countRecorded(body.counts, body.count ?? 0));
     failcEl.textContent = num(countStatus(body.counts, "FAILED"));
@@ -388,7 +480,8 @@ async function poll() {
     }
     statusEl.textContent = num(body.matched ?? rows.length) + " matched · "
       + num(body.returned ?? rows.length) + " shown"
-      + (body.capped ? " · CAPPED (severity-first — FAILED/EMPTY always shown)" : "");
+      + (body.capped ? " · paged (severity-first — FAILED/EMPTY on page 1)" : "");
+    updatePager(body.matched ?? rows.length, body.returned ?? rows.length);
     renderWindows(rows);
     lastLiveLine = "live · " + rows.length + " rows";
     liveTxt.textContent = lastLiveLine;
