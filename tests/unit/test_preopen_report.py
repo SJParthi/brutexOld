@@ -909,7 +909,12 @@ def test_minute_prev_close_contiguous_coverage_floor_abstains() -> None:
     minute_last = {prior: Decimal("100")}
     with capture_logs() as logs:
         assert _minute_prev_close_contiguous(minute_last, trading_dates, floor_edge) is None
-    assert any(e["event"] == "calendar.coverage_exhausted" for e in logs)
+    # DEC-PREOPEN-PREVDAY-COMMON-002 merge-reconcile: the module-local
+    # ``calendar.coverage_exhausted`` event was RETIRED for the ONE COMMON
+    # ``calendar.previous_session_coverage_exhausted`` (the sanctioned rename in
+    # MIGRATION.md #1649a); this pin — added by main's #1634 against the old
+    # local walk — now asserts the COMMON event.
+    assert any(e["event"] == "calendar.previous_session_coverage_exhausted" for e in logs)
 
 
 def test_build_minute_basis_skips_row_on_session_hole_in_both_series(tmp_path: Path) -> None:
