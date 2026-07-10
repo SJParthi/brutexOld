@@ -17,8 +17,13 @@ constructor that formats its arguments:
 Both empirically proven pre-fix; the ``__reduce__`` constructor-arg fixes are
 pinned here per class (type / ``str`` / ``args`` / attribute fidelity). This
 file is also the module's discovery-gate test: it exercises every class +
-:func:`~brutex.data.errors.parquet_read_skip_errors` so
-``brutex/data/errors.py`` reads 100% line+branch standalone.
+:func:`~brutex.data.errors.parquet_read_skip_errors` + the round-18
+datetime-out-of-range sets
+(:func:`~brutex.data.errors.datetime_out_of_range_errors` /
+:func:`~brutex.data.errors.datetime_out_of_range_escape_errors` — MOVED here
+from ``test_parquet_read_skip_errors.py``, which does not stem-match the
+discovery gate's ``test_data_errors*`` / ``test_errors*`` globs; one source
+of truth) so ``brutex/data/errors.py`` reads 100% line+branch standalone.
 """
 
 from __future__ import annotations
@@ -38,6 +43,8 @@ from brutex.data.errors import (
     StoreWriteDeadlineExceeded,
     WriteDeadlineExceeded,
     WriterError,
+    datetime_out_of_range_errors,
+    datetime_out_of_range_escape_errors,
     parquet_read_skip_errors,
 )
 from brutex.models import BruteXError
@@ -225,3 +232,41 @@ class TestParquetReadSkipErrors:
         # NARROW on purpose (Golden Rule #1): a genuine code bug still propagates.
         skip = parquet_read_skip_errors()
         assert not issubclass(ValueError, skip)
+
+
+class TestDatetimeOutOfRangeErrorSets:
+    """The round-18 out-of-range Datetime conversion-fault sets
+    (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+
+    def test_full_probe_set(self) -> None:
+        """The FULL probe set covers every empirically-verified
+        conversion-fault type — OverflowError (tz-aware positive overflow via
+        min/max), ValueError (naive/negative overflow via min/max), and
+        polars' PanicException (to_list — a BaseException that escapes
+        ``except Exception``)."""
+        import polars as pl
+
+        probe = datetime_out_of_range_errors()
+        assert OverflowError in probe
+        assert ValueError in probe
+        assert pl.exceptions.PanicException in probe
+        # The panic rationale: a BaseException, NOT an Exception — the reason
+        # the blanket guards must name it explicitly.
+        assert not issubclass(pl.exceptions.PanicException, Exception)
+        assert issubclass(pl.exceptions.PanicException, BaseException)
+        # NOT folded into the file-unreadable set (different consumers/semantics).
+        assert OverflowError not in parquet_read_skip_errors()
+
+    def test_escape_set_excludes_value_error(self) -> None:
+        """The BROAD-guard subset (healer per-finding set + L3 boot blanket)
+        deliberately EXCLUDES ValueError — around arbitrary heal/sweep code
+        that is the genuine-code-bug class and must keep propagating (Golden
+        Rule #1)."""
+        import polars as pl
+
+        escape = datetime_out_of_range_escape_errors()
+        assert OverflowError in escape
+        assert pl.exceptions.PanicException in escape
+        assert ValueError not in escape
+        # A strict subset of the full probe set (no member invented twice).
+        assert set(escape) < set(datetime_out_of_range_errors())

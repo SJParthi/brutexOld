@@ -121,6 +121,42 @@ def _poison_options(lake_root: Path) -> Path:
     return dest
 
 
+def _poison_options_foreign(lake_root: Path) -> Path:
+    """Plant an OVERLAPPING foreign ``(side, timestamp)`` key in the options tree.
+
+    The canonical September file holds the key; the October file carries a
+    misplaced copy of it (foreign + overlap) alongside its own home row
+    (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    series = lake_root / "options" / "NSE-NIFTY-2025-09"
+    series.mkdir(parents=True, exist_ok=True)
+    sep_ts = datetime(2025, 9, 1, 4, 0, tzinfo=UTC)
+    oct_ts = datetime(2025, 10, 1, 4, 0, tzinfo=UTC)
+    pq.write_table(
+        pa.table(
+            {
+                "side": pa.array(["CE"]),
+                "timestamp": pa.array([sep_ts], type=pa.timestamp("us", tz="UTC")),
+            }
+        ),
+        series / "2025-09.parquet",
+    )
+    dest = series / "2025-10.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "side": pa.array(["CE", "CE"]),
+                "timestamp": pa.array([oct_ts, sep_ts], type=pa.timestamp("us", tz="UTC")),
+            }
+        ),
+        dest,
+    )
+    return dest
+
+
 def _tree_digest(root: Path) -> dict[str, str]:
     """sha256 of every file under *root*, keyed by relative path (the READ-ONLY oracle)."""
     return {
@@ -311,6 +347,33 @@ class TestCmdLakeAuditUnique:
         rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path)])
         assert rc == cli.EXIT_INTERNAL_ERROR
         assert "lake audit-unique scan errored: boom" in capsys.readouterr().err
+
+    def test_options_foreign_overlap_render_real_numbers(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The OPTIONS row shows REAL foreign/overlap counts (drift stays "-")
+        and an options-foreign-ONLY lake exits 1
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 closed the "-" placeholders)."""
+        _seed_clean(tmp_path)
+        _poison_options_foreign(tmp_path)
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path)])
+        assert rc == cli.EXIT_USER_ERROR  # options-foreign is the ONLY finding
+        out = capsys.readouterr().out
+        (options_line,) = [line for line in out.splitlines() if line.startswith("OPTIONS")]
+        cells = options_line.split()
+        # segment / files / clean / dup / foreign / overlap / drift-dirs
+        assert cells == ["OPTIONS", "2", "1", "0", "1", "1", "-"]
+        # The JSON twin carries the same real numbers.
+        capsys.readouterr()
+        rc = cli.main(["lake", "audit-unique", "--lake-root", str(tmp_path), "--json"])
+        assert rc == cli.EXIT_USER_ERROR
+        out = capsys.readouterr().out
+        payload = json.loads(out[out.index("{") :])
+        options_row = next(row for row in payload["segments"] if row["segment"] == "OPTIONS")
+        assert options_row["foreign_files"] == 1
+        assert options_row["overlap_files"] == 1
+        assert options_row["dup_files"] == 0
+        assert options_row["clean"] == 1
 
     def test_no_options_flag_skips_the_options_tree(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

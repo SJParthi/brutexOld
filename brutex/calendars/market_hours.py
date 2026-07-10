@@ -1,6 +1,6 @@
 """NSE market-hours pull guard — no Groww VENDOR pulls during the trading window.
 
-DEC-GROWW-MARKET-HOURS-GUARD-001 (MIGRATION.md #1624). The Groww access token is
+DEC-GROWW-MARKET-HOURS-GUARD-001 (MIGRATION.md #1673). The Groww access token is
 SHARED with TickVault's live feed on the SAME account (§2 Rule 6 — a single TOTP
 token, one 500/min governor). A nightly BruteX pull (launched ~01:30 IST) that
 runs long enough to bleed into the NSE trading session competes with TickVault
