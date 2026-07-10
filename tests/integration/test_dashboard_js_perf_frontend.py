@@ -243,12 +243,14 @@ def test_v29_filter_column_indices_match_the_combos_thead() -> None:
 def test_db_ships_the_in_place_tbody_patch() -> None:
     html = _template("db.html")
     # The guard that authorizes a rows-only swap (any false → full rebuild).
-    assert "function patchGridRows(grid, cols, rows, total, off)" in html
+    # `spotJoinMark` (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9 review fold) is an
+    # optional trailing flag — every non-candle caller passes nothing → inert.
+    assert "function patchGridRows(grid, cols, rows, total, off, spotJoinMark)" in html
     # The ONE sanctioned narrower innerHTML target: the SAME esc()'d builder
     # strings the full rebuild uses, written to tbody instead of the grid.
-    assert "tbody.innerHTML = gridRowsHtml(cols, rows);" in html
+    assert "tbody.innerHTML = gridRowsHtml(cols, rows, spotJoinMark);" in html
     # The rows builder is shared by BOTH the full build and the patch.
-    assert "function gridRowsHtml(cols, rows)" in html
+    assert "function gridRowsHtml(cols, rows, spotJoinMark)" in html
 
 
 def test_db_ships_the_delegated_pager_handler() -> None:
@@ -357,7 +359,7 @@ _BASELINE_INNERHTML_SINKS: dict[str, int] = {
 }
 
 # db.html carries EXACTLY ONE sanctioned extra sink over baseline:
-# `tbody.innerHTML = gridRowsHtml(cols, rows);` — the SAME already-esc()'d
+# `tbody.innerHTML = gridRowsHtml(cols, rows, spotJoinMark);` — the SAME already-esc()'d
 # builder strings the pre-existing full rebuild writes, against a NARROWER
 # target (tbody instead of the whole grid). Explicitly allowed by the
 # DEC-DASHBOARD-JS-PERF-001 security invariant; pinned verbatim in

@@ -1183,6 +1183,16 @@ jobs:
           else
             echo "(brutex.engine.stage3_select test file not present yet — gate inactive)"
           fi
+          # 19i1a · brutex.engine.sweep_apriori — the Apriori / anti-monotone
+          # level-wise pruned sweep candidate generator (DEC-SWEEP-APRIORI-TUPLE-001,
+          # default-OFF behind BRUTEX_SWEEP_APRIORI). 100% line+branch from the
+          # dedicated unit suite (the byte-identical-leaderboard parity gate lives
+          # in tests/golden/test_engine_sweep_apriori_parity.py).
+          if compgen -G "tests/unit/test_engine_sweep_apriori.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_apriori --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_apriori.py
+          else
+            echo "(brutex.engine.sweep_apriori test file not present yet — gate inactive)"
+          fi
           # 19i1b · brutex.engine.stage3_refine — Stage-3 BIPOP-CMA-ES refinement
           # runner (DEC-STAGE3-REFINE-001; the A/B determinism oracle, the ≤600
           # hard budget, the run-scoped value cache — ADR-0007 conditions 4-6/8).
@@ -1614,6 +1624,15 @@ jobs:
             pytest --cov=brutex.data.fno_candle_lake --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_candle_lake.py
           else
             echo "(brutex.data.fno_candle_lake test file not present yet — gate inactive)"
+          fi
+          # DEC-DB-FNO-DISPLAY-TRUTH-001: the COMMON wheel-free packed Greeks
+          # provenance vocabulary (pack/unpack/status labels) — stdlib-only at
+          # import (greeks_enrich re-exports it; the /db viewer decodes through
+          # it). 100% line+branch standalone.
+          if compgen -G "tests/unit/test_greeks_provenance.py" > /dev/null; then
+            pytest --cov=brutex.data.greeks_provenance --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_greeks_provenance.py
+          else
+            echo "(brutex.data.greeks_provenance test file not present yet — gate inactive)"
           fi
           # DEC-FNO-MONEYNESS-001: the shared option moneyness (ITM/ATM/OTM) + ATM±N
           # engine — pure, stdlib+Decimal only, the ONE source consumed by the movers
