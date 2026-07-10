@@ -138,10 +138,16 @@ function bxHarvestFilterOptions(rows) {
     sort: { field: 'rank', type: 'num', dir: 'asc' },
     showAll: false
   };
+  // The winners load generation (adversarial-review fold, NEW-R2-1 — the
+  // gbPollGen idiom): a rapid run switch fires overlapping loadRows and the
+  // memo'd promises can resolve INVERTED (cold run A after warm run B) — a
+  // stale run's rows must never paint under a newer run's strip.
+  var loadGen = 0;
   var deps = {
     columns: null,
     getTop100: null,
-    onRowClick: null
+    onRowClick: null,
+    onRender: null
   };
   var mounted = false;
 
@@ -222,6 +228,12 @@ function bxHarvestFilterOptions(rows) {
       var row = sorted[i];
       var tr = document.createElement('tr');
       tr.setAttribute('data-rank', String(row.rank));
+      // Keyboard operability (adversarial-review fold, C-M3/E-M5): rows are
+      // real tab stops activated by Enter/Space (the delegated keydown
+      // handler shares the click path), and a focused row is what the
+      // portal's close-focus-restore lands back on.
+      tr.setAttribute('tabindex', '0');
+      tr.setAttribute('role', 'button');
       // Winners-cascade stagger index (inert without the portal's cascade
       // class; CSS min() caps the stagger — see bx-oneclick-panels.css).
       tr.style.setProperty('--wn-i', String(i));
@@ -244,6 +256,13 @@ function bxHarvestFilterOptions(rows) {
       cap, state.rowCount, sorted.length, RENDER_CAP,
       applied.null_vix_excluded, window.BXScreener.nullVixNote
     );
+    // Post-render hook (adversarial-review fold, C-N1/NEW-R1-2): the tbody
+    // is rebuilt from scratch, so the portal re-applies its you-are-here
+    // row mark after EVERY render (async first mount AND filter/sort
+    // re-renders alike).
+    if (deps.onRender) {
+      deps.onRender();
+    }
   }
 
   function fillFilterOptions() {
@@ -266,6 +285,8 @@ function bxHarvestFilterOptions(rows) {
      BXUI.errorCard with Retry on any failure (F-M4 — a rejected memo
      self-evicts in bx-oneclick.js, so Retry genuinely refetches). */
   function loadRows(runId) {
+    loadGen += 1; // NEW-R2-1: a newer load discards every older response
+    var gen = loadGen;
     state.runId = runId;
     byId('scRunId').textContent = runId;
     var panel = byId('scPanel');
@@ -278,6 +299,7 @@ function bxHarvestFilterOptions(rows) {
     var getTop100 = deps.getTop100 || window.BXOneclick.getTop100;
     getTop100(runId)
       .then(function (payload) {
+        if (gen !== loadGen) { return; } // stale-run response — discarded
         if (!payload || typeof payload !== 'object') {
           throw new Error('malformed payload');
         }
@@ -311,6 +333,7 @@ function bxHarvestFilterOptions(rows) {
         }
       })
       .catch(function (err) {
+        if (gen !== loadGen) { return; } // stale-run failure — discarded
         if (panel && window.BXUI) {
           window.BXUI.errorCard(panel, {
             status: err && err.status,
@@ -338,6 +361,7 @@ function bxHarvestFilterOptions(rows) {
     deps.columns = opts.columns || null;
     deps.getTop100 = opts.getTop100 || null;
     deps.onRowClick = opts.onRowClick || defaultOnRowClick;
+    deps.onRender = opts.onRender || null;
     if (mounted) {
       return controller; // mount-once: listeners are never re-bound
     }
@@ -358,6 +382,15 @@ function bxHarvestFilterOptions(rows) {
     byId('scRows').addEventListener('click', function (ev) {
       var tr = ev.target.closest('tr');
       if (!tr || !state.runId) { return; }
+      deps.onRowClick(tr.getAttribute('data-rank') || '1', state.runId);
+    });
+    // Keyboard activation (C-M3/E-M5): Enter/Space on a focused row shares
+    // the click path; Space is prevented from page-scrolling.
+    byId('scRows').addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter' && ev.key !== ' ') { return; }
+      var tr = ev.target && ev.target.closest ? ev.target.closest('tr') : null;
+      if (!tr || !state.runId) { return; }
+      ev.preventDefault();
       deps.onRowClick(tr.getAttribute('data-rank') || '1', state.runId);
     });
     ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {

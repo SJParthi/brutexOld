@@ -699,7 +699,20 @@ class TestRoutesEndToEnd:
         # v29.html JOINS the scan (DEC-OPERATOR-PAGE-CONSOLIDATE-001): its
         # three static-string sink sites (confetti reset + the two toggle
         # labels) were refactored sink-free in the SAME change.
-        sink = re.compile(r"\.innerHTML\s*\+?=|insertAdjacentHTML|document\.write\(")
+        # WIDENED (adversarial-review fold, S-M1 — refuter-validated: zero
+        # false positives on this exact corpus, 8/8 named bypass classes
+        # caught): outerHTML + bracket-access innerHTML/outerHTML +
+        # createContextualFragment + .srcdoc= + setAttribute('on…') +
+        # eval/new Function + javascript: URL literals join the ban. The
+        # raw-substring ban in test_dashboard_oneclick_frontend.py already
+        # covers the JS files' innerHTML/outerHTML word forms; this regex is
+        # the templates' (inline-script) guard + the executable-sink net.
+        sink = re.compile(
+            r"\.(inner|outer)HTML\s*\+?=|\[[\"'](inner|outer)HTML[\"']\]\s*="
+            r"|insertAdjacentHTML|document\.write\(|createContextualFragment"
+            r"|\.srcdoc\s*=|setAttribute\(\s*[\"']on|\beval\(|new\s+Function\("
+            r"|[\"']javascript:"
+        )
         for name in ("screener.html", "strategy.html", "v29.html"):
             assert sink.search(_template(name)) is None, name
         for js_name in (

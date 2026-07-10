@@ -105,7 +105,10 @@ function bxPortalParse(search) {
  * Foreign (non-portal) params are preserved byte-for-byte in their original
  * relative order; portal keys are appended in the deterministic
  * BX_PORTAL_KEYS order. ``null`` in the patch DELETES the key;
- * ``winners: false`` deletes 'winners'; a set rank FORCES ``winners=1``.
+ * ``winners: false`` deletes 'winners' AND any lingering rank (the coupling
+ * law's contrapositive — rank ⇒ winners, so ¬winners ⇒ ¬rank; a rank set in
+ * the SAME patch still wins and re-forces winners); a set rank FORCES
+ * ``winners=1``.
  *
  * @param {string|null|undefined} search - the current search string.
  * @param {{winners?: boolean, rank?: number|null, runId?: string|null,
@@ -131,6 +134,11 @@ function bxPortalSerialize(search, patch) {
       known.winners = "1";
     } else {
       delete known.winners;
+      // The coupling law's contrapositive (rank ⇒ winners ⊢ ¬winners ⇒
+      // ¬rank): a URL-carried rank must not survive winners:false and
+      // silently re-add winners below. A rank set in the SAME patch is
+      // applied AFTER this branch, so an explicit rank still wins.
+      delete known.rank;
     }
   }
   if ("rank" in p) {

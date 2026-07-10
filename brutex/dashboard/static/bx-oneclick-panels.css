@@ -143,17 +143,24 @@ body.share-mode .plain-eng-block { display:block; }
   border-radius:999px; font-weight:800; font-size:13px; color:var(--yellow); }
 .drawer-rank-pill::after { content:""; position:absolute; inset:-3px;
   border-radius:999px; border:1px solid var(--yellow); opacity:0;
-  animation: bxdGlowRing 1.2s var(--ease) 2; pointer-events:none; }
+  pointer-events:none; }
+/* The pill glow is SCOPED under .open (adversarial-review fold, P-N3/E-M2):
+   CSS animations run even at visibility:hidden, so an unscoped rule played
+   once invisibly at page load and never replayed — .open re-matching the
+   selector restarts it on every real open. */
+.strategy-drawer.open .drawer-rank-pill::after { animation: bxdGlowRing 1.2s var(--ease) 2; }
 body.bx-drawer-open { overflow:hidden; } /* scroll lock while the drawer is open */
 
-/* Drawer section rise — one-shot nth-of-type ladder (≤ .35s tail). */
-.strategy-drawer .drawer-body section { animation: bxRiseIn .3s var(--ease) backwards; }
-.strategy-drawer .drawer-body section:nth-of-type(2) { animation-delay:.05s; }
-.strategy-drawer .drawer-body section:nth-of-type(3) { animation-delay:.1s; }
-.strategy-drawer .drawer-body section:nth-of-type(4) { animation-delay:.15s; }
-.strategy-drawer .drawer-body section:nth-of-type(5) { animation-delay:.2s; }
-.strategy-drawer .drawer-body section:nth-of-type(6) { animation-delay:.25s; }
-.strategy-drawer .drawer-body section:nth-of-type(7) { animation-delay:.3s; }
+/* Drawer section rise — one-shot nth-of-type ladder (≤ .35s tail), SCOPED
+   under .open (P-N3/E-M2 — same dead-at-load class as the pill glow: the
+   ladder now fires on every real open, never invisibly at first paint). */
+.strategy-drawer.open .drawer-body section { animation: bxRiseIn .3s var(--ease) backwards; }
+.strategy-drawer.open .drawer-body section:nth-of-type(2) { animation-delay:.05s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(3) { animation-delay:.1s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(4) { animation-delay:.15s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(5) { animation-delay:.2s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(6) { animation-delay:.25s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(7) { animation-delay:.3s; }
 
 /* Candle materialization: the WHOLE session rises off the axis as ONE
    animated group (O(1) animated elements over ≤500 nodes). */

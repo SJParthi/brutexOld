@@ -149,6 +149,27 @@ class TestPortalSerialize:
         )
         assert out == ""
 
+    def test_winners_false_alone_kills_a_lingering_rank(self) -> None:
+        """E-N1 (adversarial-review fold): the coupling law's contrapositive
+        — rank ⇒ winners ⊢ ¬winners ⇒ ¬rank. Previously a FULL no-op: the
+        URL-carried rank survived the delete and re-added winners."""
+        out = _node_call(
+            "P.bxPortalSerialize(ARGS[0], ARGS[1])",
+            json.dumps("?winners=1&rank=5"),
+            json.dumps({"winners": False}),
+        )
+        assert out == ""
+
+    def test_winners_false_with_an_explicit_rank_still_wins(self) -> None:
+        """A rank set in the SAME patch is applied AFTER the contrapositive
+        delete — it survives and re-forces winners (patch precedence)."""
+        out = _node_call(
+            "P.bxPortalSerialize(ARGS[0], ARGS[1])",
+            json.dumps("?winners=1&rank=5"),
+            json.dumps({"winners": False, "rank": 7}),
+        )
+        assert out == "?winners=1&rank=7"
+
     def test_rank_null_deletes_rank_but_keeps_winners(self) -> None:
         out = _node_call(
             "P.bxPortalSerialize(ARGS[0], ARGS[1])",
@@ -445,12 +466,14 @@ class TestLoadGenerationGuard:
     def test_every_async_render_arm_opens_with_the_gen_guard(self) -> None:
         """T-N7: the `gen !== state.gen` guard on EVERY async render arm of
         the strategy panel (loadCandles · loadTrades · loadEquity then+catch
-        · loadRow then+catch · loadManifestSymbol · the mountFromLocation
-        runs fallback) — count-locked so a new fetch arm cannot land
-        guardless and a refactor cannot silently drop one."""
+        · loadRow then+catch · loadManifestSymbol then+catch · the
+        mountFromLocation runs fallback = 9) — count-locked. HONEST scope
+        (COV-N2 reword): a count pin catches a DROPPED guard and forces a
+        conscious update when an arm is added; it cannot by itself prove a
+        NEW arm carries a guard — the per-arm source pins around it do."""
         js = _js(_STRATEGY_PANEL_JS)
         guards = js.count("if (gen !== state.gen) { return; }")
-        assert guards == 8, f"expected 8 gen guards, found {guards}"
+        assert guards == 9, f"expected 9 gen guards, found {guards}"
         # Every guard captures the generation BEFORE its fetch:
         assert js.count("var gen = state.gen;") >= 6
         # update() owns the ONE bump:
@@ -517,6 +540,31 @@ class TestOneclickSeam:
     def test_last_manifest_is_fed_by_render_manifest(self) -> None:
         js = _js(_ONECLICK_JS)
         assert "lastManifestPayload = payload; // the BXOneclick.lastManifest() source" in js
+
+    def test_manifest_inflight_dedupe_is_settle_evicting(self) -> None:
+        """P-M1 (adversarial-review fold): a cold deep-link drawer open and
+        the manifest poller share ONE in-flight /manifest promise — the
+        second concurrent caller never pays a duplicate fetch. The memo
+        self-evicts on SETTLE (resolve AND reject), so it is an in-flight
+        dedupe only — the poller always refetches fresh on its next tick,
+        never a stale-manifest cache."""
+        js = _js(_ONECLICK_JS)
+        assert "var manifestInflight = { runId: null, promise: null };" in js
+        assert "function getManifestOnce(runId, timeoutMs) {" in js
+        assert "promise.then(evict, evict); // settle-evict — an in-flight dedupe only" in js
+        assert "getManifestOnce: getManifestOnce," in js  # exported for the panel
+        # The manifest poller rides the SAME dedupe:
+        assert "return getManifestOnce(state.selectedRunId, timeoutMs);" in js
+
+    def test_strategy_panel_cold_manifest_arm_rides_the_dedupe(self) -> None:
+        """The panel's cold-start manifest one-shot consumes the shared
+        in-flight promise (no second concurrent /manifest fetch), and a
+        manifest FAILURE still advances to loadRow — the story card loads
+        and the chart names the missing symbol (never a silently dead
+        drawer)."""
+        st = _js(_STRATEGY_PANEL_JS)
+        assert "window.BXOneclick.getManifestOnce(state.runId, 12000)" in st
+        assert "next(); // honest: symbol stays null — the chart names the miss" in st
 
     def test_each_subscriber_runs_in_its_own_try_catch(self) -> None:
         js = _js(_ONECLICK_JS)
@@ -790,7 +838,13 @@ class TestPortalWiring:
     def test_pushstate_exactly_on_the_drawer_open_arm(self) -> None:
         js = _js(_PORTAL_JS)
         assert js.count("history.pushState(") == 1  # drawer open — the ONLY push
-        assert "writeUrl({ winners: true, rank: rank }, true); // the ONLY pushState arm" in js
+        # NEW-R2-3: the open arm is the only push-CAPABLE arm; a re-open from
+        # the rank-less entry a prior close left behind replaces instead
+        # (open/close cycles never accumulate duplicate history entries).
+        assert (
+            "writeUrl({ winners: true, rank: rank }, !state.reopenReplaces);"
+            " // the ONLY pushState-capable arm" in js
+        )
         assert js.count("history.replaceState(") == 1  # the one shared write funnel
 
     def test_close_never_navigates(self) -> None:
@@ -889,6 +943,300 @@ class TestPortalWiring:
     def test_inert_on_every_other_page(self) -> None:
         js = _js(_PORTAL_JS)
         assert 'if (!byId("ocWinnersSection")) {' in js
+
+
+# ---------------------------------------------------------------------------
+# Adversarial-review fix-round pins (refuter-majority-confirmed findings —
+# each class names the finding it kills; source pins per the #1557 envelope,
+# node-executed where the logic is pure)
+# ---------------------------------------------------------------------------
+
+
+class TestDeepLinkRestoreLatch:
+    """C-M1: on `/?winners=1&rank=N` WITHOUT run_id, the runs poller's /runs
+    fetch is issued BEFORE the portal's latestRun() and usually resolves
+    first — its onRunChanged ran OUTSIDE any reconciling window and stripped
+    the deep link's rank via replaceState. The fix is a distinct
+    restore-pending LATCH (the reconciling flag alone cannot cover the
+    window)."""
+
+    def test_latch_set_before_any_async_restore_arm(self) -> None:
+        js = _js(_PORTAL_JS)
+        restore = js[js.index("function restoreFromUrl(parsed) {") :]
+        latch_at = restore.index("state.restorePending = true;")
+        select_at = restore.index("window.BXOneclick.selectRun(parsed.runId);")
+        latest_at = restore.index("window.BXOneclick.latestRun()")
+        assert latch_at < select_at
+        assert latch_at < latest_at
+
+    def test_latch_releases_only_in_finish_restore_finally(self) -> None:
+        js = _js(_PORTAL_JS)
+        assert js.count("state.restorePending = false;") == 1
+        finish = js[js.index("function finishRestore(parsed) {") :]
+        finish = finish[: finish.index("function restoreFromUrl")]
+        assert "state.restorePending = false; // the C-M1 latch releases HERE only" in finish
+        assert finish.index("} finally {") < finish.index("state.restorePending = false;")
+
+    def test_run_change_strip_is_guarded_by_the_latch(self) -> None:
+        """The killing pin: the strip must sit INSIDE the latch guard so the
+        poller's first auto-selection cannot rewrite the deep link away
+        while the restore is in flight — the opened drawer ends with the
+        deep-link URL + history entry intact."""
+        js = _js(_PORTAL_JS)
+        handler = js[js.index("function onRunChanged(runId) {") :]
+        handler = handler[: handler.index("winnersCtl.loadRows(runId);") + 30]
+        guard_at = handler.index("if (!state.restorePending) {")
+        strip_at = handler.index("writeUrl({ rank: null, runId: null }, false);")
+        assert guard_at < strip_at
+        between = handler[guard_at + len("if (!state.restorePending) {") : strip_at]
+        assert "}" not in between  # the strip is INSIDE the guard block
+
+
+class TestDrawerHiddenState:
+    """E-M1/S-N1: the drawer + backdrop ship with the `hidden` attribute
+    (UA display:none) managed by the portal — a panels-CSS load failure now
+    degrades to an INVISIBLE drawer, never an unstyled static skeleton
+    dumped at the document end."""
+
+    def test_markup_ships_hidden_on_drawer_and_backdrop(self) -> None:
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert '<div class="drawer-back" id="ocDrawerBack" hidden></div>' in html
+        assert 'aria-label="Strategy detail" hidden' in html
+
+    def test_open_unhides_then_adds_open_on_the_next_task(self) -> None:
+        """Un-hide first; `.open` lands via a next-task one-shot (the
+        swapDrawerBody idiom — no rAF, no forced layout flush) so the
+        slide-in transition starts from a computed shut style; a close
+        inside the window keeps the drawer shut (the state.rank guard)."""
+        js = _js(_PORTAL_JS)
+        open_fn = js[js.index("function openDrawer(rank) {") :]
+        open_fn = open_fn[: open_fn.index("function closeDrawer()")]
+        unhide_at = open_fn.index('drawer.removeAttribute("hidden");')
+        assert 'back.removeAttribute("hidden");' in open_fn
+        timer_at = open_fn.index("setTimeout(function () {")
+        add_at = open_fn.index('drawer.classList.add("open");')
+        assert unhide_at < timer_at < add_at
+        assert "return; // closed again before the frame — stay shut" in open_fn
+
+    def test_close_rehides_after_the_slide_out_with_a_reopen_guard(self) -> None:
+        js = _js(_PORTAL_JS)
+        close_fn = js[js.index("function closeDrawer() {") :]
+        close_fn = close_fn[: close_fn.index("function surfPrev()")]
+        assert 'd.setAttribute("hidden", "");' in close_fn
+        assert 'b.setAttribute("hidden", "");' in close_fn
+        assert "return; // reopened — stays visible" in close_fn
+        assert "}, 400);" in close_fn  # bounded one-shot > slide (.32s) + delay (.34s)
+
+
+class TestOpenChoreographyScopedUnderOpen:
+    """P-N3/E-M2: CSS animations run even at visibility:hidden, so the
+    UNscoped section-rise ladder + rank-pill glow played once invisibly at
+    page load and were dead on every real open. Both are now scoped under
+    `.strategy-drawer.open` — re-matching restarts them per open."""
+
+    def test_section_rise_ladder_is_open_scoped(self) -> None:
+        css = _js(_PANELS_CSS)
+        assert ".strategy-drawer.open .drawer-body section { animation: bxRiseIn" in css
+        assert "\n.strategy-drawer .drawer-body section { animation:" not in css  # dead form killed
+        for n in range(2, 8):
+            assert f".strategy-drawer.open .drawer-body section:nth-of-type({n})" in css, n
+
+    def test_pill_glow_is_open_scoped_and_base_rule_carries_no_animation(self) -> None:
+        css = _js(_PANELS_CSS)
+        assert ".strategy-drawer.open .drawer-rank-pill::after { animation: bxdGlowRing" in css
+        base = css[css.index(".drawer-rank-pill::after {") :]
+        base = base[: base.index("}")]
+        assert "animation" not in base  # the ::after base is geometry only
+
+
+class TestWinnersCollapsedUntabbable:
+    """C-M2 + E-M3: the collapsed winners body's 8 filter controls + rows +
+    Show-all were clipped but still tabbable; and the sticky filter bar
+    could never stick inside an overflow:hidden scroll container."""
+
+    def test_collapsed_inner_is_visibility_hidden_with_delayed_flip(self) -> None:
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        # the drawer's own delayed-visibility idiom: instant on open,
+        # delayed past the .38s fold on close — untabbable when shut.
+        assert "visibility: hidden; transition: visibility 0s linear .4s; }" in html
+        assert "#ocWinnersSection .winners-body.open .winners-body-inner" in html
+        assert "visibility: visible; transition: visibility 0s; }" in html
+
+    def test_unfold_clips_via_overflow_clip_so_sticky_engages(self) -> None:
+        """overflow:clip clips exactly like hidden but creates NO scroll
+        container, so .wn-filterbar's position:sticky engages against the
+        PAGE scrollport; older engines fall back to the hidden form (the
+        pre-fix never-sticks behavior — stated honestly in the comment)."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "overflow: hidden; overflow: clip;" in html
+        assert ".wn-filterbar { position:sticky;" in _js(_PANELS_CSS)
+
+
+class TestWinnersRowKeyboardAccess:
+    """C-M3/E-M5 (merged): winners rows are real tab stops activated by
+    Enter/Space through the SAME onRowClick seam, and the focus-restore
+    target is the activating row (previously <body> — a restore no-op)."""
+
+    def test_rows_are_focusable_buttons(self) -> None:
+        sc = _js(_SCREENER_PANEL_JS)
+        assert "tr.setAttribute('tabindex', '0');" in sc
+        assert "tr.setAttribute('role', 'button');" in sc
+
+    def test_enter_and_space_share_the_click_path(self) -> None:
+        sc = _js(_SCREENER_PANEL_JS)
+        assert "if (ev.key !== 'Enter' && ev.key !== ' ') { return; }" in sc
+        keydown = sc[sc.index("addEventListener('keydown'") :]
+        keydown = keydown[: keydown.index("});")]
+        assert "ev.preventDefault();" in keydown  # Space must never page-scroll
+        assert "deps.onRowClick(tr.getAttribute('data-rank') || '1', state.runId);" in keydown
+
+    def test_focus_restore_reaches_the_activating_row(self) -> None:
+        js = _js(_PORTAL_JS)
+        assert "state.lastFocus = document.activeElement; // focus restore target" in js
+        assert "state.lastFocus.focus();" in js
+
+
+class TestWinnersStaleResponseGuard:
+    """NEW-R2-1: the winners table had ZERO stale-response guard — a rapid
+    run switch could paint run A's rows under a run-B strip (and a stale
+    run's row_count could set the surf bounds). Both reads now carry the
+    gbPollGen-idiom load generation."""
+
+    def test_load_rows_carries_the_load_generation_guard(self) -> None:
+        sc = _js(_SCREENER_PANEL_JS)
+        assert "var loadGen = 0;" in sc
+        assert "loadGen += 1; // NEW-R2-1: a newer load discards every older response" in sc
+        guards = sc.count("if (gen !== loadGen) { return; }")
+        assert guards == 2, f"expected 2 loadGen guards (then + catch), found {guards}"
+
+    def test_row_count_read_carries_its_own_guard(self) -> None:
+        js = _js(_PORTAL_JS)
+        assert "var rowCountGen = 0;" in js
+        guards = js.count("if (gen !== rowCountGen) { return; }")
+        assert guards == 2, f"expected 2 rowCountGen guards (then + catch), found {guards}"
+
+
+class TestRunSwitchStopsTheOldRunChain:
+    """E-M4 + NEW-R3-1: a run switch bumps the strategy panel's load
+    generation (the old run's in-flight callback chain stops dead — no
+    ~4 dead old-run fetches, no stale write into the hidden drawer), and
+    update() clears the previously PAINTED body so a reopen never shows the
+    old run/rank's residue during the new fetch window."""
+
+    def test_run_change_bumps_the_strategy_panel_generation(self) -> None:
+        js = _js(_PORTAL_JS)
+        handler = js[js.index("function onRunChanged(runId) {") :]
+        handler = handler[: handler.index("winnersCtl.loadRows(runId);") + 30]
+        close_at = handler.index("closeDrawer();")
+        bump_at = handler.index("window.BXStrategyPanel.update({ runId: null });")
+        assert close_at < bump_at  # close first, then kill the old chain
+
+    def test_update_clears_the_previous_targets_painted_dom(self) -> None:
+        st = _js(_STRATEGY_PANEL_JS)
+        assert "function resetPanelDom() {" in st
+        update = st[st.index("function bxStrategyPanelUpdate(target) {") :]
+        update = update[: update.index("function bxStrategyPanelMountFromLocation")]
+        # AFTER the no-run early return (a null-run update never wipes the
+        # standalone page's static awaiting copy) and BEFORE the fetch:
+        no_run_at = update.index("if (!state.runId) { return; }")
+        reset_at = update.index("resetPanelDom(); // NEW-R3-1: no previous-target residue")
+        fetch_at = update.index("loadManifestSymbol(loadRow);")
+        assert no_run_at < reset_at < fetch_at
+
+    def test_reset_covers_story_trades_chart_and_equity(self) -> None:
+        st = _js(_STRATEGY_PANEL_JS)
+        reset = st[st.index("function resetPanelDom() {") :]
+        reset = reset[: reset.index("function bxStrategyPanelUpdate")]
+        for token in (
+            "'stName'",
+            "'stWorst5'",
+            "'stTrendSplit'",
+            "byId('stTradesBody')",
+            "'loading trades…'",
+            "'loading chart…'",
+            "'loading equity…'",
+        ):
+            assert token in reset, token
+
+
+class TestActiveRowRemark:
+    """C-N1 + NEW-R1-2: the you-are-here row mark is re-applied on EVERY
+    panel render (the async first mount on combos-intercept/deep-link opens
+    AND filter/sort re-renders, which rebuild the tbody from scratch)."""
+
+    def test_panel_fires_the_post_render_hook(self) -> None:
+        sc = _js(_SCREENER_PANEL_JS)
+        render = sc[sc.index("function render() {") : sc.index("function fillFilterOptions")]
+        assert "if (deps.onRender) {" in render
+        assert "deps.onRender();" in render
+        assert "deps.onRender = opts.onRender || null;" in sc
+
+    def test_portal_remarks_the_active_row_on_every_render(self) -> None:
+        js = _js(_PORTAL_JS)
+        mount = js[js.index("winnersCtl = window.BXScreenerPanel.mount({") :]
+        mount = mount[: mount.index("markActiveRow(state.rank);") + 40]
+        assert "onRender: function () {" in mount
+
+
+class TestCombosInterceptRunCoherence:
+    """NEW-R2-2: a not-yet-repainted combos row for ANOTHER run falls
+    through to its REAL /strategy href — the mismatch check runs BEFORE the
+    intercept commits (preventDefault)."""
+
+    def test_a_foreign_run_link_falls_through_to_the_real_href(self) -> None:
+        js = _js(_PORTAL_JS)
+        combos = js[js.index('var combosBody = byId("combosBody");') :]
+        combos = combos[: combos.index("window.BXOneclick.onRunChange")]
+        mismatch_at = combos.index("String(parsed.runId) !== String(state.runId)")
+        prevent_at = combos.index("ev.preventDefault();")
+        assert mismatch_at < prevent_at
+
+
+class TestHistoryEntryHygiene:
+    """NEW-R2-3: N open/close cycles must not accumulate N identical
+    rank-less history entries — a re-open from the close-created duplicate
+    entry REPLACES it; popstate (a REAL prior entry) re-arms pushing."""
+
+    def test_close_arms_the_reopen_replace(self) -> None:
+        js = _js(_PORTAL_JS)
+        close_fn = js[js.index("function closeDrawer() {") :]
+        close_fn = close_fn[: close_fn.index("function surfPrev()")]
+        assert "state.reopenReplaces = true;" in close_fn
+        assert "if (!state.reconciling) {" in close_fn  # a reconciler close wrote nothing
+
+    def test_popstate_disarms_it(self) -> None:
+        js = _js(_PORTAL_JS)
+        pop = js[js.index('window.addEventListener("popstate"') :]
+        pop = pop[: pop.index("});")]
+        assert "state.reopenReplaces = false;" in pop
+
+    def test_open_consumes_the_flag_once(self) -> None:
+        js = _js(_PORTAL_JS)
+        open_fn = js[js.index("function openDrawer(rank) {") :]
+        open_fn = open_fn[: open_fn.index("function closeDrawer()")]
+        assert "!state.reopenReplaces); // the ONLY pushState-capable arm" in open_fn
+        assert "state.reopenReplaces = false;" in open_fn
+
+
+class TestPanelsCssLinked:
+    """COV-N1: every template that uses the Beginner/Pro block classes must
+    LINK bx-oneclick-panels.css (the rules moved there — a class without its
+    stylesheet is a silent no-op toggle)."""
+
+    def test_every_jargon_block_template_links_the_panels_css(self) -> None:
+        consumers = []
+        for tpl in sorted(_TEMPLATES.glob("*.html")):
+            html = tpl.read_text(encoding="utf-8")
+            if "jargon-block" in html:
+                consumers.append(tpl.name)
+                assert "/static/bx-oneclick-panels.css" in html, tpl.name
+        # the two known block consumers really are in the covered set:
+        assert {"strategy.html", "v29.html"} <= set(consumers)
+
+    def test_screener_links_the_panels_css_for_its_scpanel_rules(self) -> None:
+        html = (_TEMPLATES / "screener.html").read_text(encoding="utf-8")
+        assert "bx-scpanel" in html
+        assert "/static/bx-oneclick-panels.css" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1040,6 +1388,31 @@ class TestHonestDegradeMatrix:
         payload = resp.json()
         assert payload["status"] == "corrupt"
         assert "schema_version" in payload["detail"]
+
+    def test_partial_artifact_serves_partial_with_named_detail(self, tmp_path: Path) -> None:
+        """COV-M1 (adversarial-review fold): the §10-promised `partial` case
+        — ONE malformed entry degrades to a NAMED partial with the rows kept
+        up to it (never a 500, never a silent drop); both panels branch on
+        status === 'partial' client-side (source-pinned)."""
+        import json as _json
+
+        client, lake = _degrade_client(tmp_path)
+        path = lake / "sweep_runs" / "r-20260707-fixt01" / "top100.json"
+        doc = _json.loads(path.read_text(encoding="utf-8"))
+        doc["entries"][-1] = "junk — not an object"  # the LAST entry breaks
+        path.write_text(_json.dumps(doc), encoding="utf-8")
+        resp = client.get("/api/v1/oneclick/top100?run_id=r-20260707-fixt01")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["status"] == "partial"
+        assert "is not an object — rows kept up to it" in payload["detail"]
+        assert payload["row_count"] == len(payload["rows"])
+        assert payload["row_count"] > 0  # the good rows survive
+        # The client renders the PARTIAL arm loudly (the DOM layer is
+        # source-pinned per the #1557 envelope):
+        sc = _js(_SCREENER_PANEL_JS)
+        assert "payload.status === 'ok' || payload.status === 'partial'" in sc
+        assert "'PARTIAL artifact: ' + String(payload.detail)" in sc
 
     def test_one_row_artifact_serves_the_single_row(self, tmp_path: Path) -> None:
         import json as _json

@@ -27,7 +27,8 @@
  *     transition, ArrowLeft/ArrowRight prev/next outside form fields.
  *
  * No pollers, no intervals, no rAF loops — zero background work; the only
- * timers are bounded one-shot animation-class fallbacks.
+ * timers are bounded one-shot animation-class/visibility fallbacks (the
+ * drawer's next-task class add on open + the after-slide re-hide on close).
  *
  * Honest envelope (Golden Rule #10): browser-only glue pinned by
  * SOURCE-STRING tests (presence, not execution — the #1557 Playwright job
@@ -54,9 +55,26 @@
     winnersMounted: false,
     drawerMounted: false,
     reconciling: false, // suppresses ALL history writes while converging
+    // C-M1 (adversarial-review fold): TRUE from restoreFromUrl until
+    // finishRestore completes — the runs poller's first auto-selection
+    // resolves BEFORE the portal's own latestRun() on the common no-run_id
+    // deep-link path, and its onRunChanged must NOT strip the deep link's
+    // rank while the restore is still in flight (the `reconciling` flag
+    // alone cannot cover this window — the strip runs OUTSIDE it).
+    restorePending: false,
+    // NEW-R2-3 (adversarial-review fold): a close leaves a rank-less entry
+    // identical to the pre-open one — the NEXT open replaces it instead of
+    // pushing, so open/close cycles never accumulate duplicate entries.
+    // Cleared on popstate (there the current entry is a REAL prior one).
+    reopenReplaces: false,
     lastFocus: null
   };
   var winnersCtl = null;
+  // NEW-R2-1 twin (adversarial-review fold): the rowCount read rides the
+  // same memo'd promise as the winners table — and needs the same
+  // stale-response guard, or a slow old run's row_count sets the surf
+  // bounds under a newer run.
+  var rowCountGen = 0;
 
   /* ── URL writes (all through the pure serializer; foreign params kept) ── */
 
@@ -84,6 +102,13 @@
       onRowClick: function (rank, runId) {
         void runId; // the portal's run is the page's selected run
         openDrawer(Math.max(1, parseInt(rank, 10) || 1));
+      },
+      onRender: function () {
+        // C-N1/NEW-R1-2 (adversarial-review fold): the panel rebuilds its
+        // tbody from scratch on EVERY render — re-apply the you-are-here
+        // mark each time (the async first mount on combos-intercept/deep-
+        // link opens AND filter/sort re-renders while the drawer is open).
+        markActiveRow(state.rank);
       }
     });
     if (state.runId) {
@@ -186,6 +211,8 @@
   }
 
   function refreshRowCount() {
+    rowCountGen += 1; // a newer read discards every older response
+    var gen = rowCountGen;
     if (!state.runId) {
       state.rowCount = null;
       updatePrevNext();
@@ -194,6 +221,7 @@
     // Rides the SAME memo'd promise as every other consumer — no extra fetch.
     window.BXOneclick.getTop100(state.runId)
       .then(function (payload) {
+        if (gen !== rowCountGen) { return; } // stale-run response — discarded
         var ok =
           payload &&
           typeof payload === "object" &&
@@ -202,6 +230,7 @@
         updatePrevNext();
       })
       .catch(function () {
+        if (gen !== rowCountGen) { return; } // stale-run failure — discarded
         state.rowCount = 0; // honest: no rows known ⇒ both surf buttons disabled
         updatePrevNext();
       });
@@ -258,25 +287,43 @@
     var drawer = byId("ocStrategyDrawer");
     var back = byId("ocDrawerBack");
     if (!wasOpen) {
-      // Visibility discipline is CSS-owned (bx-oneclick-panels.css): the
-      // shut drawer sits at visibility:hidden (untabbable) + translateX;
-      // .open flips visibility instantly and slides in — and on close the
-      // delayed visibility transition re-hides it only AFTER the slide-out
-      // completes. No display toggling ⇒ no forced layout flush here.
+      // Managed hidden state (E-M1/S-N1 adversarial-review fold): the SHUT
+      // drawer + backdrop carry the `hidden` attribute (UA display:none) so
+      // a panels-CSS load failure degrades to an INVISIBLE drawer — never
+      // an unstyled skeleton dumped at the document end. Un-hide first;
+      // `.open` (the slide-in + the .open-scoped section-rise/pill-glow
+      // choreography) lands on the NEXT task so the transition starts from
+      // a computed shut style — never a forced synchronous layout flush
+      // (the swapDrawerBody idiom; no rAF — T-N6). The CSS
+      // visibility:hidden discipline stays as belt-and-braces.
       if (drawer) {
-        drawer.classList.add("open");
+        drawer.removeAttribute("hidden");
       }
       if (back) {
-        back.classList.add("open");
+        back.removeAttribute("hidden");
       }
       document.body.classList.add("bx-drawer-open"); // scroll lock
       setMainInert(true);
       state.lastFocus = document.activeElement; // focus restore target
-      var closeBtn = byId("ocDrawerClose");
-      if (closeBtn) {
-        closeBtn.focus();
-      }
-      writeUrl({ winners: true, rank: rank }, true); // the ONLY pushState arm
+      setTimeout(function () {
+        if (state.rank === null) {
+          return; // closed again before the frame — stay shut
+        }
+        if (drawer) {
+          drawer.classList.add("open");
+        }
+        if (back) {
+          back.classList.add("open");
+        }
+        var closeBtn = byId("ocDrawerClose");
+        if (closeBtn) {
+          closeBtn.focus(); // focusable only once visibility flips
+        }
+      }, 0);
+      // NEW-R2-3: a re-open from the rank-less entry a prior close left
+      // behind REPLACES that entry instead of pushing a duplicate.
+      writeUrl({ winners: true, rank: rank }, !state.reopenReplaces); // the ONLY pushState-capable arm
+      state.reopenReplaces = false;
     } else {
       swapDrawerBody(prevRank !== null && rank > prevRank);
       writeUrl({ rank: rank }, false); // re-rank is a replaceState
@@ -303,6 +350,23 @@
     if (back) {
       back.classList.remove("open");
     }
+    // Re-add `hidden` only AFTER the slide-out (bounded one-shot fallback,
+    // > the .32s slide + the .34s visibility delay — also covers the
+    // reduced-motion no-transition arm); a reopen inside the window keeps
+    // the drawer visible (the state.rank guard re-checks at fire time).
+    setTimeout(function () {
+      if (state.rank !== null) {
+        return; // reopened — stays visible
+      }
+      var d = byId("ocStrategyDrawer");
+      var b = byId("ocDrawerBack");
+      if (d) {
+        d.setAttribute("hidden", "");
+      }
+      if (b) {
+        b.setAttribute("hidden", "");
+      }
+    }, 400);
     document.body.classList.remove("bx-drawer-open");
     setMainInert(false);
     markActiveRow(null);
@@ -317,6 +381,12 @@
     // deep-linked rank); Back still closes via the popstate reconciler
     // because drawer-open is the only pushState.
     writeUrl({ rank: null }, false);
+    if (!state.reconciling) {
+      // NEW-R2-3: the current entry now duplicates the pre-open one — the
+      // next open replaces it (a reconciler close wrote nothing, so the
+      // flag stays as-is there).
+      state.reopenReplaces = true;
+    }
   }
 
   function surfPrev() {
@@ -367,7 +437,19 @@
     // freshly-invalidated memo (a failed reload leaves the honest
     // awaiting/errorCard state — never stale rows for the old run).
     closeDrawer();
-    writeUrl({ rank: null, runId: null }, false);
+    if (state.drawerMounted) {
+      // E-M4 (adversarial-review fold): bump the strategy panel's load
+      // generation so the OLD run's in-flight callback chain stops dead —
+      // no further dead fetches, no stale write into the hidden drawer.
+      window.BXStrategyPanel.update({ runId: null });
+    }
+    if (!state.restorePending) {
+      // C-M1 (adversarial-review fold): while a no-run_id deep-link restore
+      // is in flight (the latestRun arm), the poller's first auto-selection
+      // must NOT strip the deep link's rank — finishRestore owns the URL
+      // until it completes.
+      writeUrl({ rank: null, runId: null }, false);
+    }
     state.runId = runId;
     refreshRowCount();
     if (state.winnersMounted && winnersCtl) {
@@ -482,6 +564,13 @@
         if (!parsed.runId) {
           return;
         }
+        if (state.runId && String(parsed.runId) !== String(state.runId)) {
+          // NEW-R2-2 (adversarial-review fold): a not-yet-repainted combos
+          // row for ANOTHER run (a just-switched page) falls through to its
+          // REAL /strategy href — the drawer must never show the new run's
+          // rank-N for a row that described the old run's strategy.
+          return;
+        }
         ev.preventDefault();
         if (!state.runId) {
           state.runId = parsed.runId;
@@ -497,6 +586,10 @@
     // Back/forward: converge the DOM to the URL (drawer-open is the only
     // pushState, so Back = close drawer; never a site exit from close).
     window.addEventListener("popstate", function () {
+      // Back landed on a REAL prior entry — the next open must PUSH again
+      // (the reopen-replaces shortcut applies only to the close-created
+      // duplicate entry).
+      state.reopenReplaces = false;
       applyUrl(window.BXPortalState.parse(window.location.search));
     });
   }
@@ -516,6 +609,7 @@
       }
     } finally {
       state.reconciling = false;
+      state.restorePending = false; // the C-M1 latch releases HERE only
     }
   }
 
@@ -523,6 +617,11 @@
     if (!parsed.winners && parsed.rank === null && parsed.runId === null) {
       return; // nothing to restore — the portal stays lazy
     }
+    // C-M1 (adversarial-review fold): the latch is set BEFORE any async arm
+    // resolves, so the runs poller's first auto-selection — usually issued
+    // (and resolved) before the portal's own latestRun() — can never strip
+    // the deep link's rank while the restore is in flight.
+    state.restorePending = true;
     if (parsed.runId) {
       // 1) the URL's run wins: select it page-wide BEFORE opening anything
       //    (the reconciling flag suppresses the run-change handler's strip).

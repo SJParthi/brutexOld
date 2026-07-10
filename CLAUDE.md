@@ -1954,7 +1954,34 @@ hostile-review pass._
   node goldens · T-N2 ONE-inventory hook-parity fence over BOTH markup copies · T-N3 id uniqueness
   with an EMPTY baseline · T-N4 portal wiring pins · T-N5 honest-degrade route matrix incl. the
   bad-rank deep-link honest miss · T-N6 zero new pollers · T-N7 gen-guard count pin · T-N8
-  motion-covenant pins). HONEST: DOM wiring is source-string-pinned, not executed (the #1557
+  motion-covenant pins). ADVERSARIAL-REVIEW FIX ROUND folded (refuter-majority-confirmed;
+  every fix pin-killed, MIGRATION.md #1714 carries the full record): the no-run_id deep-link
+  rank strip closed by a `restorePending` LATCH (the poller's first auto-selection resolves
+  before the portal's latestRun — the reconciling flag alone could not cover the window); the
+  drawer+backdrop gain MANAGED `hidden` (CSS-404 degrades invisible, never a dumped skeleton;
+  next-task `.open`, bounded 400 ms re-hide with a reopen guard); the section-rise ladder +
+  pill glow SCOPED under `.strategy-drawer.open` (they played once invisibly at load — dead on
+  every real open); the collapsed winners body is delayed-`visibility:hidden` (untabbable) and
+  the inner clips via `overflow:clip` so the sticky filter bar actually engages (hidden
+  fallback = the pre-fix never-sticks, stated); winners rows keyboard-operable (tabindex/role
+  + Enter/Space sharing the click path; focus restore lands on the row); the winners table +
+  rowCount read gain gbPollGen-idiom stale-response guards; a run switch bumps the strategy
+  panel's gen (`update({runId:null})` kills the old run's dead-fetch chain) and `update()`
+  clears the painted body (`resetPanelDom` — no previous-target residue on reopen); the cold
+  double /manifest fetch deduped via the settle-evicting `getManifestOnce` in-flight memo
+  (poller + panel cold arm; a manifest failure now still loads the story card) and the
+  O-envelope corrected to the honest 3-warm/4-cold one-shot split + bounded-one-shot-setTimeout
+  timer wording; the hostile sink regex WIDENED (outerHTML/bracket-access/fragment/srcdoc/
+  setAttribute-on/eval/Function/javascript: — refuter-validated 0 FP, 8/8 bypasses); the
+  §10-promised `partial` route case landed; NITs: codec `{winners:false}` contrapositive kills
+  a lingering rank (node-goldened), the you-are-here mark re-applies on every render
+  (`onRender` hook), the combos intercept falls through on a run_id mismatch, open/close
+  cycles no longer accumulate duplicate history entries (reopen replaces the close-created
+  duplicate), the panels-CSS `<link>` pinned per consumer template. REFUTED items stand as-is
+  (P-N5 subscribe-race structurally impossible · COV-N3 source≡wire · E-M6 the ledgered R10
+  deferral); pre-existing verbatim-port NITs (per-keystroke filter render · double equity
+  render · out-of-page ?trade= label) are INHERITED, noted not fixed. HONEST: DOM wiring is
+  source-string-pinned, not executed (the #1557
   envelope); the drawer equity is minute-path-first with the labeled per-trade fallback while the
   operator `#ocEquityHost` stays per-trade (the #48 ruling). DISPLAY zone ONLY — ZERO Python
   changes; the two oneclick 100% line+branch gates stay green byte-untouched; ENGINE UNCHANGED —

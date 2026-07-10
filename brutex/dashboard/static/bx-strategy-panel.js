@@ -572,18 +572,25 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       return;
     }
     var gen = state.gen;
-    window.BXOneclick.oneshotFetch(
-      '/api/v1/oneclick/manifest?run_id=' + encodeURIComponent(state.runId),
-      null,
-      function (payload) {
+    // The cold arm rides the in-flight /manifest dedupe (adversarial-review
+    // fold, P-M1): a cold deep-link open no longer pays a SECOND manifest
+    // fetch concurrently with the manifest poller's own — both share ONE
+    // in-flight promise. A manifest failure still calls next() so the story
+    // card loads and the chart shows its honest no-mappable-symbol note
+    // (never a silently dead drawer).
+    window.BXOneclick.getManifestOnce(state.runId, 12000)
+      .then(function (payload) {
         if (gen !== state.gen) { return; } // stale-target response — discarded
-        var m = payload.manifest;
+        var m = payload && typeof payload === 'object' ? payload.manifest : null;
         if (m && m.selection && Array.isArray(m.selection.symbols) && m.selection.symbols.length) {
           state.symbol = String(m.selection.symbols[0]);
         }
         next();
-      }
-    );
+      })
+      .catch(function () {
+        if (gen !== state.gen) { return; } // stale-target response — discarded
+        next(); // honest: symbol stays null — the chart names the miss
+      });
   }
 
   /* ── mount-once + update() (graft C.3 — the leak-free listener law) ── */
@@ -609,6 +616,44 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     });
   }
 
+  /* The story-card / trades / chart / equity hosts painted for the PREVIOUS
+     target (adversarial-review fold, NEW-R3-1): the gen guard stops stale
+     WRITES but not stale RESIDUE — a reopen after a run switch must never
+     show the old run's rank under the new pill during the fetch window.
+     Values reset to the honest placeholder; the hosts drop to a loading
+     note (the awaiting/error strings are re-written by the loads). */
+  function resetPanelDom() {
+    var dashIds = [
+      'stRank', 'stName', 'stInstr', 'stTf', 'stDir', 'stArm', 'stMask',
+      'stFamily', 'stNet', 'stMaxDd', 'stSharpe', 'stDsr', 'stCpcv',
+      'stWinRate', 'stPf', 'stTrades', 'stVixBand', 'stArith',
+      'stExpectancy', 'stRecovery', 'stLossStreak', 'stMae', 'stMfe',
+      'stMinuteDd', 'stExitMix', 'stWorst5', 'stTrendSplit', 'stRegimeWonder'
+    ];
+    for (var i = 0; i < dashIds.length; i++) {
+      var n = byId(dashIds[i]);
+      if (n) { n.textContent = '—'; }
+    }
+    var tbody = byId('stTradesBody');
+    if (tbody) {
+      while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
+    }
+    var note = byId('stTradesNote');
+    if (note) { note.textContent = 'loading trades…'; }
+    if (window.BXUI) {
+      var chart = byId('stChartHost');
+      if (chart) {
+        window.BXUI.clear(chart);
+        chart.appendChild(window.BXUI.el('div', 'note', 'loading chart…'));
+      }
+      var equity = byId('stEquityHost');
+      if (equity) {
+        window.BXUI.clear(equity);
+        equity.appendChild(window.BXUI.el('div', 'note', 'loading equity…'));
+      }
+    }
+  }
+
   function bxStrategyPanelUpdate(target) {
     var t = target && typeof target === 'object' ? target : {};
     state.gen += 1; // the load-generation bump — stale responses discarded
@@ -624,6 +669,7 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     state.equityTotal = null;
     state.equityOkEmpty = false;
     if (!state.runId) { return; }
+    resetPanelDom(); // NEW-R3-1: no previous-target residue while fetching
     byId('stRunId').textContent = String(state.runId);
     loadManifestSymbol(loadRow);
   }

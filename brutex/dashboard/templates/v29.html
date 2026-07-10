@@ -2195,7 +2195,19 @@
   #ocWinnersSection .winners-body { display: grid; grid-template-rows: 0fr;
     transition: grid-template-rows .38s var(--ease); }
   #ocWinnersSection .winners-body.open { grid-template-rows: 1fr; }
-  #ocWinnersSection .winners-body-inner { overflow: hidden; min-height: 0; }
+  /* overflow: clip (with the hidden fallback for older engines) clips the
+     unfold EXACTLY like hidden but does NOT create a scroll container —
+     so the .wn-filterbar position:sticky actually engages against the
+     PAGE scrollport (adversarial-review fold, E-M3; under the hidden
+     fallback the bar simply never sticks — the pre-fix behavior).
+     The COLLAPSED body is visibility:hidden (the drawer's own delayed-
+     visibility idiom — adversarial-review fold, C-M2) so its 8 filter
+     controls + rows + Show-all are untabbable while clipped; the flip is
+     instant on open and delayed past the .38s fold on close. */
+  #ocWinnersSection .winners-body-inner { overflow: hidden; overflow: clip;
+    min-height: 0; visibility: hidden; transition: visibility 0s linear .4s; }
+  #ocWinnersSection .winners-body.open .winners-body-inner {
+    visibility: visible; transition: visibility 0s; }
   .winners-toggle { display: inline-flex; align-items: center; gap: 8px;
     cursor: pointer; border: 1px solid var(--border-strong); border-radius: 10px;
     padding: 8px 14px; font: inherit; font-size: 13px; font-weight: 800;
@@ -3039,9 +3051,9 @@
      fenced), wired by the SAME shared bx-strategy-panel.js via
      bx-operator-portal.js (mount once + gen-guarded update per rank).
      /strategy stays a first-class deep-link page. -->
-<div class="drawer-back" id="ocDrawerBack"></div>
+<div class="drawer-back" id="ocDrawerBack" hidden></div>
 <aside class="strategy-drawer bx-stpanel" id="ocStrategyDrawer" role="dialog"
-       aria-modal="true" aria-label="Strategy detail">
+       aria-modal="true" aria-label="Strategy detail" hidden>
   <div class="drawer-head">
     <button id="ocDrawerPrev" type="button" title="previous winner" disabled>‹</button>
     <span class="drawer-rank-pill" id="ocDrawerRankPill">—</span>

@@ -483,6 +483,32 @@ function bxFunnelProvenance(source, runId) {
     return window.BXPoll.fetchJson(RUNS_URL, 12000);
   }
 
+  /* In-flight /manifest dedupe (adversarial-review fold, P-M1): a cold
+     deep-link drawer open (the strategy panel's manifest one-shot) and the
+     manifest poller can request the SAME run's manifest concurrently — the
+     second caller rides the FIRST in-flight promise instead of paying a
+     duplicate network fetch. HONEST: an IN-FLIGHT dedupe ONLY, never a
+     payload cache — the memo self-evicts on settle (resolve AND reject) so
+     the poller always refetches fresh on its next tick. */
+  var manifestInflight = { runId: null, promise: null };
+  function getManifestOnce(runId, timeoutMs) {
+    if (manifestInflight.runId === runId && manifestInflight.promise) {
+      return manifestInflight.promise;
+    }
+    var promise = window.BXPoll.fetchJson(
+      MANIFEST_URL + "?run_id=" + encodeURIComponent(runId),
+      timeoutMs === undefined ? 12000 : timeoutMs
+    );
+    manifestInflight = { runId: runId, promise: promise };
+    var evict = function () {
+      if (manifestInflight.promise === promise) {
+        manifestInflight = { runId: null, promise: null };
+      }
+    };
+    promise.then(evict, evict); // settle-evict — an in-flight dedupe only
+    return promise;
+  }
+
   var state = {
     selectedRunId: null,
     sweepRunning: false,
@@ -1350,10 +1376,10 @@ function bxFunnelProvenance(source, runId) {
         if (!state.selectedRunId) {
           return Promise.resolve({ status: "awaiting", detail: "no run selected" });
         }
-        return window.BXPoll.fetchJson(
-          MANIFEST_URL + "?run_id=" + encodeURIComponent(state.selectedRunId),
-          timeoutMs
-        );
+        // Rides the in-flight dedupe: a concurrent cold drawer open shares
+        // this tick's fetch (the memo self-evicts on settle, so the NEXT
+        // poll tick always refetches fresh).
+        return getManifestOnce(state.selectedRunId, timeoutMs);
       },
       onData: function (data) {
         renderManifest(data);
@@ -1408,6 +1434,7 @@ function bxFunnelProvenance(source, runId) {
     lastManifest: function () {
       return lastManifestPayload;
     },
+    getManifestOnce: getManifestOnce,
     latestRun: latestRun,
     selectRun: function (runId) {
       top100Memo = { runId: null, promise: null }; // run switch invalidates
