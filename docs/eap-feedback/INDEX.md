@@ -98,32 +98,34 @@ with the real paths and complete the item list from the files themselves.
 
 ## Round 4 — Coordinator/session-management batch (2026-07-10)
 
-**Status:** final — 9 items, awaiting operator send.
+**Status:** final — 7 items, awaiting operator send. (The interim v1
+9-item copy was superseded in-place by the crisp 7-item v2 on 2026-07-10:
+the two model-mapping complaints were dropped after the double-canary
+experiment showed model-default propagation working — the defect is
+effort-only.)
 
-9 items (titles as in `round4/EAP_ROUND4_SUBMISSION.md`):
+7 items (titles as in `round4/EAP_ROUND4_SUBMISSION.md`):
 
 | # | Item (short title) |
 |---|---|
-| 1 | The model selected at spawn time is not mapped onto the new session |
-| 2 | The Project Settings default model does not take effect: every session re-selected by hand |
-| 3 | Desktop app auto-restarts when changing the model or effort across sessions in quick succession |
-| 4 | Scale instability with more than 10 open sessions, especially on session-create bursts |
-| 5 | Cross-session messages drop mid-turn, silently |
-| 6 | No way to close or archive a session from the coordinator |
-| 7 | "Needs input" badge shows when nothing needs input |
-| 8 | Actively-working sessions show as "idle" |
-| 9 | The project-level default reasoning effort is ignored — every new session comes up at the platform default (double-canary two-spawn evidence) |
+| 1 | The project-level default reasoning effort is ignored: every new session comes up at the platform default (High) — double-canary two-spawn evidence |
+| 2 | Desktop app auto-restarts when correcting the effort across multiple sessions in quick succession |
+| 3 | Scale instability on session-create bursts (more than 10 parallel sessions) |
+| 4 | Cross-session messages drop mid-turn, silently |
+| 5 | No way to close or archive a session from the coordinator |
+| 6 | "Needs input" badge shows when nothing needs input |
+| 7 | Actively-working sessions show as "idle" |
 
 **Files (in repo):**
 
-- `round4/EAP_ROUND4_SUBMISSION.md` — the full round-4 dossier (9 items:
+- `round4/EAP_ROUND4_SUBMISSION.md` — the full round-4 dossier (7 items:
   issues at a glance, requests, open questions, per-item details, and the
-  11-screenshot attachment list).
+  9-screenshot attachment list).
 - `round4/EAP_ROUND4_SUBMISSION.html` — the self-contained one-page HTML
   twin (inline CSS, house style).
 - `round4/EAP_ROUND4_EMAIL.md` — the round-4 cover email (subject, body,
-  send checklist; same 9 items).
-- `round4/EAP_ROUND4_SCREENSHOT_GUIDE.md` — the capture guide for the 11
+  send checklist; same 7 items).
+- `round4/EAP_ROUND4_SCREENSHOT_GUIDE.md` — the capture guide for the 9
   screenshots attached with the email.
 
 ---
