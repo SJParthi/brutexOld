@@ -60,7 +60,7 @@ def _wire_legacy_wants_to_fire(monkeypatch: pytest.MonkeyPatch) -> list[list[Any
     """Make the LEGACY arm eager (gates ON + outstanding ledger) + spy every Popen.
 
     ``BRUTEX_AUTO_RESUME=1`` opts INTO the master kill switch
-    (DEC-AUTO-RESUME-MASTER-GATE, default OFF); without it neither arm
+    (DEC-AUTO-RESUME-DEFAULT-OFF-001, default OFF); without it neither arm
     fires regardless of the legacy sub-gate — that default-OFF neutralisation
     is pinned separately in :class:`TestMasterGateDefaultOff`.
 
@@ -295,7 +295,7 @@ class TestIntentDecisionPointAtBootSeam:
 
 
 class TestMasterGateDefaultOff:
-    """DEC-AUTO-RESUME-MASTER-GATE — the ``BRUTEX_AUTO_RESUME`` master kill switch.
+    """DEC-AUTO-RESUME-DEFAULT-OFF-001 — the ``BRUTEX_AUTO_RESUME`` master kill switch.
 
     The operator's #1 pain: a leftover ``<lake>/.pull_intent.json`` silently
     auto-launched a full-universe pull on boot with ZERO clicks. The master gate
