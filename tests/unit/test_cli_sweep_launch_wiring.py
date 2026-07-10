@@ -106,3 +106,23 @@ def test_sla_acknowledge_is_sweep_all_only() -> None:
         ["sweep-daemon", "--once", "--start", "2024-01-01", "--end", "2024-01-02"]
     )
     assert not hasattr(daemon_args, "acknowledge_sla_overrun")
+
+
+def test_cmd_sweep_all_validates_enum_plan_before_the_preload() -> None:
+    """The §12.2 LAUNCH-eager pin (DESIGN_FINAL_RUST_SWEEP_CORE.md): the
+    sweep-core enum plan (BRUTEX_SWEEP_RUST_ENUM + BRUTEX_SWEEP_CORE_ENUM_CELLS)
+    is resolved inside ``cmd_sweep_all`` BEFORE the lake preload, with junk
+    routed to the clean ``sweep-all config error`` + EXIT_USER_ERROR arm —
+    never a raw mid-grid ValueError after the whole bar preload (the body is
+    a pragma-no-cover shim, so this source pin is the wiring oracle; the
+    resolver's own fail-loud law is 100%-tested in test_engine_sweep_core.py)."""
+    import inspect
+
+    src = inspect.getsource(cli.cmd_sweep_all)
+    call = src.index("resolve_sweep_rust_enum_plan()")
+    preload = src.index("slices: dict[tuple[str, str], list[Any]] = {}")
+    assert call < preload, "enum-plan validation must run BEFORE the bar preload"
+    window = src[call : call + 400]
+    assert "except ValueError as exc" in window
+    assert "sweep-all config error" in window
+    assert "EXIT_USER_ERROR" in window

@@ -1279,7 +1279,11 @@ def run_persisted_sweep(
         If ``bars`` is empty, ``cfg.direction`` is ``HOLD``, the enumerated combo
         count exceeds ``cfg.max_combos``, ``kernel`` was built from a different
         number of bars than ``bars``, an env knob is malformed
-        (``BRUTEX_SWEEP_BOUNDED_RANK`` / ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``), or
+        (``BRUTEX_SWEEP_BOUNDED_RANK`` / ``BRUTEX_SWEEP_MEM_BUDGET_BYTES`` /
+        ``BRUTEX_SWEEP_CORE_ENUM_CELLS`` — the last parsed only when
+        ``BRUTEX_SWEEP_RUST_ENUM`` is ON; ``cmd_sweep_all`` pre-validates the
+        pair at LAUNCH per the §12.2 exemplar rule, so on the grid path junk
+        fails loud before the bar preload, never here mid-grid), or
         ``BRUTEX_SWEEP_BOUNDED_RANK=on`` is forced without the digest path or a
         finite ``top_k`` (a config error — global, not a tuple condition).
     SweepMemoryBudgetError
@@ -1301,9 +1305,14 @@ def run_persisted_sweep(
     bars = maybe_guard_bars(bars)
     # Rust sweep-core Slice 1 (DESIGN_FINAL_RUST_SWEEP_CORE.md §5/§6): the
     # BRUTEX_SWEEP_RUST_ENUM arm flag + its work-cells knob are resolved ONCE
-    # per invocation, EAGERLY (a junk knob fails loud here, never mid-tuple —
-    # the §12.2 exemplar rule; the knob is only parsed when the flag is ON,
-    # so the default-OFF path is byte-identical to today).
+    # per invocation, before any per-mask/FFI work (the knob is only parsed
+    # when the flag is ON, so the default-OFF path is byte-identical to
+    # today). The §12.2 LAUNCH-eager arm lives in `cmd_sweep_all`, which
+    # pre-validates the pair BEFORE the grid's bar preload — a junk knob on
+    # the grid path is a clean EXIT_USER_ERROR at launch, never a raw
+    # mid-grid ValueError from this line (spawn workers inherit that
+    # launch-validated env; a direct library caller still gets the loud
+    # ValueError here, named in the Raises section above).
     enum_plan = resolve_sweep_rust_enum_plan()
     direction_label = _direction_label(cfg.direction)
 

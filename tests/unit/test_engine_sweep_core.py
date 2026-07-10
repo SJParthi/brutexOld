@@ -59,11 +59,12 @@ def _fresh_seam_state() -> Iterator[None]:
     reset_observability_memo_for_tests()
 
 
-def _bars(n: int = 8) -> list[CandleBar]:
-    """A tiny deterministic regular-session bar window."""
+def _bars(n: int = 8, *, start: datetime | None = None) -> list[CandleBar]:
+    """A tiny deterministic regular-session bar window (optionally re-dated)."""
+    base = datetime(2026, 1, 5, 9, 16, tzinfo=_IST) if start is None else start
     out: list[CandleBar] = []
     for i in range(n):
-        ts = (datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(minutes=i)).astimezone(UTC)
+        ts = (base + timedelta(minutes=i)).astimezone(UTC)
         out.append(
             CandleBar(
                 timestamp=ts,
@@ -264,9 +265,27 @@ class TestShadowState:
         with capture_logs() as logs:
             sweep_core._consume_shadow_range(64, 10)
         assert enum_shadow_masks_remaining(64) == 0  # window closed via ranges cap
-        events = [e for e in logs if e["reason"] == "enum_shadow_floor_unmet"]
+        events = [e for e in logs if e.get("reason") == "enum_shadow_floor_unmet"]
         assert len(events) == 1
         assert events[0]["masks_unmet"] == 90
+        # Its OWN event name — the kernel's results still ship, so this is
+        # deliberately NOT a `fallback` event (module-docstring law).
+        assert events[0]["event"] == "sweep_rust_enum.shadow_floor_unmet"
+        assert _fallback_reasons(logs) == []
+
+    def test_consume_floor_unmet_warns_per_width(self) -> None:
+        # The memo is keyed per WIDTH (the `_warn_clamp` per-direction
+        # pattern): a u64 floor-unmet close must never suppress the later
+        # u128 one — the width-keyed degenerate-stream signal feeds the
+        # flip-ADR residual list (§5 audit C51).
+        reset_enum_self_check_for_tests(masks_remaining=100, ranges_cap_remaining=1)
+        with capture_logs() as logs:
+            sweep_core._consume_shadow_range(64, 10)
+            sweep_core._consume_shadow_range(128, 10)
+            # A repeat close on an already-warned width stays memoised.
+            sweep_core._consume_shadow_range(64, 0)
+        events = [e for e in logs if e["event"] == "sweep_rust_enum.shadow_floor_unmet"]
+        assert [e["width"] for e in events] == [64, 128]
 
     def test_consume_floor_met_no_warn(self) -> None:
         reset_enum_self_check_for_tests(width=64, masks_remaining=5, ranges_cap_remaining=1)
@@ -356,7 +375,8 @@ class TestEngagementRefusals:
         from brutex.engine import sweep_parallel
 
         # A synthetic near-zero deadline: the fresh shadow window's enum term
-        # (~0.16 s at 8 bars) exceeds 0.5 × deadline.
+        # (~2.7 s at 8 bars — remaining floor + the one-range overshoot slop)
+        # exceeds 0.5 × deadline.
         monkeypatch.setattr(sweep_parallel, "resolve_stall_seconds", lambda: 1e-6)
         monkeypatch.setattr(sweep_parallel, "resolve_stall_min_mask_bars_per_sec", lambda: 1e18)
         with capture_logs() as logs:
@@ -402,6 +422,68 @@ class TestEngagementRefusals:
         with capture_logs() as logs:
             assert _call() is None
         assert _fallback_reasons(logs) == ["stall_guard_unavailable"]
+
+    def test_stall_guard_memory_error_reraises_bare(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The design's "MemoryError re-raises BARE everywhere" carve-out: the
+        # guard's TOTAL evaluation must never swallow an OOM into the
+        # stall_guard_unavailable refusal (the engine OOM global-stop law).
+        from brutex.engine import sweep_parallel
+
+        def _oom() -> float:
+            raise MemoryError("stub")
+
+        monkeypatch.setattr(sweep_parallel, "resolve_stall_seconds", _oom)
+        with pytest.raises(MemoryError):
+            _call()
+
+    def test_stall_budget_prices_one_range_overshoot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The enum term prices the WORST case: remaining floor PLUS one
+        # range's overshoot (the final open range is compared WHOLE). With 1
+        # mask remaining and max_enumerated at the 2**20 ceiling (8 bars),
+        # the priced term is ~2.5 s — a 1.0 s deadline (budget 0.5 s) fits
+        # the bare remainder (~2.4 µs) but NOT the overshoot, so it REFUSES.
+        from brutex.engine import sweep_parallel
+
+        reset_enum_self_check_for_tests(width=64, masks_remaining=1)
+        monkeypatch.setattr(sweep_parallel, "resolve_stall_seconds", lambda: 1.0)
+        monkeypatch.setattr(sweep_parallel, "resolve_stall_min_mask_bars_per_sec", lambda: 1e18)
+        with capture_logs() as logs:
+            assert _call() is None
+        assert _fallback_reasons(logs) == ["stall_budget_exceeded"]
+
+    def test_stall_budget_zero_priced_when_window_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A CLOSED shadow window prices ZERO (no slop term): even a near-zero
+        # deadline engages — the overshoot slop applies only while shadowing.
+        from brutex.engine import sweep_parallel
+
+        reset_enum_self_check_for_tests(width=64, masks_remaining=0)
+        monkeypatch.setattr(sweep_parallel, "resolve_stall_seconds", lambda: 1e-6)
+        monkeypatch.setattr(sweep_parallel, "resolve_stall_min_mask_bars_per_sec", lambda: 1e18)
+        outcome = _call()
+        assert outcome is not None
+
+    def test_input_derivation_error_falls_back(self) -> None:
+        # Out-of-coverage bar dates (2031 — past the published NSE holiday
+        # span; a REAL production shape per the #1294 ingest abstain-and-KEEP
+        # law): the session-calendar raise inside derive_kernel_inputs must
+        # REFUSE to the spine (which then reproduces today's exact per-tuple
+        # behavior — the #904 SweepComboError skip), never propagate raw past
+        # the grid drivers' SweepComboError-only quarantine as a grid abort.
+        bars = _bars(start=datetime(2031, 1, 6, 9, 16, tzinfo=_IST))
+        with capture_logs() as logs:
+            assert _call(bars=bars) is None
+        assert _fallback_reasons(logs) == ["input_derivation_error"]
+
+    def test_derivation_memory_error_reraises_bare(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The derivation's TOTAL catch carves out MemoryError (bare re-raise).
+        def _oom(bars: object, tf_minutes: object) -> object:
+            raise MemoryError("stub")
+
+        monkeypatch.setattr(sweep_core, "derive_kernel_inputs", _oom)
+        with pytest.raises(MemoryError):
+            _call()
 
     def test_kernel_error_at_construction(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class _Raising:
@@ -595,6 +677,41 @@ class TestShadowMismatch:
         # The latch holds: the NEXT tuple refuses with kernel_disabled.
         with capture_logs() as logs2:
             assert _call() is None
+        assert _fallback_reasons(logs2) == ["kernel_disabled"]
+
+    def test_second_range_poison_mid_stream_continuation_byte_identity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The deterministic MID-STREAM twin of the rank-0 pin above: poison
+        the SECOND range (start_rank 4096 of the C(16,6)=8008 two-range
+        tuple), exercising the riskiest continuation arithmetic — resuming
+        the SAME iter_masks stream AFTER a core-shipped prior range, at
+        `rank + len(python_window)`, with mixed-provenance reconciliation."""
+        bits = list(range(16))
+        k = 6
+        n_masks = count_combos(k, 16)
+        assert n_masks == 8008  # max_enum = 2**16/16 = 4096 → ranges at 0, 4096
+        self._poisoned_module(monkeypatch, poison_rank=4096)
+        expected_pruned, expected_kept = sweep_core._python_prefilter(
+            list(iter_masks_k_of_bits(bits, k)), [0b1] * 16, 0
+        )
+        with capture_logs() as logs:
+            outcome = _call(
+                bars=_bars(16),
+                bar_bits=[0b1] * 16,
+                bits=bits,
+                k=k,
+                plan=EnumPlan(requested=True, enum_cells=sweep_core.ENUM_CELLS_LOWER_CLAMP),
+            )
+        assert outcome is not None
+        assert outcome.enumerated == n_masks
+        assert outcome.conflict_pruned == expected_pruned
+        assert outcome.kept == expected_kept  # byte-identical to the pure spine
+        errors = [e for e in logs if e["event"] == "sweep_rust_enum.kernel_autoreverted"]
+        assert len(errors) == 1
+        assert errors[0]["start_rank"] == 4096  # genuinely the SECOND range
+        with capture_logs() as logs2:
+            assert _call() is None  # the latch holds
         assert _fallback_reasons(logs2) == ["kernel_disabled"]
 
     def test_match_consumes_shadow_window(self) -> None:

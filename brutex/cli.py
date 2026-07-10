@@ -6256,6 +6256,23 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # Rust sweep-core enum arm (DESIGN_FINAL_RUST_SWEEP_CORE.md §12.2): the
+    # BRUTEX_SWEEP_RUST_ENUM flag + BRUTEX_SWEEP_CORE_ENUM_CELLS knob resolve
+    # EAGERLY here — the exemplar rule ("EAGER at launch resolve … never
+    # first-parsed mid-tuple") — so a junk cells budget is a clean pre-preload
+    # user-config error, never a raw mid-grid ValueError after the whole bar
+    # preload (run_persisted_sweep re-resolves per invocation: same env, same
+    # verdict; spawn workers inherit the launch-validated env). The plan value
+    # is deliberately discarded — this call is the VALIDATION, the per-tuple
+    # re-resolve is the consumer.
+    from brutex.engine.sweep_core import resolve_sweep_rust_enum_plan
+
+    try:
+        resolve_sweep_rust_enum_plan()
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
     # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). The catalog FILE is
     # deliberately NOT gated — sweep-all reconciles the catalog from the lake

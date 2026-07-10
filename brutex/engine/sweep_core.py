@@ -33,9 +33,15 @@ n_bars), 4096, 2**20)`` (the DIVISOR-floored repo idiom). The env override is
 fail-LOUD (junk → ``ValueError`` naming the env — the
 ``BRUTEX_SWEEP_PER_TUPLE_SECONDS`` exemplar, §12.2) and DUAL-CLAMPED (upper
 ``2**30``, lower ``2**16``) with one loud ``work_cap_clamped`` warn-once
-carrying a ``direction`` field. Parsed EAGERLY at plan resolution (never
-first-parsed mid-tuple) — and ONLY when the arm flag is ON, so an OFF-arm
-process with a junk knob stays byte-identical to today.
+carrying a ``direction`` field. Parsed ONLY when the arm flag is ON, so an
+OFF-arm process with a junk knob stays byte-identical to today. The §12.2
+LAUNCH-eager arm lives in ``cmd_sweep_all`` (the ``check_sweep_sla``
+exemplar position): the plan is resolved once there, BEFORE the grid's bar
+preload, so a junk knob is a clean ``EXIT_USER_ERROR`` one-liner at launch —
+never a raw mid-grid ``ValueError`` after the preload. ``run_persisted_sweep``
+then re-resolves per invocation (same env, same verdict — eager relative to
+the TUPLE, before any per-mask/FFI work; spawn workers inherit the
+launch-validated env).
 
 ## Engagement condition (the §5 ENUM column, in FALLBACK-REASON PRECEDENCE
 ## LAW listing order)
@@ -54,9 +60,17 @@ process with a junk knob stays byte-identical to today.
    term; the fold-arm oracle-walk terms cannot execute on an enum-only
    pass) — ``stall_budget_exceeded`` / ``stall_guard_unavailable`` (the
    guard evaluation is TOTAL: any escape refuses, never crashes a tuple);
-8. core construction from the SAME single-source columns
-   (:func:`brutex.engine.rust_trade_sim.derive_kernel_inputs`) under the
-   narrow ``kernel_error`` catch ``(ValueError, TypeError, OverflowError)``;
+8. input derivation + core construction from the SAME single-source columns
+   (:func:`brutex.engine.rust_trade_sim.derive_kernel_inputs`) — the
+   derivation is TOTAL at the seam (ANY failure, e.g. a session-calendar
+   ``HolidayDataUnavailableError`` on out-of-coverage bar dates, refuses
+   with ``input_derivation_error`` so the byte-identical Python spine
+   reproduces today's exact behavior: the #904 per-tuple ``SweepComboError``
+   skip when the kept set is non-empty, clean completion when it is empty —
+   never a raw grid-wide abort past the ``SweepComboError``-only
+   quarantine; ``MemoryError`` re-raises BARE, the engine OOM global-stop
+   law); construction rides the narrow ``kernel_error`` catch
+   ``(ValueError, TypeError, OverflowError)``;
 9. the §1.3 F27 window-length seam invariant ``core.n_bars() == len(bars)``
    — ``bars_length_mismatch``.
 
@@ -81,8 +95,12 @@ the tuple's rank space by CONTINUING the same Python ``iter_masks`` stream
 from rank ``start_rank + len(python_window)`` to exhaustion (the MID-TUPLE
 CONTINUATION contract) — the §1.3 total reconciliation is defined over the
 resulting MIXED provenance. A stream that cannot reach the mask floor within
-the ranges cap warns once per width (``enum_shadow_floor_unmet``) and closes
-the window (the genuine degenerate-stream signal). The window state + latch
+the ranges cap warns once per width (``enum_shadow_floor_unmet``, memoised
+per WIDTH — a u64 floor-unmet close never suppresses the later u128 one)
+under its own ``sweep_rust_enum.shadow_floor_unmet`` event — deliberately
+NOT the ``fallback`` event, because no fallback occurs (the kernel's results
+still ship; the window merely closes — the genuine degenerate-stream
+signal). The window state + latch
 are the documented no-global-mutable-state exceptions (the ``rust_metrics``
 precedent); :func:`reset_enum_self_check_for_tests` restores a fresh view.
 
@@ -98,13 +116,19 @@ string via :func:`mask_hex` — never a bare int (grep-pinned).
   cost (§0/§9) — no wall-clock speedup is claimed here, the twin-run
   byte-identity gates are the ship condition.
 * The shadow costs ~2**16 shadowed Python enumerations per process per
-  engaged width (seconds-scale, priced by the stall guard's enum term).
+  engaged width PLUS up to one range's overshoot: the final open range is
+  compared WHOLE (the range is the §5 comparison unit), so on a small-bar
+  window (``max_enumerated`` at the 2**20 ceiling) the actual shadowed count
+  can exceed the floor by up to ``max_enumerated − 1`` masks (~seconds-scale
+  once per process per width). The stall guard's enum term prices
+  ``remaining + (max_enumerated − 1)`` — the worst case, erring toward
+  refusing (§5).
 * Core construction derives the full 7-column trade-sim inputs (the frozen
   §1.3 constructor contract — Slice 2's ``fold_block`` consumes them), an
-  O(N_bars) cost per engaged tuple; a session-calendar failure inside that
-  derivation propagates exactly as the trade-sim construction for kept masks
-  would later raise it (documented in IMPLEMENTATION_NOTES — not a silent
-  fallback, never misattributed to the kernel).
+  O(N_bars) cost per engaged tuple; the derivation is TOTAL at the seam — a
+  session-calendar failure there refuses (``input_derivation_error``) to the
+  byte-identical Python spine, which reproduces today's exact per-tuple
+  behavior (never a raw grid-wide abort; ``MemoryError`` re-raises bare).
 """
 
 from __future__ import annotations
@@ -492,13 +516,22 @@ def _shadow_open(width: int) -> bool:
 
 
 def _consume_shadow_range(width: int, shadowed_masks: int) -> None:
-    """Account one shadowed range; warn ``enum_shadow_floor_unmet`` on a
-    ranges-cap exhaustion that leaves the mask floor unmet (§5 audit C51)."""
+    """Account one shadowed range; warn ``enum_shadow_floor_unmet`` once per
+    WIDTH on a ranges-cap exhaustion that leaves the mask floor unmet (§5
+    audit C51 — the width-keyed degenerate-stream signal feeding the flip-ADR
+    residual list, so a u64 close must never suppress the u128 one). Emitted
+    under its own ``sweep_rust_enum.shadow_floor_unmet`` event — deliberately
+    NOT ``fallback``: no fallback occurs (the kernel's results still ship)."""
     _SHADOW_MASKS_REMAINING[width] = max(0, _SHADOW_MASKS_REMAINING[width] - shadowed_masks)
     _SHADOW_RANGES_REMAINING[width] = max(0, _SHADOW_RANGES_REMAINING[width] - 1)
     if _SHADOW_RANGES_REMAINING[width] == 0 and _SHADOW_MASKS_REMAINING[width] > 0:
-        _warn_once(
-            "enum_shadow_floor_unmet",
+        key = f"enum_shadow_floor_unmet:{width}"
+        if key in _OBSERVABILITY_MEMO:
+            return
+        _OBSERVABILITY_MEMO.add(key)
+        _LOG.warning(
+            "sweep_rust_enum.shadow_floor_unmet",
+            reason="enum_shadow_floor_unmet",
             width=width,
             masks_unmet=_SHADOW_MASKS_REMAINING[width],
             ranges_cap=SWEEP_ENUM_SELF_CHECK_RANGES_CAP,
@@ -630,19 +663,28 @@ def core_enumerate_kept(
         return None
     # 7. STALL-BUDGET GUARD — enum-arm terms only; TOTAL evaluation (§5:
     # any escape refuses with `stall_guard_unavailable`, never a per-tuple
-    # crash — the guard runs OUTSIDE the narrow kernel_error catch).
+    # crash — the guard runs OUTSIDE the narrow kernel_error catch;
+    # MemoryError re-raises BARE, the engine OOM global-stop law).
     n_bars = len(bars)
     try:
         deadline = _effective_stall_deadline(n_masks, n_bars)
+    except MemoryError:
+        raise
     except Exception as exc:
         _warn_refusal("stall_guard_unavailable", error=repr(exc))
         return None
     if deadline is None:
         _warn_refusal("stall_guard_unavailable", error="stall symbols unresolvable")
         return None
-    overhead_s = (
-        enum_shadow_masks_remaining(width) * (ENUM_SHADOW_NS + n_bars * PREFILTER_NS_PER_BAR) * 1e-9
-    )
+    # The enum term prices the WORST-case shadow cost: the remaining floor
+    # PLUS one range's overshoot — the final open range is compared WHOLE
+    # (the §5 comparison unit), so the actual shadowed count can exceed the
+    # floor by up to `max_enumerated − 1` masks (module docstring, honest
+    # envelope). Erring toward refusing, per §5's own pricing law.
+    max_enum = max_enumerated_for(n_bars, plan.enum_cells)
+    shadow_masks = enum_shadow_masks_remaining(width)
+    priced_masks = shadow_masks + (max_enum - 1) if shadow_masks > 0 else 0
+    overhead_s = priced_masks * (ENUM_SHADOW_NS + n_bars * PREFILTER_NS_PER_BAR) * 1e-9
     budget = SWEEP_CORE_STALL_BUDGET_FRACTION * deadline
     if overhead_s > budget:
         _warn_refusal(
@@ -652,11 +694,28 @@ def core_enumerate_kept(
             deadline_s=deadline,
         )
         return None
-    # 8. core construction — the SAME single-source columns ResidentTradeSim
-    # derives (§1.2); the FFI validation errors ride the narrow kernel_error
-    # catch. A session-calendar derivation failure propagates (module
-    # docstring — the same raise the kept-mask trade sim would surface).
-    open_p, high_p, low_p, close_p, forced, session_days = derive_kernel_inputs(bars, tf_minutes)
+    # 8. input derivation + core construction — the SAME single-source
+    # columns ResidentTradeSim derives (§1.2). The derivation is TOTAL at
+    # the seam: ANY failure (e.g. a session-calendar
+    # HolidayDataUnavailableError on out-of-coverage bar dates — a real
+    # production shape once lake bars pass the calendar coverage span, per
+    # the #1294 ingest abstain-and-KEEP law) refuses to the byte-identical
+    # Python spine, which reproduces today's EXACT behavior for the tuple:
+    # `_build_trade_sim` converts the same raise into the #904 per-tuple
+    # SweepComboError skip when `kept` is non-empty, and a kept-empty tuple
+    # completes clean — never a raw grid-wide abort past the parallel/grid
+    # drivers' SweepComboError-only quarantine (§5 law (d): every
+    # mis-application errs toward the spine). MemoryError re-raises BARE.
+    try:
+        open_p, high_p, low_p, close_p, forced, session_days = derive_kernel_inputs(
+            bars, tf_minutes
+        )
+    except MemoryError:
+        raise
+    except Exception as exc:
+        _warn_refusal("input_derivation_error", error=repr(exc))
+        return None
+    # The FFI validation errors ride the narrow kernel_error catch.
     try:
         core = cast(
             "_SweepCoreLike",
@@ -678,10 +737,10 @@ def core_enumerate_kept(
         pairs_sorted=pairs_sorted,
         min_hits=min_hits,
         bar_bits=bar_bits,
-        n_bars=n_bars,
         n_masks=n_masks,
         width=width,
         enum_cells=plan.enum_cells,
+        max_enum=max_enum,
     )
 
 
@@ -693,10 +752,10 @@ def _drive(
     pairs_sorted: list[tuple[int, int]],
     min_hits: int,
     bar_bits: Sequence[int],
-    n_bars: int,
     n_masks: int,
     width: int,
     enum_cells: int,
+    max_enum: int,
 ) -> EnumOutcome | None:
     """The §1.4 range-driver loop: shadow → belts → tallies → kept.
 
@@ -705,9 +764,10 @@ def _drive(
     non-exhausted call advance rank (belted by ``enum_no_progress``). On loop
     exit the §1.3 TOTAL-RECONCILIATION belt asserts against the driver's
     INDEPENDENT ``count_combos`` total (``n_masks``) — defined over MIXED
-    provenance after a mid-tuple latch.
+    provenance after a mid-tuple latch. ``max_enum`` is the caller's
+    :func:`max_enumerated_for` bound — computed ONCE (the stall guard prices
+    its one-range shadow slop from the SAME value).
     """
-    max_enum = max_enumerated_for(n_bars, enum_cells)
     rank = 0
     enumerated = 0
     conflict_pruned = 0

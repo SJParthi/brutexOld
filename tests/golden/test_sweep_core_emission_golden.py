@@ -14,8 +14,19 @@ ordering pins" fold, item 1:
    byte-identical (summary tallies, store `content_hash`, trial-stats
    sidecar BYTES, completion sentinel) with EXACTLY ONE
    `sweep_rust_enum.engaged` event on the ON arm and ZERO on the OFF arm;
-   the frozen `_GOLDEN_CONTENT_HASH_DIGEST` literal is MINTED ON THE OFF ARM
-   (shipping-spine-authored, new-core-free by construction — §6 Slice 1).
+   the frozen `_GOLDEN_RUN_ID_DIGEST` + `_GOLDEN_CONTENT_HASH_DIGEST`
+   literals (the two §6-named OFF-arm-minted literals) are MINTED ON THE OFF
+   ARM (shipping-spine-authored, new-core-free by construction — §6 Slice 1).
+3b. **MULTI-TUPLE GRID TWIN** — the CI-lane golden-grid arm driven through
+   the REAL `run_sweep_grid` driver across ≥4 tuples: OFF ≡ ON on the grid
+   summary + every per-tuple store's BYTES, with engaged events present
+   (non-vacuous) and zero fallbacks — the venue where the seam's CROSS-TUPLE
+   process state (shadow accumulation across tuples, warn memos, per-tuple
+   flag re-resolution) actually composes. Honest scope: the end-to-end twin
+   cannot by itself catch a kernel divergence while the burn-in shadow is
+   open (a mismatch latches and self-heals the bytes BY DESIGN) — the
+   direct-kernel emission/survivor goldens are the kernel's teeth; this
+   twin's value is seam-state composition.
 4. **LEGACY-REFUSAL GOLDEN** — the legacy (no-digest) fixture with the flag
    ON refuses with exactly ONE `legacy_dedup_path` warn, ZERO engaged
    events, and bytes identical to the OFF arm (the §5 precedence-law pin).
@@ -266,6 +277,13 @@ _GOLDEN_CONTENT_HASH_DIGEST = "9be499497db187a339d9adfb23e518a0bd84ea35711ab69d5
 #: The digest fixture's logical tallies (identical on BOTH arms).
 _GOLDEN_TALLIES_DIGEST = {"enumerated": 15, "conflict_pruned": 3, "evaluated": 12}
 
+#: The OFF-arm-minted run_id of the store's FIRST persisted row (rows are
+#: sorted by run_id before render — results_store's determinism law), the
+#: second §6-named shipping-spine-authored literal beside the content hash
+#: (the content hash transitively pins every row's run_id; this literal makes
+#: the run-identity pin EXPLICIT and independently legible).
+_GOLDEN_RUN_ID_DIGEST = "30061bc68b94f5e9800b5af16b918c83f7e8bb461cd99206a148fe10eab4c59c"
+
 
 class TestDigestPathTwin:
     """The end-to-end counter-exactness golden — OFF arm ≡ enum arm, bytes."""
@@ -281,6 +299,10 @@ class TestDigestPathTwin:
         assert summary.conflict_pruned == _GOLDEN_TALLIES_DIGEST["conflict_pruned"]
         assert summary.evaluated == _GOLDEN_TALLIES_DIGEST["evaluated"]
         assert summary.skipped_dedup == 0
+        # The §6 run-identity literal: the FIRST persisted row's run_id
+        # (rows sort by run_id — the store's own determinism law).
+        loaded = ResultsStore.load(tmp_path / "off.parquet")
+        assert loaded.rows()[0].run_id == _GOLDEN_RUN_ID_DIGEST
         engaged = [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
         assert engaged == []  # the negative pin — OFF arm never engages
 
@@ -483,3 +505,77 @@ class TestWorkBoundBoundaries:
                 assert outcome == reference, f"shape=({max_enum}, {max_cells})"
         assert reference is not None
         assert reference[0] == count_combos(3, 8)
+
+
+# ────── 3b. Multi-tuple GRID twin (the real grid driver) ──────
+
+
+class TestGridTwin:
+    """OFF ≡ ON through the REAL ``run_sweep_grid`` driver across ≥4 tuples.
+
+    The single-tuple digest twins above prove per-tuple byte-identity; this
+    twin composes the seam's CROSS-TUPLE process state — the shadow window
+    accumulating across tuples, the warn-once memos, the per-invocation flag
+    re-resolution — through the production grid driver. Honest scope (module
+    docstring, item 3b): with the burn-in shadow open a kernel divergence
+    self-heals the BYTES by design, so the direct-kernel goldens stay the
+    kernel's teeth; this twin's value is seam-state composition.
+    """
+
+    def _grid(self) -> Any:
+        from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+
+        return SweepGridConfig(
+            instruments=["NIFTY"],
+            timeframes=[Timeframe("1minute", 1)],
+            directions=[Side.BUY, Side.SELL],
+            k_values=[1, 2],
+            condition_bits=[0, 1, 2, 3, 4],
+            stop_losses=[80],
+            take_profits=[50],
+            proximities=[None],
+            mode="A",
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="deadbeef",
+        )
+
+    def _run(self, root: Path, audit_path: Path, bars: list[CandleBar]) -> Any:
+        from brutex.engine.sweep_orchestrator import make_store_for, run_sweep_grid
+
+        grid = self._grid()
+        dedup = ComboDedup(OptionDedupIndex(capacity=100_000, fpr_target=1e-7))
+        with AuditWriter.open(audit_path) as audit:
+            return run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(root, grid),
+                dedup=dedup,
+                audit=audit,
+            )
+
+    def test_grid_off_on_byte_identity_across_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+
+        bars = _bars()
+        monkeypatch.delenv(sweep_core.SWEEP_RUST_ENUM_ENV, raising=False)
+        off = self._run(tmp_path / "off", tmp_path / "off.jsonl", bars)
+        monkeypatch.setenv(sweep_core.SWEEP_RUST_ENUM_ENV, "1")
+        sweep_core.reset_enum_self_check_for_tests()
+        sweep_core.reset_observability_memo_for_tests()
+        with capture_logs() as logs:
+            on = self._run(tmp_path / "on", tmp_path / "on.jsonl", bars)
+        assert on == off  # grid summary — tallies + hashes across ALL tuples
+        assert on.tuples_run == 4  # genuinely multi-tuple (2 directions × 2 k)
+        grid = self._grid()
+        for t in iter_sweep_tuples(grid):
+            off_bytes = tuple_store_path(tmp_path / "off", t, grid).read_bytes()
+            on_bytes = tuple_store_path(tmp_path / "on", t, grid).read_bytes()
+            assert on_bytes == off_bytes  # per-tuple store BYTES
+        engaged = [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+        assert engaged  # non-vacuous — the ON grid genuinely ran the kernel
+        fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+        assert fallbacks == []
