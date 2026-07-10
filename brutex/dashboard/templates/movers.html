@@ -340,7 +340,15 @@ function fillTimes() {
    (DEC-DASHBOARD-XSS-HARDENING-001). */
 function refreshBaselineLegend(note) {
   const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
-  $("noteText").textContent = (note||"") + (staleBaseline ? " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)" : "");
+  /* Muhurat legend (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the EMIT-ON-TRUE keys
+     arrive only when the baseline is the legitimate Diwali Muhurat close — a real
+     NSE session, never a lake hole — so it gets its OWN " †" legend, distinct from
+     the " *" possible-lake-hole legend (whose wording is shape-neutral: no
+     unconditional re-pull imperative — the hole may be a stray bar instead). */
+  const muhuratBaseline = rowsData.some(r => r && (r.prev_close_muhurat === true || r.oi_baseline_muhurat === true));
+  $("noteText").textContent = (note||"")
+    + (staleBaseline ? " · * baseline is not the immediately-preceding REGULAR NSE session (nearest-prior shown — possible lake hole)" : "")
+    + (muhuratBaseline ? " · † baseline is the Diwali Muhurat session close (a real NSE session the lake legitimately carries; engine day-anchors deliberately use the prior regular session)" : "");
 }
 /* Sub-filter (pill) switch: re-render the already-fetched payload's other category
    list IN THE BROWSER — the server returned every category for this coordinate, so
@@ -528,6 +536,11 @@ function renderRows() {
        esc(v) return — the marker rides the same escape as the value. */
     if ((field==="change"||field==="pct_change") && row.prev_close_contiguous === false && v!=="—" && v!=="?") v += " *";
     if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_contiguous === false && v!=="—" && v!=="?") v += " *";
+    /* " †" Muhurat marker (DEC-PREVSESSION-MUHURAT-COHERENCE-001): STRICT === true
+       on the EMIT-ON-TRUE keys — a legitimate Diwali Muhurat baseline is flagged
+       distinctly from the " *" possible-lake-hole marker; pre-esc like " *". */
+    if ((field==="change"||field==="pct_change") && row.prev_close_muhurat === true && v!=="—" && v!=="?") v += " †";
+    if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_muhurat === true && v!=="—" && v!=="?") v += " †";
     return `<td class="${cls}">${esc(v)}</td>`;
   }).join("") + "</tr>";
   }).join("");
