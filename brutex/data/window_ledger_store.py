@@ -83,6 +83,7 @@ from brutex.data.window_ledger import (
     WindowLedger,
     WindowLedgerRecord,
 )
+from brutex.observability.progress_beat import emit_progress_beat
 
 #: Structured logger — surfaces a corrupt/absent ledger into ``/logs``.
 _LOG = structlog.get_logger("brutex.data.window_ledger_store")
@@ -793,6 +794,17 @@ def save_window_ledger(
 
     import pyarrow.parquet as pq
 
+    # Liveness beats around the whole synchronous save body
+    # (DEC-HEAL-SCAN-LIVENESS-BEATS-001): the drain-time full save is a single
+    # multi-second synchronous read-merge-write (a forensically-measured
+    # 12.96 s ``window_ledger.save_slow`` over 68,234 rows) running on the
+    # beat-watched pull worker AFTER the last fetched-window heartbeat — the
+    # entry beat marks the save alive and the completion beat (both arms of
+    # the try/except below) refreshes liveness before the next silent stage.
+    # HONEST envelope: no mid-save heartbeat thread — a save LONGER than the
+    # ~600 s stall timeout would still gap (the ``save_slow`` WARN makes it
+    # visible); ``emit_progress_beat`` is a cheap no-op with no watchdog.
+    emit_progress_beat()
     tick = clock if clock is not None else time.monotonic
     started = tick()
     directory = ledger_dir(lake_root)
@@ -893,6 +905,11 @@ def save_window_ledger(
             path=str(path),
             error=str(exc),
         )
+    # Completion beat (both the completed-save AND lock-timeout-skip arms; a
+    # RAISING save skips it — the pull is halting anyway): a multi-second save
+    # can no longer leave the watchdog's last heartbeat stranded at its entry
+    # (DEC-HEAL-SCAN-LIVENESS-BEATS-001).
+    emit_progress_beat()
 
 
 def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:

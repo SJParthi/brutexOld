@@ -1998,8 +1998,22 @@ class TestOptionsPcr:
 from brutex.data.moneyness import Moneyness  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
 
-#: The FROZEN additive-key vocabulary this decision may ever add to a row.
+#: The FROZEN additive-key vocabulary this decision family may ever add to a
+#: row. DELIBERATE widening 2026-07-09 (DEC-PREVSESSION-MUHURAT-COHERENCE-001):
+#: the two EMIT-ON-TRUE-ONLY Muhurat keys join the #1539 EMIT-ON-FALSE pairs.
 _CONTIGUITY_KEYS = frozenset(
+    {
+        "prev_close_session",
+        "prev_close_contiguous",
+        "oi_baseline_session",
+        "oi_baseline_contiguous",
+        "prev_close_muhurat",
+        "oi_baseline_muhurat",
+    }
+)
+
+#: The #1539 EMIT-ON-FALSE lake-hole pairs alone (the noncontiguous-arm wire).
+_HOLE_KEYS = frozenset(
     {
         "prev_close_session",
         "prev_close_contiguous",
@@ -2114,9 +2128,55 @@ class TestOptionsContiguityGoldens:
         assert row["prev_close_contiguous"] is False
         assert row["oi_baseline_session"] == "2025-09-25"
         assert row["oi_baseline_contiguous"] is False
-        assert set(row) - _OPTION_ROW_KEYS == _CONTIGUITY_KEYS
+        assert set(row) - _OPTION_ROW_KEYS == _HOLE_KEYS
         warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
         assert sorted((e["kind"], e["symbol"]) for e in warns) == [
             ("oi", _G_CE),
             ("prev_close", _G_CE),
         ]
+
+    def test_muhurat_boundary_close_and_oi_flagged_no_warn_one_info(self, tmp_path: Path) -> None:
+        # DEC-PREVSESSION-MUHURAT-COHERENCE-001, the options OI twin: the ONLY
+        # prior 1-day bar is the 2024-11-01 Diwali Muhurat session — BOTH
+        # baselines legitimately ride it → both EMIT-ON-TRUE muhurat keys, no
+        # hole pair, ZERO noncontiguous WARNs, exactly ONE per-build INFO.
+        day = date(2024, 11, 4)
+        ce = "NSE-NIFTY-28Nov24-24000-CE"
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=ce,
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=day),
+                _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=day),
+            ],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=ce,
+            interval="1day",
+            bars=[_day_bar(day=date(2024, 11, 1), close="100", oi=1000)],
+        )
+        with capture_logs() as logs:
+            payload = run_options_snapshot(
+                lake_root=tmp_path, interval="1day", date=day.isoformat(), time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # VALUE-EQUALITY: served numbers baseline on the REAL Muhurat close/OI.
+        assert row["ltp"] == "₹164.00"
+        assert row["pct_change"] == str(
+            (Decimal("164.00") - Decimal("100.00")) / Decimal("100.00") * 100
+        )
+        assert row["oi_chg"] == 100
+        # The SANCTIONED wire delta: exactly the two muhurat keys, no hole pair.
+        assert row["prev_close_muhurat"] is True
+        assert row["oi_baseline_muhurat"] is True
+        assert set(row) & _HOLE_KEYS == set()
+        assert set(row) - _OPTION_ROW_KEYS == {"prev_close_muhurat", "oi_baseline_muhurat"}
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        infos = [e for e in logs if e["event"] == "movers.prev_baseline_muhurat"]
+        assert len(infos) == 1
+        assert infos[0]["symbol"] == ce
+        assert infos[0]["found_session"] == "2024-11-01"

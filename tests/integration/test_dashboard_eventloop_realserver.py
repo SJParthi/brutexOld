@@ -19,6 +19,7 @@ Skipped cleanly without the ``[ui]`` extra (matches the sibling dashboard suites
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -191,6 +192,190 @@ def test_generation_probe_off_loop_real_server(
     )
     assert status == 200
     assert b"underlyings" in body
+
+
+# ── DEC-LAKE-CENSUS-NONBLOCKING-001: the census must never starve the threadpool ──
+
+
+class _HeldScan:
+    """A ``scan_lake_invariants`` stand-in: ticks progress, then blocks until released.
+
+    Mirrors the production callable's shape: it receives the holder's
+    ``per_file_pause`` progress callback and fires it three times BEFORE
+    blocking (so the route's honest ``scan_progress.files_scanned`` counter is
+    observable mid-scan), records the executing thread's name (the dedicated
+    daemon thread vs an AnyIO worker is load-bearing evidence), and returns a
+    clean empty report once released so the REAL census fold runs after.
+    """
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+        self.thread_names: list[str] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        with self._lock:
+            self.calls += 1
+            self.thread_names.append(threading.current_thread().name)
+        pause = kwargs.get("per_file_pause")
+        if callable(pause):
+            for _ in range(3):
+                pause()
+        self.entered.set()
+        self.release.wait(timeout=60.0)
+        from brutex.data.lake_invariants import LakeScanReport
+
+        return LakeScanReport(
+            findings=(),
+            files_scanned=3,
+            files_skipped=0,
+            series_scanned=0,
+            option_files_scanned=0,
+            option_files_skipped=0,
+            duration_s=0.0,
+        )
+
+
+#: Budget for every probe while the census scan is held + 45 polls stacked.
+#: Locally measured <100 ms; widened to 2.0 s as a documented flake margin for
+#: contended shared CI (45 concurrent client threads) — still ~30x separation
+#: from the 60 s stub hold, so a pre-fix starved probe (frozen until release /
+#: its 6-8 s timeout) is unambiguously past this bound.
+_STARVE_BUDGET_S: float = 2.0
+
+
+def _timed_get(port: int, path: str, timeout: float) -> tuple[float, int | None, bytes | None]:
+    """GET with wall-clock timing; a timeout/failure returns (elapsed, None, None)."""
+    t0 = time.perf_counter()
+    try:
+        status, body = _get(port, path, timeout=timeout)
+    except Exception:  # pylint: disable=broad-except — a starved route times out; the elapsed IS the evidence
+        return time.perf_counter() - t0, None, None
+    return time.perf_counter() - t0, status, body
+
+
+def test_lake_census_scan_never_starves_the_shared_threadpool(
+    server: _RealServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-LAKE-CENSUS-NONBLOCKING-001 — the exact frozen-probe repro, as a regression.
+
+    PRE-FIX wedge mechanism (reproduced on a real uvicorn over the operator's
+    2.14M-file lake): the census route offloaded the O(files)
+    ``scan_lake_invariants`` walk to ``run_in_threadpool`` (the loop stayed
+    free — #1316/#1302's offload was real), but ``SummaryCache``'s COLD
+    single-flight parked every concurrent poller in an UNBOUNDED
+    ``decision.wait()`` ON a threadpool worker, and ``universe.html`` polls the
+    route every 15 s with no in-flight guard — so ~40 stacked pollers exhausted
+    the shared default AnyIO limiter and EVERY offloaded route (the whole data
+    surface incl. /db) froze until the 26-minute scan completed. Measured
+    during the repro: /api/v1/state (pure async) = 5 ms while
+    /api/v1/universe/summary and the /db datasets discovery were FROZEN >10 s.
+
+    POST-FIX contract (all four measured here, asserted after collection so a
+    pre-fix run reports every freeze):
+
+    (i)   GET lake-uniqueness answers within the starve budget with
+          ``scan_in_progress=true`` while the scan is held (O(1) snapshot —
+          never a blocking wait);
+    (ii)  after 45 additional stacked GETs, /api/v1/universe/summary AND
+          /api/v1/db/candles/datasets still answer within the starve budget
+          (pre-fix: frozen — threadpool-token starvation).
+          BUDGET: 2.0 s (documented flake margin for contended shared CI
+          under 45 concurrent client threads — locally measured <100 ms;
+          still ~30x separation from the 60 s stub hold and 3x under the 6 s
+          probe timeouts, so the wedge assertion keeps its teeth);
+    (iii) releasing the scan lands the verdict and exactly ONE scan ran;
+    (iv)  the honest progress counter is monotone non-decreasing, and the scan
+          ran on the DEDICATED census daemon thread, never an AnyIO worker.
+    """
+    scan = _HeldScan()
+    monkeypatch.setattr("brutex.dashboard.app.scan_lake_invariants", scan)
+    census = "/api/v1/universe/lake-uniqueness"
+
+    # Warm the server (connection + route table) so timings measure the routes.
+    _get(server.port, "/api/v1/state", timeout=10.0)
+
+    # (i) the first poll arms the scan; it must return immediately, not wait.
+    first: dict[str, Any] = {}
+
+    def _first_poll() -> None:
+        first["elapsed"], first["status"], first["body"] = _timed_get(server.port, census, 8.0)
+
+    first_thread = threading.Thread(target=_first_poll, daemon=True)
+    first_thread.start()
+    assert scan.entered.wait(timeout=10.0), "the census scan was never entered"
+
+    # A snapshot poll while the scan is held — honest warming state, O(1).
+    snap_elapsed, snap_status, snap_body = _timed_get(server.port, census, 8.0)
+
+    # (ii) 45 stacked polls — the pre-fix wedge parked each on a threadpool token.
+    stacked: list[threading.Thread] = []
+    for _ in range(45):
+        t = threading.Thread(target=lambda: _timed_get(server.port, census, 25.0), daemon=True)
+        t.start()
+        stacked.append(t)
+    time.sleep(1.0)  # let the stack land server-side
+
+    summary_elapsed, summary_status, _ = _timed_get(server.port, "/api/v1/universe/summary", 6.0)
+    datasets_elapsed, datasets_status, _ = _timed_get(
+        server.port, "/api/v1/db/candles/datasets", 6.0
+    )
+
+    # (iv) two progress samples while the scan is still held.
+    _, _, sample1 = _timed_get(server.port, census, 8.0)
+    _, _, sample2 = _timed_get(server.port, census, 8.0)
+
+    scan.release.set()
+    first_thread.join(timeout=15.0)
+    for t in stacked:
+        t.join(timeout=30.0)
+
+    # (iii) the verdict lands after release — poll briefly for the daemon store.
+    verdict: dict[str, Any] | None = None
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        _, status, body = _timed_get(server.port, census, 8.0)
+        if status == 200 and body is not None:
+            candidate = json.loads(body)
+            if "findings_total" in candidate:
+                verdict = candidate
+                break
+        time.sleep(0.1)
+
+    # ── assertions (collected first so a pre-fix run reports every freeze) ──
+    assert summary_status == 200 and summary_elapsed < _STARVE_BUDGET_S, (
+        f"/api/v1/universe/summary took {summary_elapsed * 1000:.0f}ms "
+        f"(status={summary_status}) while the census scan was held + 45 polls "
+        "stacked — threadpool-token starvation (the pre-fix wedge)."
+    )
+    assert datasets_status == 200 and datasets_elapsed < _STARVE_BUDGET_S, (
+        f"/api/v1/db/candles/datasets took {datasets_elapsed * 1000:.0f}ms "
+        f"(status={datasets_status}) while the census scan was held + 45 polls "
+        "stacked — threadpool-token starvation (the pre-fix wedge)."
+    )
+    assert first.get("status") == 200 and first["elapsed"] < _STARVE_BUDGET_S, (
+        f"the scan-arming census poll took {first['elapsed'] * 1000:.0f}ms "
+        f"(status={first.get('status')}) — it must snapshot, never wait."
+    )
+    assert snap_status == 200 and snap_elapsed < _STARVE_BUDGET_S, (
+        f"a census poll during the held scan took {snap_elapsed * 1000:.0f}ms "
+        f"(status={snap_status}) — it must snapshot, never wait."
+    )
+    snap = json.loads(snap_body or b"{}")
+    assert snap.get("scan_in_progress") is True
+    assert "findings_total" not in snap, "no verdict may be fabricated mid-first-scan"
+    p1 = json.loads(sample1 or b"{}").get("scan_progress") or {}
+    p2 = json.loads(sample2 or b"{}").get("scan_progress") or {}
+    assert p1.get("files_scanned") == 3  # the stub ticked the counter 3 times
+    assert p2.get("files_scanned", 0) >= p1.get("files_scanned", 0)  # monotone
+    assert verdict is not None, "the verdict never landed after the scan released"
+    assert verdict["findings_total"] == 0
+    assert scan.calls == 1, f"expected exactly ONE scan, saw {scan.calls}"
+    assert scan.thread_names == ["brutex-lake-census"], (
+        f"the scan must run on the dedicated census daemon thread, saw {scan.thread_names}"
+    )
 
 
 # ── DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 — the /api/v1/sweep-progress file read ──
