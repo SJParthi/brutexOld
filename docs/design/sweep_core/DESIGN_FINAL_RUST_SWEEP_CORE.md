@@ -2294,7 +2294,12 @@ this design.
   test set BEFORE that PR opens (it is part of Slice-0's Definition of
   Ready, not a follow-up), and is the Slice-0 instance of the §7 O2
   cross-arm oracle discipline — the later Rust fold_block arm (Slice 2)
-  re-verifies against the SAME oracle through the §5 burn-in.
+  re-verifies against the SAME oracle through the §5 burn-in
+  [SUPERSEDED-IN-PART for Slice 2 by the Slice-2 INDEPENDENT-ORACLE
+  MANDATE below (Verifier B Slice-0 re-pin, 2026-07-10): the Slice-0
+  oracle imports leaf helpers from live compute.py, so Slice 2's
+  differential must bind to a GENUINELY independent oracle instead —
+  the §5 burn-in machinery stands, the "SAME oracle" arm does not].
   **COORDINATOR RULING RECEIVED (2026-07-09): the compute.py Slice-0 zone
   is GRANTED**, under three binding conditions carried verbatim into the
   Slice-0 PR: (1) BEHAVIOR-IDENTICAL — a pure parameterisation, zero
@@ -2396,6 +2401,16 @@ this design.
   the two disabled-arm poison goldens (§5 anti-vacuous bullet), not by
   byte-equality alone (bytes are arm-identical by construction and
   cannot discriminate).
+  **INDEPENDENT-ORACLE MANDATE (Verifier B Slice-0 carry-forward —
+  Verifier B Slice-0 re-pin, 2026-07-10; BINDING Definition-of-Ready
+  item for this slice): Slice-2's Rust-arm differential must verify
+  against a GENUINELY independent oracle — frozen-bytes golden corpus
+  or a hand-rolled reference implementation — NEVER an oracle importing
+  leaf helpers from live compute.py. Recorded counterexample: Verifier
+  B's Pébay-m3 delta-sign mutant passed Slice-0's C23 differential 4/4
+  (the oracle shared `_accumulate_moments`) and was killed only by the
+  exact-value pins. This mandate sits ALONGSIDE the existing TradeFolds
+  §1.3 pairing obligation (#1685 item (3)).**
 - **Slice 3 — measured constant work, no semantic change.** Drawdown
   scratch-buffer chunk-level reuse (touched-index reset, equality-pinned);
   fused single-pass walk+drawdown ONLY if the per-bar fold order is provably
