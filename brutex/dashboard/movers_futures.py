@@ -74,6 +74,7 @@ from brutex.dashboard.movers_snapshot import (
     _NoncontiguousWarnState,
     _prior_session_last_from_minute,
     filter_to_ist_minute,
+    info_prev_baseline_muhurat,
     interval_minutes,
     make_expected_session_resolver,
     normalize_min_volume,
@@ -427,12 +428,21 @@ class FuturesMover:
         Calendar-contiguity provenance of the ``pct_change`` baseline
         (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — the ISO session date the prior
         close actually came from + whether it IS the immediately-preceding NSE
-        session (``None`` = no baseline / calendar abstained). Additive +
+        session (``False`` = the baseline provably skipped a nearer REGULAR
+        session, or a stray non-session bar served it — a lake defect either
+        way; ``None`` = no baseline / calendar abstained). Additive +
         defaulted; the row projector emits the pair ONLY on ``False``.
     oi_baseline_session, oi_baseline_contiguous
         The INDEPENDENT OI twin — a null-OI 1-day bar makes the OI baseline
         fall to the minute fallback on a possibly DIFFERENT day than the close
         baseline, so the two flags never share a verdict.
+    prev_close_muhurat, oi_baseline_muhurat
+        ``True`` iff that baseline is a legitimate Diwali **Muhurat** session
+        close after the prior REGULAR session (the day-after-Diwali boundary —
+        a healthy lake, never a hole; DEC-PREVSESSION-MUHURAT-COHERENCE-001).
+        Judged INDEPENDENTLY per baseline like the contiguity pair; emitted
+        ON TRUE ONLY. The engine's day anchors deliberately skip the Muhurat
+        session instead (#1616) — the recorded two-law design.
     underlying_kind
         The resolved index-vs-stock class of this future's underlying
         (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
@@ -458,6 +468,8 @@ class FuturesMover:
     prev_close_contiguous: bool | None = None
     oi_baseline_session: str | None = None
     oi_baseline_contiguous: bool | None = None
+    prev_close_muhurat: bool = False
+    oi_baseline_muhurat: bool = False
     underlying_kind: str = KIND_UNKNOWN
 
     @property
@@ -686,6 +698,13 @@ def _futures_row(mover: FuturesMover) -> dict[str, Any]:
     if mover.oi_baseline_contiguous is False:
         row["oi_baseline_session"] = mover.oi_baseline_session
         row["oi_baseline_contiguous"] = mover.oi_baseline_contiguous
+    # EMIT-ON-TRUE-ONLY, each baseline INDEPENDENT (DEC-PREVSESSION-MUHURAT-
+    # COHERENCE-001): the baseline is the legitimate Diwali Muhurat session's
+    # close/OI — a healthy lake, never a hole; non-Muhurat rows byte-identical.
+    if mover.prev_close_muhurat:
+        row["prev_close_muhurat"] = True
+    if mover.oi_baseline_muhurat:
+        row["oi_baseline_muhurat"] = True
     return row
 
 
@@ -1255,12 +1274,15 @@ def compute_futures_candidates(
         # (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — a null-OI 1-day bar sends the OI
         # baseline to the minute fallback on a possibly DIFFERENT day. Served
         # values are untouched; each strictly-False verdict gets ONE capped WARN.
+        # A legitimate day-after-Diwali Muhurat baseline is contiguous-True +
+        # flagged per baseline with ONE per-build INFO instead (never a false
+        # WARN — DEC-PREVSESSION-MUHURAT-COHERENCE-001).
         cal_exchange = _calendar_exchange(exchange)
         expected_session = expected_session_for(cal_exchange)
-        close_iso, close_contig = prev_baseline_provenance(
+        close_iso, close_contig, close_muhurat = prev_baseline_provenance(
             close_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
-        oi_iso, oi_contig = prev_baseline_provenance(
+        oi_iso, oi_contig, oi_muhurat = prev_baseline_provenance(
             oi_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         mover = replace(
@@ -1269,6 +1291,8 @@ def compute_futures_candidates(
             prev_close_contiguous=close_contig,
             oi_baseline_session=oi_iso,
             oi_baseline_contiguous=oi_contig,
+            prev_close_muhurat=close_muhurat,
+            oi_baseline_muhurat=oi_muhurat,
             # DEC-MOVERS-UNDERLYING-CLASS-001: resolve the index-vs-stock class from
             # the stored-master kind map. The map is keyed by primary_fno_underlying
             # FORMS (BAJAJAUTO) while the PARSED token is hyphen-preserving
@@ -1301,6 +1325,26 @@ def compute_futures_candidates(
                 snapshot_day=day,
                 found_session=oi_iso,
                 expected_session=expected_session,
+            )
+        if close_muhurat and close_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="prev_close",
+                exchange=exchange,
+                segment=_FNO_SEGMENT,
+                symbol=chosen,
+                snapshot_day=day,
+                found_session=close_iso,
+            )
+        if oi_muhurat and oi_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="oi",
+                exchange=exchange,
+                segment=_FNO_SEGMENT,
+                symbol=chosen,
+                snapshot_day=day,
+                found_session=oi_iso,
             )
         movers.append(mover)
 

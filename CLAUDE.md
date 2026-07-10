@@ -18,7 +18,59 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md
+_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a — renamed from -001 at the 2026-07-10 merge-reconcile (main's #1634/PR #1323 claimed -001 for the minute-basis calendar-cross-check ADVANCE; -002 is the COMMON-ization remainder + hole-shape observability + the #1649b Muhurat pack) —
+renumbered #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took
+#1623 for DEC-DASHBOARD-POLL-HYGIENE-001, then #1631/#1632 for
+DEC-ONECLICK-TOP100-OBJECT-ROOT-001 + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the
+613a/613b both-suffixed pair convention keeps the companion entries adjacent);
+the /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named
+follow-up CLOSED: the minute-basis PREV. CLOSE anchored on the symbol's OWN
+1-day series with ZERO real-calendar check (its docstring called a real NSE
+session absent from BOTH series "a genuine holiday" — the confirmed repro
+fabricated pct_chng=+10.0 for 2024-01-04 across the missing Wednesday
+2024-01-03, and select_top_movers would have crowned it); the minute guard is
+now the exact structural mirror of the daily guard — the checked calendar is
+the prior-session AUTHORITY, refusal = honest row ABSENCE ("correct-or-absent,
+never wrong"; never a fabricated %CHNG, never a 500), surfaced as ONE
+`preopen.prev_close_noncontiguous` WARN per (exchange, segment, symbol)
+dataset triple (capped 20/build + one suppressed summary) carrying a
+machine `hole_shape` + shape-matched detail (the hostile-review
+fold — the original one-line "re-pull" advice was WRONG remediation in two
+reproduced shapes; since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment
+fold, MIGRATION.md #1649b, the split is FOUR-WAY): muhurat_session_bar (the
+calendar-confirmed Diwali boundary — a HEALTHY lake, "no action needed",
+cross-referencing the #1616 engine anchor law + /movers' prev_close_muhurat
+display stamp) / extra_nonsession_bar (a non-Muhurat unexpected non-session
+bar — honestly suspicious, inspect it) / prebuild_lag (the 1day series lags
+the minute series — run the pipeline prebuild; diagnostic only, the guard
+never anchors on minute presence) / missing_session (the genuine hole —
+re-pull kept verbatim); the found<expected arms are two-way on the daily
+basis (no minute series read). The same #1649b fold ends the annual /movers
+false-hole flag: a day-after-Diwali Muhurat baseline now reads
+contiguous-True + EMIT-ON-TRUE `prev_close_muhurat`/`oi_baseline_muhurat`
++ " †" + ONE INFO per build (never " *"/WARN), and /db gains the static
+%CHNG anchor footnote. CONSOLIDATION: `nse.previous_trading_session` gains the
+REMOVE-ONLY kw-only `observed` overlay kwarg (default frozenset() —
+every existing caller byte-identical, parity-pinned) and
+`preopen_report._previous_trading_day` becomes a THIN delegator over it
+(private walk DELETED; delegation-equivalence pinned over the full covered
+span; the module-local `calendar.coverage_exhausted` event RETIRED for the
+COMMON `calendar.previous_session_coverage_exhausted` — a sanctioned,
+consumer-free rename). SANCTIONED: hole rows disappear from minute-basis
+exports (remediation now shape-matched — re-pull ONLY for a genuine
+missing_session, the pipeline prebuild for a 1day-lag, none for a Muhurat
+extra bar); coverage-abstain +
+Muhurat-bar / unflagged-drift anchors now SKIP on the minute basis too
+(parity with daily; an overlay-flagged day is recovered). HONEST: the
+pure-minute no-1day fallback arm stays deliberately calendar-blind (a chosen,
+pinned limit); the prior-session memo is O(unique report days) per build, NOT
+O(1)-total. EVIDENCE: the finder's repro KILLED on the fixed tree; PRE-fix
+goldens (weekend + Holi-2024 + Budget-Saturday contiguous fixture) byte-equal;
+the `!=`→`==` mutant proven dead on both guards. READ-ONLY dashboard — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+preopen_report.py + calendars/nse.py 100% line+branch; ruff/ruff-format clean,
+`mypy --strict` clean, pyright 0 errors at the pre-change baseline).
+Earlier: 2026-07-08 (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md
 #1594 — the automatic lake healer is COMPLETED for the
 `options/<series>/<YYYY>-<MM>.parquet` expired-options table: foreign-month-row
 + overlapping-partition detection+heal on the SAME proven quarantine →
@@ -1058,14 +1110,20 @@ figure is 0.2033%) is now STAMPED (`prev_close_session`/`prev_close_contiguous`
 per (symbol, kind)), and marked " *" on the screen — while the SERVED VALUE is
 untouched in every branch: NEW COMMON `calendars/nse.previous_trading_session`
 (strict back-walk, coverage-floor ABSTAIN — never a guessed session; Muhurat =
-NON-session documented limit), enriched resolvers `resolve_prev_close`/
+NON-session documented limit [SUPERSEDED for the movers VERDICT layer by
+DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1649b: the walk still
+treats Muhurat a NON-session, but a found-after-expected Muhurat baseline now
+reads contiguous-True + `prev_close_muhurat`/`oi_baseline_muhurat` — a healthy
+lake, never a false hole]), enriched resolvers `resolve_prev_close`/
 `resolve_prev_oi` with byte-identical `.value` seams over the historical
 `_prev_day_close`/`_prev_day_oi`, ONE pure `prev_baseline_provenance`, and
 EMIT-ON-FALSE row projection (contiguous + abstained payloads byte-for-byte
 the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
 HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
-the missing session does; `preopen_report._previous_trading_day` NOT refactored
-(named follow-up DEC-PREOPEN-PREVDAY-COMMON-001). READ-ONLY dashboard — ENGINE
+the missing session does; `preopen_report._previous_trading_day` was NOT
+refactored there (named follow-up DEC-PREOPEN-PREVDAY-COMMON-001 — since
+ADVANCED by main's #1634 and CLOSED by MIGRATION.md #1649a,
+DEC-PREOPEN-PREVDAY-COMMON-002). READ-ONLY dashboard — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
 MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
@@ -1815,7 +1873,68 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/cool-cerf-tq8c27` (**DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md #1594** — the
+- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a** — RENAMED from -001 at the 2026-07-10 merge-reconcile: main's #1634 (PR #1323) claimed -001 for the minute-basis calendar-cross-check ADVANCE while this branch was in flight; -002 delivers #1634's named OPEN work (the observed-overlay COMMON-ization + thin delegator) + the hole-shape WARN observability + the #1649b Muhurat coherence pack — renumbered
+  #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623 for DEC-DASHBOARD-POLL-HYGIENE-001 (PR #1335),
+  then #1631/#1632 for DEC-ONECLICK-TOP100-OBJECT-ROOT-001 (PR #1352) + DEC-DASHBOARD-VISUAL-OVERHAUL-001; the coordinator
+  slot is #1649, and the 613a/613b both-suffixed pair convention — a bare number may not coexist with suffixed forms —
+  keeps this entry + its same-branch amendment adjacent as #1649a/#1649b); the
+  /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named follow-up consolidation: the minute-basis
+  PREV. CLOSE guard (`_minute_prev_close_contiguous`) anchored on `trading_dates[idx-1]` — the symbol's OWN 1-day
+  series — with ZERO real-NSE-calendar check (its docstring claimed a session absent from BOTH series is "a genuine
+  holiday"; the confirmed repro: a lake holding 2024-01-02 + 2024-01-04 in BOTH series with the REAL Wednesday session
+  2024-01-03 absent from BOTH emitted prev_close=100.0 → a FABRICATED pct_chng=+10.0 that `select_top_movers` would
+  have crowned, while the DAY basis on the identical lake skipped). THE FIX: the minute guard is now the exact
+  structural mirror of `_daily_prev_close_contiguous` — the checked calendar (`_previous_trading_day`) is the
+  prior-session AUTHORITY; the anchor is valid ONLY when the nearest earlier 1-day date IS the calendar's prior
+  session AND that session has minute data; refusal = honest row ABSENCE riding the existing skip `continue`
+  ("correct-or-absent, never wrong" — never a fabricated %CHNG, never a raise/500). Both guards gain the
+  Ellipsis-sentinel `expected_session` seam + the `on_hole(expected, nearest_lake_session)` observability seam;
+  `build_preopen_rows` threads the observed overlay into BOTH bases through ONE function-local O(unique days)
+  prior-session memo (spy-pinned one-walk-per-day; NOT an O(1)-total claim) and surfaces holes as
+  `preopen.prev_close_noncontiguous` WARNs (deduped per (exchange, segment, symbol) dataset triple — the
+  hostile-review fold widened the bare-symbol key that silenced a dual-listed symbol's second exchange — cap
+  20/build, ONE `preopen.prev_close_noncontiguous_suppressed` summary) carrying a machine `hole_shape`
+  + shape-matched detail (the review fold on the original unconditional "re-pull" advice, WRONG in two reproduced
+  shapes; FOUR-WAY since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment fold, MIGRATION.md #1649b):
+  muhurat_session_bar (the calendar-confirmed Diwali boundary — a HEALTHY lake, "no action needed", cross-referencing
+  the #1616 engine anchor law + /movers' prev_close_muhurat display stamp) / extra_nonsession_bar (a non-Muhurat
+  unexpected non-session bar — honestly suspicious, inspect it; the old "e.g. a Diwali Muhurat session" guess is
+  gone) / prebuild_lag (1day lags minute —
+  run the pipeline prebuild; DIAGNOSTIC only, the guard never anchors on minute presence — a partial-day close
+  would be a fabrication) / missing_session (genuine hole — re-pull kept verbatim); the daily basis carries no
+  minute evidence, so only its found<expected diagnostic degrades; the golden generator now REFUSES to overwrite existing
+  fixtures without BRUTEX_REGEN_PREOPEN_GOLDEN=1 (the pre-fix capture stays the oracle). THE SAME #1649b AMENDMENT
+  FOLD (DEC-PREVSESSION-MUHURAT-COHERENCE-001, this branch, the recorded TWO-LAW design — engine anchor law #1616
+  vs display baseline law): /movers stops false-flagging the day-after-Diwali boundary as a lake hole — a
+  found-after-expected Muhurat baseline reads contiguous-True + the EMIT-ON-TRUE `prev_close_muhurat`/
+  `oi_baseline_muhurat` keys + " †" + at most ONE `movers.prev_baseline_muhurat` INFO per build (never the false
+  EMIT-ON-FALSE pair/" *"/WARN — the SANCTIONED wire delta, pinned before/after; every non-Muhurat row
+  byte-identical; the 39-key warm grid fires ZERO noncontiguous WARNs on a healthy Muhurat lake), and /db gains the
+  static "%CHNG anchors on the nearest stored prior bar (including a Diwali Muhurat session's close)" footnote
+  (per-row marker = named follow-up DEC-DB-MUHURAT-PREVCLOSE-MARK-001; the operator-gated
+  DEC-PREOPEN-MUHURAT-SERVE-001 stays behind a bhavcopy evidence gate). CONSOLIDATION (the #1535/#1539-named follow-up CLOSED):
+  `nse.previous_trading_session` gains kw-only `observed: AbstractSet[date] = frozenset()` — REMOVE-ONLY
+  (`is_trading_day_checked(probe) and probe not in observed`; plain data, no overlay-loader import into nse.py, no
+  cycle; default-empty parity pinned unit + hypothesis so every existing caller is byte-identical) — and
+  `preopen_report._previous_trading_day` becomes a THIN delegator over it (name+signature KEPT, private walk DELETED;
+  delegation-equivalence pinned against a verbatim in-test copy of the old walk over every day 2020-01-02→2026-12-31
+  × observed sets; the module-local `calendar.coverage_exhausted` event RETIRED for the COMMON
+  `calendar.previous_session_coverage_exhausted` — a sanctioned, grep-verified consumer-free observability rename,
+  its one test pin reconciled). SANCTIONED (each pinned): minute-basis hole rows DISAPPEAR from exports (remediation
+  shape-matched: re-pull / prebuild / none); coverage-abstain + Muhurat-bar / unflagged-drift anchor days now SKIP on
+  the minute basis (parity with
+  daily; an overlay-flagged day is recovered — the dedicated spurious-skip pin). HONEST: the pure-minute no-1day
+  fallback arm stays deliberately calendar-blind (a CHOSEN, pinned, ledgered limit). EVIDENCE: the finder's repro
+  KILLED on the fixed tree ("row SKIPPED (no fabrication) … VERDICT: NOT CONFIRMED"); PRE-fix-captured goldens
+  (contiguous weekend + Holi-2024-cluster + Budget-Saturday fixture, day+minute .xlsx + .zip) byte-equal post-fix;
+  the `!=`→`==` expected-check mutant proven dead on BOTH guards; the fixture audit of test_preopen_report.py +
+  test_surface_trial_reports.py found ZERO non-real-session dates. READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `preopen_report.py` (307/90 pre-fold; 323/98
+  post-REVIEW-ROUND-1) + `calendars/nse.py`
+  (204/52) BOTH 100.00% line+branch on their static gates; ruff/ruff-format clean; `mypy --strict` clean (403 files);
+  pyright 0 errors at the pre-change baseline, +2 test-file `reportPrivateUsage` warnings — the house private-import
+  test pattern — plus 2 more for the round-1 `_hole_shape`/`_hole_detail` private-helper imports.)
+  Earlier: `claude/cool-cerf-tq8c27` (**DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md #1594** — the
   automatic lake healer COMPLETED for the `options/<series>/<YYYY>-<MM>.parquet` expired-options table
   (`OptionParquetWriter`, dedup key `(side, timestamp)`): FOREIGN-MONTH-ROW + OVERLAPPING-PARTITION detection+heal on
   the SAME proven machinery — quarantine-COPY of original bytes BEFORE any rewrite → rewrite THROUGH the writer's
@@ -2975,7 +3094,10 @@ hostile-review pass._
   where the true figure is 0.2033%) are now judged against the NEW COMMON `calendars/nse.previous_trading_session`
   (strict `is_trading_day_checked` back-walk over weekends/holidays, Budget weekend sessions honoured, coverage-floor
   ABSTAIN with one `calendar.previous_session_coverage_exhausted` warning — never a guessed session; Muhurat day =
-  documented NON-session limit; NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
+  documented NON-session limit [the WALK's stance stands, but the VERDICT layer's false-hole reading of a
+  day-after-Diwali Muhurat baseline is SUPERSEDED by DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1649b —
+  contiguous-True + the EMIT-ON-TRUE `prev_close_muhurat`/`oi_baseline_muhurat` stamp + " †", never " *"/WARN];
+  NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
   `movers_snapshot.resolve_prev_close` → `PrevDayBaseline(value, found_date)` + `movers_futures.resolve_prev_oi` →
   `PrevOiBaseline(value, found_date)` keep byte-identical `.value` seams (`_prev_day_close`/`_prev_day_oi` wrappers —
   every historical pin green unmodified; `_prior_session_last_from_minute` appends its found date, [0]/[1] stable);
@@ -2986,8 +3108,9 @@ hostile-review pass._
   `movers.prev_baseline_noncontiguous` WARN + a single suppressed summary; `movers.html` appends a strict-`=== false`
   " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
   makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
-  session does; no bar is ever fabricated); `preopen_report._previous_trading_day` deliberately NOT refactored — the
-  named follow-up DEC-PREOPEN-PREVDAY-COMMON-001. READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  session does; no bar is ever fabricated); `preopen_report._previous_trading_day` was deliberately NOT refactored
+  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since ADVANCED by main's #1634 and CLOSED by
+  MIGRATION.md #1649a, DEC-PREOPEN-PREVDAY-COMMON-002 (the thin-delegator consolidation). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
   line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
   Earlier (same branch): (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538**
@@ -4708,9 +4831,28 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/cool-cerf-tq8c27`
+- **Active feature branch:** `claude/preopen-prevday-common`
+  (DEC-PREOPEN-PREVDAY-COMMON-002, MIGRATION.md #1649a — renamed from -001 (main's #1634/PR #1323 claimed -001 for the minute-basis cross-check ADVANCE; -002 = the COMMON-ization remainder + observability + the #1649b Muhurat pack); renumbered
+  #1623→#1631→#1649a across the 2026-07-09 merge-reconciles (main took #1623
+  for DEC-DASHBOARD-POLL-HYGIENE-001, then #1631/#1632 for
+  DEC-ONECLICK-TOP100-OBJECT-ROOT-001 + DEC-DASHBOARD-VISUAL-OVERHAUL-001;
+  both-suffixed pair per the 613a/613b precedent); the /reports preopen
+  minute-basis calendar-contiguity fix (a real-session lake hole no longer
+  fabricates a %CHNG — correct-or-absent) + the #1539-named follow-up CLOSED:
+  `_previous_trading_day` delegates to the COMMON
+  `nse.previous_trading_session`, which gains the remove-only `observed`
+  overlay kwarg; PLUS the same-branch amendment fold
+  DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1649b — the two-law
+  day-after-Diwali coherence ruling: /movers stops false-flagging a healthy
+  Muhurat-boundary lake as a lake hole (contiguous-True + EMIT-ON-TRUE
+  `prev_close_muhurat`/`oi_baseline_muhurat` + " †" + one INFO, never
+  " *"/WARN), preopen names the boundary definitively (`muhurat_session_bar`;
+  `extra_nonsession_bar` reworded honestly suspicious), /db gains the static
+  %CHNG anchor footnote; READ-ONLY dashboard; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/cool-cerf-tq8c27`
   (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md #1594 — the options-tree
-  foreign-month + overlap heal; matches §1's Active branch line)
+  foreign-month + overlap heal; see §1 Active-branch chain for the full blurb)
   Earlier: `claude/movers-underlying-class`
   (DEC-MOVERS-UNDERLYING-CLASS-001, MIGRATION.md #1650 — renumber history
   #1631→#1632→#1633→#1650 (PRs #1352/#1354 took the first two; the slot wave
@@ -5044,7 +5186,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4879-4880` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4757-4758` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
