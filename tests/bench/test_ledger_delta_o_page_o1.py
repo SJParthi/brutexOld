@@ -737,8 +737,8 @@ def test_fresh_fold_at_production_scale_is_bounded_and_not_flat(tmp_path: Path) 
     → 19.52× for 50× the rows; the full first payload (fold + one 500-row page)
     at 500k ran 562 ms. Both ≪ the 8 s ABSOLUTE ceiling.
     """
-    small = _seeded_lake(tmp_path, depth=_LARGE, deltas=5, tag="b8_small")  # 10k rows
-    big = _seeded_lake(tmp_path, depth=500_000, deltas=5, tag="b8_big")
+    small = _seeded_lake(tmp_path, depth=_LARGE, deltas=5, tag="b9_small")  # 10k rows
+    big = _seeded_lake(tmp_path, depth=500_000, deltas=5, tag="b9_big")
     conn = duckdb.connect()
 
     def _fresh(lake: Path) -> float:
