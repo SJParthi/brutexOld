@@ -496,3 +496,130 @@ auto-merged).
 - `validate_ledger_numbering.py` → 1262 headers OK (on the MERGED tree —
   the pre-fix red reproduced then closed);
   `validate_citation_accuracy.py` → every citation accurate.
+
+## Fixer round 3 (2026-07-10) — additions round-3 confirmed findings
+
+Nine confirmed findings (1 MAJOR + 1 MINOR + 7 NIT). Verified state first:
+the MAJOR (ledger #1632/#1633 collision with live main) and the verifier-B
+ledger-arm NIT were ALREADY RESOLVED by fixer round 1 (renumber to
+#1655/#1656 + the PR-BODY MATERIALS passage folded into #1655) — the
+round-3 evidence for those two findings predates the round-1 commit
+0d317954. Re-verified at this HEAD: live main's max ledger number is #1654
+(its new-since-merge entries are #1633–#1636/#1648/#1651 — none collide
+with the branch-only #1625/#1626/#1655/#1656), so NO further renumber was
+needed. The remaining findings were fixed here:
+
+### Pre-ship re-merge (finding: branch behind origin/main)
+
+- `origin/main` advanced TWO commits since the branch's last merge
+  (130cc1a2 non-blocking lake census #1648/#1651 + 074dd148 display-truth
+  honesty #1633–#1636). Merged clean (zero conflicts — main's delta
+  overlaps this branch only on `docs/MIGRATION.md`, both sides append);
+  `validate_ledger_numbering.py` green on the merged tree (1268 headers).
+  Zero main-side changes to `bad_tick.py`/`replay.py`/`stage1a.py`/
+  `weekly_anchors.py` since merge-base 0729fee1.
+
+### MINOR — hi/lo "the x10 class is always caught" OVERCLAIMED
+
+- For CLOSES the claim is true by construction; for HIGHS/LOWS the arm
+  judges the corrupt field against the SESSION reference, so a x10 HIGH on
+  a bar whose own close is legitimately KEPT in the (0.25, 0.4)x-reference
+  band is only ~2.5-4.0x the reference and is SERVED (the ÷10-LOW twin
+  escapes on a kept close in (2.5, 4)x); reproduced at this HEAD with
+  closes [100, 100, 100, 30, 30] + a 300 high. The escape applies at head
+  AND post-head — not bounded by the `[4·min-neighbor, 4·median)` bracket.
+  Reworded at every claim site: `bad_tick.py` module docstring (hi/lo
+  honest-limits bullet), MIGRATION.md #1655, CLAUDE.md header + §1 blurbs.
+  Adversarial-synthetic only (needs a kept >= 60% one-bar move); wording
+  fix + disclosure, ZERO code change.
+
+### NIT — majority-dropped WARN is FINITE-subset scoped (undisclosed)
+
+- Non-finite rows are filtered out before `screen_mask`, so the
+  strict-majority gate and its `kept`/`skipped` fields count only the
+  session's FINITE rows. Both directions probe-verified at this HEAD
+  (2 non-finite + 3 ratio-skipped of 5 → fires skipped=3 kept=0, session
+  lost 5; 6 NaN + 4 finite-kept → never fires) and now disclosed at the
+  claim sites (`bad_tick.py` docstring honest-limits + the
+  `BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT` constant comment + MIGRATION.md
+  #1655/#1656) + integration-pinned both directions
+  (`test_majority_dropped_warn_is_finite_subset_scoped`).
+
+### NIT — no composition pin for non-finite + positivity-refused table
+
+- NEW `test_refused_table_with_non_finite_row_emits_both_warns_before_the_
+  positivity_raise`: a NaN-high row + a masked x10 spike + a finite-negative
+  row → exactly one non-finite WARN (skipped=1, first_field=high) AND one
+  bad-tick WARN (skipped=2, skip_reasons={'close': 2} — the finite-negative
+  close IS fed to the ratio screen) both emitted in the pre-pass BEFORE the
+  positivity ValueError; nothing served. Behavior was already correct
+  (probe r1) — this pins the three-way composition.
+
+### NIT — 2-bar hi/lo escape is runtime-SILENT (asymmetric with the close arm)
+
+- The close arm's unconfirmable 2-bar inconsistency emits
+  `feed.bad_tick_head_unconfirmed`; the 2-bar hi/lo escape produces ZERO
+  runtime signal (the closes agree — no session signal exists) and was
+  disclosed docs-only. Now disclosed AS an asymmetry at the claim sites
+  (`bad_tick.py` docstring + #1655 + CLAUDE.md), with the INTRA-bar witness
+  (a high >= max_ratio-x / low <= 1/max_ratio-x the bar's OWN close — no
+  session reference needed, no false-positive risk under the circuit-band
+  physics, closes the 1-bar/2-bar hi/lo escapes) recorded as a NAMED
+  optional follow-up — a recorded decision, deliberately not implemented in
+  a fixer round.
+
+### NIT — ledger commit-type token `fix(data)` vs the real `feat(data)`
+
+- #1655/#1656 recorded `fix(data)` while the additions commit (and the
+  correct squash type — two NEW guards + a sanctioned behavior change) is
+  `feat(data)`. Both entries corrected in place with the correction noted
+  (the #1616 token-matches-squash precedent).
+
+### NIT — reviewer-apparatus hazard: shared venv312 stale editable install
+
+- The scratchpad `venv312` had carried an `__editable__.brutex` path hook
+  resolving into a DIFFERENT session's dirty worktree
+  (`.claude/worktrees/wf_e3947895-2da-1`), which silently shadowed the tree
+  under review and produced bogus failures until uninstalled (it has been
+  uninstalled). RULE for every later round: before gating, run
+  `python -c "import brutex; print(brutex.__file__)"` under the venv WITH
+  `PYTHONPATH` pinned to the worktree and verify it resolves INSIDE that
+  worktree (this round verified:
+  `.claude/worktrees/degf-r3-fixer/brutex/__init__.py`); if an editable
+  install shadows it, `pip uninstall brutex` first. Apparatus-only — not a
+  branch defect.
+
+### Verifier-B obligations (re-checked, no change needed)
+
+- Req 1a/1b/2 material lives durably in MIGRATION.md #1655 (PR-BODY
+  MATERIALS passage, folded at fixer round 1) AND in this file's
+  "PR-body obligations carried forward" section — the disjunctive
+  requirement's LEDGER arm is satisfied; the ship step should still
+  transcribe the req-3 notification pings (final DEC ids + PR number) into
+  the PR body per that section.
+
+### Fixer round-3 gate outputs (measured 2026-07-10, this worktree, venv312
+### with PYTHONPATH pinned per the apparatus rule above)
+
+- `pytest tests/unit/test_data_bad_tick.py
+  tests/integration/test_feed_replay_bad_tick_screen.py
+  tests/integration/test_feed_replay.py -q` → 133 passed (89 + 22 + 22 —
+  the two NEW integration pins); coverage (branch):
+  `brutex/data/bad_tick.py` 100.00% (124/46) + `brutex/feed/replay.py`
+  100.00% (106/34).
+- `pytest tests/property/test_lookahead_properties.py
+  tests/property/test_sweep_suffix_independence.py
+  tests/property/test_market_structure_lookahead.py -q` → 18 passed
+  UNMODIFIED (scoped: they do not certify the screens).
+- `pytest tests/golden -q` → 388 passed;
+  `git diff origin/main HEAD -- tests/golden/fixtures/` EMPTY.
+- `pytest tests/unit/test_claude_md_branch_consistency.py -q` → 10 passed
+  (post-CLAUDE.md edits).
+- `ruff check` + `ruff format --check` clean on every touched file.
+- `mypy --strict brutex` → Success: no issues found in 408 source files
+  (the merged tree — main's delta added one module).
+- pyright: touched files (`bad_tick.py` + `replay.py` + both test files)
+  0 errors.
+- `validate_ledger_numbering.py` → 1268 headers OK (post-merge tree);
+  `validate_citation_accuracy.py` → every citation accurate;
+  `validate_dec_ids.py` → green (no PR context).

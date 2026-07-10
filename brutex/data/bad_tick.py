@@ -127,7 +127,15 @@ Honest limits (disclosed, not papered over):
   skips 1 < keeps 2, and a 4-bar 2v2 split is not a strict majority — so
   those emit only the ordinary skip WARN; real NSE sessions carry 60-375
   bars, so a real corrupt-majority head cascades far past the gate and DOES
-  fire it). Mask unchanged, disclosure only;
+  fire it). SCOPE (fixer round 3): the gate and its ``kept``/``skipped``
+  fields are computed over the session's FINITE rows only — non-finite rows
+  are filtered out BEFORE the ratio screen (see the non-finite screen below)
+  and counted solely by their own :data:`NON_FINITE_SKIP_EVENT` WARN, so a
+  mixed session dominated by non-finite skips can read ``kept >= skipped``
+  here and never fire this WARN, and a fired WARN's counts understate the
+  whole-session loss by the non-finite count (probe-verified: 2 non-finite +
+  3 ratio-skipped of 5 rows fires with ``skipped=3 kept=0``). Mask unchanged,
+  disclosure only;
 * the **head verdict is bounded-forward-looking** — a session-head bar's KEEP
   verdict reads up to 2 FOLLOWING same-session bars (the median vote), so a
   load truncated INSIDE a session's first 3 bars can keep a poison head bar
@@ -173,9 +181,31 @@ bounded-multiple law (boundary = bad):
 * the 1-bar / 2-bar / escape-band honest limits carry over: a 1-bar session
   is kept unscreened, a 2-bar session is kept (its highs/lows included — no
   confirmed reference exists, so a 2-bar session's x10 high is a DISCLOSED
-  escape), and the head escape band applies to the high/low judgment
-  identically (a threshold-adjacent ~4.00-4.04x high inside
-  ``[4·min-neighbor, 4·median)`` rides it; the x10 class is always caught);
+  escape; fixer round 3 — unlike the close arm's 2-bar mutual-inconsistency
+  :data:`BAD_TICK_HEAD_UNCONFIRMED_EVENT` WARN, this hi/lo escape is
+  runtime-SILENT, test-pinned: the closes agree, so no session signal exists;
+  an INTRA-bar witness — a high ``>= max_ratio``x or a low ``<=
+  1/max_ratio``x the bar's OWN close needs no session reference and would
+  close the 1-bar/2-bar hi/lo escapes with no false-positive risk under the
+  same circuit-band physics — is a NAMED optional follow-up, deliberately not
+  folded into a fixer round), and the head escape band applies to the
+  high/low judgment identically (a threshold-adjacent ~4.00-4.04x high
+  inside ``[4·min-neighbor, 4·median)`` rides it). PRECISION (fixer round 3
+  — the earlier "the x10 class is always caught" wording OVERCLAIMED for
+  highs/lows): the hi/lo judgment compares the corrupt field against the
+  SESSION reference (head median / last-kept close), never the bar's OWN
+  level, so a x10-scaled HIGH is caught only when ``10·true_high >=
+  4·reference`` — a bar whose own close is legitimately KEPT in the
+  ``(0.25, 0.4)``x-reference band carries a x10 high of only ~2.5-4.0x the
+  reference and is SERVED (the ``÷10`` LOW twin escapes on a kept close in
+  ``(2.5, 4)``x); reproduced: closes ``[100, 100, 100, 30, 30]`` with a
+  ``300`` high on the first 30-close bar — all bars kept, no WARN. The
+  window applies at head (median reference) AND post-head (baseline
+  reference) — it is NOT bounded by the escape-band bracket above.
+  Reachability is adversarial-synthetic only: it needs a KEPT ``>= 60%``
+  one-bar move, impossible on real index minute data under the NSE circuit
+  bands (the CLOSE arm's x10-always-caught claim stands — a x10 close vs a
+  healthy reference is ``>= 4``x by construction);
 * ONE head-seed invariant does NOT carry over: the ``DEC-BADTICK-HEAD-SEED-001``
   "a session can never be emptied by its own head screen" guarantee is
   CLOSE-vote-ONLY — the hi/lo arm additionally judges the median-close bar's
@@ -293,6 +323,9 @@ BAD_TICK_HEAD_UNCONFIRMED_EVENT: Final[str] = "feed.bad_tick_head_unconfirmed"
 #: differently-corrupt head bars trips it after a PERFECT screen), and the
 #: minimal corrupt-majority shapes (3-bar 2-of-3 corrupt; 4-bar 2v2) sit at or
 #: below the strict-majority gate and emit only the ordinary skip WARN.
+#: FINITE-subset scoped (fixer round 3): non-finite rows never reach the
+#: ratio screen, so they count in neither ``kept`` nor ``skipped`` here —
+#: their loss is reported by :data:`NON_FINITE_SKIP_EVENT` alone.
 #: Disclosure only — the keep mask is unchanged; remediation is a re-pull /
 #: lake-heal of the named partition.
 BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT: Final[str] = "feed.bad_tick_session_majority_dropped"

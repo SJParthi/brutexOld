@@ -42,8 +42,15 @@ the one per-session skip WARN's `skipped` count, which gains the ADDITIVE
 name + meaning); `replay.py` passes the table's highs/lows. Honest limits:
 the #1625 1-bar/2-bar/escape-band limits carry over — 1-bar/2-bar sessions
 kept INCLUDING their highs/lows (no confirmed reference — a 2-bar session's
-x10 high is a disclosed escape, pinned); the head escape band
-`[4·min-neighbor, 4·median)` applies to the hi/lo judgment identically —
+x10 high is a disclosed escape, pinned — and runtime-SILENT, unlike the
+close arm's 2-bar WARN; an intra-bar witness is the named optional
+follow-up, fixer round 3); the head escape band
+`[4·min-neighbor, 4·median)` applies to the hi/lo judgment identically,
+PLUS a hi/lo-ONLY kept-close escape window (fixer round 3, superseding
+round 1's "x10 always caught" hi/lo wording: the arm judges the corrupt
+field vs the SESSION reference, so a x10 HIGH / ÷10 LOW on a bar whose own
+close is kept at (0.25, 0.4)x / (2.5, 4)x the reference is SERVED —
+adversarial-synthetic only, needs a kept >= 60% one-bar move; #1655) —
 but the #1625 "a session can never be emptied by its own head vote"
 invariant is CLOSE-vote-ONLY (fixer round 1): the arm judges the
 median-close bar's OWN high/low, so a ≤3-bar session whose every head bar
@@ -2006,8 +2013,13 @@ hostile-review pass._
   precedence close→high→low pinned; hi/lo skips fold into the one skip WARN's
   `skipped` + ADDITIVE `skip_reasons`/`first_reason` fields; `replay.py`
   passes the table's highs/lows; 1-bar/2-bar sessions stay kept incl. their
-  highs/lows (disclosed) and the `[4·min-neighbor, 4·median)` head escape
-  band applies identically — but the #1625 never-emptied-by-its-own-head-vote
+  highs/lows (disclosed; the 2-bar hi/lo escape is runtime-SILENT — the
+  intra-bar witness is the named optional follow-up, fixer round 3) and the
+  `[4·min-neighbor, 4·median)` head escape band applies identically, PLUS
+  the hi/lo-ONLY kept-close escape window (fixer round 3 — a x10 high/÷10
+  low on a bar whose own close is kept at (0.25, 0.4)x/(2.5, 4)x the
+  session reference is SERVED; adversarial-synthetic only, #1655) — but
+  the #1625 never-emptied-by-its-own-head-vote
   invariant is CLOSE-vote-ONLY (fixer round 1): the arm can drop the
   median-close bar for its own out-of-band high/low, so a ≤3-bar session
   whose every head bar carries one is fully EMPTIED (kept=0, both WARNs

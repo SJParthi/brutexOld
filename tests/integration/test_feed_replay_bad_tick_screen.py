@@ -18,6 +18,7 @@ import pyarrow as pa
 import pytest
 from brutex.data.bad_tick import (
     BAD_TICK_HEAD_UNCONFIRMED_EVENT,
+    BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT,
     BAD_TICK_SKIP_EVENT,
     NON_FINITE_SKIP_EVENT,
 )
@@ -200,6 +201,75 @@ def test_refused_table_emits_bad_tick_warns_before_the_positivity_raise() -> Non
     assert len(warns) == 1  # the D1 spike's WARN landed before the raise
     assert warns[0]["skipped"] == 1
     assert warns[0]["session"] == "2024-01-02"
+
+
+def test_refused_table_with_non_finite_row_emits_both_warns_before_the_raise() -> None:
+    # COMPOSITION PIN (fixer round 3): a table combining ALL THREE row classes —
+    # a NON-FINITE row (NaN high), a masked ×10 ratio spike, and a FINITE
+    # negative row that both feeds the ratio screen AND trips the positivity
+    # refusal — emits exactly one non-finite WARN and one bad-tick WARN in the
+    # pre-pass BEFORE the positivity ValueError, and serves nothing.  Each
+    # pairwise ordering was already pinned (bad-tick-WARN-before-raise above;
+    # isfinite-before-positivity in the unit suite); this pins the three-way
+    # composition, including that the finite-negative close IS fed to the ratio
+    # screen on a refused table (it counts in `skip_reasons`).
+    rows = [
+        (_BASE + timedelta(minutes=i), 100.0 + i, 101.0 + i, 99.0 + i, 100.0 + i) for i in range(3)
+    ] + [
+        (_BASE + timedelta(minutes=3), 103.0, float("nan"), 102.0, 103.0),  # non-finite
+        (_BASE + timedelta(minutes=4), 1000.0, 1001.0, 999.0, 1000.0),  # ×10 spike (masked)
+        (_BASE + timedelta(minutes=5), -5.0, -4.0, -6.0, -5.0),  # finite negative, refused
+    ]
+    with capture_logs() as logs, pytest.raises(ValueError, match="non-positive price"):
+        arrow_table_to_bars(_table(rows), source="src")
+    nf = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert len(nf) == 1  # emitted before the raise
+    assert nf[0]["skipped"] == 1
+    assert nf[0]["first_field"] == "high"
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1  # emitted before the raise
+    assert warns[0]["skipped"] == 2  # the spike AND the finite-negative close
+    assert warns[0]["skip_reasons"] == {"close": 2}
+
+
+def test_majority_dropped_warn_is_finite_subset_scoped() -> None:
+    # SCOPE PIN (fixer round 3): the majority-dropped gate and its
+    # `kept`/`skipped` fields are computed over the session's FINITE rows only
+    # — non-finite rows are filtered out before the ratio screen and counted
+    # solely by the non-finite WARN. Both directions:
+    # (a) 2 non-finite + 3 ratio-skipped of 5 rows → the WARN fires with
+    #     skipped=3 kept=0 (the session actually lost all 5);
+    # (b) 6 non-finite + 4 finite-kept rows → most of the session was screened
+    #     away, yet the majority WARN never fires (kept 4 > skipped 0 on the
+    #     finite subset) — the non-finite WARN's own count carries the loss.
+    rows_a = [
+        (_BASE, 100.0, float("inf"), 99.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.0, float("nan"), 99.0, 100.0),
+    ] + [
+        (_BASE + timedelta(minutes=2 + i), 100.0, 1010.0, 99.0, 100.0)  # high ×10
+        for i in range(3)
+    ]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows_a), source="src")
+    assert bars == []
+    nf = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert len(nf) == 1
+    assert nf[0]["skipped"] == 2
+    majority = [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    assert len(majority) == 1
+    assert majority[0]["skipped"] == 3  # finite subset only — NOT 5
+    assert majority[0]["kept"] == 0
+
+    rows_b = [
+        (_BASE + timedelta(minutes=i), 100.0, float("nan"), 99.0, 100.0) for i in range(6)
+    ] + [(_BASE + timedelta(minutes=6 + i), 100.0, 101.0, 99.0, 100.0) for i in range(4)]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows_b), source="src")
+    assert len(bars) == 4
+    assert not [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    nf = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert len(nf) == 1
+    assert nf[0]["skipped"] == 6
 
 
 # ────────────────────────────────────────────────────────────────────────
