@@ -165,7 +165,9 @@ class TestScannerEmission:
         assert aliens[0].coords is None
         assert report.option_files_skipped == 1
         events = [e for e in logs if e["event"] == "lake.invariant.schema_alien_file"]
-        assert events[0]["partition"] == "options/SERIES-A/2024-06.parquet"
+        # repr() — the options-arm partition embeds the RAW vendor-
+        # influenceable series dir name (the round-8/17 log-injection folds).
+        assert events[0]["partition"] == repr("options/SERIES-A/2024-06.parquet")
 
     def test_transient_read_failure_with_sane_schema_stays_scan_skip(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
