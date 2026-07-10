@@ -61,8 +61,14 @@ The two params-emit classes are now:
 ## HONEST budget verdict — REDUCED / STAGED (Override 3, Golden Rule #10)
 
 The measured baseline (locked k=1..5 NIFTY-futures grid) is **≈ 0.45 – 1.48
-M4-days** (central estimates carrying uncertainty — no measured post-Apriori
-wall exists; Apriori is **not in this checkout**).
+M4-days**. This is the **PRE-Apriori (current-engine)** basis, derived from the
+operator-locked `launch_button` k≤6 measurement (**4.2 – 13.9 M4-days**) × the
+~10.7% k=1..5 fraction of that grid — NOT a post-Apriori figure. Note this is a
+**different measurement** from the separate statement that **no measured
+post-Apriori wall exists**: the post-Apriori (pruned) wall is unmeasured simply
+because Apriori is **not in this checkout**, so there is nothing to contradict —
+the ≈ 0.45 – 1.48 M4-days is the pre-Apriori engine cost, the missing figure is
+the pruned-engine cost.
 
 - **A combined 5-cell run does NOT fit the ≤ 2-day bar** — 5× baseline =
   **≈ 2.3 – 7.4 M4-days**, exceeding two days even at the optimistic end.
@@ -154,6 +160,19 @@ For EMA HLC3, mirror Decimal-divide-**then**-one-`float()`, **not**
   Group-4 / VWAP-EMA bits. This is a **pre-existing** limitation (equally true for
   `fib_anchor` since #1011); closing it requires `ResultRow` to carry the axis
   coordinates. Out of scope for this axis.
+- **Stage-4 CPCV robustness + OOS validation are BASELINE-SOURCE ONLY for a
+  non-default cell.** The anti-luck robustness analysis
+  (`brutex/engine/robustness.py`, CPCV) and the out-of-sample validation
+  (`brutex/engine/validation.py`) rebuild `bar_bits` with the **default**
+  `(HLC3, CLOSE)` source — exactly as the shipped `fib_anchor` axis does — so a
+  survivor swept under a non-default price-source cell has these **secondary
+  statistics** computed at the baseline source. This is **inherited parity with
+  `fib_anchor`, not a defect**: it sits off the run-identity / persistence path
+  (a `ResultRow` carries no axis column), and it affects only the
+  analysis/reporting surface — the **primary sweep, the Stage-3 refinement, and
+  the run-identity ARE source-correct**; the trade results themselves are not
+  recomputed at baseline. Closing it requires the same `ResultRow` axis-column
+  change as the options-translation limit above.
 - **VWAP-on-spot is documented, not hard-enforced.** A VWAP-variant cell
   (`vwap_source != HLC3`) on a non-NIFTY-futures / engine-spot instrument produces
   meaningless bits 52-53 (a spot index carries no traded volume). This is surfaced
