@@ -7116,9 +7116,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     # core.on_progress SUBSUMES the DEC-JOB-COOPERATIVE-CANCEL-001
                     # review fold's cross-process /api/v1/sweep-progress file
                     # bridge (it publish_progress()es to progress_path on every
-                    # tick — start/apply/cancelled/finish/fail), so the dashboard
-                    # sees a parallel sweep as running and the Stop button shows
-                    # on the flagship multi-day surface.
+                    # tick — one per applied slot, plus the in-driver
+                    # cancelled/fail terminals; the #1445 G3 exact-count law).
+                    # The Stop button shows on the flagship multi-day surface
+                    # via the run-core's G4 reset-at-launch `running=True`
+                    # baseline, and the `done` terminal is published right
+                    # after this driver returns (below).
                     on_progress=core.on_progress,
                     # MAJOR round-2 fix: wire the parent-side per-tuple hook so
                     # TUPLE_DONE flight records + the R39 NaN/absurd SUSPECT
@@ -7137,6 +7140,17 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
                 )
+                # Fold reconcile (#1445 G3 exact-count law ⇄ the
+                # DEC-JOB-COOPERATIVE-CANCEL-001 file bridge): the parallel
+                # driver's `on_progress` ticks ONLY per applied slot + the
+                # in-driver `cancelled`/`fail` terminals — it no longer emits
+                # the trailing `finish` tick. Publish the `done` terminal
+                # snapshot to the bridge HERE instead (the driver already ran
+                # `progress.finish()`), so the dashboard's terminal render at
+                # grid completion is unchanged; the cancelled arm published its
+                # own honest terminal in-driver.
+                if not result.cancelled:
+                    core.on_progress(guards.progress.snapshot())
             else:
                 result = run_supervised_grid(
                     grid,

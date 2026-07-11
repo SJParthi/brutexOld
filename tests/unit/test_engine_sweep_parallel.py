@@ -2492,11 +2492,15 @@ class TestParallelOnProgress:
     took NO progress hook, so ``cmd_sweep_all``'s parallel arm never published the
     ``/api/v1/sweep-progress`` file bridge — the dashboard's Stop button (keyed on
     the bridge's ``running``) never showed on the flagship multi-day parallel
-    sweep. These tests pin the FULL tick set: start (running, BEFORE any tuple
-    completes) · every apply · the done / cancelled / error terminals.
+    sweep. FOLD RECONCILE (#1445 run-core G3 exact-count law WINS): a CLEAN run
+    ticks EXACTLY once per applied slot — no leading ``start`` tick (the
+    run-core's G4 reset-at-launch writes the ``running=True`` bridge baseline at
+    core enter) and no trailing ``finish`` tick (``cmd_sweep_all`` publishes the
+    ``done`` snapshot after the driver returns). The in-driver ``cancelled`` /
+    ``error`` terminals — the cancel semantics this DEC actually adds — stand.
     """
 
-    def test_streams_start_applies_and_finish(self, tmp_path: Path) -> None:
+    def test_clean_run_ticks_exactly_once_per_applied_slot(self, tmp_path: Path) -> None:
         grid = _grid()  # 1 instrument × 1 tf × 2 dirs × 2 k = 4 tuples
         snaps: list[Any] = []
         with (
@@ -2514,19 +2518,14 @@ class TestParallelOnProgress:
             )
         assert summary.cancelled is False
         total = count_sweep_tuples(grid)
-        # START tick + one apply per tuple + the finish terminal.
-        assert len(snaps) == total + 2
-        first = snaps[0]
-        assert first.state == "running"
-        assert first.running is True
-        assert first.enumerated == total
-        assert first.evaluated == 0  # the start tick lands BEFORE any tuple applies
-        for snap in snaps[1:-1]:
+        # The #1445 G3 exact-count law: one tick per applied slot — never a
+        # leading evaluated=0 start tick, never a duplicated finish terminal.
+        assert len(snaps) == total
+        assert [snap.evaluated for snap in snaps] == list(range(1, total + 1))
+        for snap in snaps:
             assert snap.state == "running"
-        last = snaps[-1]
-        assert last.state == "done"
-        assert last.running is False
-        assert last.evaluated == total
+            assert snap.running is True
+            assert snap.enumerated == total
 
     def test_streams_cancelled_terminal(self, tmp_path: Path) -> None:
         grid = _grid()
@@ -2546,8 +2545,7 @@ class TestParallelOnProgress:
                 on_progress=snaps.append,
             )
         assert summary.cancelled is True
-        assert snaps, "the start tick must publish even on an immediate cancel"
-        assert snaps[0].state == "running"
+        assert snaps, "the cancelled terminal must publish even on an immediate cancel"
         assert snaps[-1].state == "cancelled"
         assert snaps[-1].running is False
 
@@ -2574,7 +2572,7 @@ class TestParallelOnProgress:
             )
         # The bridge receives the honest ERROR terminal — never a frozen
         # last-running tick (the phantom-live class the staleness decay bounds).
-        assert snaps[0].state == "running"
+        assert snaps, "the error terminal must publish even on a pre-dispatch abort"
         assert snaps[-1].state == "error"
         assert snaps[-1].running is False
 
@@ -2588,10 +2586,11 @@ class TestParallelOnProgress:
         resume/cache-skip storm over a big grid wrote the bridge file once per
         skipped tuple in a tight loop — contradicting the sequential arm's
         explicit single-publish resume batch. A fully-cached second run must now
-        publish start + at most a couple of end-of-drain flushes + finish (with
-        per-tuple publishes this run emits total + 2 = 6 snapshots), and the
-        LAST pre-terminal snapshot still carries the FULL cumulative skip count
-        (no tick is lost — only the write cadence is batched).
+        publish at most a couple of end-of-drain flushes (with per-tuple
+        publishes this run emits total = 4 snapshots; the start/finish ticks
+        were removed by the #1445 G3 exact-count fold reconcile), and the LAST
+        snapshot still carries the FULL cumulative skip count (no tick is
+        lost — only the write cadence is batched).
         """
         # Legacy (guard-OFF) arm: run 2 deliberately probes a DIFFERENT (empty)
         # results root, which the default-ON resume store guard
@@ -2635,16 +2634,14 @@ class TestParallelOnProgress:
             )
         assert summary.skipped_cache == total
         # THE TEETH: strictly fewer publishes than one-per-skipped-tuple (the
-        # pre-fix cadence was exactly total + 2), and O(1) per drain — with
+        # pre-batching cadence was exactly total), and O(1) per drain — with
         # workers=3 (pool_size=2, heap_cap=4) today's driver drains the whole
-        # 4-tuple skip prefix in one pass: start + ONE flush + finish.
-        assert len(snaps) < total + 2
-        assert len(snaps) <= 4
-        assert snaps[0].state == "running"
-        assert snaps[0].skipped == 0  # the start tick
+        # 4-tuple skip prefix in one pass: ONE flush.
+        assert snaps, "the batched drain flush must publish the cumulative skips"
+        assert len(snaps) < total
+        assert len(snaps) <= 2
         # Nothing is lost: the batched flush carries the cumulative skip count.
-        assert snaps[-2].skipped == total
-        assert snaps[-1].state == "done"
+        assert snaps[-1].state == "running"
         assert snaps[-1].skipped == total
 
     def test_default_none_publishes_nothing(self, tmp_path: Path) -> None:

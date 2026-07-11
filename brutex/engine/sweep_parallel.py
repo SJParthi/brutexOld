@@ -1198,22 +1198,26 @@ class ParallelGridDriver:
             process boundary (nothing new is pickled). See :func:`run_parallel_grid`.
         on_progress
             Optional PARENT-side hook receiving the fresh
-            :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` after the
-            ``start`` tick, every NON-SKIP apply-loop advance (a contiguous run
-            of parent-synchronous resume/cache/quarantined-prior skips is
+            :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` on
+            every NON-SKIP apply-loop advance (a contiguous run of
+            parent-synchronous resume/cache/quarantined-prior skips is
             BATCHED into one cumulative publish per drain — fix round 4, the
             sequential resume batch's parallel twin; a resumed prefix never
-            storms one fsync'd bridge write per skipped tuple), and each terminal
-            (``finish`` / ``cancelled`` / ``fail``) — the sequential
-            ``run_supervised_grid`` seam's parallel twin (the CLI wires
-            :func:`~brutex.engine.sweep_supervisor.publish_progress` here, so the
-            cross-process ``/api/v1/sweep-progress`` file bridge is fed on the
-            PRODUCTION parallel path too — DEC-JOB-COOPERATIVE-CANCEL-001 review
-            fold; previously only the sequential arm published, so the dashboard's
-            Stop button never showed on a parallel sweep). ``None`` (every
-            pre-existing caller) is byte-identical. Never crosses the process
-            boundary (parent-only, like the progress mutation itself). Also the
-            G3 (DEC-SWEEP-UNKILLABLE-CORE-001) live-progress stream seam —
+            storms one fsync'd bridge write per skipped tuple) plus the
+            in-driver ``cancelled`` / ``fail`` terminals — the G3
+            (DEC-SWEEP-UNKILLABLE-CORE-001) exact-count law: a CLEAN run
+            observes EXACTLY one tick per applied slot (no leading ``start``
+            tick, no trailing ``finish`` tick — fold reconcile of the
+            DEC-JOB-COOPERATIVE-CANCEL-001 publish set with the #1445 run-core
+            pins). The CLI wires
+            :func:`~brutex.engine.sweep_supervisor.publish_progress` here, so
+            the cross-process ``/api/v1/sweep-progress`` file bridge is fed on
+            the PRODUCTION parallel path too; the ``running=True`` launch
+            baseline (the Stop button's key) is written by the run-core's G4
+            reset-at-launch at core enter, and ``cmd_sweep_all`` publishes the
+            ``done`` terminal snapshot after this driver returns. ``None``
+            (every pre-existing caller) is byte-identical. Never crosses the
+            process boundary (parent-only, like the progress mutation itself);
             ticked from the single-threaded writer-actor apply path, so the
             parallel run streams live progress exactly like the sequential
             driver.
@@ -1347,11 +1351,13 @@ class ParallelGridDriver:
         resume_from = self._guards.checkpoint.next_index
 
         self._guards.progress.start(enumerated=total, detail=self._subject)
-        # Publish the START tick (running=True) IMMEDIATELY — a heavy first
-        # tuple legitimately runs many minutes (the #1608 arithmetic), and the
-        # dashboard's Stop button keys on the bridge file's `running`, so the
-        # button must show before the first tuple completes.
-        self._publish_progress()
+        # NO start publish here (fold reconcile with the #1445 run-core G3
+        # exact-count law: `on_progress` observes EXACTLY one tick per applied
+        # slot on a clean run — never a leading evaluated=0 tick). The
+        # dashboard's Stop button still shows before a heavy first tuple
+        # completes (the #1608 arithmetic): on the production path the
+        # run-core's G4 reset-at-launch writes the `running=True` baseline to
+        # the progress bridge at core ENTER, before this driver runs.
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_START,
             subject=self._subject,
@@ -1504,7 +1510,12 @@ class ParallelGridDriver:
                 f"{quarantine_note}"
             )
         )
-        self._publish_progress()
+        # NO finish publish here (fold reconcile with the #1445 run-core G3
+        # exact-count law — the trailing tick would duplicate the last apply's
+        # `evaluated` on the hook). `cmd_sweep_all`'s parallel arm publishes
+        # this `done` snapshot to the file bridge itself, right after this
+        # driver returns, so the DEC-JOB-COOPERATIVE-CANCEL-001 dashboard
+        # terminal render is unchanged on the production path.
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_COMPLETE, subject=self._subject, payload=payload
         )
@@ -2345,11 +2356,15 @@ def run_parallel_grid(
     ``on_progress`` is the sequential seam's parallel twin — the PARENT-side
     snapshot stream ``cmd_sweep_all`` wires to
     :func:`~brutex.engine.sweep_supervisor.publish_progress` so the
-    cross-process ``/api/v1/sweep-progress`` file bridge (and with it the
-    dashboard's Stop button) is live on the PRODUCTION parallel path (fired on
-    start / every non-skip apply — a contiguous resume/cache/quarantined-prior
-    skip run batches into ONE publish per drain, fix round 4 — / cancelled /
-    finish / fail; ``None`` = no publish, byte-identical).
+    cross-process ``/api/v1/sweep-progress`` file bridge is live on the
+    PRODUCTION parallel path (fired on every non-skip apply — a contiguous
+    resume/cache/quarantined-prior skip run batches into ONE publish per
+    drain, fix round 4 — plus the in-driver ``cancelled`` / ``fail``
+    terminals; a CLEAN run ticks EXACTLY once per applied slot — the #1445 G3
+    exact-count law, no start/finish ticks; the Stop button's ``running``
+    baseline comes from the run-core's G4 reset-at-launch and the ``done``
+    terminal is published by ``cmd_sweep_all`` after this driver returns;
+    ``None`` = no publish, byte-identical).
 
     Raises
     ------
