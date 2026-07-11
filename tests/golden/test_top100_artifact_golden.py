@@ -39,7 +39,15 @@ _RUN = "a1" * 32
 
 #: Locked digest (sha256 hex of the rendered top100.json bytes).
 #: Regeneration is a deliberate, ledgered act — see the module docstring.
-_GOLDEN_TOP100_SHA256 = "db2cfaffcf4786988a059595a46a3c720897f9021b9a9588e42d29bc152e4764"
+#: RE-LOCKED under DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (MIGRATION.md #1749):
+#: the writer now ALWAYS emits the additive root ``cascade_join`` meta + the
+#: per-entry ``cascade`` object (state/status ``no_report``/``not_validated``
+#: when no report was threaded — this fixture's arm); the diff vs the prior
+#: lock is EXACTLY those additive keys (pinned by
+#: test_engine_top100_artifact.py's additive-only strip pin against the
+#: frozen pre-change fixture) — readers stay presence-tolerant, so every
+#: committed pre-change artifact fixture still loads byte-untouched.
+_GOLDEN_TOP100_SHA256 = "2b3562a01567c3d2da32b274a2a53c0c437029c9fa88cb5920334469a2f4ebe5"
 
 
 def _fixture_artifact() -> Top100Artifact:
