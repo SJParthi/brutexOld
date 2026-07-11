@@ -8514,7 +8514,10 @@ def build_app(
             (measured 42× on the synthetic repro's WALK, 420.0 ms → 10.0 ms —
             the full unfiltered ``_build`` measured 490.9 ms; the production
             unfiltered walk's own docstring figure is 29.7 min at 2.36M
-            files). ``filter_spot_datasets``
+            files — OUT-OF-CI measurements; the structural walk-flatness the
+            figures follow from is pinned deterministically by the committed
+            op-count bench ``tests/bench/test_db_spot_cascade_fno_flat_o1.py``
+            — round-5 review). ``filter_spot_datasets``
             stays as the provable-no-op belt (the ONE spot-vs-F&O split, §11
             COMMON). A FILTERED walk deliberately NEVER rebuilds the dataset
             manifest (db_view's :func:`list_candle_datasets` guard) — rebuild duty

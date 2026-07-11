@@ -9,12 +9,16 @@ asserts the serve-order invariants:
 * every served value is a PREVIOUSLY-COMPLETED real compute result — never a
   fabrication, never a torn/partial value;
 * the cache never deadlocks or raises on any legal interleaving;
-* with an entry present and the SWR arm engaged, a read NEVER invokes the
-  inline compute (the non-blocking law — inline computes happen only on a
-  miss, idle-no-inflight staleness, or force_fresh);
+* with an entry present and the SWR arm engaged (pull active OR a revalidator
+  already in flight), a read NEVER invokes the inline compute — asserted via a
+  per-read compute-counter delta (the non-blocking law; inline computes happen
+  only on a miss, idle-no-inflight staleness, or force_fresh — round-5 review:
+  this bullet previously claimed the assertion without the teeth);
 * at most ONE revalidator is ever in flight per key.
 """
 
+# Whitebox pins read module-private state by design (DEC-P0-017).
+# pyright: reportPrivateUsage=none
 from __future__ import annotations
 
 from typing import Any
@@ -71,9 +75,21 @@ def test_swr_interleavings_serve_only_completed_computes(
 
     for op, arg in ops:
         if op == "read":
+            # The SWR arm is engaged for this read iff an entry exists AND
+            # (a pull is active OR a revalidator is already in flight) — the
+            # exact serve-stale precondition. Captured BEFORE the call.
+            swr_engaged = "k" in cache._entries and (pull["active"] or "k" in cache._revalidating)
+            computes_before = counter["n"]
             served = cache.get_or_compute("k", generation=int(arg), compute=_make_compute())
             # THE core invariant: only a completed real compute is ever served.
             assert served in completed
+            if swr_engaged:
+                # The non-blocking law, ASSERTED (round-5 review nit — the
+                # docstring claimed it without teeth): an SWR-armed read never
+                # invokes the inline compute synchronously — a spawned
+                # revalidator's compute runs only on a later "complete" op,
+                # so ANY counter bump inside this call was an inline compute.
+                assert counter["n"] == computes_before
         elif op == "warm":
             served = cache.get_or_compute(
                 "k", generation=int(arg), compute=_make_compute(), force_fresh=True
