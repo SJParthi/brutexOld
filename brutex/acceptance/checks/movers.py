@@ -69,9 +69,7 @@ def _months_for(day: date) -> set[tuple[int, int]]:
     return {(day.year, day.month), (prev_year, prev_month)}
 
 
-def _pct_2dp(text: str | None) -> Fraction | None:
-    if text is None:
-        return None
+def _pct_2dp(text: str) -> Fraction:
     return ind.half_up_2dp(Fraction(text))
 
 
@@ -280,25 +278,21 @@ def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear 
     # ── movers.tf_invariance — #1535/#1538 cross-TF agreement on the wire ──
     tf_mismatches: list[str] = []
     tf_units = 0
-    latest_payloads = {
-        interval: payloads[(interval, None)]
+    # The three Latest coords are structurally present here (a gated payload
+    # returned early above), so the cross-TF compare always has its inputs.
+    by_tf = {
+        interval: {r["symbol"]: r for r in payloads[(interval, None)].get("volume", [])}
         for interval in ("1minute", "5minute", "1day")
-        if (interval, None) in payloads
     }
-    if len(latest_payloads) == 3:
-        by_tf = {
-            interval: {r["symbol"]: r for r in payload.get("volume", [])}
-            for interval, payload in latest_payloads.items()
-        }
-        common = set.intersection(*(set(m) for m in by_tf.values()))
-        for symbol in sorted(common):
-            tf_units += 1
-            ltps = {tf: by_tf[tf][symbol]["ltp"] for tf in by_tf}
-            values = {tf: by_tf[tf][symbol]["value_cr"] for tf in by_tf}
-            if len(set(ltps.values())) != 1:
-                tf_mismatches.append(f"{symbol}: ltp diverges across TFs {ltps}")
-            if len(set(values.values())) != 1:
-                tf_mismatches.append(f"{symbol}: value_cr diverges across TFs {values}")
+    common = set.intersection(*(set(m) for m in by_tf.values()))
+    for symbol in sorted(common):
+        tf_units += 1
+        ltps = {tf: by_tf[tf][symbol]["ltp"] for tf in by_tf}
+        values = {tf: by_tf[tf][symbol]["value_cr"] for tf in by_tf}
+        if len(set(ltps.values())) != 1:
+            tf_mismatches.append(f"{symbol}: ltp diverges across TFs {ltps}")
+        if len(set(values.values())) != 1:
+            tf_mismatches.append(f"{symbol}: value_cr diverges across TFs {values}")
     tf_sub = make_subcheck(
         "movers.tf_invariance",
         Verdict.FAIL if tf_mismatches else Verdict.PASS,

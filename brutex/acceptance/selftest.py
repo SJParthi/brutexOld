@@ -114,6 +114,19 @@ def _twin_bars(day: date, *, base: float) -> list[Any]:
     return bars
 
 
+def _write_grouped(
+    writer: Any, *, symbol: str, interval: str, bars: list[Any], segment: str = "INDEX"
+) -> None:
+    """Write bars through the real writer, grouped by (year, month) partition."""
+    by_month: dict[tuple[int, int], list[Any]] = {}
+    for bar in bars:
+        by_month.setdefault((bar.timestamp.year, bar.timestamp.month), []).append(bar)
+    for _cell, group in sorted(by_month.items()):
+        writer.write(
+            exchange="NSE", segment=segment, symbol=symbol, interval=interval, bars=group
+        )
+
+
 def build_twin_lake(
     root: Path,
     *,
@@ -134,27 +147,27 @@ def build_twin_lake(
 
     writer = ParquetWriter(lake_root=root)
     for offset, symbol in enumerate(symbols):
-        bars = [
-            *_twin_bars(days[0], base=100.0 + offset * 50),
-            *_twin_bars(days[1], base=110.0 + offset * 50),
-        ]
-        writer.write(
-            exchange="NSE", segment="INDEX", symbol=symbol, interval="1minute", bars=bars
-        )
+        # One write per session day — bars may span calendar months and the
+        # writer (correctly) refuses a multi-partition batch.
+        for day_index, day in enumerate(days):
+            writer.write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol=symbol,
+                interval="1minute",
+                bars=_twin_bars(day, base=100.0 + offset * 50 + day_index * 10),
+            )
         symbol_dir = root / "bars" / "NSE" / "INDEX" / symbol
         df_1m = read_lake_bars_frame(symbol_dir, "1minute")
         df_5m = resample_1m_to_tf(df_1m, 5)
-        writer.write(
-            exchange="NSE",
-            segment="INDEX",
+        _write_grouped(
+            writer,
             symbol=symbol,
             interval="5minute",
             bars=frame_to_candle_bars(df_5m, absent_open_interest=None),
         )
         daily = resample_1m_to_daily(df_1m, before=days[1] + timedelta(days=1))
-        writer.write(
-            exchange="NSE", segment="INDEX", symbol=symbol, interval="1day", bars=daily
-        )
+        _write_grouped(writer, symbol=symbol, interval="1day", bars=daily)
 
 
 def _month_file(root: Path, symbol: str, interval: str, day: date) -> Path:
