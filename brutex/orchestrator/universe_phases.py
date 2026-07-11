@@ -361,6 +361,22 @@ def settled_contract_jobs(
     return frozenset(rows)
 
 
+def _reraise_if_market_hours_halt(exc: BaseException | None) -> None:
+    """Re-raise *exc* iff it is a market-hours global stop (DEC-GROWW-MARKET-HOURS-GUARD-001).
+
+    The two-phase engine captures every fetcher exception per cell (record-and-resume);
+    a :class:`~brutex.data.errors.MarketHoursHalt` (the metadata phase crossed into the
+    NSE trading window) is the ONE class that must instead halt the whole phase — the
+    metadata twin of the ingest spines' ``_GLOBAL_STOP_ERRORS`` carve-out. Imported
+    INSIDE the call so this low-level orchestrator stays import-light. ``None`` (a clean
+    cell) is a no-op.
+    """
+    from brutex.data.errors import MarketHoursHalt
+
+    if isinstance(exc, MarketHoursHalt):
+        raise exc
+
+
 def run_two_phase(
     cells: Sequence[ExpiryCell],
     *,
@@ -441,6 +457,12 @@ def run_two_phase(
         else:
             expiry_failures += 1
             on_expiry_cell(e_outcome.item, [], e_outcome.exc)
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: a fetcher that raised MarketHoursHalt
+            # (the metadata phase crossed into the NSE trading window) is a PULL-WIDE
+            # global stop — re-raise it past the per-cell record-and-resume so the
+            # phase halts like the ingest spines instead of fail-fasting every
+            # remaining cell. The cell's outcome was already recorded above.
+            _reraise_if_market_hours_halt(e_outcome.exc)
     # ── Barrier: Phase 1 fully drained above; ONLY now do we build Phase 2 ──
 
     # ── Phase 2 — contracts, from discovered ∪ persisted expiries ───────
@@ -457,6 +479,8 @@ def run_two_phase(
         else:
             contract_failures += 1
             on_contract(c_outcome.item, 0, c_outcome.exc)
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: a Phase-2 MarketHoursHalt halts the pull.
+            _reraise_if_market_hours_halt(c_outcome.exc)
 
     return TwoPhaseReport(
         expiry_cells=expiry_cells,
