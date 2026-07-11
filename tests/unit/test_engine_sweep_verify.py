@@ -280,6 +280,22 @@ class TestRecordedContext:
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_context_from_audit(path)
 
+    def test_shared_list_parse_maps_unreadable_audit(self, tmp_path: Path) -> None:
+        """The VERIFIED seam's shared list parse keeps its AuditError mapping.
+
+        Club reconcile pin: the streaming conversion moved
+        ``recorded_context_from_audit`` off ``_entries_from_audit``, so the
+        shared list parse's unreadable arm (rode by
+        ``_verified_entries_from_audit`` after ``verify_chain`` — e.g. a file
+        replaced between the verify and the parse) needs its own teeth.
+        """
+        from brutex.engine.sweep_verify import _entries_from_audit
+
+        path = tmp_path / "a.jsonl"
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            _entries_from_audit(path)
+
     def test_mid_chain_corruption_after_valid_start_still_maps(self, tmp_path: Path) -> None:
         """DEC-AUDIT-READERS-STREAM-001: the streaming reader raises its
         AuditError lazily MID-iteration — a malformed committed line AFTER a

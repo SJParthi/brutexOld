@@ -2246,6 +2246,33 @@ class TestEquityPage:
         clamped = reader.equity_page("r-x", 1, offset=-5, limit=100)
         assert len(clamped.rows) == 3  # negative offset clamps to 0
 
+    def test_equity_page_names_a_top100_probe_outage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The equity page's detail carries the top100 outage note too.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (club reconcile): the note threads
+        through the SHARED ``_resolve_sidecars`` 3-tuple, so BOTH pages name
+        a last-known top100 serve — never a silent stale resolution.
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.equity_page("r-x", 1, offset=0, limit=100).status == "ok"
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        page = reader.equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "ok"
+        assert "top100 revision probe outage — serving last-known" in page.detail
+
     def test_limit_beyond_the_equity_cap_is_clamped_and_named(self, tmp_path: Path) -> None:
         results_root = _rebind_run(tmp_path)
         _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)

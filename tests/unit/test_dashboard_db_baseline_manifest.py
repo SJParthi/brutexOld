@@ -309,7 +309,7 @@ class TestSpotJoinPruning:
         _write_months(tmp_path, 24, segment="INDEX", symbol="NIFTY")
         spy = _BindSpy(store.connection)
         ts = datetime(2024, 6, 3, 4, 1, tzinfo=UTC)
-        out = _underlying_spot_close_by_ts(
+        out, served_interval = _underlying_spot_close_by_ts(
             spy,
             tmp_path,
             exchange="NSE",
@@ -318,6 +318,7 @@ class TestSpotJoinPruning:
             ts_values=[ts],
         )
         assert out == {ts: Decimal("117.10")}
+        assert served_interval == "1minute"  # no TF fallback engaged (#1367 shape)
         assert all(isinstance(b, list) for b in spy.binds)
         assert spy.bound_files() == {"06.parquet"}  # 1 of 24 files
 
@@ -331,7 +332,7 @@ class TestSpotJoinPruning:
         ]
 
         def run() -> dict[datetime, Decimal]:
-            return _underlying_spot_close_by_ts(
+            spots, _served_interval = _underlying_spot_close_by_ts(
                 store.connection,
                 tmp_path,
                 exchange="NSE",
@@ -339,6 +340,7 @@ class TestSpotJoinPruning:
                 interval="1minute",
                 ts_values=ts_values,
             )
+            return spots
 
         pruned = run()
         monkeypatch.setattr(db_view, "_bars_file_windows", lambda *a, **k: None)
