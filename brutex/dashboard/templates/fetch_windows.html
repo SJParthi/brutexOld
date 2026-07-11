@@ -107,6 +107,10 @@
 <link rel="stylesheet" href="/static/bx-theme.css">
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
+<!-- The ONE shared poll-discipline core (DEC-FRONTEND-LATENCY-HARDENING-001,
+     MIGRATION.md #1720): hidden guard, one-in-flight chain, 10 s fetch abort,
+     capped 3 s→30 s backoff, visibilitychange catch-up. -->
+<script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 </head>
@@ -329,17 +333,17 @@ function updatePager(matched, returned) {
 winPrev.addEventListener("click", () => {
   winOffset = Math.max(0, winOffset - winLimit());
   lastPayloadKey = null;
-  poll();
+  repoll();
 });
 winNext.addEventListener("click", () => {
   winOffset += winLimit();
   lastPayloadKey = null;
-  poll();
+  repoll();
 });
 winPageSize.addEventListener("change", () => {
   winOffset = 0;
   lastPayloadKey = null;
-  poll();
+  repoll();
 });
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): the raw response
    text LAST RENDERED, folded with the filter state that rendered it (belt-and-
@@ -358,7 +362,7 @@ function wireChips(boxId, key, setter) {
       document.querySelectorAll("#" + boxId + " a").forEach(x => x.classList.toggle("active", x === a));
       winOffset = 0; // a fresh filter selection starts at page 1
       lastPayloadKey = null; // manual filter flip: force the next render, never a stale skip
-      poll();
+      repoll();
     });
   });
 }
@@ -435,11 +439,32 @@ function countRecorded(counts, total) {
   return n;
 }
 
-async function poll() {
-  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
-     ZERO fetches; the interval keeps ticking (hidden ticks are free) and the
-     visibilitychange listener below re-polls immediately on return. */
-  if (document.hidden) return;
+/* Bounded text fetch (DEC-FRONTEND-LATENCY-HARDENING-001 review fix): the
+   abort timer stays ARMED through the BODY read (the bx-poll.js bxFetchJson
+   precedent) so a headers-then-stalled-body response aborts too — under
+   BXPoll's one-in-flight scheduling an unresolved tick would never
+   reschedule (the frozen-tab class the migration exists to prevent).
+   timeoutMs is the seam's own bound (BXPoll passes FETCH_TIMEOUT_MS); the
+   legacy no-BXPoll arm defaults to the sibling pages' 12 s. */
+function fetchTextBounded(url, timeoutMs) {
+  const ms = (typeof timeoutMs === "number" && timeoutMs > 0) ? timeoutMs : 12000;
+  const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  const timer = setTimeout(function () { if (ctrl) { ctrl.abort(); } }, ms);
+  const init = ctrl ? { signal: ctrl.signal } : {};
+  return fetch(url, init)
+    .then(function (r) {
+      /* timer deliberately still armed through the body read */
+      return r.text().then(function (txt) {
+        return { ok: r.ok, status: r.status, text: txt };
+      });
+    })
+    .then(
+      function (res) { clearTimeout(timer); return res; },
+      function (err) { clearTimeout(timer); throw err; }
+    );
+}
+
+async function poll(timeoutMs) {
   try {
     const qs = new URLSearchParams();
     if (marketFilter) qs.set("market", marketFilter);
@@ -447,11 +472,11 @@ async function poll() {
     /* Sane page instead of the 20k-row server default (DEC-WINDOWS-COUNTS-ONLY-001). */
     qs.set("limit", String(winLimit()));
     qs.set("offset", String(winOffset));
-    const r = await fetch("/api/v1/coverage/windows?" + qs.toString());
-    if (!r.ok) { lastPayloadKey = null; liveTxt.textContent = "error " + r.status; return; }
-    const txt = await r.text();
+    const res = await fetchTextBounded("/api/v1/coverage/windows?" + qs.toString(), timeoutMs);
+    if (!res.ok) { lastPayloadKey = null; liveTxt.textContent = "error " + res.status; return false; }
+    const txt = res.text;
     const payloadKey = marketFilter + "|" + statusFilter + "|" + winLimit() + "|" + winOffset + "|" + txt;
-    if (payloadKey === lastPayloadKey) { liveTxt.textContent = lastLiveLine; return; }
+    if (payloadKey === lastPayloadKey) { liveTxt.textContent = lastLiveLine; return true; }
     lastPayloadKey = payloadKey;
     const body = JSON.parse(txt);
     const rows = body.windows || [];
@@ -461,8 +486,7 @@ async function poll() {
     if (!rows.length && winOffset > 0 && (body.matched || 0) > 0) {
       winOffset = 0;
       lastPayloadKey = null;
-      poll();
-      return;
+      return poll(timeoutMs);
     }
     emptyThreshold = body.empty_threshold ?? 3;
     wincEl.textContent = num(countRecorded(body.counts, body.count ?? 0));
@@ -489,18 +513,56 @@ async function poll() {
     renderWindows(rows);
     lastLiveLine = "live · " + rows.length + " rows";
     liveTxt.textContent = lastLiveLine;
+    return true;
   } catch (e) {
     lastPayloadKey = null;
     liveTxt.textContent = "offline";
+    return false;
   }
 }
 
-poll();
-setInterval(poll, 4000);
-/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001). */
-document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) poll();
-});
+/* Self-recovering scheduler (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md
+   #1720): the tick above rides the ONE shared BXPoll discipline core
+   (bx-poll.js — hidden-tab guard BEFORE any fetch, one-in-flight
+   self-scheduling chain, capped 3 s→30 s failure backoff, visibilitychange
+   catch-up) instead of a bare fixed setInterval + un-timed fetch scheduling;
+   the visible-tab cadence is unchanged (pollMs: 4000) and every
+   render/degrade above is byte-identical. Chip/pager clicks re-poll through
+   repoll() → poller.pollNow(), which supersedes any in-flight response (the
+   BXPoll seq guard) instead of stacking a parallel fetch. The poller starts
+   at DOMContentLoaded, by which every deferred script has executed; a
+   missing bx-poll.js degrades to the legacy guarded interval — the page
+   never goes pollerless. */
+let poller = null;
+function repoll() { if (poller) { poller.pollNow(); } else { void poll(); } }
+function startPolling() {
+  if (window.BXPoll) {
+    poller = window.BXPoll.createPoller({
+      url: "/api/v1/coverage/windows", // informational — the tick owns its own fetch
+      pollMs: 4000,
+      fetchJson: function (_url, timeoutMs) {
+        return poll(timeoutMs).then(function (ok) {
+          if (!ok) { throw new Error("coverage/windows poll tick failed"); }
+          return { ok: true };
+        });
+      },
+      onData: function () { /* the tick already rendered */ }
+    });
+    poller.start();
+  } else {
+    const legacyTick = function () { if (!document.hidden) void poll(); };
+    legacyTick();
+    setInterval(legacyTick, 4000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) void poll();
+    });
+  }
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startPolling);
+} else {
+  startPolling();
+}
 </script>
 </body>
 </html>

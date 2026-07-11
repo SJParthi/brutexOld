@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Final
 
 from brutex.data.models import CandleBar
-from brutex.engine.stage3_wire import data_snapshot_hash
+from brutex.engine.snapshot_hash import data_snapshot_hash
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 

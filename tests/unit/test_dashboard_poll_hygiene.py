@@ -20,10 +20,23 @@ polling concern). It also:
 once DEC-OPERATOR-PAGE-REAL-001 moved the Run-Sweep surface off ``/reports``;
 its dedicated pin was removed with it.)
 
+SUPERSESSION (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): the
+five uniform 4 s pollers no longer own an inline ``if (document.hidden)``
+guard + bare ``setInterval(poll, 4000)`` — their SCHEDULING moved onto the ONE
+shared ``BXPoll.createPoller`` core (``bx-poll.js``), which provides the SAME
+guarantees this suite pinned (hidden-tab guard BEFORE any fetch, catch-up on
+tab return) PLUS a one-in-flight chain, a 10 s fetch abort and capped
+3 s→30 s failure backoff. The pins below therefore now assert the NEW
+mechanism with the SAME intent: a hidden tab fires zero fetches, the 4 s
+visible cadence survives (``pollMs: 4000``), and a tab return re-polls
+immediately (BXPoll wires its own visibilitychange catch-up in ``start()``;
+the no-BXPoll degrade path keeps an explicit guarded interval + catch-up).
+
 HONEST envelope (Golden Rule #10): these are SOURCE-STRING pins — the repo has
-no JS runtime in CI — not a browser-executed behavioural test. Visible-tab
-cadence/data is byte-identical (the guard is a first-statement early return;
-the ``setInterval`` cadence lines are unchanged where they existed).
+no JS runtime in CI — not a browser-executed behavioural test. bx-poll.js's
+own discipline (hidden guard / backoff / catch-up) is pinned at its source by
+``test_dashboard_oneclick_frontend.py`` and node-golden-tested for its pure
+parts.
 """
 
 from __future__ import annotations
@@ -34,8 +47,7 @@ import pytest
 
 _TEMPLATES = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates"
 
-#: The five uniform ``poll(); setInterval(poll, 4000)`` pages: the guard is the
-#: first statement of ``poll()`` and the catch-up re-polls ``poll()`` on return.
+#: The five uniform 4 s-poller pages, now scheduled through BXPoll.createPoller.
 _UNIFORM_POLLERS = (
     "coverage.html",
     "spot_coverage.html",
@@ -44,9 +56,6 @@ _UNIFORM_POLLERS = (
     "expired_options.html",
 )
 
-_HIDDEN_GUARD = "if (document.hidden) return;"
-_UNIFORM_CATCHUP = "if (!document.hidden) poll();"
-
 
 def _tpl(name: str) -> str:
     text = (_TEMPLATES / name).read_text(encoding="utf-8")
@@ -54,48 +63,64 @@ def _tpl(name: str) -> str:
     return text
 
 
-# ── The five uniform 4 s pollers: guard + cadence intact + catch-up ──────────
+# ── The five uniform 4 s pollers: BXPoll discipline + cadence + degrade ──────
 
 
 @pytest.mark.parametrize("name", _UNIFORM_POLLERS)
-def test_uniform_poller_has_hidden_guard_before_first_fetch(name: str) -> None:
-    """``if (document.hidden) return;`` opens ``poll()`` — ahead of every fetch.
+def test_uniform_poller_rides_the_shared_bxpoll_core(name: str) -> None:
+    """The tick is scheduled by ``BXPoll.createPoller`` — never a bare interval.
 
-    A hidden tab returns before either endpoint fetch fires (the whole point of
-    the pause). The 4 s ``setInterval`` cadence line is left intact so a visible
-    tab's behaviour is byte-identical.
+    BXPoll's ``poll()`` checks ``document.hidden`` BEFORE invoking the tick
+    (zero fetches while hidden — the original intent of the inline guard this
+    supersedes), runs a ONE-in-flight self-scheduling chain (a slow tick can
+    never overlap the next one), and backs off 3 s→30 s on counted failures.
     """
     js = _tpl(name)
-    assert js.count("async function poll() {") == 1, f"{name}: expected one poll()"
-    body = js.index("async function poll() {") + len("async function poll() {")
-    assert _HIDDEN_GUARD in js[body:], f"{name}: the document.hidden guard is missing"
-    guard_pos = js.index(_HIDDEN_GUARD, body)
-    # The guard must precede poll()'s first network call.
-    fetch_candidates = [
-        pos
-        for pos in (
-            js.find("fetch(", body),
-            js.find("doFetch(", body),
-            js.find("Promise.allSettled(", body),
-        )
-        if pos != -1
-    ]
-    assert fetch_candidates, f"{name}: no network call found in poll()"
-    assert guard_pos < min(fetch_candidates), f"{name}: the guard must precede poll()'s first fetch"
-    # The interval cadence line still exists (visible-tab behaviour unchanged).
-    assert "setInterval(poll, 4000);" in js, f"{name}: the 4 s poll cadence must survive"
+    assert '<script defer src="/static/bx-poll.js"></script>' in js, (
+        f"{name}: the shared bx-poll.js core must be loaded"
+    )
+    assert "window.BXPoll.createPoller({" in js, f"{name}: the BXPoll migration is missing"
+    # The tick keeps its OWN render/degrade semantics: the poller consumes it
+    # through the custom fetchJson seam and a failed tick throws (→ backoff).
+    # fetch_windows/completeness thread BXPoll's timeoutMs into the tick
+    # (the DEC-FRONTEND-LATENCY-HARDENING-001 review MAJOR — their fetches are
+    # bounded through the body read; pinned in TestBoundedTickFetch); the
+    # other pollers keep the plain seam.
+    assert (
+        "return poll().then(function (ok) {" in js
+        or "return poll(timeoutMs).then(function (ok) {" in js
+    ), f"{name}: the tick must feed BXPoll through the custom fetchJson seam"
+    assert "poll tick failed" in js or "surfaces failed" in js, (
+        f"{name}: a failed tick must throw into BXPoll's counted-failure backoff"
+    )
+    # The old inline-guard mechanism is fully superseded — no bare interval.
+    assert "setInterval(poll, 4000);" not in js, (
+        f"{name}: the bare 4 s setInterval must not survive beside BXPoll"
+    )
 
 
 @pytest.mark.parametrize("name", _UNIFORM_POLLERS)
-def test_uniform_poller_has_visibilitychange_catch_up(name: str) -> None:
-    """ONE ``visibilitychange`` listener fires an immediate ``poll()`` on return."""
+def test_uniform_poller_keeps_the_4s_cadence(name: str) -> None:
+    """The visible-tab cadence is unchanged: ``pollMs: 4000``."""
     js = _tpl(name)
-    assert _UNIFORM_CATCHUP in js, f"{name}: the !document.hidden catch-up poll() is missing"
-    # The catch-up lives inside a visibilitychange listener registered AFTER the
-    # interval (the v29/liveproof order).
-    assert 'addEventListener("visibilitychange"' in js, f"{name}: no visibilitychange listener"
-    assert js.index("setInterval(poll, 4000);") < js.index(_UNIFORM_CATCHUP), (
-        f"{name}: the catch-up listener must register after the interval"
+    assert "pollMs: 4000," in js, f"{name}: the 4 s cadence token (pollMs: 4000) must survive"
+
+
+@pytest.mark.parametrize("name", _UNIFORM_POLLERS)
+def test_uniform_poller_starts_at_domcontentloaded_with_guarded_degrade(name: str) -> None:
+    """The poller starts once deferred scripts are guaranteed executed, and a
+    missing bx-poll.js degrades to a legacy HIDDEN-GUARDED interval + catch-up
+    (the page never goes pollerless, and even the degrade path keeps the
+    zero-fetches-while-hidden law + the tab-return catch-up)."""
+    js = _tpl(name)
+    assert 'document.addEventListener("DOMContentLoaded", startPolling);' in js, (
+        f"{name}: the poller must start at DOMContentLoaded"
+    )
+    assert "if (!document.hidden) void poll();" in js, (
+        f"{name}: the degrade path lost its hidden guard / catch-up"
+    )
+    assert 'addEventListener("visibilitychange"' in js, (
+        f"{name}: the degrade path lost its visibilitychange catch-up"
     )
 
 
@@ -106,8 +131,14 @@ def test_completeness_ships_payload_diff_gate() -> None:
     """The ~750-row options table no longer rebuilds every 4 s unconditionally."""
     js = _tpl("completeness.html")
     assert "let lastBoardTxt = null;" in js
-    assert "const txt = await r.text();" in js
-    assert "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return; }" in js
+    # The body text now arrives through the BOUNDED text fetch (the
+    # DEC-FRONTEND-LATENCY-HARDENING-001 review MAJOR — abort armed through
+    # the body read); the compare gate is still the raw response text.
+    assert "return r.text().then(function (txt) {" in js
+    assert "const txt = res.text;" in js
+    # `return true` since DEC-FRONTEND-LATENCY-HARDENING-001: a skipped tick is
+    # a SUCCESSFUL tick for BXPoll's failure counting (same skip semantics).
+    assert "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return true; }" in js
     # The parse now rides the memoised raw text, not a second r.json().
     assert "const board = JSON.parse(txt);" in js
     assert "renderOptions(board.options.per_underlying || []);" in js
