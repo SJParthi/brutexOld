@@ -594,6 +594,7 @@ def run_stage3_pass(
     end: str,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     stamper_for: Callable[[], TradeReferenceStamper | None] | None = None,
+    rollup_paths_hook: Callable[[Sequence[Path]], None] | None = None,
 ) -> Stage3PassReport:
     """Run the Stage-3 refinement post-pass over a persisted grid — single-threaded.
 
@@ -661,6 +662,14 @@ def run_stage3_pass(
         the provider); the resolved stamper (or
         an honest ``None``) rides every refinement evaluation AND the
         persisted refined-row projection. ``None`` (default) = unstamped.
+    rollup_paths_hook
+        Optional ``/results`` rollup batch-merge seam
+        (DEC-RESULTS-TOPK-ROLLUP-001 Hook A, stage-3 arm —
+        ``RollupMergeHook.merge_paths``), fired ONCE per pass with the
+        flushed cell-store paths after the cell loop completes (never per
+        cell). FENCED INTERNALLY at BLOCKER-1 strength — never raises into
+        the pass. ``None`` (the default) is byte-identical to the
+        pre-rollup pass.
 
     Returns
     -------
@@ -927,6 +936,14 @@ def run_stage3_pass(
                 derived_rows=len(derived),
             )
         cells.append(Stage3RefinedCell(tuple_=cell, path=cell_path, rows=len(store)))
+
+    if rollup_paths_hook is not None and cells:
+        # Hook A, stage-3 arm (DEC-RESULTS-TOPK-ROLLUP-001): ONE rollup merge
+        # per PASS over the flushed cell stores (never per cell — the doc's
+        # one-merge-per-pass law). A VIX-conflicted cell above was NOT flushed
+        # and is deliberately absent from `cells`. The hook is fenced
+        # internally (BLOCKER-1) — it never raises into the pass.
+        rollup_paths_hook([cell.path for cell in cells])
 
     payload = {
         "masks_refined": masks_refined,

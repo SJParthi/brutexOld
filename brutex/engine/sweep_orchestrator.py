@@ -948,6 +948,7 @@ def run_sweep_grid(
     reuse_bar_bits: bool = True,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    rollup_hook: Callable[[SweepTuple], None] | None = None,
 ) -> SweepGridSummary:
     """Run the full grid sweep: enumerate the outer product + persist every tuple.
 
@@ -1028,6 +1029,14 @@ def run_sweep_grid(
     reference_stamper
         Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001), forwarded to
         every tuple's :func:`run_one_tuple` — ONE stamper per grid run.
+    rollup_hook
+        Optional per-tuple ``/results`` rollup merge seam
+        (DEC-RESULTS-TOPK-ROLLUP-001 Hook A —
+        ``RollupMergeHook.merge_tuple``), fired after each SUCCESSFUL tuple
+        (after *on_tuple*). The hook is FENCED INTERNALLY at BLOCKER-1
+        strength — it never raises into the grid (a display optimization
+        must never abort a 2-4 day grid; regression-pinned). ``None`` (the
+        default) is byte-identical to the pre-rollup driver.
 
     Returns
     -------
@@ -1136,6 +1145,11 @@ def run_sweep_grid(
         persisted += summary.persisted
         if on_tuple is not None:
             on_tuple(tuple_, summary)
+        if rollup_hook is not None:
+            # Hook A (DEC-RESULTS-TOPK-ROLLUP-001): merge THIS tuple's freshly
+            # flushed store into the /results rollup. Internally fenced —
+            # never raises into the grid.
+            rollup_hook(tuple_)
 
     grid_summary = SweepGridSummary(
         tuples_total=total,
