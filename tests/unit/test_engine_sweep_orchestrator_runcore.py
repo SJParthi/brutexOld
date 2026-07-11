@@ -39,6 +39,7 @@ TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
     "test_g1_quarantine_then_one_retry_regenerates_the_tuple": ("G1",),
     "test_g1_second_store_failure_demotes_to_combo_error": ("G1",),
     "test_g1_no_quarantine_seam_keeps_the_raw_abort": ("G1",),
+    "test_g1_vix_trio_conflict_sails_past_the_quarantine": ("G1",),
     "test_r45_diffcheck_invoked_post_persist_with_kernel_bits": ("R45",),
 }
 
@@ -146,6 +147,39 @@ def test_g1_no_quarantine_seam_keeps_the_raw_abort(tmp_path: Path) -> None:
     _poison(out)
     with pytest.raises(ResultsStoreError):
         _run(out, tmp_path / "a.jsonl", store_quarantine=None)
+
+
+def test_g1_vix_trio_conflict_sails_past_the_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The VIX-trio conflict is NOT store corruption — it must SKIP the G1 ladder.
+
+    Merge-seam regression (DEC-VIX-STAMP-WIRE-001 x DEC-SWEEP-UNKILLABLE-CORE-001):
+    :class:`~brutex.engine.results_store.VixTrioConflictError` subclasses
+    ``ResultsStoreError``, so without an explicit passthrough the G1
+    quarantine-retry ladder would quarantine the tuple's trio and silently
+    REGENERATE it — masking the loud #904 tuple-skip contract the grid
+    drivers implement by catching it beside ``SweepComboError``. The typed
+    conflict must propagate out of :func:`run_one_tuple` with the quarantine
+    seam NEVER invoked (the stored trio stays untouched for forensics).
+    """
+    from brutex.engine.results_store import VixTrioConflictError
+
+    out = tmp_path / "out"
+    quarantined: list[BaseException] = []
+
+    def _quarantine(_tuple: Any, exc: BaseException) -> None:
+        quarantined.append(exc)  # pragma: no cover — MUST never fire
+
+    def _vix_moved(*_args: Any, **_kwargs: Any) -> Any:
+        raise VixTrioConflictError("VIX trio conflict: the VIX lake moved between runs")
+
+    import brutex.engine.sweep_orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "run_persisted_sweep", _vix_moved)
+    with pytest.raises(VixTrioConflictError, match="VIX lake moved"):
+        _run(out, tmp_path / "a.jsonl", store_quarantine=_quarantine)
+    assert quarantined == []  # sailed PAST the quarantine — the grid skips the tuple
 
 
 def test_r45_diffcheck_invoked_post_persist_with_kernel_bits(tmp_path: Path) -> None:
