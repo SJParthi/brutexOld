@@ -260,6 +260,77 @@ def test_happy_persist_expiries_and_contracts(tmp_path: Path) -> None:
     registry.close()
 
 
+def test_metadata_phase_1_halts_when_market_opens(tmp_path: Path) -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-2: a metadata phase whose belt is CLOSED
+    raises MarketHoursHalt at the first expiry cell — the per-cell guard, mirroring the
+    ingest spines. No vendor call is issued (the guard fires BEFORE ``get_expiries``)."""
+    from brutex.data.errors import MarketHoursHalt
+
+    sdk = _FakeSDK(expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]})
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+
+    with pytest.raises(MarketHoursHalt):
+        pull_expiries_contracts(
+            [_instrument("NIFTY")],
+            registry=registry,
+            coverage_store=coverage,
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id="r-halt-1",
+            market_closed=lambda: True,
+        )
+    # The per-cell guard fires BEFORE the vendor call — no expiries fetched.
+    assert "get_expiries" not in sdk.calls
+    registry.close()
+
+
+def test_metadata_phase_2_halts_when_market_opens_mid_phase(tmp_path: Path) -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-2: a belt that opens BETWEEN Phase-1 and
+    Phase-2 halts the contract phase (the per-cell guard in ``_fetch_contracts``) —
+    Phase-1's discovered expiries stay committed (resumable next out-of-hours run)."""
+    from brutex.data.errors import MarketHoursHalt
+
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]},
+        contracts={("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24000-CE"]},
+    )
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+
+    calls = {"n": 0}
+
+    def _belt() -> bool:
+        # False for the single Phase-1 expiry cell, True for the Phase-2 contract job
+        # (the clock crossed 08:45 between the two phases).
+        calls["n"] += 1
+        return calls["n"] >= 2
+
+    with pytest.raises(MarketHoursHalt):
+        pull_expiries_contracts(
+            [_instrument("NIFTY")],
+            registry=registry,
+            coverage_store=coverage,
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id="r-halt-2",
+            market_closed=_belt,
+        )
+    # Phase-1 expiries were discovered + committed before the Phase-2 halt; the
+    # contract fetch never fired (guard before ``get_contracts``).
+    assert registry.count_expiries() == 1
+    assert "get_contracts" not in sdk.calls
+    registry.close()
+
+
 def test_report_to_dict_is_json_safe(tmp_path: Path) -> None:
     sdk = _FakeSDK(expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]})
     registry = _registry(tmp_path)
