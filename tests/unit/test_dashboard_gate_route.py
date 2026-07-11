@@ -293,6 +293,54 @@ class TestL2CacheKeyInjection:
         assert first["rank_by"] == "sharpe_ratio"
         assert calls["build"] == 1  # ONE compute — the aliases were cache hits
 
+    @pytest.mark.parametrize("leg", ["instrument", "tf", "direction"])
+    @pytest.mark.parametrize("empty_first", [False, True])
+    def test_empty_filter_leg_is_absent_parity(
+        self,
+        client: TestClient,
+        store: InstrumentStore,
+        monkeypatch: pytest.MonkeyPatch,
+        leg: str,
+        empty_first: bool,
+    ) -> None:
+        """Empty-string filter leg ('' ) ≡ absent (round-2 LOW fix).
+
+        The L2 key already collapsed '' and None to one instrument/tf/direction
+        slot, but ``build_sweep_leaderboard``'s ``_matches`` treated '' as an
+        ACTIVE exclude-all filter while None = no filter — so two decode-identical
+        keys computed DIFFERENT payloads (an order-dependent stale/empty
+        cross-serve). After the normalization ``GET(absent)`` and ``GET(?<leg>=)``
+        serve the IDENTICAL full board regardless of call order AND share ONE L2
+        cache slot ('' is 'no filter' everywhere). Discriminating: with the fix
+        reverted the ``empty_first`` order caches (then cross-serves) a 0-row
+        board, so the ``[0.9]`` assertion fails.
+        """
+        from brutex.dashboard import app as app_module
+
+        # gated 0.9 + ungated 0.1 → the default resolution serves the GATED
+        # coordinate's full board ([0.9]); an active-'' filter would exclude it.
+        self._seed(store.path.parent)
+        calls = {"build": 0}
+        real_build = app_module.build_sweep_leaderboard
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            calls["build"] += 1
+            return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(app_module, "build_sweep_leaderboard", _spy)
+
+        def _absent() -> dict[str, object]:
+            return client.get("/api/v1/sweep/leaderboard").json()
+
+        def _empty() -> dict[str, object]:
+            return client.get("/api/v1/sweep/leaderboard", params={leg: ""}).json()
+
+        first, second = (_empty(), _absent()) if empty_first else (_absent(), _empty())
+        # '' behaves as 'no filter' → the full default board, both orders.
+        assert [r["sharpe_ratio"] for r in first["rows"]] == [0.9]
+        assert first == second  # identical payload regardless of call order
+        assert calls["build"] == 1  # ONE compute → absent and '' share a slot
+
 
 class TestGateComposesWithPresetAndFilters:
     """?gate= ∘ ?preset= ∘ instrument/tf filters (the tests-adequacy MINOR)."""

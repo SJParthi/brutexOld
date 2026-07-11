@@ -7257,6 +7257,20 @@ def build_app(
         # key legs, and every unknown spelling would mint its own slot for
         # the ONE default-ranked payload.
         resolved_rank_by = resolve_rank_by_param(rank_by)
+        # Empty-filter-leg normalization (DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+        # round-2 LOW): the L2 key collapses '' and None to the same
+        # instrument/tf/direction slot (`quote((x or '').casefold())`), but
+        # ``build_sweep_leaderboard``'s ``_matches`` treats '' as an ACTIVE
+        # exclude-all filter while None = no filter — so two decode-identical
+        # keys computed DIFFERENT payloads (an order-dependent stale cross-serve
+        # for a hand-crafted client appending a blank ?instrument=/?tf=/?direction=).
+        # Normalize each leg to None-or-value ONCE and use it for BOTH the key
+        # leg AND every build call, so '' behaves as 'no filter' everywhere. The
+        # key bytes for a real (non-empty) value are UNCHANGED (`v or None` keeps
+        # any truthy string), so existing cache slots + goldens are untouched.
+        inst_n = instrument or None
+        tf_n = tf or None
+        dir_n = direction or None
 
         store = _require_store()
         store_path = getattr(store, "path", None)
@@ -7267,9 +7281,9 @@ def build_app(
             try:
                 empty = build_sweep_leaderboard(
                     Path("/nonexistent-lake"),
-                    instrument=instrument,
-                    tf=tf,
-                    direction=direction,
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
                     rank_by=rank_by,
                     top_n=top,
                     preset=resolved_preset,
@@ -7312,9 +7326,9 @@ def build_app(
             # two requests build the same key ONLY when every decoded leg is
             # identical; a must-400 request can never alias a cached 200.
             lb_key = (
-                f"sweep_leaderboard|i={quote((instrument or '').casefold(), safe='')}"
-                f"|tf={quote((tf or '').casefold(), safe='')}"
-                f"|d={quote((direction or '').casefold(), safe='')}"
+                f"sweep_leaderboard|i={quote((inst_n or '').casefold(), safe='')}"
+                f"|tf={quote((tf_n or '').casefold(), safe='')}"
+                f"|d={quote((dir_n or '').casefold(), safe='')}"
                 f"|r={quote(resolved_rank_by, safe='')}"
                 f"|p={quote(resolved_preset or '', safe='')}"
                 f"|g={quote((gate or '').strip(), safe='')}|n={top}"
@@ -7323,9 +7337,9 @@ def build_app(
             def _fresh() -> dict[str, Any]:
                 return build_sweep_leaderboard(
                     lake_root,
-                    instrument=instrument,
-                    tf=tf,
-                    direction=direction,
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
                     rank_by=rank_by,
                     top_n=top,
                     preset=resolved_preset,
@@ -7366,9 +7380,9 @@ def build_app(
                 generation=gen,
                 compute=lambda: build_sweep_leaderboard(
                     lake_root,
-                    instrument=instrument,
-                    tf=tf,
-                    direction=direction,
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
                     rank_by=rank_by,
                     top_n=top,
                     scan=scan,
