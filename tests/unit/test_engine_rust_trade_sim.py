@@ -149,6 +149,33 @@ class TestConstruction:
         with pytest.raises(HolidayDataUnavailableError):
             ResidentTradeSim(bars, [0], tf_minutes=1)
 
+    def test_multi_pathology_window_raises_the_calendar_error_first(self) -> None:
+        # Refuter RF2 C-1 regression: the forced/session loop must run BEFORE
+        # the price-column derivation (main's pre-W2-rider statement order),
+        # so a window holding BOTH an out-of-coverage weekday bar AND an
+        # over-precision price — each ACCEPTED by CandleBar validation
+        # (Decimal("1E+40") is positive + ordered) — raises the class
+        # contract's HolidayDataUnavailableError, never the price snap's
+        # decimal.InvalidOperation.
+        from brutex.calendars.nse import HolidayDataUnavailableError
+
+        def _dated(day: date, price: str) -> CandleBar:
+            ts = datetime(day.year, day.month, day.day, 10, 0, tzinfo=IST).astimezone(UTC)
+            return CandleBar(
+                timestamp=ts,
+                open=Decimal(price),
+                high=Decimal(price),
+                low=Decimal(price),
+                close=Decimal(price),
+                volume=100,
+                open_interest=None,
+            )
+
+        out_of_coverage = _dated(date(2030, 1, 2), "100")  # Wednesday, > 2026 ceiling
+        over_precision = _dated(date(2026, 1, 5), "1E+40")  # validates; snap raises
+        with pytest.raises(HolidayDataUnavailableError):
+            ResidentTradeSim([out_of_coverage, over_precision], [0, 0], tf_minutes=1)
+
     def test_missing_kernel_falls_back_without_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Shadow `import fno_math` with a module lacking ResidentSweepSim so the
         # `except (ImportError, AttributeError)` branch is covered even when the

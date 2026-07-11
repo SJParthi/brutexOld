@@ -545,12 +545,17 @@ class Stage1AMatrixBuilder:
         consumes the roll cursor / day state). A bar beyond the roll schedule
         raises the SAME ``ValueError`` f-string as :meth:`push` (G-7,
         test-pinned), so marshal-time raises are arm-identical by construction
-        and PROPAGATE. Honest limit (review correctness MINOR-1): an input
-        carrying MULTIPLE pathologies at once may surface a DIFFERENT
-        pathology's exception MESSAGE ON vs OFF (the arms check in a
-        different order); exception TYPE parity holds, the bit-identity of
-        every ACCEPTED input is unaffected, and no such input is reachable
-        through a validated :class:`~brutex.data.models.CandleBar`.
+        and PROPAGATE. Honest limit (review correctness MINOR-1, wording
+        corrected per refuter RF2 C-1(b)): a stream carrying MULTIPLE
+        pathologies — REACHABLE via extreme-but-valid ``Decimal`` prices
+        (:class:`~brutex.data.models.CandleBar` accepts ``1E+40``) — may
+        surface a DIFFERENT pathology's exception ON vs OFF: this walk defers
+        the value-ENVELOPE judgment to the FFI guard pass while raising snap
+        errors in bar order, so across bars even the exception TYPE can
+        differ (verified: OFF ``OverflowError`` at an envelope-violating bar
+        vs ON ``decimal.InvalidOperation`` at a LATER unsnappable bar).
+        Single-pathology streams raise identically (G-6/G-7 pinned) and the
+        bit-identity of every ACCEPTED stream is unaffected.
 
         Parameters
         ----------

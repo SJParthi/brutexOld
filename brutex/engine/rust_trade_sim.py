@@ -598,13 +598,16 @@ class ResidentTradeSim:
         promotion's second derivation is a dict-free O(1) handoff. Every
         column in the memo is an immutable ``tuple`` — the price columns are
         SHARED across every sim built from one kernel, so no consumer can
-        corrupt a sibling in place (review LOW-2 hardening).
+        corrupt a sibling in place (review LOW-2 hardening). The forced/
+        session loop runs BEFORE the local price-column derivation — the
+        pre-rider statement order — so a multi-pathology window (an
+        out-of-coverage weekday PLUS an over-precision price, both
+        constructible from validated ``CandleBar``\\s) still raises the class
+        contract's ``HolidayDataUnavailableError``, never
+        ``decimal.InvalidOperation`` (refuter RF2 C-1; regression-pinned).
         """
         if self._kernel_inputs is not None:
             return self._kernel_inputs
-        columns = self._precomputed_columns
-        if columns is None:
-            columns = derive_price_columns(self._bars)
         forced: list[bool] = []
         cache_date: date | None = None
         cache_seconds: int | None = None
@@ -618,6 +621,9 @@ class ResidentTradeSim:
                     None if session is None else forced_exit_seconds_for_session(session)
                 )
             forced.append(is_forced_exit_bar(ts_ist.time(), self._tf_minutes, cache_seconds))
+        columns = self._precomputed_columns
+        if columns is None:
+            columns = derive_price_columns(self._bars)
         self._kernel_inputs = (
             columns.open_paisa,
             columns.high_paisa,
