@@ -2240,7 +2240,7 @@ hostile-review pass._
   (counted-handle-pinned); m5 a post-sweep deferral retains as the pull terminal (reads deferred, never idle); n6 the
   degrade-log headline repr()'d (#1594 discipline); n7 the ledger/blurb over-claims reconciled. TESTS:
   `pull_outcome.py` (83/32) + `health_hub.py` (177/38) BOTH 100.00%
-  line+branch on NEW ci.yml standalone gates; 22 route-integration tests drive clean · completed-with-failures ·
+  line+branch on NEW ci.yml standalone gates; 23 route-integration tests drive clean · completed-with-failures ·
   halted-disk-full/OOM/market-hours/quota · deferred · running · never-run · sweep-done · halt-then-sweep-stays-red ·
   stale-verdict-dropped · pipeline-mid-run-stop-deferred through a REAL BackgroundPullJob
   + the REAL routes; 16 frontend pins incl. the killed unconditional-green token + node-EXECUTED helper goldens;

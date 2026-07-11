@@ -134,6 +134,29 @@ class TestPullRateLastPullBlock:
         assert block["tone"] == "ok"
         assert block["headline"] == "pull complete — all windows settled"
 
+    def test_worker_ambient_pull_id_correlates_with_the_retained_run(self) -> None:
+        """The production stamp mechanism's load-bearing identity (M2 drift
+        pin): the app's ``_stamp_pull_verdict`` reads ``current_pull_id()``
+        AT STAMP TIME inside the worker — ``_run`` scopes the worker under
+        the SAME id it retains, so a worker-stamped verdict MUST correlate."""
+        from brutex.observability.correlation import current_pull_id
+
+        job = _job()
+        holder = _holder()
+
+        def work(hook: Any) -> None:
+            # Mirror _stamp_pull_verdict: stamp using the AMBIENT run id.
+            holder["verdict"] = _clean_verdict()
+            holder["pull_id"] = current_pull_id()
+
+        assert job.start(work, total=1) is True
+        retained = job.last_pull_state()
+        assert retained is not None
+        assert holder["pull_id"] == retained.pull_id != ""
+        with _client(_probe_over(job, holder)) as c:
+            block = _last_pull(c)
+        assert block["outcome"] == "clean"
+
     def test_completed_without_verdict_is_green_but_never_claims_cleanly(self) -> None:
         job = _job()
         assert job.start(lambda hook: None, total=1) is True
