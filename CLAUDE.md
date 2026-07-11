@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1631 —
+_Last updated: 2026-07-09 (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1753 —
 the temporal-robustness YEAR GATE + per-period finalist stats (engine truth;
 the /results display surfaces are the named PR-B follow-up): an opt-in
 pre-rank SURVIVORS filter (hard doors → temporal → overfit/DSR — the DSR pool
@@ -1735,7 +1735,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sweep-temporal-robustness` (**DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1631** —
+- **Active branch:** `claude/sweep-temporal-robustness` (**DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1753** —
   the temporal-robustness YEAR GATE + per-period finalist stats, ENGINE TRUTH only (predicate core · storage ·
   rank-time gate wiring · CLI; the /results year strip + temporal drill + cascade-verdict join are the NAMED PR-B
   follow-up on this same DEC): a one-lucky-year combo MUST NOT occupy a top-K slot — pre-rank SURVIVORS filter
@@ -1743,7 +1743,7 @@ hostile-review pass._
   years / P2 positive-mass share ≤ 0.6, whole-gate abstention < 2 judged years, gate|observe modes with the shipped
   `BRUTEX_TEMPORAL=observe` CLI default, four optional emit-on-present ResultRow columns cross-sum-validated through
   the NEW `brutex/engine/period_stats.py`, the D16 append-enrichment rule, and the frozen sweep goldens +
-  pre-extension parquet passing UNMODIFIED (see MIGRATION.md #1631 for the full envelope; H₀ honesty: at defaults
+  pre-extension parquet passing UNMODIFIED (see MIGRATION.md #1753 for the full envelope; H₀ honesty: at defaults
   the gate passes 50% of pure noise over 7 judged years — a concentration filter, NOT a significance test).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
   Earlier: `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
@@ -4147,7 +4147,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/sweep-temporal-robustness`
-  (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1631 — the
+  (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1753 — the
   temporal-robustness YEAR GATE + per-period finalist stats, engine truth;
   matches §1's Active branch line)
   Earlier: `claude/dazzling-pasteur-jf8s3w`
