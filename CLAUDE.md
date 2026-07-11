@@ -41,7 +41,11 @@ escalation point — polars-native route first, else escalate with the priced
 DEC-LAKE-EXACT-PIN-001. The panel's findings persist as the risk register + standing
 hazards (lockstep fails LOUD flag-stays-OFF; zstd stack identity; exception-taxonomy
 re-derivation; run-identity bytes downstream). ENGINE UNCHANGED —
-NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; zero code ships in this commit.)
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; zero code ships in the roadmap
+commit itself — PR-1 has since SHIPPED on the same branch (the `rust/brutex-lake`
+crate + the default-OFF `BRUTEX_LAKE_RUST_RENDER` render seam with import/version
+guards + burn-in autorevert; the 5-case byte-parity corpus green locally — the §1
+Active-branch blurb + the MIGRATION.md #1726 PR-1 segment carry the record).)
 Earlier: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
 DEC-STAGE1A-ROLL-RESET-001 + the round-1–8 review-fix packs DEC-FUTURES-LAUNCH-REVIEW-FIXES-001…-008,
 MIGRATION.md #1700–#1709 + #1710 — the ADR-0012 NIFTY-futures sweep LAUNCH
@@ -2066,7 +2070,33 @@ hostile-review pass._
   run-identity `bxsnap2` digest, #1179 — two distinct chains, both downstream of writer
   output). `feed/resampler.py` stays EXEMPT (production-dead test oracle, #1492 G3;
   deletion-vs-retention a separate DEC). Umbrella DEC-RUST-FIRST-MANDATE-001 (ledger
-  #1713) is in flight on the Slice-1 PR, NOT on main at this HEAD. ENGINE UNCHANGED —
+  #1713) is in flight on the Slice-1 PR, NOT on main at this HEAD. **PR-1 SHIPPED on
+  this branch (same DEC — the #1726 PR-1 segment):** NEW standalone crate
+  `rust/brutex-lake/` (pyo3 0.29 abi3-py312 maturin, the fno-math layout; in NO
+  workspace, built ONLY by its own lane; polars git-pinned `py-1.42.1` + restated
+  object_store patch + the zstd trio via the COMMITTED Cargo.lock — 0.13.3/7.2.4/
+  2.0.16 = libzstd 1.5.7; lockstep pins cargo-tested; the render mirrors the wheel's
+  streaming-engine `sink_parquet` chain verbatim into an in-memory Dyn sink; panics
+  caught at the FFI boundary) + the facade leaf `brutex/data/lake_rust_render.py` +
+  the ONE `_render_bytes` seam: `BRUTEX_LAKE_RUST_RENDER` default OFF (junk →
+  loud-OFF; the flag vocabulary is a LOCAL twin of the engine's `env_flag_tristate`,
+  equality-pinned — the engine package hard-imports the fno_math wheel and a lake
+  write must never require it), import guard / VERSION GUARD (installed polars ≠
+  crate pin → one loud WARN naming both, latch OFF — never silently different bytes)
+  / the 16-render BURN-IN with ship-the-oracle-bytes autorevert; crate/IPC errors
+  degrade to the Python render (never a new crash class), `MemoryError` rides
+  `lake_write_guard` → `LakeWriteHalt` unchanged; flag-OFF byte-identical
+  (never-routes spy). Parity EXECUTED locally against the built wheel: the spike's
+  5-case corpus through the REAL `_render_bytes` — all 5 sha256+raw-bytes MATCH (the
+  spike's exact digests) + whole-write-path ON/OFF parity through
+  `ParquetWriter.write` (partition bytes + `raw_hash` equal); NEW non-required
+  `.github/workflows/lake-rust-parity.yml` lane (path-triggered + dispatch; drift
+  WARN step) + `docs/runbooks/lake-rust-render-lockstep.md` (bump ritual +
+  escalation). HONEST: MEASURED small SLOWDOWN engaged (+~6 ms/+47% on the 100k-row
+  encode tail, ~3% of the full render wall) — payoff ≈ 0, uniformity not speed;
+  locks/error mapping unmoved; PR-2..PR-4 + waves future. `lake_rust_render.py`
+  100% line+branch standalone; `parquet_writer.py` 100% on its full matched suite;
+  cargo fmt/clippy/test green. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
   Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
   DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702** — the ADR-0012
@@ -5232,10 +5262,16 @@ hostile-review pass._
   (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726 — slice 8 of the
   Rust-first conversion program, the data-lake I/O layer: the panel's
   keep-Python verdict OPERATOR-OVERRIDDEN to Rust-everywhere; the
-  byte-identity-gated conversion roadmap is adopted as ADR-0019 (PR-1 =
-  the `parquet_writer` render seam, default-OFF, Python as live parity
-  oracle; `window_ledger_store` = the LAST-MILE named escalation point);
-  DOCS-ONLY in this commit; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  byte-identity-gated conversion roadmap is adopted as ADR-0019, and
+  **PR-1 is SHIPPED on this branch** — the `parquet_writer` render seam
+  re-hosted on the NEW `rust/brutex-lake` crate (polars git-pinned
+  `py-1.42.1`, zstd trio via the committed Cargo.lock), default-OFF
+  behind `BRUTEX_LAKE_RUST_RENDER` with import/version guards + the
+  16-render burn-in autorevert, Python as the live parity oracle; the
+  5-case byte-parity corpus + whole-write-path parity EXECUTED locally
+  (all sha256+bytes equal); NEW non-required lake-rust-parity.yml lane +
+  the lockstep runbook (`window_ledger_store` stays the LAST-MILE named
+  escalation point); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
   Earlier: `claude/magical-cray-g6agaw`
   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +

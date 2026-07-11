@@ -309,3 +309,29 @@ byte-identical lake, 124/124 SHA match). The conversion's expected deltas:
 * Kernel-track ownership boundaries (sweep cores, `arrow_table_to_bars`, the
   frozen `rust/trading-core` per DEC-SHARED-CORE-001, MIGRATION.md #441) are
   untouched by this roadmap and remain owned elsewhere.
+
+## 9. PR-1 shipped surface (2026-07-11 — appended when PR-1 landed on this branch, same DEC)
+
+The §3 PR-1 gate set is IMPLEMENTED (full record: the PR-1 segment of
+MIGRATION.md #1726): the standalone `rust/brutex-lake/` crate (polars
+git-pinned `py-1.42.1`, restated object_store patch, zstd trio via the
+committed `Cargo.lock`, lockstep pins cargo-tested, panics caught at the
+FFI boundary), the `brutex/data/lake_rust_render.py` facade + the ONE
+`_render_bytes` seam (`BRUTEX_LAKE_RUST_RENDER` default OFF; import guard /
+version guard / 16-render burn-in with ship-the-oracle autorevert exactly
+as §3 specifies; `MemoryError` → `lake_write_guard` → `LakeWriteHalt`
+unchanged), the 5-case corpus + whole-write-path byte-parity suites
+(EXECUTED locally against the built wheel — all cases sha256+raw-bytes
+equal, the spike's exact digests), the dedicated non-required
+`.github/workflows/lake-rust-parity.yml` lane, and
+`docs/runbooks/lake-rust-render-lockstep.md` (the bump ritual + the
+coordinator escalation). Deviation from §3's sketch, recorded: the frame
+crosses as UNCOMPRESSED ARROW IPC bytes (the spike's proven handoff), not
+Arrow C-data FFI — same zero-drift byte surface, simpler boundary; the
+build-time byte-probe is subsumed by the burn-in (the first engaged renders
+ARE the probe, per-process, against the live oracle). MEASURED per-render
+engaged overhead: ~+6 ms (+47%) on the 100k-row encode tail vs the Python
+`write_parquet` tail (~3% of the full `_render_bytes` wall) — the expected
+≈0-payoff banner holds as a small measured slowdown. Locks + error mapping
+did not move (the PR-1 boundary). PR-2..PR-4 and the waves remain future
+work under the same apparatus.
