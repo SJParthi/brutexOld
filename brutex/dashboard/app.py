@@ -46,7 +46,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -260,6 +260,7 @@ from brutex.dashboard.sweep_results_view import (
     build_sweep_leaderboard,
     load_sweep_scan,
     resolve_preset_param,
+    resolve_rank_by_param,
     store_error_payload,
 )
 from brutex.dashboard.sweep_runner import (
@@ -7246,6 +7247,16 @@ def build_app(
             resolved_preset = resolve_preset_param(preset)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # d1 cache-key-injection fix (DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+        # MIGRATION.md #1758): resolve rank_by to its EFFECTIVE column BEFORE
+        # it can enter the L2 cache key. The rank-time behaviour is UNCHANGED
+        # (build_sweep_leaderboard still receives the raw token and applies
+        # the identical allow-list fall-back), but the KEY must never carry
+        # the raw user-controlled string — a hostile rank_by like
+        # `sharpe_ratio|p=|g=ungated` could otherwise forge another request's
+        # key legs, and every unknown spelling would mint its own slot for
+        # the ONE default-ranked payload.
+        resolved_rank_by = resolve_rank_by_param(rank_by)
 
         store = _require_store()
         store_path = getattr(store, "path", None)
@@ -7281,23 +7292,32 @@ def build_app(
             # The STABLE (revision-free) filter key. Casefold the filter
             # axes: build_sweep_leaderboard's _matches filters them
             # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
-            # leaderboard and must share ONE cache slot (rank_by stays raw — it
-            # is matched exactly against RANKABLE_COLUMNS, not casefolded; the
-            # RESOLVED preset token rides too — a preset-ranked payload must
-            # never share a slot with the default ordering, and blank/absent
-            # share ONE slot because both resolve to None).
+            # leaderboard and must share ONE cache slot. The |r= leg carries
+            # the RESOLVED rank column (resolve_rank_by_param above), never
+            # the raw query string — every rank_by spelling that resolves to
+            # one column shares ONE slot (the payload echoes the resolved
+            # value, so the shared slot is byte-exact); the RESOLVED preset
+            # token rides too — a preset-ranked payload must never share a
+            # slot with the default ordering, and blank/absent share ONE
+            # slot because both resolve to None.
             # The |g= leg (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): the gate
             # scope changes the served ROW SET, so an explicit ?gate= token
             # (stripped raw — resolution needs the scan) must occupy its OWN
             # L2 slot; absent/blank share ONE slot (the default resolution is
-            # deterministic per scan revision). Poisoning-safe by construction:
-            # two back-to-back calls with different gate params can never
-            # serve each other's payload.
+            # deterministic per scan revision).
+            # Poisoning-safe by CONSTRUCTION (the d1 injection fix,
+            # MIGRATION.md #1758): EVERY user-controlled leg is percent-
+            # encoded (quote, safe='') before it enters the key, so the '|'
+            # and '=' delimiters can never be forged from a query value —
+            # two requests build the same key ONLY when every decoded leg is
+            # identical; a must-400 request can never alias a cached 200.
             lb_key = (
-                f"sweep_leaderboard|i={(instrument or '').casefold()}"
-                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
-                f"|r={rank_by or ''}|p={resolved_preset or ''}"
-                f"|g={(gate or '').strip()}|n={top}"
+                f"sweep_leaderboard|i={quote((instrument or '').casefold(), safe='')}"
+                f"|tf={quote((tf or '').casefold(), safe='')}"
+                f"|d={quote((direction or '').casefold(), safe='')}"
+                f"|r={quote(resolved_rank_by, safe='')}"
+                f"|p={quote(resolved_preset or '', safe='')}"
+                f"|g={quote((gate or '').strip(), safe='')}|n={top}"
             )
 
             def _fresh() -> dict[str, Any]:

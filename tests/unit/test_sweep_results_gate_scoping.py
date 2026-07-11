@@ -272,6 +272,38 @@ class TestCoexistenceFolding:
         assert GATE_COORDINATE_SENTINEL in payload["gate_coordinates"]
         assert len(payload["gate_coordinates"]) == 3
 
+    def test_zero_row_foreign_config_misattribution_boundary(self, tmp_path: Path) -> None:
+        """BOUNDARY PIN (documented honest limit — DEC-SWEEP-SERVING-GATE-
+        PROVENANCE-001, MIGRATION.md #1758): a 0-row gated store written by a
+        DIFFERENT config B is MIS-ATTRIBUTED to the lone populated config A.
+
+        Config B's token is unrecoverable from a 0-row store's bytes (the
+        conditional column carries schema PRESENCE only — no row carries the
+        token), so the store reads the ``"gated"`` sentinel; the |K| == 1
+        coexistence rule then FOLDS that sentinel into the single known config
+        A. This pins the CURRENT deterministic behaviour: config B's honest
+        empty set silently merges under config A's coordinate — the ledger's
+        0-row token-unrecoverable honest limit (broader than the two-all-0-row
+        -configs merge also disclosed there), deliberately NOT fixed here (a
+        v2 carrier that persists the token at 0 rows is the named follow-up).
+        """
+        _write_store(tmp_path, "a_g.parquet", [_row(1, gate_provenance=_TOKEN_A, sharpe=0.9)])
+        # Config B ran and persisted ZERO survivors: token B never hits a row.
+        _write_store(tmp_path, "b_zero.parquet", [], gate_provenance=_TOKEN_B)
+        payload = build_sweep_leaderboard(tmp_path).to_dict()
+        # The FOLD: B's sentinel vanished into A's coordinate — |K| == 1.
+        assert payload["gate_coordinates"] == [_COORD_A]
+        assert _COORD_B not in payload["gate_coordinates"]
+        assert GATE_COORDINATE_SENTINEL not in payload["gate_coordinates"]
+        assert payload["mixed_gate_coordinates"] is False
+        # Case 1 view: config A's rows serve under A's coordinate; config B's
+        # empty result is structurally invisible (the mis-attribution).
+        assert payload["gate_coordinate"] == _COORD_A
+        assert [r["sharpe_ratio"] for r in payload["rows"]] == [0.9]
+        # ...and config B's coordinate cannot even be requested explicitly.
+        with pytest.raises(ValueError, match="unknown gate coordinate"):
+            build_sweep_leaderboard(tmp_path, gate=_COORD_B)
+
     def test_zero_row_ungated_store_contributes_ungated(self, tmp_path: Path) -> None:
         """A 0-row UNGATED store names the ungated coordinate, never a gate."""
         _write_store(tmp_path, "e_u.parquet", [])

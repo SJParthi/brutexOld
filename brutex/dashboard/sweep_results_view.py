@@ -112,6 +112,7 @@ __all__ = [
     "gate_coordinate_of",
     "load_sweep_scan",
     "resolve_preset_param",
+    "resolve_rank_by_param",
     "store_error_payload",
 ]
 
@@ -478,6 +479,24 @@ def _resolve_rank_by(rank_by: str | None) -> str:
     if rank_by is not None and rank_by in RANKABLE_COLUMNS:
         return rank_by
     return DEFAULT_RANK_BY
+
+
+def resolve_rank_by_param(rank_by: str | None) -> str:
+    """Resolve a raw ``?rank_by=`` query token to its EFFECTIVE ranking column.
+
+    The public twin of :func:`_resolve_rank_by` (ONE source of truth — a thin
+    delegator, CLAUDE.md §11 COMMON) for callers that must key on the RESOLVED
+    value BEFORE the build runs: the route's L2 cache key
+    (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md #1758 — the d1
+    cache-key-injection fix) carries this resolved column, never the raw
+    user-controlled string, so an unknown/hostile ``rank_by`` (a) cannot smuggle
+    key-delimiter bytes into the key and (b) shares ONE cache slot with every
+    other spelling that resolves to the same column (the payload echoes the
+    resolved value, so slot-sharing is byte-exact). Rank-time behaviour is
+    UNCHANGED — :func:`build_sweep_leaderboard` still applies the identical
+    fall-back internally.
+    """
+    return _resolve_rank_by(rank_by)
 
 
 def _clamp_top_n(top_n: int) -> int:

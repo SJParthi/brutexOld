@@ -57,11 +57,19 @@ def _nifty() -> Instrument:
     )
 
 
-def _row(seed: int, *, gate_provenance: str | None = None, sharpe: float = 1.0) -> ResultRow:
+def _row(
+    seed: int,
+    *,
+    gate_provenance: str | None = None,
+    sharpe: float = 1.0,
+    instrument: str = "NIFTY",
+    tf: str = "5m",
+    max_dd_pct: float = 0.05,
+) -> ResultRow:
     return ResultRow(
         run_id=f"{seed:064x}",
-        instrument="NIFTY",
-        tf="5m",
+        instrument=instrument,
+        tf=tf,
         direction="bull",
         mode="A",
         mask_bits=0,
@@ -78,7 +86,7 @@ def _row(seed: int, *, gate_provenance: str | None = None, sharpe: float = 1.0) 
         calmar_ratio=0.9,
         profit_factor=2.0,
         win_rate=0.6,
-        max_drawdown_pct=0.05,
+        max_drawdown_pct=max_dd_pct,
         avg_entry_price=Decimal("100.00"),
         avg_exit_price=Decimal("101.00"),
         gate_provenance=gate_provenance,
@@ -209,6 +217,123 @@ class TestGateRoute:
         again = client.get("/api/v1/sweep/leaderboard", params={"gate": _COORD}).json()
         assert again == first
         assert calls["scan"] == 1
+
+
+class TestL2CacheKeyInjection:
+    """The d1 cache-key-injection regression (MIGRATION.md #1758 fix round).
+
+    The refuter's SURVIVED d1 shape: the L2 key was built by raw f-string
+    interpolation, so request A ``?rank_by=sharpe_ratio|p=|g=ungated`` (no
+    gate — legal 200) and request B ``?rank_by=sharpe_ratio&gate=ungated|p=|g=``
+    (must-400: unknown gate coordinate) forged IDENTICAL keys and B was served
+    A's cached 200. Fixed structurally: every user-controlled leg is
+    percent-encoded (``quote``, ``safe=''``) AND ``rank_by`` enters the key as
+    its RESOLVED effective column (``resolve_rank_by_param``), never the raw
+    string.
+    """
+
+    def _seed(self, lake_root: Path) -> None:
+        _write_sweeps(lake_root, "u.parquet", [_row(1, sharpe=0.1)])
+        _write_sweeps(lake_root, "g1.parquet", [_row(2, gate_provenance=_TOKEN, sharpe=0.9)])
+
+    def test_d1_a_then_b_b_is_400_not_cached_200(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """The exact refuter repro: A caches, then must-400 B is still 400."""
+        self._seed(store.path.parent)
+        resp_a = client.get(
+            "/api/v1/sweep/leaderboard", params={"rank_by": "sharpe_ratio|p=|g=ungated"}
+        )
+        assert resp_a.status_code == 200
+        # The hostile rank_by is unknown → resolved to the default column.
+        assert resp_a.json()["rank_by"] == "sharpe_ratio"
+        resp_b = client.get(
+            "/api/v1/sweep/leaderboard",
+            params={"rank_by": "sharpe_ratio", "gate": "ungated|p=|g="},
+        )
+        assert resp_b.status_code == 400  # NOT A's cached 200 (the d1 cross-serve)
+        assert "unknown gate coordinate" in resp_b.json()["detail"]
+
+    def test_d1_b_cold_is_400(self, client: TestClient, store: InstrumentStore) -> None:
+        """The must-400 request refuses on a cold cache too (the d2 control)."""
+        self._seed(store.path.parent)
+        resp_b = client.get(
+            "/api/v1/sweep/leaderboard",
+            params={"rank_by": "sharpe_ratio", "gate": "ungated|p=|g="},
+        )
+        assert resp_b.status_code == 400
+        # ...and a follow-up legal request is untouched by the refusal.
+        resp_a = client.get(
+            "/api/v1/sweep/leaderboard", params={"rank_by": "sharpe_ratio|p=|g=ungated"}
+        )
+        assert resp_a.status_code == 200
+
+    def test_same_resolved_rank_by_shares_one_cache_slot(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Normalization teeth (beyond escaping): every rank_by spelling that
+        RESOLVES to one column maps to ONE L2 slot — absent, the exact column
+        name, and an unknown token (which falls back to the default) all serve
+        the SAME cached payload with exactly ONE ranked build."""
+        from brutex.dashboard import app as app_module
+
+        self._seed(store.path.parent)
+        calls = {"build": 0}
+        real_build = app_module.build_sweep_leaderboard
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            calls["build"] += 1
+            return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(app_module, "build_sweep_leaderboard", _spy)
+        first = client.get("/api/v1/sweep/leaderboard").json()
+        second = client.get("/api/v1/sweep/leaderboard", params={"rank_by": "sharpe_ratio"}).json()
+        third = client.get("/api/v1/sweep/leaderboard", params={"rank_by": "not_a_column"}).json()
+        assert first == second == third  # byte-exact shared slot (resolved echo)
+        assert first["rank_by"] == "sharpe_ratio"
+        assert calls["build"] == 1  # ONE compute — the aliases were cache hits
+
+
+class TestGateComposesWithPresetAndFilters:
+    """?gate= ∘ ?preset= ∘ instrument/tf filters (the tests-adequacy MINOR)."""
+
+    def test_gate_preset_and_filters_compose(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """The served set is exactly (gate coordinate ∩ filters), preset-ranked."""
+        lake_root = store.path.parent
+        # Gated config: two NIFTY/5m rows (dd 0.09 vs 0.01 — preset order is the
+        # REVERSE of the sharpe order), plus one wrong-instrument and one
+        # wrong-tf row that the filters must drop.
+        _write_sweeps(
+            lake_root,
+            "g.parquet",
+            [
+                _row(1, gate_provenance=_TOKEN, sharpe=0.9, max_dd_pct=0.09),
+                _row(2, gate_provenance=_TOKEN, sharpe=0.5, max_dd_pct=0.01),
+                _row(3, gate_provenance=_TOKEN, sharpe=0.8, instrument="BANKNIFTY"),
+                _row(4, gate_provenance=_TOKEN, sharpe=0.7, tf="15m"),
+            ],
+        )
+        # Ungated twin rows the gate scope must exclude.
+        _write_sweeps(lake_root, "u.parquet", [_row(5, sharpe=2.0, max_dd_pct=0.001)])
+        payload = client.get(
+            "/api/v1/sweep/leaderboard",
+            params={
+                "gate": _COORD,
+                "preset": "min_dd_first",
+                "instrument": "NIFTY",
+                "tf": "5m",
+            },
+        ).json()
+        assert payload["gate_coordinate"] == _COORD
+        assert payload["preset"] == "min_dd_first"
+        # Exactly the (coordinate ∩ filters) survivors — the ungated 2.0-sharpe
+        # row, the BANKNIFTY row, and the 15m row are all absent.
+        assert [r["run_id"] for r in payload["rows"]] == [f"{2:064x}", f"{1:064x}"]
+        # ...ranked by the PRESET (smallest max-DD first), NOT by sharpe.
+        assert [r["sharpe_ratio"] for r in payload["rows"]] == [0.5, 0.9]
+        assert all(r["gate_coordinate"] == _COORD for r in payload["rows"])
 
 
 class TestResultsTemplateGateControls:
