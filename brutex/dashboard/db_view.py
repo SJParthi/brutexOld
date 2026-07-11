@@ -6073,9 +6073,14 @@ def window_ledger_rows_page(
     logged on the ``ledger-records`` key).
     """
     from brutex.data.window_ledger import ledger_record_row
-    from brutex.data.window_ledger_store import ledger_path
 
-    path = ledger_path(lake_root)
+    # Path derived from the pinned module-local constants (the #1431 fast-path
+    # pattern — see :data:`_LEDGER_TABLE_DIRNAME`): even a FUNCTION-local
+    # ``window_ledger_store`` import participates in the
+    # ``window_ledger_store → coverage_reconcile → db_view`` cycle CodeQL
+    # ``py/cyclic-import`` flags; the constants are test-pinned equal to
+    # ``window_ledger_store.LEDGER_DIRNAME`` / ``LEDGER_FILENAME``.
+    path = lake_root / _LEDGER_TABLE_DIRNAME / _LEDGER_TABLE_FILENAME
     # The SAME OSError-classed presence gate + named read degrade as
     # :func:`window_ledger_rows_cached` (DEC-WINDOWS-STAT-GUARD-LATCH-001,
     # merge-composed — the /db grid route rides THIS function, so the #1386

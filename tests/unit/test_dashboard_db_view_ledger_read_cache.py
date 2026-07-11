@@ -840,7 +840,7 @@ class TestLedgerSizingHint:
         The rollup dict DELIBERATELY stays on the accurate deep walk (small by
         construction), so the spy forbids only the records-family shape.
         """
-        import brutex.dashboard.movers_cache as mc_mod
+        from brutex.dashboard import movers_cache as mc_mod
         from brutex.data.window_ledger import WindowLedgerRecord
 
         _seed(tmp_path, ["SYM0", "SYM1"])
@@ -873,7 +873,7 @@ class TestLedgerSizingHint:
         remains meaningful (an estimate feeding an estimate — the 3× tolerance
         is the stated contract, wide enough for string-length/layout variance,
         tight enough that an order-of-magnitude drift fails loudly)."""
-        import brutex.dashboard.movers_cache as mc_mod
+        from brutex.dashboard import movers_cache as mc_mod
 
         _seed(tmp_path, [f"SYM{i}" for i in range(200)])
         records = tuple(load_window_ledger(tmp_path).records())

@@ -834,7 +834,7 @@ class TestRegistryContentTokenKeying:
         run exactly ONCE (the O(1)-on-repeat contract is not regressed by the
         key change) and the second payload equals the first.
         """
-        import brutex.dashboard.app as app_mod
+        from brutex.dashboard import app as app_mod
 
         _seed_sparse_july_lake(tmp_path)
         _upsert_registry_expiries(
@@ -874,7 +874,7 @@ class TestRegistryContentTokenKeying:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """`_registry_key_component`: the real token, the stable sentinels, the outage arm."""
-        import brutex.dashboard.app as app_mod
+        from brutex.dashboard import app as app_mod
         from brutex.dashboard.lake_revision import ABSENT_TOKEN, registry_revision
 
         # Absent registry → the stable "absent" sentinel passes through.
@@ -889,7 +889,7 @@ class TestRegistryContentTokenKeying:
 
     def test_registry_keyed_cache_adapter_folds_the_token_into_every_key(self) -> None:
         """`_RegistryKeyedCache` delegates with `|r=<token>` appended, stamp untouched."""
-        import brutex.dashboard.app as app_mod
+        from brutex.dashboard import app as app_mod
         from brutex.dashboard.movers_cache import MoversSnapshotCache
 
         inner = MoversSnapshotCache()

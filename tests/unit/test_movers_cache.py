@@ -734,7 +734,7 @@ class TestByteWatermark:
     ) -> None:
         """The parity pin: without a watermark the sizer is NEVER called and no
         byte-watermark event can fire — behaviour byte-identical to before."""
-        import brutex.dashboard.movers_cache as mod
+        from brutex.dashboard import movers_cache as mod
 
         def _must_not_size(_value: object) -> int:
             raise AssertionError("deep_size_bytes must not run without a watermark")
@@ -871,7 +871,7 @@ class TestSizingHint:
         (TypeError), and behaviourally every watermarked insert paid the deep
         walk (measured 5.28 s at the 841k-row production ledger scale).
         """
-        import brutex.dashboard.movers_cache as mod
+        from brutex.dashboard import movers_cache as mod
 
         def _must_not_deep_size(_value: object) -> int:
             raise AssertionError("the hint must short-circuit deep_size_bytes")
@@ -958,7 +958,7 @@ class TestSizingHint:
         inflate the floor. Pinned via source order."""
         import inspect
 
-        import brutex.dashboard.movers_cache as mod
+        from brutex.dashboard import movers_cache as mod
 
         src = inspect.getsource(mod.MoversSnapshotCache.get_or_compute)
         sizing_at = src.index("entry_bytes = self._size_payload(value)")
