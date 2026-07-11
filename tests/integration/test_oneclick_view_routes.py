@@ -127,8 +127,15 @@ class TestPagesServe:
         assert 'id="swConditions"' in html
         assert "disabled" in html.split('id="swConditions"')[1][:120]
         assert "condition-subset — not wired yet, lands at merge-integration" in html
-        # The preflight/estimator strip is HONEST about not being wired (P1).
-        assert "estimator not wired yet — lands at merge-integration (P1)" in html
+        # The preflight strip names the extinction default + the operative
+        # guard and deliberately shows NO fabricated time estimate
+        # (DEC-SWEEP-APRIORI-DEFAULT-001 — extinction depth is data-dependent;
+        # the old "estimator not wired yet" placeholder token is KILLED on
+        # this page, negative-pinned below).
+        assert "exploration: Apriori-to-extinction (default)" in html
+        assert "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS" in html
+        assert "No time estimate is shown" in html
+        assert "estimator not wired yet — lands at merge-integration (P1)" not in html
         # R3: the button never pulls — stated on the page.
         assert "this button NEVER pulls" in html or "NEVER pulls" in html
 

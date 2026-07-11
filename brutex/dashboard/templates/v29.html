@@ -2349,7 +2349,7 @@
       <input id="swEnd" type="date">
     </label>
     <label>K-DEPTH
-      <input id="swK" type="number" min="1" max="5" placeholder="default">
+      <input id="swK" type="number" min="1" max="5" placeholder="extinction (default)" title="blank = Apriori-to-extinction default; a number = classic fixed-K sweep">
     </label>
     <label>DIRECTIONS
       <select id="swDirections">
@@ -2379,7 +2379,7 @@
   <div class="oc-controls-row">
     <button class="oc-run-btn" id="run-sweep" type="button">🚀 Run Sweep</button>
     <button class="oc-cascade-btn" id="run-cascade" type="button">🪜 Run cascade</button>
-    <span class="oc-disabled-note" id="ocPreflight">estimator not wired yet — lands at merge-integration (P1); every time estimate is PROVISIONAL until the smoke run calibrates it (R23)</span>
+    <span class="oc-disabled-note" id="ocPreflight">exploration: Apriori-to-extinction (default) — each cell's k-ladder runs until no combo survives min-hits; a level exceeding the mask·bar budget (BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS) refuses loudly and that cell's tuples at and above it are marked FAILED (raise the budget and re-run to explore deeper — the checkpoint re-runs exactly those). Enter an explicit K for the legacy fixed-K sweep (byte-identical to previous behavior). No time estimate is shown: extinction depth is data-dependent — every figure would be modeled, not measured; the run's audit artifacts carry the real per-level counts + timings.</span>
   </div>
   <div class="oc-msg" id="sweep-msg"></div>
   <div id="sweep-bar" style="display:none;margin-top:10px;height:8px;border-radius:4px;background:#1b2030;overflow:hidden;">
