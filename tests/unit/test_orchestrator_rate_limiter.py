@@ -9,9 +9,11 @@ of the timing the caller reports.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+import types
+from collections.abc import Callable, Iterator
 
 import pytest
+from brutex.orchestrator import rate_limiter as rate_limiter_module
 from brutex.orchestrator.rate_limiter import (
     _ACQUIRE_LOOP_CAP,
     _LEGACY_HARD_CAP_RPS,
@@ -25,6 +27,7 @@ from brutex.orchestrator.rate_limiter import (
     RateLimiterError,
     RateLimiterEvent,
 )
+from structlog.testing import capture_logs
 
 # ────────────────────────────────────────────────────────────────────────
 # Fake clock & sleep helpers — deterministic test infrastructure
@@ -1350,3 +1353,281 @@ class TestLast429SentinelInvariants:
         clock.advance(1.0)
         b.acquire()  # recovery gate: now - (-inf) = +inf >= upshift_recovery → open
         assert b.current_rps() == b.initial_rps
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Rust rate-math kernel seam (DEC-RATE-MATH-RUST-001, ADR-0019)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRustRateMathSeam:
+    """The flag-gated Rust dispatch: flag arms, kernel resolution, burn-in +
+    autorevert latch, and both-arms f64-byte identity."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_seam(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        """Every test starts and ends with a fresh-process seam view."""
+        monkeypatch.delenv(rate_limiter_module.RUST_RATE_MATH_ENV, raising=False)
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        yield
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+
+    def _arm(self, monkeypatch: pytest.MonkeyPatch, *, burn_in_remaining: int = 16) -> None:
+        monkeypatch.setenv(rate_limiter_module.RUST_RATE_MATH_ENV, "1")
+        rate_limiter_module._reset_rust_rate_math_for_tests(burn_in_remaining=burn_in_remaining)
+
+    @staticmethod
+    def _fake_kernel(
+        refill: float = 999.0,
+        consume: tuple[float, float] = (999.0, 999.0),
+        more_wait: float = 999.0,
+        set_rate: tuple[float, float] = (999.0, 999.0),
+    ) -> rate_limiter_module._RustRateKernel:
+        return rate_limiter_module._RustRateKernel(
+            refill_fn=lambda *a: refill,
+            consume_fn=lambda *a: consume,
+            more_wait_fn=lambda *a: more_wait,
+            set_rate_fn=lambda *a: set_rate,
+        )
+
+    # ── flag arms ────────────────────────────────────────────────────────
+
+    def test_flag_default_off_resolves_no_kernel(self) -> None:
+        assert rate_limiter_module._rust_rate_kernel() is None
+
+    def test_flag_falsy_off_silent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(rate_limiter_module.RUST_RATE_MATH_ENV, "off")
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        with capture_logs() as logs:
+            assert rate_limiter_module._rust_rate_kernel() is None
+        assert logs == []
+
+    def test_flag_junk_warns_once_and_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(rate_limiter_module.RUST_RATE_MATH_ENV, "flase")
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        with capture_logs() as logs:
+            assert rate_limiter_module._rust_flag_enabled() is False
+            assert rate_limiter_module._rust_flag_enabled() is False  # memo: warn once
+        assert [r["event"] for r in logs] == ["rate_math.rust_flag_unrecognised"]
+
+    # ── kernel resolution arms ───────────────────────────────────────────
+
+    def test_flag_on_resolves_the_real_kernel_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        kernel = rate_limiter_module._rust_rate_kernel()
+        assert kernel is not None
+        # Memoized: a second call returns the SAME resolved object.
+        assert rate_limiter_module._rust_rate_kernel() is kernel
+
+    def test_wheel_missing_warns_once_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+    ) -> None:
+        self._arm(monkeypatch)
+
+        def _no_wheel() -> object:
+            raise ImportError("no fno_math")
+
+        monkeypatch.setattr(rate_limiter_module, "_import_fno_math", _no_wheel)
+        with capture_logs() as logs:
+            assert rate_limiter_module._rust_rate_kernel() is None
+        assert [r["event"] for r in logs] == ["rate_math.rust_kernel_unavailable"]
+        assert logs[0]["reason"] == "wheel_missing"
+        # The bucket still paces from the Python oracle.
+        b = AdaptiveTokenBucket(clock=clock.now, sleep=clock.sleep)
+        assert b.acquire() == 0.0
+
+    @pytest.mark.parametrize(
+        "stale_ns",
+        [
+            {},
+            {"bucket_refill": lambda *a: 0.0},
+            {
+                "bucket_refill": lambda *a: 0.0,
+                "bucket_consume": lambda *a: (0.0, 0.0),
+            },
+            {
+                "bucket_refill": lambda *a: 0.0,
+                "bucket_consume": lambda *a: (0.0, 0.0),
+                "bucket_more_wait": lambda *a: 0.0,
+            },
+            {
+                "bucket_refill": lambda *a: 0.0,
+                "bucket_consume": lambda *a: (0.0, 0.0),
+                "bucket_more_wait": lambda *a: 0.0,
+                "bucket_set_rate_state": "not-callable",
+            },
+        ],
+        ids=["empty", "refill-only", "no-more-wait", "no-set-rate", "set-rate-not-callable"],
+    )
+    def test_wheel_stale_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, stale_ns: dict[str, object]
+    ) -> None:
+        self._arm(monkeypatch)
+        monkeypatch.setattr(
+            rate_limiter_module, "_import_fno_math", lambda: types.SimpleNamespace(**stale_ns)
+        )
+        with capture_logs() as logs:
+            assert rate_limiter_module._rust_rate_kernel() is None
+        assert [r["event"] for r in logs] == ["rate_math.rust_kernel_unavailable"]
+        assert logs[0]["reason"] == "wheel_stale"
+
+    # ── dispatch parity (the real kernel) ────────────────────────────────
+
+    def test_flag_on_all_four_surfaces_match_the_python_oracle_bytes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every dispatch surface serves f64-byte-identical values to the
+        retained Python expressions — probed DIRECTLY so the retry-wait
+        surface (naturally reachable only under a concurrent downshift) is
+        exercised too."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        vectors: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
+        for tokens, burst, rps, elapsed in [
+            (0.0, 5.0, 3.0, 0.5),
+            (4.0, 5.0, 3.0, 1.0),
+            (2.0, 5.0, 8.0, 1e-9),
+            (0.9999999999999999, 5.0, 1.5, 0.25),
+        ]:
+            vectors.append(
+                (
+                    (rate_limiter_module._bucket_refill(tokens, burst, rps, elapsed),),
+                    (rate_limiter_module._py_bucket_refill(tokens, burst, rps, elapsed),),
+                )
+            )
+        for tokens, rps in [(1.0, 3.0), (0.25, 3.0), (5.0, 8.0), (1.0 - 1e-12, 1.5)]:
+            vectors.append(
+                (
+                    rate_limiter_module._bucket_consume(tokens, rps),
+                    rate_limiter_module._py_bucket_consume(tokens, rps),
+                )
+            )
+        for tokens, rps, eps in [(0.25, 3.0, 1e-9), (1.0 - 1e-12, 3.0, 1e-9), (0.5, 2.0, 0.25)]:
+            vectors.append(
+                (
+                    (rate_limiter_module._bucket_more_wait(tokens, rps, eps),),
+                    (rate_limiter_module._py_bucket_more_wait(tokens, rps, eps),),
+                )
+            )
+        for new_rps in [8.0, 3.0, 1.5, 5e-324]:
+            vectors.append(
+                (
+                    rate_limiter_module._bucket_set_rate_state(new_rps),
+                    rate_limiter_module._py_bucket_set_rate_state(new_rps),
+                )
+            )
+        for served, oracle in vectors:
+            assert rate_limiter_module._f64_bytes(served) == rate_limiter_module._f64_bytes(oracle)
+        # None of the double-computes diverged — the kernel is still live.
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] is None
+
+    def test_flag_on_bucket_end_to_end_matches_flag_off_twin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full acquire/set_rate/refill sequence produces IDENTICAL waits,
+        tokens and rates under both arms (the AIMD ladder untouched)."""
+        pytest.importorskip("fno_math")
+
+        def _run() -> list[float]:
+            c = FakeClock()
+            b = AdaptiveTokenBucket(
+                initial_rps=8.0, downshift_rps=4.0, start_empty=True, clock=c.now, sleep=c.sleep
+            )
+            out: list[float] = []
+            out.append(b.acquire())  # empty bucket → real wait
+            b.record_success()
+            b.set_rate(3.0)  # drain-to-empty + downshift moves
+            out.append(b.downshift_rps)
+            out.append(b.acquire())
+            c.advance(2.0)
+            out.append(b.acquire())  # refilled — free token
+            out.append(b.available_tokens())
+            out.append(b.current_rps())
+            return out
+
+        self._arm(monkeypatch)
+        rust_arm = _run()
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] is None
+        monkeypatch.delenv(rate_limiter_module.RUST_RATE_MATH_ENV)
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        python_arm = _run()
+        assert rate_limiter_module._f64_bytes(tuple(rust_arm)) == rate_limiter_module._f64_bytes(
+            tuple(python_arm)
+        )
+
+    # ── burn-in + autorevert ─────────────────────────────────────────────
+
+    def test_burn_in_consumes_one_shared_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=3)
+        rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5)
+        rate_limiter_module._bucket_consume(1.0, 3.0)
+        assert rate_limiter_module._RUST_BURN_IN_REMAINING[0] == 1
+        rate_limiter_module._bucket_more_wait(0.25, 3.0, 1e-9)
+        rate_limiter_module._bucket_set_rate_state(8.0)  # exhausted — no decrement below 0
+        assert rate_limiter_module._RUST_BURN_IN_REMAINING[0] == 0
+
+    def test_burn_in_mismatch_ships_python_latches_and_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._arm(monkeypatch)
+        rate_limiter_module._set_rust_kernel_for_tests(self._fake_kernel())
+        with capture_logs() as logs:
+            served = rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5)
+        assert served == rate_limiter_module._py_bucket_refill(0.0, 5.0, 3.0, 0.5)
+        assert [r["event"] for r in logs] == ["rate_math.kernel_autoreverted"]
+        assert logs[0]["reason"] == "burn_in_mismatch"
+        assert logs[0]["surface"] == "bucket_refill"
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
+        # Latched: every later call short-circuits to the oracle (no kernel).
+        assert rate_limiter_module._rust_rate_kernel() is None
+        assert rate_limiter_module._bucket_consume(0.25, 3.0) == (
+            rate_limiter_module._py_bucket_consume(0.25, 3.0)
+        )
+        # The latch logs ONCE — a second disable call is a no-op.
+        with capture_logs() as logs:
+            rate_limiter_module._disable_rust_kernel("again")
+        assert logs == []
+
+    def test_burn_in_signed_zero_mismatch_is_caught_by_the_byte_comparator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``-0.0 == 0.0`` under ``==`` — the byte comparator must still latch."""
+        self._arm(monkeypatch)
+        rate_limiter_module._set_rust_kernel_for_tests(
+            self._fake_kernel(set_rate=(-0.0, 4.0))  # oracle drains to +0.0
+        )
+        with capture_logs() as logs:
+            served = rate_limiter_module._bucket_set_rate_state(8.0)
+        assert served == (0.0, 4.0)
+        assert rate_limiter_module._f64_bytes((served[0],)) == rate_limiter_module._f64_bytes(
+            (0.0,)
+        )
+        assert [r["event"] for r in logs] == ["rate_math.kernel_autoreverted"]
+
+    def test_post_burn_in_rust_value_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With the budget exhausted the kernel values serve directly —
+        proven with a fake kernel whose values are distinguishable."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        rate_limiter_module._set_rust_kernel_for_tests(
+            self._fake_kernel(refill=7.0, consume=(6.0, 0.5), more_wait=0.75, set_rate=(0.0, 2.5))
+        )
+        assert rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5) == 7.0
+        assert rate_limiter_module._bucket_consume(1.0, 3.0) == (6.0, 0.5)
+        assert rate_limiter_module._bucket_more_wait(0.25, 3.0, 1e-9) == 0.75
+        assert rate_limiter_module._bucket_set_rate_state(8.0) == (0.0, 2.5)
+
+    # ── seam plumbing ────────────────────────────────────────────────────
+
+    def test_reset_seam_restores_a_fresh_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm(monkeypatch, burn_in_remaining=0)
+        rate_limiter_module._set_rust_kernel_for_tests(self._fake_kernel())
+        rate_limiter_module._disable_rust_kernel("test")
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] is None
+        assert (
+            rate_limiter_module._RUST_BURN_IN_REMAINING[0]
+            == rate_limiter_module.RATE_MATH_BURN_IN_SAMPLES
+        )
+        assert rate_limiter_module._RUST_KERNEL_RESOLVED[0] is False
