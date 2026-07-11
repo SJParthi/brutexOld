@@ -72,6 +72,7 @@ from brutex.dashboard.completeness import (
     per_symbol_completeness,
     scoreboard_to_csv,
 )
+from brutex.dashboard.composite_join import CompositeIndex, load_composite_index
 from brutex.dashboard.composite_pull import (
     CompositePullReport,
     # The ONE index/stock classification-map builder the six-step F&O order keys on
@@ -140,7 +141,6 @@ from brutex.dashboard.lake_census_holder import (
     FIRST_SCAN_PER_FILE_BUDGET_S,
     LakeCensusHolder,
 )
-from brutex.dashboard.composite_join import CompositeIndex, load_composite_index
 from brutex.dashboard.lake_revision import (
     cascade_report_revision,
     lake_revision,
