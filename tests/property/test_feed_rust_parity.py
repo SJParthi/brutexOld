@@ -20,9 +20,11 @@ driven through the REAL :func:`brutex.feed.replay.arrow_table_to_bars` with
 * the ``BRUTEX_BAD_TICK_SCREEN=off`` × flag-ON arm (spikes kept, no ts ever
   crossing the FFI) under the same laws.
 
-Skips loudly when the wheel is absent (the CI property job installs it) —
-without the wheel every ON arm would degrade to the oracle and the gate
-would be vacuous.
+Skips loudly when pyarrow or the wheel is absent — without the kernel every
+ON arm would degrade to the oracle and the gate would be vacuous. The CI
+property job is `.[dev]`-only (no pyarrow), so this module's real CI
+execution home is the unit-test job, whose [dev,data,ui] env + wheel install
+runs tests/property inside the whole-package coverage pass.
 """
 
 from __future__ import annotations
