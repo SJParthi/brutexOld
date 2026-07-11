@@ -1759,9 +1759,10 @@ class TestRustCalendarSeam:
         assert session is not None
         assert forced_exit_seconds_for_session(session) == 55_200
         assert session_last_bar_complete(session, datetime(2026, 7, 6, 15, 29)) is True
-        # ZERO mismatches: the kernel is still engaged and budget was consumed.
+        # ZERO mismatches: the kernel is still engaged and EVERY surface's
+        # own budget was consumed (per-surface dict — the audit pattern).
         assert nse_module._CAL_DISABLED_REASON[0] is None
-        assert nse_module._CAL_BURN_IN_REMAINING[0] < 10_000
+        assert all(v < 10_000 for v in nse_module._CAL_BURN_IN_REMAINING.values())
 
     # ── steady state (burn-in exhausted — genuinely Rust-served) ─────────
 
@@ -1891,7 +1892,13 @@ class TestRustCalendarSeam:
         self._arm(monkeypatch, burn_in_remaining=2)
         with pytest.raises(HolidayDataUnavailableError):
             is_trading_day_checked(self.OOC_WEEKDAY)
-        assert nse_module._CAL_BURN_IN_REMAINING[0] == 1
+        assert nse_module._CAL_BURN_IN_REMAINING["is_trading_day_checked"] == 1
+        # Only ITS surface consumed — every other budget is untouched.
+        assert all(
+            v == 2
+            for s, v in nse_module._CAL_BURN_IN_REMAINING.items()
+            if s != "is_trading_day_checked"
+        )
         assert nse_module._CAL_DISABLED_REASON[0] is None
 
     def test_prev_session_mismatch_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2005,8 +2012,53 @@ class TestRustCalendarSeam:
 
     def test_consume_burnin_clamps_at_zero(self) -> None:
         nse_module._reset_rust_calendar_for_tests(burn_in_remaining=0)
-        nse_module._cal_consume_burnin()
-        assert nse_module._CAL_BURN_IN_REMAINING[0] == 0
+        nse_module._cal_consume_burnin("is_trading_day")
+        assert nse_module._CAL_BURN_IN_REMAINING["is_trading_day"] == 0
+
+    def test_burn_in_budgets_are_independent_per_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each surface owns its OWN burn-in budget (slice-9 refuter
+        round-2 NIT, the audit MINOR-1 pattern — a shared budget let a hot
+        ``is_trading_day`` loop exhaust the window before a rarer surface
+        was ever validated)."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=2)
+        assert is_trading_day(self.REGULAR_MON) is True
+        assert is_trading_day(self.HOLIDAY) is False
+        assert is_trading_day(self.SATURDAY) is False  # exhausted — clamps at 0
+        assert is_weekend(self.SATURDAY) is True
+        assert nse_module._CAL_BURN_IN_REMAINING["is_trading_day"] == 0
+        assert nse_module._CAL_BURN_IN_REMAINING["is_weekend"] == 1
+        # Every never-called surface's budget is untouched.
+        assert all(
+            v == 2
+            for s, v in nse_module._CAL_BURN_IN_REMAINING.items()
+            if s not in {"is_trading_day", "is_weekend"}
+        )
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_hot_surface_exhaustion_still_validates_a_rarer_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The audit-MINOR-1 regression, calendar twin: a hot
+        ``is_trading_day`` loop (that surface's budget exhausted) must
+        STILL burn-in-validate the process's first ``is_weekend`` — a wrong
+        kernel verdict ships the PYTHON value and latches, never serving
+        the kernel value unvalidated."""
+        self._arm(monkeypatch, burn_in_remaining=1)
+        nse_module._set_rust_calendar_for_tests(
+            _fake_kernel(is_trading_day=True, is_weekend=False)  # weekend wrong on purpose
+        )
+        # The hot-loop shape: is_trading_day calls only, exhausting THAT budget.
+        assert is_trading_day(self.REGULAR_MON) is True
+        assert nse_module._CAL_BURN_IN_REMAINING["is_trading_day"] == 0
+        # is_weekend still owes its own burn-in: the wrong kernel verdict is
+        # caught, the Python verdict ships, the kernel latches.
+        with capture_logs() as logs:
+            assert is_weekend(self.SATURDAY) is True
+        assert [r["event"] for r in logs] == ["calendar.kernel_autoreverted"]
+        assert nse_module._CAL_DISABLED_REASON[0] == "is_weekend"
 
     def test_reset_seam_restores_a_fresh_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._arm(monkeypatch, burn_in_remaining=0)
@@ -2014,5 +2066,8 @@ class TestRustCalendarSeam:
         nse_module._disable_rust_calendar("test", rust="r", python="p")
         nse_module._reset_rust_calendar_for_tests()
         assert nse_module._CAL_DISABLED_REASON[0] is None
-        assert nse_module._CAL_BURN_IN_REMAINING[0] == nse_module.CALENDAR_BURN_IN_SAMPLES
+        assert all(
+            v == nse_module.CALENDAR_BURN_IN_SAMPLES
+            for v in nse_module._CAL_BURN_IN_REMAINING.values()
+        )
         assert nse_module._CAL_KERNEL_RESOLVED[0] is False

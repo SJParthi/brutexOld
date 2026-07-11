@@ -1558,15 +1558,53 @@ class TestRustRateMathSeam:
 
     # ── burn-in + autorevert ─────────────────────────────────────────────
 
-    def test_burn_in_consumes_one_shared_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_burn_in_consumes_independent_per_surface_budgets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each surface owns its OWN burn-in budget (slice-9 refuter
+        round-2 NIT, the audit MINOR-1 pattern — a shared budget let a hot
+        refill/consume loop exhaust the window before ``set_rate`` was
+        ever validated)."""
         pytest.importorskip("fno_math")
-        self._arm(monkeypatch, burn_in_remaining=3)
+        self._arm(monkeypatch, burn_in_remaining=2)
         rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5)
+        rate_limiter_module._bucket_refill(4.0, 5.0, 3.0, 1.0)
+        rate_limiter_module._bucket_refill(2.0, 5.0, 8.0, 1e-9)  # exhausted — clamps at 0
         rate_limiter_module._bucket_consume(1.0, 3.0)
-        assert rate_limiter_module._RUST_BURN_IN_REMAINING[0] == 1
-        rate_limiter_module._bucket_more_wait(0.25, 3.0, 1e-9)
-        rate_limiter_module._bucket_set_rate_state(8.0)  # exhausted — no decrement below 0
-        assert rate_limiter_module._RUST_BURN_IN_REMAINING[0] == 0
+        assert rate_limiter_module._RUST_BURN_IN_REMAINING == {
+            "bucket_refill": 0,
+            "bucket_consume": 1,
+            "bucket_more_wait": 2,
+            "bucket_set_rate_state": 2,
+        }
+
+    def test_hot_surface_exhaustion_still_validates_a_rarer_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The audit-MINOR-1 regression, rate twin: a refill-heavy process
+        (that surface's budget exhausted) must STILL burn-in-validate its
+        first ``set_rate`` — a wrong kernel post-state ships the PYTHON
+        values and latches, never serving the kernel value unvalidated."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=1)
+        rate_limiter_module._set_rust_kernel_for_tests(
+            rate_limiter_module._RustRateKernel(
+                refill_fn=rate_limiter_module._py_bucket_refill,  # correct — passes burn-in
+                consume_fn=lambda *a: (999.0, 999.0),
+                more_wait_fn=lambda *a: 999.0,
+                set_rate_fn=lambda *a: (999.0, 999.0),  # wrong on purpose
+            )
+        )
+        # The hot-loop shape: refill calls only, exhausting THAT budget.
+        rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5)
+        assert rate_limiter_module._RUST_BURN_IN_REMAINING["bucket_refill"] == 0
+        # set_rate still owes its own burn-in: the wrong kernel post-state
+        # is caught, the Python values ship, the kernel latches.
+        with capture_logs() as logs:
+            served = rate_limiter_module._bucket_set_rate_state(8.0)
+        assert served == rate_limiter_module._py_bucket_set_rate_state(8.0)
+        assert [r["event"] for r in logs] == ["rate_math.kernel_autoreverted"]
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
 
     def test_burn_in_mismatch_ships_python_latches_and_errors(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1626,8 +1664,8 @@ class TestRustRateMathSeam:
         rate_limiter_module._disable_rust_kernel("test")
         rate_limiter_module._reset_rust_rate_math_for_tests()
         assert rate_limiter_module._RUST_DISABLED_REASON[0] is None
-        assert (
-            rate_limiter_module._RUST_BURN_IN_REMAINING[0]
-            == rate_limiter_module.RATE_MATH_BURN_IN_SAMPLES
+        assert all(
+            remaining == rate_limiter_module.RATE_MATH_BURN_IN_SAMPLES
+            for remaining in rate_limiter_module._RUST_BURN_IN_REMAINING.values()
         )
         assert rate_limiter_module._RUST_KERNEL_RESOLVED[0] is False

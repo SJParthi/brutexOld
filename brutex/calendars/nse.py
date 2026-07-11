@@ -480,9 +480,15 @@ def is_holiday_data_available(d: date) -> bool:
 #: ``0/false/no/off``; unset/empty = OFF; junk = OFF with one warning.
 RUST_CALENDAR_ENV: Final[str] = "BRUTEX_RUST_CALENDAR"
 
-#: Rust-served verdicts double-computed against the Python oracle bodies
-#: per process (the burn-in; the 2,557-day flag-ON golden replay is the
-#: stronger CI proof — this is the uniform runtime belt).
+#: Rust-served verdicts PER SURFACE (each dispatched calendar function
+#: carries its OWN budget — see :data:`_CAL_SURFACES`) double-computed
+#: against the Python oracle bodies per process (the burn-in; the
+#: 2,557-day flag-ON golden replay is the stronger CI proof — this is the
+#: uniform runtime belt). Independent counters (slice-9 refuter round-2
+#: NIT, the audit.py MINOR-1 pattern): a hot ``is_trading_day`` loop must
+#: not exhaust the window before the same process's first
+#: ``forced_exit_seconds_for_session`` / ``daily_derive_cutoff`` call ever
+#: gets an in-process oracle compare.
 CALENDAR_BURN_IN_SAMPLES: Final[int] = 16
 
 _CAL_FLAG_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
@@ -540,12 +546,39 @@ class _RustCalendarKernel:
     last_bar_complete: Callable[[int, int], bool]
 
 
-#: Kernel memo + burn-in budget + autorevert latch + warn-once memo —
-#: single-cell mutable module state, the same documented exception to the
-#: no-global-mutable-state rule as ``brutex.engine.rust_metrics``.
+#: Kernel memo + per-surface burn-in budgets + autorevert latch +
+#: warn-once memo — single-cell mutable module state, the same documented
+#: exception to the no-global-mutable-state rule as
+#: ``brutex.engine.rust_metrics``.
 _CAL_KERNEL_RESOLVED: Final[list[bool]] = [False]
 _CAL_KERNEL_VALUE: Final[list[_RustCalendarKernel | None]] = [None]
-_CAL_BURN_IN_REMAINING: Final[list[int]] = [CALENDAR_BURN_IN_SAMPLES]
+
+#: Every dispatched surface name — the burn-in dict's key vocabulary. A
+#: dispatch site MUST use one of these (an unregistered surface fails
+#: LOUDLY with a ``KeyError`` at the first burn-in probe, never a silent
+#: shared budget — the audit.py per-surface-dict pattern).
+_CAL_SURFACES: Final[tuple[str, ...]] = (
+    "is_holiday",
+    "is_holiday_checked",
+    "is_weekend",
+    "is_trading_day",
+    "is_trading_day_checked",
+    "has_muhurat_session",
+    "get_session",
+    "get_session_checked",
+    "previous_trading_session",
+    "daily_derive_cutoff",
+    "session_last_bar_complete",
+    "trading_days_between",
+    "trading_days_between_checked",
+    "expected_bars_per_day_for_tf",
+    "is_forced_exit_bar",
+    "forced_exit_seconds_for_session",
+    "is_special_weekend_session",
+)
+_CAL_BURN_IN_REMAINING: Final[dict[str, int]] = dict.fromkeys(
+    _CAL_SURFACES, CALENDAR_BURN_IN_SAMPLES
+)
 _CAL_DISABLED_REASON: Final[list[str | None]] = [None]
 _CAL_WARN_MEMO: Final[set[str]] = set()
 
@@ -674,7 +707,8 @@ def _reset_rust_calendar_for_tests(*, burn_in_remaining: int = CALENDAR_BURN_IN_
     """Restore a fresh-process seam view (test isolation ONLY)."""
     _CAL_KERNEL_RESOLVED[0] = False
     _CAL_KERNEL_VALUE[0] = None
-    _CAL_BURN_IN_REMAINING[0] = burn_in_remaining
+    for surface in _CAL_BURN_IN_REMAINING:
+        _CAL_BURN_IN_REMAINING[surface] = burn_in_remaining
     _CAL_DISABLED_REASON[0] = None
     _CAL_WARN_MEMO.clear()
 
@@ -725,33 +759,40 @@ def _session_from_code(d: date, type_code: int, open_s: int, close_s: int) -> Tr
     )
 
 
-def _cal_burnin_pending() -> bool:
-    """``True`` while this process still owes burn-in verdict compares."""
-    return _CAL_BURN_IN_REMAINING[0] > 0
+def _cal_burnin_pending(surface: str) -> bool:
+    """``True`` while this process still owes *surface* burn-in compares.
+
+    Per-surface budgets (the audit.py dict pattern): a hot surface can
+    never exhaust a rarer surface's window. An unregistered surface name
+    raises ``KeyError`` — fail-loud, never a silent shared budget.
+    """
+    return _CAL_BURN_IN_REMAINING[surface] > 0
 
 
-def _cal_consume_burnin() -> None:
-    """Consume one burn-in sample after a PASSED compare (clamped at zero)."""
-    if _CAL_BURN_IN_REMAINING[0] > 0:
-        _CAL_BURN_IN_REMAINING[0] -= 1
+def _cal_consume_burnin(surface: str) -> None:
+    """Consume one *surface* burn-in sample after a PASSED compare (clamped)."""
+    if _CAL_BURN_IN_REMAINING[surface] > 0:
+        _CAL_BURN_IN_REMAINING[surface] -= 1
 
 
 def _serve_value[T](surface: str, rust_value: T, python_thunk: Callable[[], T]) -> T:
     """Serve a NON-raising Rust verdict through the burn-in window.
 
-    Post burn-in the (already-decoded) Rust value serves directly. During
-    burn-in the Python oracle also runs and is compared by ``==``; a
-    mismatch ships the PYTHON value, latches the kernel and logs ONE
+    Post burn-in (for *surface* — each surface owns its OWN budget, so a
+    hot ``is_trading_day`` loop cannot exhaust a rarer surface's window)
+    the (already-decoded) Rust value serves directly. During burn-in the
+    Python oracle also runs and is compared by ``==``; a mismatch ships
+    the PYTHON value, latches the kernel and logs ONE
     ``calendar.kernel_autoreverted`` ERROR; a match serves the Python object
     (identical by the compare) and consumes one sample.
     """
-    if not _cal_burnin_pending():
+    if not _cal_burnin_pending(surface):
         return rust_value
     python_value = python_thunk()
     if rust_value != python_value:
         _disable_rust_calendar(surface, rust=repr(rust_value), python=repr(python_value))
         return python_value
-    _cal_consume_burnin()
+    _cal_consume_burnin(surface)
     return python_value
 
 
@@ -767,19 +808,19 @@ def _serve_checked[T](
     latches the kernel. Post burn-in a :data:`_RAISES` verdict routes
     through the shared :func:`_raise_unavailable` (same WARN + message).
     """
-    if _cal_burnin_pending():
+    if _cal_burnin_pending(surface):
         try:
             python_value = python_thunk()
         except HolidayDataUnavailableError:
             if rust_outcome is _RAISES:
-                _cal_consume_burnin()
+                _cal_consume_burnin(surface)
             else:
                 _disable_rust_calendar(surface, rust=repr(rust_outcome), python="raises")
             raise
         if rust_outcome is _RAISES or rust_outcome != python_value:
             _disable_rust_calendar(surface, rust=repr(rust_outcome), python=repr(python_value))
         else:
-            _cal_consume_burnin()
+            _cal_consume_burnin(surface)
         return python_value
     if rust_outcome is _RAISES:
         _raise_unavailable(raise_date)
@@ -1547,7 +1588,7 @@ def previous_trading_session(
             d.toordinal(), _SEL_BY_EXCHANGE[exchange], sorted(o.toordinal() for o in observed)
         )
         rust_value = date.fromordinal(int(ordinal)) if verdict == _VERDICT_TRUE else None
-        if _cal_burnin_pending():
+        if _cal_burnin_pending("previous_trading_session"):
             # The Python oracle emits the abstain WARN itself (once, with
             # today's exact fields), so its outcome is served directly.
             python_value = _py_previous_trading_session(d, exchange, observed)
@@ -1556,7 +1597,7 @@ def previous_trading_session(
                     "previous_trading_session", rust=repr(rust_value), python=repr(python_value)
                 )
             else:
-                _cal_consume_burnin()
+                _cal_consume_burnin("previous_trading_session")
             return python_value
         if verdict != _VERDICT_TRUE:
             # Observability identity with the Python walk: the raising probe

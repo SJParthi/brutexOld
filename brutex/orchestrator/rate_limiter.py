@@ -149,7 +149,12 @@ _ACQUIRE_LOOP_CAP: Final[int] = 16
 #: The default-OFF opt-in flag for the Rust token-math kernel.
 RUST_RATE_MATH_ENV: Final[str] = "BRUTEX_RUST_RATE_MATH"
 
-#: Burn-in double-compute budget (mirrors the audit/calendar seams' 16).
+#: Burn-in double-compute budget PER SURFACE — each of the four token-math
+#: expressions carries its OWN budget (mirrors the audit/calendar seams'
+#: per-surface 16; slice-9 refuter round-2 NIT, the audit.py MINOR-1
+#: pattern): a hot refill/consume loop must not exhaust the window before
+#: the same process's first ``set_rate`` downshift ever gets an in-process
+#: oracle compare.
 RATE_MATH_BURN_IN_SAMPLES: Final[int] = 16
 
 #: The env-flag vocabulary — a DELIBERATE local copy of the sweep flags'
@@ -177,16 +182,29 @@ class _RustRateKernel:
     set_rate_fn: Callable[[float], tuple[float, float]]
 
 
-#: Kernel memo + burn-in budget + autorevert latch + warn-once memo —
-#: single-cell mutable module state, the same documented exception to the
-#: no-global-mutable-state rule as the audit.py seam. The cells are written
-#: under a BUCKET's lock (or test-only seams), so two buckets could race a
-#: burn-in decrement — worst case one extra double-compute, never a wrong
-#: result (mismatch always ships the PYTHON value and the latch write is
-#: idempotent).
+#: Kernel memo + per-surface burn-in budgets + autorevert latch +
+#: warn-once memo — single-cell mutable module state, the same documented
+#: exception to the no-global-mutable-state rule as the audit.py seam. The
+#: cells are written under a BUCKET's lock (or test-only seams), so two
+#: buckets could race a burn-in decrement — worst case one extra
+#: double-compute, never a wrong result (mismatch always ships the PYTHON
+#: value and the latch write is idempotent).
 _RUST_KERNEL_RESOLVED: Final[list[bool]] = [False]
 _RUST_KERNEL_VALUE: Final[list[_RustRateKernel | None]] = [None]
-_RUST_BURN_IN_REMAINING: Final[list[int]] = [RATE_MATH_BURN_IN_SAMPLES]
+
+#: The four dispatched surface names — the burn-in dict's key vocabulary.
+#: A dispatch site MUST use one of these (an unregistered surface fails
+#: LOUDLY with a ``KeyError`` at the first burn-in probe, never a silent
+#: shared budget — the audit.py per-surface-dict pattern).
+_RUST_MATH_SURFACES: Final[tuple[str, ...]] = (
+    "bucket_refill",
+    "bucket_consume",
+    "bucket_more_wait",
+    "bucket_set_rate_state",
+)
+_RUST_BURN_IN_REMAINING: Final[dict[str, int]] = dict.fromkeys(
+    _RUST_MATH_SURFACES, RATE_MATH_BURN_IN_SAMPLES
+)
 _RUST_DISABLED_REASON: Final[list[str | None]] = [None]
 _RUST_WARN_MEMO: Final[set[str]] = set()
 
@@ -289,7 +307,8 @@ def _reset_rust_rate_math_for_tests(*, burn_in_remaining: int = RATE_MATH_BURN_I
     """Restore a fresh-process seam view (test isolation ONLY)."""
     _RUST_KERNEL_RESOLVED[0] = False
     _RUST_KERNEL_VALUE[0] = None
-    _RUST_BURN_IN_REMAINING[0] = burn_in_remaining
+    for surface in _RUST_BURN_IN_REMAINING:
+        _RUST_BURN_IN_REMAINING[surface] = burn_in_remaining
     _RUST_DISABLED_REASON[0] = None
     _RUST_WARN_MEMO.clear()
 
@@ -310,13 +329,14 @@ def _settle_rust_result(
 ) -> tuple[float, ...]:
     """Serve a kernel result through the burn-in double-compute window.
 
-    Post burn-in: the kernel values serve directly. During burn-in the
-    Python oracle also runs and the tuples are compared on exact f64
-    BYTES — a mismatch ships the PYTHON values (correctness first),
-    latches the kernel off, and logs ONE ``rate_math.kernel_autoreverted``
-    ERROR. One shared budget across all four surfaces.
+    Post burn-in (for *surface* — each surface owns its OWN budget, so a
+    hot refill/consume loop cannot exhaust the ``set_rate`` window): the
+    kernel values serve directly. During burn-in the Python oracle also
+    runs and the tuples are compared on exact f64 BYTES — a mismatch
+    ships the PYTHON values (correctness first), latches the kernel off,
+    and logs ONE ``rate_math.kernel_autoreverted`` ERROR.
     """
-    if _RUST_BURN_IN_REMAINING[0] <= 0:
+    if _RUST_BURN_IN_REMAINING[surface] <= 0:
         return rust_values
     python_values = python_thunk()
     if _f64_bytes(rust_values) != _f64_bytes(python_values):
@@ -324,7 +344,7 @@ def _settle_rust_result(
             "burn_in_mismatch", surface=surface, rust=rust_values, python=python_values
         )
         return python_values
-    _RUST_BURN_IN_REMAINING[0] -= 1
+    _RUST_BURN_IN_REMAINING[surface] -= 1
     return rust_values
 
 
