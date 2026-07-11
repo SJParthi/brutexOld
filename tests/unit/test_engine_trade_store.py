@@ -311,6 +311,24 @@ class TestWriteAndStamp:
         ):
             write_tuple_sidecars(paths, [], [record], store_content_hash=_STORE_HASH)
 
+    def test_rejects_agg_extra_key_alone(self, paths: SidecarPaths) -> None:
+        """The strict agg key-set EQUALITY check refuses a pure-extra-key record.
+
+        Pins a PRE-EXISTING strictness law adjacent to the AGG_COLUMNS
+        extension (refuter round 5 MS4 — in-scope hardening beside the
+        `exits_session_gap` row, not a drive-by): a record carrying ALL 50
+        pinned columns PLUS one unknown extra key must refuse with
+        ``missing=[]`` under the STRICT ``keys != _AGG_COLUMN_NAMES`` compare.
+        A superset-weakening mutant (``not keys >= _AGG_COLUMN_NAMES``)
+        silently ACCEPTS this shape — the extra key dropped at columnarise —
+        while the rename-shaped sibling above (missing + extra
+        simultaneously) still raises under it, so only this shape kills it.
+        """
+        record = _agg_record(_RUN_A)
+        record["surprise"] = 1
+        with pytest.raises(TradeStoreError, match=r"missing=\[\].*extra=\['surprise'\]"):
+            write_tuple_sidecars(paths, [], [record], store_content_hash=_STORE_HASH)
+
     def test_rejects_agg_bad_run_id(self, paths: SidecarPaths) -> None:
         bad_type = _agg_record(_RUN_A)
         bad_type["run_id"] = 7

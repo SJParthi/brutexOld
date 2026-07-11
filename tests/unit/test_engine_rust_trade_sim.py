@@ -1676,3 +1676,57 @@ class TestSessionTailHoleWarn:
             _warn_session_tail_holes(forced, session_days)
         holes = self._tail_hole_events(logs)
         assert [(e["session"], e["bars"]) for e in holes] == [(date.fromordinal(2).isoformat(), 2)]
+
+    def test_single_forced_bar_interior_session_is_not_a_hole(self) -> None:
+        # Direct call (refuter round 5 MR3b, slice-START mutant killer): an
+        # interior session whose ONLY stored bar IS a forced-exit bar — e.g. a
+        # lake hole leaving just the 15:20 bar — is healthy, NOT a hole.
+        # Because forced flags are a monotone suffix within a session, the
+        # single-bar forced-only run is the ONE shape that discriminates the
+        # slice start: a `forced[run_start:i]` → `forced[run_start+1:i]`
+        # mutant scans the EMPTY slice here and fabricates a false
+        # session_tail_hole WARN (bars=1). The forced-bearing sibling test
+        # above puts its forced bar SECOND, so only this shape kills it.
+        session_days = [738522, 738523, 738523]
+        forced = [True, False, False]
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        assert self._tail_hole_events(logs) == []
+        assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
+    def test_session_days_derive_from_the_ist_session_date_not_the_utc_date(self) -> None:
+        """``session_days`` ordinals derive from the bar's IST session date,
+        never its UTC calendar date (refuter round 5 MD2, directed mutant pin
+        — the Rust-path derivation mirror of the walker's
+        ``test_entry_day_is_the_ist_session_date_not_the_utc_date``).
+
+        The ``bar.timestamp.date()`` (UTC-date) mutant at the
+        ``session_days.append`` in ``_derive_kernel_inputs`` survived the
+        suite because the mismatch is domain-bounded — no NSE session bar
+        exists before 05:30 IST post-ingest-filter, so IST and UTC dates
+        always agree on real lake bars. The derivation's DOCUMENTED semantics
+        are the IST session date ("mirrors the walker's gate bit-for-bit"),
+        so this pins that law beyond the NSE trading window
+        (defense-in-depth; the domain never produces such bars): two bars in
+        ONE IST session 2024-01-02 straddle UTC midnight (IST 01:00 = UTC
+        2024-01-01 19:30; IST 06:00 = UTC 2024-01-02 00:30) — under the
+        mutant the IST session SPLITS into two kernel sessions (a phantom
+        boundary the kernel's (A2) guard would session_gap-close across) and
+        a false ``trade_sim.session_tail_hole`` WARN fires naming the UTC
+        date 2024-01-01.
+        """
+        bars = [
+            _bar(1, 0, "100", "101", "99", "100"),  # IST 01:00 = UTC 2024-01-01T19:30
+            _bar(6, 0, "100", "101", "99", "100"),  # IST 06:00 = UTC 2024-01-02T00:30
+        ]
+        # The fixture genuinely straddles UTC midnight within one IST session.
+        assert [b.timestamp.astimezone(UTC).date().isoformat() for b in bars] == [
+            "2024-01-01",
+            "2024-01-02",
+        ]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, [0, 0], tf_minutes=1)
+            derived = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        session_days = derived[5]
+        assert session_days == [_DAY.toordinal()] * 2  # ONE IST session (2024-01-02)
+        assert self._tail_hole_events(logs) == []
