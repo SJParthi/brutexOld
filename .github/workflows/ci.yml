@@ -1232,6 +1232,17 @@ jobs:
           else
             echo "(brutex.engine.sweep_apriori test file not present yet — gate inactive)"
           fi
+          # 19i1a2 · brutex.engine.rust_enum — the flag-gated Rust sweep-enum
+          # kernel seam (DEC-SWEEP-ENUM-RUST-001 #1738, default-OFF behind
+          # BRUTEX_SWEEP_RUST_ENUM; 151 stmts, 66 branches measured at the
+          # slice-1 head). 100% line+branch from the dedicated unit suite (the
+          # byte-identical-leaderboard parity gate lives in
+          # tests/golden/test_engine_rust_enum_parity.py).
+          if compgen -G "tests/unit/test_engine_rust_enum.py" > /dev/null; then
+            pytest --cov=brutex.engine.rust_enum --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_rust_enum.py
+          else
+            echo "(brutex.engine.rust_enum test file not present yet — gate inactive)"
+          fi
           # 19i1b · brutex.engine.stage3_refine — Stage-3 BIPOP-CMA-ES refinement
           # runner (DEC-STAGE3-REFINE-001; the A/B determinism oracle, the ≤600
           # hard budget, the run-scoped value cache — ADR-0007 conditions 4-6/8).

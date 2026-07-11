@@ -435,6 +435,7 @@ jobs:
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
+            "brutex/engine/rust_enum.py:tests/unit/test_engine_rust_enum.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             mod="${pair%%:*}"
@@ -602,9 +603,10 @@ jobs:
             });
 
   # ─────────────────────────────────────────────────────────────────
-  # Rust mutation — cargo-mutants over rust/fno-math/ (6-shard matrix)
+  # Rust mutation — cargo-mutants over rust/fno-math/ (7-shard matrix)
   #
-  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
+  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs +
+  # enum_kernel.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
@@ -612,7 +614,7 @@ jobs:
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
-    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/6)"
+    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/7)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003):
@@ -626,7 +628,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6]
     defaults:
       run:
         working-directory: rust/fno-math
@@ -664,30 +666,31 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants@27.1.0
-      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
+      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/7)
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
-          #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 599 mutants measured
-          #   2026-07-08 (`cargo mutants --list | wc -l` on the post-merge HEAD —
-          #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
-          #   trade_sim 124->167; the pre-merge 2026-07-07 measurement was 556).
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + enum_kernel.rs
+          #   = 699 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`
+          #   on the DEC-SWEEP-ENUM-RUST-001 slice-1 tree: the enum kernel adds
+          #   100 over the 2026-07-08 599 — metrics 358 + trade_sim 167 +
+          #   python 65 + lib 9 + enum_kernel 100).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1597
-          #   pre-decided +1-shard dial, taken when the 599 re-measure pushed the
-          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin):
-          #   ceil(599/6)=100 mutants x 29-40 s/mutant serial (CI per-lane measured
-          #   4-9 s build + 25-31 s test) ~= 48-67 min + ~5.5 min baseline/setup
-          #   ~= 54-72 min nominal, ~86 at +20% on the worst end -> >= 34 min
-          #   margin per shard.
+          #   wall-clock parallelism = this 7-way shard matrix (6->7 = the #1597
+          #   pre-decided +1-shard dial taken AGAIN for the slice-1 699
+          #   re-measure: at 6 shards ceil(699/6)=117 mutants/shard x 29-40 s
+          #   ~= 63-85 min nominal, ~102 min at +20% on the worst end — the
+          #   SAME ~18 min margin that took the 5->6 dial; at 7 shards
+          #   ceil(699/7)=100/shard restores the proven ~100-mutant budget:
+          #   ~= 54-72 min nominal, ~87 at +20% -> >= 33 min margin per shard).
           cargo mutants \
             --in-place \
-            --shard ${{ matrix.shard }}/6 \
+            --shard ${{ matrix.shard }}/7 \
             --test-tool cargo \
             --no-shuffle \
             --timeout 300 \
