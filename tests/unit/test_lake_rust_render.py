@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -330,7 +330,13 @@ class TestBurnIn:
 class TestDegradePaths:
     @pytest.mark.parametrize(
         "exc",
-        [ValueError("bad ipc"), RuntimeError("panicked"), TypeError("arg"), OverflowError("x")],
+        [
+            ValueError("bad ipc"),
+            RuntimeError("panicked"),
+            TypeError("arg"),
+            OverflowError("x"),
+            AttributeError("broken crate internals"),
+        ],
     )
     def test_crate_errors_degrade_to_python_with_one_warn(
         self, monkeypatch: pytest.MonkeyPatch, exc: Exception
@@ -413,12 +419,390 @@ class TestDegradePaths:
         """The defensive belt: polars unimportable → the stdlib set only."""
         monkeypatch.setitem(sys.modules, "polars.exceptions", None)
         errors = lrr._degrade_errors()
-        assert errors == (ValueError, RuntimeError, TypeError, OverflowError)
+        assert errors == (ValueError, RuntimeError, TypeError, OverflowError, AttributeError)
 
     def test_degrade_error_set_includes_polars_error(self) -> None:
         import polars.exceptions as pl_exc
 
         assert pl_exc.PolarsError in lrr._degrade_errors()
+
+
+# ---------------------------------------------------------------------------
+# foreign-crate API guard + metadata guard (review-round folds)
+# ---------------------------------------------------------------------------
+
+
+class TestCrateApiGuard:
+    @pytest.mark.parametrize("missing", sorted(lrr._CRATE_API))
+    def test_importable_module_missing_api_latches_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch, missing: str
+    ) -> None:
+        """A name-collision/hand-broken ``brutex_lake`` must fail CLOSED.
+
+        The review-round repro: a module that IMPORTS but lacks the API
+        previously escaped as a raw ``AttributeError`` into the pull spine
+        (the docstring's 'never a new crash class' contract violated).
+        """
+        crate = _fake_crate()
+        delattr(crate, missing)
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert out == PY_BYTES
+        assert lrr.rust_render_disabled()
+        disabled = [e for e in logs if e["event"] == "lake_rust_render.rust_path_disabled"]
+        assert len(disabled) == 1
+        assert disabled[0]["reason"] == "crate_unavailable"
+        assert missing in disabled[0]["error_detail"]
+
+    def test_non_callable_api_attr_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        crate = _fake_crate()
+        crate.render_parquet_from_ipc = "not-callable"  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, crate)
+        out = lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_python_render,
+            polars_version="1.42.1",
+        )
+        assert out == PY_BYTES
+        assert lrr.rust_render_disabled()
+
+    def test_empty_foreign_module_latches_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reviewer's exact repro: a bare ``types.ModuleType`` shadow."""
+        _install_crate(monkeypatch, types.ModuleType("brutex_lake"))
+        out = lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_python_render,
+            polars_version="1.42.1",
+        )
+        assert out == PY_BYTES
+        assert lrr.rust_render_disabled()
+
+
+class TestMetadataGuard:
+    def test_raising_pinned_version_latches_and_never_renders(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising metadata pyfunction previously ESCAPED (outside the try)."""
+        calls: list[bytes] = []
+
+        def _render(ipc: bytes) -> bytes:
+            calls.append(ipc)
+            return PY_BYTES
+
+        crate = _fake_crate(render=_render)
+
+        def _boom() -> str:
+            raise RuntimeError("stale/foreign crate metadata")
+
+        crate.pinned_polars_version = _boom  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert out == PY_BYTES
+        assert calls == []  # fail-closed BEFORE any render/IPC crossing
+        assert lrr.rust_render_disabled()
+        disabled = [e for e in logs if e["event"] == "lake_rust_render.rust_path_disabled"]
+        assert len(disabled) == 1
+        assert disabled[0]["reason"] == "crate_metadata_error"
+        assert disabled[0]["metadata_call"] == "pinned_polars_version"
+
+    def test_raising_linked_zstd_latches_and_serves_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reviewer's standalone repro: linked_zstd_version() raising ESCAPED."""
+        crate = _fake_crate(render=lambda ipc: b"rust-bytes-not-trusted")
+
+        def _boom() -> str:
+            raise RuntimeError("zstd probe broke")
+
+        crate.linked_zstd_version = _boom  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert out == PY_BYTES  # the foreign crate's bytes are NOT shipped
+        assert lrr.rust_render_disabled()
+        disabled = [e for e in logs if e["event"] == "lake_rust_render.rust_path_disabled"]
+        assert disabled and disabled[0]["reason"] == "crate_metadata_error"
+        assert disabled[0]["metadata_call"] == "linked_zstd_version"
+        # The engaged INFO must NOT have been emitted for the refused render.
+        assert not any(e["event"] == "lake_rust_render.engaged" for e in logs)
+
+    def test_none_returning_pinned_version_fails_the_version_guard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A literal-``None`` metadata VALUE is not the error sentinel — it
+        flows into the ``!=`` version guard and fails closed there, loudly."""
+        crate = _fake_crate()
+        crate.pinned_polars_version = lambda: None  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert out == PY_BYTES
+        disabled = [e for e in logs if e["event"] == "lake_rust_render.rust_path_disabled"]
+        assert disabled and disabled[0]["reason"] == "polars_version_mismatch"
+
+    def test_memory_error_from_metadata_propagates_bare(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate()
+
+        def _oom() -> str:
+            raise MemoryError
+
+        crate.pinned_polars_version = _oom  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, crate)
+        with pytest.raises(MemoryError):
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert not lrr.rust_render_disabled()  # OOM is a global stop, not a latch
+
+
+# ---------------------------------------------------------------------------
+# the BaseException / PanicException belt (review-round fold)
+# ---------------------------------------------------------------------------
+
+
+class _FakePanicException(BaseException):
+    """The ``pyo3_runtime.PanicException`` shape: BaseException, not Exception."""
+
+
+class TestPanicBelt:
+    def test_base_exception_from_the_render_latches_and_serves_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _panic(ipc: bytes) -> bytes:
+            raise _FakePanicException("polars worker panicked past catch_unwind")
+
+        _install_crate(monkeypatch, _fake_crate(render=_panic))
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+            again = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert out == PY_BYTES
+        assert again == PY_BYTES
+        assert lrr.rust_render_disabled()  # a broken boundary contract LATCHES
+        disabled = [e for e in logs if e["event"] == "lake_rust_render.rust_path_disabled"]
+        assert len(disabled) == 1
+        assert disabled[0]["reason"] == "crate_panic"
+
+    @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+    def test_interrupt_and_exit_re_raise_bare(
+        self, monkeypatch: pytest.MonkeyPatch, exc_type: type[BaseException]
+    ) -> None:
+        def _interrupt(ipc: bytes) -> bytes:
+            raise exc_type
+
+        _install_crate(monkeypatch, _fake_crate(render=_interrupt))
+        with pytest.raises(exc_type):
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert not lrr.rust_render_disabled()  # never swallowed into a latch
+
+
+# ---------------------------------------------------------------------------
+# the burn-in SHAPE gate (review-round fold)
+# ---------------------------------------------------------------------------
+
+
+class TestShapeGate:
+    def test_new_shape_after_spent_budget_is_byte_compared_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reviewer's scenario: 16 spot renders complete the count budget,
+        then the FIRST-EVER Greeks shape must still be byte-compared."""
+        oracle_calls: list[int] = []
+
+        def _oracle() -> bytes:
+            oracle_calls.append(1)
+            return PY_BYTES
+
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: PY_BYTES))
+        lrr.reset_lake_rust_render_for_tests(remaining=1)
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_oracle,
+            polars_version="1.42.1",
+            schema_token="spot-7col",
+        )
+        assert len(oracle_calls) == 1  # count-budget compare; budget now 0
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_oracle,
+            polars_version="1.42.1",
+            schema_token="greeks-17col",
+        )
+        assert len(oracle_calls) == 2  # NEW shape → compare despite spent budget
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_oracle,
+            polars_version="1.42.1",
+            schema_token="greeks-17col",
+        )
+        assert len(oracle_calls) == 2  # seen shape → steady state, no oracle
+        assert not lrr.rust_render_disabled()
+
+    def test_shape_compare_mismatch_autoreverts_with_the_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: b"WRONG"))
+        lrr.reset_lake_rust_render_for_tests(remaining=1)
+        # Burn the budget on a clean shape first.
+        clean = _fake_crate(render=lambda ipc: PY_BYTES)
+        _install_crate(monkeypatch, clean)
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_python_render,
+            polars_version="1.42.1",
+            schema_token="shape-a",
+        )
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: b"WRONG"))
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+                schema_token="shape-b",
+            )
+        assert out == PY_BYTES  # the ORACLE bytes ship on the shape compare too
+        assert lrr.rust_render_disabled()
+        errors = [e for e in logs if e["event"] == "lake_rust_render.render_autoreverted"]
+        assert errors and errors[0]["schema_token"] == "shape-b"
+
+    def test_none_token_degrades_to_the_count_budget_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        oracle_calls: list[int] = []
+
+        def _oracle() -> bytes:
+            oracle_calls.append(1)
+            return PY_BYTES
+
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: PY_BYTES))
+        lrr.reset_lake_rust_render_for_tests(remaining=1)
+        for _ in range(3):
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_oracle,
+                polars_version="1.42.1",
+            )
+        assert len(oracle_calls) == 1  # only the count-budget sample compared
+
+    def test_steady_state_reset_disarms_the_shape_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``remaining=0`` must mean CRATE bytes with no oracle in the path —
+        the parity corpus depends on it (an armed gate would cushion a
+        first-shape divergence)."""
+        lrr.reset_lake_rust_render_for_tests(remaining=0)
+
+        def _oracle_must_not_run() -> bytes:
+            raise AssertionError("steady state must not run the oracle")
+
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: b"rust-steady"))
+        out = lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_oracle_must_not_run,
+            polars_version="1.42.1",
+            schema_token="never-seen-shape",
+        )
+        assert out == b"rust-steady"
+
+
+# ---------------------------------------------------------------------------
+# thread-fuzz: the unlocked latch/counter/memo invariant (review-round fold)
+# ---------------------------------------------------------------------------
+
+
+class TestThreadFuzz:
+    def test_concurrent_renders_never_ship_a_wrong_byte(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """K threads × distinct frames, flag ON: every returned byte equals
+        that frame's oracle, and at least the full burn-in budget of
+        compares ran (the documented race can only LOSE decrements — extra
+        compares, never fewer, never a wrong byte)."""
+        import threading
+
+        def _render(ipc: bytes) -> bytes:
+            return b"rendered:" + ipc
+
+        _install_crate(monkeypatch, _fake_crate(render=_render))
+        oracle_calls: list[int] = []
+        results: dict[int, list[bytes]] = {}
+        errors: list[BaseException] = []
+        n_threads, per_thread = 8, 10
+
+        def _const(payload: bytes) -> Callable[[], bytes]:
+            return lambda: payload
+
+        def _oracle_for(payload: bytes) -> Callable[[], bytes]:
+            def _oracle() -> bytes:
+                oracle_calls.append(1)
+                return b"rendered:" + payload
+
+            return _oracle
+
+        def _worker(idx: int) -> None:
+            out: list[bytes] = []
+            try:
+                for j in range(per_thread):
+                    payload = f"frame-{idx}-{j}".encode()
+                    out.append(
+                        lrr.render_parquet_bytes(
+                            ipc_bytes_factory=_const(payload),
+                            python_render=_oracle_for(payload),
+                            polars_version="1.42.1",
+                            schema_token="fuzz-shape",
+                        )
+                    )
+            except BaseException as exc:  # deliberate — surfaced to the assert below
+                errors.append(exc)
+            results[idx] = out
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert not lrr.rust_render_disabled()  # no autorevert — all compares agreed
+        for idx in range(n_threads):
+            expected = [f"rendered:frame-{idx}-{j}".encode() for j in range(per_thread)]
+            assert results[idx] == expected  # every stored byte == that frame's oracle
+        total = n_threads * per_thread
+        assert lrr.BURN_IN_SAMPLES <= len(oracle_calls) <= total  # lost decrements only ADD
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +837,14 @@ class TestLatchAndReset:
     def test_reset_restores_a_fresh_process_view(self) -> None:
         lrr._disable("crate_unavailable")
         lrr._warn_once("render_error")
+        lrr._BURN_IN_SHAPES_SEEN.add("stale-shape")
         lrr.reset_lake_rust_render_for_tests()
         assert not lrr.rust_render_disabled()
         assert lrr._BURN_IN_REMAINING[0] == lrr.BURN_IN_SAMPLES
         assert set() == lrr._OBSERVABILITY_MEMO
+        assert set() == lrr._BURN_IN_SHAPES_SEEN
+        assert lrr._BURN_IN_SHAPE_GATE[0] is True  # armed on a fresh view
+
+    def test_reset_steady_state_disarms_the_shape_gate(self) -> None:
+        lrr.reset_lake_rust_render_for_tests(remaining=0)
+        assert lrr._BURN_IN_SHAPE_GATE[0] is False  # steady state — crate bytes, no oracle

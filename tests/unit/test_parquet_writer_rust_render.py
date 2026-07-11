@@ -173,6 +173,59 @@ class TestFlagOnGuards:
         assert excinfo.value.reason == "out_of_memory"
 
 
+class TestSchemaTokenWiring:
+    def test_seam_passes_the_frame_schema_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The production seam keys the burn-in SHAPE gate (review-round fold).
+
+        A ``None`` token would silently degrade the shape gate to the count
+        budget alone — the ONE production caller must pass the frame's
+        schema fingerprint.
+        """
+        captured: dict[str, object] = {}
+
+        def _capture(**kwargs: object) -> bytes:
+            captured.update(kwargs)
+            return b"routed"
+
+        monkeypatch.setattr(lrr, "render_parquet_bytes", _capture)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
+        assert ParquetWriter._render_bytes(_bars()) == b"routed"
+        token = captured["schema_token"]
+        assert isinstance(token, str) and token  # non-None, non-empty
+        assert "timestamp" in token  # the frame schema fingerprint, not a constant
+
+    def test_spot_and_greeks_frames_carry_distinct_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.models import FnoGreeksBar
+
+        tokens: list[object] = []
+
+        def _capture(**kwargs: object) -> bytes:
+            tokens.append(kwargs["schema_token"])
+            return b"routed"
+
+        monkeypatch.setattr(lrr, "render_parquet_bytes", _capture)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
+        spot = _bars()
+        greeks = [
+            FnoGreeksBar(
+                timestamp=b.timestamp,
+                open=b.open,
+                high=b.high,
+                low=b.low,
+                close=b.close,
+                volume=b.volume,
+                open_interest=b.open_interest,
+            )
+            for b in spot
+        ]
+        ParquetWriter._render_bytes(spot)
+        ParquetWriter._render_bytes(greeks)
+        assert len(tokens) == 2
+        assert tokens[0] != tokens[1]  # 7-col spot vs 17-col Greeks overlay
+
+
 class TestIpcHandoff:
     def test_ipc_bytes_round_trips_the_frame(self) -> None:
         import polars as pl

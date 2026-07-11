@@ -1885,6 +1885,12 @@ class ParquetWriter:
                     ipc_bytes_factory=lambda: _ipc_bytes(df),
                     python_render=_python_render,
                     polars_version=pl.__version__,
+                    # The burn-in SHAPE gate's key (review-round fold): every
+                    # distinct frame schema (7-col spot / 17-col Greeks
+                    # overlay) is byte-compared at least once before crate
+                    # bytes ship for it — the count budget alone would let a
+                    # spot-only burn-in license a first-ever Greeks shape.
+                    schema_token=str(df.schema),
                 )
             return _python_render()
 
@@ -1910,7 +1916,13 @@ def _ipc_bytes(df: pl.DataFrame) -> bytes:
     ``rechunk``s after the read so the memory layout matches the
     single-chunk frame this module builds from per-column lists).
     Uncompressed deliberately: the handoff must never introduce its own
-    compression variable into the byte-parity surface. Reached ONLY from the
+    compression variable into the byte-parity surface. MEMORY HONESTY: this
+    materialises a FULL uncompressed-IPC copy of the frame (≈ the frame's
+    in-RAM size, LARGER than the compressed parquet) that lives alongside
+    the source ``df``, the crate's re-decoded frame and the parquet
+    buffer(s) — the engaged render's transient peak is several× the frame
+    footprint (quantified in the runbook cost table,
+    docs/runbooks/lake-rust-render-lockstep.md §0). Reached ONLY from the
     flag-ON path inside :meth:`ParquetWriter._render_bytes`'s
     ``lake_write_guard`` block, so an allocation failure here maps to
     ``LakeWriteHalt`` like every other render allocation.

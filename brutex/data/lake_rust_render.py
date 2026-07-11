@@ -31,8 +31,13 @@ silently. (The same wheel-boundary reasoning is why
 1. **Import guard** — the crate is resolved lazily on first engaged render;
    an absent/broken ``brutex_lake`` install logs ONE
    ``lake_rust_render.crate_unavailable`` WARN and LATCHES the seam OFF for
-   the process. Every render (including the failed one) serves the Python
-   bytes.
+   the process. The resolved module's API surface is VERIFIED (all three
+   callables present — a name-collision / hand-broken ``brutex_lake`` that
+   imports but lacks the API latches the SAME ``crate_unavailable``, never
+   an ``AttributeError`` into the pull spine), and a metadata pyfunction
+   that RAISES latches ``crate_metadata_error`` (a foreign/stale install
+   must fail closed, not crash). Every render (including the failed one)
+   serves the Python bytes.
 2. **Version guard** — the installed ``polars.__version__`` must equal the
    crate's ``pinned_polars_version()``. Any difference logs ONE loud
    ``lake_rust_render.polars_version_mismatch`` WARN naming BOTH versions
@@ -48,7 +53,17 @@ silently. (The same wheel-boundary reasoning is why
    (``lake_rust_render.burn_in_complete``), Rust bytes ship directly. The
    pattern is the sweep-metrics kernel's burn-in verbatim
    (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 / DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001
-   — see ``brutex/engine/rust_metrics.py``).
+   — see ``brutex/engine/rust_metrics.py``), EXTENDED with a SCHEMA-SHAPE
+   gate: the count budget alone would let a process that burnt in on 16
+   spot partitions ship crate bytes for its FIRST-EVER Greeks-overlay
+   partition with zero byte witness, so the caller passes a
+   ``schema_token`` (the frame's column/dtype fingerprint) and every
+   DISTINCT shape is byte-compared at least once before crate bytes ship
+   for it — even after the count budget is spent. The production token
+   space is the writer's two schema shapes (7-column spot / 17-column
+   Greeks overlay — the overlay is all-or-nothing), so the seen-set is
+   bounded by construction; a ``None`` token honestly degrades that call
+   to the count budget alone.
 
 ## Log events (all literal — greppable)
 
@@ -56,7 +71,8 @@ silently. (The same wheel-boundary reasoning is why
   {``flag_unrecognised``, ``render_error``, ``render_result_refused``}) —
   the Python bytes served.
 * ``lake_rust_render.rust_path_disabled`` (WARN, once — ``reason`` ∈
-  {``crate_unavailable``, ``polars_version_mismatch``}) — the guard latch.
+  {``crate_unavailable``, ``crate_metadata_error``,
+  ``polars_version_mismatch``, ``crate_panic``}) — the guard latch.
 * ``lake_rust_render.render_autoreverted`` (ERROR, once) — the burn-in
   byte-compare mismatch; oracle bytes shipped, latch set.
 * ``lake_rust_render.engaged`` (INFO, once) — the first Rust-served render
@@ -65,13 +81,28 @@ silently. (The same wheel-boundary reasoning is why
 
 A Rust-path render error (crate ``ValueError``/``RuntimeError`` — including
 a crate-side panic, which the crate catches at the FFI boundary and maps to
-``RuntimeError`` — or a polars error from the IPC serialisation) degrades to
-the Python render with one ``lake_rust_render.render_error`` WARN per
-process: NEVER a new crash class — the Python oracle is always available.
-``MemoryError`` is NEVER caught here: it propagates into the caller's
-``lake_write_guard`` and maps to ``LakeWriteHalt`` exactly as on the pure
-Python path (DEC-LAKE-WRITE-HALT-001). ``LakeWriteHalt`` semantics are
-untouched — this seam sits strictly INSIDE the guarded render block.
+``RuntimeError`` — or a polars error from the IPC serialisation, or an
+``AttributeError`` from a broken crate internal) degrades to the Python
+render with one ``lake_rust_render.render_error`` WARN per process: NEVER a
+new crash class — the Python oracle is always available. Belt on top of the
+crate's own boundary: a ``BaseException`` that nonetheless escapes the crate
+(the ``pyo3_runtime.PanicException`` shape — a ``BaseException`` subclass no
+``except Exception`` sees) is caught HERE, latches ``crate_panic``, and
+serves the oracle — ``KeyboardInterrupt``/``SystemExit`` re-raise
+immediately (the ``errors.py`` escape-set doctrine).
+
+**OOM honesty (scoped precisely):** a PYTHON-SURFACED ``MemoryError``
+(the BytesIO/object-list allocations, the IPC handoff) is NEVER caught
+here: it propagates into the caller's ``lake_write_guard`` and maps to
+``LakeWriteHalt`` exactly as on the pure-Python path
+(DEC-LAKE-WRITE-HALT-001). A Rust-encoder-INTERNAL allocation failure is a
+DIFFERENT class and is NOT gracefully mapped on EITHER side: the wheel's
+own ``write_parquet`` is the same Rust polars and shares it (allocator
+abort, or a panic — which on the crate side maps to ``RuntimeError`` at the
+FFI boundary and degrades to the oracle; an allocator ABORT kills the
+process on both paths). The seam neither narrows nor widens that envelope.
+``LakeWriteHalt`` semantics are untouched — this seam sits strictly INSIDE
+the guarded render block.
 
 ## Honest envelope (Golden Rule #10)
 
@@ -79,19 +110,28 @@ untouched — this seam sits strictly INSIDE the guarded render block.
   (ADR-0019 §0): the crate links the SAME polars encoder the wheel already
   runs, and the engaged path additionally pays one uncompressed Arrow-IPC
   serialisation + one FFI crossing per render. MEASURED (2026-07-11
-  sandbox, median of 15, 100k-row corpus shape): IPC handoff ~6.6 ms +
+  sandbox, median of 15, 100k-row corpus shape — a spike-transcript
+  figure, no committed bench reproduces it; directional, and it DISCLOSES
+  a slowdown): IPC handoff ~6.6 ms +
   crate render ~12.5 ms ≈ 19 ms vs ~13 ms for the Python ``write_parquet``
   tail alone — the engaged encode tail is ~1.5× the Python one (~3% of the
   FULL ``_render_bytes`` wall, which the Python-side frame build
   dominates). The engaged path is strictly a small SLOWDOWN — the runbook's
-  cost table carries the numbers.
+  cost table carries the numbers, including the engaged path's transient
+  PEAK-MEMORY amplification (frame + uncompressed-IPC copy + the crate's
+  re-decoded frame + parquet buffer(s) — several× the frame's in-RAM
+  footprint; during burn-in BOTH engines' parquet buffers are live for the
+  compare) and the crate's SEPARATE rayon thread pool beside the wheel's.
 * The latches + warn-once memo are the same *documented exception* to the
   no-global-mutable-state rule as ``rust_metrics``'s: plain unlocked writes
   — a racing writer thread can at worst run a few extra burn-in compares or
   emit a duplicate warn, never a wrong byte (the compare ships oracle bytes
-  on ANY mismatch).
+  on ANY mismatch; thread-fuzz-pinned in the unit suite).
 * The burn-in doubles the render cost for its first 16 engaged renders per
-  process (bounded, amortised-nil).
+  process (bounded, amortised-nil) — and since the caller holds the
+  partition's cross-process flock around the render, those first renders
+  hold that flock ~2-3× longer (a concurrent process waiting on the SAME
+  partition waits with them; bounded to the burn-in window).
 * :func:`reset_lake_rust_render_for_tests` restores a fresh process view —
   test isolation only, never called from production paths.
 """
@@ -138,6 +178,26 @@ _DISABLED_REASON: Final[list[str | None]] = [None]
 
 #: Burn-in samples still to run this process (same documented exception).
 _BURN_IN_REMAINING: Final[list[int]] = [BURN_IN_SAMPLES]
+
+#: Schema-shape tokens already byte-compared this process (the shape gate —
+#: module docstring layer 3). Bounded by construction: the ONE production
+#: caller derives the token from the writer's frame schema, which has
+#: exactly two shapes (7-column spot / 17-column Greeks overlay).
+_BURN_IN_SHAPES_SEEN: Final[set[str]] = set()
+
+#: Whether the shape gate is armed. Always ``True`` in production; the test
+#: reset seam disarms it together with a zeroed count budget so
+#: ``remaining=0`` keeps meaning "steady state — crate bytes, no oracle".
+_BURN_IN_SHAPE_GATE: Final[list[bool]] = [True]
+
+#: The crate API surface the import guard verifies (layer 1) — a module that
+#: imports but lacks any of these is a foreign/broken install and latches
+#: ``crate_unavailable`` instead of raising ``AttributeError`` mid-render.
+_CRATE_API: Final[tuple[str, ...]] = (
+    "pinned_polars_version",
+    "render_parquet_from_ipc",
+    "linked_zstd_version",
+)
 
 #: Once-per-process-per-reason warn memo + the engaged-once latch. LOG-VOLUME
 #: state ONLY: rendered bytes never depend on it.
@@ -195,14 +255,20 @@ def rust_render_disabled() -> bool:
 
 
 def reset_lake_rust_render_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
-    """Reset the latch + burn-in budget + warn memo (test isolation ONLY).
+    """Reset the latch + burn-in budget + shape gate + warn memo (test isolation ONLY).
 
-    ``remaining=0`` puts the process in the post-burn-in steady state; the
-    default restores a fresh-process view. Never called from production
-    code paths (the ``rust_metrics`` reset-seam convention).
+    ``remaining=0`` puts the process in the post-burn-in steady state —
+    count budget spent AND the shape gate disarmed, so the returned bytes
+    are the crate's with no oracle in the path (the parity corpus depends
+    on that: an armed shape gate would cushion a first-shape divergence by
+    shipping oracle bytes). The default restores a fresh-process view
+    (budget full, shape gate armed, no shapes seen). Never called from
+    production code paths (the ``rust_metrics`` reset-seam convention).
     """
     _DISABLED_REASON[0] = None
     _BURN_IN_REMAINING[0] = remaining
+    _BURN_IN_SHAPES_SEEN.clear()
+    _BURN_IN_SHAPE_GATE[0] = remaining > 0
     _OBSERVABILITY_MEMO.clear()
 
 
@@ -245,10 +311,13 @@ def _resolve_crate() -> ModuleType | None:
     An absent wheel (``ImportError``) latches ``crate_unavailable`` — the
     facade is default-OFF and opt-in, so an operator who set the flag
     without installing the crate gets ONE loud WARN naming the remedy, and
-    every render serves the Python bytes.
+    every render serves the Python bytes. A module that IMPORTS but lacks
+    any :data:`_CRATE_API` callable (a name collision / hand-broken
+    install) latches the SAME reason — the fail-closed contract is "never a
+    new crash class", so an ``AttributeError`` must never leave this seam.
     """
     try:
-        return importlib.import_module("brutex_lake")
+        crate = importlib.import_module("brutex_lake")
     except ImportError as exc:
         _disable(
             "crate_unavailable",
@@ -256,6 +325,44 @@ def _resolve_crate() -> ModuleType | None:
             remedy="pip install rust/brutex-lake (see docs/runbooks/lake-rust-render-lockstep.md)",
         )
         return None
+    for name in _CRATE_API:
+        if not callable(getattr(crate, name, None)):
+            _disable(
+                "crate_unavailable",
+                error_detail=f"brutex_lake.{name} missing or not callable — foreign/broken install",
+                remedy="pip install rust/brutex-lake (see docs/runbooks/lake-rust-render-lockstep.md)",
+            )
+            return None
+    return crate
+
+
+#: Sentinel for "the metadata call raised" — distinct from any value a
+#: foreign crate could RETURN (even ``None``, which flows on into the
+#: version guard's ``!=`` and fails closed there, loudly).
+_METADATA_ERROR: Final[object] = object()
+
+
+def _crate_metadata(crate: ModuleType, attr: str) -> object:
+    """Call a crate metadata pyfunction defensively; latch OFF on ANY raise.
+
+    A metadata call (``pinned_polars_version`` / ``linked_zstd_version``)
+    that raises marks a foreign/stale install whose bytes must not be
+    trusted — latch ``crate_metadata_error`` (→ :data:`_METADATA_ERROR`)
+    and let the caller serve the oracle, identically to
+    ``crate_unavailable`` (fail-closed, never a new crash class).
+    ``MemoryError`` re-raises bare: OOM stays a global stop riding
+    ``lake_write_guard`` → ``LakeWriteHalt``. Returns the raw value
+    un-typechecked: a non-str ``pinned_polars_version`` simply fails the
+    ``!=`` version guard (fail-closed already), and the zstd fingerprint is
+    log-only.
+    """
+    try:
+        return getattr(crate, attr)()
+    except MemoryError:
+        raise
+    except Exception as exc:
+        _disable("crate_metadata_error", metadata_call=attr, error_detail=repr(exc))
+        return _METADATA_ERROR
 
 
 def _degrade_errors() -> tuple[type[Exception], ...]:
@@ -264,8 +371,11 @@ def _degrade_errors() -> tuple[type[Exception], ...]:
     ``ValueError``/``RuntimeError`` are the crate's declared FFI error
     surface (a crate-side panic is caught at the FFI boundary and mapped to
     ``RuntimeError`` — never a ``pyo3_runtime.PanicException``, which is a
-    ``BaseException`` that would escape any ``Exception`` catch);
+    ``BaseException`` that would escape any ``Exception`` catch; the render
+    call carries its own ``BaseException`` belt for exactly that shape);
     ``TypeError``/``OverflowError`` are PyO3 argument-conversion failures;
+    ``AttributeError`` is the broken-crate-internals defensive belt (the
+    import guard already refuses a module MISSING the API);
     ``PolarsError`` covers the IPC serialisation leg
     (``DataFrame.write_ipc``). Resolved lazily so this leaf keeps zero
     module-import-time engine deps; in practice polars is always already
@@ -274,7 +384,13 @@ def _degrade_errors() -> tuple[type[Exception], ...]:
     absent: OOM propagates into ``lake_write_guard`` → ``LakeWriteHalt``,
     identical to the pure-Python path.
     """
-    base: tuple[type[Exception], ...] = (ValueError, RuntimeError, TypeError, OverflowError)
+    base: tuple[type[Exception], ...] = (
+        ValueError,
+        RuntimeError,
+        TypeError,
+        OverflowError,
+        AttributeError,
+    )
     try:
         import polars.exceptions as _pl_exc
     except ImportError:
@@ -287,6 +403,7 @@ def render_parquet_bytes(
     ipc_bytes_factory: Callable[[], bytes],
     python_render: Callable[[], bytes],
     polars_version: str,
+    schema_token: str | None = None,
 ) -> bytes:
     """The routed render — called by ``_render_bytes`` ONLY when the flag is ON.
 
@@ -310,13 +427,21 @@ def render_parquet_bytes(
     polars_version
         The installed ``polars.__version__`` (the caller already imported
         polars; passed in so this leaf never imports it at module scope).
+    schema_token
+        The frame's column/dtype fingerprint (the production caller passes
+        ``str(df.schema)``) — keys the burn-in SHAPE gate so every distinct
+        schema shape is byte-compared at least once before crate bytes
+        ship for it. ``None`` honestly degrades this call to the count
+        budget alone (module docstring layer 3).
     """
     if rust_render_disabled():
         return python_render()
     crate = _resolve_crate()
     if crate is None:
         return python_render()
-    pinned = crate.pinned_polars_version()
+    pinned = _crate_metadata(crate, "pinned_polars_version")
+    if pinned is _METADATA_ERROR:
+        return python_render()
     if pinned != polars_version:
         # Layer 2 — the version guard (ADR-0019 §7 hazard 1): fail-closed,
         # ONE loud WARN naming BOTH versions, never silently different bytes.
@@ -333,6 +458,19 @@ def render_parquet_bytes(
     except _degrade_errors() as exc:
         _warn_once("render_error", error_detail=repr(exc))
         return python_render()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        # The escape set (the errors.py doctrine): operator interrupt /
+        # interpreter shutdown / OOM stay global — OOM in particular must
+        # reach lake_write_guard → LakeWriteHalt, never a fallback.
+        raise
+    except BaseException as exc:  # deliberate — the PanicException belt (below)
+        # Belt over the crate's own catch_unwind: a `pyo3_runtime.
+        # PanicException` is a BaseException subclass that no `except
+        # Exception` sees — if one nonetheless escapes the crate boundary,
+        # the crate's contract is broken; latch OFF and serve the oracle
+        # (fail-closed, never a new crash class into the pull spine).
+        _disable("crate_panic", error_detail=repr(exc))
+        return python_render()
     if not isinstance(rust_bytes, bytes):
         # Refuse-poison gate (the `rust_metrics._valid_drawdown` stance): a
         # non-bytes return is a crate BUG — never persisted, served loudly
@@ -341,16 +479,27 @@ def render_parquet_bytes(
         _warn_once("render_result_refused", result_type=type(rust_bytes).__name__)
         return python_render()
     if _ENGAGED_KEY not in _OBSERVABILITY_MEMO:
+        linked_zstd = _crate_metadata(crate, "linked_zstd_version")
+        if linked_zstd is _METADATA_ERROR:
+            # A raising metadata pyfunction marks a foreign/stale install —
+            # its bytes are not trusted either (fail-closed; latched above).
+            return python_render()
         _OBSERVABILITY_MEMO.add(_ENGAGED_KEY)
         _LOG.info(
             "lake_rust_render.engaged",
             crate_pinned_polars=pinned,
-            linked_zstd=crate.linked_zstd_version(),
+            linked_zstd=linked_zstd,
         )
-    if _BURN_IN_REMAINING[0] > 0:
-        # Layer 3 — burn-in self-check (the #1531/#1532 pattern): both
-        # engines render; ANY byte difference ships the ORACLE bytes and
-        # autoreverts the Rust path for the process.
+    shape_unseen = (
+        _BURN_IN_SHAPE_GATE[0]
+        and schema_token is not None
+        and schema_token not in _BURN_IN_SHAPES_SEEN
+    )
+    if _BURN_IN_REMAINING[0] > 0 or shape_unseen:
+        # Layer 3 — burn-in self-check (the #1531/#1532 pattern, plus the
+        # shape gate — module docstring): both engines render; ANY byte
+        # difference ships the ORACLE bytes and autoreverts the Rust path
+        # for the process.
         oracle_bytes = python_render()
         if rust_bytes != oracle_bytes:
             _disable(
@@ -358,11 +507,15 @@ def render_parquet_bytes(
                 error=True,
                 rust_len=len(rust_bytes),
                 python_len=len(oracle_bytes),
+                schema_token=schema_token,
             )
             return oracle_bytes
-        _BURN_IN_REMAINING[0] -= 1
-        if _BURN_IN_REMAINING[0] == 0:
-            _LOG.info("lake_rust_render.burn_in_complete", samples=BURN_IN_SAMPLES)
+        if schema_token is not None:
+            _BURN_IN_SHAPES_SEEN.add(schema_token)
+        if _BURN_IN_REMAINING[0] > 0:
+            _BURN_IN_REMAINING[0] -= 1
+            if _BURN_IN_REMAINING[0] == 0:
+                _LOG.info("lake_rust_render.burn_in_complete", samples=BURN_IN_SAMPLES)
         return rust_bytes
     return rust_bytes
 
