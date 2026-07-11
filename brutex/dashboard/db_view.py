@@ -1336,6 +1336,18 @@ def _execute_parquet_resilient(
     (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix; Golden Rule #1 — never a fabricated number).
     The fast (no-error) path never touches *skip_sink*.
 
+    *files* (optional, DEC-DB-LATENCY-HARDENING-001): an explicit BOUNDED candidate
+    file list (POSIX paths under *directory*) bound to the source ``?`` instead of
+    the whole ``/**/*.parquet`` glob — the caller has proven (byte-parity pinned per
+    caller) that only these files can hold rows the query can match, so DuckDB opens
+    O(candidates) Parquet footers per statement instead of O(all stored months).
+    ``None`` (the default) keeps the whole-glob read byte-identical; an EMPTY list
+    short-circuits to ``[]`` with ZERO queries (no candidate file ⇒ no matchable
+    row). The degraded corrupt-skip path probes ONLY the bounded candidates (a
+    corrupt file OUTSIDE them provably cannot hold a matchable row, so it neither
+    trips the probe nor the *skip_sink* adjacency guard — a strictly-narrower
+    degrade blast radius, named in MIGRATION.md #1719).
+
     The skip set is the COMMON :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`
     (``duckdb.Error`` covers a corrupt ``read_parquet``; ``OSError`` covers a file-level
     fault). ``duckdb.Error`` is deliberately BROAD (DuckDB exposes no version-stable
@@ -1368,6 +1380,8 @@ def _execute_parquet_resilient(
     list). The degraded probe path probes exactly the pruned set.
     """
     if files is not None and not files:
+        # A bounded read with ZERO candidate files: no matchable row can exist —
+        # the whole-glob read would return the same [] after opening every footer.
         return []
     source_bind: Any = list(files) if files is not None else directory.as_posix() + "/**/*.parquet"
     try:
@@ -4037,13 +4051,17 @@ def _intraday_last_close_with_predecessor(
     hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
     skip_source = f"candle-prevclose:{exchange}/{segment}/{symbol}"
     # ADJACENCY GUARD (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix): the prior-day-close baseline
-    # is ONLY valid if the partition read in full — `_prev_trading_close` maps each page
-    # date to its IMMEDIATE predecessor, and the predecessor read (#2 below) finds "the
-    # bar just before `lo`". If ANY file in this 1-minute partition was skipped (corrupt),
-    # the true adjacent predecessor may have lived in the dropped file, so any %-change we
+    # is ONLY valid if every CANDIDATE file read cleanly — `_prev_trading_close` maps each
+    # page date to its IMMEDIATE predecessor, and the predecessor read (#2 below) finds
+    # "the bar just before `lo`". If a bounded-candidate file was skipped (corrupt), the
+    # true adjacent predecessor may have lived in the dropped file, so any %-change we
     # computed would be baselined on a NON-ADJACENT earlier day — a confidently-WRONG
-    # number. So we record whether either read omitted a file and, if so, return {} → every
-    # affected bar gets an honest BLANK %-change, never a fabricated one (Golden Rule #1).
+    # number. So we record whether either read omitted a candidate and, if so, return {} →
+    # every affected bar gets an honest BLANK %-change, never a fabricated one (Golden
+    # Rule #1). A corrupt file OUTSIDE the pruned candidate lists provably cannot hold
+    # the span's bars or the true predecessor (`_bars_file_windows`'s window bounds —
+    # DEC-DB-BASELINE-MANIFEST-ROUTE-001 #1670 / DEC-DB-LATENCY-HARDENING-001 #1719),
+    # so it no longer blanks the page (the named strictly-narrower degrade).
     skip_sink: list[bool] = []
     # File-list pruning (DEC-DB-BASELINE-MANIFEST-ROUTE-001): bind ONLY the
     # files whose windows can hold the read's rows; None ⇒ the legacy
@@ -4190,8 +4208,47 @@ def _daily_close_by_date(
     return {_bar_ist_date(ts): _to_decimal(close) for ts, close in rows}
 
 
+def _existing_month_files_in_span(base: Path, start: date, end: date) -> list[str]:
+    """The EXISTING ``<base>/<yyyy>/<mm>.parquet`` files that can hold a bar whose
+    IST date falls in the INCLUSIVE ``[start, end]`` span — pure enumeration.
+
+    DEC-DB-LATENCY-HARDENING-001: the file-list bound for the span-scoped readers.
+    The candidate months follow the ±1-calendar-day pad law of
+    ``spot_daily_resample.ist_span_partition_months`` (a bar's UTC partition month
+    can differ from its IST date's month by at most the 05:30 offset — the pad can
+    only ever ADD the immediately-adjacent month, never drop a matchable file),
+    saturating at the ``date`` domain edges so a degenerate 0001/9999 span simply
+    keeps everything (never an ``OverflowError``). Enumerated from the EXISTING
+    tree — honestly a SECOND full rglob BESIDE the readers' own ``any(...)``
+    presence-guard listing (immaterial next to the O(all-months) Parquet
+    footer opens it removes, but a real added directory walk, stated) — each
+    rel parsed by the SAME ASCII month grammar the stats
+    manifest pins (:func:`~brutex.data.lake_stats_manifest.parse_rel_month`,
+    ``KIND_BARS``); a NON-grammar file (a stray out-of-band parquet whose month is
+    unknowable) is conservatively KEPT so the bounded read can never exclude a file
+    the whole-glob read would have seen (byte-parity, Golden Rule #1). O(existing
+    files) listing per call — this bounds the DuckDB FOOTER OPENS per statement to
+    O(span months), NOT the directory listing (stated, never O(1)).
+    """
+    lo = (start - timedelta(days=1)) if start > date.min else start
+    hi = (end + timedelta(days=1)) if end < date.max else end
+    lo_key, hi_key = (lo.year, lo.month), (hi.year, hi.month)
+    keep: list[str] = []
+    for path in sorted(base.rglob("*.parquet")):
+        parsed = parse_rel_month(KIND_BARS, f"{path.parent.name}/{path.name}")
+        if parsed is None or lo_key <= parsed <= hi_key:
+            keep.append(path.as_posix())
+    return keep
+
+
 def _daily_open_by_date(
-    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    span: tuple[date, date] | None = None,
 ) -> dict[date, Decimal]:
     """Read the symbol's 1-DAY official open per IST date → ``{ist_date: open}``.
 
@@ -4200,6 +4257,15 @@ def _daily_open_by_date(
     the pre-open report (DEC-PREOPEN-REPORT-1DAY-001), on the SAME 1-day basis as
     the report's previous close so the two never mix price scales. Reads the
     1-day partition keyed by :func:`_bar_ist_date`; ``{}`` when absent.
+
+    *span* (DEC-DB-LATENCY-HARDENING-001): the report's own INCLUSIVE
+    ``[start, end]`` IST date range. When given, the read binds ONLY the
+    existing month files that can hold an in-span bar
+    (:func:`_existing_month_files_in_span` — O(span months) DuckDB footer opens
+    per click instead of O(all stored months)); the consumer
+    (``build_preopen_rows``) uses ONLY in-span days of this map, so the bounded
+    map is byte-identical for every consumed key (parity-pinned). ``None`` (the
+    default) keeps the whole-partition read byte-identical.
     """
     _validate_candle_coords(exchange, segment, symbol, _DAILY_INTERVAL)
     base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
@@ -4213,12 +4279,19 @@ def _daily_open_by_date(
         'SELECT "timestamp", open FROM read_parquet(?, union_by_name=true)',
         [],
         source=f"candle-dayopen:{exchange}/{segment}/{symbol}",
+        files=None if span is None else _existing_month_files_in_span(base, span[0], span[1]),
     )
     return {_bar_ist_date(ts): _to_decimal(open_) for ts, open_ in rows}
 
 
 def _intraday_open_by_date(
-    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    span: tuple[date, date] | None = None,
 ) -> dict[date, Decimal]:
     """Read the symbol's 09:15 IST session-open 1-minute OPEN per day → ``{ist_date: open}``.
 
@@ -4236,6 +4309,13 @@ def _intraday_open_by_date(
     session ``TimeZone`` and would roll a session bar back one calendar day on a
     negative-offset host — DEC-SPOT-SESSION-DAYS-IST-TZ-001), matching
     :func:`_bar_ist_date`. ``{}`` when the symbol has no 1-minute partition.
+
+    *span* (DEC-DB-LATENCY-HARDENING-001): the report's own INCLUSIVE
+    ``[start, end]`` IST date range — the exact bound-law + parity contract of
+    :func:`_daily_open_by_date` (the profiling evidence measured the minute
+    basis binding EVERY 1-minute month file of EVERY symbol — 616 files per
+    export click at 103 symbols — where a 3-week report needs ~1–2 per symbol).
+    ``None`` (the default) keeps the whole-partition read byte-identical.
     """
     _validate_candle_coords(exchange, segment, symbol, _INTRADAY_BASE_INTERVAL)
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
@@ -4252,6 +4332,7 @@ def _intraday_open_by_date(
         "FROM read_parquet(?, union_by_name=true) GROUP BY d",
         [],
         source=f"candle-dayopen-min:{exchange}/{segment}/{symbol}",
+        files=None if span is None else _existing_month_files_in_span(base, span[0], span[1]),
     )
     return {day: _to_decimal(first_open) for day, first_open in rows}
 
@@ -5549,6 +5630,18 @@ def make_window_payload_caches(
 #: ``window_ledger_store`` edge — CodeQL ``py/cyclic-import``).
 _LEDGER_DELTAS_DIRNAME: Final[str] = "deltas"
 
+#: The ledger table's directory + filename under the lake root
+#: (DEC-DB-LATENCY-HARDENING-001). MUST equal
+#: ``window_ledger_store.LEDGER_DIRNAME`` / ``LEDGER_FILENAME`` — pinned by
+#: test, not imported (the :data:`_LEDGER_DELTAS_DIRNAME` precedent + the
+#: ``phase_progress_payload`` no-import-edge law): even a FUNCTION-local
+#: ``window_ledger_store`` import participates in the
+#: ``window_ledger_store → coverage_reconcile → db_view`` cycle CodeQL
+#: ``py/cyclic-import`` flags, so the new fast path derives the path from
+#: these constants instead of importing ``ledger_path``.
+_LEDGER_TABLE_DIRNAME: Final[str] = "window_ledger"
+_LEDGER_TABLE_FILENAME: Final[str] = "ledger.parquet"
+
 
 def _ledger_delta_files(ledger_file: Path) -> tuple[Path, ...]:
     """The pending ledger delta Parquets, in append (filename) order — ``()`` if none.
@@ -6143,6 +6236,280 @@ def _window_counts_since(
         [*source.params, since_iso],
     )
     return _fold_status_counts(cursor.fetchall())
+
+
+#: The canonical 16-column ledger row projection, in ``LedgerRowTuple`` order
+#: (DEC-DB-LATENCY-HARDENING-001). MUST equal ``window_ledger_store._COLUMNS``
+#: — pinned by test, not imported (the :data:`_WINDOW_KEY_COLUMNS` precedent:
+#: this module deliberately carries no module-level ``window_ledger_store``
+#: edge — CodeQL ``py/cyclic-import``).
+_LEDGER_ROW_COLUMNS: Final[tuple[str, ...]] = (
+    *_WINDOW_KEY_COLUMNS,
+    "status",
+    "bars",
+    "attempts",
+    "last_error",
+    "first_seen_at",
+    "last_attempt_at",
+    "empty_streak",
+    "in_pull_fetches",
+    "bars_net_new",
+    "empty_retries",
+    "transient_retries",
+)
+
+
+def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
+    """Coerce ONE DuckDB ledger page row to the canonical ``LedgerRowTuple`` shape.
+
+    DEC-DB-LATENCY-HARDENING-001: the EXACT per-cell coercion the legacy Python
+    parse applies (``window_ledger_store._rows_to_records`` — ``str``/``int`` on
+    the required cells, ``None``-passthrough on the optional trio), so the fast
+    path's tuples are byte-equal to :func:`window_ledger_rows_cached`'s. A
+    ``None`` in ANY column the legacy parse either requires or DERIVES
+    (``empty_streak`` / ``in_pull_fetches`` carry legacy per-row derivation
+    rules this projection deliberately does not duplicate) raises ``ValueError``
+    so :func:`query_window_ledger_page` defers the WHOLE request to the
+    byte-identical legacy parse — never a divergent cell (Golden Rule #1).
+    """
+    (
+        market,
+        security_id,
+        interval,
+        window_start,
+        window_end,
+        status,
+        bars,
+        attempts,
+        last_error,
+        first_seen_at,
+        last_attempt_at,
+        empty_streak,
+        in_pull_fetches,
+        bars_net_new,
+        empty_retries,
+        transient_retries,
+    ) = raw
+    required = (
+        market,
+        security_id,
+        interval,
+        window_start,
+        window_end,
+        status,
+        bars,
+        attempts,
+        first_seen_at,
+        empty_streak,
+        in_pull_fetches,
+    )
+    if any(cell is None for cell in required):
+        raise ValueError(
+            "window-ledger fast path: NULL in a required/derivable column — "
+            "defer to the legacy Python parse"
+        )
+    return (
+        str(market),
+        str(security_id),
+        str(interval),
+        str(window_start),
+        str(window_end),
+        str(status),
+        int(bars),
+        int(attempts),
+        None if last_error is None else str(last_error),
+        str(first_seen_at),
+        None if last_attempt_at is None else str(last_attempt_at),
+        int(empty_streak),
+        int(in_pull_fetches),
+        None if bars_net_new is None else int(bars_net_new),
+        None if empty_retries is None else int(empty_retries),
+        None if transient_retries is None else int(transient_retries),
+    )
+
+
+def query_window_ledger_page(
+    conn: Any,
+    lake_root: Path,
+    *,
+    limit: int,
+    offset: int,
+    count_cache: WindowCountsCache | None = None,
+    page_cache: WindowCountsCache | None = None,
+    retry_sleep: Callable[[float], None] | None = None,
+) -> tuple[tuple[tuple[Any, ...], ...], int]:
+    """ONE ``/db`` window-ledger page + the real total — DuckDB-first, legacy-safe.
+
+    DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md #1719): the ``/api/v1/db/window-ledger``
+    route previously served a 100-row page by paying ONE full
+    ``load_window_ledger`` Python parse per ledger stamp move (measured
+    7,177.5 ms of a 7,628 ms request at 400k rows — and the stamp moves
+    repeatedly MID-PULL, so the "first read per stamp" cost recurred every few
+    seconds). The page is now a DuckDB ``LIMIT``/``OFFSET`` projection over the
+    SAME assembled :func:`_ledger_scan_source` the ``/coverage/windows`` fast
+    paths scan (steady state = the bare ``read_parquet(?)`` literal; mid-pull =
+    the :func:`~brutex.data.lake_read.dedup_latest_source_sql` latest-wins
+    base+delta fold — provably the ``load_window_ledger`` fold), ordered by the
+    5-part window key exactly as :meth:`WindowLedger.records` sorts (DuckDB's
+    binary VARCHAR collation == Python's code-point ``str`` order over the
+    UTF-8 key columns; a NULL in a KEY column would diverge — DuckDB orders
+    NULLS LAST while the legacy parse coerces ``str(None)`` and sorts it
+    lexicographically — but that shape is writer-UNREACHABLE today: the key
+    columns are ``pa.string()`` cells rendered from non-null ``WindowKey``
+    fields, and a page CONTAINING such a row defers via the NULL-cell guard
+    anyway), with the total from ONE ``COUNT(*)`` over the fold.
+    Both are memoised on the injected caches (``wledger-total|…`` /
+    ``wledger-page|…`` key families) at the composite-stamp-token generation —
+    a repeat click within one ledger stamp is an O(1) handoff.
+
+    BYTE-PARITY + degrade law (the fast-equals-legacy pin,
+    ``tests/unit/test_dashboard_db_view_window_ledger_page.py``): the projected
+    tuples are cell-for-cell equal to ``window_ledger_rows_cached``'s slice. A
+    shape the legacy parse handles with DERIVATION rules this query cannot
+    reproduce — a legacy pre-R1 base missing any of the 5 optional columns
+    (probed via one metadata-only ``LIMIT 0`` describe over the BASE file, the
+    :func:`_build_window_payload_duckdb` precedent), or a NULL in a
+    required/derivable cell — defers the WHOLE request to the byte-identical
+    legacy path. A transient ``duckdb.Error`` (the torn-read replace race)
+    retries ONCE after :data:`_DUCKDB_RETRY_DELAY_S`; a second failure (e.g. a
+    persistently malformed delta, which the multi-file SQL read cannot skip
+    file-granularly but ``load_window_ledger`` can) degrades to the legacy
+    parse too — never a 500, never a divergent row. ``conn=None`` (no DuckDB
+    connection wired) is the legacy path outright.
+
+    HONEST envelope (Golden Rule #10): the page render is O(page) but each
+    FRESH-stamp query is ONE O(total physical rows + pending delta footers)
+    columnar scan (the ``query_candles`` envelope — NOT literal O(page); true
+    O(page) needs a write-time row manifest, NOT claimed); what this fix
+    removes is the O(rows) PYTHON record fold + full-tuple projection per
+    stamp (the measured 7.2–8.8 s term), replaced by the columnar scan the
+    coverage paths already pay. Repeat clicks within a stamp are O(1) hits.
+    """
+    # Path derived from the pinned module-local constants — deliberately NO
+    # ``window_ledger_store`` import, not even function-local: the lazy import
+    # still participates in the ``window_ledger_store → coverage_reconcile →
+    # db_view`` cycle CodeQL ``py/cyclic-import`` flags (the
+    # ``phase_progress_payload`` no-import-edge precedent).
+    path = lake_root / _LEDGER_TABLE_DIRNAME / _LEDGER_TABLE_FILENAME
+    if not path.is_file() and not _ledger_delta_files(path):
+        return (), 0
+
+    def _fast() -> tuple[tuple[tuple[Any, ...], ...], int]:
+        """One fast-path attempt — re-assembles the scan source per attempt."""
+        # Re-assembled per attempt (fresh delta listing), so the retry below
+        # self-heals the save-time flock prune race (DEC-LEDGER-DELTA-O-PAGE-001).
+        source = _ledger_scan_source(path)
+        ledger_glob = path.as_posix()
+        probed = False
+
+        def _ensure_full_schema() -> None:
+            """Legacy-shape probe — LAZY, so a warm (fully-cached) click runs
+            ZERO SQL. The _build_window_payload_duckdb precedent, but STRICTER:
+            the /db grid projects ALL 16 columns, so ANY absent optional column
+            defers to the legacy parse, whose per-row derivation rules this
+            query deliberately does not duplicate. Metadata-only LIMIT 0
+            describe over the BASE file ONLY — never the union_by_name'd delta
+            list, whose NULL-fill would mask a legacy base's missing columns.
+            Base-ABSENT (a first pull's delta-only checkpoint) skips it: every
+            delta is written by `append_ledger_delta` with the full current
+            schema (writer-pinned). Run at most once per fresh attempt."""
+            nonlocal probed
+            if probed or not path.is_file():
+                return
+            available = {
+                str(col[0])
+                for col in (
+                    conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
+                    or []
+                )
+            }
+            if not set(_LEDGER_ROW_COLUMNS).issubset(available):
+                raise ValueError("legacy-shape ledger Parquet — defer to the Python parse path")
+            probed = True
+
+        generation = revision_generation(source.stamp_token)
+        select_sql = ", ".join(f'"{name}"' for name in _LEDGER_ROW_COLUMNS)
+        order_sql = ", ".join(f'"{name}"' for name in _WINDOW_KEY_COLUMNS)
+
+        def _total() -> int:
+            _ensure_full_schema()
+            # COUNT(*) over the fold = the number of DISTINCT window keys (the
+            # QUALIFY keeps exactly one row per key; a steady-state base holds
+            # unique keys by construction — save writes the folded to_rows()).
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
+                list(source.params),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+        def _page() -> tuple[tuple[Any, ...], ...]:
+            _ensure_full_schema()
+            # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
+            # source params bind FIRST (the subquery precedes them in the text).
+            cursor = conn.execute(
+                f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
+                f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
+                [*source.params, limit, offset],
+            )
+            return tuple(_ledger_page_row(raw) for raw in cursor.fetchall())
+
+        if count_cache is None:
+            total = _total()
+        else:
+            total = count_cache.get_or_compute(
+                f"wledger-total|{ledger_glob}", generation=generation, compute=_total
+            )
+        if page_cache is None:
+            rows = _page()
+        else:
+            # The page key folds (limit, offset) via one tuple repr (the
+            # window-page precedent — unambiguous, no bare `|` joins).
+            rows = page_cache.get_or_compute(
+                f"wledger-page|{ledger_glob}|{(limit, offset)!r}",
+                generation=generation,
+                compute=_page,
+            )
+        return rows, total
+
+    if conn is not None:
+        try:
+            return _fast()
+        except ValueError as exc:
+            # Legacy shape / NULL-in-derivable-cell — the legacy parse owns the
+            # derivation rules; defer the whole request (byte-identical output).
+            _LOG.warning(
+                "window_ledger_page.fallback",
+                fallback="legacy_shape",
+                error=str(exc),
+                **_ledger_stat_fields(path),
+            )
+        except duckdb.Error as exc:
+            # Torn read (reader-side multi-open race vs the atomic writer) —
+            # retry ONCE, then degrade to the legacy parse (which skips a
+            # persistently malformed delta file-granularly).
+            _LOG.warning(
+                "window_ledger_page.duckdb_retry",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **_ledger_stat_fields(path),
+            )
+            sleeper = _default_sleep if retry_sleep is None else retry_sleep
+            sleeper(_DUCKDB_RETRY_DELAY_S)
+            try:
+                return _fast()
+            except (duckdb.Error, ValueError) as exc2:
+                _LOG.warning(
+                    "window_ledger_page.duckdb_fallback",
+                    fallback="rows",
+                    error=str(exc2),
+                    error_type=type(exc2).__name__,
+                    **_ledger_stat_fields(path),
+                )
+    # LEGACY degrade — byte-identical to the pre-fix route: the stamp-cached
+    # full-tuple projection, sliced O(page). Serves the no-conn caller, the
+    # legacy-shape ledger, and the double-failure torn-read/bad-delta arm.
+    all_rows = window_ledger_rows_cached(lake_root)
+    return all_rows[offset : offset + limit], len(all_rows)
 
 
 #: The three window-phase buckets, in pull order (spot → futures → options), the
