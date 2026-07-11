@@ -478,6 +478,48 @@ class TestChargePathViaSyntheticCitedFixture:
         assert out.slippage_paisa == 2 * TICK_PAISA * 500
         assert out.lot_size_basis == "trade_date"
 
+    def test_charge_path_zerodha_flat_brokerage_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # [DEC-EXEC-RUST-CORE-001] the Zerodha (flat-only, NO turnover-min)
+        # brokerage arm through the FULL stack — no zerodha full-stack test
+        # existed before the charge-stack extraction. Small notionals chosen
+        # so the arms genuinely diverge: the Groww turnover arm would price
+        # each leg at ~3 paisa (min binds on the turnover side), while
+        # Zerodha stays flat ₹20/leg. Hand-recomputed: RELIANCE long
+        # ₹100.00 → ₹110.00, lot 1, entry 2025-01-02 (STT 0.02% VERIFIED;
+        # ETC 173 / IPFT 10 / stamp 200 SYNTHETIC):
+        #   buy_fill 10,005 · sell_fill 10,995 · n_shares 1 · gross 990
+        #   brokerage: 2,000 + 2,000 = 4,000 (flat — never min()'d)
+        #   STT: 10,995×2,000//1e7 = 2 → rupee-round → 0
+        #   ETC: round(10,005×173/1e7)=0 + round(10,995×173/1e7)=0 = 0
+        #   SEBI: 0 + 0 = 0 · IPFT: 0 + 0 = 0
+        #   stamp: 10,005×200//1e7 = 0 → 0
+        #   GST: 18% × 4,000 = 720 → rupee-round → 700
+        #   total = 4,700 · net = 990 − 4,700 = −3,710
+        monkeypatch.setitem(fc._ETC_FUTURES_REGIMES_BY_EXCHANGE, "NSE", _SYNTH_ETC)
+        monkeypatch.setattr(fc, "_NSE_IPFT_FUTURES_REGIMES", _SYNTH_IPFT)
+        monkeypatch.setattr(fc, "_STAMP_FUTURES_REGIMES", _SYNTH_STAMP)
+        out = compute_futures_trade_cost(
+            _trade(
+                instrument="RELIANCE",
+                lot_size=1,
+                entry_bar_open_paisa=10_000,
+                exit_bar_open_paisa=11_000,
+                broker="zerodha",
+            )
+        )
+        assert out.cost_free is False
+        assert (out.buy_fill_paisa, out.sell_fill_paisa) == (10_005, 10_995)
+        assert out.gross_pnl_paisa == 990
+        assert out.brokerage_paisa == 4_000  # flat both legs — the Groww arm would read 6
+        assert out.stt_paisa == 0
+        assert out.exch_paisa == 0
+        assert out.sebi_paisa == 0
+        assert out.ipft_paisa == 0
+        assert out.stamp_paisa == 0
+        assert out.gst_paisa == 700
+        assert out.total_charges_paisa == 4_700
+        assert out.net_pnl_paisa == -3_710
+
     def test_charge_path_bse_arm_ipft_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The BSE arm covers the assumed-0 IPFT branch inside the charge stack.
         # SENSEX is cost-FREE, so route a synthetic cost-bearing BSE label by
