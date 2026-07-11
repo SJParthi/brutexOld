@@ -50,13 +50,20 @@ _NOW = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
 _ISO = "2026-07-01T12:00:00+00:00"
 
 
-def _key(symbol: str, *, market: str = "groww", start_day: int = 1) -> WindowKey:
+def _key(
+    symbol: str,
+    *,
+    market: str = "groww",
+    start_day: int = 1,
+    interval: str = "1minute",
+    end_day: int = 31,
+) -> WindowKey:
     return WindowKey(
         market=market,
         security_id=symbol,
-        interval="1minute",
+        interval=interval,
         start=date(2025, 1, start_day),
-        end=date(2025, 1, 31),
+        end=date(2025, 1, end_day),
     )
 
 
@@ -71,13 +78,33 @@ def _seed_mixed_ledger(lake: Path) -> None:
     for i in range(8):
         market = "groww" if i % 2 == 0 else "groww-option"
         ledger.record(
-            _key(f"SYM{i:02d}", market=market),
+            # Vary interval / window_start / window_end across rows (hostile-
+            # review fold): the DuckDB-vs-Python order over the 3 TEMPORAL key
+            # columns is genuinely exercised, not vacuously equal on constants.
+            # i=0 keeps the defaults so the SYM00 demotion delta's key matches.
+            _key(
+                f"SYM{i:02d}",
+                market=market,
+                start_day=1 + (i % 3) * 9,
+                interval="1day" if i % 2 else "1minute",
+                end_day=31 - (i % 4),
+            ),
             raw_bars=5 if i % 3 else 0,
             error_type="timeout" if i % 4 == 3 else None,
             bars_appended=5 if i % 3 else 0,
             bars_net_new=3 if i % 3 else None,
             now=_NOW,
         )
+    # A SECOND window under an EXISTING (market, security_id, interval) triple —
+    # rows differing ONLY in window_start — so the within-triple temporal
+    # ordering is pinned directly (never just cross-symbol).
+    ledger.record(
+        _key("SYM01", market="groww-option", start_day=2, interval="1day", end_day=29),
+        raw_bars=5,
+        error_type=None,
+        bars_appended=5,
+        now=_NOW,
+    )
     wls.save_window_ledger(ledger, lake)
     # Delta 1: a brand-new key (mid-pull flush).
     live = wls.load_window_ledger(lake)
@@ -154,6 +181,15 @@ def test_ledger_row_columns_pinned_to_the_store_schema() -> None:
     assert wls._COLUMNS == _LEDGER_ROW_COLUMNS
 
 
+def test_ledger_table_path_constants_pinned_to_the_store() -> None:
+    """The fast path derives ``<lake>/window_ledger/ledger.parquet`` from
+    pinned module-local constants (NO ``window_ledger_store`` import — even a
+    function-local one participates in the CodeQL ``py/cyclic-import`` cycle);
+    this pin keeps them from ever drifting off the store's own names."""
+    assert db_view._LEDGER_TABLE_DIRNAME == wls.LEDGER_DIRNAME
+    assert db_view._LEDGER_TABLE_FILENAME == wls.LEDGER_FILENAME
+
+
 # ── fast-equals-legacy (the #893 pattern) ────────────────────────────────────
 
 
@@ -167,13 +203,17 @@ class TestFastEqualsLegacy:
         _fresh_caches(monkeypatch)
         _seed_mixed_ledger(tmp_path)
         legacy = window_ledger_rows_cached(tmp_path)
-        assert len(legacy) == 9  # 8 base keys + 1 delta-new key
+        assert len(legacy) == 10  # 8 base keys + 1 second-window key + 1 delta-new
+        # The within-triple temporal pin really exists (two SYM01 rows differing
+        # only in window_start) and the 5-column sort keeps them adjacent + ordered.
+        sym01 = [r for r in legacy if r[1] == "SYM01"]
+        assert len(sym01) == 2 and sym01[0][3] < sym01[1][3]
         # The demotion survived the fold on the legacy side (sanity).
         demoted = [r for r in legacy if r[1] == "SYM00"]
         assert demoted and demoted[0][5] == "FAILED"
         with duckdb.connect() as conn:
             for limit in (1, 2, 4, 500):
-                for offset in (0, 1, 3, 8, 9, 50):
+                for offset in (0, 1, 3, 9, 10, 50):
                     page, total = query_window_ledger_page(
                         conn, tmp_path, limit=limit, offset=offset
                     )
@@ -243,7 +283,7 @@ class TestDegradeLaw:
                 "last_attempt_at": [_ISO],
             }
         )
-        pq.write_table(table, path)
+        pq.write_table(table, path)  # type: ignore[no-untyped-call, unused-ignore]
         legacy = window_ledger_rows_cached(tmp_path)
         # The legacy parse DERIVES empty_streak (SKIPPED → threshold) — the exact
         # rule the fast path must not half-reproduce.
@@ -263,7 +303,9 @@ class TestDegradeLaw:
         import pyarrow.parquet as pq
 
         _fresh_caches(monkeypatch)
-        row = (
+        # Widened (Any) — this deliberately-junk row carries a NULL in an
+        # int-typed LedgerRowTuple slot, which is the very shape under test.
+        row: tuple[Any, ...] = (
             "groww",
             "NIFTY",
             "1minute",
@@ -325,7 +367,7 @@ class TestDegradeLaw:
             b"not a parquet file"
         )
         legacy = window_ledger_rows_cached(tmp_path)
-        assert len(legacy) == 9  # the bad delta is skipped, rows intact
+        assert len(legacy) == 10  # the bad delta is skipped, rows intact
         with duckdb.connect() as conn, capture_logs() as logs:
             page, total = query_window_ledger_page(conn, tmp_path, limit=500, offset=0)
         assert total == len(legacy) and page == legacy
@@ -379,14 +421,14 @@ class TestMemoFamilies:
         _page, total = query_window_ledger_page(
             conn, tmp_path, limit=500, offset=0, count_cache=count_cache, page_cache=page_cache
         )
-        assert total == 9
+        assert total == 10
         live = wls.load_window_ledger(tmp_path)
         live.record(_key("ZZLATE"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
         assert wls.append_ledger_delta(live, tmp_path) == 1
         page2, total2 = query_window_ledger_page(
             conn, tmp_path, limit=500, offset=0, count_cache=count_cache, page_cache=page_cache
         )
-        assert total2 == 10
+        assert total2 == 11
         assert any(r[1] == "ZZLATE" for r in page2)
 
     def test_defensive_none_count_row_reads_zero(
@@ -401,7 +443,11 @@ class TestMemoFamilies:
 
 
 class TestLedgerPageRow:
-    _BASE = (
+    # Widened annotation (Any elements): the row cells legitimately take None
+    # in the mutation tests below — an unannotated literal tuple makes pyright
+    # infer per-element Literal types, refusing `row[i] = None` (the CI-caught
+    # reportCallIssue class).
+    _BASE: tuple[Any, ...] = (
         "groww",
         "NIFTY",
         "1minute",

@@ -38,7 +38,6 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 
 _MONTHS = 12
-_DAYS_PER_MONTH = 3
 _BARS_PER_DAY = 20
 
 

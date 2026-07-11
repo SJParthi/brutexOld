@@ -3949,8 +3949,10 @@ def _existing_month_files_in_span(base: Path, start: date, end: date) -> list[st
     only ever ADD the immediately-adjacent month, never drop a matchable file),
     saturating at the ``date`` domain edges so a degenerate 0001/9999 span simply
     keeps everything (never an ``OverflowError``). Enumerated from the EXISTING
-    tree (ONE rglob — the same listing cost the readers' own ``any(...)`` presence
-    guard already pays), each rel parsed by the SAME ASCII month grammar the stats
+    tree — honestly a SECOND full rglob BESIDE the readers' own ``any(...)``
+    presence-guard listing (immaterial next to the O(all-months) Parquet
+    footer opens it removes, but a real added directory walk, stated) — each
+    rel parsed by the SAME ASCII month grammar the stats
     manifest pins (:func:`~brutex.data.lake_stats_manifest.parse_rel_month`,
     ``KIND_BARS``); a NON-grammar file (a stray out-of-band parquet whose month is
     unknowable) is conservatively KEPT so the bounded read can never exclude a file
@@ -5371,6 +5373,18 @@ def make_window_payload_caches(
 #: ``window_ledger_store`` edge — CodeQL ``py/cyclic-import``).
 _LEDGER_DELTAS_DIRNAME: Final[str] = "deltas"
 
+#: The ledger table's directory + filename under the lake root
+#: (DEC-DB-LATENCY-HARDENING-001). MUST equal
+#: ``window_ledger_store.LEDGER_DIRNAME`` / ``LEDGER_FILENAME`` — pinned by
+#: test, not imported (the :data:`_LEDGER_DELTAS_DIRNAME` precedent + the
+#: ``phase_progress_payload`` no-import-edge law): even a FUNCTION-local
+#: ``window_ledger_store`` import participates in the
+#: ``window_ledger_store → coverage_reconcile → db_view`` cycle CodeQL
+#: ``py/cyclic-import`` flags, so the new fast path derives the path from
+#: these constants instead of importing ``ledger_path``.
+_LEDGER_TABLE_DIRNAME: Final[str] = "window_ledger"
+_LEDGER_TABLE_FILENAME: Final[str] = "ledger.parquet"
+
 
 def _ledger_delta_files(ledger_file: Path) -> tuple[Path, ...]:
     """The pending ledger delta Parquets, in append (filename) order — ``()`` if none.
@@ -5995,7 +6009,12 @@ def query_window_ledger_page(
     base+delta fold — provably the ``load_window_ledger`` fold), ordered by the
     5-part window key exactly as :meth:`WindowLedger.records` sorts (DuckDB's
     binary VARCHAR collation == Python's code-point ``str`` order over the
-    UTF-8 key columns), with the total from ONE ``COUNT(*)`` over the fold.
+    UTF-8 key columns; a NULL in a KEY column would diverge — DuckDB orders
+    NULLS LAST while the legacy parse coerces ``str(None)`` and sorts it
+    lexicographically — but that shape is writer-UNREACHABLE today: the key
+    columns are ``pa.string()`` cells rendered from non-null ``WindowKey``
+    fields, and a page CONTAINING such a row defers via the NULL-cell guard
+    anyway), with the total from ONE ``COUNT(*)`` over the fold.
     Both are memoised on the injected caches (``wledger-total|…`` /
     ``wledger-page|…`` key families) at the composite-stamp-token generation —
     a repeat click within one ledger stamp is an O(1) handoff.
@@ -6023,9 +6042,12 @@ def query_window_ledger_page(
     stamp (the measured 7.2–8.8 s term), replaced by the columnar scan the
     coverage paths already pay. Repeat clicks within a stamp are O(1) hits.
     """
-    from brutex.data.window_ledger_store import ledger_path
-
-    path = ledger_path(lake_root)
+    # Path derived from the pinned module-local constants — deliberately NO
+    # ``window_ledger_store`` import, not even function-local: the lazy import
+    # still participates in the ``window_ledger_store → coverage_reconcile →
+    # db_view`` cycle CodeQL ``py/cyclic-import`` flags (the
+    # ``phase_progress_payload`` no-import-edge precedent).
+    path = lake_root / _LEDGER_TABLE_DIRNAME / _LEDGER_TABLE_FILENAME
     if not path.is_file() and not _ledger_delta_files(path):
         return (), 0
 

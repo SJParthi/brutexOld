@@ -34,6 +34,7 @@ pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
 from brutex.dashboard.app import DashboardState, _preopen_rows_key, build_app
+from brutex.dashboard.preopen_report import build_preopen_rows as _real_build_preopen_rows
 from brutex.dashboard.summary_cache import SummaryCache
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.models import CandleBar
@@ -128,6 +129,21 @@ def _client(tmp_path: Path) -> tuple[TestClient, _StoreSpy, SummaryCache]:
     return TestClient(app), store, summary
 
 
+def _count_builds(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Patch the app module's ``build_preopen_rows`` binding with a counting
+    delegator (string-form monkeypatch — no ``import brutex.dashboard.app``
+    beside the file's ``from ... import``, the CodeQL both-import-styles
+    finding) and return the live counter."""
+    builds = {"n": 0}
+
+    def _counting_build(*args: Any, **kwargs: Any) -> Any:
+        builds["n"] += 1
+        return _real_build_preopen_rows(*args, **kwargs)
+
+    monkeypatch.setattr("brutex.dashboard.app.build_preopen_rows", _counting_build)
+    return builds
+
+
 class TestPreopenExportCache:
     def test_repeat_click_serves_identical_bytes_with_zero_scans(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -137,16 +153,7 @@ class TestPreopenExportCache:
         route re-paid the identical full scan per click (206 statements / 616
         files measured) — and the served bytes are byte-identical."""
         client, store, _summary = _client(tmp_path)
-        builds = {"n": 0}
-        import brutex.dashboard.app as app_module
-
-        real_build = app_module.build_preopen_rows
-
-        def _counting_build(*args: Any, **kwargs: Any) -> Any:
-            builds["n"] += 1
-            return real_build(*args, **kwargs)
-
-        monkeypatch.setattr(app_module, "build_preopen_rows", _counting_build)
+        builds = _count_builds(monkeypatch)
         cold = client.get(_XLSX)
         assert cold.status_code == 200 and builds["n"] == 1
         spy = store.conn_spy
@@ -164,16 +171,7 @@ class TestPreopenExportCache:
         """The ``.zip`` export keys the SAME coordinate (mode/min_pct shape only
         the render), so it rides the ``.xlsx``'s cached rows — one build total."""
         client, _store, _summary = _client(tmp_path)
-        builds = {"n": 0}
-        import brutex.dashboard.app as app_module
-
-        real_build = app_module.build_preopen_rows
-
-        def _counting_build(*args: Any, **kwargs: Any) -> Any:
-            builds["n"] += 1
-            return real_build(*args, **kwargs)
-
-        monkeypatch.setattr(app_module, "build_preopen_rows", _counting_build)
+        builds = _count_builds(monkeypatch)
         assert client.get(_XLSX).status_code == 200
         assert client.get(_ZIP).status_code == 200
         assert client.get(_ZIP + "&mode=topmover&min_pct=0.1").status_code == 200
@@ -185,16 +183,7 @@ class TestPreopenExportCache:
         """A pull (write-generation bump) invalidates the memo — the next click
         rebuilds over the fresh lake, never a stale export (Golden Rule #1)."""
         client, _store, summary = _client(tmp_path)
-        builds = {"n": 0}
-        import brutex.dashboard.app as app_module
-
-        real_build = app_module.build_preopen_rows
-
-        def _counting_build(*args: Any, **kwargs: Any) -> Any:
-            builds["n"] += 1
-            return real_build(*args, **kwargs)
-
-        monkeypatch.setattr(app_module, "build_preopen_rows", _counting_build)
+        builds = _count_builds(monkeypatch)
         assert client.get(_XLSX).status_code == 200 and builds["n"] == 1
         summary.mark_dirty()  # what every pull write does
         assert client.get(_XLSX).status_code == 200
@@ -205,16 +194,7 @@ class TestPreopenExportCache:
     ) -> None:
         """basis / range / symbols-filter each mint their own memo coordinate."""
         client, _store, _summary = _client(tmp_path)
-        builds = {"n": 0}
-        import brutex.dashboard.app as app_module
-
-        real_build = app_module.build_preopen_rows
-
-        def _counting_build(*args: Any, **kwargs: Any) -> Any:
-            builds["n"] += 1
-            return real_build(*args, **kwargs)
-
-        monkeypatch.setattr(app_module, "build_preopen_rows", _counting_build)
+        builds = _count_builds(monkeypatch)
         assert client.get(_XLSX).status_code == 200
         assert client.get(_XLSX + "&basis=minute").status_code == 200
         assert client.get(_XLSX + "&symbols=COALINDIA").status_code == 200
