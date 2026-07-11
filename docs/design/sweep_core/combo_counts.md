@@ -149,30 +149,50 @@ these rows describe the non-apriori arm the kernel serves):
 | C, k≤5 (378 tuples) | 2.262 B | 12.5 min | 16 s |
 | C, k≤6 | 21.19 B | 2.0 h | 2.5 min |
 
-**Term-2 dominance (unchanged by Slice 1 in magnitude; re-homed in-kernel).**
-At `min_hits>0` every conflict-free mask pays `coeff_count × n_bars`. Per
-SINGLE tuple at k≤5 (5,188,854 cf masks, k-weighted coefficient dominated by
-k=5's 0.125 ns). A tuple runs on ONE worker (`sweep_parallel` splits across
-TUPLES), so the per-tuple column is single-worker; the grid-wall column is
-its ÷8 amortisation across a many-tuple grid:
+**Term-2 — the fused per-mask hits count (unchanged by Slice 1 in
+asymptotic shape; re-homed in-kernel at a measured 2–3× cheaper
+coefficient).** At `min_hits>0` every conflict-free mask pays
+`coeff_count × n_bars`. Per SINGLE tuple at k≤5 (5,188,854 cf masks,
+k-weighted coefficient dominated by k=5's 0.125 ns). A tuple runs on ONE
+worker (`sweep_parallel` splits across TUPLES), so the per-tuple column is
+single-worker; the grid-wall column is its ÷8 amortisation across a
+many-tuple grid:
 
 | tuple TF | n_bars (2020→2026) | measured coeff (per tuple / grid-wall share) | carried 0.257 (per tuple / grid-wall share) |
 |---|---:|---:|---:|
-| 1minute | ~555,000 | ≈ 98 h / ≈ 12 h | ≈ 206 h / ≈ 26 h |
-| 15minute | ~37,000 | ≈ 6.5 h / ≈ 49 min | ≈ 13.7 h / ≈ 1.7 h |
+| 1minute | ~555,000 | ≈ 6.0 min / ≈ 45 s | ≈ 12.3 min / ≈ 1.5 min |
+| 15minute | ~37,000 | ≈ 24 s / ≈ 3 s | ≈ 49 s / ≈ 6 s |
 
-The 1-minute k≤5 full-vocabulary tuple is COUNT-TERM dominated under EITHER
-arm (today's Python spine pays the same O(cf × n_bars) via batched
-`count_supermasks` PLUS 2.66 µs/mask enumeration on top) — this is exactly
-the design §10.5 hit-list-intersection lever's target, and the ~10%
-bit-52/53 dead-condition shrink (§4 caveat 4) helps linearly. Slice 1
-strictly improves this arm (term 1 removed, count re-homed at a measured
-2–3× cheaper coefficient) but does NOT change its asymptotic shape.
+> **CORRECTED (review round 1, 2026-07-11).** The first-published table
+> printed 98 h / 206 h (1minute) and 6.5 h / 13.7 h (15minute) — a uniform
+> ×1000 unit slip (the ns/(mask·bar) coefficient applied as µs).
+> Recomputed from this doc's OWN constants: 5,188,854 cf × 555,000 bars ×
+> 0.125e-9 s = 360 s ≈ 6.0 min per tuple, not 98 h (carried 0.257 → 740 s
+> ≈ 12.3 min, not 206 h). The correction INVERTS the section's original
+> "count-term dominated" conclusion — restated honestly below.
+
+**Dominance (corrected — the 1-minute tuple at `top=1000` is TERM-3
+dominated, not count-term dominated).** On the corrected numbers, term 3's
+finalist Python-oracle re-simulation is the dominant per-tuple term at the
+production `--top=1000` on a 1-minute tuple: row 9's 0.24–0.40 s/kept was
+measured at 93,750 bars and scales O(n_bars) to ≈ 1.4–2.4 s/kept at
+~555,000 bars → **≈ 24–39 min/tuple** at 1000 finalists, versus the count
+term's ≈ 6–12 min (table above) and term 1's seconds. The count term is
+still the design §10.5 hit-list-intersection lever's target (today's
+Python spine pays the same O(cf × n_bars) via batched `count_supermasks`
+PLUS 2.66 µs/mask enumeration on top; the ~10% bit-52/53 dead-condition
+shrink, §4 caveat 4, helps it linearly), and Slice 1 strictly improves this
+arm (term 1 removed at 46.9×, the count re-homed at a measured 2–3× cheaper
+coefficient) without changing its asymptotic shape — but the next wall to
+attack at `top=1000` is term 3, not term 2.
 
 **Term-3 cap.** Per tuple the finalist Python-oracle re-simulation is capped
-at `top_k` finalists: at `--top=1000` on a 1-minute tuple, ≤1000 ×
-~0.24–0.40 s ≈ **≤ 4–7 min/tuple** (row 9's bundle; the gap-register #1
-`top=1000` cost, measured not estimated). Zero-trade kept masks (`f_zero`)
+at `top_k` finalists: at `--top=1000`, ≤1000 × ~0.24–0.40 s ≈ **≤ 4–7
+min/tuple at the 93,750-bar sandbox fixture** (row 9's bundle; the
+gap-register #1 `top=1000` cost, measured not estimated), scaling O(n_bars)
+to **≈ 24–39 min/tuple at the real ~555,000-bar 1-minute window** — the
+dominant per-tuple term there (the corrected dominance note above).
+Zero-trade kept masks (`f_zero`)
 skip the walk — on min_hits≥30 grids this fixture measured `f_zero=0`, so
 budget with `f_trade≈1` unless the grid drops the floor.
 
