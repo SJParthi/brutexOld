@@ -2223,7 +2223,7 @@ hostile-review pass._
   is missing. HONEST LIMITS: the pull lane covers THIS dashboard process (a CLI pull's bridge carries rate, no outcome —
   its halt stays Telegram/exit-code visible); the verdict holder is process-local + un-timestamped (THIS run's own
   `failed` tally outranks it; the `completed*` arms never claim "cleanly"); doctor/mutation stay `not_wired` until a
-  local artifact exists (named follow-up seam). TESTS: `pull_outcome.py` (85/38) + `health_hub.py` (161/32) BOTH 100.00%
+  local artifact exists (named follow-up seam). TESTS: `pull_outcome.py` (85/38) + `health_hub.py` (175/38) BOTH 100.00%
   line+branch on NEW ci.yml standalone gates; 17 route-integration tests drive clean · completed-with-failures ·
   halted-disk-full/OOM/market-hours/quota · deferred · running · never-run · sweep-done through a REAL BackgroundPullJob
   + the REAL routes; 16 frontend pins incl. the killed unconditional-green token + node-EXECUTED helper goldens;

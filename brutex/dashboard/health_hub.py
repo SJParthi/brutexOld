@@ -476,15 +476,47 @@ class HealthHub:
         self._lock = threading.Lock()
         self._file_lanes: list[LaneStatus] | None = None
         self._file_lanes_at = float("-inf")
+        #: EMIT-ON-CHANGE degrade-log signature (instance state, never a module
+        #: global — CLAUDE.md §4): the (lane, verdict, headline) tuple of the
+        #: last refresh's degraded lanes, so a persistently-corrupt state file
+        #: logs ONE WARN on the transition (not one per 5 s TTL refresh) and
+        #: recovery logs ONE INFO. Mutated only under :attr:`_lock`.
+        self._degraded_sig: tuple[tuple[str, str, str], ...] = ()
 
     def _refresh_file_lanes(self, now: float) -> list[LaneStatus]:
-        """Recompute the durable-file lanes (nightly + backup); memoised under TTL."""
+        """Recompute the durable-file lanes (nightly + backup); memoised under TTL.
+
+        EMIT-ON-CHANGE observability: a lane entering/changing a ``bad`` /
+        ``unknown`` verdict logs ONE ``health_hub.lane_degraded`` WARN naming
+        every currently-degraded lane; all-clear after a degraded period logs
+        ONE ``health_hub.lanes_recovered`` INFO. A steady state (degraded or
+        healthy) logs nothing — bounded noise, never a per-poll storm.
+        Called with :attr:`_lock` HELD (the signature mutation rides it).
+        """
         lake_root = self._lake_root_resolver()
         results_root = None if lake_root is None else lake_root / "sweeps"
-        return [
+        lanes = [
             nightly_lane(results_root, now=now),
             backup_deadman_lane(now=now, env=self._env),
         ]
+        degraded = tuple(
+            (lane.lane, lane.verdict, lane.headline)
+            for lane in lanes
+            if lane.verdict in (VERDICT_BAD, VERDICT_UNKNOWN)
+        )
+        if degraded != self._degraded_sig:
+            if degraded:
+                _LOG.warning(
+                    "health_hub.lane_degraded",
+                    lanes=[
+                        {"lane": name, "verdict": verdict, "headline": headline}
+                        for name, verdict, headline in degraded
+                    ],
+                )
+            else:
+                _LOG.info("health_hub.lanes_recovered")
+            self._degraded_sig = degraded
+        return lanes
 
     def _cold_pending_lanes(self) -> list[LaneStatus]:
         """The honest COLD-follower degrade: a refresh is in flight elsewhere.

@@ -488,6 +488,43 @@ class TestHealthHubPayload:
         # unknown folds WARN — a pending probe never reads green.
         assert payload["fold"]["verdict"] == VERDICT_WARN
 
+    def test_degrade_log_emits_on_change_only_and_recovers(self, tmp_path: Path) -> None:
+        """ONE `health_hub.lane_degraded` WARN per transition (never per poll);
+        all-clear logs ONE `health_hub.lanes_recovered` INFO (the CodeQL-flagged
+        `_LOG` binding is genuinely load-bearing)."""
+        import structlog
+
+        lake = tmp_path / "lake"
+        run_dir = lake / "sweeps" / NIGHTLY_DIRNAME / "nightly-20261008T120000Z-abc123"
+        run_dir.mkdir(parents=True)
+        report_file = run_dir / REPORT_FILENAME
+        report_file.write_text("{torn", encoding="utf-8")  # a corrupt report → unknown
+        hub = _hub(tmp_path, lake_root=lake, ttl_s=0.0)  # every poll refreshes
+        with structlog.testing.capture_logs() as logs:
+            hub.payload()  # transition healthy(∅) → degraded: ONE WARN
+            hub.payload()  # SAME degraded signature: no new log
+        degraded_events = [e for e in logs if e["event"] == "health_hub.lane_degraded"]
+        assert len(degraded_events) == 1
+        assert degraded_events[0]["lanes"][0]["lane"] == LANE_NIGHTLY
+        # The report heals → ONE recovery INFO, then steady healthy logs nothing.
+        report_file.write_text(json.dumps(_report()), encoding="utf-8")
+        with structlog.testing.capture_logs() as logs:
+            hub.payload()
+            hub.payload()
+        recovered = [e for e in logs if e["event"] == "health_hub.lanes_recovered"]
+        assert len(recovered) == 1
+        assert not [e for e in logs if e["event"] == "health_hub.lane_degraded"]
+
+    def test_healthy_refreshes_log_nothing(self, tmp_path: Path) -> None:
+        """A never-degraded hub emits ZERO degrade/recovery events."""
+        import structlog
+
+        hub = _hub(tmp_path, ttl_s=0.0)  # not_wired lanes only — neutral, not degraded
+        with structlog.testing.capture_logs() as logs:
+            hub.payload()
+            hub.payload()
+        assert not [e for e in logs if str(e["event"]).startswith("health_hub.")]
+
     def test_pull_lane_is_never_ttl_delayed(self, tmp_path: Path) -> None:
         outcomes = [
             LastPullOutcome(outcome="running", tone="ok", headline="pull running", detail=""),
