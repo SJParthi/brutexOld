@@ -15,7 +15,19 @@
 #                      below_parallel_threshold dispatch predicate extracted by
 #                      DEC-MUTATION-RUNTIME-003 (kept IN scope so the dispatch
 #                      boundary itself stays mutation-gated)
-# 599 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
+#   src/audit_chain.rs      — slice-9 orchestrator SHA-256 audit-chain serializer
+#                             (DEC-AUDIT-CHAIN-RUST-PORT-001, ADR-0019)
+#   src/calendar_verdict.rs — slice-9 NSE/BSE calendar-verdict engine
+#                             (DEC-CALENDAR-VERDICT-RUST-001, ADR-0019)
+# 1,071 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from
+# this dir on the slice-9 tree: metrics 358 + trade_sim 167 + python 65 +
+# lib 9 + audit_chain 120 + calendar_verdict 352). The +472 growth (~1.8x the
+# prior 599) EXCEEDS the shard-budget bands — the mutation.yml fno-math matrix
+# re-shard (6 → a re-measured count, planning number ~11 at the observed
+# ~0.65 min/mutant worst-case vs the 120-min cap) is a NAMED follow-up for the
+# slice-9 review round; the weekly gate owner re-shards before the next
+# scheduled run, per the #1597 measured-not-projected convention.
+# Prior measurement history: 599 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
 # dir on the post-merge HEAD: metrics 358 + trade_sim 167 + python 65 + lib 9).
 # Measurement history, kept honest (convergence round 1 — the counts here must
 # describe the SHIPPED tree, Golden Rule #1): the below_parallel_threshold
@@ -35,4 +47,4 @@
 #                 path; its known June/July survivors are enumerated in
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
-examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs"]
+examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs", "src/audit_chain.rs", "src/calendar_verdict.rs"]

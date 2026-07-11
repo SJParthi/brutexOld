@@ -35,17 +35,27 @@ def _fresh_real_facade() -> Any:
 _EXPECTED_SURFACE: frozenset[str] = frozenset(
     {
         # fno_math (rust/fno-math)
+        "AuditEnvelopeError",
+        "CalendarVerdictEngine",
         "ResidentBars",
         "ResidentSweepSim",
         "ResidentSweepSimU128",
         "add_u64",
+        "audit_entry_hash",
+        "audit_entry_line",
         "bitand_count_u64s",
         "bitcount_u64s",
         "blake3_hash",
+        "canonical_json",
         "count_supermask_u64s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
+        "expected_bars_per_day_for_tf",
+        "forced_exit_seconds_s",
+        "is_forced_exit_bar_s",
         "popcount_bytes",
+        "py_float_repr",
+        "session_last_bar_complete_s",
         "sweep_drawdown_stats",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",

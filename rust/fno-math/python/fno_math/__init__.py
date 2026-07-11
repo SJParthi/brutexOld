@@ -61,18 +61,28 @@ from collections.abc import Sequence
 #: in-repo ``EXPECTED_BUILD.json`` (read by ``brutex doctor``) mirrors this
 #: list; a test pins the two equal so they cannot drift.
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
+    "AuditEnvelopeError",
+    "CalendarVerdictEngine",
     "ResidentBars",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
     "add_u64",
+    "audit_entry_hash",
+    "audit_entry_line",
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
+    "canonical_json",
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "expected_bars_per_day_for_tf",
+    "forced_exit_seconds_s",
+    "is_forced_exit_bar_s",
     "popcount_bytes",
+    "py_float_repr",
+    "session_last_bar_complete_s",
     "sweep_drawdown_stats",
 )
 
@@ -109,18 +119,28 @@ _assert_compiled_surface(_compiled)
 # The freshness handshake above MUST run before this re-export so a stale
 # wheel raises the actionable message, not a bare from-import failure.
 from ._fno_math import (  # noqa: E402
+    AuditEnvelopeError,
+    CalendarVerdictEngine,
     ResidentBars,
     ResidentSweepSim,
     ResidentSweepSimU128,
     __version__,
     add_u64,
+    audit_entry_hash,
+    audit_entry_line,
     bitand_count_u64s,
     bitcount_u64s,
     blake3_hash,
+    canonical_json,
     count_supermask_u64s,
     count_supermasks_u64s,
     count_supermasks_u64s_nthreads,
+    expected_bars_per_day_for_tf,
+    forced_exit_seconds_s,
+    is_forced_exit_bar_s,
     popcount_bytes,
+    py_float_repr,
+    session_last_bar_complete_s,
     sweep_drawdown_stats,
 )
 
@@ -140,17 +160,27 @@ from ._fno_math import (  # noqa: E402
 __build_crate_version__: str = __version__
 
 __all__ = [
+    "AuditEnvelopeError",
+    "CalendarVerdictEngine",
     "ResidentBars",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
     "add_u64",
+    "audit_entry_hash",
+    "audit_entry_line",
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
+    "canonical_json",
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "expected_bars_per_day_for_tf",
+    "forced_exit_seconds_s",
+    "is_forced_exit_bar_s",
     "popcount_bytes",
+    "py_float_repr",
+    "session_last_bar_complete_s",
     "sweep_drawdown_stats",
 ]

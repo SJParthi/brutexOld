@@ -72,6 +72,18 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+/// DEC-AUDIT-CHAIN-RUST-PORT-001 (slice 9, ADR-0019 / #1727): the orchestrator
+/// SHA-256 audit-chain serializer — CPython-exact float repr + canonical JSON
+/// + `|`-joined preimage + on-disk line bytes, parity-gated on the frozen
+/// `tests/golden/fixtures/audit_chain_parity_*` fixtures. File I/O stays Python.
+pub mod audit_chain;
+
+/// DEC-CALENDAR-VERDICT-RUST-001 (slice 9, ADR-0019 / #1727): the NSE/BSE
+/// calendar VERDICT engine — decision logic only; the calendar DATA stays in
+/// `brutex.calendars` (ADR-0012 D8) and crosses the FFI as runtime config,
+/// parity-gated on the frozen 2,557-day calendar verdict-table golden.
+pub mod calendar_verdict;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -142,5 +154,37 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
+    // ── slice-9 audit-chain kernels (DEC-AUDIT-CHAIN-RUST-PORT-001, ADR-0019) ──
+    // The orchestrator SHA-256 chain's serializer + hash + line bytes; the
+    // envelope-error type routes out-of-model payloads back to the Python oracle.
+    m.add(
+        "AuditEnvelopeError",
+        m.py().get_type::<audit_chain::AuditEnvelopeError>(),
+    )?;
+    m.add_function(wrap_pyfunction!(audit_chain::audit_entry_hash_py, m)?)?;
+    m.add_function(wrap_pyfunction!(audit_chain::audit_entry_line_py, m)?)?;
+    m.add_function(wrap_pyfunction!(audit_chain::py_float_repr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(audit_chain::canonical_json_py, m)?)?;
+    // ── slice-9 calendar-verdict kernels (DEC-CALENDAR-VERDICT-RUST-001) ──
+    // The NSE/BSE verdict engine (config supplied by brutex.calendars at
+    // runtime — ADR-0012 D8) + the four module-level session-law scalars
+    // (`_s` suffix = seconds-of-day, avoiding nse.py name shadowing).
+    m.add_class::<calendar_verdict::CalendarVerdictEngine>()?;
+    m.add_function(wrap_pyfunction!(
+        calendar_verdict::expected_bars_per_day_for_tf_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        calendar_verdict::is_forced_exit_bar_s_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        calendar_verdict::forced_exit_seconds_s_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        calendar_verdict::session_last_bar_complete_s_py,
+        m
+    )?)?;
     Ok(())
 }

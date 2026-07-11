@@ -178,7 +178,14 @@ parameters; ONLY the verdict LOGIC ports.** Constraints carried forward:
   (whose version sits OUTSIDE the run identity — a calendar-logic port there
   never re-keys the sweep grid; a trading-core touch would, via
   `_indicator_version()`, `brutex/cli.py:6239` — the ledgered 0.3.0→0.3.1
-  full-re-sweep precedent #1548).
+  full-re-sweep precedent #1548). **Run-identity honesty for the porting
+  phase's ONE wheel bump (fno-math 0.3.0 → 0.4.0, the slice-9 batch):** at
+  THIS tree the bump moves NO run identity (the statement above holds — only
+  `trading_core.__version__` is folded into `indicator_version`); once PR
+  #1353 (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001) lands and folds
+  `fno_math.__version__` into `indicator_version`, that landing absorbs this
+  bump and re-keys every sweep run identity (a full-grid re-sweep, the
+  #1548/#1612 precedent) — coordinator-announced here, never silent.
 * **The FFI-parameter doctrine** (the existing, verified seam): calendar
   VERDICTS cross as pre-resolved scalars / day-ordinal arrays — the
   `trading_core.derive_bar_metadata` session-open-seconds scalar
