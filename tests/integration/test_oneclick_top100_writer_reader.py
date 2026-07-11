@@ -151,6 +151,20 @@ class TestEngineWriterThroughDisplayReader:
             # The engine names ride along verbatim (additive mapping).
             assert metrics["sharpe_ratio"] == raw["sharpe_ratio"]
 
+    def test_instrument_flows_writer_to_reader_rows_untouched(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-INSTRUMENT-DISPLAY-001: the writer's additive per-entry
+        ``instrument`` (``_entry_payload`` — the winner's OWN market, from
+        ``ResultRow.instrument``) passes through ``load_top100`` UNTOUCHED to
+        every consumer row — the operator rank-1 card / combos Inst column /
+        /strategy identity strip / /screener column all read this ONE key."""
+        artifact = _engine_artifact()
+        _write_engine_artifact(tmp_path / "lake", artifact)
+        result = oc.load_top100((tmp_path / "lake" / "sweep_runs") / _GRID_RUN_ID)
+        assert result.status == "ok"
+        for row, entry in zip(result.rows, artifact.entries, strict=True):
+            assert entry["instrument"] == "NIFTY"  # writer truth (ResultRow.instrument)
+            assert row["instrument"] == entry["instrument"]  # verbatim passthrough
+
     def test_arm_dict_bridges_to_the_display_string_never_object_object(
         self, tmp_path: Path
     ) -> None:
@@ -320,6 +334,126 @@ class TestEngineWriterThroughRoutes:
         assert "/api/v1/oneclick/top100?run_id=" in template
         assert template.count("arm") >= 1
         assert client.get("/strategy").status_code == 200
+
+    def test_instrument_is_on_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-INSTRUMENT-DISPLAY-001 route twin: every wire row of
+        ``/api/v1/oneclick/top100`` carries the writer's ``instrument``, and
+        the three consumer surfaces are WIRED to read it (template/JS pins —
+        the rank-1 card + combos Inst cell via ``bxInstrumentText``, the
+        /strategy identity strip via ``BXOneclick.instrumentText``, the
+        /screener column via ``BXScreener.COLUMNS``)."""
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _engine_artifact())
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok"
+        assert all(row["instrument"] == "NIFTY" for row in payload["rows"])
+        root = Path(__file__).resolve().parents[2] / "brutex" / "dashboard"
+        strategy = (root / "templates" / "strategy.html").read_text(encoding="utf-8")
+        assert 'id="stInstr"' in strategy
+        assert (
+            "byId('stInstr').textContent = window.BXOneclick.instrumentText(row.instrument);"
+            in strategy
+        )
+        oneclick_js = (root / "static" / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert 'setOc("r1_instrument", bxInstrumentText(row.instrument));' in oneclick_js
+        assert "td(bxInstrumentText(row.instrument)" in oneclick_js
+        screener_js = (root / "static" / "bx-screener.js").read_text(encoding="utf-8")
+        assert '{ key: "instrument", label: "Inst", type: "str"' in screener_js
+
+    def test_equity_route_serves_the_real_sidecar_series(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item 4C (the #48 overlap): the
+        NEW ``/api/v1/oneclick/equity`` route pages the REAL results-depth
+        equity sidecar — engine writers end-to-end (``build_top100`` +
+        ``write_tuple_sidecars``) → the adapter's rank → ``equity_ref`` chain
+        → the wire; before the sidecars land the same coordinates read the
+        honest awaiting (never a fabricated curve)."""
+        from datetime import date
+
+        from brutex.dashboard import oneclick_artifacts as oc_mod
+        from brutex.engine.minute_path import PathStatus, SessionEquityPoint
+        from brutex.engine.trade_capture import ComboCapture
+        from brutex.engine.trade_store import write_tuple_sidecars
+
+        from tests.fakes.wp5_depth_fixtures import run_id_of as rid_of
+
+        lake = tmp_path / "lake"
+        artifact = _engine_artifact()
+        _write_engine_artifact(lake, artifact)
+        client = self._client(lake)
+        # Pre-sidecars: honest awaiting, total null.
+        before = client.get(f"/api/v1/oneclick/equity?run_id={_GRID_RUN_ID}&rank=1").json()
+        assert before["status"] == "awaiting"
+        assert before["total"] is None
+        # Now land the REAL sidecars for the rank-1 entry's equity_ref.
+        run_dir = (lake / "sweep_runs") / _GRID_RUN_ID
+        rank1_ref = artifact.entries[0]["equity_ref"]
+        assert isinstance(rank1_ref, dict)
+        paths = oc_mod.sidecar_paths_from_ref(run_dir, str(rank1_ref["tuple"]))
+        assert paths is not None
+        combo = str(artifact.entries[0]["run_id"])
+        assert combo == rid_of(1)  # min_dd_first: candidate 1 ranks first
+        capture = ComboCapture(
+            run_id=combo,
+            trades=(),
+            equity=(
+                SessionEquityPoint(date(2026, 7, 1), 1_000, 900, 1),
+                SessionEquityPoint(date(2026, 7, 2), 1_500, None, 1),
+            ),
+            equity_status=PathStatus.OK,
+            vix_missing_trades=0,
+            parity_ok=True,
+            parity_detail="",
+        )
+        write_tuple_sidecars(paths, [capture], [], store_content_hash="0" * 64)
+        payload = client.get(f"/api/v1/oneclick/equity?run_id={_GRID_RUN_ID}&rank=1").json()
+        assert payload["status"] == "ok", payload["detail"]
+        assert payload["source"] == "results_store"
+        assert payload["total"] == 2
+        assert [row["equity_close_paisa"] for row in payload["rows"]] == [1_000, 1_500]
+        assert payload["rows"][1]["equity_intraday_low_paisa"] is None  # honest None low
+        # The strategy page consumes exactly this route + the shared series
+        # builder (minute-path label; per-trade cumsum stays the fallback).
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "templates"
+            / "strategy.html"
+        ).read_text(encoding="utf-8")
+        assert "/api/v1/oneclick/equity" in template
+        assert "window.BXChart.minutePathSeries(state.equity)" in template
+        assert "per-trade close equity (minute-path unavailable for this run)" in template
+
+    def test_strategy_link_contract_run_id_rank_params(self, tmp_path: Path) -> None:
+        """Item 5 (BLOCKER-3, our half): the STABLE deep-link contract
+        ``/strategy?run_id=<id>&rank=<n>`` — the route serves 200 with params,
+        the wire payload carries the addressed rank, and the template resolves
+        rank from the query (exact-match loop; honest rank-miss message;
+        latest-run fallback when no run_id is given). The display-truth
+        session builds the /results-side link against THIS contract."""
+        lake = tmp_path / "lake"
+        artifact = _engine_artifact()
+        _write_engine_artifact(lake, artifact)
+        client = self._client(lake)
+        page = client.get(f"/strategy?run_id={_GRID_RUN_ID}&rank=3")
+        assert page.status_code == 200
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        ranks = [row["rank"] for row in payload["rows"]]
+        assert 3 in ranks  # the addressed rank exists on the wire
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "templates"
+            / "strategy.html"
+        ).read_text(encoding="utf-8")
+        # The client-side contract, pinned (no browser harness — honest envelope):
+        assert "state.runId = params.get('run_id');" in template
+        assert "state.rank = Math.max(1, parseInt(params.get('rank') || '1', 10) || 1);" in template
+        assert "if (Number(rows[i].rank) === state.rank) { row = rows[i]; break; }" in template
+        assert "is not in the stored top-100 (" in template  # honest rank-miss
+        assert "runs.latest_run_id" in template  # no-run_id fallback
 
     def test_route_names_a_future_schema_version_corruptly_never_500(self, tmp_path: Path) -> None:
         """A NEWER writer's artifact degrades to a NAMED corrupt through the

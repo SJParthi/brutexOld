@@ -14,7 +14,7 @@ The SERVER fix is the LANDED DEC-DASHBOARD-LAKE-IO-LIMITER-001 (MIGRATION.md
 #1642, PR #1362): every lake-touching offload rides the app's OWN bounded
 :class:`~brutex.dashboard.lake_offload.LakeOffload` limiter, DISJOINT from the
 default pool. (This branch's original ``LakeOffloadPool`` server half was
-SUPERSEDED by #1642 and dropped — MIGRATION.md #1645.) The oracles below are
+SUPERSEDED by #1642 and dropped — MIGRATION.md #1712.) The oracles below are
 the retained ROUTE-LEVEL pins, retargeted at the landed limiter: inject a
 1-token ``LakeOffload`` through the #1642 ``build_app(lake_offload=)`` seam AND
 shrink the default AnyIO limiter to 1, wedge a heavy read (it holds the lake
@@ -25,7 +25,7 @@ the DEFAULT pool) — STILL answer within budget. With every site on the shared
 (here: 1-token default) pool, the wedged heavy read holds the only token, so
 ``/api/v1/pull/rate`` can never get a worker and the poll times out.
 
-Retargeting delta (honest, MIGRATION.md #1645): the original assertion that
+Retargeting delta (honest, MIGRATION.md #1712): the original assertion that
 ``/api/v1/universe/pull-progress`` answers under a saturated lake limiter is
 REMOVED — on #1642's landed design that route's ``_phases`` fold rides the
 LAKE limiter BY DECISION (a lake-touching ledger fold), so pinning its

@@ -90,3 +90,25 @@ class TestComboReturns:
         )
         assert len(rets) == 1
         assert rets[0] > 0.0
+
+    def test_roll_schedule_reaches_the_stage1a_build(self) -> None:
+        # ADR-0012 pass-through (review round-2 finding 2): pre-fix
+        # combo_returns accepted NO roll_schedule — schedule-blind bar_bits
+        # were the only possible CPCV input for roll-stitched futures bars.
+        # A schedule ending before the bars now provably reaches Stage-1A.
+        bars = _session_bars()
+        stale = (bars[0].timestamp.astimezone(_IST).date().toordinal() - 1,)
+        with pytest.raises(ValueError, match="beyond the last roll_schedule expiry"):
+            combo_returns(bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=stale)
+
+    def test_covering_schedule_and_defaults_stay_the_spot_path(self) -> None:
+        bars = _session_bars()
+        covering = (bars[-1].timestamp.astimezone(_IST).date().toordinal(),)
+        base = combo_returns(bars, 0, direction=Side.BUY, tf_minutes=1)
+        explicit = combo_returns(
+            bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=None, apply_1day_mask=False
+        )
+        scheduled = combo_returns(bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=covering)
+        assert explicit == base  # the defaults ARE the spot path
+        # A single covering contract has no roll boundary → same trades.
+        assert scheduled == base

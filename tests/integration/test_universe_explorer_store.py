@@ -35,7 +35,13 @@ def test_empty_store_snapshot_yields_zero_universe(tmp_path: Path) -> None:
     """Regression for the load_snapshot 500: an empty opened store → 0/0, no crash."""
     store = _open_empty(tmp_path)
     snapshot = store.load_snapshot(in_scope_only=False)  # the op that 500'd on a Path
-    assert universe_summary(snapshot) == {"index_count": 0, "stock_count": 0, "total": 0}
+    assert universe_summary(snapshot) == {
+        "index_count": 0,
+        "stock_count": 0,
+        "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
     assert list_underlyings(snapshot, kind="index") == []
     assert list_underlyings(snapshot, kind="stock") == []
 

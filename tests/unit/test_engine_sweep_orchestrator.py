@@ -109,6 +109,15 @@ def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
 
 
+#: An ADR-0012 roll schedule spanning the `_trending_bars` fixture (which
+#: starts 2026-01-05 IST): one mid-stream roll boundary + a covering tail
+#: entry, expressed as owning-expiry day-ordinals.
+_FUT_SCHEDULE: tuple[int, ...] = (
+    datetime(2026, 1, 8, tzinfo=_IST).date().toordinal(),
+    datetime(2026, 3, 31, tzinfo=_IST).date().toordinal(),
+)
+
+
 def _tuple(**overrides: object) -> SweepTuple:
     base: dict[str, object] = {
         "instrument": "NIFTY",
@@ -196,11 +205,25 @@ class TestSweepGridConfig:
         grid = _grid(instruments=["INDIAVIX"], unsafe_allow_out_of_scope_instruments=True)
         assert list(grid.instruments) == ["INDIAVIX"]
 
-    @pytest.mark.parametrize(
-        "symbol", ["NIFTY", "BANKNIFTY", "SENSEX", "NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"]
-    )
+    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX", "NSE-NIFTY-FUT"])
     def test_in_scope_instruments_construct_by_default(self, symbol: str) -> None:
+        # The futures track is addressed by the ONE pinned series alias
+        # (DEC-FUTURES-ADDRESSING-PIN-001) — the two pre-launch shapes moved to
+        # the retired-refusal test below.
         assert list(_grid(instruments=[symbol]).instruments) == [symbol]
+
+    @pytest.mark.parametrize("symbol", ["NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"])
+    def test_retired_futures_shapes_refused_naming_the_alias(self, symbol: str) -> None:
+        """The two RETIRED pre-launch addressing shapes are refused at Layer 1.
+
+        DEC-FUTURES-ADDRESSING-PIN-001 supersedes the dual-acceptance envelope:
+        only the series alias is engine-sweepable, and the reworded refusal
+        message names it so the operator learns the correct shape.
+        """
+        with pytest.raises(ValueError, match="outside the brute-force engine scope") as exc:
+            _grid(instruments=[symbol])
+        assert "NSE-NIFTY-FUT" in str(exc.value)
+        assert "DEC-FUTURES-ADDRESSING-PIN-001" in str(exc.value)
 
     def test_scope_flag_is_identity_safe(self) -> None:
         """Regression pin (DEC-ENGINE-SCOPE-GUARD-001): the new field enters NO identity.
@@ -386,6 +409,24 @@ class TestToRunConfig:
         grid = _grid(overfit=overfit)
         cfg = _tuple().to_run_config(grid)
         assert cfg.overfit is overfit
+
+    def test_threads_roll_schedule_for_the_futures_alias(self) -> None:
+        # ADR-0012 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the per-tuple schedule
+        # is argument-plumbed into the SweepRunConfig, never a grid field.
+        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        t = _tuple(instrument="NSE-NIFTY-FUT")
+        cfg = t.to_run_config(grid, roll_schedule=_FUT_SCHEDULE)
+        assert cfg.roll_schedule == _FUT_SCHEDULE
+
+    def test_default_roll_schedule_is_none_for_spot(self) -> None:
+        cfg = _tuple().to_run_config(_grid())
+        assert cfg.roll_schedule is None
+
+    def test_spot_tuple_with_a_schedule_is_rejected_by_the_run_config_invariant(self) -> None:
+        # The SweepRunConfig instrument⟺schedule invariant fires through the
+        # threading seam too — a misrouted schedule can never mint an identity.
+        with pytest.raises(ValueError, match="roll_schedule is required for"):
+            _tuple().to_run_config(_grid(), roll_schedule=_FUT_SCHEDULE)
 
 
 # ────── count / iter ──────
@@ -848,3 +889,78 @@ class TestRunSweepGridResilientHardening:
 
 def test_default_max_tuples_is_exposed() -> None:
     assert DEFAULT_MAX_TUPLES == 100_000
+
+
+# ────── ADR-0012 roll_schedule threading through the grid ──────
+
+
+class TestRunSweepGridRollSchedule:
+    """`roll_schedule_by_instrument` — argument-plumbed, identity-safe.
+
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001: the launcher resolves the schedule map
+    ONCE and hands it alongside ``bars_for``; a futures tuple's run identity
+    moves ONLY via ``SweepRunConfig.roll_schedule`` → ``canonical_trade_params``
+    — a spot grid is byte-identical with and without the argument present.
+    """
+
+    def test_futures_grid_threads_the_schedule_and_runs(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        bars = _trending_bars(n_days=4)
+        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": _FUT_SCHEDULE},
+            )
+        assert summary.tuples_run == 1
+        assert summary.persisted > 0
+
+    def test_futures_grid_without_a_schedule_map_fails_the_invariant(self, tmp_path: Path) -> None:
+        # A futures tuple with NO schedule cannot mint an identity — the
+        # SweepRunConfig invariant propagates (a genuine wiring bug, never a
+        # silent constant-key sweep).
+        bars = _trending_bars(n_days=2)
+        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="roll_schedule is required for"),
+        ):
+            run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+
+    def test_spot_grid_is_byte_identical_with_and_without_the_argument(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("polars")
+        bars = _trending_bars(n_days=4)
+
+        def _run(tag: str, schedule_map: dict[str, tuple[int, ...]] | None) -> bytes:
+            grid = _grid()
+            results = tmp_path / tag
+            with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+                summary = run_sweep_grid(
+                    grid,
+                    bars_for=lambda _i, _t: bars,
+                    store_for=make_store_for(results, grid),
+                    dedup=_dedup(),
+                    audit=audit,
+                    roll_schedule_by_instrument=schedule_map,
+                )
+            assert summary.tuples_run == 1
+            store_path = tuple_store_path(results, next(iter_sweep_tuples(grid)), grid)
+            return store_path.read_bytes()
+
+        # None, an empty map, and a map naming ONLY the alias (a mixed launch)
+        # all leave a spot tuple's persisted bytes identical.
+        base = _run("none", None)
+        assert _run("empty", {}) == base
+        assert _run("foreign", {"NSE-NIFTY-FUT": _FUT_SCHEDULE}) == base
