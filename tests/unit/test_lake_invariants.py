@@ -789,6 +789,38 @@ class TestStreamingWalk:
             _dest(tmp_path, symbol="NIFTY"),
         ]
 
+    def test_child_dir_stat_fault_keeps_siblings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review fold (MINOR): ONE child's ``is_dir()`` OSError (EACCES /
+        EIO / ESTALE — the errnos 3.12 pathlib re-raises) skips THAT entry
+        only, never the whole level — the reviewer's repro: EIO on sibling B
+        must yield [A, C] (pre-fix the whole-comprehension guard returned
+        ``[]``, silently dropping the entire level; the old glob dropped only
+        the offending entry)."""
+        import errno
+
+        parent = tmp_path / "bars"
+        for name in ("A", "B", "C"):
+            (parent / name).mkdir(parents=True)
+        real_is_dir = Path.is_dir
+
+        def flaky_is_dir(self: Path, **kwargs: bool) -> bool:
+            if self.name == "B" and self.parent == parent:
+                raise OSError(errno.EIO, "Input/output error", str(self))
+            return real_is_dir(self, **kwargs)
+
+        monkeypatch.setattr(Path, "is_dir", flaky_is_dir)
+        assert li._child_dirs(parent, None) == [parent / "A", parent / "C"]
+        # The name filter still applies over the surviving entries.
+        assert li._child_dirs(parent, "C") == [parent / "C"]
+
+    def test_child_dirs_vanished_parent_yields_empty(self, tmp_path: Path) -> None:
+        """The whole-parent-listing guard is untouched by the per-child fold:
+        a vanished parent still yields ``[]`` (the old ``base.exists()``
+        guard generalised per level)."""
+        assert li._child_dirs(tmp_path / "bars" / "gone", None) == []
+
     def test_streaming_resident_is_per_series_not_per_lake(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

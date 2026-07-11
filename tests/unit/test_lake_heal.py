@@ -4207,6 +4207,9 @@ class TestSentinelStampGate:
         assert attempt["reason"] == "observe_mode"
         assert attempt["mode"] == "observe"
         assert attempt["lake_token"] == result.token
+        # The REAL batch tallies are persisted (the re-alert's source values).
+        assert attempt["findings"] == 1
+        assert attempt["files_scanned"] == 1
         # Next boot, UNCHANGED token + mode: the scan verdict is a pure
         # function of (token, mode) — skipped LOUDLY, never silently.
         with capture_logs() as logs2:
@@ -4464,6 +4467,111 @@ class TestAttemptRecordBackoff:
         forced = run_startup_sweep(lake, force=True, per_file_pause=lambda: None, now=_now)
         assert forced.ran is True
 
+    def _flat_attempt(self, *, reason: str, mode: str) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "lake_token": "T",
+            "reason": reason,
+            "mode": mode,
+            "attempt_utc": _NOW.isoformat(),
+        }
+
+    def test_mode_mismatch_reruns_every_reason(self) -> None:
+        """MAJOR fold (reproduced): the mode gate covers ALL reasons — a
+        recorded-vs-current mode mismatch re-runs the sweep for BOTH the
+        deterministic AND the transient arms, both flip directions; an
+        unchanged mode still skips (deterministic / backoff)."""
+        from brutex.data.lake_heal import LakeHealMode, _attempt_skip_verdict
+
+        expected = {
+            "observe_mode": "deterministic",
+            "mass_heal_refused": "deterministic",
+            "heal_errors": "backoff",
+            "unhealed_findings": "backoff",
+        }
+        flips: tuple[tuple[LakeHealMode, LakeHealMode], ...] = (
+            ("auto", "observe"),
+            ("observe", "auto"),
+        )
+        for reason, verdict in expected.items():
+            for recorded, current in flips:
+                flipped = self._flat_attempt(reason=reason, mode=recorded)
+                assert _attempt_skip_verdict(flipped, token="T", mode=current, now=_NOW) is None, (
+                    reason,
+                    recorded,
+                    current,
+                )
+                same = self._flat_attempt(reason=reason, mode=current)
+                assert _attempt_skip_verdict(same, token="T", mode=current, now=_NOW) == verdict, (
+                    reason,
+                    current,
+                )
+
+    def test_mode_flip_during_transient_backoff_reruns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reviewer's repro end-to-end: an operator flipping auto →
+        observe to DIAGNOSE a ``heal_errors`` lake must get a real (observe)
+        re-run — pre-fix the transient arm ignored the flip and backoff-
+        skipped the diagnosis for up to 24 h. The flip BACK re-runs too."""
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+
+        def _boom(self: ParquetWriter, dest: Path, **_kw: Any) -> Any:
+            raise WriterError("simulated per-finding heal failure")
+
+        monkeypatch.setattr(ParquetWriter, "heal_partition", _boom)
+        first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.ran is True
+        assert first.report is not None
+        assert first.report.errors == 1
+        # Same mode, within the backoff: skipped (unchanged law).
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        # Flip auto → observe: the diagnosis run MUST happen.
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        diag = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert diag.ran is True
+        assert diag.report is not None
+        assert diag.report.mode == "observe"
+        assert diag.report.findings == 1  # the poison is now VISIBLE to the operator
+        # …and the flip BACK (observe → auto) re-runs as well (direction 2).
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        back = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert back.ran is True
+        assert back.report is not None
+        assert back.report.errors == 1  # genuinely re-attempted the heal
+
+    def test_remediation_wording_is_verdict_specific(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review fold: the backoff skip names ITS lever
+        (``BRUTEX_LAKE_HEAL_RETRY_S=0`` + a reboot re-runs now), the
+        deterministic skip names the mode flip — pre-fix both verdicts read
+        the deterministic wording."""
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        # Backoff verdict (transient reason, unchanged auto mode).
+        self._write_attempt(lake, self._attempt(lake))
+        with capture_logs() as logs:
+            assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        (skip,) = _events(logs, "lake_heal.sweep_skip_attempt")
+        assert skip["verdict"] == "backoff"
+        backoff_remediation = str(skip["remediation"])
+        assert f"{LAKE_HEAL_RETRY_ENV}=0 + a reboot re-runs now" in backoff_remediation
+        assert "mode flip" not in backoff_remediation
+        # Deterministic verdict (observe record, unchanged observe mode).
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        self._write_attempt(lake, self._attempt(lake, reason="observe_mode", mode="observe"))
+        with capture_logs() as logs2:
+            assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        (skip2,) = _events(logs2, "lake_heal.sweep_skip_attempt")
+        assert skip2["verdict"] == "deterministic"
+        deterministic_remediation = str(skip2["remediation"])
+        assert f"{LAKE_HEAL_ENV} mode flip re-runs" in deterministic_remediation
+        assert LAKE_HEAL_RETRY_ENV not in deterministic_remediation
+
 
 class TestResolveHealRetry:
     """``BRUTEX_LAKE_HEAL_RETRY_S`` — the ``resolve_sweep_throttle_s`` parse
@@ -4484,6 +4592,187 @@ class TestResolveHealRetry:
         assert resolve_heal_retry_s() == 3600.0
         monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "-5")
         assert resolve_heal_retry_s() == 0.0
+
+    def test_non_finite_takes_the_junk_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Review fold (NIT): ``inf`` parsed as a valid float = skip-forever
+        within one token, violating the "any ambiguity → re-run" law; ``nan``
+        poisons the elapsed compare. Both (and every spelling) take the
+        junk-value treatment — the default, never a silent forever-skip."""
+        for junk in ("inf", "+inf", "-inf", "Infinity", "nan", "NaN"):
+            monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, junk)
+            assert resolve_heal_retry_s() == DEFAULT_LAKE_HEAL_RETRY_S, junk
+
+
+class TestAttemptRecordBestEffort:
+    """The attempt-record write is BEST-EFFORT (review fold, MINOR).
+
+    On a read-only / wedged lake mount an observe boot previously escalated
+    the record's OSError to the :class:`StartupSweeper` blanket guard — a
+    scary ``lake_heal.sweep_failed`` EVERY boot, the real result DISCARDED,
+    and (ironically) the skip never engaging so the O(files) scan re-ran
+    every boot too. Now: ONE targeted ``lake_heal.attempt_record_failed``
+    WARNING, the real :class:`StartupSweepResult` still returned.
+    ``MemoryError`` is NOT caught (house law).
+    """
+
+    def test_unwritable_record_warns_once_and_returns_the_real_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A FILE planted at ``.lake_heal`` (the unwritable-metadata shape —
+        works under root, unlike a chmod) faults the record's ``mkdir``: the
+        sweep result survives, ONE targeted WARN fires, NO ``sweep_failed``."""
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        (lake / ".lake_heal").write_text("not a dir", encoding="utf-8")
+        with capture_logs() as logs:
+            result = StartupSweeper(lake).run_sync()
+        assert result is not None  # NOT discarded by the blanket guard
+        assert result.ran is True
+        assert result.report is not None
+        assert result.report.findings == 1
+        (warn,) = _events(logs, "lake_heal.attempt_record_failed")
+        assert warn["log_level"] == "warning"
+        assert warn["path"] == str(lake / ATTEMPT_RELPATH)
+        assert _events(logs, "lake_heal.sweep_failed") == []
+        assert load_last_attempt(lake) is None  # honestly unrecorded — next boot re-scans
+
+    def test_memory_error_from_the_record_write_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MemoryError is NOT swallowed by the best-effort arm (house law) —
+        it propagates raw out of :func:`run_startup_sweep`."""
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+
+        def _boom(dest: Path, render: Any) -> None:
+            raise MemoryError
+
+        monkeypatch.setattr(lake_heal, "atomic_write_simple", _boom)
+        with pytest.raises(MemoryError):
+            run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+
+
+class TestMassRefusalRealert:
+    """The standing mass-heal-refusal keeps its per-boot Telegram cadence
+    (review fold, judgment ruling): a deterministic skip of a
+    ``mass_heal_refused`` record re-fires the CRITICAL alert from the
+    record's PERSISTED REAL tallies — never a fabricated
+    :class:`HealReport`; any other reason / a pre-fix record shape abstains;
+    an alert fault is swallowed (alerts never crash boot).
+    """
+
+    def _refused_lake(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        monkeypatch.setattr(lake_heal, "MASS_HEAL_MIN_FILES", 1)
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.report is not None
+        assert first.report.refused_mass_heal is True
+        return lake
+
+    def test_deterministic_skip_realerts_from_persisted_values(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.notifications.sweep_alerts as sweep_alerts_mod
+
+        lake = self._refused_lake(tmp_path, monkeypatch)
+        attempt = load_last_attempt(lake)
+        assert attempt is not None
+        assert attempt["findings"] == 1
+        assert attempt["files_scanned"] == 1
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            sweep_alerts_mod,
+            "emit_lake_heal_still_refused_alert",
+            lambda **kw: calls.append(dict(kw)),
+        )
+        second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        (call,) = calls
+        assert call == {
+            "findings": 1,
+            "files_scanned": 1,
+            "attempt_utc": attempt["attempt_utc"],
+            "scope": "startup-sweep",
+        }
+
+    def test_observe_deterministic_skip_never_realerts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The re-alert is mass_heal_refused-ONLY — an observe-mode
+        deterministic skip stays a structlog WARNING (the sweep already
+        alerted once via ``on_report`` when it ran)."""
+        import brutex.notifications.sweep_alerts as sweep_alerts_mod
+
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            sweep_alerts_mod,
+            "emit_lake_heal_still_refused_alert",
+            lambda **kw: calls.append(dict(kw)),
+        )
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        assert calls == []
+
+    def test_pre_fix_record_shape_abstains_never_fabricates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A record missing (or carrying junk-typed) tallies ABSTAINS —
+        honesty over noise; the persisted values are the ONLY alert source."""
+        import brutex.notifications.sweep_alerts as sweep_alerts_mod
+        from brutex.data.lake_heal import _realert_mass_heal_refused
+
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            sweep_alerts_mod,
+            "emit_lake_heal_still_refused_alert",
+            lambda **kw: calls.append(dict(kw)),
+        )
+        base = {"findings": 1, "files_scanned": 2, "attempt_utc": "2024-07-01T00:00:00+00:00"}
+        _realert_mass_heal_refused({k: v for k, v in base.items() if k != "findings"})
+        _realert_mass_heal_refused({**base, "findings": "1"})
+        _realert_mass_heal_refused({**base, "files_scanned": None})
+        _realert_mass_heal_refused({**base, "attempt_utc": 5})
+        assert calls == []
+        _realert_mass_heal_refused(base)  # the well-formed record DOES fire
+        (call,) = calls
+        assert call == {**base, "scope": "startup-sweep"}
+
+    def test_realert_fault_swallowed_with_one_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Alerts never crash boot: a raising emit is ONE warning."""
+        import brutex.notifications.sweep_alerts as sweep_alerts_mod
+        from brutex.data.lake_heal import _realert_mass_heal_refused
+
+        def _boom(**_kw: Any) -> None:
+            raise RuntimeError("simulated alert-path fault")
+
+        monkeypatch.setattr(sweep_alerts_mod, "emit_lake_heal_still_refused_alert", _boom)
+        with capture_logs() as logs:
+            _realert_mass_heal_refused(
+                {"findings": 1, "files_scanned": 2, "attempt_utc": "2024-07-01T00:00:00+00:00"}
+            )
+        (warn,) = _events(logs, "lake_heal.still_refused_alert_failed")
+        assert warn["log_level"] == "warning"
+
+    def test_realert_rides_the_real_emit_when_telegram_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No mock: the deterministic skip drives the REAL emit helper, which
+        is a silent no-op when Telegram is disabled (the default) — the skip
+        result is unchanged and nothing raises."""
+        lake = self._refused_lake(tmp_path, monkeypatch)
+        with capture_logs() as logs:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        assert _events(logs, "lake_heal.still_refused_alert_failed") == []
 
 
 class TestStartupSweeper:
