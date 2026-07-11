@@ -1094,6 +1094,50 @@ class SweepAlerter:
             dedupe_key=f"lake-heal:{scope}",
         )
 
+    def lake_heal_still_refused(
+        self, *, findings: int, files_scanned: int, attempt_utc: str, scope: str
+    ) -> bool:
+        """Re-alert a STANDING lake mass-heal refusal on a skipped boot sweep (CRITICAL).
+
+        DEC-LAKE-INVARIANTS-PREINDEX-001 (review fold): once a
+        mass-heal-refused sweep's attempt record lets later boots skip the
+        provably-identical O(files) re-scan, the operator would otherwise
+        LOSE the per-boot Telegram re-alert of a CRITICAL human-required
+        state. This is that re-alert, fired by the skipping boot from the
+        attempt record's PERSISTED REAL tallies (the refused sweep wrote them
+        itself) — explicitly worded as a re-alert of the PRIOR sweep, never a
+        fabricated fresh heal report. ``PHASE_BLOCKED`` kind (the CRITICAL
+        operator-must-act house pattern — :meth:`pull_halted`); the
+        ``dedupe_key`` binds the ATTEMPT timestamp so re-alerts of the same
+        standing refusal coalesce only within the notifier's window while a
+        NEW refusal always alerts fresh.
+
+        Parameters
+        ----------
+        findings, files_scanned
+            The refused batch's real tallies, as persisted in the attempt
+            record.
+        attempt_utc
+            The refused sweep's recorded wall time (ISO) — named in the body.
+        scope
+            The seam token (``"startup-sweep"``) — part of the dedupe key.
+        """
+        message = escape_markdown_v2(
+            f"🛑 Lake heal STILL REFUSED (mass-heal rail) — re-alert of a prior "
+            f"sweep, still refused since {attempt_utc} ({scope}): {findings} "
+            f"finding(s) across {files_scanned} scanned file(s) would rewrite too "
+            "large a fraction of the lake, so NOTHING was fixed; this boot skipped "
+            "the provably-identical re-scan (lake unchanged). Human decision "
+            "required: inspect the findings, then re-arm (any lake content change "
+            "re-runs; BRUTEX_LAKE_HEAL=observe to diagnose)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"lake-heal-still-refused:{scope}:{attempt_utc}",
+        )
+
     def vendor_down(self, *, failed_windows: int, distinct_symbols: int) -> bool:
         """Alert that the VENDOR looks DOWN — the pull halted; WAIT then re-run (CRITICAL).
 
@@ -1523,6 +1567,35 @@ def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
         )
 
 
+def emit_lake_heal_still_refused_alert(
+    *, findings: int, files_scanned: int, attempt_utc: str, scope: str
+) -> None:
+    """Fire the best-effort standing mass-heal-refusal RE-alert (DEC-LAKE-INVARIANTS-PREINDEX-001).
+
+    The :func:`emit_lake_heal_alert` sibling for the ONE caller that has no
+    fresh :class:`HealReport` — the L3 boot that SKIPPED a provably-identical
+    re-scan of a mass-heal-refused lake (``lake_heal._realert_mass_heal_refused``)
+    and re-alerts from the attempt record's persisted real tallies instead.
+    The whole body is wrapped in a blanket ``try/except`` so the
+    fire-and-forget contract is STRUCTURAL: an alert failure is swallowed +
+    logged and can NEVER fail the boot. Silent no-op when Telegram is
+    disabled (the default).
+    """
+    import structlog
+
+    try:
+        SweepAlerter().lake_heal_still_refused(
+            findings=findings,
+            files_scanned=files_scanned,
+            attempt_utc=attempt_utc,
+            scope=scope,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the boot
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "lake_heal_still_refused_alert_failed"
+        )
+
+
 def emit_greeks_backfill_complete_alert(report: GreeksBackfillReportLike) -> None:
     """Fire the ONE best-effort Greeks-backfill completion summary (DEC-GREEKS-BULK-REENRICH-001).
 
@@ -1564,6 +1637,7 @@ __all__ = [
     "conflict_alert_threshold",
     "emit_greeks_backfill_complete_alert",
     "emit_lake_heal_alert",
+    "emit_lake_heal_still_refused_alert",
     "emit_pull_halt_alert",
     "emit_vendor_conflict_alert",
     "escape_markdown_v2",

@@ -695,15 +695,27 @@ def _child_dirs(parent: Path, name_filter: str | None) -> list[Path]:
     coordinate). ``is_dir()`` follows a symlinked dir exactly as the old
     fixed-depth glob's ``*`` components did (empirically pinned). A vanished
     *parent* (or one raced away mid-``iterdir``) yields ``[]`` — the old
-    ``base.exists()`` guard generalised per level. Sorting ``Path`` objects
-    sorts by path COMPONENTS (3.12 ``PurePath.__lt__``), the same order
+    ``base.exists()`` guard generalised per level. A single CHILD whose
+    ``is_dir()`` stat faults (EACCES / EIO / ESTALE — the errnos 3.12
+    ``pathlib`` re-raises) is skipped ALONE under a per-child guard (review
+    fold, MINOR): pre-fix the one ``try`` wrapped the whole comprehension,
+    so one faulting sibling silently dropped the ENTIRE level — the old glob
+    dropped only the offending entry. Sorting ``Path`` objects sorts by path
+    COMPONENTS (3.12 ``PurePath.__lt__``), the same order
     ``sorted(base.glob(...))`` yielded, so the walk preserves the old scan
     order exactly.
     """
     try:
-        children = [child for child in parent.iterdir() if child.is_dir()]
+        entries = list(parent.iterdir())
     except OSError:
         return []
+    children: list[Path] = []
+    for child in entries:
+        try:
+            if child.is_dir():
+                children.append(child)
+        except OSError:
+            continue  # one unstat-able child never drops its siblings
     if name_filter is not None:
         children = [child for child in children if child.name == name_filter]
     return sorted(children)

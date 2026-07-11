@@ -70,6 +70,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -281,15 +282,19 @@ def resolve_sweep_throttle_s() -> float:
 def resolve_heal_retry_s() -> float:
     """Resolve the transient-non-stamp re-attempt backoff (seconds), tolerantly.
 
-    Unset / blank / unparsable → :data:`DEFAULT_LAKE_HEAL_RETRY_S`; a negative
-    value clamps to ``0.0`` (= re-attempt on every boot, the pre-fix cadence).
-    The :func:`resolve_sweep_throttle_s` parse contract, applied to
-    :data:`LAKE_HEAL_RETRY_ENV` (DEC-LAKE-INVARIANTS-PREINDEX-001).
+    Unset / blank / unparsable / NON-FINITE → :data:`DEFAULT_LAKE_HEAL_RETRY_S`;
+    a negative value clamps to ``0.0`` (= re-attempt on every boot, the pre-fix
+    cadence). The :func:`resolve_sweep_throttle_s` parse contract, applied to
+    :data:`LAKE_HEAL_RETRY_ENV` (DEC-LAKE-INVARIANTS-PREINDEX-001). The
+    non-finite arm is the review fold: ``inf`` parses as a valid float yet
+    means "skip forever within one token" — violating the "any ambiguity →
+    re-run" law — and ``nan`` poisons the elapsed compare; both take the
+    junk-value treatment (the default), never a silent forever-skip.
 
     Returns
     -------
     float
-        The backoff in seconds (≥ 0).
+        The backoff in seconds (≥ 0, finite).
     """
     raw = os.environ.get(LAKE_HEAL_RETRY_ENV, "").strip()
     if not raw:
@@ -297,6 +302,8 @@ def resolve_heal_retry_s() -> float:
     try:
         value = float(raw)
     except ValueError:
+        return DEFAULT_LAKE_HEAL_RETRY_S
+    if not math.isfinite(value):
         return DEFAULT_LAKE_HEAL_RETRY_S
     return max(0.0, value)
 
@@ -2214,30 +2221,53 @@ def _sentinel_skip_reason(report: HealReport) -> str | None:
 
 
 def _write_attempt_record(
-    lake_root: Path, *, token: str, reason: str, mode: str, now: datetime
+    lake_root: Path,
+    *,
+    token: str,
+    reason: str,
+    mode: str,
+    findings: int,
+    files_scanned: int,
+    now: datetime,
 ) -> None:
     """Stamp :data:`ATTEMPT_RELPATH` after a sweep that did NOT stamp the sentinel.
 
     Records the POST-heal token the next boot will observe over unchanged
     content, the :func:`_sentinel_skip_reason` verdict, the heal mode the
-    attempt ran under (a mode flip must re-run a deterministic non-stamp),
-    and the attempt wall time (the transient backoff anchor). Atomic write —
-    a failure propagates to the caller exactly like a sentinel-stamp failure
-    (the :class:`StartupSweeper` blanket guard owns "boot never crashes").
+    attempt ran under (a mode flip must re-run ANY skip), the REAL batch
+    ``findings`` + scan ``files_scanned`` tallies (the persisted values the
+    :func:`_realert_mass_heal_refused` re-alert reads — never a fabricated
+    report), and the attempt wall time (the transient backoff anchor).
+
+    BEST-EFFORT (review fold, MINOR-2): an :class:`OSError` (a read-only /
+    wedged lake mount) logs ONE targeted ``lake_heal.attempt_record_failed``
+    WARNING and returns — the sweep genuinely ran, so its real
+    :class:`StartupSweepResult` must still reach the caller instead of being
+    discarded by the :class:`StartupSweeper` blanket guard as a scary
+    every-boot ``lake_heal.sweep_failed`` (with the skip machinery then —
+    ironically — never engaging, so the O(files) scan re-ran every boot too).
+    The cost of a failed write is honestly the pre-record cadence: the next
+    boot re-scans. :class:`MemoryError` is NOT caught (house law) — it
+    propagates to the pull-wide/boot guards untouched.
     """
     path = lake_root / ATTEMPT_RELPATH
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
         {
             "version": 1,
             "lake_token": token,
             "reason": reason,
             "mode": mode,
+            "findings": findings,
+            "files_scanned": files_scanned,
             "attempt_utc": now.astimezone(UTC).isoformat(),
         },
         sort_keys=True,
     )
-    atomic_write_simple(path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_simple(path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+    except OSError as exc:
+        _LOG.warning("lake_heal.attempt_record_failed", path=str(path), error=str(exc))
 
 
 def _attempt_skip_verdict(
@@ -2254,16 +2284,24 @@ def _attempt_skip_verdict(
     A TRANSIENT non-stamp (heal errors / unhealed findings — I/O may heal
     itself) is re-attempted once the :func:`resolve_heal_retry_s` backoff
     elapses, or immediately when the token moves (any pull/heal/manual copy).
-    Every ambiguity — no record, foreign token, unknown reason, unparsable or
-    future-skewed timestamp — biases to ``None`` = re-run (fail-open to
-    CHECKING, the sentinel loaders' contract). ``"deterministic"`` /
-    ``"backoff"`` name the skip class for the caller's WARNING.
+    A MODE FLIP re-runs for ALL reasons (review fold, MAJOR): the mode gate
+    is hoisted ABOVE the reason dispatch — pre-fix only the deterministic arm
+    honoured it, so an operator flipping ``auto`` → ``observe`` to DIAGNOSE a
+    ``heal_errors`` lake was backoff-skipped for up to 24 h; the operator
+    changed the sweep's inputs, so the recorded outcome no longer predicts
+    this boot's. Every ambiguity — no record, foreign token, unknown reason,
+    unparsable or future-skewed timestamp — biases to ``None`` = re-run
+    (fail-open to CHECKING, the sentinel loaders' contract).
+    ``"deterministic"`` / ``"backoff"`` name the skip class for the caller's
+    WARNING.
     """
     if attempt is None or attempt.get("lake_token") != token:
         return None
+    if attempt.get("mode") != mode:
+        return None  # mode flipped since the attempt — re-run under the new mode
     reason = attempt.get("reason")
     if reason in _DETERMINISTIC_ATTEMPT_REASONS:
-        return "deterministic" if attempt.get("mode") == mode else None
+        return "deterministic"
     if reason in _TRANSIENT_ATTEMPT_REASONS:
         raw = attempt.get("attempt_utc")
         if not isinstance(raw, str):
@@ -2278,6 +2316,49 @@ def _attempt_skip_verdict(
         # Elapsed backoff — or a FUTURE-skewed stamp (elapsed < 0): re-run.
         return None
     return None  # unknown reason (forward compat / hand-edited) — re-run
+
+
+def _realert_mass_heal_refused(attempt: Mapping[str, Any]) -> None:
+    """Re-fire the standing mass-heal-refusal CRITICAL alert on a skipped boot.
+
+    Review fold (judgment ruling): the deterministic skip dropped the
+    per-boot Telegram re-alert — sharpest for ``mass_heal_refused``, a
+    CRITICAL human-required state the pre-change every-boot re-sweep re-fired
+    on each boot. The re-alert reads ONLY the PERSISTED REAL scalars the
+    refused sweep itself recorded in the attempt sidecar (``findings`` /
+    ``files_scanned`` / ``attempt_utc`` — :func:`_write_attempt_record`) and
+    routes them through
+    :func:`~brutex.notifications.sweep_alerts.emit_lake_heal_still_refused_alert`,
+    whose wording is explicitly a re-alert of the PRIOR sweep ("still refused
+    since <ts>") — NEVER a fabricated per-boot :class:`HealReport` for a
+    sweep that did not run. A pre-fix-shaped record missing any of the three
+    fields (or carrying junk types) ABSTAINS silently — honesty over noise.
+    Best-effort end to end: the notifications import is function-local (the
+    :func:`_startup_sweep_alert` precedent), the emit helper is itself
+    blanket-guarded, and this wrapper's own guard means an alert-path fault
+    is ONE ``lake_heal.still_refused_alert_failed`` WARNING — alerts never
+    crash boot.
+    """
+    findings = attempt.get("findings")
+    files_scanned = attempt.get("files_scanned")
+    attempt_utc = attempt.get("attempt_utc")
+    if (
+        not isinstance(findings, int)
+        or not isinstance(files_scanned, int)
+        or not isinstance(attempt_utc, str)
+    ):
+        return  # pre-fix / hand-edited record shape — abstain, never fabricate
+    try:
+        from brutex.notifications.sweep_alerts import emit_lake_heal_still_refused_alert
+
+        emit_lake_heal_still_refused_alert(
+            findings=findings,
+            files_scanned=files_scanned,
+            attempt_utc=attempt_utc,
+            scope="startup-sweep",
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort alert seam
+        _LOG.warning("lake_heal.still_refused_alert_failed", error=str(exc))
 
 
 def run_startup_sweep(
@@ -2307,16 +2388,24 @@ def run_startup_sweep(
     the stamp (``lake_heal.sweep_sentinel_skipped`` with the reason) so a
     later boot re-attempts instead of token-matching past live poison — and
     additionally stamps the :data:`ATTEMPT_RELPATH` sibling record
-    (DEC-LAKE-INVARIANTS-PREINDEX-001): on the next boot with an UNCHANGED
-    token, a DETERMINISTIC non-stamp (observe mode / mass-heal refusal, mode
-    unchanged) skips the provably-identical re-scan with a loud
+    (DEC-LAKE-INVARIANTS-PREINDEX-001; BEST-EFFORT — an unwritable record
+    logs ``lake_heal.attempt_record_failed`` and the real result still
+    returns, degrading to the pre-record every-boot cadence): on the next
+    boot with an UNCHANGED token AND UNCHANGED mode (a
+    :data:`LAKE_HEAL_ENV` flip re-runs for ALL reasons — the operator
+    changed the sweep's inputs), a DETERMINISTIC non-stamp (observe mode /
+    mass-heal refusal) skips the provably-identical re-scan with a loud
     ``lake_heal.sweep_skip_attempt`` WARNING naming the standing poison +
-    remediation, and a TRANSIENT non-stamp (heal errors / unhealed findings)
-    re-attempts only after the :func:`resolve_heal_retry_s` backoff (default
-    24 h, env :data:`LAKE_HEAL_RETRY_ENV`) — every skipped boot still WARNs,
-    any token move (a pull/heal/manual copy) re-arms immediately, and
-    *force* bypasses both records. This never weakens the clean-sentinel
-    meaning: the silent fast path still requires a genuinely-clean stamp.
+    verdict-specific remediation — a skipped standing MASS-HEAL REFUSAL
+    additionally re-fires the CRITICAL Telegram alert from the record's
+    persisted real tallies (:func:`_realert_mass_heal_refused`, "still
+    refused since <ts>") — and a TRANSIENT non-stamp (heal errors / unhealed
+    findings) re-attempts only after the :func:`resolve_heal_retry_s`
+    backoff (default 24 h, env :data:`LAKE_HEAL_RETRY_ENV`) — every skipped
+    boot still WARNs, any token move (a pull/heal/manual copy) re-arms
+    immediately, and *force* bypasses both records. This never weakens the
+    clean-sentinel meaning: the silent fast path still requires a
+    genuinely-clean stamp.
     Cost honesty (Golden Rule #10): O(files) total with a per-file key-column
     read that scales with row count — NOT O(1); paid once per lake content
     token; the per-boot token walk itself stays an O(files) stat cost.
@@ -2352,6 +2441,22 @@ def run_startup_sweep(
             # LOUD by design — the lake still carries whatever kept the
             # sentinel unstamped; the skip only avoids re-paying the O(files)
             # scan for a provably-identical (or backoff-bounded) outcome.
+            # Remediation is VERDICT-specific (review fold): a deterministic
+            # skip names its lever (the mode flip), a backoff skip names ITS
+            # lever (the retry env — =0 + a reboot re-runs now); pre-fix both
+            # verdicts read the deterministic wording.
+            if verdict == "deterministic":
+                remediation = (
+                    "fix the recorded cause then re-arm: any lake content change "
+                    f"re-runs immediately; a {LAKE_HEAL_ENV} mode flip re-runs; "
+                    "force=True bypasses"
+                )
+            else:
+                remediation = (
+                    "fix the recorded cause then re-arm: any lake content change "
+                    f"re-runs immediately; {LAKE_HEAL_RETRY_ENV}=0 + a reboot "
+                    "re-runs now; force=True bypasses"
+                )
             _LOG.warning(
                 "lake_heal.sweep_skip_attempt",
                 verdict=verdict,
@@ -2359,13 +2464,13 @@ def run_startup_sweep(
                 mode=attempt.get("mode"),
                 attempt_utc=attempt.get("attempt_utc"),
                 retry_s=resolve_heal_retry_s() if verdict == "backoff" else None,
-                remediation=(
-                    "fix the recorded cause then re-arm: any lake content change "
-                    f"re-runs immediately; a {LAKE_HEAL_ENV} mode flip re-runs a "
-                    f"deterministic skip; {LAKE_HEAL_RETRY_ENV} bounds the "
-                    "transient backoff; force=True bypasses"
-                ),
+                remediation=remediation,
             )
+            if verdict == "deterministic" and attempt.get("reason") == "mass_heal_refused":
+                # The standing CRITICAL human-required state keeps its
+                # per-boot Telegram cadence — from the PERSISTED real tallies
+                # (review fold; see _realert_mass_heal_refused).
+                _realert_mass_heal_refused(attempt)
             return StartupSweepResult(ran=False, token=token, scan=None, report=None)
     pause = per_file_pause
     if pause is None:
@@ -2420,7 +2525,13 @@ def run_startup_sweep(
             errors=report.errors,
         )
         _write_attempt_record(
-            lake_root, token=post_token, reason=skip_reason, mode=report.mode, now=now_fn()
+            lake_root,
+            token=post_token,
+            reason=skip_reason,
+            mode=report.mode,
+            findings=report.findings,
+            files_scanned=files_scanned,
+            now=now_fn(),
         )
     _LOG.info(
         "lake_heal.sweep_complete",
