@@ -1570,3 +1570,148 @@ class TestReferenceStamperSeam:
             assert trade.vix_at_exit == stamper.vix.level_at(trade.exit_ts)
             assert trade.vix_at_entry is not None
             assert trade.vix_at_exit is not None
+
+
+# ────────────────────────────────────────────────────────────────────────
+# PriceColumns + derive_price_columns + the injection/memo seams
+# (DEC-STAGE1A-RUST-BATCH-001 — the W2 rider)
+# ────────────────────────────────────────────────────────────────────────
+
+from brutex.engine import rust_trade_sim as _rts_module  # noqa: E402
+from brutex.engine.rust_trade_sim import (  # noqa: E402
+    PriceColumns,
+    derive_price_columns,
+)
+
+
+class TestPriceColumns:
+    def test_derive_matches_the_historical_inline_derivation(self) -> None:
+        # The extraction golden: the module-level derive equals the old
+        # inline comprehensions (via the canonical _price_to_paisa seam) +
+        # the per-bar IST-date ordinals.
+        from brutex.engine.stage1a import (
+            _price_to_paisa,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        bars = _feed()
+        columns = derive_price_columns(bars)
+        assert columns.open_paisa == [_price_to_paisa(b.open) for b in bars]
+        assert columns.high_paisa == [_price_to_paisa(b.high) for b in bars]
+        assert columns.low_paisa == [_price_to_paisa(b.low) for b in bars]
+        assert columns.close_paisa == [_price_to_paisa(b.close) for b in bars]
+        assert columns.session_days == [
+            b.timestamp.astimezone(IST).date().toordinal() for b in bars
+        ]
+        assert columns.n_bars == len(bars)
+
+    @pytest.mark.parametrize("field", ["high_paisa", "low_paisa", "close_paisa", "session_days"])
+    def test_inconsistent_columns_are_refused_naming_the_field(self, field: str) -> None:
+        kwargs: dict[str, list[int]] = {
+            "open_paisa": [1, 2],
+            "high_paisa": [1, 2],
+            "low_paisa": [1, 2],
+            "close_paisa": [1, 2],
+            "session_days": [1, 2],
+        }
+        kwargs[field] = [1]
+        with pytest.raises(ValueError, match=field):
+            PriceColumns(**kwargs)
+
+    def test_precomputed_arm_equals_the_derive_arm_bit_for_bit(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        derived = ResidentTradeSim(bars, bits, tf_minutes=1)
+        injected = ResidentTradeSim(
+            bars, bits, tf_minutes=1, precomputed_columns=derive_price_columns(bars)
+        )
+        # The assembled kernel-input 6-tuples are bit-equal…
+        assert (
+            derived._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+            == injected._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        )
+        # …and the simulated trades identical (both kernel-served).
+        masks = [0, 1, 3]
+        assert derived.rust_active is True
+        assert injected.rust_active is True
+        assert derived.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=300
+        ) == injected.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+
+    def test_length_mismatched_precomputed_columns_are_refused_naming_both(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        short = derive_price_columns(bars[:-1])
+        with pytest.raises(ValueError, match=r"cover 4 bars != bars length 5"):
+            ResidentTradeSim(bars, bits, tf_minutes=1, precomputed_columns=short)
+
+    def test_default_none_is_the_flag_independent_byte_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The default-None arm derives locally regardless of the Stage-1A
+        # flag (the W2 rider is flag-INDEPENDENT — pinned).
+        monkeypatch.delenv("BRUTEX_SWEEP_RUST_STAGE1A", raising=False)
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        monkeypatch.setenv("BRUTEX_SWEEP_RUST_STAGE1A", "1")
+        sim_on = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert (
+            sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+            == sim_on._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        )
+
+
+class TestKernelInputsMemo:
+    def test_derive_runs_once_per_instance_including_wide_promotion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The G-4 memo: construction derives ONCE; the u128 promotion reuses
+        # the memoised 6-tuple instead of re-paying the Decimal pass.
+        calls = [0]
+        real = derive_price_columns
+
+        def _counting(bars: object) -> PriceColumns:
+            calls[0] += 1
+            return real(bars)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(_rts_module, "derive_price_columns", _counting)
+        bars = _feed()
+        bits = build_bar_bits(bars)  # u64-fit bits
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert calls[0] == 1
+        # A >64-bit mask promotes the window to the u128 sibling kernel …
+        wide_mask = 1 << 100
+        with capture_logs() as logs:
+            got = sim.simulate_masks([wide_mask], direction=Side.BUY)
+        assert [e for e in logs if e.get("event") == "rust_trade_sim.wide_kernel_promoted"]
+        # … WITHOUT a second derivation (the memo handoff).
+        assert calls[0] == 1
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                wide_mask,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
+
+    def test_injected_columns_skip_the_local_derivation_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        columns = derive_price_columns(bars)
+        monkeypatch.setattr(
+            _rts_module,
+            "derive_price_columns",
+            lambda *_a, **_k: pytest.fail("injected columns re-derived"),
+        )
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1, precomputed_columns=columns)
+        assert sim.rust_active is True
+        first = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        second = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        assert first is second  # the memo hit

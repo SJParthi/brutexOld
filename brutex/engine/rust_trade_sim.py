@@ -100,6 +100,7 @@ appears ONLY on tuples served by the Python fallback arm. The per-TUPLE signals
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Final
 
@@ -138,7 +139,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     # numpy-load-once guard).
     from brutex.metrics.types import ClosedTrade
 
-__all__ = ["ResidentTradeSim"]
+__all__ = ["PriceColumns", "ResidentTradeSim", "derive_price_columns"]
 
 _LOG = structlog.get_logger("brutex.engine.rust_trade_sim")
 
@@ -155,6 +156,81 @@ _MAX_KERNEL_PRICE_PAISA: Final[int] = (2**63 - 1) // 8
 #: Beyond it (or below zero) the value cannot reach EITHER compiled kernel and
 #: the seam routes to the pure-Python oracle.
 _U128_MASK: Final[int] = (1 << MAX_VOCAB_BITS) - 1
+
+
+@dataclass(frozen=True, slots=True)
+class PriceColumns:
+    """The tf-independent per-bar kernel input columns for ONE bar window.
+
+    The four OHLC paisa columns (the flagged 4×-Decimal-snap-per-bar cost of
+    ``_derive_kernel_inputs``) plus the per-bar IST-date ``session_days``
+    ordinals — everything in the resident kernel's input set that is a pure
+    function of the BARS alone (the ``forced`` flags depend on ``tf_minutes``
+    and stay per-instance). Derived once per kernel lifetime by
+    :func:`derive_price_columns` and shareable across every
+    :class:`ResidentTradeSim` built over the same window
+    (DEC-STAGE1A-RUST-BATCH-001, the W2 rider).
+
+    Raises
+    ------
+    ValueError
+        If the five columns do not share one length (a malformed hand-built
+        instance — :func:`derive_price_columns` always produces consistent
+        columns).
+    """
+
+    open_paisa: list[int]
+    high_paisa: list[int]
+    low_paisa: list[int]
+    close_paisa: list[int]
+    session_days: list[int]
+
+    def __post_init__(self) -> None:
+        n = len(self.open_paisa)
+        for name, column in (
+            ("high_paisa", self.high_paisa),
+            ("low_paisa", self.low_paisa),
+            ("close_paisa", self.close_paisa),
+            ("session_days", self.session_days),
+        ):
+            if len(column) != n:
+                raise ValueError(
+                    f"PriceColumns: {name} length {len(column)} != open_paisa length {n}"
+                )
+
+    @property
+    def n_bars(self) -> int:
+        """Number of bars the columns cover."""
+        return len(self.open_paisa)
+
+
+def derive_price_columns(bars: Sequence[CandleBar]) -> PriceColumns:
+    """Derive the tf-independent kernel input columns from *bars* (pure).
+
+    The four ``_price_to_paisa`` comprehensions + the per-bar IST-date
+    ordinals extracted from ``ResidentTradeSim._derive_kernel_inputs`` (the
+    SAME canonical seams, byte-identical output — golden-pinned) so a caller
+    holding a :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel` can pay
+    them ONCE per bar window instead of once per tuple. Bar ``i``'s values
+    derive from bar ``i``'s own fields (P-06: no look-ahead).
+
+    Parameters
+    ----------
+    bars
+        Chronologically ordered bars for one ``(instrument, interval)``.
+
+    Returns
+    -------
+    PriceColumns
+        The five per-bar columns, positionally aligned with *bars*.
+    """
+    return PriceColumns(
+        open_paisa=[_price_to_paisa(bar.open) for bar in bars],
+        high_paisa=[_price_to_paisa(bar.high) for bar in bars],
+        low_paisa=[_price_to_paisa(bar.low) for bar in bars],
+        close_paisa=[_price_to_paisa(bar.close) for bar in bars],
+        session_days=[bar.timestamp.astimezone(IST).date().toordinal() for bar in bars],
+    )
 
 
 def _construction_fallback_reason(
@@ -320,6 +396,8 @@ class ResidentTradeSim:
         "_bar_bits",
         "_bars",
         "_call_fallback_warned",
+        "_kernel_inputs",
+        "_precomputed_columns",
         "_reference_stamper",
         "_rust",
         "_rust_is_wide",
@@ -336,6 +414,7 @@ class ResidentTradeSim:
         *,
         tf_minutes: int,
         reference_stamper: TradeReferenceStamper | None = None,
+        precomputed_columns: PriceColumns | None = None,
     ) -> None:
         if not bars:
             raise ValueError("ResidentTradeSim: bars must be non-empty")
@@ -345,10 +424,27 @@ class ResidentTradeSim:
             )
         if tf_minutes < 1:
             raise ValueError(f"ResidentTradeSim: tf_minutes must be >= 1, got {tf_minutes}")
+        if precomputed_columns is not None and precomputed_columns.n_bars != len(bars):
+            # The W2 rider's injection seam (DEC-STAGE1A-RUST-BATCH-001):
+            # a mismatched column set is a caller bug — refuse it naming both
+            # lengths, never a silently misaligned kernel window.
+            raise ValueError(
+                f"ResidentTradeSim: precomputed_columns cover {precomputed_columns.n_bars} "
+                f"bars != bars length {len(bars)}"
+            )
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._bar_bits: list[int] = list(bar_bits)
         self._tf_minutes = tf_minutes
         self._reference_stamper = reference_stamper
+        # The G-4 unconditional memo: `_derive_kernel_inputs` is a pure
+        # function of the immutable `_bars` + `_tf_minutes` (its docstring
+        # law), so its 6-tuple is derived at most ONCE per instance — the
+        # duplicate O(N_bars) Decimal pass the lazy u128 promotion used to pay
+        # is gone even flag-OFF (no observable output change; spy-pinned).
+        self._kernel_inputs: (
+            tuple[list[int], list[int], list[int], list[int], list[bool], list[int]] | None
+        ) = None
+        self._precomputed_columns = precomputed_columns
         # Exit-index certification (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): the
         # window's timestamps strictly increase ⇒ index↔timestamp is a
         # bijection ⇒ a trade's TRUE exit index provably equals the metrics
@@ -456,9 +552,21 @@ class ResidentTradeSim:
         walker's ``_pending_entry_day`` gate bit-for-bit). Bar ``i``'s session
         derives from bar ``i``'s own timestamp — knowable at bar ``i`` (P-06:
         no look-ahead).
+
+        Since DEC-STAGE1A-RUST-BATCH-001 (the W2 rider): the tf-independent
+        columns come from the injected ``precomputed_columns`` when a kernel
+        holder supplied them (byte-identical by construction — the SAME
+        :func:`derive_price_columns` produced them, golden-pinned) else from
+        one local :func:`derive_price_columns` call, and the assembled
+        6-tuple is MEMOISED on the instance (pure — the G-4 law), so the u128
+        promotion's second derivation is a dict-free O(1) handoff.
         """
+        if self._kernel_inputs is not None:
+            return self._kernel_inputs
+        columns = self._precomputed_columns
+        if columns is None:
+            columns = derive_price_columns(self._bars)
         forced: list[bool] = []
-        session_days: list[int] = []
         cache_date: date | None = None
         cache_seconds: int | None = None
         for bar in self._bars:
@@ -471,12 +579,15 @@ class ResidentTradeSim:
                     None if session is None else forced_exit_seconds_for_session(session)
                 )
             forced.append(is_forced_exit_bar(ts_ist.time(), self._tf_minutes, cache_seconds))
-            session_days.append(bar_day.toordinal())
-        open_p = [_price_to_paisa(bar.open) for bar in self._bars]
-        high_p = [_price_to_paisa(bar.high) for bar in self._bars]
-        low_p = [_price_to_paisa(bar.low) for bar in self._bars]
-        close_p = [_price_to_paisa(bar.close) for bar in self._bars]
-        return open_p, high_p, low_p, close_p, forced, session_days
+        self._kernel_inputs = (
+            columns.open_paisa,
+            columns.high_paisa,
+            columns.low_paisa,
+            columns.close_paisa,
+            forced,
+            columns.session_days,
+        )
+        return self._kernel_inputs
 
     def _promote_wide_kernel(self) -> object | None:
         """Build (at most once) the u128 sibling kernel for >64-bit mask batches.
@@ -484,8 +595,10 @@ class ResidentTradeSim:
         DEC-TRADE-SIM-U128-KERNEL-001: a mask in ``(U64_MASK, _U128_MASK]``
         over a u64-resident window promotes the WHOLE batch to
         ``fno_math.ResidentSweepSimU128`` — built lazily HERE from the same
-        :meth:`_derive_kernel_inputs` columns (one more ``O(N_bars)``
-        derivation + FFI copy, paid once per instance, announced with ONE
+        :meth:`_derive_kernel_inputs` columns (an O(1) memo handoff since the
+        DEC-STAGE1A-RUST-BATCH-001 G-4 memo — the historical second
+        ``O(N_bars)`` Decimal derivation is gone — plus the FFI copy, paid
+        once per instance, announced with ONE
         ``rust_trade_sim.wide_kernel_promoted`` INFO) and memoised, so the
         chunked sweep's subsequent wide batches are pure kernel calls. Returns
         ``None`` when the installed wheel predates the class (memoised via
