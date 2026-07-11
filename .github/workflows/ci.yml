@@ -785,7 +785,9 @@ jobs:
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
               tests/golden/test_greeks_enrich_golden.py \
-              tests/golden/test_greeks_enrich_parallel_golden.py
+              tests/golden/test_greeks_enrich_parallel_golden.py \
+              tests/unit/test_greeks_enrich_rust_batch.py \
+              tests/golden/test_greeks_enrich_rust_batch_golden.py
           else
             echo "(brutex.data.greeks_enrich test file not present yet — gate inactive)"
           fi

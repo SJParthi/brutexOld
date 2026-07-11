@@ -73,6 +73,23 @@ liveness beats fire once pre-dispatch then per COMPLETED unit
 the DEEP seam logs (read-dedup warnings, ``spot_key_recovered``) fire inside
 per-target processing and therefore emit CHILD-side in parallel mode —
 honest: log parity is driver-events-only, never claimed for the deep seams.
+
+Rust batch arm (`DEC-GREEKS-RUST-BATCH-001`, default OFF): the env flag
+``BRUTEX_GREEKS_RUST_BATCH`` (tristate — truthy ``1/true/yes/on`` enables,
+falsy ``0/false/no/off`` disables, unset/blank/unrecognised falls to the
+default OFF, junk warned once per process) routes the screened-SOLVABLE rows
+of :func:`enrich_option_bars` through ONE ``trading_core.greeks_batch``
+FFI call per contract (chunk-capped at :data:`GREEKS_BATCH_MAX_ROWS`)
+instead of N scalar calls. Every screen / gate / Decimal / repr / ``exp``
+operation stays in the ONE shared Python copy (:func:`_screen_bar` /
+:func:`_finish_bar`), so both arms are bit-identical by construction; a
+16-element per-process burn-in bit-compares the batch outcomes against the
+per-row oracle (:func:`_solve_one`) and any mismatch or batch-path exception
+SHIPS THE ORACLE VALUES and latches the batch OFF for the process
+(``greeks_enrich.rust_batch_autoreverted`` ERROR — never a silently wrong
+bar). The flag is resolved per CALL from the process env, so spawn workers
+read their own inherited environment; the OFF (default) arm is byte- and
+log-identical to the pre-batch code.
 """
 
 from __future__ import annotations
@@ -80,6 +97,7 @@ from __future__ import annotations
 import multiprocessing
 import os
 import pickle  # nosec B403 — dumps-only picklability probe; never loads untrusted data
+import struct
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
@@ -88,7 +106,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
@@ -124,13 +142,16 @@ from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
 from brutex.data.spot_daily_resample import ist_span_partition_files
 from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
+from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
 from brutex.options.greeks import (
     T_FLOOR_YEARS,
     GreeksBatchOutcome,
     GreeksInputError,
+    GreeksSolveRequest,
     compute_greeks,
+    compute_greeks_batch,
 )
 from brutex.options.risk_free import (
     CsvRateSource,
@@ -152,7 +173,10 @@ __all__ = [
     "DEGENERATE_TIME_VALUE_REL",
     "EXPIRY_HOUR_IST",
     "EXPIRY_MINUTE_IST",
+    "GREEKS_BATCH_MAX_ROWS",
     "GREEKS_FORMULA_VERSION",
+    "GREEKS_RUST_BATCH_DEFAULT",
+    "GREEKS_RUST_BATCH_ENV",
     "GREEKS_WORKERS_ENV",
     "Q_BIAS_ZERO",
     "RATE_SOURCE_ID_CSV",
@@ -179,9 +203,11 @@ __all__ = [
     "enrich_option_bars",
     "expiry_instant_utc",
     "greeks_pool_workers",
+    "greeks_rust_batch_enabled",
     "pack_greeks_provenance",
     "rate_source_id_for",
     "read_spot_join_with_recovery",
+    "reset_rust_batch_for_tests",
     "resolve_greeks_workers",
     "resolve_risk_free_source",
     "stamp_is_current_inputs",
@@ -240,6 +266,79 @@ _MINUTE_INTERVAL: Final[str] = "1minute"
 #: holds one window's close map, so the memory envelope is O(2 windows) —
 #: deliberately NOT raised (unbounded would hold every underlying's map).
 _SPOT_MEMO_CAPACITY: Final[int] = 2
+
+#: Env flag selecting the Rust columnar batch arm of
+#: :func:`enrich_option_bars` (`DEC-GREEKS-RUST-BATCH-001`). Tristate via the
+#: COMMON :func:`brutex.engine.sweep_lookahead.env_flag_tristate` vocabulary
+#: (imported, never copied — CLAUDE.md §11): truthy → ON, falsy → OFF,
+#: unset/blank → the default, non-blank junk → the default + ONE warn per
+#: process (``greeks_enrich.rust_batch_flag_unrecognised``). Resolved per
+#: CALL from the process env so spawn workers read their own inherited
+#: environment (the ``rust_metrics`` stance; zero ``_GreeksWorkerContext``
+#: change).
+GREEKS_RUST_BATCH_ENV: Final[str] = "BRUTEX_GREEKS_RUST_BATCH"
+
+#: The batch arm ships INERT — flipping the default needs its own DEC/ADR
+#: with measured evidence (the ``SWEEP_RUST_METRICS_DEFAULT`` precedent).
+GREEKS_RUST_BATCH_DEFAULT: Final[bool] = False
+
+#: Python-side chunk cap on one ``trading_core.greeks_batch`` crossing —
+#: bounds the FFI allocation envelope deterministically (~4.6 MiB of element
+#: tuples at the cap; an alloc failure under ``panic="abort"`` would abort,
+#: the same disclosed residual as every existing FFI path).
+GREEKS_BATCH_MAX_ROWS: Final[int] = 65_536
+
+#: Burn-in budget: the first N batch-served elements per PROCESS are ALSO
+#: solved on the per-row oracle and bit-compared (the ``rust_metrics``
+#: ``SELF_CHECK_SAMPLES`` twin).
+_SELF_CHECK_SAMPLES: Final[int] = 16
+
+
+@dataclass(slots=True)
+class _RustBatchState:
+    """Process-local batch-arm state — latch + burn-in budget + warn-once memos.
+
+    A documented exception to the no-global-mutable-state rule (the
+    ``brutex.engine.rust_metrics`` latch precedent): the autorevert latch
+    MUST outlive one call so a poisoned wheel is consulted at most once per
+    process, and the warn/engage memos exist precisely to bound log volume.
+    """
+
+    disabled: bool = False
+    self_check_left: int = _SELF_CHECK_SAMPLES
+    engaged: bool = False
+    flag_warned: bool = False
+
+
+_RUST_BATCH_STATE: Final[_RustBatchState] = _RustBatchState()
+
+
+def reset_rust_batch_for_tests() -> None:
+    """Restore all four batch-arm state fields (test isolation seam)."""
+    _RUST_BATCH_STATE.disabled = False
+    _RUST_BATCH_STATE.self_check_left = _SELF_CHECK_SAMPLES
+    _RUST_BATCH_STATE.engaged = False
+    _RUST_BATCH_STATE.flag_warned = False
+
+
+def greeks_rust_batch_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Resolve the ``BRUTEX_GREEKS_RUST_BATCH`` tristate (default OFF).
+
+    Truthy literals enable, falsy literals disable, unset/blank falls to the
+    default silently, and non-blank junk falls to the default with ONE
+    ``greeks_enrich.rust_batch_flag_unrecognised`` WARNING per process (the
+    raw value repr'd) — under default-OFF the junk fallback is already
+    fail-safe.
+    """
+    mapping: Mapping[str, str] = os.environ if env is None else env
+    raw = mapping.get(GREEKS_RUST_BATCH_ENV, "")
+    verdict = env_flag_tristate(raw)
+    if verdict is not None:
+        return verdict
+    if raw.strip() and not _RUST_BATCH_STATE.flag_warned:
+        _RUST_BATCH_STATE.flag_warned = True
+        _LOG.warning("greeks_enrich.rust_batch_flag_unrecognised", value=repr(raw))
+    return GREEKS_RUST_BATCH_DEFAULT
 
 
 def rate_source_id_for(source: RiskFreeSource) -> int:
@@ -603,7 +702,9 @@ def enrich_option_bars(
     current_inputs = current_inputs_pack(rate_source)
     rate_by_date: dict[date, RiskFreeRate | None] = {}
 
-    out: list[FnoGreeksBar] = []
+    batch_on = greeks_rust_batch_enabled() and not _RUST_BATCH_STATE.disabled
+    out: list[FnoGreeksBar | _PendingSolve] = []
+    pending_meta: list[tuple[int, _PendingSolve, tuple[object, ...]]] = []
     solved = nulls = reused = changed = skipped = 0
     reasons: dict[int, int] = {}
 
@@ -745,6 +846,12 @@ def enrich_option_bars(
             style_flag=style_flag,
             source_id=source_id,
         )
+        if batch_on and isinstance(screened, _PendingSolve):
+            # ON arm: defer the kernel solve — the placeholder keeps the
+            # bar's index, the meta carries what the fill-in pass needs.
+            out.append(screened)
+            pending_meta.append((len(out) - 1, screened, stored_overlay))
+            continue
         bar = (
             screened
             if isinstance(screened, FnoGreeksBar)
@@ -752,7 +859,20 @@ def enrich_option_bars(
         )
         out.append(bar)
         _account(bar, stored_overlay)
-    return out, EnrichStats(
+    if pending_meta:
+        outcomes = _batch_solve_outcomes([p for _, p, _ in pending_meta])
+        for slot, (i, p, overlay) in enumerate(pending_meta):
+            # An absent slot means the batch autoreverted — solve THAT row
+            # on the per-row oracle (identical bytes by construction).
+            outcome = outcomes.get(slot)
+            filled = _finish_bar(p, outcome if outcome is not None else _solve_one(p))
+            out[i] = filled
+            _account(filled, overlay)
+    bars = cast("list[FnoGreeksBar]", out)  # every slot filled by construction:
+    # placeholders exist only in pending_meta, and the fill-in pass replaced
+    # each one — no runtime re-check (an isinstance sweep would be an
+    # uncoverable arm); TestFillInCompleteness type-checks every element.
+    return bars, EnrichStats(
         solved=solved,
         nulls=nulls,
         reused=reused,
@@ -1031,6 +1151,99 @@ def _finish_bar(p: _PendingSolve, outcome: GreeksBatchOutcome) -> FnoGreeksBar:
             status=STATUS_OK,
         ),
     )
+
+
+def _outcome_key(outcome: GreeksBatchOutcome) -> tuple[object, ...]:
+    """Bit-exact burn-in compare key for one solve outcome.
+
+    Shape verdicts first (which of the three legal outcome families), then —
+    for a solved result — the seven floats as their IEEE-754 bit patterns
+    (``struct.pack``, signed zeros included — the ``drawdown_compare_key``
+    idiom), the admission verdict and the rate provenance stamp.
+    """
+    key: tuple[object, ...] = (outcome.invalid_input is not None, outcome.result is None)
+    result = outcome.result
+    if result is not None:
+        key = (
+            *key,
+            struct.pack(
+                "<7d",
+                result.iv,
+                result.delta,
+                result.gamma,
+                result.theta,
+                result.vega,
+                result.rho,
+                result.price,
+            ),
+            result.admissible,
+            result.rate_source,
+            result.rate_version,
+        )
+    return key
+
+
+def _batch_solve_outcomes(pending: list[_PendingSolve]) -> dict[int, GreeksBatchOutcome]:
+    """Solve the pending rows through ONE columnar FFI crossing per chunk.
+
+    The ON-arm dispatch of `DEC-GREEKS-RUST-BATCH-001`: builds the request
+    columns, routes them through :func:`compute_greeks_batch` in
+    :data:`GREEKS_BATCH_MAX_ROWS` chunks, burn-in bit-compares the first
+    :data:`_SELF_CHECK_SAMPLES` elements per process against the per-row
+    oracle (:func:`_solve_one`), and returns ``{slot: outcome}``.
+
+    Fault posture: an EMPTY dict means "batch results discarded — solve every
+    pending row on the oracle" (the caller's fill-in does exactly that).
+    Any batch-path exception EXCEPT ``MemoryError`` (which re-raises raw —
+    house law) latches the batch OFF for the process with one
+    ``greeks_enrich.rust_batch_autoreverted`` ERROR; a burn-in mismatch does
+    the same, so the oracle value ships for the WHOLE call and — because the
+    screens already ran once in pass 1 — no per-row WARN is ever duplicated.
+    """
+    requests = [
+        GreeksSolveRequest(
+            price=float(p.close),
+            forward=p.forward,
+            strike=p.strike_f,
+            t_years=p.t_years,
+            rate=p.rate,
+            is_call=p.is_call,
+        )
+        for p in pending
+    ]
+    try:
+        outcomes: list[GreeksBatchOutcome] = []
+        for start in range(0, len(requests), GREEKS_BATCH_MAX_ROWS):
+            outcomes.extend(compute_greeks_batch(requests[start : start + GREEKS_BATCH_MAX_ROWS]))
+    except MemoryError:
+        raise  # house law: MemoryError re-raises raw (never absorbed)
+    except Exception as exc:  # the autorevert fence: ANY batch-path
+        # fault (a stale wheel's AttributeError, an FFI marshal fault, a
+        # length-mismatch ValueError) must ship the oracle values, never
+        # a crashed pass or a silently wrong bar.
+        _RUST_BATCH_STATE.disabled = True
+        _LOG.error(
+            "greeks_enrich.rust_batch_autoreverted",
+            reason="exception",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return {}
+    check_n = min(_RUST_BATCH_STATE.self_check_left, len(outcomes))
+    for slot in range(check_n):  # burn-in BEFORE adoption
+        if _outcome_key(outcomes[slot]) != _outcome_key(_solve_one(pending[slot])):
+            _RUST_BATCH_STATE.disabled = True
+            _LOG.error(
+                "greeks_enrich.rust_batch_autoreverted",
+                reason="self_check_mismatch",
+                slot=slot,
+            )
+            return {}
+    _RUST_BATCH_STATE.self_check_left -= check_n
+    if not _RUST_BATCH_STATE.engaged:
+        _RUST_BATCH_STATE.engaged = True
+        _LOG.info("greeks_enrich.rust_batch_engaged")
+    return dict(enumerate(outcomes))
 
 
 #: Back-compat private alias — the FIX-7 candidate ladder MOVED VERBATIM to its
