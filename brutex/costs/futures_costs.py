@@ -925,7 +925,13 @@ def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown
         brokerage_flat_paisa = GROWW_BROKERAGE_PAISA
         brokerage_turnover_bps_x100 = GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100
 
-    stack = _futures_charge_stack_py(
+    # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+    # Lazy import (the calculator-site cycle law; see compute_trade_cost).
+    # Default-OFF (`BRUTEX_EXEC_RUST`): the seam returns None unless the
+    # kernel serves; the Python core below stays the permanent oracle arm.
+    from brutex import exec_rust
+
+    stack = exec_rust.charge_stack_futures(
         trade.entry_bar_open_paisa,
         trade.exit_bar_open_paisa,
         is_long=trade.side == "long",
@@ -941,6 +947,24 @@ def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown
         stamp_rate=stamp_rate,
         gst_rate=GST_TOTAL_BPS_X100,
     )
+    # --- end exec-rust dispatch ---
+    if stack is None:
+        stack = _futures_charge_stack_py(
+            trade.entry_bar_open_paisa,
+            trade.exit_bar_open_paisa,
+            is_long=trade.side == "long",
+            lot_size=trade.lot_size,
+            n_lots=trade.n_lots,
+            cost_free=cost_free,
+            brokerage_flat_paisa=brokerage_flat_paisa,
+            brokerage_turnover_bps_x100=brokerage_turnover_bps_x100,
+            stt_rate=stt_rate,
+            etc_rate=exch_rate,
+            sebi_rate=SEBI_FEE_BPS_X100,
+            ipft_rate=ipft_rate,
+            stamp_rate=stamp_rate,
+            gst_rate=GST_TOTAL_BPS_X100,
+        )
     return FuturesCostBreakdown(
         n_shares_per_lot=trade.lot_size,
         n_shares=stack.n_shares,

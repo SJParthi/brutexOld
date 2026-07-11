@@ -151,5 +151,15 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
+    // --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_paisa, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_rupee, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_apply_slippage, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_apply_futures_fill, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_option_charge_stack, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_futures_charge_stack, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_options_materialize, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_futures_materialize, m)?)?;
+    // --- end exec (slice 7 / P8) ---
     Ok(())
 }

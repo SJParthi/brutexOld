@@ -613,6 +613,151 @@ def _excursions_paisa(
     return mae_unit * n_shares, mfe_unit * n_shares
 
 
+# --- exec-rust dispatch helper (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+def _materialize_tail_rust(
+    signal: FuturesSignal,
+    leg: FuturesLeg,
+    window: FuturesBarWindow,
+    lot_size: int,
+    *,
+    broker: Broker,
+    gst_split: GstSplit,
+    n_lots: int,
+    reject_stale_bars: bool,
+) -> MaterializedFuturesTrade | RejectedFuturesTrade | None:
+    """The ``BRUTEX_EXEC_RUST`` tail of :func:`materialize_futures_trade`.
+
+    ``None`` means "not served": the verbatim Python tail below reproduces
+    the exact behaviour (including any raise) from its own natural site —
+    so ANY prep or kernel fallback is behaviour-neutral (default-OFF —
+    MIGRATION.md #1724). A served ``trade`` verdict is re-materialized
+    through the EXISTING frozen ``FuturesTradeInput`` +
+    ``MaterializedFuturesTrade`` dataclasses, so every validation the
+    Python arm runs (intraday-only R18, dead-contract, ≥-one-tick opens,
+    ``net == gross − charges``) still runs; the stale-reject WARN is
+    emitted HERE with identical event name / keys / cardinality.
+    """
+    from brutex import exec_rust
+
+    if not exec_rust.exec_rust_enabled():
+        return None
+    from brutex.costs.constants import (
+        GROWW_BROKERAGE_PAISA,
+        GST_TOTAL_BPS_X100,
+        SEBI_FEE_BPS_X100,
+        ZERODHA_BROKERAGE_PAISA,
+    )
+    from brutex.costs.futures_costs import (
+        GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100,
+        ipft_futures_bps_x100,
+        stamp_futures_rate_bps_x100,
+        stt_futures_rate_bps_x100,
+    )
+
+    try:
+        entry_ist = signal.entry_ts.astimezone(IST)
+        entry_date = entry_ist.date()
+        entry_open_paisa = rupees_to_paisa(window.entry_bar.open)
+        exit_open_paisa = rupees_to_paisa(window.exit_bar.open)
+        path_highs = [rupees_to_paisa(bar.high) for bar in window.path]
+        path_lows = [rupees_to_paisa(bar.low) for bar in window.path]
+        # COST SCOPE first, then rate resolution in the PINNED refusal order
+        # STT → ETC → NSE-IPFT → stamp — a refusal raise here falls back and
+        # re-raises from the Python tail's compute exactly as today (gate 2
+        # already proved the ETC probe for a cost-bearing signal).
+        cost_free = is_cost_free_future_underlying(signal.instrument)
+        if cost_free:
+            stt_rate = etc_rate = ipft_rate = stamp_rate = 0
+        else:
+            stt_rate = stt_futures_rate_bps_x100(entry_date)
+            etc_rate = futures_exchange_charge_bps_x100(signal.instrument, entry_date)
+            ipft_rate = ipft_futures_bps_x100(signal.instrument, entry_date)
+            stamp_rate = stamp_futures_rate_bps_x100(entry_date)
+        if broker == "zerodha":
+            brokerage_flat = ZERODHA_BROKERAGE_PAISA
+            brokerage_turnover: int | None = None
+        else:
+            brokerage_flat = GROWW_BROKERAGE_PAISA
+            brokerage_turnover = GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100
+        tail = exec_rust.materialize_futures_tail(
+            entry_open_paisa,
+            exit_open_paisa,
+            entry_volume=window.entry_bar.volume,
+            exit_volume=window.exit_bar.volume,
+            path_highs_paisa=path_highs,
+            path_lows_paisa=path_lows,
+            is_long=leg.side == "long",
+            reject_stale=reject_stale_bars,
+            lot_size=lot_size,
+            n_lots=n_lots,
+            cost_free=cost_free,
+            brokerage_flat_paisa=brokerage_flat,
+            brokerage_turnover_bps_x100=brokerage_turnover,
+            stt_rate=stt_rate,
+            etc_rate=etc_rate,
+            sebi_rate=SEBI_FEE_BPS_X100,
+            ipft_rate=ipft_rate,
+            stamp_rate=stamp_rate,
+            gst_rate=GST_TOTAL_BPS_X100,
+        )
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+    if tail is None:
+        return None
+    kind, stack, mae_paisa, mfe_paisa = tail
+    if kind == "stale_bar":
+        _LOG.warning(
+            "futures.reject.stale_bar",
+            instrument=signal.instrument,
+            contract_symbol=leg.contract_symbol,
+            entry_volume=window.entry_bar.volume,
+            exit_volume=window.exit_bar.volume,
+        )
+        return RejectedFuturesTrade(leg=leg, reason=FuturesRejectReason.STALE_BAR)
+    if kind != "trade" or stack is None:
+        # A kernel contract fault — the Python oracle arm serves instead.
+        return None
+    # Validation parity: the SAME FuturesTradeInput the Python tail builds —
+    # its __post_init__ re-validates the inputs and raises byte-identically.
+    FuturesTradeInput(
+        entry_dt_ist=entry_ist,
+        exit_dt_ist=signal.exit_ts.astimezone(IST),
+        instrument=signal.instrument,
+        contract_symbol=leg.contract_symbol,
+        expiry_date=leg.expiry_date,
+        entry_bar_open_paisa=entry_open_paisa,
+        exit_bar_open_paisa=exit_open_paisa,
+        side=leg.side,
+        lot_size=lot_size,
+        n_lots=n_lots,
+        broker=broker,
+        gst_split=gst_split,
+    )
+    return MaterializedFuturesTrade(
+        leg=leg,
+        entry_ts=signal.entry_ts,
+        exit_ts=signal.exit_ts,
+        entry_open_paisa=entry_open_paisa,
+        exit_open_paisa=exit_open_paisa,
+        buy_fill_paisa=stack.buy_fill_paisa,
+        sell_fill_paisa=stack.sell_fill_paisa,
+        lot_size=lot_size,
+        n_lots=n_lots,
+        gross_pnl_paisa=stack.gross_pnl_paisa,
+        total_charges_paisa=stack.total_charges_paisa,
+        net_pnl_paisa=stack.net_pnl_paisa,
+        mae_paisa=mae_paisa,
+        mfe_paisa=mfe_paisa,
+        vix_at_entry=signal.vix_at_entry,
+        vix_at_exit=signal.vix_at_exit,
+        cost_free=cost_free,
+        exit_reason=signal.exit_reason,
+    )
+
+
+# --- end exec-rust dispatch helper ---
+
+
 def materialize_futures_trade(
     signal: FuturesSignal,
     *,
@@ -698,6 +843,24 @@ def materialize_futures_trade(
     )
     if window is None:
         return RejectedFuturesTrade(leg=leg, reason=FuturesRejectReason.NO_DATA)
+
+    # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+    # Default-OFF (`BRUTEX_EXEC_RUST`): None unless the kernel serves the
+    # whole stale/cost/excursion tail; the verbatim Python tail below is the
+    # permanent oracle arm.
+    rust_served = _materialize_tail_rust(
+        signal,
+        leg,
+        window,
+        lot_size,
+        broker=broker,
+        gst_split=gst_split,
+        n_lots=n_lots,
+        reject_stale_bars=reject_stale_bars,
+    )
+    if rust_served is not None:
+        return rust_served
+    # --- end exec-rust dispatch ---
 
     # Gate 5 — STALE_BAR (OPT-IN only; the default fills volume-0 bars, R14/R15).
     if reject_stale_bars and (window.entry_bar.volume == 0 or window.exit_bar.volume == 0):

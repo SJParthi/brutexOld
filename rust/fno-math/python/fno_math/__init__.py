@@ -72,6 +72,16 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+    "exec_apply_futures_fill",
+    "exec_apply_slippage",
+    "exec_futures_charge_stack",
+    "exec_futures_materialize",
+    "exec_option_charge_stack",
+    "exec_options_materialize",
+    "exec_round_to_paisa",
+    "exec_round_to_rupee",
+    # --- end exec (slice 7 / P8) ---
     "popcount_bytes",
     "sweep_drawdown_stats",
 )
@@ -120,6 +130,16 @@ from ._fno_math import (  # noqa: E402
     count_supermask_u64s,
     count_supermasks_u64s,
     count_supermasks_u64s_nthreads,
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+    exec_apply_futures_fill,
+    exec_apply_slippage,
+    exec_futures_charge_stack,
+    exec_futures_materialize,
+    exec_option_charge_stack,
+    exec_options_materialize,
+    exec_round_to_paisa,
+    exec_round_to_rupee,
+    # --- end exec (slice 7 / P8) ---
     popcount_bytes,
     sweep_drawdown_stats,
 )
@@ -151,6 +171,16 @@ __all__ = [
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+    "exec_apply_futures_fill",
+    "exec_apply_slippage",
+    "exec_futures_charge_stack",
+    "exec_futures_materialize",
+    "exec_option_charge_stack",
+    "exec_options_materialize",
+    "exec_round_to_paisa",
+    "exec_round_to_rupee",
+    # --- end exec (slice 7 / P8) ---
     "popcount_bytes",
     "sweep_drawdown_stats",
 ]

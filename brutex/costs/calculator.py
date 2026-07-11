@@ -441,7 +441,16 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # introduction has NO in-repo citation, so it is deliberately NOT
     # implemented (a pre-boundary trade is OVER-charged by 18% of the
     # sub-rupee SEBI fee — conservative; COSTS_VERIFIED.md §20).
-    stack = _charge_stack_py(
+    # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+    # Lazy import: brutex.exec_rust imports THIS module's ChargeStack shape,
+    # so a top-level import here would be a cycle (the materialize_trade
+    # lazy-import precedent). Default-OFF (`BRUTEX_EXEC_RUST`): the seam
+    # returns None unless the kernel actually serves; the Python core below
+    # stays the permanent oracle arm (DEC-EXEC-PY-BODY-DELETE-001 owns any
+    # later deletion decision).
+    from brutex import exec_rust
+
+    stack = exec_rust.charge_stack_option(
         trade.entry_bar_open_paisa,
         trade.exit_bar_open_paisa,
         is_long=trade.side.startswith("long"),
@@ -455,6 +464,22 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         stamp_rate=C.STAMP_DUTY_OPTIONS_BPS_X100,
         gst_rate=C.GST_TOTAL_BPS_X100,
     )
+    # --- end exec-rust dispatch ---
+    if stack is None:
+        stack = _charge_stack_py(
+            trade.entry_bar_open_paisa,
+            trade.exit_bar_open_paisa,
+            is_long=trade.side.startswith("long"),
+            lot_size=n_shares_per_lot,
+            n_lots=trade.n_lots,
+            brokerage_round_trip_paisa=per_leg_brokerage * 2,
+            stt_rate=stt_rate_bps_x100,
+            etc_rate=exch_rate_bps_x100,
+            sebi_rate=C.SEBI_FEE_BPS_X100,
+            ipft_rate=ipft_rate_bps_x100,
+            stamp_rate=C.STAMP_DUTY_OPTIONS_BPS_X100,
+            gst_rate=C.GST_TOTAL_BPS_X100,
+        )
 
     return TradeCostBreakdown(
         n_shares_per_lot=n_shares_per_lot,

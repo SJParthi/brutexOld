@@ -31,6 +31,16 @@ __all__ = [
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+    "exec_apply_futures_fill",
+    "exec_apply_slippage",
+    "exec_futures_charge_stack",
+    "exec_futures_materialize",
+    "exec_option_charge_stack",
+    "exec_options_materialize",
+    "exec_round_to_paisa",
+    "exec_round_to_rupee",
+    # --- end exec (slice 7 / P8) ---
     "popcount_bytes",
 ]
 
@@ -111,6 +121,115 @@ def count_supermasks_u64s_nthreads(
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
     ...
+
+# --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+# Options/futures execution integer cores (rust/fno-math/src/exec/). All
+# money values are int64 paisa; rates use the `rate_decimal × 10^7` encoding;
+# a charge stack crosses as the PINNED 17-slot list mirroring
+# `brutex.costs.calculator.ChargeStack`; out-of-envelope arithmetic raises
+# `ValueError` (the Python seam falls back to the Python oracle arm).
+
+def exec_round_to_paisa(amount_x_bps_x100: int) -> int:
+    """Half-away-from-zero at scale 10^7 (`_round_to_paisa` twin)."""
+    ...
+
+def exec_round_to_rupee(amount_paisa: int) -> int:
+    """Half-away-from-zero to a multiple of 100 paise (`_round_to_rupee` twin)."""
+    ...
+
+def exec_apply_slippage(
+    entry_open_paisa: int, exit_open_paisa: int, is_long: bool
+) -> tuple[int, int, int]:
+    """R15 fill law → `(buy_fill, sell_fill, realized_slip_per_share)`."""
+    ...
+
+def exec_apply_futures_fill(
+    entry_open_paisa: int, exit_open_paisa: int, is_long: bool
+) -> tuple[int, int, int]:
+    """Futures R15 fill law (numerically the reconciled `exec_apply_slippage`)."""
+    ...
+
+def exec_option_charge_stack(
+    entry_open_paisa: int,
+    exit_open_paisa: int,
+    is_long: bool,
+    lot_size: int,
+    n_lots: int,
+    brokerage_round_trip_paisa: int,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> list[int]:
+    """CALCULATOR_SPEC §4 steps 1,3–13 → the pinned 17-slot wire list."""
+    ...
+
+def exec_futures_charge_stack(
+    entry_open_paisa: int,
+    exit_open_paisa: int,
+    is_long: bool,
+    lot_size: int,
+    n_lots: int,
+    cost_free: bool,
+    brokerage_flat_paisa: int,
+    brokerage_turnover_bps_x100: int | None,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> list[int]:
+    """Futures charge stack (cost-free short-circuit) → 17-slot wire list."""
+    ...
+
+def exec_options_materialize(
+    entry_open_paisa: int,
+    exit_open_paisa: int,
+    entry_volume: int,
+    exit_volume: int,
+    is_long: bool,
+    reject_stale: bool,
+    lot_size: int,
+    n_lots: int,
+    brokerage_round_trip_paisa: int,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> tuple[str, list[int] | None]:
+    """Options post-I/O tail → `("stale_bar"|"tick_floor", None)` or `("trade", wire)`."""
+    ...
+
+def exec_futures_materialize(
+    entry_open_paisa: int,
+    exit_open_paisa: int,
+    entry_volume: int,
+    exit_volume: int,
+    path_highs_paisa: list[int],
+    path_lows_paisa: list[int],
+    is_long: bool,
+    reject_stale: bool,
+    lot_size: int,
+    n_lots: int,
+    cost_free: bool,
+    brokerage_flat_paisa: int,
+    brokerage_turnover_bps_x100: int | None,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> tuple[str, list[int] | None]:
+    """Futures post-I/O tail → `("stale_bar", None)` or `("trade", wire+[mae, mfe])`."""
+    ...
+
+# --- end exec (slice 7 / P8) ---
 
 def sweep_drawdown_stats(
     n_bars: int,
