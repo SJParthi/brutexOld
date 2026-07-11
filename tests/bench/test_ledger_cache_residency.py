@@ -136,10 +136,11 @@ def test_residency_collapse_and_repeat_polls(
     # M-1 baseline: the VERBATIM pre-fix two-family cached values — the records
     # family's ``(generation, records)`` and the retired rows family's whole
     # projection — sized by the deep-size accounting the byte watermark (fix 2)
-    # used pre-hint; the post side (`total_bytes`) now tracks the records
-    # family via the M1 hint's conservative 640 B/record estimate (slightly
-    # OVER the deep walk — the ratio moved 0.500 → 0.537, still a genuine
-    # one-family residency against the same two-family baseline).
+    # used pre-hint; the post side (`total_bytes`) tracks the records family
+    # via the M1 hint's conservative per-record estimate (slightly OVER the
+    # deep walk; 320 B/record since the 2026-07-11 #1719 merge-reconcile —
+    # main's #1386 interned ledger decode halved the measured deep size to
+    # ~301 B/record, re-measured ratio ~0.53 vs the same two-family baseline).
     old_rows = tuple(ledger_record_row(r) for r in records)
     baseline = deep_size_bytes((0, records)) + deep_size_bytes(old_rows)
 

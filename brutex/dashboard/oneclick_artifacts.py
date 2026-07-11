@@ -657,6 +657,21 @@ class _RevisionMemo[MemoValueT]:
         self._entries: OrderedDict[tuple[str, ...], MemoValueT] = OrderedDict()
         self._inflight: dict[tuple[str, ...], threading.Event] = {}
 
+    def peek(self, key: tuple[str, ...]) -> MemoValueT | None:
+        """Return the memoised value for *key* WITHOUT computing (``None`` on a miss).
+
+        The serve-last-known outage arm (DEC-CACHE-SERVE-LAST-KNOWN-001,
+        merge-composed onto this memo) peeks the last healthily-served
+        revision key during a stat-probe outage — a hit refreshes LRU
+        recency (a long outage keeps its last-known entry resident), a miss
+        falls back to the caller's honest fresh uncached parse.
+        """
+        with self._lock:
+            value = self._entries.get(key)
+            if value is not None:
+                self._entries.move_to_end(key)
+            return value
+
     def get_or_compute(self, key: tuple[str, ...], compute: Callable[[], MemoValueT]) -> MemoValueT:
         """Return the memoised value for *key*, running *compute* on a miss.
 
@@ -2212,6 +2227,11 @@ class TradeStoreReader:
         # alternation no longer re-parses on every flip.
         self._top100_memo: _RevisionMemo[Top100Result] = _RevisionMemo()
         self._equity_memo: _RevisionMemo[tuple[dict[str, Any], ...]] = _RevisionMemo()
+        #: Reader-owned once-per-outage WARN bookkeeping for the top100 stat
+        #: probe (DEC-CACHE-SERVE-LAST-KNOWN-001, reconciled onto the ONE
+        #: repo-wide :class:`OutageGate` mechanism — #1406's C-r2-5 gate;
+        #: coordinate = the top100 path). No route gate covers this reader.
+        self._outages = OutageGate()
         self.parse_count: int = 0
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -2237,7 +2257,7 @@ class TradeStoreReader:
         resolved = self._resolve_sidecars(run_id, rank)
         if isinstance(resolved, TradesResult):
             return resolved
-        combo_run_id, paths = resolved
+        combo_run_id, paths, outage_note = resolved
         try:
             page = read_trade_page(paths, run_id=combo_run_id, offset=offset, limit=limit)
         except TradeStoreError as exc:
@@ -2250,15 +2270,17 @@ class TradeStoreReader:
             return TradesResult(
                 "corrupt", (), None, "results_store", f"results-depth read failed: {exc}"
             )
-        detail = ""
+        detail_parts: list[str] = []
         if limit != page.limit:
-            detail = f"limit clamped to {page.limit} (trade_store page law)"
+            detail_parts.append(f"limit clamped to {page.limit} (trade_store page law)")
+        if outage_note:
+            detail_parts.append(outage_note)
         return TradesResult(
             status="ok",
             rows=tuple(dict(row) for row in page.rows),
             total=page.total,
             source="results_store",
-            detail=detail,
+            detail="; ".join(detail_parts),
         )
 
     def equity_page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -2300,7 +2322,7 @@ class TradeStoreReader:
         resolved = self._resolve_sidecars(run_id, rank)
         if isinstance(resolved, TradesResult):
             return resolved
-        combo_run_id, paths = resolved
+        combo_run_id, paths, outage_note = resolved
         try:
             series = self._equity_cached(paths.equity, combo_run_id)
         except TradeStoreError as exc:
@@ -2315,33 +2337,47 @@ class TradeStoreReader:
             )
         page_offset = max(0, offset)
         page_limit = max(1, min(limit, _MAX_EQUITY_LIMIT))
-        detail = ""
+        detail_parts: list[str] = []
         if page_limit != limit:
-            detail = f"limit clamped to {page_limit} (equity page law)"
+            detail_parts.append(f"limit clamped to {page_limit} (equity page law)")
+        if outage_note:
+            detail_parts.append(outage_note)
         return TradesResult(
             status="ok",
             rows=series[page_offset : page_offset + page_limit],
             total=len(series),
             source="results_store",
-            detail=detail,
+            detail="; ".join(detail_parts),
         )
 
-    def _resolve_sidecars(self, run_id: str, rank: int) -> tuple[str, SidecarPaths] | TradesResult:
-        """Resolve (*run_id*, *rank*) → the combo's ``(store run_id, sidecar paths)``.
+    def _resolve_sidecars(
+        self, run_id: str, rank: int
+    ) -> tuple[str, SidecarPaths, str] | TradesResult:
+        """Resolve (*run_id*, *rank*) → ``(store run_id, sidecar paths, outage note)``.
 
         The ONE rank → ``equity_ref.tuple`` resolution chain shared by the
         trades AND equity pages (steps 1-2 of the class docstring). Returns a
         :class:`TradesResult` degrade instead of raising — awaiting for
         absent/pre-#1275 artifacts, NAMED corrupt for a hostile tuple ref.
+        The third element is the top100 probe-outage note
+        (DEC-CACHE-SERVE-LAST-KNOWN-001 — ``""`` on a healthy probe): a page
+        resolved through a last-known top100 memo NAMES that in ``detail``,
+        never a silent stale serve.
         """
         if not is_safe_run_id(run_id) or rank < 1:
             return TradesResult(
                 "awaiting", (), None, "none", "invalid run_id/rank — nothing to read"
             )
         run_dir = runs_root(self._results_root) / run_id
-        top100 = self._top100_cached(run_dir)
+        top100, top100_last_known = self._top100_cached(run_dir)
+        outage_note = (
+            "top100 revision probe outage — serving last-known" if top100_last_known else ""
+        )
         if top100.status in ("awaiting", "corrupt"):
-            return TradesResult(top100.status, (), None, "none", top100.detail)
+            detail = top100.detail
+            if outage_note:
+                detail = f"{detail}; {outage_note}" if detail else outage_note
+            return TradesResult(top100.status, (), None, "none", detail)
         entry = next(
             (row for row in top100.rows if row.get("rank") == rank),
             None,
@@ -2383,7 +2419,7 @@ class TradeStoreReader:
                 "none",
                 f"{AWAITING_DETAIL} — results-depth sidecars absent for {tuple_ref}",
             )
-        return combo_run_id, paths
+        return combo_run_id, paths, outage_note
 
     def _equity_cached(self, path: Path, combo_run_id: str) -> tuple[dict[str, Any], ...]:
         """Serve the ``(path, revision, combo)`` equity memo (single-flight, bounded).
@@ -2404,20 +2440,46 @@ class TradeStoreReader:
             lambda: _load_equity_records(path, combo_run_id),
         )
 
-    def _top100_cached(self, run_dir: Path) -> Top100Result:
+    def _top100_cached(self, run_dir: Path) -> tuple[Top100Result, bool]:
         """Serve the ``(path, revision)`` top100 memo (single-flight, bounded), parsing on a miss.
 
-        A ``None`` revision (absent/unstattable) computes fresh and caches
-        NOTHING (the ``lake_revision`` doctrine — no stale illusion).
+        Returns ``(result, served_last_known)``. A ``None`` revision splits
+        (DEC-CACHE-SERVE-LAST-KNOWN-001): a merely-ABSENT artifact computes
+        fresh and caches NOTHING (the cheap awaiting parse — never a stale
+        serve of a deleted artifact; the gate FORGETS the coordinate), while
+        a probe OUTAGE (a stalled volume — ``oneclick.probe_outage`` WARNed
+        once per outage per path via the reader-owned :class:`OutageGate`,
+        ``oneclick.probe_recovered`` on the flip back) serves the LAST-KNOWN
+        memo for this exact path when one exists (``served_last_known=True``
+        — the caller labels the page detail), falling back to the fresh
+        uncached parse when none does. The pre-change doctrine re-parsed the
+        whole artifact on EVERY trades-page request for the outage's
+        duration.
         """
         path = run_dir / TOP100_FILENAME
-        revision = artifact_revision(path)
-        if revision is None:
+        probe = artifact_probe(path)
+        key = str(path)
+        if probe.token is None:
+            if probe.outage:
+                # once-per-outage WARN latch; the returned last-known revision
+                # keys the bounded _RevisionMemo peek (merge-compose: #1719's
+                # serve-last-known doctrine over #1721's fix-4b memo — a
+                # two-run alternation may have evicted the entry, in which
+                # case the honest fresh uncached parse below stands).
+                last = self._outages.outage_key(key)
+                if last is not None:
+                    memo = self._top100_memo.peek((key, last))
+                    if memo is not None:
+                        return memo, True
+            else:
+                self._outages.absent(key)
             self.parse_count += 1
-            return load_top100(run_dir)
+            return load_top100(run_dir), False
+        revision = probe.token
+        self._outages.healthy(key, revision)
 
         def _parse() -> Top100Result:
             self.parse_count += 1
             return load_top100(run_dir)
 
-        return self._top100_memo.get_or_compute((str(path), revision), _parse)
+        return self._top100_memo.get_or_compute((key, revision), _parse), False

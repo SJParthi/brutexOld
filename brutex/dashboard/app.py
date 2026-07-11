@@ -150,7 +150,11 @@ from brutex.dashboard.launch_button import register_launch_routes, store_lake_ro
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
-from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
+from brutex.dashboard.movers_cache import (
+    MoversSnapshotCache,
+    candidate_key,
+    revision_generation,
+)
 from brutex.dashboard.movers_futures import (
     build_futures_payload,
     compute_futures_candidates,
@@ -165,6 +169,7 @@ from brutex.dashboard.movers_options import (
 from brutex.dashboard.movers_snapshot import (
     DEFAULT_INTERVAL,
     DEFAULT_TOP_N,
+    asof_through_label,
     build_snapshot_payload,
     compute_spot_candidates,
     is_intraday_interval,
@@ -269,7 +274,9 @@ from brutex.dashboard.sweep_runner import (
     sweep_progress_file,
 )
 from brutex.dashboard.universe_cache import (
+    STORE_FAULT_TYPES,
     UniverseSnapshotCache,
+    UniverseStoreOutageError,
     coverage_revision,
     master_revision,
 )
@@ -1795,17 +1802,42 @@ def build_app(
     # not share the 256-cap counts instance nor evict its tiny entries); both
     # stay outside the candle int-total cache's key namespace above.
     _window_counts_cache, _window_page_cache = make_window_payload_caches()
-    # The FOUR discovery-walk memos below additionally opt into the PULL-TIME
-    # adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the ported #920
-    # pattern): during a pull the write generation bumps on EVERY window tick,
-    # so each poll used to re-pay a full O(datasets) walk back-to-back — and
-    # post-prebuild (dataset count × the 19 materialised TFs) that walk is
-    # multi-minute. While `_pull_live()` reads True, a generation-mismatched
-    # entry younger than min(max(2 s, its own walk duration), 600 s) is served
-    # STALE (logged `movers_cache.stale_served`, never silent); the moment the
-    # pull ends the probe reads False → fresh recompute, and the post-pipeline
-    # `warm_discovery_memos` force-refreshes them all off ONE shared walk so
-    # the stale-floor state can never outlive the pull.
+    # The pre-open EXPORT rows cache (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md
+    # #1719): a repeat `.xlsx`/`.zip` export click previously RE-RAN the entire
+    # report build — measured 206 DuckDB per-symbol aggregates binding 616 files
+    # + a 1,442-scandir dataset walk per click (326–574 ms at 103 symbols,
+    # +22 MB RSS cold; identical statement counts on the REPEAT click — zero
+    # caching). The built `PreOpenRow` list is invariant within one write
+    # generation for one (basis, [from, to], symbols filter) coordinate, so it
+    # is memoised here behind `_summary_cache.generation` (a pull — or a
+    # cross-process CLI pull via the revision probe — bumps it → rebuild; the
+    # SAME invalidation signal every discovery cache above rides). SMALL
+    # dedicated instance (a row list holds symbols × days entries, so it must
+    # not share — nor churn-evict — the 256-cap generic caches; the
+    # WINDOW_PAGE_CACHE precedent). The workbook/zip SERIALISATION stays
+    # per-click (CPU-bound over the cached rows, mode/min_pct-dependent).
+    # Single-flight: two concurrent export clicks pay ONE build.
+    _preopen_rows_cache = MoversSnapshotCache(capacity=8)
+    # The discovery-walk memos below (the F&O/spot cascades, the datasets
+    # triple-walk, the latest-date/minute resolvers) additionally opt into the
+    # PULL-TIME adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the
+    # ported #920 pattern) — and since DEC-NAV-CACHES-FLOOR-REKEY-001 so do
+    # the nav-latency trio (`_coverage_cache` / `_universe_completeness_cache`
+    # / `_mapping_integrity_cache`) and the /results
+    # `_sweep_leaderboard_cache`, whose freshness tokens moved OUT of the
+    # cache KEY into the GENERATION (`revision_generation`) exactly so the
+    # floor is REACHABLE (a token folded into the key at generation=0 minted
+    # a COLD key per mid-pull poll — the floor's stale-serve branch was
+    # structurally dead for them). Mechanics: during a pull the write
+    # generation bumps on EVERY window tick, so each poll used to re-pay a
+    # full O(datasets) walk back-to-back — and post-prebuild (dataset count ×
+    # the 19 materialised TFs) that walk is multi-minute. While
+    # `_pull_live()` reads True, a generation-mismatched entry younger than
+    # min(max(2 s, its own walk duration), 600 s) is served STALE (logged
+    # `movers_cache.stale_served`, never silent); the moment the pull ends
+    # the probe reads False → fresh recompute, and the post-pipeline
+    # `warm_discovery_memos` force-refreshes the discovery memos off ONE
+    # shared walk so the stale-floor state can never outlive the pull.
     #
     # The /db F&O cascade cache (DEC-DB-FNO-CASCADE-001): the underlying→expiry→contract
     # index is an O(datasets) build over a lake dir-walk; memoised here behind the SAME
@@ -1884,8 +1916,8 @@ def build_app(
     # (`build_underlying_kind_map`, an O(underlyings) read) stamps each F&O candidate's
     # `underlying_kind` for the RANK-time `All | Indices | Stocks` filter. The map is a
     # pure function of the instrument MASTER, so it is keyed on the master CONTENT
-    # revision (`master_revision` — the `_nav_latency_key` component) at a FIXED
-    # generation=0. Review round 1: the original generation-only key missed a keyless
+    # revision (`master_revision`) at a FIXED generation=0. Review round 1: the original
+    # generation-only key missed a keyless
     # `load-instruments`, which moves the master WITHOUT bumping the write generation
     # (the documented master_revision trap the sibling nav-latency caches close) — and
     # a write-generation key would ALSO rebuild pointlessly on every mid-pull write
@@ -1905,8 +1937,10 @@ def build_app(
         the map is a pure function of the instrument MASTER, so the key folds
         :func:`master_revision` — the content token a keyless ``load-instruments``
         moves WITHOUT bumping the write generation — at a FIXED ``generation=0``
-        (the ``_nav_latency_key`` / ``_sweep_leaderboard_cache`` token-in-key
-        precedent). The returned *master_token* MUST also be folded into the F&O
+        (the ``_sweep_leaderboard_cache`` token-in-key precedent; the nav-latency
+        trio has since moved to the ``_nav_latency_coords`` digest-bridge form —
+        equivalent invalidation). The returned *master_token* MUST also be folded
+        into the F&O
         candidate cache keys by every caller (the movers route AND the post-pull
         warmer), because the computed candidates carry the map's verdict STAMPED per
         row — a fresh map beside a stale stamped candidate set would still
@@ -1921,21 +1955,36 @@ def build_app(
         )
         return kinds, master_token
 
-    # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
-    # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
-    # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
-    # projection on EVERY poll. Each payload is a pure function of the instrument master +
-    # the coverage ledger, so it is memoised behind a COMPOSITE token = the dashboard
-    # write-generation (`_summary_cache.generation`, bumped by every pull / materialize)
-    # AND the instrument-master content revision (`master_revision`, which a keyless
-    # `load-instruments` moves WITHOUT bumping the generation). Folding BOTH into the cache
-    # KEY (with a fixed generation=0) means a hit fires only when neither the ledger nor the
-    # master has changed — a pull OR an instrument load → new key → recompute, never stale
-    # (Golden Rule #1). REUSES the COMMON generation-stamped LRU `MoversSnapshotCache` (the
-    # SAME generic memo `_db_datasets_cache` / `_candle_count_cache` use; no new class).
-    _coverage_cache = MoversSnapshotCache()
-    _universe_completeness_cache = MoversSnapshotCache()
-    _mapping_integrity_cache = MoversSnapshotCache()
+    # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001,
+    # re-keyed by DEC-NAV-CACHES-FLOOR-REKEY-001): three pollers —
+    # `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness` and
+    # `/api/v1/universe/mapping-integrity` (every 15 s) — each a pure function
+    # of the instrument master + the coverage ledger, memoised behind the
+    # COMPOSITE token = the dashboard write-generation (`_summary_cache.
+    # generation`, bumped by every pull / materialize) AND the
+    # instrument-master content revision (`master_revision`, which a keyless
+    # `load-instruments` moves WITHOUT bumping the generation). The token now
+    # drives the GENERATION via the `revision_generation` digest bridge over a
+    # STABLE key (`_nav_latency_coords`) — invalidation is equivalent to the
+    # superseded token-in-key-at-generation=0 fold (any token change moves the
+    # generation → recompute, never stale — Golden Rule #1), but a mid-pull
+    # mark_dirty storm now lands on the SAME key and can engage the pull-time
+    # adaptive floor below instead of minting a cold key per poll (the #920
+    # storm class this trio was previously blind to: every window tick forced
+    # a full O(datasets)+ledger rebuild per poll). FLOOR CAVEAT (stated): a
+    # floored serve is generation-blind within its window, so a poll landing
+    # ≤ min(max(2 s, its own build duration), 600 s) after an instrument load
+    # DURING a pull may serve the pre-load payload once — bounded, logged
+    # `movers_cache.stale_served`, and closed the moment the pull ends (the
+    # same envelope the discovery memos above accept). REUSES the COMMON
+    # generation-stamped LRU `MoversSnapshotCache` (no new class).
+    _coverage_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    _universe_completeness_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
+    _mapping_integrity_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
     # The /universe lake-uniqueness census (DEC-LAKE-HEAL-001) deliberately does
     # NOT get a `MoversSnapshotCache` here: it is a full bounded lake scan —
     # O(files), one key-column read per file — and `pull_jobs` bumps the write
@@ -1951,27 +2000,37 @@ def build_app(
     # threadpool worker and starved the shared AnyIO limiter for the whole
     # 26-minute production scan (the reproduced dashboard-wide freeze).
     # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001,
-    # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001): the `<lake>/sweeps` discovery +
+    # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001, then again by
+    # DEC-NAV-CACHES-FLOOR-REKEY-001): the `<lake>/sweeps` discovery +
     # per-tuple Parquet read is O(stores × rows); the ranked leaderboard for a
-    # given (instrument, tf, direction, rank_by, top_n) is a pure function of the
-    # sweep tree, so it is memoised behind the `sweep_results_revision` CONTENT
-    # token folded into the KEY at a fixed `generation=0` (the `_nav_latency_key`
-    # precedent) — NOT the `_summary_cache` write generation, which the pull
-    # funnel's `mark_dirty` bumps per window tick and which a CLI
-    # `brutex sweep-all` (a separate process) never bumps at all. Two-level
-    # entries share this ONE instance: a `sweep_scan|rev=…` SweepScan per
-    # revision + a `sweep_leaderboard|rev=…|…` ranked payload per filter key, so
-    # a filter/rank click within one revision re-ranks the cached scan with zero
-    # store loads (see `api_sweep_leaderboard`). REUSES the COMMON LRU
-    # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON); the LRU ages
-    # out old-revision keys, and the RAM-derived byte watermark bounds the
-    # resident SweepScan payload bytes (DEC-MEMORY-FOOTPRINT-HARDENING-001 —
-    # the constants + rationale live at the module-level block above build_app).
+    # given (instrument, tf, direction, rank_by, top_n) is a pure function of
+    # the sweep tree, so it is memoised behind the `sweep_results_revision`
+    # CONTENT token — NOT the `_summary_cache` write generation, which the
+    # pull funnel's `mark_dirty` bumps per window tick and which a CLI
+    # `brutex sweep-all` (a separate process) never bumps at all. The token
+    # now drives the GENERATION (`revision_generation`) over STABLE keys —
+    # invalidation equivalent to the superseded rev-in-key fold, but a RUNNING
+    # dashboard sweep's per-flush revision moves can now engage the pull-time
+    # adaptive floor (bounded stale serves, logged) instead of paying the full
+    # scan per 4 s poll; a separate-process CLI sweep still recomputes per
+    # flush (the probe reads False there — the floor's honest envelope).
+    # Two-level entries share this ONE instance: the `sweep_scan` SweepScan +
+    # a `sweep_leaderboard|…` ranked payload per filter key, so a filter/rank
+    # click within one revision re-ranks the cached scan with zero store
+    # loads; on a revision-probe OUTAGE the filter key doubles as the
+    # serve-last-known prefix (DEC-CACHE-SERVE-LAST-KNOWN-001 — see
+    # `api_sweep_leaderboard`). REUSES the COMMON LRU `MoversSnapshotCache`
+    # (no new class — CLAUDE.md §11 COMMON); the LRU ages out old keys.
+    # The RAM-derived byte watermark bounds the resident SweepScan payload
+    # bytes (DEC-MEMORY-FOOTPRINT-HARDENING-001 — the constants + rationale
+    # live at the module-level block above build_app).
     _sweep_leaderboard_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live,
+        adaptive_floor=True,
         max_bytes=memory_budget_bytes(
             fraction=_SWEEP_LEADERBOARD_CACHE_FRACTION,
             floor_bytes=_SWEEP_LEADERBOARD_CACHE_FLOOR_BYTES,
-        )
+        ),
     )
     # The one-click artifact read memo (DEC-OPERATOR-PAGE-REAL-001): every
     # `/api/v1/oneclick/*` read (runs listing, manifest, top100, events tail
@@ -1986,7 +2045,10 @@ def build_app(
     # (C-r2-5, DEC-ONECLICK-PERF-CLUB-001 — the serve-last-known doctrine; the
     # gate + chokepoint live in `oneclick_artifacts.serve_revision_cached`;
     # SIBLING stats folded into the verify/manifest keys ride the SAME gate
-    # via `sibling_key_token` — r1 MINOR-1 fold).
+    # via `sibling_key_token` — r1 MINOR-1 fold; on the DEC-CACHE-SERVE-LAST-
+    # KNOWN-001 reconcile this landed arm SUPERSEDED batch A's route-level
+    # `serve_last_known` branches here — the labelled arm survives on the
+    # non-oneclick keystone sites below).
     # HONEST envelope (Golden Rule #10): the FIRST read per revision pays the
     # O(artifact) parse; the cached hit is O(1) vs run count / artifact size.
     # REUSES the COMMON `MoversSnapshotCache`, with the RAM-derived byte
@@ -2006,6 +2068,60 @@ def build_app(
     # PayloadCache instance differs (see _ONECLICK_EVENTS_CACHE_CAPACITY).
     _oneclick_events_cache = MoversSnapshotCache(capacity=_ONECLICK_EVENTS_CACHE_CAPACITY)
     _oneclick_outages = oneclick_artifacts.OutageGate()
+
+    def _probe_outage_payload(
+        payload: dict[str, Any], *, served_last_known: bool
+    ) -> dict[str, Any]:
+        """Shallow-copy *payload* + stamp the ADDITIVE `revision_probe` degrade marker.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the `store_error_payload` honest-degrade
+        precedent): a payload served while the revision probe is DOWN must say
+        so — either "serving last-known" (a previously-cached payload) or
+        "computed fresh (seeded as last-known)" (the outage's first poll for
+        this key family). The copy keeps the CACHED dict immutable — a marker
+        must never leak into the entry another (post-recovery) poll serves.
+        """
+        out = dict(payload)
+        out["revision_probe"] = _probe_outage_marker(served_last_known=served_last_known)
+        return out
+
+    def _probe_outage_marker(*, served_last_known: bool) -> str:
+        """The ONE `revision_probe` degrade-marker string (JSON field + CSV row).
+
+        Split out of :func:`_probe_outage_payload` (review fold) so the
+        mapping-integrity CSV download can carry the SAME in-band staleness
+        wording as the JSON routes — one marker vocabulary, never two that
+        drift.
+        """
+        return (
+            "outage — serving last-known"
+            if served_last_known
+            else "outage — computed fresh (seeded as last-known)"
+        )
+
+    def _store_outage_response(**extra: Any) -> JSONResponse:
+        """The honest 503 degrade for a COLD store outage (nothing last-known).
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001, the `store_error_payload` precedent: when
+        the instrument store is unreachable AND no last-known snapshot exists
+        (:class:`UniverseStoreOutageError`), the route serves explicit error
+        markers at 503 — never a raw 500 (the pre-fix per-poll traceback storm),
+        never a fabricated empty universe (Golden Rule #1). SANITIZED: the wire
+        carries only the stable generic markers — the full store fault detail is
+        WARN-logged server-side by the cache's once-per-outage latch. ``extra``
+        lets a route keep its envelope shape keys (e.g. ``kind``) beside the
+        markers.
+        """
+        return JSONResponse(
+            {
+                "available": False,
+                "error": "instrument store unavailable — retry shortly",
+                "error_type": "store_outage",
+                **extra,
+            },
+            status_code=503,
+        )
+
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
@@ -2435,9 +2551,20 @@ def build_app(
         DuckDB ``COUNT`` + ``MAX``) — and the three base reads on a miss — run on a
         threadpool worker, NEVER the uvicorn event loop, so a stalled lake volume
         cannot freeze the whole dashboard.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the 8th keystone site): a store OUTAGE
+        with a resident snapshot serves it labelled (the additive
+        ``revision_probe`` marker on a COPY — the memoised dict stays clean);
+        a COLD outage degrades to the honest 503 markers, never a raw 500.
         """
         store = _require_store()
-        return JSONResponse(await _run_lake(_universe_cache.summary, store))
+        try:
+            payload, served_last_known = await _run_lake(_universe_cache.summary_view, store)
+        except UniverseStoreOutageError:
+            return _store_outage_response()
+        if served_last_known:
+            return JSONResponse(_probe_outage_payload(payload, served_last_known=True))
+        return JSONResponse(payload)
 
     @app.get("/api/v1/universe/instruments")
     async def api_universe_instruments(
@@ -2457,7 +2584,15 @@ def build_app(
         O(1) repeat poll (DEC-UNIVERSE-BACKEND-CACHE-001): the base reads + the
         per-*kind* classified rows are cached behind ``_universe_cache``, keyed by
         the master's ``instruments``-table content token. A bad *kind* still surfaces
-        as a 400 (the classifier's ``ValueError`` is raised before any caching).
+        as a 400 (the classifier's ``ValueError`` is raised before any caching;
+        NO DuckDB exception subclasses ``ValueError``, so a store fault can never
+        masquerade as a bad request).
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the 8th keystone site): a store OUTAGE
+        with a resident snapshot serves its rows labelled (the additive
+        ``revision_probe`` marker on the route envelope); a COLD outage degrades
+        to the honest 503 markers, never a raw 500 per poll (the pre-fix
+        500-storm the scout reproduced).
         """
         store = _require_store()
         try:
@@ -2465,10 +2600,17 @@ def build_app(
             # per-kind base reads run on a threadpool worker, never the event loop
             # (the classifier's ValueError for a bad kind still propagates out of
             # run_in_threadpool → 400, before any caching).
-            rows = await _run_lake(lambda: _universe_cache.instruments(store, kind=kind))
+            rows, served_last_known = await _run_lake(
+                lambda: _universe_cache.instruments_view(store, kind=kind)
+            )
+        except UniverseStoreOutageError:
+            return _store_outage_response(instruments=[], kind=kind)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"instruments": rows, "kind": kind})
+        payload: dict[str, Any] = {"instruments": rows, "kind": kind}
+        if served_last_known:
+            payload = _probe_outage_payload(payload, served_last_known=True)
+        return JSONResponse(payload)
 
     @app.get("/api/v1/universe/index-constituents")
     async def api_universe_index_constituents(
@@ -5175,31 +5317,91 @@ def build_app(
 
     # ── Completeness ledger / Coverage (DEC-COVERAGE-LEDGER-001) ────
 
-    def _nav_latency_key(name: str, store: Any, *extra: object) -> str:
-        """Build the COMPOSITE cache key for the nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001).
+    def _nav_latency_coords(name: str, store: Any, *extra: object) -> tuple[str, int]:
+        """Build the ``(stable key, token generation)`` pair for the nav-latency caches.
 
-        Encodes the route name, the dashboard write-generation (``_summary_cache.generation``,
-        bumped by every pull / materialize), the instrument-master content revision
-        (:func:`master_revision`, moved by a keyless ``load-instruments`` that does NOT bump
-        the generation) AND the coverage-ledger content revision (:func:`coverage_revision`,
-        moved by every ``upsert_coverage`` — a metadata pull, in THIS process or another one,
-        writes coverage cells without moving either of the first two signals;
-        DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660) into ONE string key, plus any
-        route-specific ``extra`` discriminants (e.g. the coverage ``years`` span). Folding ALL
-        THREE freshness signals into the KEY — and passing ``generation=0`` to
-        :meth:`MoversSnapshotCache.get_or_compute` — means a cache hit fires ONLY when neither
-        the ledger, the master, NOR the coverage ledger has changed since the entry was
-        stored, so a pull, an instrument load, or a coverage write always yields a fresh key
-        (never a stale payload — Golden Rule #1). The token is cheap (two COUNT+MAX
-        aggregates over the lean master + the PK-indexed coverage ledger plus an O(1)
-        generation read), strictly lighter than the projections it guards; an unchanged
-        store yields a byte-identical key (no thrash).
+        DEC-DASHBOARD-NAV-LATENCY-001, re-keyed by DEC-NAV-CACHES-FLOOR-REKEY-001
+        (supersedes ``_nav_latency_key``, which folded the freshness token into
+        the KEY at ``generation=0``). The KEY is the STABLE route identity
+        (name + route-specific ``extra`` discriminants, e.g. the coverage
+        ``years`` span); the GENERATION digests the COMPOSITE freshness token —
+        the dashboard write-generation (``_summary_cache.generation``, bumped
+        by every pull / materialize) AND the instrument-master content revision
+        (:func:`master_revision`, moved by a keyless ``load-instruments`` that
+        does NOT bump the generation) AND the coverage-ledger content revision
+        (:func:`coverage_revision`, moved by every ``upsert_coverage`` — a
+        metadata pull, in THIS process or another one, writes coverage cells
+        without moving either of the first two signals;
+        DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660) — through the ONE
+        :func:`~brutex.dashboard.movers_cache.revision_generation` digest
+        bridge (any token change moves the generation; the ~2^-64 collision
+        envelope is documented on the bridge). Invalidation is equivalent to
+        the superseded key fold — a pull OR an instrument load recomputes,
+        never stale (Golden Rule #1) — but a mid-pull ``mark_dirty`` storm now
+        lands on the SAME key, so the trio's pull-time adaptive floor is
+        actually REACHABLE (the old cold-key-per-poll shape starved it). The
+        token stays cheap (two COUNT+MAX aggregates over the lean master +
+        the PK-indexed coverage ledger plus an O(1) generation read), strictly
+        lighter than the projections it guards.
         """
         gen = _summary_cache.generation
         count, latest = master_revision(store)
         c_count, c_latest = coverage_revision(store)
+        return _nav_latency_stable_key(name, *extra), revision_generation(
+            f"gen={gen}|m={count}:{latest}|c={c_count}:{c_latest}"
+        )
+
+    def _nav_latency_stable_key(name: str, *extra: object) -> str:
+        """The trio's STABLE cache key (route identity only — no freshness token).
+
+        Split out of :func:`_nav_latency_coords` (DEC-CACHE-SERVE-LAST-KNOWN-001)
+        so the store-outage arm can address the SAME key withOUT the
+        ``master_revision`` probe that just failed — the key doubles as
+        :meth:`~brutex.dashboard.movers_cache.MoversSnapshotCache.serve_last_known`'s
+        prefix (entries are stored at exactly this key, so the direct
+        ``key == prefix`` fallback resolves the last-known entry).
+        """
         extra_repr = "|".join(repr(item) for item in extra)
-        return f"{name}|gen={gen}|m={count}:{latest}|c={c_count}:{c_latest}|{extra_repr}"
+        return f"{name}|{extra_repr}"
+
+    def _nav_cached_or_last_known(
+        cache: MoversSnapshotCache,
+        name: str,
+        store: Any,
+        *extra: object,
+        compute: Callable[[], Any],
+    ) -> tuple[Any, bool, bool]:
+        """Resolve a nav-latency cached payload; a store-probe OUTAGE serves last-known.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the 8th keystone site's nav-trio arm —
+        the scout-confirmed ``_nav_latency_coords`` → ``master_revision`` unguarded
+        probe 500'd `/api/v1/coverage` + `/api/v1/universe/completeness` +
+        `/api/v1/universe/mapping-integrity` under the SAME store outage): the
+        composite freshness probe is guarded by :data:`STORE_FAULT_TYPES` — on a
+        probe fault the route's STABLE key resolves the last-known entry via
+        :meth:`~brutex.dashboard.movers_cache.MoversSnapshotCache.serve_last_known`
+        (once-per-outage WARN latch + recovery INFO live there; a cold outage
+        seeds ONE fresh compute at ``OUTAGE_GENERATION``). A compute that ITSELF
+        hits a store fault during the cold-outage seed raises the typed
+        :class:`UniverseStoreOutageError` the routes map to the honest 503
+        degrade — never a raw 500.
+
+        Returns ``(value, probe_outage, served_last_known)`` — the caller stamps
+        the additive ``revision_probe`` marker when ``probe_outage`` is ``True``
+        (a stale serve is never silent, Golden Rule #1).
+        """
+        try:
+            key, token_gen = _nav_latency_coords(name, store, *extra)
+        except STORE_FAULT_TYPES:
+            key = _nav_latency_stable_key(name, *extra)
+            try:
+                value, served_last_known = cache.serve_last_known(key, compute=compute)
+            except STORE_FAULT_TYPES as inner:
+                raise UniverseStoreOutageError(
+                    f"instrument store unreachable at the {name} probe with no last-known payload"
+                ) from inner
+            return value, True, served_last_known
+        return cache.get_or_compute(key, generation=token_gen, compute=compute), False, False
 
     @app.get("/api/v1/coverage")
     async def api_coverage() -> JSONResponse:
@@ -5242,19 +5444,36 @@ def build_app(
             return build_coverage_payload(store.list_coverage(), expected, years)
 
         # Memoise behind the COMPOSITE (generation, master-revision) token
-        # (DEC-DASHBOARD-NAV-LATENCY-001): a 4 s poll within one generation + master
-        # revision is an O(1) handoff, while a pull (generation bump) OR an instrument
-        # load (master-revision move) yields a new key → recompute, never stale. The
-        # full O(datasets)+ledger build runs ONLY on a miss, on the threadpool worker.
+        # (DEC-DASHBOARD-NAV-LATENCY-001, re-keyed by
+        # DEC-NAV-CACHES-FLOOR-REKEY-001 — the token drives the GENERATION over
+        # a stable key): a 4 s poll within one token is an O(1) handoff; a pull
+        # (generation bump) OR an instrument load (master-revision move) moves
+        # the token → recompute — UNLESS a pull is actively running, where the
+        # per-window-tick bumps engage the bounded, logged adaptive floor
+        # instead of a full O(datasets)+ledger rebuild per poll (the #920
+        # storm class). The build runs ONLY on a miss, on the threadpool worker.
         def _cached_build() -> dict[str, Any]:
-            """Return the coverage payload, memoised behind the composite freshness key."""
-            return _coverage_cache.get_or_compute(
-                _nav_latency_key("coverage", store, years),
-                generation=0,
-                compute=_build,
-            )
+            """Return the coverage payload, memoised behind the composite freshness token.
 
-        return JSONResponse(await _run_lake(_cached_build))
+            DEC-CACHE-SERVE-LAST-KNOWN-001: a store fault from the composite
+            probe serves the last-known payload LABELLED (the additive
+            ``revision_probe`` marker on a copy) instead of the pre-fix raw 500.
+            """
+            value, probe_outage, served = _nav_cached_or_last_known(
+                _coverage_cache, "coverage", store, years, compute=_build
+            )
+            if probe_outage:
+                payload: dict[str, Any] = _probe_outage_payload(value, served_last_known=served)
+                return payload
+            result: dict[str, Any] = value
+            return result
+
+        try:
+            return JSONResponse(await _run_lake(_cached_build))
+        except UniverseStoreOutageError:
+            # COLD outage (nothing last-known, the seed compute hit the same
+            # fault): the honest 503 markers, never a raw 500.
+            return _store_outage_response()
 
     @app.get("/api/v1/coverage/spot")
     async def api_coverage_spot() -> JSONResponse:
@@ -5491,21 +5710,40 @@ def build_app(
         lake = lake_root.parent
 
         # Memoise the per-symbol projection behind the COMPOSITE (generation,
-        # master-revision) token (DEC-DASHBOARD-NAV-LATENCY-001). The inner SPOT lake
+        # master-revision) token (DEC-DASHBOARD-NAV-LATENCY-001, re-keyed by
+        # DEC-NAV-CACHES-FLOOR-REKEY-001 — the token drives the GENERATION over
+        # a stable key). The inner SPOT lake
         # scan is ALREADY `_summary_cache`-cached (DEC-COMPLETENESS-O1-LATENCY-001), but
         # the residual `categorize_instruments` + `list_coverage` + `per_symbol_completeness`
         # projection re-ran on every 15 s poll; this caches the WHOLE map so a repeat poll
-        # within one generation + master revision is an O(1) handoff. A pull (generation) or
-        # an instrument load (master revision) yields a new key → recompute, never stale.
-        def _cached_per_symbol() -> dict[str, dict[str, Any]]:
-            """Return the per-symbol completeness map, memoised behind the composite freshness key."""
-            return _universe_completeness_cache.get_or_compute(
-                _nav_latency_key("universe-completeness", store),
-                generation=0,
+        # within one token is an O(1) handoff. A pull (generation) or an instrument load
+        # (master revision) moves the token → recompute, never stale — with mid-pull
+        # window-tick bumps riding the bounded, logged adaptive floor (#920).
+        def _cached_per_symbol() -> dict[str, Any]:
+            """Return the per-symbol completeness map, memoised behind the composite token.
+
+            DEC-CACHE-SERVE-LAST-KNOWN-001: a store fault from the composite
+            probe serves the last-known map LABELLED (the additive
+            ``revision_probe`` marker on a copy — symbols are instrument names,
+            so the marker key can never collide with a row) instead of the
+            pre-fix raw 500.
+            """
+            value, probe_outage, served = _nav_cached_or_last_known(
+                _universe_completeness_cache,
+                "universe-completeness",
+                store,
                 compute=lambda: _build_per_symbol_completeness(store, lake),
             )
+            if probe_outage:
+                payload: dict[str, Any] = _probe_outage_payload(value, served_last_known=served)
+                return payload
+            result: dict[str, Any] = value
+            return result
 
-        per_symbol = await _run_lake(_cached_per_symbol)
+        try:
+            per_symbol = await _run_lake(_cached_per_symbol)
+        except UniverseStoreOutageError:
+            return _store_outage_response()
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -5542,7 +5780,7 @@ def build_app(
             now=datetime.now(UTC),
         )
 
-    def _build_mapping_integrity_report_cached() -> MappingIntegrityReport:
+    def _build_mapping_integrity_report_cached() -> tuple[MappingIntegrityReport, bool, bool]:
         """Cache the mapping-integrity report behind the COMPOSITE freshness token.
 
         DEC-DASHBOARD-NAV-LATENCY-001. The JSON route polls this every 15 s and the CSV
@@ -5555,13 +5793,26 @@ def build_app(
         whitelist + ``now`` are constants here; ``now`` only stamps the report's clock, the
         verdict itself depends solely on the cached master + ledger, so a same-revision
         re-serve carrying the entry's ``now`` is byte-identical to recomputing (the entry is
-        dropped the instant either signal moves).
+        dropped the instant either signal moves — with mid-pull window-tick bumps riding
+        the bounded, logged adaptive floor per DEC-NAV-CACHES-FLOOR-REKEY-001, which also
+        moved the token from the key into the generation via ``_nav_latency_coords``).
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001: returns ``(report, probe_outage,
+        served_last_known)`` — a store fault from the composite probe serves the
+        last-known report (the JSON route stamps the ``revision_probe`` marker on
+        the serialized dict; the CSV download prepends the in-band
+        ``# revision_probe: …`` marker row — the review fold — and the
+        server-side WARN latch still fires); a COLD outage raises the typed
+        :class:`UniverseStoreOutageError` both routes map to the honest 503.
         """
-        return _mapping_integrity_cache.get_or_compute(
-            _nav_latency_key("mapping-integrity", _require_store()),
-            generation=0,
+        report, probe_outage, served = _nav_cached_or_last_known(
+            _mapping_integrity_cache,
+            "mapping-integrity",
+            _require_store(),
             compute=_build_mapping_integrity_report,
         )
+        result: MappingIntegrityReport = report
+        return result, probe_outage, served
 
     @app.get("/api/v1/universe/mapping-integrity")
     async def api_universe_mapping_integrity() -> JSONResponse:
@@ -5575,11 +5826,20 @@ def build_app(
         This is the real-time, self-checking guarantee that the core spot↔options mapping is
         precise, surfaced as ``is_green`` + a drill-down. Pure delegation to
         :mod:`brutex.data.mapping_integrity` (its grouping + reconciliation are at 100%
-        line+branch); READ-ONLY, no pull. No store wired → 503.
+        line+branch); READ-ONLY, no pull. No store wired → 503. A store OUTAGE
+        (DEC-CACHE-SERVE-LAST-KNOWN-001) serves the last-known verdict labelled
+        with the additive ``revision_probe`` marker; a COLD outage degrades to
+        the honest 503 markers, never a raw 500.
         """
         _require_store()
-        report = await _run_lake(_build_mapping_integrity_report_cached)
-        return JSONResponse(report_to_dict(report))
+        try:
+            report, probe_outage, served = await _run_lake(_build_mapping_integrity_report_cached)
+        except UniverseStoreOutageError:
+            return _store_outage_response()
+        payload = report_to_dict(report)
+        if probe_outage:
+            payload = _probe_outage_payload(payload, served_last_known=served)
+        return JSONResponse(payload)
 
     @app.get("/api/v1/universe/mapping-integrity.csv")
     async def api_universe_mapping_integrity_csv() -> Response:
@@ -5592,12 +5852,29 @@ def build_app(
         :func:`brutex.dashboard.mapping_integrity_csv.mapping_integrity_to_csv` (a three-section
         human report; every cell formula-injection-safe via the shared
         :class:`~brutex.dashboard._csv_utils.FormulaSafeWriter`). READ-ONLY, no pull; no store
-        wired → 503.
+        wired → 503. A store OUTAGE (DEC-CACHE-SERVE-LAST-KNOWN-001 + the review
+        fold) serves the last-known report LABELLED IN-BAND: one informational
+        ``# revision_probe: …`` row is prepended (the CSV twin of the JSON
+        routes' additive marker — same :func:`_probe_outage_marker` wording,
+        rendered through the same ``FormulaSafeWriter``), so an Excel reader
+        sees the staleness signal, not just the server-side WARN latch; a
+        healthy serve is byte-identical (no marker row — regression-pinned).
+        A COLD outage returns a plain-text 503, never a raw 500.
         """
         _require_store()
-        report = await _run_lake(_build_mapping_integrity_report_cached)
+        try:
+            report, probe_outage, served = await _run_lake(_build_mapping_integrity_report_cached)
+        except UniverseStoreOutageError:
+            return Response(
+                content="instrument store unavailable — retry shortly",
+                media_type="text/plain; charset=utf-8",
+                status_code=503,
+            )
+        marker: str | None = None
+        if probe_outage:
+            marker = _probe_outage_marker(served_last_known=served) + " (store unreachable)"
         return Response(
-            content=mapping_integrity_to_csv(report),
+            content=mapping_integrity_to_csv(report, revision_probe=marker),
             media_type="text/csv; charset=utf-8",
             headers={
                 "Content-Disposition": 'attachment; filename="mapping_integrity.csv"',
@@ -6269,6 +6546,11 @@ def build_app(
                             lake_root, parse_snapshot_date(date_str)
                         ),
                     )
+                # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001: display-only provenance — the
+                # completed-bucket final "HH:MM" an explicit bucket-anchor `time` was
+                # resolved forward to (`None` for daily / latest / TF-1minute / non-anchor,
+                # keeping the payload byte-identical). O(1) pure; shared by all three tabs.
+                resolved_through = asof_through_label(interval, time)
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a
@@ -6387,6 +6669,7 @@ def build_app(
                         pcr=opt_cands.pcr,
                         latest_time=latest_time,
                         underlying_class=underlying_class,
+                        resolved_through=resolved_through,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -6438,6 +6721,7 @@ def build_app(
                         min_volume=min_volume,
                         latest_time=latest_time,
                         underlying_class=underlying_class,
+                        resolved_through=resolved_through,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -6479,6 +6763,7 @@ def build_app(
                     resampled_reads=spot_cands.resampled_reads,
                     latest_time=latest_time,
                     underlying_class=underlying_class,
+                    resolved_through=resolved_through,
                 )
 
             payload = await _run_lake(_resolve)
@@ -6689,17 +6974,24 @@ def build_app(
         lake_root = getattr(store, "path", None)
 
         def _build_rows(lake: Path) -> list[Any]:
-            """Build the pre-open report rows off the event loop (threadpool worker)."""
-            # Offloaded: the dataset discovery (filesystem walk) + the per-symbol
-            # DuckDB aggregate run on a threadpool worker, building store.connection
+            """Serve the memoised report rows off the event loop (threadpool worker)."""
+            # DEC-DB-LATENCY-HARDENING-001: rows memoised per (basis, range,
+            # symbols filter) at the write generation — a repeat click within one
+            # generation is an O(1) handoff (ZERO dataset walks, ZERO DuckDB
+            # statements, spy-pinned); the cold build (discovery walk + per-symbol
+            # aggregates) runs on this threadpool worker, building store.connection
             # here so the store RLock stays on this thread (DEC-DASHBOARD-FASTREAD-001).
-            return build_preopen_rows(
-                store.connection,
-                lake,
-                datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
-                start=start_d,
-                end=end_d,
-                basis=report_basis,
+            return _preopen_rows_cache.get_or_compute(
+                _preopen_rows_key(report_basis, start_d, end_d, wanted),
+                generation=_summary_cache.generation,
+                compute=lambda: build_preopen_rows(
+                    store.connection,
+                    lake,
+                    datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
+                    start=start_d,
+                    end=end_d,
+                    basis=report_basis,
+                ),
             )
 
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
@@ -6768,14 +7060,23 @@ def build_app(
         lake_root = getattr(store, "path", None)
 
         def _build_rows(lake: Path) -> list[Any]:
-            """Build the pre-open report rows off the event loop (threadpool worker)."""
-            return build_preopen_rows(
-                store.connection,
-                lake,
-                datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
-                start=start_d,
-                end=end_d,
-                basis=report_basis,
+            """Serve the memoised report rows off the event loop (threadpool worker).
+
+            DEC-DB-LATENCY-HARDENING-001: the SAME memo coordinate as the
+            ``.xlsx`` route — mode/min_pct shape only the RENDER below, so both
+            exports share ONE cached row build per (basis, range, symbols).
+            """
+            return _preopen_rows_cache.get_or_compute(
+                _preopen_rows_key(report_basis, start_d, end_d, wanted),
+                generation=_summary_cache.generation,
+                compute=lambda: build_preopen_rows(
+                    store.connection,
+                    lake,
+                    datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
+                    start=start_d,
+                    end=end_d,
+                    basis=report_basis,
+                ),
             )
 
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
@@ -7112,6 +7413,19 @@ def build_app(
             (DEC-LEDGER-DELTA-O-PAGE-001).
             """
             rev = sweep_results_revision(lake_root)
+            # The STABLE (revision-free) filter key. Casefold the filter
+            # axes: build_sweep_leaderboard's _matches filters them
+            # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
+            # leaderboard and must share ONE cache slot (rank_by stays raw — it
+            # is matched exactly against RANKABLE_COLUMNS, not casefolded; the
+            # RESOLVED preset token rides too — a preset-ranked payload must
+            # never share a slot with the default ordering, and blank/absent
+            # share ONE slot because both resolve to None).
+            lb_key = (
+                f"sweep_leaderboard|i={(instrument or '').casefold()}"
+                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
+                f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+            )
 
             def _fresh() -> dict[str, Any]:
                 return build_sweep_leaderboard(
@@ -7125,36 +7439,37 @@ def build_app(
                 ).to_dict()
 
             if rev is None:
-                # No signal → no freshness decision: compute fresh, cache
-                # NOTHING (never a stale serve, never a poisoned key — Golden
-                # Rule #1; the lake_revision "None = no signal" doctrine).
-                return _fresh()
+                # Probe OUTAGE (`sweep_results_revision` returns None ONLY on a
+                # non-missing-file OSError — an absent sweeps tree is the stable
+                # ABSENT_TOKEN composite): serve the LAST-KNOWN payload for this
+                # filter key, labelled + WARN-latched (DEC-CACHE-SERVE-LAST-
+                # KNOWN-001, C-r2-3 — the pre-change "compute fresh, cache
+                # NOTHING" doctrine re-paid the full O(stores × rows) scan on
+                # EVERY poll for the outage's duration).
+                payload, served = _sweep_leaderboard_cache.serve_last_known(lb_key, compute=_fresh)
+                return _probe_outage_payload(payload, served_last_known=served)
             # Level 1: ONE rank-independent SweepScan per revision — the
             # O(stores × rows) load + the audit era pass run once, then every
-            # filter/rank/top_n click within this revision re-ranks it.
+            # filter/rank/top_n click within this revision re-ranks it. The
+            # revision drives the GENERATION via the ONE `revision_generation`
+            # digest bridge over STABLE keys (DEC-NAV-CACHES-FLOOR-REKEY-001):
+            # invalidation is equivalent to the superseded rev-in-key fold
+            # (any token change moves the generation), while a RUNNING
+            # dashboard sweep's per-flush revision moves can now engage the
+            # instance's pull-time adaptive floor (bounded, logged stale
+            # serves) instead of paying the full scan per poll.
+            gen = revision_generation(rev)
             scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
-                f"sweep_scan|rev={rev}",
-                generation=0,
+                "sweep_scan",
+                generation=gen,
                 compute=lambda: load_sweep_scan(lake_root),
             )
-            # Level 2: the ranked payload per filter key. Casefold the filter
-            # axes: build_sweep_leaderboard's _matches filters them
-            # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
-            # leaderboard and must share ONE cache slot (rank_by stays raw — it
-            # is matched exactly against RANKABLE_COLUMNS, not casefolded; the
-            # RESOLVED preset token rides too — a preset-ranked payload must
-            # never share a slot with the default ordering, and blank/absent
-            # share ONE slot because both resolve to None). The revision rides
-            # in the KEY at a fixed generation=0 (the `_nav_latency_key`
-            # precedent); the LRU ages out old revisions.
-            key = (
-                f"sweep_leaderboard|rev={rev}|i={(instrument or '').casefold()}"
-                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
-                f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
-            )
+            # Level 2: the ranked payload per stable filter key (same token
+            # generation; `mru_prefix` records the last-known pointer the
+            # probe-outage arm above serves).
             return _sweep_leaderboard_cache.get_or_compute(
-                key,
-                generation=0,
+                lb_key,
+                generation=gen,
                 compute=lambda: build_sweep_leaderboard(
                     lake_root,
                     instrument=instrument,
@@ -7165,6 +7480,7 @@ def build_app(
                     scan=scan,
                     preset=resolved_preset,
                 ).to_dict(),
+                mru_prefix=lb_key,
             )
 
         try:
@@ -8173,26 +8489,31 @@ def build_app(
         The response is now ONE ``LIMIT``/``OFFSET`` page with a real ``total``
         (DEC-DB-VIEWER-PAGINATE-ALL-001) so the /db viewer renders O(visible), not
         every window. Honest envelope (Golden Rule #10,
-        DEC-SUSPICION-SWEEP-FIXES-001 D3): the ledger is NOT small — a pre-planned
-        full-universe options pull holds ~841k rows (the measured shape behind
-        ``db_view.WINDOW_ROWS_CAP``), and this route previously re-PARSED the whole
-        Parquet (``load_window_ledger(...).to_rows()``) on EVERY paging click. The
-        read now rides :func:`~brutex.dashboard.db_view.window_ledger_rows_page`
-        — the SAME stamp-keyed single parse the other ledger readers share, with
-        ONLY the page's records projected to row tuples
-        (DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3: the former cached
-        whole-ledger rows projection was a SECOND resident per-row family beside
-        the records cache — retired; residency is now the ONE records family) —
-        so a paging click within one ledger generation is an O(1) records-cache
-        handoff + an O(page) projection/format; the FIRST read after a ledger
-        flush still pays one
-        real O(rows) parse (true O(page) needs a write-time manifest, NOT claimed).
-        The page-slice preserves the canonical
-        :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort + derived
-        columns byte-for-byte (ONE row-shape source:
-        ``window_ledger.ledger_record_row``).
+        DEC-DB-LATENCY-HARDENING-001 — supersedes the D3 cached-Python-parse
+        cost model): the ledger is NOT small — a pre-planned full-universe
+        options pull holds ~841k rows (the measured shape behind
+        ``db_view.WINDOW_ROWS_CAP``), and the D3-era read still paid ONE full
+        ``load_window_ledger`` Python parse per ledger STAMP move (measured
+        7,177.5 ms of a 7,628 ms request at 400k rows — recurring every
+        mid-pull flush). The read now rides
+        :func:`~brutex.dashboard.db_view.query_window_ledger_page` — a DuckDB
+        ``LIMIT``/``OFFSET`` projection over the SAME delta-folded ledger scan
+        source the ``/coverage/windows`` fast paths use, with the total from
+        ONE stamp-memoised ``COUNT(*)`` — so a fresh-stamp click is one
+        columnar scan (O(total rows + delta footers), NOT the O(rows) Python
+        record fold) and a repeat click within one stamp is an O(1) cache
+        handoff + an O(page) format. A legacy-shape ledger / a persistently
+        malformed delta / no DuckDB conn degrades to the byte-identical
+        stamp-cached Python parse, sliced O(page)
+        (``window_ledger_rows_page`` — DEC-MEMORY-FOOTPRINT-HARDENING-001
+        fix 3: the records family is the ONE resident per-row
+        representation; the degrade never re-materializes the whole-ledger
+        rows projection). The page preserves the
+        canonical :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort
+        + derived columns byte-for-byte (fast-equals-legacy pinned; ONE
+        row-shape source: ``window_ledger.ledger_record_row``).
         """
-        from brutex.dashboard.db_view import window_ledger_rows_page
+        from brutex.dashboard.db_view import query_window_ledger_page
 
         columns = [
             "market",
@@ -8221,14 +8542,22 @@ def build_app(
         lake = lake_root.parent
 
         def _load() -> dict[str, Any]:
-            """Read ONE page off the cached ledger records, then IST-format it."""
+            """Read ONE DuckDB page (legacy-parse fallback), then IST-format it."""
             from brutex.data.session import format_ist_clock
 
-            # Slice BEFORE projecting/formatting → only the page's records are
-            # tuple-projected + IST-coerced (O(page)); the whole-ledger rows are
-            # never materialized per poll (DEC-MEMORY-FOOTPRINT-HARDENING-001
-            # fix 3). An offset past the end is a clean empty page.
-            total, page = window_ledger_rows_page(lake, offset=offset, limit=limit)
+            # DEC-DB-LATENCY-HARDENING-001: DuckDB LIMIT/OFFSET page + memoised
+            # COUNT over the delta-folded scan source (the /coverage/windows
+            # caches — distinct `wledger-*` key families, stamp-token keyed);
+            # the store connection is built + used on this threadpool worker so
+            # its RLock stays on one thread (DEC-DASHBOARD-FASTREAD-001).
+            page, total = query_window_ledger_page(
+                store.connection,
+                lake,
+                limit=limit,
+                offset=offset,
+                count_cache=_window_counts_cache,
+                page_cache=_window_page_cache,
+            )
             rows: list[list[Any]] = []
             for row in page:
                 cells: list[Any] = list(row)
@@ -9165,6 +9494,22 @@ def _load_results_template() -> str:
 def _render_results_html() -> str:
     """Return the brute-force sweep leaderboard page HTML (DEC-DASHBOARD-RESULTS-PAGE-001)."""
     return _load_results_template()
+
+
+def _preopen_rows_key(basis: str, start: date, end: date, wanted: Sequence[str] | None) -> str:
+    """The pre-open export rows-memo key — pure, deterministic, collision-safe.
+
+    DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md #1719): one memo coordinate per
+    ``(basis, inclusive [from, to] range, symbols filter)`` — the exact inputs
+    that shape the built ``PreOpenRow`` list (the ``.zip`` route's mode/min_pct
+    shape only the RENDER, so both export routes share one coordinate). The
+    filter segment rides one tuple ``repr`` (the window-page precedent —
+    unambiguous, a client-supplied comma-joined symbols string can never forge
+    a key collision through a bare separator); ``None`` (no filter) keys as
+    ``None``, distinct from any explicit tuple.
+    """
+    filter_token = None if wanted is None else tuple(wanted)
+    return f"preopen-rows|{basis}|{start.isoformat()}|{end.isoformat()}|{filter_token!r}"
 
 
 def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, date]:
