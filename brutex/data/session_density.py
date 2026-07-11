@@ -115,7 +115,13 @@ SESSION_DENSITY_MIN_FRACTION: Final[float] = 0.90
 SESSION_DENSITY_ABS_FLOOR: Final[int] = 30
 
 #: Environment kill switch. Default ON; a falsy value ("0"/"false"/"no"/
-#: "off") disables the census (the ``bad_tick`` kill-switch pattern).
+#: "off") disables ALL census output (the ``bad_tick`` kill-switch pattern):
+#: BOTH the ingest-tail emitter (:func:`observe_session_density` checks it
+#: FIRST) and the sweep-preflight note consumption (``cmd_sweep_all`` gates
+#: its ``preflight_session_density`` call on
+#: :func:`session_density_census_enabled`). The pure classifier
+#: (:func:`classify_session_density`) itself stays un-gated BY DESIGN —
+#: callers gate, so purity is preserved and no env read hides inside it.
 SESSION_DENSITY_KILL_ENV: Final[str] = "BRUTEX_SESSION_DENSITY_CENSUS"
 
 #: Per-emit cap on ``window.session_density_low`` WARN lines (house cap 20 —

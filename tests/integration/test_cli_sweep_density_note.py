@@ -25,6 +25,7 @@ from brutex.cli import EXIT_OK, cmd_sweep_all
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.session_density import SESSION_DENSITY_KILL_ENV
 from brutex.data.sink import ParquetBarSink
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -105,11 +106,13 @@ def _kwargs(lake_root: Path, catalog_path: Path, tmp_path: Path) -> dict[str, An
 
 
 def test_interior_hole_prints_the_note_and_the_sweep_proceeds(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """THE pin: a fully-missing interior session (Wed 2024-01-03 — under
     interior-gap's tolerance-5, invisible to every pre-census detector) is
-    NAMED on stdout with its shape, and the launch is NEVER refused."""
+    NAMED on stdout with its shape, and the launch is NEVER refused. The kill
+    switch is explicitly UNSET — the default-ON arm of the switch pair."""
+    monkeypatch.delenv(SESSION_DENSITY_KILL_ENV, raising=False)
     lake_root, catalog_path = _seed(tmp_path, holey=True)
     rc = cmd_sweep_all(symbols="NIFTY", **_kwargs(lake_root, catalog_path, tmp_path))
     out = capsys.readouterr().out
@@ -128,3 +131,22 @@ def test_clean_lake_prints_no_note(tmp_path: Path, capsys: pytest.CaptureFixture
     out = capsys.readouterr().out
     assert rc == EXIT_OK
     assert "low-density" not in out
+
+
+def test_kill_switch_silences_the_preflight_note_too(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ONE census kill switch silences the sweep-preflight arm as well
+    (review round-1 fix): the SAME holey lake that prints the note under the
+    default-ON switch prints NOTHING with BRUTEX_SESSION_DENSITY_CENSUS=0 —
+    the consumption is gated at the cli call site on
+    ``session_density_census_enabled()`` (the classifier stays pure), so the
+    docstring's "disables ALL census output" claim is genuinely true. Fails
+    without the cli.py gate."""
+    monkeypatch.setenv(SESSION_DENSITY_KILL_ENV, "0")
+    lake_root, catalog_path = _seed(tmp_path, holey=True)
+    rc = cmd_sweep_all(symbols="NIFTY", **_kwargs(lake_root, catalog_path, tmp_path))
+    out = capsys.readouterr().out
+    assert rc == EXIT_OK  # the sweep itself is untouched by the switch
+    assert "low-density" not in out
+    assert "DEC-SESSION-DENSITY-CENSUS-001" not in out

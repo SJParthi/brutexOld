@@ -161,7 +161,14 @@ class TestLargestMissingRun:
 
 
 class TestDeficiencyLaw:
-    """The two-condition AND — both boundaries pinned on both sides."""
+    """The two-condition AND + the 30-min shape cut — every boundary pinned on
+    BOTH sides: abs floor at deficit 30-flags/29-passes; the fraction cutoff at
+    the real ``ceil(375*0.9)=338`` boundary — observed 338 passes / 337 flags
+    (337 is also the ceil-vs-floor discriminator: ``floor(337.5)=337`` would
+    wrongly pass it); the intraday-hole shape cut at largest gap
+    30 → ``intraday_hole`` / 29 → ``sparse``. (Review round-1: the pre-fix
+    345/330 pair straddled the boundary too loosely — three mutants survived.)
+    """
 
     def test_45_minute_hole_flags(self) -> None:
         # 330 observed: deficit 45 >= 30 AND 330 < ceil(375*0.9)=338 → FLAG.
@@ -189,6 +196,28 @@ class TestDeficiencyLaw:
         assert verdict.flags == ()
         assert verdict.sessions_checked == 1
 
+    def test_observed_exactly_at_ceil_boundary_passes(self) -> None:
+        # The fraction cutoff's EXACT boundary: 37 missing → observed 338 ==
+        # ceil(375*0.9)=338, deficit 37 >= 30 — `observed >= ceil(...)` saves
+        # it. Kills the `>=`→`>` boundary mutant on the fraction compare.
+        hole = set(range(600, 637))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)), today_ist=_FAR_FUTURE
+        )
+        assert verdict.flags == ()
+        assert verdict.sessions_checked == 1
+
+    def test_observed_one_below_ceil_boundary_flags(self) -> None:
+        # 38 missing → observed 337 < ceil(375*0.9)=338 → FLAG. The ceil-vs-
+        # floor discriminator: floor(375*0.9)=floor(337.5)=337 would read
+        # `337 >= 337` and wrongly pass — kills the ceil→floor mutant.
+        hole = set(range(600, 638))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)), today_ist=_FAR_FUTURE
+        )
+        assert len(verdict.flags) == 1
+        assert (verdict.flags[0].expected, verdict.flags[0].observed) == (375, 337)
+
     def test_29_missing_bars_passes_abs_floor_arm(self) -> None:
         # Force a permissive fraction so ONLY the abs floor gates: 29 < 30.
         hole = set(range(600, 629))
@@ -200,7 +229,10 @@ class TestDeficiencyLaw:
         assert verdict.flags == ()
 
     def test_exactly_30_missing_bars_flags_under_permissive_fraction(self) -> None:
-        # The abs-floor boundary: deficit == 30 flags (>=, not >).
+        # The abs-floor boundary: deficit == 30 flags (>=, not >) — AND the
+        # 30-minute contiguous gap classifies INTRADAY_HOLE at the shape cut's
+        # exact `>=` boundary (kills the `>=`→`>` shape-cut mutant, which
+        # would misread this hole as `sparse`).
         hole = set(range(600, 630))
         verdict = classify_session_density(
             _bracketed(_session_minutes(_WED, skip=hole)),
@@ -209,6 +241,23 @@ class TestDeficiencyLaw:
         )
         assert len(verdict.flags) == 1
         assert verdict.flags[0].largest_gap_minutes == 30
+        assert verdict.flags[0].shape == SHAPE_INTRADAY_HOLE
+
+    def test_29_minute_largest_gap_reads_sparse(self) -> None:
+        # The shape cut's other side: a FLAGGED session (deficit 38 >= 30,
+        # observed 337 < 338) whose largest contiguous gap is 29 minutes reads
+        # SPARSE, never intraday_hole — 9 extra isolated single-minute gaps
+        # (every other minute over 700..717) push the deficit past both arms
+        # without growing the largest run.
+        hole = set(range(600, 629)) | set(range(700, 718, 2))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)), today_ist=_FAR_FUTURE
+        )
+        assert len(verdict.flags) == 1
+        flag = verdict.flags[0]
+        assert flag.observed == 337
+        assert flag.largest_gap_minutes == 29
+        assert flag.shape == SHAPE_SPARSE
 
     def test_missing_interior_session_flags_at_zero(self) -> None:
         # The 1-session hole invisible to interior-gap's tolerance-5.

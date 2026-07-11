@@ -505,8 +505,9 @@ def detect_extreme_daily_ranges(
     with its NSE/SEBI citation" — the annotation list maintains itself going
     forward instead of relying on asserted future halt dates.
 
-    One O(sessions) polars group-by over the frame ALREADY in memory (the
-    :func:`detect_daily_open_substitutions` template) — zero extra lake I/O,
+    One O(1m-rows) polars group-by folded to O(sessions) aggregates over the
+    frame ALREADY in memory (the :func:`detect_daily_open_substitutions`
+    template; only the flag loop is O(sessions)) — zero extra lake I/O,
     frame never mutated, derived bytes byte-unchanged (pinned). A defensive
     non-positive session low SKIPS that session (never a division by zero —
     price sanity makes it unreachable on a real lake). HONEST limits (Golden

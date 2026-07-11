@@ -7014,19 +7014,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # (zero extra lake I/O) — so the operator never mistakes a lake hole for a
     # strategy verdict. NEVER a refusal, NO escape flag (the
     # one_day_trade_law_note posture): the sweep proceeds; remediation is a
-    # re-pull of the named window(s).
+    # re-pull of the named window(s). The ONE census kill switch
+    # (BRUTEX_SESSION_DENSITY_CENSUS) gates THIS consumption too — the
+    # classifier/note builder stays pure (no env read inside it); callers
+    # gate, exactly like observe_session_density's ingest-tail check — so the
+    # switch genuinely kills ALL census output (review round-1 fix).
+    from brutex.data.session_density import session_density_census_enabled
     from brutex.engine.sweep_preflight import preflight_session_density
 
-    density_note = preflight_session_density(slices)
-    if not density_note.ok:
-        print(
-            f"[brutex] WARNING: {len(density_note.flagged)} low-density session(s) in "
-            "the loaded 1-minute slices (bar-density census, "
-            "DEC-SESSION-DENSITY-CENSUS-001) — remediation: re-pull the named "
-            "window(s); the sweep proceeds:"
-        )
-        for line in density_note.lines():
-            print(f"[brutex]   {line}")
+    if session_density_census_enabled():
+        density_note = preflight_session_density(slices)
+        if not density_note.ok:
+            print(
+                f"[brutex] WARNING: {len(density_note.flagged)} low-density session(s) in "
+                "the loaded 1-minute slices (bar-density census, "
+                "DEC-SESSION-DENSITY-CENSUS-001) — remediation: re-pull the named "
+                "window(s); the sweep proceeds:"
+            )
+            for line in density_note.lines():
+                print(f"[brutex]   {line}")
 
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     timeframes = [

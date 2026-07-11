@@ -237,7 +237,7 @@ Parallel to the §10.6 spec-consistency wave, a second sub-wave verified that **
 | # | DEC-ID | MIGRATION entry | Item | Verified-current code state |
 |---|---|---|---|---|
 | 1 | DEC-C08-RESOLUTION-001 | #271 | C-08 dashboard bind | `brutex/config/ports.py:62` → `DEFAULT_HOST_BIND = "127.0.0.1"` (per DEC-P0-070 #272 + Q-06) |
-| 2 | DEC-G13-RESOLUTION-001 | #273 | G-13 half-day session list | `brutex/calendars/nse.py:1214-1226` honest envelope (zero qualifying events in window) |
+| 2 | DEC-G13-RESOLUTION-001 | #273 | G-13 half-day session list | `brutex/calendars/nse.py:1539-1555` honest envelope (zero qualifying events in window) |
 | 3 | DEC-G12-RESOLUTION-001 | #274 | G-12 NIFTY rebalance | `brutex/calendars/nse.py:1397-1520` `NIFTY50_REBALANCE_EVENTS` + `is_nifty_rebalance_day` (per DEC-P0-046) |
 | 4 | DEC-G08-RESOLUTION-001 | #275 | G-08 SLA validator | `tests/bench/test_full_sweep_extrapolation.py` exists, v1 scaffold (per DEC-P0-062) |
 | 5 | DEC-G14-RESOLUTION-001 | #276 | G-14 indicator_version threading | `brutex/strategies/combo.py:100` 9-field combo_hash (per DEC-P0-060) |
