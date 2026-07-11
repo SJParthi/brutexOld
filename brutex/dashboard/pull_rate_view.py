@@ -191,8 +191,12 @@ class PullRateView:
         when idle. RETAINED for back-compat alongside the new MEASURED
         :attr:`req_per_hour_measured`.
     req_per_sec_count
-        The MEASURED trailing-1 s issue count (``recent_1s``) — the EVIDENCE behind req/sec
-        (``rps == this count over 1 s``; DEC-RATE-MONITOR-EXPAND-001). Zeroed when idle.
+        The MEASURED trailing-1 s ISSUE count (``recent_1s``) — the admission-side
+        context shown BESIDE req/sec, NOT the completed-rate evidence:
+        :attr:`req_per_sec_achieved` is meter-MEASURED (calls ÷ wall-span) and can
+        legitimately differ from this issued count under failures / in-flight calls
+        (DEC-LABEL-TRUTH-001 label reconcile of the DEC-RATE-MONITOR-EXPAND-001
+        wording; the #1022 ``meter_present`` split is untouched). Zeroed when idle.
     req_per_10min
         The MEASURED trailing-600 s issue count (``recent_600s``) — the NEW req/10min metric,
         a REAL count of issues in the trailing ten minutes (DEC-RATE-MONITOR-EXPAND-001), not
@@ -314,9 +318,11 @@ def build_pull_rate_view(
         The current monotonic clock reading (the route passes ``time.monotonic()``).
     recent_1s, recent_600s, recent_3600s
         The controller's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
-        (DEC-RATE-MONITOR-EXPAND-001) — the evidence behind req/sec, req/10min + the MEASURED
-        req/hour. Default ``0`` (an older controller / idle), so a panel that never carried
-        them projects honestly zeroed.
+        (DEC-RATE-MONITOR-EXPAND-001) — the evidence behind req/10min + the MEASURED
+        req/hour, and the ISSUED (admission) context shown beside req/sec (whose main
+        figure is the meter-measured completed rate, a different population —
+        DEC-LABEL-TRUTH-001). Default ``0`` (an older controller / idle), so a panel
+        that never carried them projects honestly zeroed.
     meter_present
         Whether the panel's ``effective_rps`` is a REAL measured completed-rate from the
         transport :class:`~brutex.adapters.call_meter.CallMeter` (DEC-RATE-WIDGET-FNO-HONEST-001).
@@ -562,7 +568,8 @@ def build_pull_rate_view_merged(
         The panel's age in seconds (``inf`` when never updated). Always real.
     panel_recent_1s, panel_recent_600s, panel_recent_3600s
         The in-memory panel's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
-        (DEC-RATE-MONITOR-EXPAND-001) — req/sec·10min·hour evidence. Default ``0``.
+        (DEC-RATE-MONITOR-EXPAND-001) — the req/10min·hour evidence + the ISSUED
+        (admission) '1s' context beside req/sec (DEC-LABEL-TRUTH-001). Default ``0``.
     panel_meter_present
         Whether the in-memory panel's ``effective_rps`` is a REAL measured completed-rate
         (a tick fed by the REGISTERED pool meter's real snapshot) or honestly absent

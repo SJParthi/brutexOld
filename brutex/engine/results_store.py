@@ -41,6 +41,25 @@ DEC-SPOT-PRICE-2DP-001, DEC-MONEY-2DP-001)
   the spot/option lakes use, so a result price is never vendor float-noise like
   ``14020.7999`` (DEC-SPOT-PRICE-2DP-001). Snapped at construction so the
   in-memory row is already canonical and the Parquet round-trip is exact.
+* **REFERENCE-ONLY India-VIX summary → nullable Float64, appended LAST**
+  (DEC-VIX-STAMP-WIRE-001). ``vix_mean`` / ``vix_min`` / ``vix_max`` carry the
+  combo's per-trade VIX-stamp aggregate
+  (:func:`brutex.engine.reference_wire.aggregate_trade_vix`) at full precision
+  (never rounded). ``None`` is the honest "unknown" (an unstamped run, no VIX
+  bar at any trade instant, or a store written before the columns existed) —
+  NEVER a fabricated ``0.0``. REFERENCE ONLY (CLAUDE.md §2 Rule 3): the trio is
+  deliberately NOT rankable (:data:`_RANKABLE_FIELDS` excludes it) and NEVER
+  part of the BLAKE3 run identity.
+
+Optional-column back-compat (the ``WindowLedger.bars_net_new`` template)
+------------------------------------------------------------------------
+Columns added AFTER a store format ships are **appended LAST** in the Parquet
+column order and read back via :func:`_optional_float`: a store written before
+the column existed loads that field as ``None`` — the honest unknown, never a
+fabricated value. Two such generations exist today: ``deflated_sharpe``
+(DEC-SWEEP-WINNERS-BY-NAME-001 era) and the ``vix_mean``/``vix_min``/``vix_max``
+trio (DEC-VIX-STAMP-WIRE-001), each pinned by a committed pre-column fixture in
+``tests/golden/fixtures/``.
 
 Idempotence + byte-determinism (Golden Rule #4 / #7, mirrors
 ``brutex/data/parquet_writer.py``)
@@ -56,7 +75,16 @@ O(1): a never-seen id is added, an identical re-append is a silent no-op, and a
 **same run-identity with different metrics raises** :class:`ResultsStoreError`
 — that conflict *is* the reproducibility guarantee (one identity can only ever
 map to one result; a clash means upstream non-determinism, never a silent
-overwrite).
+overwrite). The ONE sanctioned exception is DIRECTIONAL (DEC-VIX-STAMP-WIRE-001):
+the nullable REFERENCE-ONLY VIX trio may be backfilled ``None → value`` by a
+stamped redo of the same run (``None`` means *unknown*, not a conflicting fact);
+two DIFFERENT known VIX values for one identity still raise — but as the
+DISTINCT :class:`VixTrioConflictError`, because VIX is deliberately OUTSIDE the
+run identity: a trio clash means the India-VIX *lake* moved between the two
+runs (a re-pull backfilled missing VIX bars, or the derived ``1day`` partition
+was legitimately re-derived latest-wins), NOT upstream non-determinism. The
+grid drivers treat it as a #904 tuple-skip (one tuple redoes, the grid
+completes) instead of a grid-wide abort.
 
 Schema back-compat law (gap-register ruling 5, DEC-SWEEP-RESULTS-DEPTH-001)
 ---------------------------------------------------------------------------
@@ -79,8 +107,9 @@ reader or silently rot:
   the missing field as an honest ``None``, NEVER a fabricated value and
   NEVER a "corrupt" verdict that would trigger a full quarantine-redo of
   the pre-extension history. ``deflated_sharpe`` is the template (a
-  pre-DEC-RANKING-OVERFIT-001 store loads it as ``None``). The frozen
-  pre-extension golden fixture
+  pre-DEC-RANKING-OVERFIT-001 store loads it as ``None``; the REFERENCE-ONLY
+  ``vix_mean``/``vix_min``/``vix_max`` trio follows it, DEC-VIX-STAMP-WIRE-001).
+  The frozen pre-extension golden fixture
   (``tests/golden/fixtures/results_store_pre_extension_v1.parquet`` +
   ``tests/golden/test_results_store_pre_extension_golden.py``) is the guard
   every future extension must keep green.
@@ -92,7 +121,7 @@ import hashlib
 import io
 import math
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Final
@@ -182,8 +211,25 @@ _METRIC_FIELDS: Final[tuple[str, ...]] = (
 _NULLABLE_METRIC_FIELDS: Final[tuple[str, ...]] = ("deflated_sharpe",)
 #: Float64 price columns — Decimal rupees snapped to the 2dp tick grid at write.
 _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
+#: Float64 **nullable** REFERENCE-ONLY India-VIX columns (DEC-VIX-STAMP-WIRE-001):
+#: the combo's ``(mean, min, max)`` over every non-``None`` ``vix_at_entry`` /
+#: ``vix_at_exit`` stamp of its finalist trades, produced by the ONE COMMON
+#: :func:`brutex.engine.reference_wire.aggregate_trade_vix` fold. Full precision,
+#: NEVER rounded; ``None`` = honestly unknown (unstamped run / no VIX bar at any
+#: trade instant / a pre-VIX store), NEVER a fabricated ``0.0``. Appended LAST in
+#: the on-disk column order (the optional-column back-compat template). VIX stays
+#: REFERENCE ONLY (CLAUDE.md §2 Rule 3): these are deliberately excluded from
+#: :data:`_RANKABLE_FIELDS` and are never an input to the BLAKE3 run identity.
+#: PUBLIC because it is the ONE cross-module source of truth for the trio's
+#: column names (CLAUDE.md §2 Rule 11 COMMON): ``sweep_verify``'s recount
+#: VIX-attribution imports it — never a mirrored literal — so adding a fourth
+#: field here can never silently desync the attribution's nulling/schema gates.
+VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
 
 #: Numeric columns a leaderboard may rank by (metrics + money + counts).
+#: The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio are
+#: deliberately NOT rankable — VIX must never drive strategy ranking
+#: (CLAUDE.md §2 Rule 3) and a nullable column has no total order.
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
     _METRIC_FIELDS + _MONEY_PAISA_FIELDS + _COUNT_FIELDS
 )
@@ -197,6 +243,38 @@ class ResultsStoreError(BruteXError):
     different metrics — a reproducibility breach), a missing ``polars``
     dependency, an unknown leaderboard ranking field, or a read-back of a file
     that does not exist.
+    """
+
+
+class VixTrioConflictError(ResultsStoreError):
+    """A redo disagrees with the stored REFERENCE-ONLY VIX trio — and nothing else.
+
+    Raised by :meth:`ResultsStore.append` when the incoming row carries the
+    SAME ``run_id`` and byte-equal non-VIX fields, but one of
+    :data:`VIX_FIELDS` holds two DIFFERENT known (non-``None``) values.
+    Because VIX is deliberately OUTSIDE the BLAKE3 run identity
+    (CLAUDE.md §2 Rule 3), this is **NOT evidence of upstream
+    non-determinism**: it means the India-VIX *lake* moved between the two
+    runs — a re-pull backfilled previously-missing VIX bars, or the derived
+    ``1day`` partition was legitimately re-derived latest-wins
+    (``spot_daily_resample``) — so the redo aggregated a different trio under
+    an unchanged identity (DEC-VIX-STAMP-WIRE-001 round-2 panel, MAJOR).
+
+    Kept a DISTINCT type so the grid drivers (``run_sweep_grid`` /
+    ``run_supervised_grid`` / ``_run_tuple_in_worker``) can ride the #904
+    "Resilient: skip + continue" tuple-skip contract — ONE tuple is skipped +
+    counted + audited ``TUPLE_FAILED`` and the grid completes — and the
+    Stage-3 pass (``run_stage3_pass``) can skip + count the ONE conflicted
+    refined cell (``cells_conflicted`` +
+    ``stage3_wire.cell_vix_conflict`` — the dominant redo path: a resumed
+    launch sentinel-skips its grid tuples but ALWAYS re-appends into the
+    pre-existing stage-3 cell stores) — instead of aborting the WHOLE launch
+    over a reference-only annotation. Still a :class:`ResultsStoreError`
+    subclass, so every existing store-error handler catches it unchanged. At
+    the :meth:`ResultsStore.load` boundary it is deliberately CARVED OUT of
+    the G14 :class:`ResultsStoreSchemaError` wrap (re-raised distinct), so a
+    load-time trio conflict keeps its typed cell-skip contract instead of
+    being misread as file damage.
     """
 
 
@@ -221,7 +299,27 @@ class ResultsStoreSchemaError(ResultsStoreError):
     skip-and-count behaviour unchanged while new callers can distinguish
     file-level damage from API misuse. A store missing a NEWER **optional**
     column is NOT damage — it loads presence-tolerantly with ``None`` (see the
-    module-level back-compat law).
+    module-level back-compat law). The ONE deliberate carve-out: a load-time
+    :class:`VixTrioConflictError` re-raises DISTINCT (never wrapped) so the
+    stage-3 cell-skip contract survives the G14 wrap (DEC-VIX-STAMP-WIRE-001
+    reconciliation with DEC-SWEEP-RESULTS-DEPTH-001).
+    """
+
+
+class ResultsStoreGateConflictError(ResultsStoreError):
+    """A run-identity conflict whose ONLY differing field(s) are nullable gate metric(s).
+
+    The C5 defense-in-depth signature (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001):
+    a conflict whose sole differing field(s) are the nullable gate-derived
+    metric(s) (:data:`_NULLABLE_METRIC_FIELDS` — ``deflated_sharpe``) is the
+    fingerprint of a gate-config (overfit / Stage-3) re-run into the SAME store
+    address, NOT upstream non-determinism: the mask ``run_id`` deliberately omits
+    the gate config (locked — zero-diff on ``sweep_run`` / ``combo``), so an
+    all-nullable-metric-only diff is a CONFIG change. Distinct from a generic
+    corruption conflict so the grid driver skips + counts the ONE tuple instead
+    of aborting the whole grid. With the store address now encoding the
+    gate + selection identity (:func:`~brutex.engine.sweep_orchestrator._tuple_digest`)
+    this is a belt-and-braces guard, never the primary defence.
     """
 
 
@@ -290,13 +388,26 @@ class ResultRow:
         Price-family representatives as :class:`~decimal.Decimal` rupees. Must be
         finite and ``>= 0``; normalised to two decimals via
         :func:`brutex.money.round_money` (``ROUND_HALF_UP``) at construction.
+    vix_mean, vix_min, vix_max
+        The REFERENCE-ONLY India-VIX summary trio (DEC-VIX-STAMP-WIRE-001): the
+        combo's mean / min / max over every non-``None`` per-trade VIX stamp
+        (``vix_at_entry`` + ``vix_at_exit``), from the ONE COMMON
+        :func:`brutex.engine.reference_wire.aggregate_trade_vix` fold. Full
+        precision, NEVER rounded. ``None`` (the default) is the honest unknown
+        — an unstamped run, a trade set with no VIX bar at any instant, or a
+        store written before the columns existed — NEVER a fabricated ``0.0``.
+        Each present value must be finite; any present pair must respect the
+        order law ``vix_min <= vix_mean <= vix_max``. Round-trips as a Parquet
+        null when ``None``. NEVER rankable, NEVER in the run identity
+        (CLAUDE.md §2 Rule 3).
 
     Raises
     ------
     ResultsStoreError
         On a malformed ``run_id``, an empty context label, an out-of-range or
         negative-where-absolute money field, a negative or inconsistent trade
-        count, a non-finite metric, or a non-finite / negative price.
+        count, a non-finite metric, a non-finite / negative price, or a VIX
+        trio violating the ``min <= mean <= max`` order law.
     """
 
     run_id: str
@@ -322,6 +433,9 @@ class ResultRow:
     avg_entry_price: Decimal
     avg_exit_price: Decimal
     deflated_sharpe: float | None = None
+    vix_mean: float | None = None
+    vix_min: float | None = None
+    vix_max: float | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -378,7 +492,7 @@ class ResultRow:
             # sign of zero is normalised (Golden Rule #4 byte-determinism).
             object.__setattr__(self, name, value + 0.0)
 
-        for name in _NULLABLE_METRIC_FIELDS:
+        for name in (*_NULLABLE_METRIC_FIELDS, *VIX_FIELDS):
             value = getattr(self, name)
             if value is None:
                 continue
@@ -388,6 +502,21 @@ class ResultRow:
                     f"determinism + ranking integrity), got {value!r}"
                 )
             object.__setattr__(self, name, value + 0.0)  # -0.0 → +0.0 (byte-determinism)
+
+        # VIX order law: every PRESENT pair respects min <= mean <= max. Pairwise
+        # (not all-three-present-only) so a part-null trio — legal, e.g. a
+        # hand-degraded or legacy-merged row — is still checked where it can be.
+        for lo_name, hi_name in (
+            ("vix_min", "vix_mean"),
+            ("vix_mean", "vix_max"),
+            ("vix_min", "vix_max"),
+        ):
+            lo, hi = getattr(self, lo_name), getattr(self, hi_name)
+            if lo is not None and hi is not None and lo > hi:
+                raise ResultsStoreError(
+                    f"ResultRow: {lo_name} ({lo}) exceeds {hi_name} ({hi}) — the VIX "
+                    f"summary trio must respect vix_min <= vix_mean <= vix_max"
+                )
 
         for name in _PRICE_FIELDS:
             price = getattr(self, name)
@@ -456,6 +585,25 @@ class ResultsStore:
     def append(self, row: ResultRow) -> bool:
         """Insert *row* keyed by its ``run_id``, idempotently (O(1)).
 
+        A re-append under an already-stored ``run_id`` follows the DIRECTIONAL
+        three-branch rule (DEC-VIX-STAMP-WIRE-001) on the nullable
+        REFERENCE-ONLY VIX trio (:data:`VIX_FIELDS`), per field:
+
+        1. **Identical value** (including both-``None``) → OK, a silent no-op.
+        2. **Backfill ``None`` → value** → OK, the stored row is UPGRADED to
+           the union (a stamped redo may fill in what an unstamped run
+           honestly didn't know; the reverse direction ``value → None`` never
+           erases — an unstamped redo is *less* informed, not conflicting).
+        3. **Two different known values** → :class:`VixTrioConflictError` —
+           NOT a run-identity breach (VIX is deliberately outside the
+           identity): the India-VIX lake moved between the two runs, so the
+           typed raise names that cause + remedy and the grid drivers demote
+           it to a #904 tuple-skip instead of a grid abort.
+
+        Every NON-VIX field keeps the strict rule: any difference raises the
+        plain :class:`ResultsStoreError` run-identity conflict (a genuine
+        reproducibility breach — the backfill never masks it).
+
         Parameters
         ----------
         row
@@ -464,16 +612,20 @@ class ResultsStore:
         Returns
         -------
         bool
-            ``True`` if the row was newly added; ``False`` if an identical row
-            for the same ``run_id`` was already present (a silent no-op — the
-            idempotence guarantee).
+            ``True`` if the store content changed — the row was newly added OR
+            an existing row was VIX-backfill-upgraded; ``False`` if the stored
+            row already carried everything *row* knows (the idempotent no-op).
 
         Raises
         ------
         ResultsStoreError
             If a *different* row is already stored under the same ``run_id`` —
             a run-identity collision means upstream non-determinism and is never
-            silently overwritten (Golden Rule #4).
+            silently overwritten (Golden Rule #4). The VIX backfill branch is
+            the ONE sanctioned, directional exception described above.
+        VixTrioConflictError
+            If the ONLY difference is two different known values on a VIX
+            field — the VIX lake moved between runs (see the class docstring).
         """
         existing = self._rows.get(row.run_id)
         if existing is not None:
@@ -484,17 +636,55 @@ class ResultsStore:
                 for f in fields(ResultRow)
                 if getattr(existing, f.name) != getattr(row, f.name)
             )
-            _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
-            raise ResultsStoreError(
-                f"run-identity conflict for {row.run_id}: a different result is already "
-                f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
-                f"map to one result (Golden Rule #4) — refusing to overwrite."
+            if any(name not in VIX_FIELDS for name in differing):
+                _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
+                if set(differing) <= set(_NULLABLE_METRIC_FIELDS):
+                    # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): the ONLY diff is
+                    # a nullable gate-derived metric — the fingerprint of a
+                    # gate-config (overfit / Stage-3) re-run into the same store
+                    # address, not upstream non-determinism. Raise the typed subclass
+                    # so the driver skips + counts this ONE tuple, never a global
+                    # grid abort. Covers None-vs-float (gate on/off) AND float-vs-float
+                    # (two overfit configs).
+                    raise ResultsStoreGateConflictError(
+                        f"run-identity conflict for {row.run_id}: the ONLY differing field(s) "
+                        f"({', '.join(differing)}) are gate-derived DSR metric(s) — a gate-config "
+                        f"change (overfit / Stage-3) re-ran into the same store address. The store "
+                        f"address now encodes the gate+selection identity "
+                        f"(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001); re-run with a fresh results "
+                        f"root or the matching config. Refusing to overwrite (Golden Rule #4)."
+                    )
+                raise ResultsStoreError(
+                    f"run-identity conflict for {row.run_id}: a different result is already "
+                    f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
+                    f"map to one result (Golden Rule #4) — refusing to overwrite."
+                )
+            merged = _merge_vix_backfill(existing, row)
+            if merged == existing:
+                # Directional no-op: the incoming row is strictly LESS informed
+                # (it only turns known VIX values into None) — the stored row
+                # already carries the union, nothing changes.
+                return False
+            _LOG.info(
+                "results_store.vix_backfill",
+                run_id=row.run_id,
+                backfilled_fields=tuple(
+                    name
+                    for name in VIX_FIELDS
+                    if getattr(existing, name) is None and getattr(merged, name) is not None
+                ),
             )
+            self._rows[row.run_id] = merged
+            return True
         self._rows[row.run_id] = row
         return True
 
     def extend(self, rows: Iterable[ResultRow]) -> int:
-        """Append every row in *rows*; return how many were newly added."""
+        """Append every row in *rows*; return how many changed the store.
+
+        The count follows :meth:`append`'s return contract: newly added rows
+        plus VIX-backfill-upgraded rows (idempotent no-ops are not counted).
+        """
         return sum(1 for row in rows if self.append(row))
 
     def get(self, run_id: str) -> ResultRow | None:
@@ -594,6 +784,10 @@ class ResultsStore:
             sweep-verify doctor — handles damage uniformly and a raw
             ``polars`` / ``KeyError`` error can never escape
             (DEC-SWEEP-VERIFY-001; G14, gap-register ruling 5).
+        VixTrioConflictError
+            Carved OUT of the G14 wrap (re-raised distinct): an in-file
+            duplicate run_id differing only in non-``None`` VIX values keeps
+            its typed cell-skip contract (DEC-VIX-STAMP-WIRE-001).
         """
         if not path.exists():
             raise ResultsStoreError(f"results store not found at {path}")
@@ -610,6 +804,14 @@ class ResultsStore:
         try:
             for record in df.iter_rows(named=True):
                 store.append(_row_from_record(record))
+        except VixTrioConflictError:
+            # Deliberate carve-out from the G14 wrap (DEC-VIX-STAMP-WIRE-001
+            # ∩ DEC-SWEEP-RESULTS-DEPTH-001 reconciliation): an in-file
+            # duplicate run_id differing ONLY in non-None VIX values re-raises
+            # DISTINCT so the stage-3 pass cell-skips it (the typed tuple-/
+            # cell-skip contract) instead of misreading a reference-only
+            # annotation clash as verdict-grade file damage.
+            raise
         except (ResultsStoreError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
             # ANY schema/decode failure — a missing required column (KeyError),
             # a null in a required cell (TypeError), a wrong-dtype value
@@ -651,11 +853,16 @@ class ResultsStore:
         for name in _PRICE_FIELDS:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
+        for name in VIX_FIELDS:
+            # The nullable REFERENCE-ONLY VIX trio — appended LAST (the
+            # optional-column back-compat template); None → Parquet null.
+            columns[name] = [getattr(row, name) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
         # fixed insertion order above (identity → mask limbs → money → counts →
-        # metrics → deflated → prices) for a reproducible byte stream.
+        # metrics → deflated → prices → the VIX trio LAST for legacy-file
+        # back-compat) for a reproducible byte stream.
         df = pl.DataFrame(
             columns,
             schema={
@@ -664,7 +871,8 @@ class ResultsStore:
                     (*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64
                 ),
                 **dict.fromkeys(
-                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS), pl.Float64
+                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *VIX_FIELDS),
+                    pl.Float64,
                 ),
             },
         )
@@ -708,6 +916,74 @@ def _validate_run_id(run_id: str) -> None:
         raise ResultsStoreError(f"run_id {run_id!r} is not valid hex") from exc
 
 
+def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
+    """Union-merge two same-``run_id`` rows differing ONLY in the nullable VIX trio.
+
+    The resolution is a per-field UNION under the directional law of
+    :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001): for each of
+    :data:`VIX_FIELDS` the known (non-``None``) value wins — ``None`` means
+    *honestly unknown*, never a conflicting fact — so a stamped redo backfills
+    an unstamped row and an unstamped redo never erases a stamp. The caller
+    (:meth:`ResultsStore.append`) has ALREADY established that every non-VIX
+    field is equal — a non-VIX difference is the plain run-identity conflict
+    and never reaches this merge.
+
+    Raises
+    ------
+    VixTrioConflictError
+        When one VIX field carries two DIFFERENT known values — the India-VIX
+        lake moved between the two runs (see the class docstring); the raise
+        names the cause + the remedy so the operator is never misdirected at
+        "upstream non-determinism". (A mutually-inconsistent backfill — e.g.
+        a merged trio violating ``min <= mean <= max`` — still raises the
+        plain order-law :class:`ResultsStoreError` from the merged row's own
+        construction.)
+    """
+    conflicting = tuple(
+        name
+        for name in VIX_FIELDS
+        if getattr(existing, name) is not None
+        and getattr(incoming, name) is not None
+        and getattr(existing, name) != getattr(incoming, name)
+    )
+    if conflicting:
+        _LOG.error(
+            "results_store.vix_conflict",
+            run_id=existing.run_id,
+            conflicting_fields=conflicting,
+            stored={name: getattr(existing, name) for name in VIX_FIELDS},
+            incoming={name: getattr(incoming, name) for name in VIX_FIELDS},
+        )
+        raise VixTrioConflictError(
+            f"REFERENCE-ONLY VIX trio conflict for {existing.run_id}: the stored row and "
+            f"the redo carry different known values for {', '.join(conflicting)} while "
+            f"every non-VIX column is identical. VIX is deliberately OUTSIDE the BLAKE3 "
+            f"run identity (CLAUDE.md §2 Rule 3), so this is NOT upstream non-determinism "
+            f"— the India-VIX lake moved between the two runs (a re-pull backfilled "
+            f"missing VIX bars, or the derived 1day partition was re-derived "
+            f"latest-wins). Grid drivers skip this ONE tuple and the Stage-3 pass skips "
+            f"this ONE refined cell (the #904 skip-and-continue contract) — the rest of "
+            f"the launch completes; remedy: quarantine/delete this tuple's results "
+            f"store so a redo re-persists it against the current VIX series, or re-run "
+            f"after the VIX lake settles."
+        )
+    resolved: dict[str, float | None] = {
+        name: (
+            getattr(existing, name)
+            if getattr(existing, name) is not None
+            else getattr(incoming, name)
+        )
+        for name in VIX_FIELDS
+    }
+    # Explicit keywords (not a **splat) so mypy checks each against its field type.
+    return replace(
+        existing,
+        vix_mean=resolved["vix_mean"],
+        vix_min=resolved["vix_min"],
+        vix_max=resolved["vix_max"],
+    )
+
+
 def _field_getter(name: str) -> Callable[[ResultRow], float]:
     """Return a typed accessor for a rankable numeric column.
 
@@ -745,6 +1021,22 @@ def _decode_mask(lo_signed: int, hi_signed: int) -> int:
     return (hi << 64) | lo
 
 
+def _optional_float(record: dict[str, object], name: str) -> float | None:
+    """Read a nullable Float64 column with optional-column back-compat.
+
+    The ONE ``record.get`` read law for every column added after a store
+    format shipped (the WindowLedgerRecord ``bars_net_new`` template; the
+    gap-register ruling-5 presence-tolerant law of
+    DEC-SWEEP-RESULTS-DEPTH-001, factored ONCE instead of per column): a
+    column ABSENT from the file — a store written before the column existed —
+    reads ``None`` exactly like a stored Parquet null. The honest unknown,
+    never a fabricated value (Golden Rule #1). Pinned by the committed
+    pre-column fixtures in ``tests/golden/fixtures/``.
+    """
+    value = record.get(name)
+    return None if value is None else float(value)  # type: ignore[arg-type]
+
+
 def _row_from_record(record: dict[str, object]) -> ResultRow:
     """Rebuild a :class:`ResultRow` from one polars ``iter_rows(named=True)`` record.
 
@@ -756,19 +1048,21 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
     (``mask_bits_lo`` / ``mask_bits_hi``).
 
     Optional columns are read PRESENCE-TOLERANTLY via ``record.get`` (the
-    WindowLedgerRecord precedent — gap-register ruling 5): a store written
-    BEFORE the column existed loads the field as an honest ``None``, exactly
-    like a stored Parquet null — never a fabricated value, never a "corrupt"
-    verdict. ``deflated_sharpe`` is the template (a pre-DEC-RANKING-OVERFIT-001
-    store carries no such column). Every FUTURE :class:`ResultRow` extension
-    MUST follow it: optional field defaulting ``None`` + ``record.get`` here +
-    keep the pre-extension golden
+    WindowLedgerRecord precedent — gap-register ruling 5), through the ONE
+    :func:`_optional_float` helper so the law is written once, not per
+    column: a store written BEFORE the column existed loads the field as an
+    honest ``None``, exactly like a stored Parquet null — never a fabricated
+    value, never a "corrupt" verdict. ``deflated_sharpe`` is the template (a
+    pre-DEC-RANKING-OVERFIT-001 store carries no such column); the
+    REFERENCE-ONLY ``vix_mean`` / ``vix_min`` / ``vix_max`` trio follows it
+    (DEC-VIX-STAMP-WIRE-001). Every FUTURE :class:`ResultRow` extension MUST
+    follow it: optional field defaulting ``None`` + :func:`_optional_float`
+    here + keep the pre-extension golden
     (``tests/golden/test_results_store_pre_extension_golden.py``) green.
     Required columns stay direct-indexed on purpose — their absence IS an
     old-schema file, wrapped by :meth:`ResultsStore.load` into
     :class:`ResultsStoreSchemaError`.
     """
-    deflated = record.get("deflated_sharpe")
     return ResultRow(
         run_id=str(record["run_id"]),
         instrument=str(record["instrument"]),
@@ -779,7 +1073,10 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
             int(record["mask_bits_lo"]),  # type: ignore[call-overload]
             int(record["mask_bits_hi"]),  # type: ignore[call-overload]
         ),
-        deflated_sharpe=None if deflated is None else float(deflated),  # type: ignore[arg-type]
+        deflated_sharpe=_optional_float(record, "deflated_sharpe"),
+        vix_mean=_optional_float(record, "vix_mean"),
+        vix_min=_optional_float(record, "vix_min"),
+        vix_max=_optional_float(record, "vix_max"),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -815,9 +1112,12 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 __all__ = [
     "CONDITION_NAME_SEP",
     "MASK_BITS_MAX",
+    "VIX_FIELDS",
     "FlushResult",
     "ResultRow",
     "ResultsStore",
     "ResultsStoreError",
+    "ResultsStoreGateConflictError",
     "ResultsStoreSchemaError",
+    "VixTrioConflictError",
 ]

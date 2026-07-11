@@ -220,7 +220,8 @@ def test_out_of_engine_scope_symbol_raises_the_scope_refusal() -> None:
         resolve_sweep_request(symbols="RELIANCE", today=_TODAY)
     message = str(excinfo.value)
     assert "RELIANCE" in message
-    assert f"{DEFAULT_EXCHANGE}/{DEFAULT_SEGMENT}" in message
+    # The launch pair is operator-typed → repr-quoted (round-8 finding 2).
+    assert f"{DEFAULT_EXCHANGE!r}/{DEFAULT_SEGMENT!r}" in message
     assert "NIFTY/BANKNIFTY/SENSEX" in message  # the law + remedy tail
 
 
@@ -317,7 +318,8 @@ def test_out_of_scope_refusal_carries_the_corp_action_rationale() -> None:
     assert "DEC-CORP-ACTION-GATE-001" in message
     assert "DEC-ENGINE-SCOPE-GUARD-001" in message
     assert "ADR-0016" in message
-    assert "- RELIANCE:" in message
+    # repr-quoted (round-4 finding 3)
+    assert "- 'RELIANCE':" in message
     assert "- NIFTY:" not in message
 
 

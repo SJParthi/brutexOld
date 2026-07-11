@@ -22,6 +22,7 @@ import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
+from brutex.engine.reference_series import TradeReferenceStamper
 
 # Whitebox friend access (DEC-P0-017 per-site convention): the guard seam is
 # module-private; each COLUMN of its envelope check is pinned directly here
@@ -1513,3 +1514,59 @@ class TestSimulateMasksWithExitIndices:
         events = [e for e in logs if e["event"] == "rust_trade_sim.exit_indices_uncertified"]
         assert len(events) == 1
         assert events[0]["reason"] == "exit_indices_not_monotonic"
+
+
+# ── reference-stamper seam (per-module 100% gate; DEC-VIX-STAMP-WIRE-001) ────
+
+
+def _vix_stamper_for(bars: list[CandleBar]) -> TradeReferenceStamper:
+    """A stamper whose VIX series covers every bar timestamp of *bars*."""
+    vix_bars = [
+        CandleBar(
+            timestamp=bar.timestamp,
+            open=Decimal("14.00"),
+            high=Decimal("15.00"),
+            low=Decimal("13.00"),
+            close=Decimal("14.00") + Decimal(i % 7) / Decimal(100),
+            volume=0,
+            open_interest=None,
+        )
+        for i, bar in enumerate(bars)
+    ]
+    return TradeReferenceStamper.from_vix_bars(vix_bars)
+
+
+class TestReferenceStamperSeam:
+    """The stamper seam's own lines, covered by THIS module's discovered suite.
+
+    The full wiring behaviour (oracle ≡ batch stamp parity, spawn-pool
+    threading, byte-identity) lives in
+    ``tests/unit/test_engine_vix_stamper_wiring.py``; these mirrors keep the
+    per-file 100% gate honest on the module's OWN covering suite
+    (``scripts/ci/coverage_gate_discovery.py`` maps ``rust_trade_sim.py`` to
+    ``test_engine_rust_trade_sim.py`` only).
+    """
+
+    def test_reference_stamper_property_default_is_none(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert sim.reference_stamper is None
+
+    def test_reference_stamper_property_returns_bound_stamper(self) -> None:
+        bars = _feed()
+        stamper = _vix_stamper_for(bars)
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, reference_stamper=stamper)
+        assert sim.reference_stamper is stamper
+
+    def test_stamped_trades_resolve_vix_at_the_conversion_seam(self) -> None:
+        bars = _feed()
+        stamper = _vix_stamper_for(bars)
+        bar_bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1, reference_stamper=stamper)
+        (trades,) = sim.simulate_masks([0], direction=Side.BUY)
+        assert trades
+        for trade in trades:
+            assert trade.vix_at_entry == stamper.vix.level_at(trade.entry_ts)
+            assert trade.vix_at_exit == stamper.vix.level_at(trade.exit_ts)
+            assert trade.vix_at_entry is not None
+            assert trade.vix_at_exit is not None

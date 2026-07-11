@@ -695,7 +695,15 @@ def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
     uncaught terminal ``RegistryError`` that kills the whole composite job."""
     sdk = _nifty_sdk()
     sink = _RecordingSink()
+    # De-flake: open the store BEFORE arming the 0.2 s wedge deadline —
+    # RegistryStore.open runs its own connect+DDL under the env-resolved
+    # deadline, and a COLD DuckDB open on a loaded CI runner can legitimately
+    # exceed 0.2 s (a spurious terminal RegistryError, not the wedge under
+    # test). The wedge teeth are untouched: StoreWriteDeadlineGuard.run
+    # re-resolves the env PER WRITE BATCH, so the phase-(a) upsert still
+    # runs under the 0.2 s bound.
     registry = _registry(tmp_path)
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
     coverage = _CoverageSink()
     # Shrink the deadline only ONCE the store is open + the wedge is installed —
     # never during the open itself, whose healthy connect/DDL would otherwise
@@ -738,7 +746,10 @@ def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
         proxy.gate.set()
     # RE-ATTEMPT ON THE NEXT PULL: the volume heals (the zombie's idempotent write
     # completes, the wedge latch self-clears) and the SAME selection runs WHOLE —
-    # metadata re-pulled, candles pulled.
+    # metadata re-pulled, candles pulled. Restore the generous default deadline
+    # first — the 0.2 s wedge deadline was for pull 1 ONLY; a loaded CI runner
+    # must never spuriously defer the healed re-pull.
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
     deadline_at = time.monotonic() + 10.0
     while registry._write_guard.wedged:
         if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang

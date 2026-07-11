@@ -403,26 +403,42 @@ class TestScreenerCellText:
 
 @pytest.mark.skipif(_NODE is None, reason="node not installed")
 class TestWinnersCountLine:
-    """bxWinnersCountLine — the [W2-5] honest numerator/denominator law."""
-
-    _NOTE = "S.nullVixNote"
+    """bxWinnersCountLine — the [W2-5] honest numerator/denominator law,
+    composed over the REAL BXScreener A-r4 cap-law primitives (capNote /
+    inputCapNote / nullVixNote — the #1406 port at the merge-reconcile;
+    ``S`` below IS the shipped bx-screener.js, never a stub)."""
 
     def test_uncapped_table(self) -> None:
-        out = _node_call(f"SP.bxWinnersCountLine(100, 100, 100, 200, 0, {self._NOTE})")
+        out = _node_call("SP.bxWinnersCountLine(100, 100, 100, false, 0, 100, 0, S)")
         assert out == "100 of 100 shown"
 
     def test_capped_table_names_the_cap(self) -> None:
-        out = _node_call(f"SP.bxWinnersCountLine(200, 500, 500, 200, 0, {self._NOTE})")
+        out = _node_call("SP.bxWinnersCountLine(200, 500, 500, false, 0, 500, 0, S)")
         assert out == "200 of 500 shown (render cap 200 — use Show all)"
 
+    def test_show_all_is_itself_bounded_and_named(self) -> None:
+        """A-r4: even Show-all caps at SHOW_ALL_CAP=1000 with the honest
+        'showing first N of M' note — never an unbounded render."""
+        out = _node_call("SP.bxWinnersCountLine(1000, 5000, 2000, true, 0, 5000, 0, S)")
+        assert out == "1000 of 5000 shown (showing first 1000 of 2000 (render cap 1000))"
+
+    def test_input_cap_truncation_is_named(self) -> None:
+        """A-r4: an out-of-contract payload cut at INPUT_CAP=5000 is NAMED
+        on the count line, never silently shrunk."""
+        out = _node_call("SP.bxWinnersCountLine(200, 6000, 5000, false, 1000, 6000, 0, S)")
+        assert out == (
+            "200 of 6000 shown (render cap 200 — use Show all)"
+            " (input capped: first 5000 of 6000 payload rows loaded)"
+        )
+
     def test_null_row_count_reads_question_mark(self) -> None:
-        out = _node_call(f"SP.bxWinnersCountLine(3, null, 3, 200, 0, {self._NOTE})")
+        out = _node_call("SP.bxWinnersCountLine(3, null, 3, false, 0, 3, 0, S)")
         assert out == "3 of ? shown"
 
     def test_null_vix_suffix_rides_the_shared_note(self) -> None:
-        out = _node_call(f"SP.bxWinnersCountLine(5, 10, 5, 200, 2, {self._NOTE})")
+        out = _node_call("SP.bxWinnersCountLine(5, 10, 5, false, 0, 5, 2, S)")
         assert out.startswith("5 of 10 shown ")
-        golden = _node_call(f"{self._NOTE}(2)")
+        golden = _node_call("S.nullVixNote(2)")
         assert out == "5 of 10 shown " + golden
 
 
@@ -605,7 +621,11 @@ class TestPanelModuleWiring:
     def test_screener_panel_exposes_the_mount_api(self) -> None:
         js = _js(_SCREENER_PANEL_JS)
         assert "window.BXScreenerPanel = {" in js
-        assert "RENDER_CAP: RENDER_CAP," in js
+        # A-r4 merge-reconcile (#1406 port): the cap constants live ONLY in
+        # BXScreener — the panel's former duplicate RENDER_CAP export is
+        # gone and must never return (ONE cap-law source of truth).
+        assert "RENDER_CAP: RENDER_CAP," not in js
+        assert "window.BXScreener.renderCount(sorted.length, state.showAll)" in js
         assert "mount: bxScreenerPanelMount," in js
         assert "mountFromLocation: bxScreenerPanelMountFromLocation" in js
         assert 'data-bx-autopanel="screener"' in js  # the self-mount gate
@@ -678,7 +698,9 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "sort basis: artifact preset (default min_dd_first — smallest max-drawdown first)"
             " — differs from /results (Rank-by metric, descending); column clicks re-sort"
             " this page only",
-            "show all rows (render capped — an oversized/corrupt artifact never freezes the tab)",
+            # A-r4 (#1406, merge-reconcile): "Show all" is itself BOUNDED at
+            # BXScreener.SHOW_ALL_CAP — the copy says so on BOTH surfaces.
+            "show all rows (itself render-capped at 1000 — an oversized/corrupt artifact never freezes the tab)",
         ),
         "killed": (),
     },

@@ -625,3 +625,84 @@ class TestRowProvenance:
         out = results_show_report(tmp_path, top=10)
         assert "src=" not in out
         assert "no per-row gate verdict" in out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Cross-store VIX-only divergence (DEC-VIX-STAMP-WIRE-001 read-surface fix)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _vix_row(seed: int, *, mean: float, lo: float, hi: float) -> ResultRow:
+    from dataclasses import replace
+
+    return replace(_row(seed), vix_mean=mean, vix_min=lo, vix_max=hi)
+
+
+class TestVixCrossStoreDivergence:
+    """A cross-file VIX-only trio clash must never refuse the whole read-back.
+
+    Fails-before: two stores under one root holding the SAME ``run_id`` with
+    two different KNOWN REFERENCE-ONLY trios (the sanctioned India-VIX lake
+    movement between two overlapping-grid launches — ``tuple_store_path``
+    digests fold ``condition_bits``, so overlapping grids write DISTINCT
+    files carrying the SAME run_ids) made ``merged.extend(rows)`` raise
+    :class:`VixTrioConflictError` out of ``_merge_files_with_sources`` and
+    ``brutex results`` refused the ENTIRE leaderboard over a reference-only
+    annotation. Now: keep-FIRST + one
+    ``results_report.vix_cross_store_divergence`` WARNING per dropped row.
+    """
+
+    def _write_conflicting_tree(self, root: Path) -> None:
+        s1 = ResultsStore(path=root / "NIFTY" / "5m" / "bull_k2_aaaa.parquet")
+        s1.append(_vix_row(1, mean=12.5, lo=12.0, hi=13.0))
+        s1.flush()
+        s2 = ResultsStore(path=root / "NIFTY" / "5m" / "bull_k2_ffff.parquet")
+        s2.append(_vix_row(1, mean=13.5, lo=13.0, hi=14.0))
+        s2.flush()
+
+    def test_keeps_first_row_and_warns_once(self, tmp_path: Path) -> None:
+        self._write_conflicting_tree(tmp_path)
+        with _capture_logs() as logs:
+            store = load_results_tree(tmp_path)
+        kept = store.get(_rid(1))
+        assert kept is not None
+        assert (kept.vix_mean, kept.vix_min, kept.vix_max) == (12.5, 12.0, 13.0)
+        events = [e for e in logs if e["event"] == "results_report.vix_cross_store_divergence"]
+        assert len(events) == 1
+        assert events[0]["run_id"] == _rid(1)
+        assert events[0]["kept_from"] == "NIFTY/5m/bull_k2_aaaa.parquet"
+        assert events[0]["dropped_from"] == "NIFTY/5m/bull_k2_ffff.parquet"
+        assert events[0]["policy"] == "first-wins"
+
+    def test_results_show_report_renders_instead_of_refusing(self, tmp_path: Path) -> None:
+        self._write_conflicting_tree(tmp_path)
+        out = results_show_report(tmp_path, top=10)  # fails-before: raised
+        assert "finalists=1" in out
+        assert "NIFTY 5m bull" in out
+
+    def test_directional_backfill_still_applies_silently(self, tmp_path: Path) -> None:
+        # An all-None trio beside a KNOWN one is the sanctioned None→value
+        # backfill, not a divergence — no warning, the union row wins.
+        s1 = ResultsStore(path=tmp_path / "NIFTY" / "5m" / "bull_k2_aaaa.parquet")
+        s1.append(_row(1))  # trio defaults to all-None
+        s1.flush()
+        s2 = ResultsStore(path=tmp_path / "NIFTY" / "5m" / "bull_k2_ffff.parquet")
+        s2.append(_vix_row(1, mean=13.5, lo=13.0, hi=14.0))
+        s2.flush()
+        with _capture_logs() as logs:
+            store = load_results_tree(tmp_path)
+        kept = store.get(_rid(1))
+        assert kept is not None
+        assert (kept.vix_mean, kept.vix_min, kept.vix_max) == (13.5, 13.0, 14.0)
+        assert not [e for e in logs if e["event"] == "results_report.vix_cross_store_divergence"]
+
+    def test_non_vix_conflict_still_raises(self, tmp_path: Path) -> None:
+        # Golden Rule #4: a genuine run-identity breach is NEVER absorbed.
+        s1 = ResultsStore(path=tmp_path / "NIFTY" / "5m" / "bull_k2_aaaa.parquet")
+        s1.append(_row(1, net_pnl_paisa=9_000))
+        s1.flush()
+        s2 = ResultsStore(path=tmp_path / "NIFTY" / "5m" / "bull_k2_ffff.parquet")
+        s2.append(_row(1, net_pnl_paisa=1))
+        s2.flush()
+        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
+            load_results_tree(tmp_path)

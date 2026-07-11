@@ -134,6 +134,64 @@ def test_decide_clean_outranks_quota() -> None:
     )
 
 
+def test_decide_stop_market_hours() -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001: market_closed with residual ⇒ stop_market_hours."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=12,
+            auth_aborted=False,
+            rounds_used=2,
+            max_rounds=50,
+            market_closed=True,
+        )
+        == "stop_market_hours"
+    )
+
+
+def test_decide_clean_outranks_market_hours() -> None:
+    """A clean ledger wins — if we're done, we're done (never a spurious deferral)."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=0,
+            auth_aborted=False,
+            rounds_used=2,
+            max_rounds=50,
+            market_closed=True,
+        )
+        == "stop_clean"
+    )
+
+
+def test_decide_market_hours_outranks_quota() -> None:
+    """Market hours is a HARD external gate on issuing any vendor call ⇒ ranked above quota."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=10,
+            auth_aborted=False,
+            rounds_used=2,
+            max_rounds=50,
+            quota_exhausted=True,
+            market_closed=True,
+        )
+        == "stop_market_hours"
+    )
+
+
+def test_decide_market_hours_false_is_pre_guard_behaviour() -> None:
+    """market_closed=False (the default) leaves the pre-guard verdict byte-unchanged."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=10,
+            auth_aborted=False,
+            rounds_used=2,
+            max_rounds=50,
+            made_progress=False,
+            market_closed=False,
+        )
+        == "stop_no_progress"
+    )
+
+
 def test_decide_stop_no_progress() -> None:
     """Residual unchanged (no progress) with budget + quota left ⇒ stop_no_progress."""
     assert (
@@ -266,6 +324,41 @@ def test_run_stop_quota_pauses_auto_resume() -> None:
     assert out.final_still_failed == 20
     assert out.pull_verdict().kind == "quota_exhausted"
     assert out.pull_verdict().needs_operator is True
+
+
+def test_run_stop_market_hours_pauses_between_rounds() -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001: the between-rounds belt stops the loop when the
+    market opens, before firing the next vendor pass."""
+    runner, calls = _scripted_runner(
+        [UntilCleanRound(50, False), UntilCleanRound(20, False), UntilCleanRound(0, False)]
+    )
+    sleep, _seen = _no_sleep()
+    # Market opens on the 2nd check (after round 2), before the clean round 3.
+    checks = iter([False, True])
+
+    out = run_until_clean(
+        runner,
+        max_rounds=50,
+        sleep=sleep,
+        market_closed=lambda: next(checks),
+        stop_when_stuck=True,
+    )
+
+    assert calls == [0, 1]  # stopped after round 2 — the doomed round 3 never fired
+    assert out.verdict == "stop_market_hours"
+    assert out.stopped_market_hours is True
+    assert out.final_still_failed == 20
+    # A market-hours pause with a live token + quota maps to transient_residual.
+    assert out.pull_verdict().kind == "transient_residual"
+
+
+def test_run_market_hours_none_hook_is_pre_guard_behaviour() -> None:
+    """market_closed=None (default) never stops the loop — byte-identical to before."""
+    runner, _calls = _scripted_runner([UntilCleanRound(5, False), UntilCleanRound(0, False)])
+    sleep, _seen = _no_sleep()
+    out = run_until_clean(runner, max_rounds=5, sleep=sleep, market_closed=None)
+    assert out.verdict == "stop_clean"
+    assert out.stopped_market_hours is False
 
 
 def test_run_stop_no_progress_when_stuck() -> None:
@@ -410,6 +503,8 @@ def test_outcome_to_dict_shape() -> None:
         "stopped_on_budget": True,
         "stopped_on_quota": False,
         "stopped_no_progress": False,
+        # DEC-GROWW-MARKET-HOURS-GUARD-001: additive verdict key.
+        "stopped_market_hours": False,
         "final_still_failed": 3,
     }
 

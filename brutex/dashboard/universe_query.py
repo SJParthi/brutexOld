@@ -133,6 +133,7 @@ def universe_summary(
     snapshot: Iterable[Instrument],
     *,
     fno_eligible: frozenset[tuple[Exchange, str]] | None = None,
+    reference_only_ids: frozenset[int] = frozenset(),
 ) -> dict[str, int]:
     """Return headline counts for the explorer's KPI band.
 
@@ -142,9 +143,41 @@ def universe_summary(
     Returns
     -------
     dict[str, int]
-        ``{"index_count": int, "stock_count": int, "total": int}``
+        ``{"index_count": int, "stock_count": int, "total": int,
+        "reference_stock_count": int, "stock_count_total": int}``
         where ``total == index_count + stock_count`` (unclassified
         rows — derivative legs, non-F&O equities — are excluded).
+
+        The two ADDITIVE keys (DEC-LABEL-TRUTH-001) make the Stocks badge
+        able to label the SAME population the explorer's Stocks tab lists
+        (:func:`list_underlyings` classifies WITH *reference_only_ids*):
+
+        * ``stock_count_total`` — every instrument classifying ``"stock"``
+          under the SAME classification the tab list uses (the ticker arm
+          plus the reference-id arm), i.e. the number of rows the Stocks
+          tab actually shows.
+        * ``reference_stock_count`` — the subset of those stocks whose
+          ``security_id`` is in *reference_only_ids* (the admitted
+          REFERENCE_ONLY NTM constituents), so the badge can honestly
+          split "N stocks · M F&O" with ``M = stock_count_total −
+          reference_stock_count`` — never a lost number.
+
+        HONESTY NOTE (Golden Rule #10): the split is by REFERENCE-ID
+        MEMBERSHIP, not by "classifies without the reference ids" — on the
+        LEAN store the SQL-derived eligible set already contains every
+        persisted NSE EQ ``symbol_name`` INCLUDING the reference rows
+        (:meth:`~brutex.data.instrument_store.InstrumentStore.fno_eligible_underlyings`
+        arm (b), default ``tradable_only=False``), so a reference row
+        classifies ``"stock"`` by TICKER there and a classify-twice diff
+        would read a dishonest 0. Membership in *reference_only_ids* is
+        the store's own explicit REFERENCE_ONLY flag — the one honest
+        discriminator on both store shapes.
+
+        ``stock_count`` / ``total`` keep their EXACT legacy semantics
+        (classification WITHOUT the reference ids) — byte-identical for
+        every existing caller; the new keys read
+        ``reference_stock_count == 0`` and ``stock_count_total ==
+        stock_count`` when *reference_only_ids* is empty (stable key set).
 
     Parameters
     ----------
@@ -161,22 +194,43 @@ def universe_summary(
         cheaply-queried eligible set, avoiding materialising every leg
         (DEC-INSTRUMENT-UNIVERSE-FAST-001) — the classification rule is
         unchanged either way.
+    reference_only_ids
+        Set of admitted REFERENCE_ONLY constituent ``security_id``\\s (the
+        same set :func:`list_underlyings` takes). Defaults empty —
+        byte-identical legacy counts plus the two additive keys at their
+        degenerate values. When supplied, ``stock_count_total`` counts the
+        tab-list population and ``reference_stock_count`` its
+        reference-only subset (see Returns).
     """
     instruments = _iter_instruments(snapshot)
     if fno_eligible is None:
         fno_eligible = build_fno_eligible_underlyings(instruments)
     index_count = 0
     stock_count = 0
+    reference_stock_count = 0
+    stock_count_total = 0
     for instrument in instruments:
         kind = classify_instrument(instrument, fno_eligible)
         if kind == KIND_INDEX:
             index_count += 1
         elif kind == KIND_STOCK:
             stock_count += 1
+        # The FULL classification — the SAME rule list_underlyings applies, so
+        # stock_count_total is exactly the Stocks-tab population (CLAUDE.md §11
+        # COMMON: classify_instrument stays the ONE rule; this is a second CALL,
+        # never a second rule). The reference split is by id membership — see
+        # the Returns honesty note.
+        kind_full = classify_instrument(instrument, fno_eligible, reference_only_ids)
+        if kind_full == KIND_STOCK:
+            stock_count_total += 1
+            if instrument.security_id in reference_only_ids:
+                reference_stock_count += 1
     return {
         "index_count": index_count,
         "stock_count": stock_count,
         "total": index_count + stock_count,
+        "reference_stock_count": reference_stock_count,
+        "stock_count_total": stock_count_total,
     }
 
 

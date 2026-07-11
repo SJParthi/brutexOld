@@ -37,10 +37,13 @@ import pytest
 
 pytest.importorskip("duckdb", reason="the universe cache reads a real DuckDB store")
 
+import duckdb
 from brutex.dashboard import universe_cache as uc
 from brutex.dashboard.universe_cache import UniverseSnapshotCache, _Snapshot
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 
 def _nifty(security_id: int = 13) -> Instrument:
@@ -117,7 +120,13 @@ def test_empty_store_is_cached_at_stable_token(store: InstrumentStore) -> None:
     """An empty universe keys at ``(0, "")`` and is cached + served."""
     cache = UniverseSnapshotCache()
     assert cache._revision(store) == (0, "")
-    assert cache.summary(store) == {"index_count": 0, "stock_count": 0, "total": 0}
+    assert cache.summary(store) == {
+        "index_count": 0,
+        "stock_count": 0,
+        "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
     assert cache.instruments(store, kind=None) == []
     assert cache.instruments(store, kind="index") == []
     assert cache.instruments(store, kind="stock") == []
@@ -132,8 +141,46 @@ def test_summary_hit_returns_memoised_object(store: InstrumentStore) -> None:
     _seed(store, [_nifty()], run_id="r1", day=date(2024, 1, 2))
     cache = UniverseSnapshotCache()
     first = cache.summary(store)
-    assert first == {"index_count": 1, "stock_count": 0, "total": 1}
+    assert first == {
+        "index_count": 1,
+        "stock_count": 0,
+        "total": 1,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
     assert cache.summary(store) is first  # same object → served from the memo.
+
+
+def test_summary_threads_reference_ids_for_stock_split(store: InstrumentStore) -> None:
+    """DEC-LABEL-TRUTH-001: the snapshot's reference ids flow into the summary.
+
+    A REAL lean store with one F&O equity + one REFERENCE_ONLY constituent must
+    serve the additive ``reference_stock_count`` / ``stock_count_total`` split
+    the Stocks badge renders — with every legacy key byte-identical (on the
+    lean store the reference row is eligible-by-storage, so ``stock_count``
+    already counts it; the id-membership split is what names the subset).
+
+    FAILS BEFORE: the cache computed ``universe_summary`` WITHOUT the
+    snapshot's ``reference`` set → ``reference_stock_count`` was absent (and a
+    naive classify-diff would read 0 here even after adding the keys).
+    """
+    store.upsert_many(
+        [_nifty(), _equity(100), _equity(200)],
+        snapshot_date=date(2024, 1, 2),
+        run_id="r1",
+        csv_source_sha256="r1".ljust(64, "0"),
+        reference_only_of=lambda inst: inst.security_id == 200,
+    )
+    cache = UniverseSnapshotCache()
+    assert cache.summary(store) == {
+        "index_count": 1,
+        "stock_count": 2,  # lean-store legacy value — reference row eligible-by-storage
+        "total": 3,
+        "reference_stock_count": 1,
+        "stock_count_total": 2,
+    }
+    # The badge's population equals the Stocks tab's population (the label truth).
+    assert cache.summary(store)["stock_count_total"] == len(cache.instruments(store, kind="stock"))
 
 
 def test_instruments_per_kind_cached_independently(store: InstrumentStore) -> None:
@@ -173,12 +220,24 @@ def test_master_change_invalidates_and_rebuilds(store: InstrumentStore) -> None:
     cache = UniverseSnapshotCache()
     first = cache.summary(store)
     first_index = cache.instruments(store, kind="index")
-    assert first == {"index_count": 1, "stock_count": 0, "total": 1}
+    assert first == {
+        "index_count": 1,
+        "stock_count": 0,
+        "total": 1,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
 
     # A new snapshot day adds a stock → the (count, max fetched_at) token moves.
     _seed(store, [_nifty(), _equity(200)], run_id="r2", day=date(2024, 1, 3))
     second = cache.summary(store)
-    assert second == {"index_count": 1, "stock_count": 1, "total": 2}
+    assert second == {
+        "index_count": 1,
+        "stock_count": 1,
+        "total": 2,
+        "reference_stock_count": 0,
+        "stock_count_total": 1,
+    }
     assert second is not first  # rebuilt, not the stale memo.
     second_index = cache.instruments(store, kind="index")
     assert second_index is not first_index  # the per-kind memo was dropped too.
@@ -229,6 +288,68 @@ def test_public_master_revision_is_the_shared_token_source(store: InstrumentStor
     assert UniverseSnapshotCache._revision(store) == second
 
 
+# ── coverage_revision — the master_revision twin over coverage_ledger ───────────
+# (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660)
+
+
+def _cov_record(underlying: str, year: int, *, fetched_at_iso: str) -> Any:
+    """One coverage_ledger cell with an explicit ``last_fetched_at``."""
+    from datetime import datetime
+
+    from brutex.data.coverage_ledger import CoverageRecord, classify_cell
+
+    return CoverageRecord(
+        exch_id="NSE",
+        underlying_symbol=underlying,
+        year=year,
+        expiries_pulled=2,
+        contracts_pulled=20,
+        status=classify_cell(2, 20, None),
+        last_run_id="run-1",
+        last_fetched_at=datetime.fromisoformat(fetched_at_iso),
+    )
+
+
+def test_coverage_revision_empty_store_is_stable_zero_token(store: InstrumentStore) -> None:
+    """An empty coverage_ledger keys at the stable ``(0, "")`` — and stays there."""
+    assert uc.coverage_revision(store) == (0, "")
+    # Unchanged table → byte-identical token (no thrash — the key is stable).
+    assert uc.coverage_revision(store) == (0, "")
+
+
+def test_coverage_revision_moves_on_upsert_and_on_newer_refetch(store: InstrumentStore) -> None:
+    """Every ``upsert_coverage`` write moves the token; an unchanged table does not.
+
+    The freshness signal the ``_nav_latency_key`` 4th component folds in
+    (DEC-STALENESS-CACHE-TRUTH-001): a NEW cell moves the count, an idempotent
+    re-upsert of the SAME cell with a newer ``last_fetched_at`` moves the MAX —
+    either way the composite key changes and the nav-latency caches recompute.
+    """
+    store.upsert_coverage(_cov_record("RELIANCE", 2024, fetched_at_iso="2026-05-30T09:15:00+00:00"))
+    first = uc.coverage_revision(store)
+    assert first[0] == 1 and first[1] != ""
+    # No write → the token is byte-identical (stable key, no cache thrash).
+    assert uc.coverage_revision(store) == first
+    # An idempotent re-upsert of the SAME cell with a newer stamp moves the MAX.
+    store.upsert_coverage(_cov_record("RELIANCE", 2024, fetched_at_iso="2026-05-30T10:15:00+00:00"))
+    second = uc.coverage_revision(store)
+    assert second[0] == 1
+    assert second != first
+    # A new cell moves the count.
+    store.upsert_coverage(_cov_record("TCS", 2024, fetched_at_iso="2026-05-30T10:15:00+00:00"))
+    third = uc.coverage_revision(store)
+    assert third[0] == 2
+    assert third != second
+
+
+def test_coverage_revision_defensive_none_row_is_zero_token() -> None:
+    """The shared ``_revision_token`` paranoid ``None``-row guard (both probes)."""
+    fake = SimpleNamespace(
+        connection=SimpleNamespace(execute=lambda _sql: SimpleNamespace(fetchone=lambda: None))
+    )
+    assert uc.coverage_revision(fake) == (0, "")
+
+
 # ── concurrent-install re-check branches (deterministic, no threads) ────────────
 
 
@@ -273,8 +394,9 @@ def test_current_adopts_concurrent_peer_snapshot() -> None:
     """``_current`` returns the peer's snapshot when one of the same revision raced in."""
     cache = UniverseSnapshotCache()
     fake = _PeerInstallStore(cache, token=(0, ""))
-    snap = cache._current(fake)
+    snap, served_last_known = cache._current(fake)
     assert snap is fake.peer  # adopted the peer, did NOT overwrite with the rebuild.
+    assert served_last_known is False  # healthy path — never flagged as an outage serve.
 
 
 def test_summary_adopts_concurrent_peer_memo(
@@ -363,7 +485,17 @@ def test_cold_concurrent_pollers_single_flight() -> None:
     assert not leader.is_alive() and all(not t.is_alive() for t in followers)
     assert compute_calls == 1  # single-flight: exactly ONE base-read scan
     assert len(results) == 5
-    assert all(r == {"index_count": 0, "stock_count": 0, "total": 0} for r in results)
+    assert all(
+        r
+        == {
+            "index_count": 0,
+            "stock_count": 0,
+            "total": 0,
+            "reference_stock_count": 0,
+            "stock_count_total": 0,
+        }
+        for r in results
+    )
     assert cache.size() == 1
     assert cache._refreshing == {}  # the single-flight registration was cleaned up
 
@@ -406,3 +538,217 @@ def test_compute_error_releases_single_flight() -> None:
     # A second call must also RAISE (not hang), proving the event was released.
     with pytest.raises(RuntimeError, match="store read failed"):
         cache.summary(raising)
+
+
+# ── store-outage serve-last-known (DEC-CACHE-SERVE-LAST-KNOWN-001, 8th keystone) ──
+
+
+def _outage_warns(logs: list[EventDict]) -> list[EventDict]:
+    return [e for e in logs if e["event"] == "universe_cache.store_probe_outage"]
+
+
+def _recovered_infos(logs: list[EventDict]) -> list[EventDict]:
+    return [e for e in logs if e["event"] == "universe_cache.store_probe_recovered"]
+
+
+class _TogglableOutageStore:
+    """The scout's repro stub: independently wedgeable revision probe + base reads.
+
+    ``fault`` picks the store-fault class (``duckdb.Error`` / ``OSError`` — both
+    members of :data:`~brutex.dashboard.universe_cache.STORE_FAULT_TYPES`).
+    """
+
+    def __init__(self, fault: type[Exception] = duckdb.Error) -> None:
+        self.token: tuple[int, str | None] = (1, "2026-07-09 00:00:00")
+        self.wedge_probe = False
+        self.wedge_base = False
+        self.fault = fault
+        self.probe_calls = 0
+        self.base_calls = 0
+
+    @property
+    def connection(self) -> Any:
+        outer = self
+
+        class _Conn:
+            def execute(self, _sql: str) -> Any:
+                outer.probe_calls += 1
+                if outer.wedge_probe:
+                    raise outer.fault("IO Error: simulated wedged volume (probe)")
+                return SimpleNamespace(fetchone=lambda: outer.token)
+
+        return _Conn()
+
+    def _wedgeable(self) -> None:
+        self.base_calls += 1
+        if self.wedge_base:
+            raise self.fault("IO Error: simulated wedged volume (base read)")
+
+    def fno_eligible_underlyings(self) -> frozenset[tuple[Exchange, str]]:
+        self._wedgeable()
+        return frozenset()
+
+    def list_index_equity_instruments(self) -> list[Instrument]:
+        return []
+
+    def reference_only_security_ids(self) -> frozenset[int]:
+        return frozenset()
+
+
+@pytest.mark.parametrize("fault", [duckdb.Error, OSError])
+def test_probe_outage_serves_resident_snapshot_labelled(fault: type[Exception]) -> None:
+    """S2 (scout): warm snapshot + probe outage → serve-last-known flagged, ONE WARN.
+
+    Fails-before: `_current` probed the revision BEFORE the resident-snapshot
+    check, so the fault propagated on every poll (serve-last-known impossible by
+    construction — the 3×500 storm despite a good snapshot).
+    """
+    fake = _TogglableOutageStore(fault=fault)
+    cache = UniverseSnapshotCache()
+    warm, warm_flag = cache.summary_view(fake)
+    assert warm == {
+        "index_count": 0,
+        "stock_count": 0,
+        "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
+    assert warm_flag is False
+    fake.wedge_probe = True
+    with capture_logs() as logs:
+        for _ in range(3):
+            value, served_last_known = cache.summary_view(fake)
+            assert value is warm  # the RESIDENT memo — never a recompute storm
+            assert served_last_known is True
+        rows, rows_flag = cache.instruments_view(fake, kind="index")
+        assert rows == [] and rows_flag is True  # derived from the resident snapshot
+    warns = _outage_warns(logs)
+    assert len(warns) == 1  # latched — one WARN per outage, never per poll
+    assert warns[0]["served"] == "last_known"
+    assert _recovered_infos(logs) == []
+
+
+def test_probe_outage_cold_raises_typed_fault() -> None:
+    """S1 (scout): cold cache + probe outage → typed fault, never a raw store error.
+
+    Fails-before: the raw ``duckdb.Error`` escaped to the route (a 500 per poll).
+    """
+    fake = _TogglableOutageStore()
+    fake.wedge_probe = True
+    cache = UniverseSnapshotCache()
+    with capture_logs() as logs:
+        with pytest.raises(uc.UniverseStoreOutageError, match="revision probe"):
+            cache.summary_view(fake)
+        with pytest.raises(uc.UniverseStoreOutageError):
+            cache.instruments_view(fake, kind=None)
+    assert cache.size() == 0  # nothing fabricated
+    warns = _outage_warns(logs)
+    assert len(warns) == 1 and warns[0]["served"] == "cold_fault"  # latched across repeats
+
+
+def test_probe_outage_chains_the_original_store_fault() -> None:
+    """The typed fault carries the store fault as ``__cause__`` (server-side diagnosis)."""
+    fake = _TogglableOutageStore()
+    fake.wedge_probe = True
+    with pytest.raises(uc.UniverseStoreOutageError) as excinfo:
+        UniverseSnapshotCache().summary_view(fake)
+    assert isinstance(excinfo.value.__cause__, duckdb.Error)
+
+
+def test_base_read_outage_serves_resident_snapshot_labelled() -> None:
+    """S3 warm twin (scout): probe OK + base reads raise → serve-last-known flagged."""
+    fake = _TogglableOutageStore()
+    cache = UniverseSnapshotCache()
+    warm = cache.summary(fake)
+    fake.token = (2, "2026-07-09 06:00:00")  # a NEW revision → the rebuild path runs
+    fake.wedge_base = True
+    base_before = fake.base_calls
+    with capture_logs() as logs:
+        for _ in range(3):
+            value, served_last_known = cache.summary_view(fake)
+            assert value is warm
+            assert served_last_known is True
+    assert fake.base_calls == base_before + 3  # one failed rebuild attempt per poll…
+    warns = _outage_warns(logs)
+    assert len(warns) == 1 and warns[0]["served"] == "last_known"  # …but ONE WARN
+    assert cache._refreshing == {}  # the single-flight registration never leaks
+
+
+def test_base_read_outage_cold_raises_typed_fault() -> None:
+    """S3 cold twin (scout): probe OK + base reads raise + nothing resident → typed fault."""
+    fake = _TogglableOutageStore()
+    fake.wedge_base = True
+    cache = UniverseSnapshotCache()
+    with capture_logs() as logs, pytest.raises(uc.UniverseStoreOutageError, match="base read"):
+        cache.summary_view(fake)
+    assert cache.size() == 0
+    assert cache._refreshing == {}  # the finally released the registration
+    warns = _outage_warns(logs)
+    assert len(warns) == 1 and warns[0]["served"] == "cold_fault"
+
+
+def test_recovery_logs_one_info_and_recomputes_fresh() -> None:
+    """The next good probe recomputes fresh + logs EXACTLY one recovery INFO."""
+    fake = _TogglableOutageStore()
+    cache = UniverseSnapshotCache()
+    cache.summary(fake)  # warm
+    fake.wedge_probe = True
+    with capture_logs() as logs:
+        cache.summary_view(fake)  # outage serve → latch armed
+    assert len(_outage_warns(logs)) == 1
+    fake.wedge_probe = False
+    fake.token = (2, "2026-07-09 06:00:00")  # the master moved during the outage
+    with capture_logs() as logs:
+        value, served_last_known = cache.summary_view(fake)
+        assert served_last_known is False  # a real fresh compute, never a stale label
+        again, again_flag = cache.summary_view(fake)
+        assert again is value and again_flag is False
+    assert len(_recovered_infos(logs)) == 1  # one flip INFO, then silence
+    assert _outage_warns(logs) == []
+    # A SECOND outage after recovery WARNs again (the latch re-armed).
+    fake.wedge_probe = True
+    with capture_logs() as logs:
+        cache.summary_view(fake)
+    assert len(_outage_warns(logs)) == 1
+
+
+def test_outage_summary_derivation_is_pure_over_the_resident_snapshot() -> None:
+    """An outage serve still derives + memoises payloads (zero store I/O needed)."""
+    fake = _TogglableOutageStore()
+    cache = UniverseSnapshotCache()
+    cache.instruments(fake, kind=None)  # warm via instruments — summary NOT yet memoised
+    fake.wedge_probe = True
+    probe_before = fake.probe_calls
+    base_before = fake.base_calls
+    value, served_last_known = cache.summary_view(fake)
+    assert value == {
+        "index_count": 0,
+        "stock_count": 0,
+        "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
+    assert served_last_known is True
+    rows, rows_flag = cache.instruments_view(fake, kind="stock")
+    assert rows == [] and rows_flag is True
+    assert fake.probe_calls == probe_before + 2  # one failed probe per call…
+    assert fake.base_calls == base_before  # …and ZERO base reads (pure derivation)
+
+
+def test_empty_store_path_is_byte_identical_after_the_fix(store: InstrumentStore) -> None:
+    """REGRESSION: the healthy empty-store path (stable ``(0, "")`` token) is unchanged."""
+    cache = UniverseSnapshotCache()
+    assert cache._revision(store) == (0, "")
+    payload, served_last_known = cache.summary_view(store)
+    assert payload == {
+        "index_count": 0,
+        "stock_count": 0,
+        "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
+    assert served_last_known is False
+    rows, rows_flag = cache.instruments_view(store, kind=None)
+    assert rows == [] and rows_flag is False
+    assert cache.summary(store) is payload  # the delegator serves the same memo
+    assert cache.instruments(store, kind=None) is rows

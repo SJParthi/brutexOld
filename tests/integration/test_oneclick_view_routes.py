@@ -404,8 +404,23 @@ class TestScreenerPage:
         js = _static_js("bx-screener-panel.js")
         assert "String(cap) + ' of ' + total + ' shown'" in js
         assert "String(sorted.length) + ' of '" not in js  # the lying numerator is gone
-        assert "render cap ' + String(RENDER_CAP)" in js
-        assert "use Show all" in js
+        # A-r4 (DEC-ONECLICK-PERF-CLUB-001): the cap/note math lives in the
+        # node-goldened BXScreener primitives — the shared panel consumes
+        # them (the wording itself is pinned by
+        # test_dashboard_screener_math.py). Re-pointed screener.html →
+        # bx-screener-panel.js at the DEC-OPERATOR-PAGE-CONSOLIDATE-001
+        # merge-reconcile (the IIFE moved into the panel, #1406 cap law
+        # ported with it).
+        assert "window.BXScreener.renderCount(sorted.length, state.showAll)" in js
+        # The count line composes the capNote/inputCapNote primitives via
+        # the node-goldened bxWinnersCountLine builder (its `screener`
+        # param IS window.BXScreener at the ONE render call site —
+        # executed-golden-proven in TestWinnersCountLine, stronger than a
+        # call-site string).
+        assert "line += screener.capNote(cap, sortedLen, showAll);" in js
+        assert "line += screener.inputCapNote(inputDropped, payloadLen);" in js
+        assert "applied.null_vix_excluded, window.BXScreener" in js
+        assert "window.BXScreener.inputCapRows(" in js
 
     def test_sort_basis_label_names_the_artifact_preset(self) -> None:
         """[11] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the visible sort-basis
