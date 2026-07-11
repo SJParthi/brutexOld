@@ -2332,7 +2332,10 @@ def _realert_mass_heal_refused(attempt: Mapping[str, Any]) -> None:
     whose wording is explicitly a re-alert of the PRIOR sweep ("still refused
     since <ts>") — NEVER a fabricated per-boot :class:`HealReport` for a
     sweep that did not run. A pre-fix-shaped record missing any of the three
-    fields (or carrying junk types) ABSTAINS silently — honesty over noise.
+    fields (or carrying junk types — a ``bool`` masquerading as an int, or a
+    negative tally, both only reachable via a hand-edited sidecar) ABSTAINS
+    silently — honesty over noise (refuter NIT-1: ``type(x) is int`` +
+    ``x >= 0``, never bare ``isinstance`` which admits ``bool``).
     Best-effort end to end: the notifications import is function-local (the
     :func:`_startup_sweep_alert` precedent), the emit helper is itself
     blanket-guarded, and this wrapper's own guard means an alert-path fault
@@ -2343,8 +2346,10 @@ def _realert_mass_heal_refused(attempt: Mapping[str, Any]) -> None:
     files_scanned = attempt.get("files_scanned")
     attempt_utc = attempt.get("attempt_utc")
     if (
-        not isinstance(findings, int)
-        or not isinstance(files_scanned, int)
+        type(findings) is not int
+        or findings < 0
+        or type(files_scanned) is not int
+        or files_scanned < 0
         or not isinstance(attempt_utc, str)
     ):
         return  # pre-fix / hand-edited record shape — abstain, never fabricate

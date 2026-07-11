@@ -4739,6 +4739,13 @@ class TestMassRefusalRealert:
         _realert_mass_heal_refused({**base, "findings": "1"})
         _realert_mass_heal_refused({**base, "files_scanned": None})
         _realert_mass_heal_refused({**base, "attempt_utc": 5})
+        # Refuter NIT-1: a bool sails past bare ``isinstance(x, int)``; a
+        # negative tally is only reachable via a hand-edited sidecar — both
+        # ABSTAIN under the tightened ``type(x) is int and x >= 0`` gate.
+        _realert_mass_heal_refused({**base, "findings": True})
+        _realert_mass_heal_refused({**base, "files_scanned": False})
+        _realert_mass_heal_refused({**base, "findings": -1})
+        _realert_mass_heal_refused({**base, "files_scanned": -2})
         assert calls == []
         _realert_mass_heal_refused(base)  # the well-formed record DOES fire
         (call,) = calls

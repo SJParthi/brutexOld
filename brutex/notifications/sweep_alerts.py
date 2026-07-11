@@ -1107,10 +1107,16 @@ class SweepAlerter:
         attempt record's PERSISTED REAL tallies (the refused sweep wrote them
         itself) — explicitly worded as a re-alert of the PRIOR sweep, never a
         fabricated fresh heal report. ``PHASE_BLOCKED`` kind (the CRITICAL
-        operator-must-act house pattern — :meth:`pull_halted`); the
-        ``dedupe_key`` binds the ATTEMPT timestamp so re-alerts of the same
-        standing refusal coalesce only within the notifier's window while a
-        NEW refusal always alerts fresh.
+        operator-must-act house pattern — :meth:`pull_halted`). HONESTY NOTE
+        (refuter NIT-2): at the ``PHASE_BLOCKED`` kind the notifier dedupe
+        WINDOW is ``0.0``
+        (:data:`~brutex.notifications.telegram.DEDUPE_WINDOW_SECONDS`), so the
+        attempt-timestamp-bound ``dedupe_key`` provides NO notifier-side
+        suppression — it is identification / defence-in-depth only. The
+        per-boot re-alert cadence is therefore INTENTIONAL: every skipping
+        boot of a still-refused lake fires one CRITICAL push (mirroring the
+        pre-change every-boot re-sweep's cadence), and a NEW refusal alerts
+        fresh under its own timestamp.
 
         Parameters
         ----------
