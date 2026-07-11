@@ -114,10 +114,16 @@ def _isolate_run_forensics_mirror(
     token cache above. A per-file fixture can still re-point or disable it (empty
     value); ``monkeypatch`` auto-restores at teardown.
     """
-    from brutex.engine.run_layout import MIRROR_ROOT_ENV
-
+    # LITERAL env-var name, deliberately NOT `from brutex.engine.run_layout
+    # import MIRROR_ROOT_ENV`: this fixture is suite-wide autouse, and the
+    # nightly red-team harness (redteam-nightly.yml) runs a PYTHON-ONLY
+    # editable install with no Rust wheels — importing brutex.engine here
+    # (package __init__ -> combo_mask -> fno_math) errored the SETUP of all
+    # 156 pre-existing tests/redteam tests (run 29145422566). The literal is
+    # drift-pinned against run_layout.MIRROR_ROOT_ENV by
+    # tests/unit/test_run_layout.py (a wheels-present suite).
     mirror = tmp_path_factory.mktemp("run-forensics-mirror")
-    monkeypatch.setenv(MIRROR_ROOT_ENV, str(mirror))
+    monkeypatch.setenv("BRUTEX_RUN_MIRROR_ROOT", str(mirror))
 
 
 @pytest.fixture(autouse=True)
