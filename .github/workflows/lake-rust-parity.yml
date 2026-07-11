@@ -6,9 +6,13 @@
 # degrades loudly to the Python render when it is absent), so this dedicated
 # lane is where the crate has teeth:
 #
-#   1. cargo fmt / clippy -D warnings / test (incl. the lockstep pins:
-#      manifest tag == PINNED_POLARS_PY_VERSION, linked libzstd ==
-#      PINNED_LIBZSTD_VERSION, IPC→parquet round-trip, row-group boundary,
+#   1. cargo fmt / clippy -D warnings / test (incl. the lockstep pins —
+#      the crate is REV-pinned, not tag-pinned (review-round fold):
+#      every manifest polars dep rev == PINNED_POLARS_GIT_REV
+#      (manifest_rev_matches_pinned_rev), the committed Cargo.lock
+#      resolves that rev (lockfile_resolves_pinned_rev), linked libzstd ==
+#      PINNED_LIBZSTD_VERSION, the metadata pyfunctions agree with the
+#      constants — plus the IPC→parquet round-trip, row-group boundary,
 #      error paths).
 #   2. maturin wheel build + install beside the repo's Python deps.
 #   3. The REAL-crate byte-parity corpus
@@ -30,8 +34,8 @@
 #
 # COST HONESTY: a cold run compiles the polars git graph from source — the
 # spike measured ~6.5 min wall / ~24 min CPU / ~12 GB target dir in release;
-# the cargo cache below (keyed on the polars tag + Cargo.lock hash) makes
-# warm runs cheap. The timeout budgets the cold path.
+# the cargo cache below (keyed on the rev-pinned Cargo.toml + Cargo.lock
+# content hash) makes warm runs cheap. The timeout budgets the cold path.
 
 name: lake-rust-parity
 
@@ -101,13 +105,14 @@ jobs:
           toolchain: ${{ env.LAKE_RUST_VERSION }}
           components: rustfmt,clippy
 
-      - name: Cache cargo (keyed on the polars tag + Cargo.lock)
+      - name: Cache cargo (keyed on the rev-pinned Cargo.toml + Cargo.lock)
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/brutex-lake -> target
-          # The polars git tag is the dominant cache invalidator: a lockstep
-          # bump recompiles the whole polars graph, so key on the tag string
-          # (extracted from the manifest) + the lockfile hash.
+          # The pinned polars git rev is the dominant cache invalidator: a
+          # lockstep bump recompiles the whole polars graph, and a rev bump
+          # rewrites BOTH the manifest and the lockfile — so key on the
+          # content hash of the two files.
           key: polars-${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock') }}
 
       - name: cargo fmt --check
