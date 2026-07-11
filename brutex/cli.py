@@ -355,8 +355,9 @@ def resolve_sweep_exploration(
     ------
     CliUserError
         A junk ``BRUTEX_SWEEP_APRIORI`` value on the token arm, a non-integer
-        legacy CSV token, or an explicit ``--max-combos`` that refuses even
-        ``k=1`` in extinction mode.
+        legacy CSV token, an EMPTY extinction ladder (zero resolved condition
+        bits — a silent zero-tuple run is never admitted), or an explicit
+        ``--max-combos`` that refuses even ``k=1`` in extinction mode.
     """
     if k.strip().lower() != EXTINCTION_K_TOKEN:
         # LEGACY arm — byte-identical: same parser, env untouched/unread.
@@ -394,19 +395,39 @@ def resolve_sweep_exploration(
                 "exploration mode — fix the env var or pass an explicit --k"
             )
     n_unique = len(set(condition_bits))
+    if n_unique == 0:
+        # An EMPTY ladder is a refusal, never a silent zero-tuple run — and
+        # never the earlier arithmetic lie "C(0,1)=0 > cap" on the trimmed arm
+        # (review fix round 1 n1). Both the capped and uncapped token arms
+        # refuse identically here, before any ladder math.
+        raise CliUserError(
+            "extinction mode resolved an EMPTY k-ladder: zero condition bits "
+            "(n_unique=0) — pass --conditions with at least one bit, or an "
+            "explicit --k"
+        )
     over_width = sorted(bit for bit in set(condition_bits) if bit >= _APRIORI_U64_BITS)
     if over_width:
         # u128 forward guard (ruling 10) — dormant at today's 60-bit vocabulary.
-        return SweepExplorationPlan(
-            apriori=False,
-            k_values=[1, 2],
-            notes=(
-                f"condition bit {over_width[0]} >= 64: the Apriori frontier is "
-                "u64-only (the frozen generator refuses >=64-bit vocabularies "
-                "per tuple), so the extinction default falls back to the legacy "
-                "k=1,2 for this run — pass an explicit --k to choose the ladder.",
-            ),
+        note = (
+            f"condition bit {over_width[0]} >= 64: the Apriori frontier is "
+            "u64-only (the frozen generator refuses >=64-bit vocabularies "
+            "per tuple), so the extinction default falls back to the legacy "
+            "k=1,2 for this run — pass an explicit --k to choose the ladder."
         )
+        if raw is not None and raw.strip():
+            # Reaching here with a set-and-nonblank env means it classified
+            # TRUTHY above (falsy returned, junk raised) — and a truthy env
+            # makes the ENGINE's own apriori_enabled() read ON regardless of
+            # this legacy fallback, so every >=64-bit tuple would STILL
+            # TUPLE_FAIL at the generator's per-tuple guard. Say so honestly
+            # (review fix round 1 n2) instead of implying the fallback alone
+            # yields a clean legacy run.
+            note += (
+                f" NOTE: {SWEEP_APRIORI_ENV}={raw!r} is set truthy, so the engine's "
+                "generator still refuses >=64-bit tuples (TUPLE_FAILED) — unset it "
+                "for a clean legacy run."
+            )
+        return SweepExplorationPlan(apriori=False, k_values=[1, 2], notes=(note,))
     k_values = list(range(1, n_unique + 1))
     notes: tuple[str, ...] = ()
     if max_combos is not None:
@@ -6672,12 +6693,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # the parent env at pool creation; sweep_run's apriori branch +
     # effective_max_combos below read only os.environ). setdefault
     # semantics — a truthy operator value is left verbatim; a SET-but-BLANK
-    # value (which the resolver classifies exactly like unset, and which
-    # apriori_enabled() reads as OFF) is overwritten too, so the resolved
-    # plan and the engine can never disagree. No restore here: a CLI
+    # or WHITESPACE-ONLY value (which the resolver classifies exactly like
+    # unset, and which apriori_enabled() reads as OFF) is overwritten too —
+    # the .strip() matches the resolver's own blank classification (review
+    # fix round 1 m1: a bare truthiness check treated "   " as set, leaving
+    # the engine OFF under an extinction banner — a split-brain) — so the
+    # resolved plan and the engine can never disagree. No restore here: a CLI
     # process exits after the sweep; the ONE in-process embedder
     # (dashboard run_sweep_from_request) snapshot-restores at its boundary.
-    if exploration.apriori and not os.environ.get(SWEEP_APRIORI_ENV):
+    if exploration.apriori and not (os.environ.get(SWEEP_APRIORI_ENV) or "").strip():
         os.environ[SWEEP_APRIORI_ENV] = "1"
     # Off-heap dedup-store knobs (R2-SL-F4-F5): validate flag + env EAGERLY —
     # before the lake preload and any store open — so a mistyped knob is a
@@ -7104,7 +7128,30 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.notifications.sweep_alerts import SweepAlerter
 
     alerter = SweepAlerter()
-    watchdog = SweepWatchdog(on_hung=alerter.watchdog_hung_callback())
+    # Ladder-aware watchdog timeout (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+    # round 1 m7): a healthy mid-ladder extinction level legitimately runs
+    # HOURS between tuple completions, so the flat 300 s default fired false
+    # CRITICAL "hung sweep" Telegram alerts on every default run. Scale the
+    # timeout by the SAME capped ladder-cumulative bound the parallel driver's
+    # stall guard uses (the heaviest tuple: deepest k × the largest loaded
+    # slice), floored at the default. The legacy arm is byte-identical
+    # (explicit --k keeps the flat default — deliberately untouched).
+    from brutex.engine.sweep_parallel import apriori_ladder_stall_bound_seconds
+    from brutex.engine.sweep_watchdog import DEFAULT_TIMEOUT_SECONDS
+
+    watchdog_timeout = DEFAULT_TIMEOUT_SECONDS
+    if exploration.apriori:
+        watchdog_timeout = max(
+            DEFAULT_TIMEOUT_SECONDS,
+            apriori_ladder_stall_bound_seconds(
+                k=exploration.k_values[-1],
+                n_unique=len(set(condition_bits)),
+                n_bars=max(loaded.values()),
+            ),
+        )
+    watchdog = SweepWatchdog(
+        timeout_seconds=watchdog_timeout, on_hung=alerter.watchdog_hung_callback()
+    )
     checkpoint = SweepCheckpointStore(
         path=checkpoint_path,
         sweep_id=grid_identity(grid),
@@ -8164,39 +8211,58 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     k_list = exploration.k_values
     if exploration.apriori:
         # The recount's shadow re-sweep + effective_max_combos read only
-        # os.environ (setdefault semantics; a SET-but-BLANK value is
-        # overwritten too — the cmd_sweep_all law).
+        # os.environ (setdefault semantics; a SET-but-BLANK or
+        # WHITESPACE-ONLY value is overwritten too — the cmd_sweep_all law,
+        # .strip()-matched to the resolver's blank classification; review
+        # fix round 1 m1).
         from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
 
-        if not os.environ.get(SWEEP_APRIORI_ENV):
+        if not (os.environ.get(SWEEP_APRIORI_ENV) or "").strip():
             os.environ[SWEEP_APRIORI_ENV] = "1"
     # Recorded-mode gate (DEC-SWEEP-APRIORI-DEFAULT-001): n_enumerated is
     # mode-dependent AND sits in the byte-diffed trial-stats sidecar, so a
     # wrong-mode recount under an otherwise MATCHED context would read
     # verdict-grade recount_divergence on a healthy tree (the false-corrupt
-    # hazard). A definite recorded-mode ≠ resolved-mode is therefore a CONTEXT
-    # mismatch: printed here, folded into the recount `mismatches` ladder
-    # below (refuse → inconclusive; --allow-context-mismatch → compare with
-    # findings degraded to INCONCLUSIVE — never verdict-grade). A pre-flip /
-    # START-less tree reads None → abstain (the code-commit context gate
-    # already protects it).
-    from brutex.engine.sweep_verify import recorded_apriori_from_audit
-
-    try:
-        recorded_mode = recorded_apriori_from_audit(out_root)
-    except SweepVerifyError as exc:
-        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
-        return EXIT_USER_ERROR
+    # hazard). The COMPARAND is the recount's ENGINE-EFFECTIVE mode (review
+    # fix round 1 M3) — the Tier-3 shadow re-sweep obeys os.environ via
+    # apriori_enabled(), NOT the resolver verdict alone: an explicit --k with
+    # BRUTEX_SWEEP_APRIORI exported truthy recounts in apriori mode even
+    # though the resolver said legacy (and, symmetrically, an
+    # explicit-ladder-under-truthy-env tree recorded apriori and re-verified
+    # the same way IS a matched-mode recount — verdict-grade allowed).
+    # Computed AFTER the env setdefault above, so it reads exactly what the
+    # shadow re-sweep will read. A definite recorded-mode ≠ effective-mode is
+    # a CONTEXT mismatch: printed here, folded into the recount `mismatches`
+    # ladder below (refuse → inconclusive; --allow-context-mismatch → compare
+    # with findings degraded to INCONCLUSIVE — never verdict-grade). A
+    # pre-flip / START-less tree reads None → abstain (the code-commit
+    # context gate already protects it). The mode read runs ONLY when it can
+    # matter — a recount was requested OR the default/extinction resolution
+    # is in play (review fix round 1 m2: an explicit-k no-recount verify must
+    # not hard-fail on an unreadable supervisor chain the gate would never
+    # consume; main returned rc 0 on the same tree).
+    recorded_mode: bool | None = None
     mode_mismatch: str | None = None
-    if recorded_mode is not None and recorded_mode != exploration.apriori:
-        mode_mismatch = (
-            f"exploration_mode: recorded "
-            f"{'apriori-extinction' if recorded_mode else 'legacy'} vs resolved "
-            f"{'apriori-extinction' if exploration.apriori else 'legacy'} — "
-            "n_enumerated in the trial-stats sidecar is mode-dependent, so a "
-            "wrong-mode recount byte-diverges without corruption"
-        )
-        print(f"[brutex] sweep-verify: {mode_mismatch}")
+    if recount or exploration.apriori:
+        from brutex.engine.sweep_apriori import apriori_enabled
+        from brutex.engine.sweep_verify import recorded_apriori_from_audit
+
+        effective_apriori = exploration.apriori or apriori_enabled()
+        try:
+            recorded_mode = recorded_apriori_from_audit(out_root)
+        except SweepVerifyError as exc:
+            print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if recorded_mode is not None and recorded_mode != effective_apriori:
+            mode_mismatch = (
+                f"exploration_mode: recorded "
+                f"{'apriori-extinction' if recorded_mode else 'legacy'} vs effective "
+                f"{'apriori-extinction' if effective_apriori else 'legacy'} (the mode "
+                "the recount's shadow re-sweep runs under) — n_enumerated in the "
+                "trial-stats sidecar is mode-dependent, so a wrong-mode recount "
+                "byte-diverges without corruption"
+            )
+            print(f"[brutex] sweep-verify: {mode_mismatch}")
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
     # condition B9): the `// 60` form maps 1day to 1440 wall-clock minutes while
     # the launcher uses the 375-minute session — tf_minutes is in every tuple

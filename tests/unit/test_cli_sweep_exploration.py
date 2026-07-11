@@ -17,6 +17,7 @@ BEHAVIOR (env state + stderr copy + exit codes), never coverage.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,44 @@ from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
 pytestmark = pytest.mark.usefixtures("_inert_sweep_logging_guard")  # see tests/conftest.py
 
 _BITS_6 = [0, 1, 2, 3, 4, 5]  # n_unique = 6
+
+
+@pytest.fixture(autouse=True)
+def _restore_apriori_env() -> Iterator[None]:
+    """Snapshot + restore ``BRUTEX_SWEEP_APRIORI`` around EVERY test in this file.
+
+    Review fix round 1 B1 (the cross-test env leak): several tests here drive
+    the PRODUCTION ``os.environ[SWEEP_APRIORI_ENV] = "1"`` setdefault write
+    through the real ``main()`` dispatch. A bare
+    ``monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)`` on an ABSENT var
+    records NO restore, so that production write LEAKED into every later test
+    in the process — flipping 8 legacy-default engine tests (parallel goldens,
+    conflict-prune, u128, digest-arm) red in a combined run. This defensive
+    autouse snapshot guarantees the var's pre-test state is restored no matter
+    which code path wrote it (belt-and-braces beside ``_delenv_recorded``).
+    """
+    before = os.environ.get(SWEEP_APRIORI_ENV)
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop(SWEEP_APRIORI_ENV, None)
+        else:
+            os.environ[SWEEP_APRIORI_ENV] = before
+
+
+def _delenv_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove ``SWEEP_APRIORI_ENV`` with a RECORDED restore (review fix B1).
+
+    ``monkeypatch.delenv(..., raising=False)`` on an ABSENT var records
+    nothing, so a later production write survives teardown. The
+    setenv-then-delenv pair records both operations: teardown re-applies them
+    in reverse (restore the sentinel, then restore the true pre-test state —
+    absent or the original value), so the var always lands back where it
+    started regardless of what the test body wrote.
+    """
+    monkeypatch.setenv(SWEEP_APRIORI_ENV, "sentinel-restore")
+    monkeypatch.delenv(SWEEP_APRIORI_ENV)
 
 
 # ─────────────────────────── the pure resolver ───────────────────────────
@@ -218,7 +257,7 @@ class TestSweepAllEnvSetdefault:
     def test_default_k_sets_the_env_before_lake_io(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        _delenv_recorded(monkeypatch)
         rc = main(_sweep_all_argv(tmp_path / "no-such-lake"))
         assert rc == EXIT_USER_ERROR  # the missing-lake refusal, not a sweep
         assert os.environ[SWEEP_APRIORI_ENV] == "1"
@@ -242,7 +281,7 @@ class TestSweepAllEnvSetdefault:
     def test_explicit_numeric_k_never_touches_the_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        _delenv_recorded(monkeypatch)
         rc = main([*_sweep_all_argv(tmp_path / "no-such-lake"), "--k", "1,2"])
         assert rc == EXIT_USER_ERROR
         assert SWEEP_APRIORI_ENV not in os.environ
@@ -350,7 +389,7 @@ class TestSweepVerifyExplorationDispatch:
     def test_default_k_sets_the_env_for_the_shadow_recount(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        _delenv_recorded(monkeypatch)
         rc = main(self._verify_argv(tmp_path))
         # An empty tree's absent expected stores are INFO findings — the
         # verify itself is CLEAN; the point is the env write for the shadow
@@ -368,25 +407,26 @@ class TestSweepVerifyExplorationDispatch:
         with AuditWriter.open(audit_path) as audit:
             audit.append(action="GRID_SWEEP_START", subject="sweep-all", payload=payload)
 
-    def test_recorded_legacy_vs_resolved_extinction_prints_the_context_mismatch(
+    def test_recorded_legacy_vs_effective_extinction_prints_the_context_mismatch(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """The recorded-mode gate (DEC-SWEEP-APRIORI-DEFAULT-001 ruling 8): a
-        definite recorded-mode ≠ resolved-mode is a CONTEXT mismatch — named
-        with the honest "without corruption" copy (n_enumerated is
-        mode-dependent, so a wrong-mode recount byte-diverges on a HEALTHY
-        tree; the recount ladder folds it into the existing refuse /
-        --allow-context-mismatch → INCONCLUSIVE mechanism, never
-        verdict-grade recount_divergence)."""
-        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        definite recorded-mode ≠ recount-EFFECTIVE-mode is a CONTEXT mismatch
+        (review fix round 1 M3: the comparand is the engine-effective mode the
+        shadow re-sweep actually runs under) — named with the honest "without
+        corruption" copy (n_enumerated is mode-dependent, so a wrong-mode
+        recount byte-diverges on a HEALTHY tree; the recount ladder folds it
+        into the existing refuse / --allow-context-mismatch → INCONCLUSIVE
+        mechanism, never verdict-grade recount_divergence)."""
+        _delenv_recorded(monkeypatch)
         self._write_mode_record(tmp_path, {"sweep_id": "x"})  # legacy: NO apriori key
         rc = main(self._verify_argv(tmp_path))
         assert rc == 0  # INFO findings only — the gate never verdict-grades alone
         out = capsys.readouterr().out
-        assert "exploration_mode: recorded legacy vs resolved apriori-extinction" in out
+        assert "exploration_mode: recorded legacy vs effective apriori-extinction" in out
         assert "without corruption" in out
 
     def test_recorded_apriori_tree_matches_the_resolved_default_silently(
@@ -395,8 +435,116 @@ class TestSweepVerifyExplorationDispatch:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        _delenv_recorded(monkeypatch)
         self._write_mode_record(tmp_path, {"apriori": {"enabled": True, "max_mask_bars": 42}})
         rc = main(self._verify_argv(tmp_path))
         assert rc == 0
         assert "exploration_mode:" not in capsys.readouterr().out
+
+
+class TestResolverEmptyLadder:
+    """Review fix round 1 n1: a zero-bit extinction ladder REFUSES loudly on
+    BOTH the capped and uncapped arms — never a silent zero-tuple run, and
+    never the arithmetic lie "C(0,1)=0 > cap" the trimmed arm used to print."""
+
+    def test_no_cap_empty_ladder_is_a_loud_refusal_not_a_silent_empty_run(self) -> None:
+        with pytest.raises(CliUserError, match="EMPTY k-ladder"):
+            resolve_sweep_exploration(
+                EXTINCTION_K_TOKEN, condition_bits=[], max_combos=None, env={}
+            )
+
+    def test_capped_empty_ladder_refuses_without_the_arithmetic_lie(self) -> None:
+        with pytest.raises(CliUserError, match="EMPTY k-ladder") as excinfo:
+            resolve_sweep_exploration(EXTINCTION_K_TOKEN, condition_bits=[], max_combos=100, env={})
+        # The old wording claimed "C(0,1)=0 > 100" — a false inequality.
+        assert "C(0,1)" not in str(excinfo.value)
+
+    def test_legacy_arm_is_untouched_by_the_refusal(self) -> None:
+        # An explicit --k with zero bits stays the legacy arm (its own
+        # downstream grid validation owns that shape).
+        plan = resolve_sweep_exploration("1,2", condition_bits=[], max_combos=None, env={})
+        assert plan.k_values == [1, 2]
+
+
+class TestResolverU128NoteHonesty:
+    """Review fix round 1 n2: the u128 fallback note tells the WHOLE truth when
+    the env is preset truthy — the legacy k=1,2 fallback alone cannot yield a
+    clean run because the engine's own apriori_enabled() still reads ON and
+    the frozen generator refuses >=64-bit tuples per tuple."""
+
+    def test_env_unset_keeps_the_plain_fallback_note(self) -> None:
+        plan = resolve_sweep_exploration(
+            EXTINCTION_K_TOKEN, condition_bits=[0, 1, 64], max_combos=None, env={}
+        )
+        assert len(plan.notes) == 1
+        assert "u64-only" in plan.notes[0]
+        assert "NOTE:" not in plan.notes[0]  # nothing to warn about — env unset
+
+    def test_truthy_env_appends_the_engine_refusal_honesty_sentence(self) -> None:
+        plan = resolve_sweep_exploration(
+            EXTINCTION_K_TOKEN,
+            condition_bits=[0, 1, 64],
+            max_combos=None,
+            env={SWEEP_APRIORI_ENV: "1"},
+        )
+        assert plan.apriori is False
+        assert plan.k_values == [1, 2]
+        assert len(plan.notes) == 1
+        assert "u64-only" in plan.notes[0]
+        assert "still refuses >=64-bit tuples (TUPLE_FAILED)" in plan.notes[0]
+        assert "unset it" in plan.notes[0]
+
+
+class TestWhitespaceEnvSetdefault:
+    """Review fix round 1 m1: a WHITESPACE-ONLY env value is classified like
+    unset by the resolver, so the setdefault write must overwrite it too —
+    the bare truthiness guard treated "   " as set, leaving apriori_enabled()
+    OFF under an extinction banner (a plan↔engine split-brain)."""
+
+    def test_whitespace_env_is_overwritten_on_sweep_all(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "   ")
+        main(_sweep_all_argv(tmp_path / "no-such-lake"))
+        assert os.environ[SWEEP_APRIORI_ENV] == "1"
+
+    def test_whitespace_env_is_overwritten_on_sweep_verify(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "   ")
+        rc = main(TestSweepVerifyExplorationDispatch._verify_argv(tmp_path))
+        assert rc == 0
+        assert os.environ[SWEEP_APRIORI_ENV] == "1"
+
+
+class TestGridSurfaceHelpCopy:
+    """Review fix round 1 M4 (spec row 23, help-string leg): the operator-facing
+    --k / --max-combos help names the extinction grammar + the operative
+    guards, EXECUTED through the real parser (never a source grep)."""
+
+    @staticmethod
+    def _surface_help(surface: str) -> str:
+        import argparse
+
+        from brutex.cli import build_parser
+
+        parser = build_parser()
+        subparsers = next(
+            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        # argparse hard-wraps help text at the terminal width — collapse the
+        # whitespace so the substring pins are wrap-invariant.
+        return " ".join(subparsers.choices[surface].format_help().split())
+
+    @pytest.mark.parametrize("surface", ["sweep-all", "sweep-daemon", "sweep-verify"])
+    def test_k_help_names_the_extinction_grammar(self, surface: str) -> None:
+        text = self._surface_help(surface)
+        assert "'extinction' (the" in text
+        assert "walk k=1,2,3" in text
+        assert "provably nothing deeper survives" in text
+
+    @pytest.mark.parametrize("surface", ["sweep-all", "sweep-daemon", "sweep-verify"])
+    def test_max_combos_help_names_both_mode_arms(self, surface: str) -> None:
+        text = self._surface_help(surface)
+        assert "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS" in text
+        assert "TRIMS the k-ladder" in text
