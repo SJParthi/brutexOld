@@ -17,18 +17,38 @@
 #                        boundary itself stays mutation-gated)
 #   src/enum_kernel.rs — fused k-of-bits enumeration + conflict-pair prune
 #                        (DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738)
-# 699 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from this
-# dir on the DEC-SWEEP-ENUM-RUST-001 slice-1 tree: metrics 358 + trade_sim 167 +
-# python 65 + lib 9 + enum_kernel 100 — after the survivor-killing reshape
-# pass: the pairs-to-bits prefilter was removed and the disjoint-bit `|`s
-# rewritten as exact `+`, deleting the provably-equivalent `|`->`^` mutant
-# class structurally; the remaining enum_kernel mutants ran to ZERO missed
-# locally, 2026-07-11). The +100 (+16.7%) growth is NOT small by the #1597
-# dial (the u128 precedent's +7.7% took +1 shard when the worst +20%-band end
-# hit ~102 min): at 6 shards ceil(699/6) = 117/shard reproduces the SAME
-# ~102-min worst end, so the matrix took the pre-decided +1-shard dial AGAIN
-# (6 -> 7; ceil(699/7) = 100/shard restores the proven ~100-mutant budget —
-# arithmetic in mutation.yml's run-step comment).
+# 803 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from this
+# dir on the DEC-SWEEP-ENUM-RUST-001 slice-1 CONFORMANCE-REWORK tree — the
+# design-of-record `enumerate_prefilter` ranged kernel on the resident
+# `ResidentSweepEnum(U128)` bitplane pyclasses: metrics 358 + trade_sim 167 +
+# python 65 + lib 9 + enum_kernel 204). The exclude_re below drops EXACTLY the
+# 578 whole-function `-> PyResult<(u64,u64,u64,bool,u64,Vec<_>)>` replacement
+# guesses cargo-mutants mints on the two thin pyclass shim METHODS (289 each,
+# all `PyResult::new/from/from_iter` constructor forms — `Result` implements
+# NONE of them, so every one is a provably-UNVIABLE build failure that adds
+# zero gate strength and only shard build-time; verified 2026-07-11:
+# `--list | grep '::enumerate_prefilter' | grep -v 'PyResult::'` is EMPTY, so
+# no body/operator mutant is excluded — any FUTURE body mutant inside the
+# shims stays IN scope because the pattern anchors on the `-> PyResult`
+# whole-fn replacement form; the shim bodies themselves are additionally
+# driven by the Python-side wrapper suites through the real wheel). The
+# rework's +104 net enum_kernel growth (100 -> 204 viable-class mutants) is
+# NOT small by the #1597 dial: at 7 shards ceil(803/7) = 115/shard reproduces
+# the SAME ~102-min worst end that took the 6->7 dial, so the matrix took the
+# pre-decided +1-shard dial AGAIN (7 -> 8; ceil(803/8) = 101/shard restores
+# the proven ~100-mutant budget — arithmetic in mutation.yml's run-step
+# comment).
+# Reworked-kernel kill evidence (2026-07-11): spot-checked 15/15 CAUGHT
+# (`cargo mutants --in-place --baseline skip -F
+# 'EnumPlanes::count_hits|binomial_table'` — the fused min-hits count core +
+# the CNS binomial foundation, CI-exact flags); the FULL 204-mutant
+# zero-survivor verdict is OWNED by the weekly mutation.yml gate and is NOT
+# pre-claimed here (Golden Rule #10 — an in-session full run was started and
+# abandoned at the session budget).
+# First-pass slice-1 history: 699 measured 2026-07-11 pre-rework (enum_kernel
+# 100 as the free-fn `sweep_enum_conflict_free`; ran to ZERO missed locally —
+# that verdict describes the RETIRED free-fn kernel, not the reworked ranged
+# kernel).
 # Pre-slice-1 history: 599 mutants measured 2026-07-08 (metrics 358 +
 # trade_sim 167 + python 65 + lib 9).
 # Measurement history, kept honest (convergence round 1 — the counts here must
@@ -50,3 +70,6 @@
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
 examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs", "src/enum_kernel.rs"]
+# The provably-unviable whole-fn constructor-guess class on the two pyclass
+# shim methods ONLY (rationale + verification in the count block above).
+exclude_re = ['replace Resident\w+::enumerate_prefilter -> PyResult']
