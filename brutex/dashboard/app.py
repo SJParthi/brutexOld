@@ -59,6 +59,7 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
+from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.paths import resolve_lake_root
@@ -3081,6 +3082,12 @@ def build_app(
                 until_clean=True,
                 on_ledger_sync=_ledger_sync,
                 floor_store=instrument_store,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
+                # into the NSE market-hours window (the shared-account belt). The env
+                # kill switch is parsed ONCE here (fail-loud); the bound predicate then
+                # reads the live clock only (no per-window env re-parse → a junk env
+                # set mid-pull can never crash a long pull).
+                market_closed=resolve_market_closed(),
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -3094,7 +3101,15 @@ def build_app(
         # bar's completed / total / bars / failed are driven per-WINDOW from the live
         # WindowLedger via _ledger_sync, so it advances continuously instead of ticking
         # once per finished symbol (DEC-SPOT-WINDOW-PROGRESS-001).
-        started = _pull_job.start(_work, total=unit_total, detail=detail, ledger_synced=True)
+        started = _pull_job.start(
+            _work,
+            total=unit_total,
+            detail=detail,
+            ledger_synced=True,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: a --dry-run pull uses a synthetic
+            # adapter (no Groww API call), so it is EXEMPT from the market-hours gate.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3304,7 +3319,14 @@ def build_app(
         # NOT by the per-pair 4-arg hook — so it fills 0→100% instead of freezing
         # (DEC-METADATA-LIVE-PROGRESS-001). The initial total is the instrument count, a
         # placeholder the first cell-settle resync re-scales to cells (then cells+jobs).
-        started = _pull_job.start(_work, total=len(instruments), detail=detail, ledger_synced=True)
+        started = _pull_job.start(
+            _work,
+            total=len(instruments),
+            detail=detail,
+            ledger_synced=True,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3442,7 +3464,13 @@ def build_app(
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
             composite_detail = label_synthetic(composite_detail)
-        started = _pull_job.start(_work, total=tradable_count, detail=composite_detail)
+        started = _pull_job.start(
+            _work,
+            total=tradable_count,
+            detail=composite_detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3681,7 +3709,13 @@ def build_app(
             _greeks_health.observe(report.greeks_enrich_ok, error=report.greeks_enrich_error)
             return report.to_dict()
 
-        started = _pull_job.start(_work, total=len(selected), detail=detail)
+        started = _pull_job.start(
+            _work,
+            total=len(selected),
+            detail=detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3884,6 +3918,15 @@ def build_app(
             # pulls/processes. A dry-run threads store=None (base-identical).
             form_preference = PersistentSymbolFormPreference(None if dry_run else instrument_store)
 
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: resolve the env kill switch ONCE, here
+            # at pull start (fail-loud on junk), and reuse the SAME bound clock-only
+            # predicate across every phase of this pipeline run — the spot spine's
+            # per-window belt (_run_spot), the metadata phase's per-cell belt
+            # (_run_metadata → pull_expiries_contracts), and the sequencer's
+            # between-phase belt (run_full_pipeline). So a junk BRUTEX_MARKET_HOURS_GUARD
+            # set MID-pull can never crash a long run with a per-call ValueError.
+            _market_closed = resolve_market_closed()
+
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
 
@@ -3920,6 +3963,9 @@ def build_app(
                     until_clean=True,
                     on_ledger_sync=_ledger_sync,
                     floor_store=instrument_store,
+                    # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull
+                    # crosses into the NSE market-hours window (shared-account belt).
+                    market_closed=_market_closed,
                 )
 
             def _run_metadata() -> MetadataPullReport:
@@ -3938,6 +3984,10 @@ def build_app(
                         session_rate=_session_rate,
                         on_progress=partial(_metadata_progress_sync, _pull_job),
                         form_preference=form_preference,
+                        # DEC-GROWW-MARKET-HOURS-GUARD-001: a metadata phase CROSSING
+                        # 08:45 halts mid-phase (per-cell belt), exactly like the
+                        # spot/historical spines — dry-run threads None (never gated).
+                        market_closed=None if dry_run else _market_closed,
                     )
 
             def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
@@ -4444,6 +4494,12 @@ def build_app(
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                         strict_gate=strict_gate,
+                        # DEC-GROWW-MARKET-HOURS-GUARD-001: if this pipeline pull
+                        # reaches the sequencer inside the NSE market-hours window,
+                        # skip the whole vendor chain (spot/metadata/historical), and
+                        # halt between phases if it crosses in. ONE bound predicate,
+                        # env parsed once at pull start (see _market_closed above).
+                        market_closed=_market_closed,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -4531,6 +4587,8 @@ def build_app(
             detail=pipeline_detail,
             ledger_synced=True,
             on_finally=on_finally,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
         )
         if pull_intent_store is not None:
             # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
@@ -4776,12 +4834,24 @@ def build_app(
                 auto_retry=True,
                 until_clean=until_clean,
                 floor_store=instrument_store,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
+                # into the NSE market-hours window (the shared-account belt). The env
+                # kill switch is parsed ONCE here (fail-loud); the bound predicate then
+                # reads the live clock only (no per-window env re-parse → a junk env
+                # set mid-pull can never crash a long pull).
+                market_closed=resolve_market_closed(),
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
 
         unit_total = len(instruments) * len(fetch_intervals)
-        started = _pull_job.start(_work, total=unit_total, detail=detail)
+        started = _pull_job.start(
+            _work,
+            total=unit_total,
+            detail=detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -4941,6 +5011,10 @@ def build_app(
             detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
             ledger_synced=True,
             cross_process_lock=not dry_run,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: the Greeks backfill re-enriches
+            # ALREADY-STORED bars and makes ZERO Groww API calls, so it is EXEMPT
+            # from the market-hours start gate (safe to run in the trading window).
+            market_hours_exempt=True,
         )
         return JSONResponse(
             {

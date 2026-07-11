@@ -412,6 +412,47 @@ def test_ampersand_fallback_stays_one_logical_fetch_for_ledger_accounting() -> N
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# ingest_option_contract — market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001)
+# ─────────────────────────────────────────────────────────────────────────
+def test_option_market_hours_guard_blocked_raises_before_fetch() -> None:
+    from brutex.data.errors import MarketHoursHalt
+
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))
+    sink = _Sink()
+    with pytest.raises(MarketHoursHalt) as excinfo:
+        ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+            market_closed=lambda: True,
+        )
+    assert excinfo.value.reason == "market_hours"
+    assert sdk.calls == 0  # the guard fires before any vendor call
+    assert sink.appends == []
+
+
+def test_option_market_hours_guard_open_does_not_gate() -> None:
+    """market_closed returning False (the A-True/B-False branch) never halts."""
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))
+    sink = _Sink()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+        market_closed=lambda: False,
+    )
+    assert report.windows == 1 and report.bars_appended == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # ingest_option_contract — happy / skip / clamp
 # ─────────────────────────────────────────────────────────────────────────
 def test_ingest_success_no_ledger_no_hooks() -> None:
