@@ -1862,11 +1862,11 @@ class TestStopStartLinearization:
 
     @staticmethod
     def _noop_guard_factory() -> pull_jobs.LeaseFactory:
-        from collections.abc import Iterator
+        from collections.abc import Generator
         from contextlib import contextmanager
 
         @contextmanager
-        def _guard(_root: Path) -> Iterator[None]:  # test double
+        def _guard(_root: Path) -> Generator[None]:  # test double
             yield
 
         return _guard
