@@ -1543,7 +1543,25 @@ fn check_stage1a_batch_values(
     }
     for i in 0..n {
         let du = inp.day_index[i] as usize;
-        let pdc = inp.day_pivot_levels[du * crate::stage1a_batch::PIVOT_ROW_LEN + 9];
+        // Operator-free row addressing (refuter RF-α round-4 F2): the former
+        // `du * PIVOT_ROW_LEN + 9` indexing left two arithmetic mutants in
+        // the cargo-mutants catalog (`+ → *` = an out-of-bounds SIGABRT
+        // class on any multi-day input; `* → /` = equivalent-but-gate-red —
+        // the levels loop above already bar_in_range-checked every element,
+        // so WHICH element the guard reads cannot move the verdict).
+        // `chunks_exact(...).nth(du)` carries no mutable arithmetic; the
+        // let-else Err keeps the never-panic totality (unreachable — the
+        // day_index law in `validate_structure` pins `du < D`).
+        let Some(day_row) = inp
+            .day_pivot_levels
+            .chunks_exact(crate::stage1a_batch::PIVOT_ROW_LEN)
+            .nth(du)
+        else {
+            return Err(format!(
+                "stage1a_batch: day_index {du} beyond the validated day table"
+            ));
+        };
+        let pdc = day_row[9];
         // The day_high/day_low/open_of_day slots get the CURRENT bar's
         // high/low/open — decision-equivalent to the OFF arm's per-bar
         // running-extremes guard (a running extreme IS some earlier bar's
@@ -3296,5 +3314,55 @@ mod tests {
         };
         let err = check_stage1a_batch_values(&inputs).unwrap_err();
         assert!(err.contains("start at 0"), "got: {err}");
+    }
+
+    /// Refuter RF-α round-4 F2(b): the guard's per-bar day-row read walked
+    /// a `du == 0` fixture in EVERY committed cargo test, so the two pdc
+    /// index-arithmetic mutants were invisible (`+ → *` = an out-of-bounds
+    /// SIGABRT on any multi-day flag-ON build). A structurally-valid TWO-DAY
+    /// input exercising `du = 1` pins the multi-day guard path; the read is
+    /// now operator-free (`chunks_exact(...).nth(du)`) so the arithmetic
+    /// mutant class is structurally absent from the catalog as well.
+    #[test]
+    fn stage1a_batch_values_accepts_a_two_day_input() {
+        let two_day_pivots: Vec<i64> = (0..24).map(|i| 10_000 + i).collect();
+        let two_day_fibs: Vec<i64> = (0..30).map(|i| 20_000 + i).collect();
+        let inputs = crate::stage1a_batch::Stage1aBatchInputs {
+            open_paisa: &[10_000, 10_020],
+            high_paisa: &[10_100, 10_120],
+            low_paisa: &[9_900, 9_920],
+            close_paisa: &[10_050, 10_070],
+            typical_paisa: &[10_017, 10_037],
+            volume: &[100, 100],
+            tod_seconds: &[34_000, 34_000],
+            pre_open: &[false, false],
+            session_key: &[0, 0],
+            session_day: &[738_000, 738_001],
+            contract_reset: &[false, false],
+            day_index: &[0, 1],
+            ema20_paisa: &[None, None],
+            ema200_paisa: &[None, None],
+            day_pivot_levels: &two_day_pivots,
+            day_fib_levels: &two_day_fibs,
+            day_has_pivot: &[true, true],
+            day_has_fib: &[true, true],
+            pivot_bps: 10,
+            pdh_pdl_bps: 10,
+            fib_bps: 10,
+            prior_n: 3,
+            fractal_k: 2,
+            apply_1day_mask: false,
+            anchor_dependent_mask: 0,
+            fib_dependent_mask: 0,
+            applies_to_1day_mask: IMPLEMENTED_MASK,
+        };
+        assert!(check_stage1a_batch_values(&inputs).is_ok());
+        // …and the whole pipeline stays total over it.
+        assert_eq!(
+            crate::stage1a_batch::stage1a_bar_bits_batch_impl(&inputs)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }
