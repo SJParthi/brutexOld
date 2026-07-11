@@ -130,6 +130,10 @@
 <link rel="stylesheet" href="/static/bx-theme.css">
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
+<!-- The ONE shared poll-discipline core (DEC-FRONTEND-LATENCY-HARDENING-001,
+     MIGRATION.md #1720): hidden guard, one-in-flight chain, 10 s fetch abort,
+     capped 3 s→30 s backoff, visibilitychange catch-up. -->
+<script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 </head>
@@ -272,7 +276,10 @@ function renderSpot(rows) {
     const N = Number(n || 0), M = Number(m || 0);
     return N > 0 ? '<span class="chip partial">' + N + "/" + M + "</span>" : "—";
   };
-  const body = rows.map((r) =>
+  /* One esc()'d row-string builder shared by the full rebuild AND the
+     in-place tbody patch (the fetch_windows.html / db.html patchGridRows
+     idiom — DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720). */
+  const spotRowsHtml = (rs) => rs.map((r) =>
     "<tr>"
     + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
     + "<td>" + esc(r.exchange) + "</td>"
@@ -283,13 +290,24 @@ function renderSpot(rows) {
     + "<td>" + chip(r.overall) + "</td>"
     + "</tr>"
   ).join("");
+  /* In-place tbody patch: fixed column set, so when the table shell already
+     stands swap ONLY the tbody rows — the SAME esc()'d builder strings the
+     full rebuild writes, against a NARROWER target — instead of tearing down
+     the whole shell + header on every changed mid-pull payload. Empty states
+     and the first paint take the full-rebuild path below (the outer raw-text
+     skip memo already skips identical payloads entirely). */
+  const spotTbody = spotPanel.querySelector("table > tbody");
+  if (spotTbody) {
+    spotTbody.innerHTML = spotRowsHtml(rows);
+    return;
+  }
   spotPanel.innerHTML =
     "<table><thead><tr>"
     + "<th>Symbol</th><th>Exchange</th><th>Category</th>"
     + "<th>1-minute</th><th>1-minute covered</th>"
     + '<th title="sessions whose first stored minute is after the 09:15 IST open — their derived 1-day open is a substituted price (informational)">Open substituted</th>'
     + "<th>Overall</th>"
-    + "</tr></thead><tbody>" + body + "</tbody></table>";
+    + "</tr></thead><tbody>" + spotRowsHtml(rows) + "</tbody></table>";
 }
 
 function renderOptions(rows) {
@@ -297,7 +315,11 @@ function renderOptions(rows) {
     optPanel.innerHTML = '<div class="empty">no option coverage records yet — pull expiries + contracts from the Universe page</div>';
     return;
   }
-  const body = rows.map((r) => {
+  /* One esc()'d row-string builder shared by the full rebuild AND the
+     in-place tbody patch (the fetch_windows.html / db.html patchGridRows
+     idiom — DEC-FRONTEND-LATENCY-HARDENING-001): the ~750-row options table
+     no longer tears down its shell on every changed mid-pull payload. */
+  const optRowsHtml = (rs) => rs.map((r) => {
     // Honest "0 contracts = metadata-only BY DESIGN" annotation (legs discarded —
     // DEC-METADATA-LIVE-PROGRESS-001 / DEC-INSTRUMENT-UNIVERSE-FAST-001); empty otherwise.
     const note = r.contracts_note || "";
@@ -314,30 +336,56 @@ function renderOptions(rows) {
     + "<td>" + esc((r.years || []).join(", ")) + "</td>"
     + "</tr>";
   }).join("");
+  const optTbody = optPanel.querySelector("table > tbody");
+  if (optTbody) {
+    optTbody.innerHTML = optRowsHtml(rows);
+    return;
+  }
   optPanel.innerHTML =
     "<table><thead><tr>"
     + "<th>Underlying</th><th>Exchange</th><th>Category</th><th>Status</th>"
     + "<th>Expiries pulled</th><th>Contracts pulled</th><th>Years</th>"
-    + "</tr></thead><tbody>" + body + "</tbody></table>";
+    + "</tr></thead><tbody>" + optRowsHtml(rows) + "</tbody></table>";
 }
 
 let lastBoardTxt = null;
 let lastLiveLine = "";
 
-async function poll() {
-  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
-     ZERO fetches; the interval keeps ticking (hidden ticks are free) and the
-     visibilitychange listener below re-polls immediately on return. */
-  if (document.hidden) return;
+/* Bounded text fetch (DEC-FRONTEND-LATENCY-HARDENING-001 review fix): the
+   abort timer stays ARMED through the BODY read (the bx-poll.js bxFetchJson
+   precedent) so a headers-then-stalled-body response aborts too — under
+   BXPoll's one-in-flight scheduling an unresolved tick would never
+   reschedule (the frozen-tab class the migration exists to prevent).
+   timeoutMs is the seam's own bound (BXPoll passes FETCH_TIMEOUT_MS); the
+   legacy no-BXPoll arm defaults to the sibling pages' 12 s. */
+function fetchTextBounded(url, timeoutMs) {
+  const ms = (typeof timeoutMs === "number" && timeoutMs > 0) ? timeoutMs : 12000;
+  const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  const timer = setTimeout(function () { if (ctrl) { ctrl.abort(); } }, ms);
+  const init = ctrl ? { signal: ctrl.signal } : {};
+  return fetch(url, init)
+    .then(function (r) {
+      /* timer deliberately still armed through the body read */
+      return r.text().then(function (txt) {
+        return { ok: r.ok, status: r.status, text: txt };
+      });
+    })
+    .then(
+      function (res) { clearTimeout(timer); return res; },
+      function (err) { clearTimeout(timer); throw err; }
+    );
+}
+
+async function poll(timeoutMs) {
   try {
-    const r = await fetch("/api/v1/completeness/scoreboard");
-    if (!r.ok) { lastBoardTxt = null; liveTxt.textContent = "error " + r.status; return; }
+    const res = await fetchTextBounded("/api/v1/completeness/scoreboard", timeoutMs);
+    if (!res.ok) { lastBoardTxt = null; liveTxt.textContent = "error " + res.status; return false; }
     /* Skip-render-when-unchanged (DEC-DASHBOARD-POLL-HYGIENE-001): the ~750-row
        options table is a full innerHTML rebuild — compare the RAW response text
        and replay the heartbeat line instead of rebuilding identical DOM every
        4 s (the coverage.html / fetch_windows.html sibling memo). */
-    const txt = await r.text();
-    if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return; }
+    const txt = res.text;
+    if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return true; }
     lastBoardTxt = txt;
     const board = JSON.parse(txt);
     renderCards(board);
@@ -349,18 +397,51 @@ async function poll() {
       + " option underlyings · spot = exact (window-ledger) · options = stability, not a fabricated %";
     lastLiveLine = "live · " + sp + " spot · " + op + " options";
     liveTxt.textContent = lastLiveLine;
+    return true;
   } catch (e) {
     lastBoardTxt = null;
     liveTxt.textContent = "offline";
+    return false;
   }
 }
 
-poll();
-setInterval(poll, 4000);
-/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001). */
-document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) poll();
-});
+/* Self-recovering scheduler (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md
+   #1720): the tick above rides the ONE shared BXPoll discipline core
+   (bx-poll.js — hidden-tab guard BEFORE any fetch, one-in-flight
+   self-scheduling chain so a slow scoreboard read can never overlap the next
+   tick, capped 3 s→30 s failure backoff, visibilitychange catch-up) instead
+   of a bare fixed setInterval + un-timed fetch scheduling; the visible-tab
+   cadence is unchanged (pollMs: 4000) and every render/degrade above is
+   byte-identical. The poller starts at DOMContentLoaded, by which every
+   deferred script has executed; a missing bx-poll.js degrades to the legacy
+   guarded interval — the page never goes pollerless. */
+function startPolling() {
+  if (window.BXPoll) {
+    window.BXPoll.createPoller({
+      url: "/api/v1/completeness/scoreboard", // informational — the tick owns its own fetch
+      pollMs: 4000,
+      fetchJson: function (_url, timeoutMs) {
+        return poll(timeoutMs).then(function (ok) {
+          if (!ok) { throw new Error("completeness poll tick failed"); }
+          return { ok: true };
+        });
+      },
+      onData: function () { /* the tick already rendered */ }
+    }).start();
+  } else {
+    const legacyTick = function () { if (!document.hidden) void poll(); };
+    legacyTick();
+    setInterval(legacyTick, 4000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) void poll();
+    });
+  }
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startPolling);
+} else {
+  startPolling();
+}
 </script>
 </body>
 </html>
