@@ -1,0 +1,171 @@
+# lake-rust-parity.yml — the brutex-lake crate build + byte-parity lane.
+#
+# ADR-0019 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726). The
+# data-lake Rust render seam is DEFAULT-OFF behind BRUTEX_LAKE_RUST_RENDER
+# and the main CI test job deliberately never installs the crate (the facade
+# degrades loudly to the Python render when it is absent), so this dedicated
+# lane is where the crate has teeth:
+#
+#   1. cargo fmt / clippy -D warnings / test (incl. the lockstep pins:
+#      manifest tag == PINNED_POLARS_PY_VERSION, linked libzstd ==
+#      PINNED_LIBZSTD_VERSION, IPC→parquet round-trip, row-group boundary,
+#      error paths).
+#   2. maturin wheel build + install beside the repo's Python deps.
+#   3. The REAL-crate byte-parity corpus
+#      (tests/golden/test_lake_rust_render_parity.py — the spike's 5 cases
+#      regenerated through the REAL ParquetWriter._render_bytes, Rust vs
+#      Python sha256 + raw bytes equal, plus the whole-write-path ON/OFF
+#      parity through ParquetWriter.write) and the crate-free facade unit
+#      suites.
+#
+# NOT a required gate (coordinator ruling): it gates the FUTURE default-ON
+# flip, not every PR — a red run here blocks re-engaging the flag, never an
+# unrelated merge. Path-triggered on the crate + the seam + the suites +
+# itself, plus workflow_dispatch for the lockstep ritual's manual re-run
+# (docs/runbooks/lake-rust-render-lockstep.md).
+#
+# COST HONESTY: a cold run compiles the polars git graph from source — the
+# spike measured ~6.5 min wall / ~24 min CPU / ~12 GB target dir in release;
+# the cargo cache below (keyed on the polars tag + Cargo.lock hash) makes
+# warm runs cheap. The timeout budgets the cold path.
+
+name: lake-rust-parity
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+    paths:
+      - "rust/brutex-lake/**"
+      - "brutex/data/parquet_writer.py"
+      - "brutex/data/lake_rust_render.py"
+      - "tests/unit/test_lake_rust_render.py"
+      - "tests/unit/test_parquet_writer_rust_render.py"
+      - "tests/golden/test_lake_rust_render_parity.py"
+      - ".github/workflows/lake-rust-parity.yml"
+  pull_request:
+    paths:
+      - "rust/brutex-lake/**"
+      - "brutex/data/parquet_writer.py"
+      - "brutex/data/lake_rust_render.py"
+      - "tests/unit/test_lake_rust_render.py"
+      - "tests/unit/test_parquet_writer_rust_render.py"
+      - "tests/golden/test_lake_rust_render_parity.py"
+      - ".github/workflows/lake-rust-parity.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # brutex-lake needs rustc >= 1.95 (the polars graph at py-1.42.1 resolves
+  # sysinfo 0.39.x, MSRV 1.95) — DELIBERATELY newer than ci.yml's
+  # RUST_VERSION 1.93.1, which stays authoritative for fno-math /
+  # trading-core. 1.97.0 is the spike-proven toolchain; parquet bytes are
+  # compiler-version independent (spike: debug == release == wheel).
+  LAKE_RUST_VERSION: "1.97.0"
+  # Cargo network resilience — the ci.yml convention (crates.io + git-dep
+  # downloads flake on GitHub-hosted runners; retry + system-git fetches).
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONHASHSEED: "0"
+  HYPOTHESIS_PROFILE: "ci"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  lake-rust-parity:
+    name: brutex-lake build + byte-parity corpus
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (>= 1.95 — the brutex-lake floor)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.LAKE_RUST_VERSION }}
+          components: rustfmt,clippy
+
+      - name: Cache cargo (keyed on the polars tag + Cargo.lock)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/brutex-lake -> target
+          # The polars git tag is the dominant cache invalidator: a lockstep
+          # bump recompiles the whole polars graph, so key on the tag string
+          # (extracted from the manifest) + the lockfile hash.
+          key: polars-${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock') }}
+
+      - name: cargo fmt --check
+        working-directory: rust/brutex-lake
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings
+        working-directory: rust/brutex-lake
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test (incl. the lockstep + libzstd pins)
+        working-directory: rust/brutex-lake
+        run: cargo test --release
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install brutex (data extra) + the brutex-lake wheel
+        # Belt-and-suspenders crates.io/git flake guard on the maturin build
+        # (the cargo download point) — the ci.yml retry idiom, POSIX sh.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[data,dev]"
+          pip install maturin
+          n=0
+          until pip install ./rust/brutex-lake; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-lake failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-lake failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Wheel/crate polars version drift check (WARN-only — visibility ruling)
+        # Non-fatal by coordinator ruling: the runtime version guard already
+        # fail-closes the flag on a mismatch; this step makes the drift
+        # VISIBLE in the workflow log the moment the installed wheel moves
+        # past the crate pin (the parity suite below then SKIPS loudly, so a
+        # silent all-skipped-green run is impossible to misread).
+        run: |
+          python - <<'EOF'
+          import polars, brutex_lake
+          installed = polars.__version__
+          pinned = brutex_lake.pinned_polars_version()
+          if installed != pinned:
+              print(
+                  f"::warning title=lake-rust lockstep drift::installed polars "
+                  f"{installed} != crate pin {pinned} — the version guard keeps the "
+                  f"Rust render OFF; run the lockstep ritual "
+                  f"(docs/runbooks/lake-rust-render-lockstep.md)"
+              )
+          else:
+              print(f"lockstep aligned: polars {installed} == crate pin {pinned} "
+                    f"(libzstd {brutex_lake.linked_zstd_version()})")
+          EOF
+
+      - name: Byte-parity corpus + facade suites
+        # The parity suite auto-SKIPS (loudly) on a version-guard mismatch —
+        # -rs surfaces every skip reason in the log so a drifted run reads
+        # as "skipped: lockstep" and never as a silent green.
+        run: |
+          pytest -rs -q \
+            tests/golden/test_lake_rust_render_parity.py \
+            tests/unit/test_lake_rust_render.py \
+            tests/unit/test_parquet_writer_rust_render.py
