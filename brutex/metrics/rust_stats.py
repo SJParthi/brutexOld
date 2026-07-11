@@ -121,7 +121,9 @@ fresh view for test isolation.
   :func:`_safe_context` (a raising or str-subclass-returning ``repr``
   degrades to a typed placeholder; output clamped at
   :data:`_CONTEXT_MAX_CHARS` with an honest truncation marker;
-  ``MemoryError`` re-raises BARE — the same global-stop carve-out as the
+  ``MemoryError`` re-raises BARE and every non-``Exception``
+  ``BaseException`` — KeyboardInterrupt/SystemExit/GeneratorExit —
+  likewise propagates bare, the same global-stop carve-out as the
   kernel call's narrow catch), kernel results are exact-TYPE validated
   (``type(result) is int`` — an ``int``-SUBCLASS result from a byzantine
   wheel is REFUSED before any comparison can dispatch its foreign
@@ -415,7 +417,12 @@ def _valid_pass_count(result: object, n_total: int) -> TypeGuard[int]:
     ``bool`` is excluded for free (``type(True)`` is ``bool``, not
     ``int``); the ``[0, n_total]`` range check on the proven-exact int is
     C-level total. A result inside this domain that is nonetheless WRONG
-    is the burn-in compare's + the parity/golden suites' layer to catch.
+    is the burn-in compare's + the parity/golden suites' layer to catch —
+    a layer with 1-ULP teeth: the round-5 ULP-boundary discriminator pins
+    (nextafter-bracketed thresholds at achieved fold Sharpes over
+    NON-power-of-2 group counts) fail on any kernel whose fold arithmetic
+    drifts by even one ULP on those fixtures, the class the value-level
+    parity cases alone were proven blind to (MIGRATION.md #1728 round 5).
     """
     return type(result) is int and 0 <= result <= n_total
 
@@ -476,11 +483,17 @@ def _safe_context(value: object) -> str:
       placeholder (a hostile subclass could smuggle lying
       ``__len__``/slicing dispatch into the clamp or the renderer);
     * the output is length-clamped via :func:`_bounded_text`;
-    * ``MemoryError`` re-raises BARE — the documented global-stop
-      carve-out, the same law as the kernel call's narrow catch (OOM is
-      never swallowed into a log placeholder; the one deliberate ON-only
-      raise this helper keeps, inside the module's disclosed exception
-      envelope).
+    * the guard catches ``Exception`` ONLY, so the FULL global-stop family
+      propagates BARE (the documented carve-out, the same law as the
+      kernel call's narrow catch): ``MemoryError`` — an ``Exception``
+      subclass — is re-raised explicitly (OOM is never swallowed into a
+      log placeholder), and every non-``Exception`` ``BaseException``
+      (``KeyboardInterrupt`` / ``SystemExit`` / ``GeneratorExit`` / a raw
+      ``BaseException``) from a byzantine ``__repr__`` passes the
+      ``except Exception`` arm untouched — these are the deliberate
+      ON-only raises this helper keeps, inside the module's disclosed
+      exception envelope (refuter round 5 completed the enumeration: the
+      pre-round-5 wording named only MemoryError).
     """
     try:
         text: object = repr(value)

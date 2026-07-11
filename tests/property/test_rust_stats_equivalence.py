@@ -42,6 +42,8 @@ from __future__ import annotations
 import math
 import struct
 from decimal import Decimal
+from itertools import combinations
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -56,6 +58,9 @@ from brutex.metrics.cpcv import (
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
+
+if TYPE_CHECKING:
+    import numpy.typing as npt
 
 
 @st.composite
@@ -221,6 +226,116 @@ def test_strict_gt_boundary_at_achieved_fold_sharpe() -> None:
     on_b, _ = _rate_under_flag("1", returns, s, k, below, burn_in=True)
     assert struct.pack("<d", on_b) == struct.pack("<d", off_b)
     assert on_b > on_rate
+
+
+# ── ULP-boundary discriminators at the RATE level (refuter round 5) ──────
+# The pre-round-5 blind spot: `test_strict_gt_boundary_at_achieved_fold_
+# sharpe` uses 8 samples / 4 groups → n_b = 2 (a power of 2 — multiply/
+# divide by 2^k is exact, so an algebraically-equal fold-op-order swap in
+# the KERNEL is bit-invisible there), and a random threshold lands within
+# 1 ULP of a fold Sharpe with probability ~1e-16 — a 1-ULP fold-order
+# mutant WHEEL passed all 52 pre-round-5 Python-side tests. These twins use
+# NON-power-of-2 group counts whose fold arithmetic is proven
+# rounding-ACTIVE in-test, with the threshold nextafter-bracketed at an
+# achieved fold Sharpe, so the ON arm's steady-state (raw-kernel) rate
+# flips against the OFF (oracle) rate on ANY ≥1-ULP kernel fold drift.
+
+
+def _witness_reorder_fold(
+    count: npt.NDArray[np.intp],
+    mean: npt.NDArray[np.float64],
+    m2: npt.NDArray[np.float64],
+    combo: tuple[int, ...],
+) -> float | None:
+    """The op-order WITNESS (`delta * n_b / combined` → `delta / combined *
+    n_b` in the mean update — the mutant that survived the pre-round-5
+    battery), used ONLY to prove a fixture's fold arithmetic rounds
+    differently under reordering; never an oracle."""
+    n_total = 0
+    mean_total = 0.0
+    m2_total = 0.0
+    for gid in combo:
+        n_b = int(count[gid])
+        mean_b = float(mean[gid])
+        m2_b = float(m2[gid])
+        combined = n_total + n_b
+        delta = mean_b - mean_total
+        mean_total += delta / combined * n_b  # the ONE reorder under test
+        m2_total += m2_b + delta * delta * n_total * n_b / combined
+        n_total = combined
+    if n_total < 2:
+        return None
+    variance = m2_total / n_total
+    if not math.isfinite(variance) or variance <= 0.0:
+        return None
+    return mean_total / math.sqrt(variance)
+
+
+def _first_rounding_active_fold(
+    count: npt.NDArray[np.intp],
+    mean: npt.NDArray[np.float64],
+    m2: npt.NDArray[np.float64],
+    s: int,
+    k: int,
+) -> float:
+    """First lexicographic fold Sharpe the reorder witness MOVES — raises
+    when the fixture is not rounding-active (a defanged fixture must fail
+    loudly, never pin vacuously)."""
+    for combo in combinations(range(s), k):
+        s_star = _combine_moments(count, mean, m2, combo)
+        if s_star is None:
+            continue
+        if _witness_reorder_fold(count, mean, m2, combo) != s_star:
+            return s_star
+    raise AssertionError("fixture is not rounding-active — the ULP bracket would be vacuous")
+
+
+def _assert_ulp_bracket_on_off_bit_equal(returns: list[float], s: int, k: int) -> None:
+    """Drive both arms at (S*, nextafter(S*, -inf)) around an achieved,
+    rounding-active fold Sharpe; steady state so the ON arm serves the
+    kernel's RAW answer (a burn-in mismatch would ship the oracle value —
+    rates equal — and the helper's latch assert catches that instead)."""
+    arr = np.asarray(returns, dtype=np.float64)
+    count, mean, m2 = _group_moments(arr, _group_bounds(len(returns), s))
+    s_star = _first_rounding_active_fold(count, mean, m2, s, k)
+    below = math.nextafter(s_star, -math.inf)
+    off_at, off_engaged = _rate_under_flag("0", returns, s, k, s_star, burn_in=False)
+    on_at, on_engaged = _rate_under_flag("1", returns, s, k, s_star, burn_in=False)
+    assert not off_engaged
+    assert on_engaged  # never vacuous — the kernel genuinely served
+    assert struct.pack("<d", on_at) == struct.pack("<d", off_at)
+    off_below, _ = _rate_under_flag("0", returns, s, k, below, burn_in=False)
+    on_below, on_below_engaged = _rate_under_flag("1", returns, s, k, below, burn_in=False)
+    assert on_below_engaged
+    assert struct.pack("<d", on_below) == struct.pack("<d", off_below)
+    # The bracket is ACHIEVED: the bracketed fold itself flips between the
+    # two thresholds (strict `>` at S* → non-pass; one ULP below → pass).
+    assert on_below > on_at
+
+
+def test_ulp_bracket_non_pow2_group_counts_rate_level() -> None:
+    """Non-power-of-2 group sizes (20 samples / 3 groups → 7/7/6) with the
+    threshold ULP-bracketed at an achieved fold Sharpe — the deterministic
+    rate-level discriminator that kills fold-op-order kernel drift in the
+    shipped wheel (fail-against-mutant-wheel proven — MIGRATION.md #1728
+    round-5 record)."""
+    returns = [
+        1.2e-05, 0.002987, -0.002741, -0.008906, -0.004547,
+        -0.009916, 0.000601, 0.013402, -0.004922, -0.006205,
+        0.004898, 0.003569, 0.001054, -0.009305, -0.000293,
+        0.006953, -0.013442, -0.004576, -0.019012, -0.012895,
+    ]  # fmt: skip
+    _assert_ulp_bracket_on_off_bit_equal(returns, 3, 2)
+
+
+def test_ulp_bracket_production_shape_non_pow2_counts() -> None:
+    """The production-shape twin: S=16, k=8 over 150 samples → group sizes
+    10 and 9 (both non-power-of-2, unlike the 512-sample sibling whose
+    32-per-group shape is reorder-exact) — the C(16,8)=12,870-fold path
+    under a ULP-bracketed threshold."""
+    rng = np.random.default_rng(20260711)
+    returns = np.round(rng.normal(0.0, 0.01, 150), 6).tolist()
+    _assert_ulp_bracket_on_off_bit_equal(returns, 16, 8)
 
 
 class _ReversedFloat(float):

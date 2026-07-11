@@ -23,6 +23,7 @@ import math
 import struct
 import sys
 from decimal import Decimal
+from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,7 @@ import numpy as np
 import pytest
 from brutex.metrics import rust_stats
 from brutex.metrics.cpcv import (
+    _combine_moments,  # pyright: ignore[reportPrivateUsage]
     _fold_pass_count,  # pyright: ignore[reportPrivateUsage]
     _group_bounds,  # pyright: ignore[reportPrivateUsage]
     _group_moments,  # pyright: ignore[reportPrivateUsage]
@@ -531,7 +533,7 @@ def test_min_sharpe_nan_takes_the_oracle_by_design() -> None:
 
 
 def test_refuter_round1_rate_level_on_off_bit_equal_and_no_false_autorevert() -> None:
-    """Rate-level refuter repro VERBATIM (scratchpad repro_int_minsharpe.py,
+    """Rate-level refuter repro VERBATIM (the refuter round-1 repro script,
     made deterministic): ULP-wobble returns around 1.0 whose fold Sharpe is
     EXACTLY ``2^53 + 4``, with the int threshold ``2^53 + 3`` one below it.
     Pre-guard: OFF read 2/6 while ON read 0.0 (bits differ) and the burn-in
@@ -608,7 +610,7 @@ class _FloatReturnsStr:
 
 
 def test_min_sharpe_float_subclass_refuses_to_oracle_on_off_bit_equal() -> None:
-    """Refuter-round-2 D2 repro VERBATIM (rA2_float_subclass.py): pre-fix
+    """Refuter-round-2 D2 repro VERBATIM (the round-2 repro script): pre-fix
     the ordering-reversed subclass gave steady-state ON 0.833… ≠ OFF 0.166…
     (bits differ) and the burn-in falsely LATCHED the faithful kernel
     (got=5 want=1). Post-fix the exact-type gate refuses the subclass
@@ -643,7 +645,7 @@ def test_min_sharpe_float_subclass_refuses_to_oracle_on_off_bit_equal() -> None:
 
 @pytest.mark.parametrize("huge", [10**400, -(10**400), 2**1024])
 def test_min_sharpe_int_past_float_range_refuses_not_crashes(huge: int) -> None:
-    """Refuter-round-2 D1 repro (repro_hugeint_minsharpe.py): a type-legal
+    """Refuter-round-2 D1 repro (the round-2 repro script): a type-legal
     ``int`` past float range makes ``float()`` raise OverflowError — pre-fix
     the hoisted conversion sat OUTSIDE the narrow catch and CRASHED the ON
     arm where OFF returns a rate. Post-fix the overflow is caught into the
@@ -797,7 +799,7 @@ def test_min_sharpe_bool_engages_the_kernel(exact_bool: bool) -> None:
 
 
 class _MetaRaisingName(type):
-    """Refuter-1 round-3 attack verbatim (repro_metaclass_name.py): a
+    """Refuter-1 round-3 attack verbatim (the round-3 repro script): a
     metaclass whose ``__name__`` is a raising property — it shadows
     ``type``'s C-level getset for ordinary attribute lookup, so the
     pre-fix ``ms_type.__name__`` raised RuntimeError ON-only."""
@@ -816,7 +818,7 @@ class _HostileNamed(metaclass=_MetaRaisingName):
 
 
 def test_min_sharpe_hostile_metaclass_name_refuses_on_off_identical() -> None:
-    """Refuter-round-3 R3-2 repro VERBATIM (r3ref1/repro_metaclass_name.py):
+    """Refuter-round-3 R3-2 repro VERBATIM (the round-3 repro script):
     pre-fix OFF returned 1.0 (the oracle dispatches the object's reflected
     ``__lt__``) while ON raised RuntimeError from the foreign refusal's
     ``ms_type.__name__`` lookup through the hostile METACLASS MRO — on
@@ -847,7 +849,7 @@ def test_min_sharpe_hostile_metaclass_name_refuses_on_off_identical() -> None:
 
 
 def test_min_sharpe_int_past_repr_digit_limit_refuses_not_crashes() -> None:
-    """Refuter-round-3 R3-1 repro VERBATIM (r3r3_repro_bigint_repr.py): a
+    """Refuter-round-3 R3-1 repro VERBATIM (the round-3 repro script): a
     type-legal exact int past BOTH float range and CPython's int→str digit
     cap took the OverflowError refusal arm and then CRASHED in the
     refusal's own ``repr(min_sharpe)`` (ValueError: Exceeds the limit …) —
@@ -905,7 +907,7 @@ def test_min_sharpe_int_past_repr_digit_limit_refuses_not_crashes() -> None:
 
 
 class _HostileReprError(ValueError):
-    """Round-4 case C verbatim (r4_repro_refused_context.py): a ValueError
+    """Round-4 case C verbatim (the round-4 repro script): a ValueError
     SUBCLASS — squarely inside the narrow catch — whose ``__repr__`` raises."""
 
     def __repr__(self) -> str:
@@ -1002,6 +1004,38 @@ def test_safe_context_memory_error_propagates_bare() -> None:
         _safe_context(_OomRepr())
 
 
+class _BaseExcRepr:
+    """A ``__repr__`` raising a NON-``Exception`` ``BaseException`` — the
+    rest of the global-stop family the ``except Exception`` guard
+    deliberately lets through (refuter-round-5 INFO: the pre-round-5
+    docstring named only MemoryError)."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def __repr__(self) -> str:
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc_type",
+    [KeyboardInterrupt, SystemExit, GeneratorExit],
+    ids=lambda t: str(t.__name__),
+)
+def test_safe_context_non_exception_base_exceptions_propagate_bare(
+    exc_type: type[BaseException],
+) -> None:
+    """The FULL global-stop carve-out, docstring-truth pin (refuter round
+    5): ``_safe_context`` catches ``Exception`` ONLY, so a byzantine
+    ``__repr__`` raising KeyboardInterrupt/SystemExit/GeneratorExit
+    propagates BARE exactly like the explicitly re-raised MemoryError — a
+    global stop is never swallowed into a log placeholder (correct and
+    idiomatic; production-unreachable — the real kernel returns a plain
+    int / raises a plain ValueError)."""
+    with pytest.raises(exc_type):
+        _safe_context(_BaseExcRepr(exc_type()))
+
+
 def test_safe_context_str_subclass_repr_is_refused() -> None:
     """A ``repr`` returning a str SUBCLASS is refused into the placeholder
     (kills the ``type(text) is str`` exactness-check mutants)."""
@@ -1035,7 +1069,7 @@ def test_safe_context_huge_int_digit_cap_placeholder() -> None:
 
 
 def test_byzantine_huge_int_result_refused_total_on_off_bit_equal() -> None:
-    """Round-4 case A verbatim (r4_repro_refused_context.py): a byzantine
+    """Round-4 case A verbatim (the round-4 repro script): a byzantine
     kernel returns 10**5000 — domain-invalid, so the refusal fires, and
     pre-fix the refusal's OWN ``result=repr(result)`` raised ValueError
     (digit cap) ON-only where OFF returns a rate. Post-fix: ONE
@@ -1245,6 +1279,169 @@ def test_kernel_matches_python_oracle_on_real_inputs() -> None:
         assert got == expected
 
 
+# ── ULP-boundary kernel-drift discriminators (refuter round 5) ───────────
+# Refuter-round-5 CONFIRMED finding (refuter 2, MINOR — fix round 6): the
+# Python-side ON-arm parity battery was BLIND to ULP-level fold-order kernel
+# drift — an algebraically-equal op-order swap in the kernel's mean update
+# (`delta * n_b / combined` → `delta / combined * n_b`, cpcv.rs fold_sharpe)
+# rebuilt into the wheel passed ALL 52 pre-round-5 Python-side parity/golden
+# tests, because every engineered boundary case used power-of-2 group counts
+# (multiply/divide by 2^k is exact, so both orders are bit-identical) and a
+# random threshold lands within 1 ULP of a fold Sharpe with probability
+# ~1e-16. These pins close the gap AT the Python battery: over fixtures with
+# NON-power-of-2 group counts whose fold arithmetic is proven rounding-ACTIVE
+# in-test (against the op-order witness below), the threshold is
+# nextafter-BRACKETED around an achieved fold Sharpe S*, so the integer
+# pass-count pair (min_sharpe=S* → that fold is a strict-`>` NON-pass;
+# min_sharpe=nextafter(S*, -inf) → it MUST pass) flips on ANY ≥1-ULP drift
+# of that fold's kernel Sharpe, in either direction. Fail-against-mutant-
+# wheel PROVEN for the op-order swap (M11) and the MIN_SAMPLES 2→1 mutant
+# (M10) — the MIGRATION.md #1728 round-5 record carries the transcript.
+
+
+def _mutant_order_fold_sharpe(
+    counts: npt.NDArray[np.intp],
+    means: npt.NDArray[np.float64],
+    m2s: npt.NDArray[np.float64],
+    group_ids: tuple[int, ...],
+) -> float | None:
+    """The refuter-round-5 op-order WITNESS — the oracle fold with the ONE
+    algebraically-equal mean-update reorder that survived the whole
+    pre-round-5 Python battery. NOT an oracle: it exists solely to prove a
+    fixture's fold arithmetic is rounding-ACTIVE (the two orders round
+    differently there), so the nextafter-bracketed threshold pins genuinely
+    carry 1-ULP teeth on that fixture — a fixture the witness cannot move
+    fails :func:`_first_rounding_active_fold_sharpe` loudly, never pins
+    vacuously."""
+    n_total = 0
+    mean_total = 0.0
+    m2_total = 0.0
+    for gid in group_ids:
+        n_b = int(counts[gid])
+        mean_b = float(means[gid])
+        m2_b = float(m2s[gid])
+        combined = n_total + n_b
+        delta = mean_b - mean_total
+        mean_total += delta / combined * n_b  # the ONE reorder under test
+        m2_total += m2_b + delta * delta * n_total * n_b / combined
+        n_total = combined
+    if n_total < 2:
+        return None
+    variance = m2_total / n_total
+    if not math.isfinite(variance) or variance <= 0.0:
+        return None
+    return mean_total / math.sqrt(variance)
+
+
+def _first_rounding_active_fold_sharpe(
+    counts: npt.NDArray[np.intp],
+    means: npt.NDArray[np.float64],
+    m2s: npt.NDArray[np.float64],
+    k: int,
+) -> float:
+    """The first lexicographic fold whose Sharpe the op-order witness MOVES.
+
+    The fixture-sensitivity gate: raises when the fixture has no
+    rounding-active fold (power-of-2 counts / order-insensitive moments), so
+    a future fixture edit can never silently defang the ULP pins."""
+    for combo in combinations(range(len(counts)), k):
+        s_star = _combine_moments(counts, means, m2s, combo)
+        if s_star is None:
+            continue
+        if _mutant_order_fold_sharpe(counts, means, m2s, combo) != s_star:
+            return s_star
+    raise AssertionError("fixture is not rounding-active — the ULP pin would be vacuous")
+
+
+#: (counts, means, m2s, k) across (S, k) shapes AND magnitude regimes; every
+#: counts vector is non-power-of-2 (the class the pre-round-5 battery never
+#: exercised at a bracketed threshold).
+_ULP_FIXTURES = [
+    pytest.param([7, 4, 9], [0.1, 0.3, -0.11], [0.5, 0.25, 1.3], 2, id="s3_k2_mag_e-1"),
+    pytest.param(
+        [3, 5, 7, 11, 13],
+        [1.1e-9, -2.3e-9, 3.1e-9, -0.7e-9, 1.9e-9],
+        [1e-19, 3e-19, 7e-19, 2e-19, 5e-19],
+        3,
+        id="s5_k3_mag_e-9",
+    ),
+    pytest.param(
+        [9, 7, 5, 3, 11, 13],
+        [1.1e6, -0.3e6, 0.7e6, 1.9e6, -1.3e6, 0.9e6],
+        [1e13, 3e13, 7e13, 2e13, 5e13, 4e13],
+        4,
+        id="s6_k4_mag_e6",
+    ),
+]
+
+
+@pytest.mark.parametrize(("counts", "means", "m2s", "k"), _ULP_FIXTURES)
+def test_ulp_bracketed_thresholds_discriminate_kernel_fold_drift(
+    counts: list[int], means: list[float], m2s: list[float], k: int
+) -> None:
+    """The ULP-boundary discriminator (refuter-round-5 F1 closed): with the
+    threshold AT an achieved fold Sharpe S* the fold is a strict-``>``
+    NON-pass, and at ``nextafter(S*, -inf)`` it MUST pass — the kernel's
+    integer counts must equal the oracle's EXACTLY at both thresholds
+    (steady state, so the kernel's RAW answer is compared, never the
+    burn-in-shipped oracle value). Any kernel whose fold arithmetic drifts
+    by even 1 ULP on the bracketed fold flips one of the two counts."""
+    counts_a = np.array(counts, dtype=np.intp)
+    means_a = np.array(means, dtype=np.float64)
+    m2s_a = np.array(m2s, dtype=np.float64)
+    s = len(counts)
+    s_star = _first_rounding_active_fold_sharpe(counts_a, means_a, m2s_a, k)
+    below = math.nextafter(s_star, -math.inf)
+    n_total = math.comb(s, k)
+    oracle_at = _fold_pass_count(counts_a, means_a, m2s_a, s, k, s_star)
+    oracle_below = _fold_pass_count(counts_a, means_a, m2s_a, s, k, below)
+    assert oracle_below - oracle_at >= 1  # the bracket sits AT an achieved fold Sharpe
+
+    def _forbidden() -> int:
+        raise AssertionError("steady state must not run the burn-in oracle")
+
+    reset_self_check_for_tests("cpcv", remaining=0)  # steady state: the kernel's RAW answer
+    with capture_logs() as logs:
+        got_at = cpcv_pass_count_via_kernel(
+            counts_a, means_a, m2s_a, k, s_star, n_total=n_total, oracle=_forbidden
+        )
+        got_below = cpcv_pass_count_via_kernel(
+            counts_a, means_a, m2s_a, k, below, n_total=n_total, oracle=_forbidden
+        )
+    assert got_at == oracle_at
+    assert got_below == oracle_below
+    assert any(e["event"] == "rust_stats.engaged" for e in logs)  # never vacuous
+    assert not any(e["event"] == "rust_stats.fallback" for e in logs)
+    assert kernel_disabled("cpcv") is False
+
+
+def test_kernel_min_samples_law_on_count1_groups_with_positive_m2() -> None:
+    """The MIN_SAMPLES law through the PYTHON battery (kills the kernel's
+    ``MIN_SAMPLES 2→1`` mutant — refuter-round-5 M10): k=1 folds over
+    count-1 groups have ``n_total = 1 < _MIN_SAMPLES`` — undefined, a
+    NON-pass on BOTH engines even with positive M2. The moment shape is
+    deliberately UNREACHABLE from ``_group_moments`` (a count-1 group
+    always carries M2 == 0.0 exactly there, where variance ≤ 0 makes the
+    fold a non-pass under either constant) — this drives the seam's public
+    FFI surface directly, the same driver-level fixture the in-crate cargo
+    kill uses; under the mutant every fold computes variance = 1.0 > 0 and
+    Sharpe 5/6/7 > 0 → count 3, not 0."""
+    counts = np.array([1, 1, 1], dtype=np.intp)
+    means = np.array([5.0, 6.0, 7.0], dtype=np.float64)
+    m2s = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+    assert _fold_pass_count(counts, means, m2s, 3, 1, 0.0) == 0  # the oracle law
+
+    def _forbidden() -> int:
+        raise AssertionError("steady state must not run the burn-in oracle")
+
+    reset_self_check_for_tests("cpcv", remaining=0)
+    with capture_logs() as logs:
+        got = cpcv_pass_count_via_kernel(counts, means, m2s, 1, 0.0, n_total=3, oracle=_forbidden)
+    assert got == 0
+    assert any(e["event"] == "rust_stats.engaged" for e in logs)  # never vacuous
+    assert not any(e["event"] == "rust_stats.fallback" for e in logs)
+
+
 # ── the round-4 STRUCTURAL pin: log-context totality by construction ─────
 
 
@@ -1259,15 +1456,62 @@ class TestLogContextStructuralPin:
     a call to a sanctioned total helper — a bare ``repr(...)`` /
     ``str(...)`` / f-string context fails this pin at the exact line — and
     the ``repr``/``str`` builtins may appear ONLY inside the sanctioned
-    helper bodies (where they are guarded + bounded).
+    helper bodies (where they are guarded + bounded). Round-5 extension
+    (refuter-1 INFO closed): the pin RECURSES into a sanctioned helper's
+    own ARGUMENTS — an f-string / bare stringification NESTED inside a
+    helper call (``_safe_context(f"{x}")``) is evaluated BEFORE the helper
+    runs and could raise ON-only, so helper args must themselves be total
+    by construction (constants, plain names, or nested total-helper calls,
+    recursively).
     """
 
     _SANCTIONED_HELPERS = frozenset(
         {"_safe_context", "_inexact_threshold_context", "_bounded_text"}
     )
+    #: Calls allowed INSIDE a sanctioned helper's arguments: the helpers
+    #: themselves plus the C-level-slot ``_type_name`` (total by design).
+    _TOTAL_ARG_CALLS = _SANCTIONED_HELPERS | frozenset({"_type_name"})
     _REPR_OWNERS = frozenset({"_safe_context", "_inexact_threshold_context"})
     _ALLOWED_CONTEXT_NAMES = frozenset({"fn", "reason", "attr"})
     _CHOKEPOINTS = frozenset({"warn_fallback_once", "disable_kernel"})
+
+    @classmethod
+    def _total_helper_arg_ok(cls, node: ast.expr) -> bool:
+        """A sanctioned helper's ARGUMENT must itself be total by
+        construction: a constant, a plain name (a local/param load runs no
+        foreign code), or a nested call to a total helper whose own
+        arguments satisfy the same rule RECURSIVELY — an f-string, a bare
+        ``repr``/``str``, or a ``%``/``.format``/``.join`` expression
+        nested inside a sanctioned call is evaluated before the helper
+        runs and could raise ON-only (the round-5 future-edit gap)."""
+        if isinstance(node, ast.Constant | ast.Name):
+            return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in cls._TOTAL_ARG_CALLS
+            and not node.keywords
+        ):
+            return all(cls._total_helper_arg_ok(arg) for arg in node.args)
+        return False
+
+    @classmethod
+    def _context_value_ok(cls, value: ast.expr) -> bool:
+        """The TOP-level context-value law: a constant, an allowed routing
+        name, or a sanctioned-total-helper call whose arguments recurse
+        through :meth:`_total_helper_arg_ok`."""
+        if isinstance(value, ast.Constant):
+            return True
+        if isinstance(value, ast.Name):
+            return value.id in cls._ALLOWED_CONTEXT_NAMES
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in cls._SANCTIONED_HELPERS
+            and not value.keywords
+        ):
+            return all(cls._total_helper_arg_ok(arg) for arg in value.args)
+        return False
 
     @classmethod
     def _calls_with_owner(cls) -> list[tuple[str | None, ast.Call]]:
@@ -1298,7 +1542,8 @@ class TestLogContextStructuralPin:
 
     def test_every_log_context_value_is_total_by_construction(self) -> None:
         context_calls = [(o, c) for o, c in self._calls_with_owner() if self._is_context_call(c)]
-        assert len(context_calls) >= 12  # anti-vacuity: the module's real call census
+        assert len(context_calls) >= 12  # anti-vacuity: the module's real call census (15)
+        helper_call_values = 0
         for owner, call in context_calls:
             where = f"{owner or '<module>'}:{call.lineno}"
             for arg in call.args:
@@ -1312,20 +1557,19 @@ class TestLogContextStructuralPin:
                     )
                     continue
                 value = kw.value
-                ok = (
-                    isinstance(value, ast.Constant)
-                    or (isinstance(value, ast.Name) and value.id in self._ALLOWED_CONTEXT_NAMES)
-                    or (
-                        isinstance(value, ast.Call)
-                        and isinstance(value.func, ast.Name)
-                        and value.func.id in self._SANCTIONED_HELPERS
-                    )
-                )
-                assert ok, (
+                if isinstance(value, ast.Call):
+                    helper_call_values += 1
+                assert self._context_value_ok(value), (
                     f"{where}: context key {kw.arg!r} must be a constant, an allowed routing "
-                    "name, or a sanctioned total-helper call — a bare repr()/str()/f-string "
-                    "context re-opens the refuter-round-2..4 detonation class"
+                    "name, or a sanctioned total-helper call whose arguments are themselves "
+                    "total (constants / plain names / nested total-helper calls) — a bare "
+                    "repr()/str()/f-string context, TOP-LEVEL or NESTED inside a helper arg, "
+                    "re-opens the refuter-round-2..5 detonation class"
                 )
+        # Anti-vacuity for the round-5 recursion: the module's real census
+        # carries 10 helper-call context values whose ARGUMENTS the recursive
+        # rule genuinely walked (incl. the nested _bounded_text(_type_name(…))).
+        assert helper_call_values >= 8
 
     def test_repr_and_str_builtins_only_inside_sanctioned_helpers(self) -> None:
         guarded_reprs = 0
@@ -1338,6 +1582,62 @@ class TestLogContextStructuralPin:
                 )
                 guarded_reprs += 1
         assert guarded_reprs >= 2  # anti-vacuity: both helpers really guard a repr
+
+    @staticmethod
+    def _parsed_context_value(snippet: str) -> ast.expr:
+        """The first keyword-argument VALUE of a parsed chokepoint call."""
+        call = ast.parse(snippet, mode="eval").body
+        assert isinstance(call, ast.Call)
+        return call.keywords[0].value
+
+    @pytest.mark.parametrize(
+        "snippet",
+        [
+            'warn_fallback_once("cpcv", "r", v=_safe_context(f"{x}"))',
+            'warn_fallback_once("cpcv", "r", v=_safe_context(repr(x)))',
+            'disable_kernel("cpcv", "r", got=_safe_context(str(x)))',
+            'warn_fallback_once("cpcv", "r", v=_safe_context("%s" % x))',
+            'warn_fallback_once("cpcv", "r", v=_safe_context("{}".format(x)))',
+            'warn_fallback_once("cpcv", "r", v=_bounded_text("".join(parts)))',
+            'warn_fallback_once("cpcv", "r", v=_bounded_text(_type_name(f"{x}")))',
+            'warn_fallback_once("cpcv", "r", v=_safe_context(x, key=f"{x}"))',
+        ],
+        ids=[
+            "fstring_arg",
+            "repr_arg",
+            "str_arg",
+            "percent_format_arg",
+            "dot_format_arg",
+            "join_arg",
+            "fstring_inside_nested_type_name",
+            "keyword_smuggle",
+        ],
+    )
+    def test_pin_rejects_stringification_nested_in_helper_args(self, snippet: str) -> None:
+        """Round-5 teeth (refuter-1 INFO closed): an ON-only-raising
+        expression NESTED inside a sanctioned helper's argument — evaluated
+        BEFORE the helper's totality guard can run — is rejected by the SAME
+        validator the module pin executes, so the documented future-edit gap
+        (``_safe_context(f"{x}")`` previously passed both pins) is closed."""
+        assert self._context_value_ok(self._parsed_context_value(snippet)) is False
+
+    @pytest.mark.parametrize(
+        "snippet",
+        [
+            'warn_fallback_once("cpcv", "r", error=_safe_context(exc))',
+            'warn_fallback_once("cpcv", "r", value=_safe_context(raw))',
+            'warn_fallback_once("cpcv", "r", ms=_inexact_threshold_context(min_sharpe))',
+            'warn_fallback_once("cpcv", "r", t=_bounded_text(_type_name(ms_type)))',
+            'warn_fallback_once("cpcv", "r", lit=_safe_context("literal"))',
+        ],
+        ids=["name_arg", "raw_name_arg", "inexact_helper", "nested_type_name", "constant_arg"],
+    )
+    def test_pin_accepts_the_sanctioned_module_shapes(self, snippet: str) -> None:
+        """No false positive: the whitelist admits exactly the module's real
+        shapes (plain names, constants, the nested C-level ``_type_name``) —
+        and the module-census pin above proves the live call sites still
+        pass under the recursive rule."""
+        assert self._context_value_ok(self._parsed_context_value(snippet)) is True
 
 
 # ── mutation-workflow wiring pin ────────────────────────────────────────
