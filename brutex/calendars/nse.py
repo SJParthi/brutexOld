@@ -505,6 +505,14 @@ _SESSION_TYPE_BY_CODE: Final[dict[int, SessionType]] = {
 #: The burn-in "the Python arm raised / would raise" comparison sentinel.
 _RAISES: Final[object] = object()
 
+#: The PyO3 ``i64`` argument bound. A ``tf_minutes`` beyond it cannot cross
+#: the FFI (PyO3 raises ``OverflowError`` at argument conversion, where the
+#: Python oracle computes a bool/int fine) — the two scalar wrappers that
+#: forward ``tf_minutes`` route such inputs straight to the Python oracle
+#: instead (slice-9 review, edge MINOR-1/NIT-2; unreachable from the engine,
+#: whose timeframes are the 1..375 vocabulary — defensive parity only).
+_RUST_TF_MAX: Final[int] = 2**63 - 1
+
 
 @dataclass(frozen=True)
 class _RustCalendarKernel:
@@ -548,7 +556,9 @@ def _cal_flag_enabled() -> bool:
     if value in _CAL_FLAG_TRUTHY:
         return True
     if value and value not in _CAL_FLAG_FALSY:
-        _cal_warn_once("calendar.rust_flag_unrecognised", value=raw)
+        # repr(): a newline-bearing env value must not forge log lines
+        # (slice-9 review, edge NIT-3 — the repr() log-injection convention).
+        _cal_warn_once("calendar.rust_flag_unrecognised", value=repr(raw))
     return False
 
 
@@ -1604,7 +1614,9 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     if tf_minutes < 1:
         raise ValueError(f"expected_bars_per_day_for_tf.tf_minutes must be >= 1, got {tf_minutes}")
     kernel = _rust_calendar()
-    if kernel is not None:
+    # tf > i64: PyO3 would raise OverflowError at conversion where the
+    # oracle returns 1 — route to the oracle (edge NIT-2; engine-unreachable).
+    if kernel is not None and tf_minutes <= _RUST_TF_MAX:
         rust_value = int(kernel.expected_bars(tf_minutes))
         return _serve_value(
             "expected_bars_per_day_for_tf",
@@ -1669,7 +1681,12 @@ def is_forced_exit_bar(t: time, tf_minutes: int, forced_exit_seconds: int | None
         raise ValueError(f"is_forced_exit_bar.tf_minutes must be >= 1, got {tf_minutes}")
     boundary = _FORCED_EXIT_SECONDS if forced_exit_seconds is None else forced_exit_seconds
     kernel = _rust_calendar()
-    if kernel is not None:
+    # tf ≤ i64 crosses the FFI (the kernel's SATURATING close arithmetic
+    # keeps parity for the whole i64 domain — a saturated close is still
+    # strictly > every boundary, matching Python's bigint result); tf > i64
+    # routes to the oracle before PyO3 can raise OverflowError (edge
+    # MINOR-1/NIT-2; engine-unreachable — tf is the 1..375 vocabulary).
+    if kernel is not None and tf_minutes <= _RUST_TF_MAX:
         rust_value = int(kernel.forced_exit_bar(_seconds_of_day(t), tf_minutes, boundary)) == 1
         return _serve_value(
             "is_forced_exit_bar",

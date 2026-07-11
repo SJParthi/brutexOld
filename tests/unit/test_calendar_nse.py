@@ -1930,6 +1930,36 @@ class TestRustCalendarSeam:
         with pytest.raises(ValueError, match="tf_minutes must be >= 1"):
             is_forced_exit_bar(time(15, 0), 0)
 
+    def test_huge_in_i64_tf_saturates_never_aborts_and_matches_python(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slice-9 edge MINOR-1 regression: ``tf=10**18`` previously
+        SIGABRTed the whole process (`tf * 60` overflow under the release
+        ``overflow-checks = true`` / ``panic = "abort"`` profile). The
+        kernel now SATURATES; the burn-in compare (budget > 0 here) proves
+        the Rust verdict equals the Python oracle's bigint result — and no
+        autorevert latches."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=4)
+        assert is_forced_exit_bar(time(9, 15), 10**18) is True
+        assert is_forced_exit_bar(time(9, 15), 10**18, 55_200) is True
+        assert is_forced_exit_bar(time(23, 59, 59), 2**63 - 1) is True  # i64::MAX exactly
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_tf_beyond_i64_routes_to_the_oracle_never_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slice-9 edge NIT-2: a ``tf > i64::MAX`` cannot cross the FFI
+        (PyO3 would raise ``OverflowError`` where the Python arm computes
+        fine) — both scalar wrappers route it to the oracle. The fake
+        kernel's raising scalar fns prove the bypass."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel())
+        beyond_i64 = 2**63  # _RUST_TF_MAX + 1
+        assert expected_bars_per_day_for_tf(beyond_i64) == 1
+        assert is_forced_exit_bar(time(9, 15), beyond_i64) is True
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
     def test_cross_date_last_bar_stays_on_the_python_arm(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

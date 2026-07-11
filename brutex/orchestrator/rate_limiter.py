@@ -211,7 +211,9 @@ def _rust_flag_enabled() -> bool:
     if value in _RUST_FLAG_TRUTHY:
         return True
     if value and value not in _RUST_FLAG_FALSY:
-        _warn_rust_once("rate_math.rust_flag_unrecognised", value=raw)
+        # repr(): a newline-bearing env value must not forge log lines
+        # (slice-9 review, edge NIT-3 — the repr() log-injection convention).
+        _warn_rust_once("rate_math.rust_flag_unrecognised", value=repr(raw))
     return False
 
 

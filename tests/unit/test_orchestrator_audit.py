@@ -1919,16 +1919,44 @@ class TestRustAuditSeam:
         stamped = self._entry(entry_hash=entry.compute_hash())
         assert stamped.to_json_line() == stamped._to_json_line_python()
 
-    def test_burn_in_consumes_one_shared_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_burn_in_consumes_independent_per_surface_budgets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each surface owns its OWN burn-in budget (slice-9 review, audit
+        MINOR-1 — a shared budget let a verify-heavy process exhaust the
+        window before the line surface was ever validated)."""
         pytest.importorskip("fno_math")
-        self._arm(monkeypatch, burn_in_remaining=3)
+        self._arm(monkeypatch, burn_in_remaining=2)
         entry = self._entry(entry_hash="h")
         entry.compute_hash()
         entry.to_json_line()
-        assert audit_module._RUST_BURN_IN_REMAINING[0] == 1
+        assert audit_module._RUST_BURN_IN_REMAINING == {"compute_hash": 1, "to_json_line": 1}
         entry.compute_hash()
-        entry.compute_hash()  # budget exhausted — steady state, no decrement below 0
-        assert audit_module._RUST_BURN_IN_REMAINING[0] == 0
+        entry.compute_hash()  # hash budget exhausted — no decrement below 0
+        assert audit_module._RUST_BURN_IN_REMAINING == {"compute_hash": 0, "to_json_line": 1}
+
+    def test_hash_exhausted_burn_in_still_validates_the_line_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MINOR-1 regression: a verify-heavy process (compute_hash
+        budget exhausted) must STILL burn-in-validate its first
+        ``to_json_line`` — a wrong kernel line ships the PYTHON bytes and
+        latches, never serving the kernel value unvalidated."""
+        entry = self._entry(entry_hash="h")
+        correct_hash = entry._compute_hash_python()
+        self._arm(monkeypatch, burn_in_remaining=1)
+        audit_module._set_rust_kernel_for_tests(
+            self._fake_kernel(hash_value=correct_hash, line_value='{"fake": true}')
+        )
+        # The verify_chain shape: hash calls only, exhausting THAT budget.
+        assert entry.compute_hash() == correct_hash
+        assert audit_module._RUST_BURN_IN_REMAINING["compute_hash"] == 0
+        # The line surface still owes its own burn-in: the wrong kernel
+        # line is caught, the Python bytes ship, the kernel latches.
+        with capture_logs() as logs:
+            assert entry.to_json_line() == entry._to_json_line_python()
+        assert audit_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
+        assert [r["event"] for r in logs] == ["audit.kernel_autoreverted"]
 
     def test_burn_in_mismatch_ships_python_latches_and_errors(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2046,5 +2074,67 @@ class TestRustAuditSeam:
         audit_module._disable_rust_kernel("test")
         audit_module._reset_rust_audit_for_tests()
         assert audit_module._RUST_DISABLED_REASON[0] is None
-        assert audit_module._RUST_BURN_IN_REMAINING[0] == audit_module.AUDIT_BURN_IN_SAMPLES
+        assert audit_module._RUST_BURN_IN_REMAINING == {
+            "compute_hash": audit_module.AUDIT_BURN_IN_SAMPLES,
+            "to_json_line": audit_module.AUDIT_BURN_IN_SAMPLES,
+        }
         assert audit_module._RUST_KERNEL_RESOLVED[0] is False
+
+    # ── logging can never fail an append (audit MINOR-2) ─────────────────
+
+    def test_raising_log_sink_never_fails_the_envelope_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising structlog processor (simulated at the seam-log sink)
+        must never fail an append/verify — the #1630 guarantee extended to
+        the seam (slice-9 review, audit MINOR-2)."""
+        pytest.importorskip("fno_math")
+        from brutex.orchestrator import audit_seam_log
+
+        self._arm(monkeypatch)
+
+        def _boom(event: str, **context: object) -> None:
+            raise RuntimeError("raising structlog processor")
+
+        monkeypatch.setattr(audit_seam_log, "warn", _boom)
+        entry = self._entry(payload={"big": 1 << 100})  # envelope fallback fires
+        assert entry.compute_hash() == entry._compute_hash_python()
+
+    def test_raising_log_sink_never_fails_the_autorevert_append(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The autorevert ERROR line is best-effort: a raising sink loses
+        the line but the append still ships the Python bytes + latches."""
+        from brutex.orchestrator import audit_seam_log
+
+        self._arm(monkeypatch)
+        audit_module._set_rust_kernel_for_tests(self._fake_kernel(hash_value="f" * 64))
+
+        def _boom(event: str, **context: object) -> None:
+            raise RuntimeError("raising structlog processor")
+
+        monkeypatch.setattr(audit_seam_log, "error", _boom)
+        entry = self._entry()
+        assert entry.compute_hash() == entry._compute_hash_python()
+        assert audit_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
+
+    # ── out-of-contract int ts_utc routes to the oracle (audit NIT-1) ────
+
+    def test_int_ts_utc_routes_to_the_oracle_never_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An int ``ts_utc`` (out of the ``float`` contract) would render
+        "1700000000" via str() but "1700000000.0" via f64 repr — the
+        dispatch routes it to the oracle; the kernel is never invoked."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        calls: list[str] = []
+        kernel = audit_module._RustAuditKernel(
+            hash_fn=lambda *a: calls.append("hash") or "x" * 64,
+            line_fn=lambda *a: calls.append("line") or "{}",
+            envelope_error=KeyError,
+        )
+        audit_module._set_rust_kernel_for_tests(kernel)
+        entry = self._entry(ts_utc=1_700_000_000, entry_hash="h")  # type: ignore[arg-type]
+        assert entry.compute_hash() == entry._compute_hash_python()
+        assert entry.to_json_line() == entry._to_json_line_python()
+        assert calls == []  # the kernel never saw the out-of-contract entry

@@ -194,8 +194,12 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     // ── slice-9 rate-limiter token math (DEC-RATE-MATH-RUST-001) ──
-    // The AdaptiveTokenBucket's four pure f64 expressions; every constant
-    // (caps, ladder, eps) stays owned by brutex/orchestrator/rate_limiter.py.
+    // The AdaptiveTokenBucket's four pure f64 expressions; every cap /
+    // floor / governor VALUE and the eps/isclose gates stay owned by
+    // brutex/orchestrator/rate_limiter.py. The ONE ladder-adjacent literal
+    // Rust-side is bucket_set_rate_state's `/ 2.0` downshift halving —
+    // inherent to the ported set_rate expression itself (byte-identical to
+    // the Python line it transcribes), not an independently tunable value.
     m.add_function(wrap_pyfunction!(rate_math::bucket_refill_py, m)?)?;
     m.add_function(wrap_pyfunction!(rate_math::bucket_consume_py, m)?)?;
     m.add_function(wrap_pyfunction!(rate_math::bucket_more_wait_py, m)?)?;

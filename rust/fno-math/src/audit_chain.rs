@@ -331,6 +331,16 @@ pub fn entry_hash(
     for (name, field) in [("actor", actor), ("action", action), ("subject", subject)] {
         // Defensive: __post_init__ already rejects these Python-side; a "|"
         // here must never produce a silently ambiguous preimage.
+        //
+        // DEAD-DEFENSIVE by construction (slice-9 review, audit NIT-2): the
+        // Python oracle `_compute_hash_python` does NOT re-check `|`, but no
+        // seam divergence exists — `AuditEntry.__post_init__` guards
+        // construction on BOTH arms, so neither arm's hash fn ever sees a
+        // `|` field through the seam. The only divergent path is a DIRECT
+        // `fno_math.audit_entry_hash` call with a `|` field (Rust refuses →
+        // the seam's envelope fallback would serve the oracle; raw Python
+        // would hash) — unreachable from `compute_hash`, kept as the
+        // no-ambiguous-preimage belt.
         if field.contains('|') {
             return Err(EnvelopeError::DelimiterInField(name));
         }

@@ -342,11 +342,23 @@ pub fn expected_bars_for_tf(tf_minutes: i64) -> i64 {
 /// the boundary. `tf < 1` → `-1` (Python raises before calling); else
 /// `1`/`0`. Python drops sub-second components exactly the same way
 /// (`t.hour*3600 + t.minute*60 + t.second`).
+///
+/// SATURATING arithmetic (the `forced_exit_seconds_of_close` precedent —
+/// keeps the release `overflow-checks = true` / `panic = "abort"` profile
+/// abort-free on junk input): for any `tf_minutes >= 1` whose `tf·60` (or
+/// the `open_s +` sum) exceeds `i64::MAX`, the close saturates to
+/// `i64::MAX`, which is still STRICTLY greater than every `u32` boundary —
+/// so the verdict is `1`, bit-identical to the Python oracle's bigint
+/// `open + tf*60 > boundary` (always true there too). Parity therefore
+/// holds for the WHOLE i64-crossable domain; a `tf_minutes` beyond
+/// `i64::MAX` never reaches this fn (PyO3 raises `OverflowError` at
+/// argument conversion — the Python seam routes that domain to the oracle
+/// before calling, see `nse.py`'s `_RUST_TF_MAX` guard).
 pub fn forced_exit_bar_verdict(open_s: u32, tf_minutes: i64, boundary_s: u32) -> i8 {
     if tf_minutes < 1 {
         return -1;
     }
-    let close_s = i64::from(open_s) + tf_minutes * 60;
+    let close_s = i64::from(open_s).saturating_add(tf_minutes.saturating_mul(60));
     if close_s > i64::from(boundary_s) {
         1
     } else {
@@ -760,6 +772,20 @@ mod tests {
         assert_eq!(forced_exit_bar_verdict(54_900, 5, 55_200), 0); // 15:15+5m ON
         assert_eq!(forced_exit_bar_verdict(54_960, 5, 55_200), 1);
         assert_eq!(forced_exit_bar_verdict(0, 0, 55_200), -1);
+        // Overflow inputs SATURATE, never abort (release overflow-checks =
+        // true / panic = "abort"): tf·60 past i64::MAX clamps to i64::MAX,
+        // which is still strictly > every u32 boundary — verdict 1, matching
+        // the Python oracle's bigint arithmetic (slice-9 review, edge
+        // MINOR-1: `10**18 * 60` previously SIGABRTed the whole process).
+        assert_eq!(
+            forced_exit_bar_verdict(33_300, 1_000_000_000_000_000_000, 55_200),
+            1
+        );
+        assert_eq!(forced_exit_bar_verdict(33_300, i64::MAX, 55_200), 1);
+        assert_eq!(
+            forced_exit_bar_verdict(u32::MAX, i64::MAX / 60, u32::MAX),
+            1
+        );
         // Forced-exit seconds: 15:30 close → 15:20; Muhurat 14:45 → 14:35.
         assert_eq!(forced_exit_seconds_of_close(55_800), 55_200);
         assert_eq!(forced_exit_seconds_of_close(53_100), 52_500);

@@ -239,8 +239,15 @@ def _canonical_json(obj: Any) -> str:
 #: ``audit.rust_flag_unrecognised`` warning.
 RUST_AUDIT_CHAIN_ENV: Final[str] = "BRUTEX_RUST_AUDIT_CHAIN"
 
-#: Rust-served computations (hash + line share ONE budget) that are
-#: double-computed against the Python oracle per process (the burn-in).
+#: Rust-served computations PER SURFACE (``compute_hash`` and
+#: ``to_json_line`` each carry their OWN budget) that are double-computed
+#: against the Python oracle per process (the burn-in). Independent
+#: counters (slice-9 review, audit MINOR-1): a flag-ON ``verify_chain`` of
+#: ≥16 entries exercises only the HASH surface — under a shared budget it
+#: would exhaust the burn-in before the same process's first ``append``
+#: ever validated the LINE surface (the verify-heavy-then-write shape,
+#: e.g. a nightly verify → pull), leaving ``to_json_line`` Rust-DIRECT
+#: without a single in-process oracle compare.
 AUDIT_BURN_IN_SAMPLES: Final[int] = 16
 
 #: The env-flag vocabulary — a DELIBERATE local copy of the sweep flags'
@@ -274,8 +281,17 @@ class _RustAuditKernel:
 _RUST_KERNEL_RESOLVED: Final[list[bool]] = [False]
 _RUST_KERNEL_VALUE: Final[list[_RustAuditKernel | None]] = [None]
 
-#: Burn-in budget + the autorevert latch (reason once latched, else None).
-_RUST_BURN_IN_REMAINING: Final[list[int]] = [AUDIT_BURN_IN_SAMPLES]
+#: Per-surface burn-in budgets + the autorevert latch (reason once
+#: latched, else None). Mutated WITHOUT a lock (slice-9 review, audit
+#: NIT-3 — deliberate): the single-writer contract holds per AuditWriter,
+#: and two concurrent in-process writers racing a decrement are
+#: GIL-benign — worst case one extra double-compute or a duplicate
+#: autorevert ERROR log, NEVER wrong bytes (the compare-and-ship-python
+#: settle is per-call deterministic).
+_RUST_BURN_IN_REMAINING: Final[dict[str, int]] = {
+    "compute_hash": AUDIT_BURN_IN_SAMPLES,
+    "to_json_line": AUDIT_BURN_IN_SAMPLES,
+}
 _RUST_DISABLED_REASON: Final[list[str | None]] = [None]
 
 #: Warn-once memo — LOG-VOLUME state only; results never depend on it.
@@ -294,9 +310,15 @@ def _warn_rust_once(event: str, **context: object) -> None:
     if key in _RUST_WARN_MEMO:
         return
     _RUST_WARN_MEMO.add(key)
-    from brutex.orchestrator import audit_seam_log
+    # suppress(Exception): this fires INSIDE compute_hash/to_json_line/
+    # verify_chain — a raising process-logging processor must never fail an
+    # append/verify for a LOGGING reason (the #1630 "logging can't touch
+    # audit records" guarantee, extended to the seam by the slice-9 review,
+    # audit MINOR-2). The record bytes never depended on this call.
+    with contextlib.suppress(Exception):
+        from brutex.orchestrator import audit_seam_log
 
-    audit_seam_log.warn(event, **context)
+        audit_seam_log.warn(event, **context)
 
 
 def _rust_flag_enabled() -> bool:
@@ -310,7 +332,10 @@ def _rust_flag_enabled() -> bool:
     if value in _RUST_FLAG_TRUTHY:
         return True
     if value and value not in _RUST_FLAG_FALSY:
-        _warn_rust_once("audit.rust_flag_unrecognised", value=raw)
+        # repr(): the raw env string is operator-controlled but free-form —
+        # a newline-bearing value must not forge log lines (slice-9 review,
+        # edge NIT-3; the repo's repr() log-injection convention).
+        _warn_rust_once("audit.rust_flag_unrecognised", value=repr(raw))
     return False
 
 
@@ -371,9 +396,14 @@ def _disable_rust_kernel(reason: str, **context: object) -> None:
     """
     if _RUST_DISABLED_REASON[0] is None:
         _RUST_DISABLED_REASON[0] = reason
-        from brutex.orchestrator import audit_seam_log
+        # suppress(Exception): the latch above is ALREADY set — a raising
+        # process-logging processor loses the ERROR line but can never fail
+        # the append that triggered the autorevert (audit MINOR-2; the
+        # caller ships the Python value regardless).
+        with contextlib.suppress(Exception):
+            from brutex.orchestrator import audit_seam_log
 
-        audit_seam_log.error("audit.kernel_autoreverted", reason=reason, **context)
+            audit_seam_log.error("audit.kernel_autoreverted", reason=reason, **context)
 
 
 def _set_rust_kernel_for_tests(kernel: _RustAuditKernel | None) -> None:
@@ -386,7 +416,8 @@ def _reset_rust_audit_for_tests(*, burn_in_remaining: int = AUDIT_BURN_IN_SAMPLE
     """Restore a fresh-process seam view (test isolation ONLY)."""
     _RUST_KERNEL_RESOLVED[0] = False
     _RUST_KERNEL_VALUE[0] = None
-    _RUST_BURN_IN_REMAINING[0] = burn_in_remaining
+    for surface in _RUST_BURN_IN_REMAINING:
+        _RUST_BURN_IN_REMAINING[surface] = burn_in_remaining
     _RUST_DISABLED_REASON[0] = None
     _RUST_WARN_MEMO.clear()
 
@@ -414,14 +445,16 @@ def _rust_serialize(kernel: _RustAuditKernel, surface: str, call: Callable[[], s
 def _settle_rust_result(surface: str, rust_value: str, python_thunk: Callable[[], str]) -> str:
     """Serve a kernel result through the burn-in double-compute window.
 
-    Post burn-in: the kernel value serves directly. During burn-in the
-    Python oracle also runs and the two strings are compared EXACTLY — a
-    mismatch ships the PYTHON value (correctness first), latches the kernel
-    off, and logs ONE ``audit.kernel_autoreverted`` ERROR. The thunk cannot
-    raise here: a payload the kernel accepted is in-model, so the oracle's
-    only raise arm (non-finite floats) is structurally unreachable.
+    Post burn-in (for *surface* — each surface owns its OWN budget, so a
+    verify-heavy process cannot exhaust the append surface's window): the
+    kernel value serves directly. During burn-in the Python oracle also
+    runs and the two strings are compared EXACTLY — a mismatch ships the
+    PYTHON value (correctness first), latches the kernel off, and logs ONE
+    ``audit.kernel_autoreverted`` ERROR. The thunk cannot raise here: a
+    payload the kernel accepted is in-model, so the oracle's only raise arm
+    (non-finite floats) is structurally unreachable.
     """
-    if _RUST_BURN_IN_REMAINING[0] <= 0:
+    if _RUST_BURN_IN_REMAINING[surface] <= 0:
         return rust_value
     python_value = python_thunk()
     if rust_value != python_value:
@@ -429,7 +462,7 @@ def _settle_rust_result(surface: str, rust_value: str, python_thunk: Callable[[]
             "burn_in_mismatch", surface=surface, rust=rust_value, python=python_value
         )
         return python_value
-    _RUST_BURN_IN_REMAINING[0] -= 1
+    _RUST_BURN_IN_REMAINING[surface] -= 1
     return rust_value
 
 
@@ -497,7 +530,12 @@ class AuditEntry:
         (:meth:`_compute_hash_python`) — bit-identical by construction.
         """
         kernel = _rust_audit_kernel()
-        if kernel is not None:
+        # isinstance(ts_utc, float): an out-of-contract INT ``ts_utc`` (the
+        # field is typed float; append/from_json_line always produce float)
+        # would render "1700000000" via Python str() but "1700000000.0" via
+        # the kernel's f64 repr — route it to the oracle instead of relying
+        # on the burn-in to catch it (slice-9 review, audit NIT-1).
+        if kernel is not None and isinstance(self.ts_utc, float):
             rust_value = _rust_serialize(
                 kernel,
                 "compute_hash",
@@ -543,7 +581,8 @@ class AuditEntry:
         raise-before-write law is preserved on both arms.
         """
         kernel = _rust_audit_kernel()
-        if kernel is not None:
+        # Same int-``ts_utc`` oracle routing as compute_hash (audit NIT-1).
+        if kernel is not None and isinstance(self.ts_utc, float):
             rust_value = _rust_serialize(
                 kernel,
                 "to_json_line",

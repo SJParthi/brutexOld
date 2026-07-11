@@ -68,6 +68,14 @@ pub fn bucket_refill(tokens: f64, burst: f64, rps: f64, elapsed: f64) -> f64 {
 
 /// `acquire`'s first consume step: `tokens >= 1.0` consumes one token with
 /// zero wait, else leaves the tokens and quotes `(1.0 - tokens) / rps`.
+///
+/// Domain note (slice-9 review, ratemath N2): `rps > 0` is a CALLER
+/// invariant (`AdaptiveTokenBucket.__post_init__` validates it, and the
+/// parity differential feeds only positive rps). For `rps == 0.0` this fn
+/// (and [`bucket_more_wait`]) returns `inf` where the Python expression
+/// raises `ZeroDivisionError` — an unreachable-domain divergence,
+/// documented rather than guarded (a guard would add a branch no caller
+/// can reach).
 pub fn bucket_consume(tokens: f64, rps: f64) -> (f64, f64) {
     if tokens >= 1.0 {
         (tokens - 1.0, 0.0)
