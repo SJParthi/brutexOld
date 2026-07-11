@@ -41,6 +41,7 @@ __all__ = [
     "ranking_passes_gates",
     "ranking_rank_order",
     "ranking_zscores",
+    "sweep_drawdown_stats",
 ]
 
 __version__: str
