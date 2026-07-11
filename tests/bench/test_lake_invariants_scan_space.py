@@ -67,7 +67,7 @@ def _build_empty_lake(root: Path, n_symbols: int) -> int:
                 d = root / "bars" / "NSE" / "CASH" / f"SYM{i:04d}" / interval / str(year)
                 d.mkdir(parents=True, exist_ok=True)
                 for month in range(1, _MONTHS + 1):
-                    fd = os.open(d / f"{month:02d}.parquet", os.O_CREAT | os.O_WRONLY, 0o644)
+                    fd = os.open(d / f"{month:02d}.parquet", os.O_CREAT | os.O_WRONLY, 0o600)
                     os.close(fd)
                     n += 1
     return n

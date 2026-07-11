@@ -4141,7 +4141,8 @@ class TestRunStartupSweep:
         # DEC-LAKE-INVARIANTS-PREINDEX-001: the refused sweep stamps the ONE
         # `.lake_heal/` ATTEMPT sidecar (metadata, a lake-data sibling); the
         # DATA tree itself stays byte-identical — not one lake byte moved.
-        assert after.pop(ATTEMPT_RELPATH, None) is not None
+        attempt_stamp = after.pop(ATTEMPT_RELPATH, None)
+        assert attempt_stamp is not None
         assert after == before
         assert load_last_sweep(lake) is None  # a refused sweep never stamps
         (refusal,) = _events(logs, "lake_heal.mass_heal_refused")
