@@ -35,7 +35,6 @@ from brutex.dashboard.db_view import (
     _execute_parquet_resilient,
     _existing_month_files_in_span,
     _intraday_open_by_date,
-    _predecessor_candidate_files,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
@@ -272,53 +271,12 @@ class TestExecuteParquetResilientFilesArm:
         assert spy.binds == []
 
 
-class TestPredecessorCandidateFiles:
-    """Fix 3 of MIGRATION.md #1719 — the %CHNG-baseline predecessor file bound."""
-
-    def test_own_month_plus_single_greatest_prior(self, tmp_path: Path) -> None:
-        from zoneinfo import ZoneInfo
-
-        base = _seed_months(tmp_path, interval="1minute", months=8)
-        # IST midnight of 2024-05-10 = 2024-05-09 18:30 UTC → own UTC month May.
-        before = datetime(2024, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-        files = [Path(f).name for f in _predecessor_candidate_files(base, before)]
-        assert files == ["05.parquet", "04.parquet"]  # own month + ONE prior
-
-    def test_ist_midnight_month_edge_shifts_the_utc_month(self, tmp_path: Path) -> None:
-        """IST midnight of the 1st = the PRIOR UTC month's 18:30 — the own-month
-        candidate must be the prior calendar month's file (the 05:30 shift)."""
-        from zoneinfo import ZoneInfo
-
-        base = _seed_months(tmp_path, interval="1minute", months=8)
-        before = datetime(2024, 5, 1, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-        files = [Path(f).name for f in _predecessor_candidate_files(base, before)]
-        assert files == ["04.parquet", "03.parquet"]  # UTC month April + prior March
-
-    def test_no_prior_month_and_stray_kept(self, tmp_path: Path) -> None:
-        from zoneinfo import ZoneInfo
-
-        base = _seed_months(tmp_path, interval="1minute", months=2)
-        stray = base / "stray.parquet"
-        stray.write_bytes((base / "2024" / "01.parquet").read_bytes())
-        before = datetime(2024, 1, 15, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-        files = _predecessor_candidate_files(base, before)
-        # Own month (Jan; IST midnight of the 15th stays in Jan UTC), the stray
-        # (unknowable month — conservative), and NO prior grammar file exists.
-        # Order is enumeration order — irrelevant to the SQL, compared as a set.
-        assert {Path(f).name for f in files} == {"stray.parquet", "01.parquet"}
-
-    def test_empty_partition_yields_no_candidates(self, tmp_path: Path) -> None:
-        from zoneinfo import ZoneInfo
-
-        base = tmp_path / "empty"
-        base.mkdir()
-        before = datetime(2024, 1, 15, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-        assert _predecessor_candidate_files(base, before) == []
-
-
 class TestPrevCloseBaselineBounded:
     """Fix 3 of MIGRATION.md #1719: the /db candles %CHNG baseline reads bind
-    O(page-span) month files, byte-identical to the whole-glob answer.
+    O(page-span) month files, byte-identical to the whole-glob answer. The
+    merged-tree MECHANISM is main's DEC-DB-BASELINE-MANIFEST-ROUTE-001 (#1670)
+    `_bars_file_windows` pruning (this branch's interim helper was superseded
+    at the merge-reconcile); these behavior-level pins hold over it unchanged.
 
     Evidence (profiling worker, 2026-07-11): even manifest-ON, every candles
     page click bound the FULL 72-file glob TWICE (7.4 + 9.5 ms) for the
@@ -413,10 +371,11 @@ class TestPrevCloseBaselineBounded:
         assert out == {}  # honest blank — the predecessor may have lived there
 
     def test_corrupt_file_outside_candidates_never_blanks(self, tmp_path: Path) -> None:
-        """The strictly-narrower degrade (named in MIGRATION.md #1719): a corrupt
-        month provably OUTSIDE the page's baseline candidates (months before the
-        single greatest prior file) no longer blanks the %CHNG — pre-fix, ANY
-        corrupt file in the partition blanked every page."""
+        """The strictly-narrower degrade (named in MIGRATION.md #1719 / #1670):
+        a corrupt month provably OUTSIDE the page's baseline candidates (its
+        window can hold neither the span's bars nor the true predecessor, and
+        the predecessor step-back stops at the first file with a row) no longer
+        blanks the %CHNG — pre-fix, ANY corrupt file blanked every page."""
         from brutex.dashboard.db_view import _intraday_prev_close_by_page_date
 
         base = _seed_months(tmp_path, interval="1minute", months=6)

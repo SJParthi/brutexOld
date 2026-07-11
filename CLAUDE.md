@@ -32,7 +32,9 @@ reads are span-bounded (the CLOSE maps deliberately stay whole-partition —
 the #1649a hole diagnostics need the unbounded view); (3) the `/db` candles
 %CHNG baseline binds the page's own month files instead of the whole glob
 (72 files bound twice per click → 2; the #863 timestamp bounds pruned ROW
-GROUPS, this bounds the Parquet FOOTER opens too). HONEST: the
+GROUPS, this bounds the Parquet FOOTER opens too — merged-tree mechanism =
+main's #1670 `_bars_file_windows`, this pack's interim arm superseded at the
+merge-reconcile, behavior pins re-run green). HONEST: the
 window-ledger fresh-stamp click stays ONE O(total rows + delta footers)
 columnar scan (never literal O(page) — the repeat click is the O(1)
 handoff); the ONE behavior-visible class is corrupt-lake-only — a corrupt
@@ -839,7 +841,10 @@ completeness hole is always visible; distinct
 actions + ERROR/WARNING logs make the loss LOUD. Fail-loud is chosen over blind
 pool-rebuild on the merits + the memory-budget-division interaction: the
 per-tuple rank budget divides across workers (`memory_budget_bytes` = `total ×
-fraction / workers`), so rebuilding into the next heavy tuple would just
+fraction / workers`) [CORRECTED by DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+(MIGRATION.md #1671): as originally wired the divisor was never passed
+(`workers` defaulted 1) — the claim was false until #1671 wired it; see that
+entry], so rebuilding into the next heavy tuple would just
 re-OOM. HONEST residual (named follow-up, NOT claimed): a deterministically-
 WEDGED non-OOM tuple still aborts via `SweepStallError` with a frozen
 checkpoint, so an identical resume re-dispatches IT — the stall path has no
@@ -2162,11 +2167,17 @@ hostile-review pass._
   bounded `files=` arm — the CLOSE maps deliberately stay whole-partition (the #1649a contiguity
   guards' `found=nearest_lake_session` diagnostics + the calendar back-walk depth need the
   unbounded view); the #1649a pre-fix goldens pass UNMODIFIED; **(3)** the `/db` candles %CHNG
-  baseline — `_intraday_last_close_with_predecessor`'s two reads bind explicit file lists (the
-  span's own months + NEW `_predecessor_candidate_files`: the earliest page instant's own UTC-month
-  file + the single greatest earlier month file + strays, month-ordering sufficiency proven in the
-  docstring), so a page click binds 2 baseline files instead of 72 (warm p50 30.7 → 21.1 ms; the
-  residual is the #1614 manifest revalidation sweep, out of scope). SANCTIONED (corrupt lakes
+  baseline — `_intraday_last_close_with_predecessor`'s two reads bind explicit file lists, so a
+  page click binds 2 baseline files instead of 72 (warm p50 30.7 → 21.1 ms; the residual is the
+  #1614 manifest revalidation sweep, out of scope). FIX-3 MECHANISM SUPERSEDED at the 2026-07-11
+  merge-reconcile (main 652301b5, PR #1386): main's DEC-DB-BASELINE-MANIFEST-ROUTE-001 (#1670)
+  landed the SAME footer-open fix in-flight with a richer mechanism (`_bars_file_windows` —
+  manifest-exact per-file bounds + month-grammar fallback + predecessor step-back, ALSO covering
+  the moneyness spot join) — the merged tree serves #1670's mechanism, this pack's interim
+  `_predecessor_candidate_files` helper was DELETED at the reconcile, and this pack's
+  behavior-level pins + bench re-ran GREEN over it unchanged; the bounded-`files=` resilient-read
+  arm CONVERGED with #1670/#1668's (main's kwarg + two-stage probe + readable-subset latch
+  adopted); fixes 1 + 2 untouched, `_existing_month_files_in_span` stays (the fix-2 consumer). SANCTIONED (corrupt lakes
   only): a corrupt file provably OUTSIDE a bounded read's candidates no longer blanks that read —
   correct-or-absent preserved, blast radius strictly narrower; a corrupt CANDIDATE still blanks
   (both directions pinned). The D3 route spy tightened 1 → 0 Python parses (byte-parity half
