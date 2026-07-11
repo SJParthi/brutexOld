@@ -251,9 +251,12 @@ from brutex.dashboard.sweep_results_view import (
     MAX_TOP_N as SWEEP_LEADERBOARD_MAX_TOP_N,
 )
 from brutex.dashboard.sweep_results_view import (
+    SWEEPS_DIRNAME,
+    RollupServe,
     SweepScan,
     build_sweep_leaderboard,
     load_sweep_scan,
+    load_sweep_scan_via_rollup,
     resolve_preset_param,
     store_error_payload,
 )
@@ -1859,6 +1862,18 @@ def build_app(
     # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON); the LRU ages
     # out old-revision keys.
     _sweep_leaderboard_cache = MoversSnapshotCache()
+    # The rollup serve-path log gates (DEC-RESULTS-TOPK-ROLLUP-001, MINOR-2):
+    # `sweep_results.rollup_fallback` / `rollup_stale_served` are deduped per
+    # (revision, reason) through ONE LRU-bounded gate (the #1711 OutageGate
+    # precedent — a poll loop against one bad state logs ONCE, never per
+    # poll), and the Hook-C serve-side rebuild fires at most once per
+    # revision through its own gate. Function-local import doctrine does not
+    # apply here — app.py already imports the engine at module scope, and
+    # `results_rollup` imports the VIEW module lazily, so no cycle.
+    from brutex.engine.results_rollup import LogGate as _RollupLogGate
+
+    _rollup_log_gate = _RollupLogGate()
+    _rollup_rebuild_gate = _RollupLogGate()
     # The one-click artifact read memo (DEC-OPERATOR-PAGE-REAL-001): every
     # `/api/v1/oneclick/*` read (runs listing, manifest, top100, events tail
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
@@ -6975,14 +6990,76 @@ def build_app(
                 # NOTHING (never a stale serve, never a poisoned key — Golden
                 # Rule #1; the lake_revision "None = no signal" doctrine).
                 return _fresh()
-            # Level 1: ONE rank-independent SweepScan per revision — the
-            # O(stores × rows) load + the audit era pass run once, then every
-            # filter/rank/top_n click within this revision re-ranks it.
+            # ── The rollup serve path (DEC-RESULTS-TOPK-ROLLUP-001) ──
+            # Serve predicate: ONLY the UNFILTERED leaderboard (instrument /
+            # tf / direction all ABSENT — an empty-string param is a
+            # DEGENERATE real filter and stays legacy). rank_by / preset /
+            # top are all rollup-servable (every axis is in the persisted
+            # union; top ≤ MAX_TOP_N=500 ≤ K=1000). The three-outcome ladder
+            # (fresh / stale-serve-with-note / legacy-fallback+rebuild) runs
+            # ONCE per revision (the level-1 slot below); repeat polls are
+            # level-2 payload hits.
+            serve: RollupServe | None = None
+            if instrument is None and tf is None and direction is None:
+                serve = _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_rollup|rev={rev}",
+                    generation=0,
+                    compute=lambda: load_sweep_scan_via_rollup(
+                        lake_root, rev=rev, log_gate=_rollup_log_gate
+                    ),
+                )
+            if serve is not None and serve.scan is not None:
+                rollup_scan = serve.scan
+                behind = serve.behind_stores
+                conflict = serve.conflict_suspect
+                key = (
+                    f"sweep_leaderboard|rev={rev}|src=rollup"
+                    f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+                    f"|b={behind}|c={int(conflict)}"
+                )
+
+                def _rollup_payload() -> dict[str, Any]:
+                    payload = build_sweep_leaderboard(
+                        lake_root,
+                        rank_by=rank_by,
+                        top_n=top,
+                        scan=rollup_scan,
+                        preset=resolved_preset,
+                    ).to_dict()
+                    # Honest additive staleness notes (MAJOR-1) — EMIT-ON-
+                    # nonzero/true so a FRESH serve's payload shape is
+                    # byte-identical to the legacy wire (parity-pinned).
+                    if behind > 0:
+                        payload["rollup_behind_stores"] = behind
+                    if conflict:
+                        payload["rollup_conflict_suspect"] = True
+                    return payload
+
+                return _sweep_leaderboard_cache.get_or_compute(
+                    key, generation=0, compute=_rollup_payload
+                )
+            # Level 1 (legacy): ONE rank-independent SweepScan per revision —
+            # the O(stores × rows) load + the audit era pass run once, then
+            # every filter/rank/top_n click within this revision re-ranks it.
             scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
                 f"sweep_scan|rev={rev}",
                 generation=0,
                 compute=lambda: load_sweep_scan(lake_root),
             )
+            if (
+                serve is not None
+                and serve.scan is None
+                and _rollup_rebuild_gate.should_emit(("rebuild", rev))
+            ):
+                # Hook C (DEC-RESULTS-TOPK-ROLLUP-001): the fallback poll just
+                # built the full legacy scan anyway — write the rollup FROM it
+                # as a best-effort byproduct (fenced inside; at most once per
+                # revision via the gate), so the NEXT revision serves rollup-
+                # first and the system converges with Hooks A/B as pure
+                # latency optimizations.
+                from brutex.engine.results_rollup import rebuild_rollup_from_scan_best_effort
+
+                rebuild_rollup_from_scan_best_effort(lake_root / SWEEPS_DIRNAME, scan)
             # Level 2: the ranked payload per filter key. Casefold the filter
             # axes: build_sweep_leaderboard's _matches filters them
             # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME

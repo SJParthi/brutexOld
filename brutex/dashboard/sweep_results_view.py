@@ -74,12 +74,20 @@ zero store loads + zero audit reads; a repeat poll is an O(1) cache hit.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
+
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    # Runtime imports of brutex.engine.results_rollup stay FUNCTION-LOCAL in
+    # this module: the rollup module's import-time K ⊇ MAX_TOP_N assertion
+    # imports THIS module, so a module-level runtime import here would be a
+    # genuine cycle (DEC-RESULTS-TOPK-ROLLUP-001).
+    from brutex.engine.results_rollup import LogGate
 
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.engine.results_store import (
@@ -103,10 +111,14 @@ __all__ = [
     "SNAPSHOT_ERA_UNKNOWN",
     "STORE_ERROR_PUBLIC_DETAIL",
     "SWEEPS_DIRNAME",
+    "RollupServe",
     "SweepLeaderboard",
     "SweepScan",
     "build_sweep_leaderboard",
     "load_sweep_scan",
+    "load_sweep_scan_tree",
+    "load_sweep_scan_via_rollup",
+    "preset_rank_record_source",
     "resolve_preset_param",
     "store_error_payload",
 ]
@@ -307,6 +319,18 @@ class SweepScan:
     snapshot_hashes
         The sorted distinct eras recorded for the coordinates the discovered
         rows cover (empty = honest "no signal").
+    total_rows_override
+        ADDITIVE (DEC-RESULTS-TOPK-ROLLUP-001): a rollup-served scan carries
+        the STAMPED global distinct-run_id count here (its ``rows`` are only
+        the K-union superset, so ``len(filtered)`` would under-report);
+        ``None`` (the default, every legacy construction) keeps the
+        byte-identical ``len(filtered)`` law.
+    superset_only
+        ADDITIVE (DEC-RESULTS-TOPK-ROLLUP-001): ``True`` marks a scan whose
+        ``rows`` are the rollup's top-K UNION superset — valid ONLY for the
+        UNFILTERED leaderboard (the union under a filter is NOT the filtered
+        top-N); :func:`build_sweep_leaderboard` structurally REFUSES to
+        filter such a scan.
     """
 
     rows: tuple[ResultRow, ...]
@@ -318,6 +342,8 @@ class SweepScan:
     timeframes: tuple[str, ...]
     directions: tuple[str, ...]
     snapshot_hashes: tuple[str, ...]
+    total_rows_override: int | None = None
+    superset_only: bool = False
 
 
 def load_sweep_scan(lake_root: Path) -> SweepScan:
@@ -329,15 +355,30 @@ def load_sweep_scan(lake_root: Path) -> SweepScan:
     → the dropdown option sets → the era map (:func:`_snapshot_eras`, only when
     rows exist) → the covered ``snapshot_hashes``. Pure function of the sweeps
     tree — the route caches the result under the ``sweep_results_revision``
-    content token.
+    content token. Since DEC-RESULTS-TOPK-ROLLUP-001 a thin delegator over
+    :func:`load_sweep_scan_tree` (``<lake_root>/sweeps`` — byte-identical for
+    every existing caller); the engine rollup's Hook-B full fold calls the
+    tree variant directly so a custom-named results root folds correctly.
 
     Honest envelope (Golden Rule #10): cold cost is O(stores) glob +
     O(stores × rows) load + ONE O(audit lines) STREAMING era pass (O(1) memory
     via :func:`brutex.orchestrator.audit.iter_entries`) — paid once per
-    revision, NOT per poll; the per-era byte-offset ``AuditCursor`` resume is
-    NAMED future work, not claimed.
+    revision, NOT per poll. The per-era byte-offset ``AuditCursor`` resume now
+    exists for the ROLLUP writers (:mod:`brutex.engine.results_rollup`,
+    DEC-RESULTS-TOPK-ROLLUP-001); THIS legacy scan deliberately keeps the full
+    streaming pass (it is the fallback + parity oracle).
     """
-    sweeps_root = lake_root / SWEEPS_DIRNAME
+    return load_sweep_scan_tree(lake_root / SWEEPS_DIRNAME)
+
+
+def load_sweep_scan_tree(sweeps_root: Path) -> SweepScan:
+    """The :func:`load_sweep_scan` body over an EXPLICIT sweeps root.
+
+    Byte-identical to the pre-split ``load_sweep_scan`` (which now delegates
+    here) — exposed so the rollup's Hook-B run-end reconcile can fold a
+    custom-named results root (``cmd_sweep_all --out``) through the ONE legacy
+    loader instead of re-deriving ``<lake>/sweeps`` (CLAUDE.md §11 COMMON).
+    """
     paths = _iter_store_paths(sweeps_root)
     all_rows, store_count, skipped, run_id_conflicts = _load_rows_resilient(paths)
 
@@ -452,6 +493,18 @@ def _preset_rank_record(row: ResultRow) -> RankRecord:
         win_rate=row.win_rate,
         calmar_ratio=row.calmar_ratio,
     )
+
+
+def preset_rank_record_source() -> str:
+    """The exact source text of :func:`_preset_rank_record` — a code-token input.
+
+    DEC-RESULTS-TOPK-ROLLUP-001 (MAJOR-3): the rollup's ``code_token`` hashes
+    this projection's SOURCE separately from the hashed ``presets.py`` module
+    (it lives HERE, outside that file) because it is the function that makes
+    the inert-axes assumption true — an edit to it MUST move the token and
+    force a rollup rebuild (invalidation-teeth-pinned).
+    """
+    return inspect.getsource(_preset_rank_record)
 
 
 #: The externally-served ``error`` marker of :func:`store_error_payload` — a
@@ -648,41 +701,19 @@ def _snapshot_eras(sweeps_root: Path) -> dict[_EraKey, frozenset[str]]:
     coordinate re-swept under two eras honestly maps to BOTH (→ ``ambiguous``
     rows); the per-file authority is dup-train PR-3's at-rest census, NOT
     claimed here (per-tuple filename digests fold the hash one-way).
+
+    Since DEC-RESULTS-TOPK-ROLLUP-001 a THIN delegator: the scan body moved
+    VERBATIM to :func:`brutex.engine.results_rollup.snapshot_eras` (the
+    COMMON home the rollup writers share — CLAUDE.md §11) — name, signature,
+    events and behavior byte-identical; the scan-split test battery stays
+    green unmodified (delegation-pinned).
     """
     # Function-local import mirroring results_report._recorded_snapshot_hash:
     # this module's read+render surface stays lean; the audit reader is only
     # paid when a leaderboard scan is actually built.
-    from brutex.orchestrator.audit import AuditError, iter_entries
+    from brutex.engine.results_rollup import snapshot_eras
 
-    audit_path = sweeps_root.joinpath(*_AUDIT_RELPATH)
-    if not audit_path.exists():
-        # iter_entries raises AuditError at CALL time on a missing file; the
-        # absent chain is the ordinary "no signal yet" state, not a failure.
-        return {}
-    collected: dict[_EraKey, set[str]] = {}
-    try:
-        for entry in iter_entries(audit_path):
-            if entry.action != _SWEEP_START_ACTION:
-                continue
-            payload = entry.payload
-            try:
-                key: _EraKey = (
-                    str(payload["instrument"]),
-                    str(payload["tf"]),
-                    str(payload["direction"]),
-                    str(payload["mode"]),
-                    int(payload["k"]),
-                )
-                snapshot = str(payload["data_snapshot_hash"])
-            except (KeyError, TypeError, ValueError):
-                # A malformed SWEEP_START payload contributes no signal — skipped,
-                # never a 500 (the doctor's verify path is where malformation raises).
-                continue
-            collected.setdefault(key, set()).add(snapshot)
-    except AuditError as exc:
-        _LOG.warning("sweep_results.era_scan_failed", audit_path=str(audit_path), error=str(exc))
-        return {}
-    return {key: frozenset(hashes) for key, hashes in collected.items()}
+    return snapshot_eras(sweeps_root)
 
 
 def _row_era_key(row: ResultRow) -> _EraKey:
@@ -771,6 +802,122 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
     }
 
 
+# ── The rollup serve path (DEC-RESULTS-TOPK-ROLLUP-001) ─────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RollupServe:
+    """The rollup serve result for one ``/results`` revision.
+
+    ``scan`` is the rollup-backed superset :class:`SweepScan` on the FRESH and
+    the conflict-suspect STALE arms, or ``None`` on the fallback arm
+    (``fallback_reason`` names why — the route then serves the byte-identical
+    legacy scan and fires the Hook-C rebuild; the behind / revision_drift
+    verdicts deliberately take this arm too, see
+    :func:`load_sweep_scan_via_rollup`). ``behind_stores`` /
+    ``conflict_suspect`` are the honest additive staleness notes
+    (EMIT-ON-nonzero/true on the wire, so a fresh serve's payload shape is
+    unchanged).
+    """
+
+    scan: SweepScan | None
+    behind_stores: int
+    conflict_suspect: bool
+    fallback_reason: str | None
+
+
+def load_sweep_scan_via_rollup(lake_root: Path, *, rev: str, log_gate: LogGate) -> RollupServe:
+    """Serve the ``/results`` scan from the persisted rollup, if valid.
+
+    Runs the V1-V5 validation ladder
+    (:func:`brutex.engine.results_rollup.classify_rollup`) for the UNFILTERED
+    leaderboard ONLY (the route's serve predicate) and maps the verdict onto
+    the serve doctrine:
+
+    * **fresh** — the rollup-backed superset scan, byte-identical payloads
+      (parity-golden-pinned against the legacy recompute).
+    * **stale · conflict_suspect** — the LAST-VALID rollup + the honest
+      additive notes (MAJOR-1: a latched Hook-A fence must never cost a
+      per-poll O(stores × rows) re-scan for the rest of a 2-4 day launch;
+      the conflict is said on the wire, exact accounting restored by the
+      next Hook B/C full fold).
+    * **stale · behind / revision_drift** — treated as FALLBACK (the folded
+      land-pass ruling, ledgered in MIGRATION.md #1732): an additions-only /
+      audit-append drift reconciles through ONE legacy scan for that
+      revision + the Hook-C rebuild, preserving the incumbent #1533
+      next-poll-freshness contract (`test_dashboard_results_revision_key`
+      passes UNMODIFIED) AND closing the convergence hole a pure stale-serve
+      would have for out-of-band writers (with no hook to advance the stamp,
+      "N behind" would be permanent). With Hook A healthy the merge stamps
+      the post-flush revision, so mid-grid polls classify FRESH — only a
+      poll racing the flush→merge window (or an out-of-band write) pays the
+      one legacy scan, never worse than the incumbent per-revision cost.
+    * **rebuild** — ``scan=None`` + the named reason; the caller falls back
+      to the byte-identical legacy scan and rebuilds the rollup from it
+      (Hook C).
+
+    The ``sweep_results.rollup_fallback`` / ``rollup_stale_served`` WARNs are
+    deduped per (revision, reason) through the injected LRU-bounded
+    *log_gate* (MINOR-2 — the #1711 ``OutageGate`` precedent: a poll loop
+    against one bad state logs ONCE, never per poll); a fresh serve after a
+    degraded stretch logs one ``rollup_recovered`` INFO.
+
+    Honest envelope (Golden Rule #10): the classification pays an O(stores)
+    stat-level glob per call (the same walk legacy discovery pays) plus an
+    O(|stamped stores|) re-stat on the non-fresh arms, and a serve pays ONE
+    bounded O(K-union) Parquet load — flat vs total finalist rows and store
+    count in the load term; "O(1) repeat poll" is scoped to AFTER grid settle
+    (the route's level-1/level-2 caches).
+    """
+    from brutex.engine import results_rollup
+
+    sweeps_root = lake_root / SWEEPS_DIRNAME
+    verdict = results_rollup.classify_rollup(sweeps_root, current_rev=rev)
+    serveable = verdict.rows is not None and verdict.stamp is not None
+    if serveable and verdict.outcome == "stale" and verdict.reason != "conflict_suspect":
+        # The behind / revision_drift reconcile arm (the folded land-pass
+        # ruling above): route through the legacy fallback + Hook C so the
+        # served payload is FRESH for this revision and the rollup converges.
+        serveable = False
+    if not serveable or verdict.rows is None or verdict.stamp is None:
+        if log_gate.should_emit(("fallback", rev, verdict.reason)):
+            _LOG.warning("sweep_results.rollup_fallback", rev=rev, reason=verdict.reason)
+        return RollupServe(
+            scan=None, behind_stores=0, conflict_suspect=False, fallback_reason=verdict.reason
+        )
+    stamp = verdict.stamp
+    scan = SweepScan(
+        rows=verdict.rows,
+        store_count=stamp.store_count,
+        skipped=stamp.skipped,
+        run_id_conflicts=stamp.run_id_conflicts,
+        eras=dict(stamp.eras),
+        instruments=stamp.instruments,
+        timeframes=stamp.timeframes,
+        directions=stamp.directions,
+        snapshot_hashes=stamp.snapshot_hashes,
+        total_rows_override=stamp.total_rows,
+        superset_only=True,
+    )
+    if verdict.outcome == "stale":
+        if log_gate.should_emit(("stale", rev, verdict.reason)):
+            _LOG.warning(
+                "sweep_results.rollup_stale_served",
+                rev=rev,
+                reason=verdict.reason,
+                behind_stores=verdict.behind_stores,
+                conflict_suspect=stamp.conflict_suspect,
+            )
+    elif log_gate.clear_degraded():
+        _LOG.info("sweep_results.rollup_recovered", rev=rev)
+    return RollupServe(
+        scan=scan,
+        behind_stores=verdict.behind_stores,
+        conflict_suspect=stamp.conflict_suspect,
+        fallback_reason=None,
+    )
+
+
 # ═══ P2 VERDICT-JOIN SEAM (gap-register ruling 10 — documented, NOT built) ═══
 # P2 (run-core) delivers gap G8 as a PURE verdict-marker function in a
 # P2-owned module: it marks stage3-ungated / cascade-rejected rows so /results
@@ -851,6 +998,17 @@ def build_sweep_leaderboard(
     depth = _clamp_top_n(top_n)
     if scan is None:
         scan = load_sweep_scan(lake_root)
+    if scan.superset_only and (instrument is not None or tf is not None or direction is not None):
+        # STRUCTURAL refusal (DEC-RESULTS-TOPK-ROLLUP-001): the rollup's rows
+        # are the top-K UNION superset — the union under a FILTER is NOT the
+        # filtered top-N (a filtered leader may have been trimmed out on the
+        # global axes). The route's serve predicate already keeps filtered
+        # requests on the legacy path; this guard makes the invariant
+        # impossible to bypass, never a silently-wrong filtered leaderboard.
+        raise ValueError(
+            "a superset-only (rollup-served) SweepScan cannot be filtered — "
+            "filtered leaderboards must use the legacy full scan"
+        )
 
     filtered = [
         r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
@@ -877,7 +1035,10 @@ def build_sweep_leaderboard(
     return SweepLeaderboard(
         rows=rows,
         available=scan.store_count > 0,
-        total_rows=len(filtered),
+        # A rollup-served scan reports the STAMPED global count (its rows are
+        # only the K-union superset); every legacy scan keeps len(filtered)
+        # byte-identically (DEC-RESULTS-TOPK-ROLLUP-001).
+        total_rows=len(filtered) if scan.total_rows_override is None else scan.total_rows_override,
         store_count=scan.store_count,
         skipped=scan.skipped,
         rank_by=resolved_rank,
