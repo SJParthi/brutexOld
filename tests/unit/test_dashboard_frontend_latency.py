@@ -327,16 +327,29 @@ _TOUCHED_TEMPLATES = [
     "v29.html",
 ]
 
-_INLINE_SCRIPT = re.compile(
-    r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE
-)
+# ONE robust block matcher (whitespace-tolerant `</script\s*>` end tag,
+# case-insensitive to mirror the open tag — the CodeQL js/bad-tag-filter
+# shape); the src-less filter runs in Python over the captured attrs
+# instead of a negative lookahead inside the tag match. This is a
+# TEST-side parser of our own trusted templates, never a sanitizer.
+_SCRIPT_BLOCK = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
+_SRC_ATTR = re.compile(r"\bsrc\s*=", re.IGNORECASE)
+
+
+def _inline_script_bodies(html: str) -> list[str]:
+    """Every non-empty src-less inline ``<script>`` body in ``html``."""
+    return [
+        body
+        for attrs, body in _SCRIPT_BLOCK.findall(html)
+        if not _SRC_ATTR.search(attrs) and body.strip()
+    ]
 
 
 @pytest.mark.skipif(_NODE is None, reason="node not installed")
 @pytest.mark.parametrize("name", _TOUCHED_TEMPLATES)
 def test_touched_template_inline_scripts_parse_under_node_check(name: str, tmp_path: Path) -> None:
     """Every src-less inline ``<script>`` block of a touched template parses."""
-    blocks = [b for b in _INLINE_SCRIPT.findall(_tpl(name)) if b.strip()]
+    blocks = _inline_script_bodies(_tpl(name))
     assert blocks, f"{name}: expected at least one inline script block"
     for i, body in enumerate(blocks):
         target = tmp_path / f"{name}.{i}.js"
