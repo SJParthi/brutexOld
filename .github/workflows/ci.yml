@@ -478,6 +478,16 @@ jobs:
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
+          # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1671): the
+          # rank-budget worker-divisor wiring — a dedicated per-module pin at
+          # 100% line+branch over its two suites (the module also rides the
+          # whole-engine glob gate above; this line keeps the divisor seam's
+          # coverage visible on its own).
+          if compgen -G "tests/unit/test_engine_sweep_mem_budget_workers.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_mem_budget --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_mem_budget.py tests/unit/test_engine_sweep_mem_budget_workers.py
+          else
+            echo "(sweep_mem_budget worker-divisor test file not present yet — gate inactive)"
+          fi
           # DEC-AUDIT-VERIFY-UNIFY-001 (MIGRATION.md #560): the unified
           # audit-chain verifier (auto-detect SHA-256 ingest vs BLAKE3
           # supervisor) ships at 100% line+branch; the CLI shim it backs
@@ -1627,6 +1637,16 @@ jobs:
           else
             echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
           fi
+          # DEC-WRITE-DEADLINE-ZOMBIE-SLIM-001 (MIGRATION.md #1672): strict gate
+          # on the durable-write freeze guard (append_with_deadline one-shot pop
+          # handoff + lock-order inversion WARN + env resolver). Injectable sink
+          # fakes, so standalone-gateable with no growwapi/network. 100%
+          # line+branch over the three suites.
+          if compgen -G "tests/unit/test_groww_write_deadline_zombie.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.write_deadline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_write_deadline.py tests/unit/test_write_deadline_lock_order.py tests/unit/test_groww_write_deadline_zombie.py
+          else
+            echo "(write_deadline zombie test file not present yet — gate inactive)"
+          fi
           # DEC-FORM-WINNER-PERSIST-001: strict gates on the durable &-underlying
           # form-winner map (symbol_form_preference — probe-evidence fold +
           # schema_meta persist/load) and the ONE shared schema_meta key/value
@@ -2063,8 +2083,20 @@ jobs:
           # log) is covered by
           # tests/unit/test_dashboard_db_candles_torn_read_retry.py, which
           # MUST also join this gate.
+          # DEC-ALIEN-SCHEMA-READ-HEAL-001: the schema-aware per-file probe
+          # (alien-schema skip + the union-conflict empty-degrade residue) is
+          # covered by tests/unit/test_dashboard_db_alien_schema.py, which
+          # MUST also join this gate.
+          # DEC-WINDOWS-STAT-GUARD-LATCH-001: the OSError-classed ledger stat
+          # guard + the readable-subset per-click latch are covered by
+          # tests/unit/test_dashboard_db_ledger_stat_guard.py, which MUST
+          # also join this gate.
+          # DEC-DB-BASELINE-MANIFEST-ROUTE-001: the %-baseline file pruning
+          # (manifest/month-grammar routing + the parity pins) is covered by
+          # tests/unit/test_dashboard_db_baseline_manifest.py, which MUST
+          # also join this gate.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py tests/unit/test_dashboard_db_baseline_manifest.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
@@ -2226,6 +2258,15 @@ jobs:
             pytest --cov=brutex.dashboard.oneclick_artifacts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_oneclick_artifacts.py
           else
             echo "(brutex.dashboard.oneclick_artifacts test file not present yet — gate inactive)"
+          fi
+          # DEC-CACHE-SERVE-LAST-KNOWN-001 (MIGRATION.md #1666): the COMMON
+          # keyed cache (`MoversSnapshotCache`) gains the serve-last-known
+          # probe-outage mode + the mru_prefix bookkeeping — the module ships
+          # at 100% line+branch under its two dedicated unit suites.
+          if compgen -G "tests/unit/test_movers_cache.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.movers_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_cache.py tests/unit/test_movers_cache_serve_last_known.py
+          else
+            echo "(brutex.dashboard.movers_cache test file not present yet — gate inactive)"
           fi
           # DEC-OPERATOR-PAGE-REAL-001 (MIGRATION.md #1561): the pure oneclick
           # payload builders — run pill / chain map / funnel reconcile / the
