@@ -2060,7 +2060,42 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
+- **Active branch:** `claude/orch-calendar-rust-verdict` (**DEC-ORCH-CALENDAR-RUST-CONVERT-001 +
+  DEC-AUDIT-CHAIN-PARITY-GOLDEN-001 + DEC-CALENDAR-VERDICT-GOLDEN-001, MIGRATION.md #1727 / ADR-0019** —
+  the entry number is coordinator-ASSIGNED from the reservation map (2026-07-11; gaps are legal, next free #1728) —
+  the slice-9 orchestrator/NSE-calendar Rust CONVERSION program, parity-gated by two frozen goldens.
+  AUTHORITY: the slice's judged keep-Python verdict was OVERRIDDEN by the operator the same day
+  (2026-07-11, relayed + ratified via the coordinator) under the program principle **"Rust EVERYWHERE
+  means LIVE code → Rust; DEAD/dormant code → DELETED, never blind-converted"** (umbrella:
+  DEC-RUST-FIRST-MANDATE-001 #1713, at ship time QUEUED on Slice-1's PR, not yet merged). HONEST
+  (Golden Rule #10): expected speed payoff ≈0 for every conversion in scope (fsync-/vendor-/memo-bound) —
+  the conversion is for the operator's Rust-everywhere uniformity decree, not speed. SCOPE (ADR-0019):
+  CONVERT the orchestrator SHA-256 audit chain + the NSE-calendar VERDICT LOGIC (calendar DATA does NOT
+  move — the D8-COMPATIBLE reading, operator-authorized: data stays in `brutex.calendars` and crosses the
+  FFI as config/day-ordinal parameters; no chrono in trading-core, fno-math is the wheel home), then the
+  rate-limiter TOKEN MATH last (bit-exact IEEE bucket arithmetic; §2 Rule 6 inviolable — every
+  ceiling/floor/governor VALUE + AIMD behavior byte-identical, convert the MATH never the caps); DELETE
+  the grep-proven-dead tail in later commits of this same PR (state/retry/pipeline scaffolding, store.py,
+  quota_tracker, adaptive_rate_limiter — keep-frozen-containers for live SHAPE consumers per the
+  DEC-EXECUTION-TRIO-DELETE-001 pattern, exact keep-set from a deletion-phase grep-proof pass); Bloom
+  STAYS (already Rust where it counts). LAWS: goldens-first (a port flips ON only when it reproduces the
+  frozen goldens BIT-FOR-BIT) · default-OFF env flag + burn-in self-check + RETAINED Python oracle (the
+  #1531–#1532 pattern) · the ESCALATION clause (unreproducible bytes/verdicts/f64 bits escalate to the
+  coordinator — a divergent port is NEVER shipped). SHIPPED IN THIS PASS (zero brutex/ source lines):
+  NEW `tests/golden/test_audit_chain_parity_golden.py` (+ generator + 2 SHA-256-manifested fixtures,
+  NEVER regenerated — a REAL 10-entry AuditWriter chain over the CPython float-repr/json.dumps hazard
+  classes + the scalar unit-vector table; writer-equivalence reproduces the fixture bytes exactly) and
+  NEW `tests/golden/test_calendar_verdict_table_golden.py` (+ harness + generator + fixture — the full
+  2020-2026 2,557-day verdict table + out-of-coverage abstain-triage strips + every scalar family incl.
+  every Muhurat/Budget-weekend forced exit + the strict-`>` boundaries + observed-overlay vectors + the
+  exchange-law NSE==BSE and coverage-span tripwires + the two frozen WARN event names; regen env-guarded
+  AND requiring its own ledgered calendar-data DEC); ADR-0019 records the ratified principle, the hazard
+  map, the D8 accommodation + baked-data refusal, and follow-ups F1–F5 (incl. the kernel-track deletion
+  request for the dead fno-math compat TradingCalendar). The retry.py phantom-docstring fix is
+  DELIBERATELY SKIPPED (retry.py is in the ratified deletion scope — recorded in ADR-0019 §6). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; both new suites ride the existing
+  golden job — 493 passed; ruff/ruff-format/`mypy --strict` clean, pyright 0 errors.)
+  Earlier: `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
   renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
   cascade reserved #1633–#1649 — see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history — and the in-flight
   cascade holds the band through #1672), then #1673 → #1692 per the coordinator reservation map (#1673 is reserved
@@ -5267,7 +5302,16 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/groww-market-hours-guard`
+- **Active feature branch:** `claude/orch-calendar-rust-verdict`
+  (DEC-ORCH-CALENDAR-RUST-CONVERT-001 + DEC-AUDIT-CHAIN-PARITY-GOLDEN-001 +
+  DEC-CALENDAR-VERDICT-GOLDEN-001, MIGRATION.md #1727 / ADR-0019 — the slice-9
+  orchestrator/NSE-calendar Rust CONVERSION program, parity-gated by the two
+  frozen goldens shipped in this pass (audit-chain byte layout + the 2,557-day
+  calendar verdict table); operator-overridden from the judged keep-Python
+  verdict under the ratified "live → Rust, dead → DELETED" principle; the port
+  + deletions land as later phases behind the goldens; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/groww-market-hours-guard`
   (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE
   market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
   days, keeping the shared account free for TickVault's live feed; matches
