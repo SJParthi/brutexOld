@@ -56,6 +56,11 @@
 //! expensive by construction); this kernel is a CONSTANT-FACTOR win only.
 //! The FFI copies three `n_groups`-length Vecs per call (48 scalars at the
 //! production S=16) — O(n_groups), disclosed, negligible.
+//! The pyfunction holds the GIL with no signal check between folds (no
+//! `allow_threads`): a pathological `(n_groups, n_test_groups)` makes the
+//! call non-interruptible (Ctrl-C deferred, Python threads blocked) for its
+//! duration, where the Python oracle stays interruptible between bytecodes
+//! — sub-ms at the production C(16, 8), so immaterial there.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

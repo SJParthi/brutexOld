@@ -2114,9 +2114,10 @@ jobs:
             echo "(brutex.metrics.spa test file not present yet — gate inactive)"
           fi
           # DEC-STAT-CPCV-WFO-001 (#428): Stage-4 cross-validation primitives —
-          # brutex.metrics.cpcv (104 stmts / 34 branches) CPCV splits +
-          # purge/embargo + pass-rate; brutex.metrics.wfo (76 / 22) walk-forward
-          # rolling/anchored/expanding pass-rates.
+          # brutex.metrics.cpcv (132 stmts / 44 branches as of
+          # DEC-METRICS-RUST-STATS-001) CPCV splits + purge/embargo +
+          # pass-rate + the rust_stats dispatch; brutex.metrics.wfo (76 / 22)
+          # walk-forward rolling/anchored/expanding pass-rates.
           # NOTE: driven via the numpy-safe `--cov=brutex` + `coverage report
           # --include` form (NOT the dotted `--cov=brutex.metrics.cpcv`): once
           # the spa re-export (DEC-STAT-SPA-001, #431) landed, brutex.metrics

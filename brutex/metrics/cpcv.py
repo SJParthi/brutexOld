@@ -423,11 +423,13 @@ def cpcv_pass_rate(
     n_pass: int | None = None
     if rust_stats.stats_rust_enabled():
         # The flag-gated Rust fold kernel (DEC-METRICS-RUST-STATS-001).
-        # ``None`` — latched / wheel-absent / kernel error / refused result —
-        # falls through to the retained-forever Python oracle, and the flag
-        # resolution above degrades to the default (warn-once) when the
-        # engine package itself cannot import — so wheel state (fno_math OR
-        # trading_core) can never change results or error behaviour.
+        # ``None`` — latched / wheel-absent / kernel error / refused result /
+        # inexact-``float(min_sharpe)`` domain refusal — falls through to the
+        # retained-forever Python oracle, and the flag resolution above
+        # degrades to the default (warn-once) when the engine package itself
+        # cannot import — so wheel state (fno_math OR trading_core) can never
+        # change results or error behaviour (within the documented exception
+        # envelope — the rust_stats module docstring).
         n_pass = rust_stats.cpcv_pass_count_via_kernel(
             count,
             mean,

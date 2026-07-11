@@ -28,7 +28,12 @@ resolution itself NEVER raises: a SET flag in an environment where
 wheel) degrades to :data:`STATS_RUST_DEFAULT` with one warn-once
 ``flag_engine_unavailable`` event — so wheel state (fno_math OR
 trading_core) changes only WHICH engine computes, never results or error
-behaviour. OFF keeps
+behaviour, within the documented exception envelope: the two disclosed
+carve-outs are the NARROW-catch law (any exception type outside
+``ValueError``/``TypeError``/``OverflowError`` from a byzantine wheel
+PROPAGATES — see :func:`cpcv_pass_count_via_kernel`) and the
+``panic=abort`` allocation-failure abort bullet in the honest envelope
+below. OFF keeps
 every caller on the verbatim pure-Python path, byte-identical by
 construction — the Python originals are RETAINED FOREVER as the parity
 oracles (operator exception).
@@ -77,8 +82,18 @@ fresh view for test isolation.
 * A Rust-side allocation failure under the crate's ``panic=abort`` profile
   is a process abort the Python ``MemoryError`` contract cannot catch (the
   CPCV kernel's scratch is O(n_groups) — ~16 machine words in production).
+* The kernel call holds the GIL with no signal check between folds, so at a
+  pathological ``n_groups``/``n_test_groups`` the ``C(S, k)`` fold loop is
+  non-interruptible (Ctrl-C deferred, other Python threads blocked) for the
+  call's duration, where the Python oracle stays interruptible between
+  bytecodes — sub-ms at the production C(16, 8), so immaterial there.
 * An env flip MID-process takes effect on the next call (per-call read);
   results are bit-identical either way.
+* The kernel engages only when ``float(min_sharpe)`` is VALUE-exact — an
+  inexact conversion (an ``int`` past 2^53, or NaN by the ``!=`` test) is a
+  pre-burn-in domain refusal to the oracle (``min_sharpe_inexact``): the
+  oracle's int↔float comparison is EXACT where the FFI rounds, and nothing
+  is normalized on the OFF arm (it stays byte-identical for every input).
 """
 
 from __future__ import annotations
@@ -194,7 +209,8 @@ def stats_rust_enabled() -> bool:
         # SET flag in a wheel-absent/stale environment must degrade to the
         # default with one warn-once — an ImportError must never propagate
         # out of a statistics call (the "wheel state can never change
-        # results or error behaviour" contract covers BOTH wheels).
+        # results or error behaviour" contract — scoped to its documented
+        # exception envelope, module docstring — covers BOTH wheels).
         warn_fallback_once(_FLAG_FN, "flag_engine_unavailable")
         return STATS_RUST_DEFAULT
 
@@ -362,11 +378,15 @@ def cpcv_pass_count_via_kernel(
 
     Returns the integer pass-count on success. Returns ``None`` — after a
     warn-once (or, for a refused result, an ERROR) — when the kernel is
-    latched, unavailable, raises a boundary/conversion error, or returns a
-    domain-invalid value; the caller then serves the call through the
-    bit-exact Python oracle, so wheel state can never change results or
-    error behaviour. The catch is NARROW (``ValueError`` — the kernel's own
-    structural arms; ``TypeError`` / ``OverflowError`` — PyO3
+    latched, unavailable, raises a boundary/conversion error, returns a
+    domain-invalid value, or when ``float(min_sharpe)`` is not value-exact
+    (``min_sharpe_inexact`` — the FFI would round what the oracle compares
+    EXACTLY; a NaN threshold conservatively takes this arm too, result-
+    identical — see the in-body note); the caller then serves the call
+    through the bit-exact Python oracle, so wheel state can never change
+    results or error behaviour (within the documented exception envelope —
+    module docstring). The catch is NARROW (``ValueError`` — the kernel's
+    own structural arms; ``TypeError`` / ``OverflowError`` — PyO3
     argument-conversion failures); any OTHER exception type PROPAGATES and
     ``MemoryError`` re-raises BARE (OOM is a GLOBAL stop — never swallowed
     into a fallback). During burn-in a compare MISMATCH ships the ORACLE
@@ -380,6 +400,26 @@ def cpcv_pass_count_via_kernel(
     if kernel_disabled(fn):
         warn_fallback_once(fn, "kernel_disabled")
         return None
+    min_sharpe_f = float(min_sharpe)
+    if min_sharpe_f != min_sharpe:
+        # Exactness DOMAIN GUARD (refuter-round-1 confirmed defect): the FFI
+        # necessarily rounds ``min_sharpe`` through ``float()``, while the
+        # Python oracle compares ``sharpe > min_sharpe`` on the ORIGINAL
+        # object — and CPython's mixed-type int↔float comparison is EXACT.
+        # A type-legal ``int`` threshold past 2^53 whose float image rounds
+        # across a fold Sharpe would make the two engines count DIFFERENT
+        # passes (ON≠OFF) and false-fire the burn-in autorevert against a
+        # FAITHFUL kernel. The kernel therefore engages ONLY when the float
+        # conversion is provably value-exact by ``==``; anything else is a
+        # pre-burn-in domain refusal to the oracle (no sample consumed, no
+        # latch risk — the OFF arm stays byte-identical: nothing normalized).
+        # NaN note (documented choice): ``float('nan') != float('nan')`` is
+        # True, so a NaN threshold conservatively takes this refusal too —
+        # SAFE and result-identical (``sharpe > nan`` is False on BOTH
+        # engines, every fold a non-pass, unit-pinned); a degenerate
+        # all-non-pass threshold has no kernel win worth a special case.
+        warn_fallback_once(fn, "min_sharpe_inexact", min_sharpe=repr(min_sharpe))
+        return None
     kernel = _resolve_kernel(fn, "stats_cpcv_pass_count")
     if kernel is None:
         return None
@@ -389,7 +429,7 @@ def cpcv_pass_count_via_kernel(
             [float(x) for x in means],
             [float(x) for x in m2s],
             int(n_test_groups),
-            float(min_sharpe),
+            min_sharpe_f,
         )
     except (ValueError, TypeError, OverflowError) as exc:
         # The kernel's structural ValueError arms + PyO3 conversion errors

@@ -411,6 +411,146 @@ def test_latched_kernel_short_circuits_with_one_warning() -> None:
     assert [e["reason"] for e in events] == ["kernel_disabled"]
 
 
+# ── the FFI call site: min_sharpe exactness domain guard ────────────────
+# Refuter-round-1 CONFIRMED defect (fix round 2): the seam fed the kernel
+# ``float(min_sharpe)`` while the Python oracle compares the ORIGINAL object
+# EXACTLY (CPython's mixed-type int↔float comparison is exact), so a
+# type-legal int threshold past 2^53 gave ON≠OFF and falsely LATCHED a
+# faithful kernel during burn-in. The guard engages the kernel only when the
+# conversion is value-exact; anything else is a pre-burn-in domain refusal.
+
+
+def test_min_sharpe_inexact_int_is_domain_refused_before_burn_in() -> None:
+    """Moment-level refuter repro VERBATIM through the seam: the group-0
+    fold Sharpe is EXACTLY ``2^53 + 4``; ``min_sharpe = 2^53 + 3`` (int) is
+    not float-representable — ``float()`` rounds it UP onto the fold Sharpe
+    (ties-to-even), so the raw kernel (996.0 > 996.0 → 0) and the exact
+    oracle (…996 > …995 → 1) genuinely DIVERGE. The seam must refuse the
+    kernel BEFORE burn-in: warn-once ``min_sharpe_inexact``, no sample
+    consumed, no autorevert risk, the burn-in oracle never invoked here."""
+    sharpe_val = float(2**53 + 4)
+    m_int = 2**53 + 3
+    assert float(m_int) == sharpe_val  # the information loss the guard sees
+    assert m_int < sharpe_val  # ...while the EXACT compare still orders them
+    counts = np.array([2, 2], dtype=np.intp)
+    means = np.array([sharpe_val, 0.0], dtype=np.float64)
+    m2s = np.array([2.0, 0.0], dtype=np.float64)
+    # The divergence the guard exists for (documented at the raw layers —
+    # the oracle compares exactly, the rounded kernel cannot):
+    assert _fold_pass_count(counts, means, m2s, 2, 1, m_int) == 1
+    raw_kernel = fno_math.stats_cpcv_pass_count(
+        [2, 2], [sharpe_val, 0.0], [2.0, 0.0], 1, float(m_int)
+    )
+    assert raw_kernel == 0
+    budgets_before = dict(rust_stats._SELF_CHECK_REMAINING)  # pyright: ignore[reportPrivateUsage]
+
+    def _forbidden() -> int:
+        raise AssertionError("a domain refusal must not run the burn-in oracle")
+
+    with capture_logs() as logs:
+        assert (
+            cpcv_pass_count_via_kernel(counts, means, m2s, 1, m_int, n_total=2, oracle=_forbidden)
+            is None
+        )
+        assert (  # second refusal is memoized (warn-once)
+            cpcv_pass_count_via_kernel(counts, means, m2s, 1, m_int, n_total=2, oracle=_forbidden)
+            is None
+        )
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_inexact"]
+    assert events[0]["fn"] == "cpcv"
+    assert events[0]["min_sharpe"] == repr(m_int)
+    # No burn-in sample consumed; no autorevert fired; latch clean.
+    assert budgets_before == rust_stats._SELF_CHECK_REMAINING  # pyright: ignore[reportPrivateUsage]
+    assert kernel_disabled("cpcv") is False
+    assert not any(e["event"] == "rust_stats.kernel_autoreverted" for e in logs)
+
+
+@pytest.mark.parametrize("exact_int", [0, 1, -1, 2**53])
+def test_min_sharpe_value_exact_int_stays_on_the_kernel(exact_int: int) -> None:
+    """An int threshold whose float image is VALUE-exact engages the kernel
+    normally and matches the exact oracle (kills the guard's ``!=`` → ``==``
+    mutant, under which every exact threshold would refuse and engagement
+    could never fire)."""
+    counts, means, m2s = _golden_moments()
+    expected = _fold_pass_count(counts, means, m2s, 4, 2, exact_int)
+    reset_self_check_for_tests("cpcv", remaining=0)
+    with capture_logs() as logs:
+        got = cpcv_pass_count_via_kernel(
+            counts, means, m2s, 2, exact_int, n_total=6, oracle=lambda: -1
+        )
+    assert got == expected
+    assert any(e["event"] == "rust_stats.engaged" for e in logs)
+    assert not any(e["event"] == "rust_stats.fallback" for e in logs)
+
+
+def test_min_sharpe_nan_takes_the_oracle_by_design() -> None:
+    """``float('nan') != float('nan')`` is True, so a NaN threshold
+    conservatively takes the domain refusal → the Python oracle serves —
+    the DOCUMENTED choice. SAFE and result-identical: ``sharpe > nan`` is
+    False on BOTH engines (every fold a non-pass), pinned here against the
+    raw kernel AND the oracle before asserting the refusal; a degenerate
+    all-non-pass threshold has no kernel win worth a NaN special case."""
+    counts, means, m2s = _golden_moments()
+    nan = float("nan")
+    # Both engines agree the answer is 0 — the refusal changes WHICH engine
+    # serves, never the result.
+    assert _fold_pass_count(counts, means, m2s, 4, 2, nan) == 0
+    raw_kernel = fno_math.stats_cpcv_pass_count(
+        [1, 1, 1, 1], [1.0, 2.0, -3.0, -4.0], [0.0, 0.0, 0.0, 0.0], 2, nan
+    )
+    assert raw_kernel == 0
+    with capture_logs() as logs:
+        assert (
+            cpcv_pass_count_via_kernel(counts, means, m2s, 2, nan, n_total=6, oracle=lambda: 0)
+            is None
+        )
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_inexact"]
+    assert kernel_disabled("cpcv") is False
+    # Rate level: both arms serve the identical all-non-pass answer.
+    returns = [0.01, -0.02, 0.03, -0.01]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=nan)
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv")
+        on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=nan)
+    assert struct.pack("<d", on) == struct.pack("<d", off) == struct.pack("<d", 0.0)
+
+
+def test_refuter_round1_rate_level_on_off_bit_equal_and_no_false_autorevert() -> None:
+    """Rate-level refuter repro VERBATIM (scratchpad repro_int_minsharpe.py,
+    made deterministic): ULP-wobble returns around 1.0 whose fold Sharpe is
+    EXACTLY ``2^53 + 4``, with the int threshold ``2^53 + 3`` one below it.
+    Pre-guard: OFF read 2/6 while ON read 0.0 (bits differ) and the burn-in
+    falsely LATCHED the faithful kernel. Post-guard: ON≡OFF bit-equal in
+    burn-in AND steady state, no autorevert fires, the latch is clean
+    afterwards."""
+    vals = [1.0 + w * 2.0**-52 for w in (2, 1, 2, 2, 1, 2, 2, 0)]
+    m_int = 2**53 + 3  # exact compare: BELOW the 2^53+4 fold Sharpe; float() rounds ONTO it
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(vals, n_groups=4, n_test_groups=2, min_sharpe=m_int)
+        assert off == 2 / 6  # the exact-compare answer (2 of the 6 folds pass)
+        mp.setenv(STATS_RUST_ENV, "1")
+        # Steady state (post-burn-in — the refuter's 17th-call shape).
+        reset_self_check_for_tests("cpcv", remaining=0)
+        on_steady = cpcv_pass_rate(vals, n_groups=4, n_test_groups=2, min_sharpe=m_int)
+        # Fresh-process burn-in (the false-autorevert shape).
+        reset_self_check_for_tests("cpcv")
+        reset_observability_memo_for_tests()
+        with capture_logs() as logs:
+            on_burn_in = cpcv_pass_rate(vals, n_groups=4, n_test_groups=2, min_sharpe=m_int)
+    assert struct.pack("<d", on_steady) == struct.pack("<d", off)
+    assert struct.pack("<d", on_burn_in) == struct.pack("<d", off)
+    assert not any(e["event"] == "rust_stats.kernel_autoreverted" for e in logs)
+    assert any(
+        e["event"] == "rust_stats.fallback" and e["reason"] == "min_sharpe_inexact" for e in logs
+    )
+    assert kernel_disabled("cpcv") is False  # latch state clean afterwards
+
+
 # ── the FFI call site: burn-in + engagement ─────────────────────────────
 
 

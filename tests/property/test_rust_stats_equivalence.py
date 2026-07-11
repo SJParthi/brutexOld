@@ -21,8 +21,10 @@ Adversarial input classes: near-zero-mean folds (the sign of the fold mean
 IS the pass verdict at ``min_sharpe=0``), exact-constant series (zero
 variance → undefined folds), 1e300-scale overflow (the inf/NaN fail-safe
 must flow IEEE-identically), and the tiny ``n == n_groups`` boundary
-(singleton groups). The strict-``>`` boundary at an ACHIEVED fold Sharpe is
-pinned deterministically below.
+(singleton groups). ``min_sharpe`` is drawn from floats ∪ INTS — including
+non-float-representable ints past 2^53, the refuter-round-1 exactness-leak
+class the seam's domain guard refuses to the oracle. The strict-``>``
+boundary at an ACHIEVED fold Sharpe is pinned deterministically below.
 """
 
 from __future__ import annotations
@@ -85,7 +87,19 @@ def _cases(draw: st.DrawFn) -> tuple[list[float], int, int, float]:
                 max_size=n,
             )
         )
-    min_sharpe = draw(st.sampled_from([0.0, 0.5, -0.5]))
+    # min_sharpe over floats ∪ INTS (refuter-round-1 fold): the ON≡OFF law
+    # must hold for EVERY type-legal threshold. Ints past 2^53 (2^53+3,
+    # 2^60+1, and random draws up to ±2^60) are not float-representable —
+    # the seam's exactness domain guard refuses the kernel for those
+    # (never a rounded FFI compare against the oracle's EXACT int↔float
+    # compare); value-exact ints (0, ±1, 2^53) stay kernel-served.
+    min_sharpe: float = draw(
+        st.one_of(
+            st.sampled_from([0.0, 0.5, -0.5]),
+            st.sampled_from([0, 1, -1, 2**53, 2**53 + 3, -(2**53 + 3), 2**60 + 1]),
+            st.integers(min_value=-(2**60), max_value=2**60),
+        )
+    )
     return vals, s, k, min_sharpe
 
 
@@ -113,10 +127,14 @@ def test_on_off_rate_bit_equal_and_count_exact(
     case: tuple[list[float], int, int, float], burn_in: bool
 ) -> None:
     returns, s, k, min_sharpe = case
+    # Value-exact conversion ⇒ the kernel engages; an inexact threshold (an
+    # int past 2^53) is domain-refused to the oracle — refuter-round-1 fold.
+    exact = float(min_sharpe) == min_sharpe
     off_rate, off_engaged = _rate_under_flag("0", returns, s, k, min_sharpe, burn_in=burn_in)
     on_rate, on_engaged = _rate_under_flag("1", returns, s, k, min_sharpe, burn_in=burn_in)
     assert not off_engaged
-    assert on_engaged, "the ON arm must engage the Rust kernel (anti-vacuous-pass law)"
+    # Anti-vacuous-pass law wherever the kernel CAN legally engage.
+    assert on_engaged == exact
     assert struct.pack("<d", on_rate) == struct.pack("<d", off_rate)
 
     # Count-exactness at the seam: the integer n_pass, not just the rate.
@@ -134,7 +152,11 @@ def test_on_off_rate_bit_equal_and_count_exact(
             n_total=math.comb(s, k),
             oracle=lambda: oracle_count,
         )
-    assert kernel_count == oracle_count
+    if exact:
+        assert kernel_count == oracle_count
+    else:
+        # The domain guard refused the kernel — the CALLER's oracle serves.
+        assert kernel_count is None
 
 
 def test_strict_gt_boundary_at_achieved_fold_sharpe() -> None:
