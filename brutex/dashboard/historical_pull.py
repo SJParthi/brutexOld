@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
@@ -1192,6 +1193,16 @@ def _run_phase(
     # spent only on a real pull.
     census_spans: Sequence[dict[str, Any]] = []
     census_rows: list[tuple[Any, ...]] = []
+    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+    # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per phase — HOISTED ABOVE the F&O
+    # cold-start reconcile so the seed and the FUTURES partial-window observe judge
+    # ONE consistent overlay snapshot; threaded into the detectors' margin
+    # arithmetic + the (documented-INERT, symmetry-pinned) F&O seed gate ONLY — an
+    # observed holiday is not a data hole — NEVER into window planning / the
+    # 30d/60d window law. A dry-run threads the empty overlay (the
+    # ``capture_hook_factory`` gating pattern); the loader never raises
+    # (missing/corrupt -> empty).
+    observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
     if ledger is not None:
         spans = load_lake_spans(lake_root)
         # Buckets REFINE (never cross) the market split, so the per-bucket
@@ -1211,6 +1222,7 @@ def _run_phase(
                 end=end,
                 market=reconcile_market,
                 contract_windows=contract_windows,
+                observed=observed_holidays,
                 span_index=span_index,
             )
         # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
@@ -1275,12 +1287,9 @@ def _run_phase(
     # then reads the live clock only, so a junk env set mid-pull can never crash a long
     # F&O phase with a per-contract ValueError.
     market_closed = None if dry_run else resolve_market_closed()
-    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
-    # phase and threaded into the FUTURES partial-window observe margin ONLY (an
-    # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d
-    # window law. A dry-run threads the empty overlay (the ``capture_hook_factory``
-    # gating pattern); the loader never raises (missing/corrupt -> empty).
-    observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
+    # (The observed-sessions overlay was loaded ONCE above, before the F&O
+    # reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME snapshot feeds the
+    # FUTURES partial-window observe below.)
     # Mass-empty breaker CANARY (DEC-EMPTY-BREAKER-CANARY-001): armed ONLY for a
     # REAL live pull (a dry-run threads None — the same gating as the storm
     # breaker above). Before the mid-run EmptySettleBreaker halts the whole F&O
@@ -1289,6 +1298,20 @@ def _run_phase(
     # healthy canary means the mass empties are genuine (a 2020-era dead chain
     # at the bucket head), so the phase continues instead of false-halting.
     breaker_canary = None if dry_run else make_breaker_canary_probe(client, pace=pace)
+    # ONE mass ALL-FILTERED breaker per PHASE (DEC-ALLFILTERED-MASS-BREAKER-001,
+    # review round 4 — supersedes the round-3 per-pass resolve): resolved HERE —
+    # not per until-clean round — so the trip LATCHES across EVERY round's market
+    # buckets of this pull's F&O phase. A per-pass fresh instance broke the
+    # alarm's pull-wide promise: a retry round re-attempts exactly the FAILED
+    # windows the tripped prior round suppressed, and when that re-attempt set
+    # sits below the observation/series floors its fresh breaker never tripped —
+    # a suppressed window bumped to threshold and settled SKIPPED post-alarm,
+    # un-rescinded (the spot spine's identical round-4 leak). Round 3's
+    # cross-bucket pooling is preserved (the SAME instance feeds every
+    # `run_groww_option_ingest` bucket call below); a fresh PHASE still starts
+    # clean (Golden Rule #7 — no state leak across pulls), and a dry-run stays
+    # ineligible by construction (empty payloads → raw_bars == 0).
+    af_breaker = resolve_all_filtered_breaker()
 
     def _progress(label: str, bars: int, failed: bool) -> None:
         """Forward to the caller's hook + flush the ledger (either side optional).
@@ -1347,6 +1370,12 @@ def _run_phase(
             _progress(label, bars, failed)
             step_monitor.observe_write(step, symbol=label)
 
+        # The ONE phase-scoped mass ALL-FILTERED breaker — `af_breaker`, resolved
+        # ABOVE the bucket/round loops (review round 4) — is injected into EVERY
+        # bucket call, so the futures + options buckets of EVERY step and EVERY
+        # until-clean round POOL their evidence into ONE latched counter
+        # (review round 3), unchanged by the step-major split of
+        # DEC-PULL-SIX-STEP-ORDER-001.
         try:
             report: GrowwOptionIngestReport = run_groww_option_ingest(
                 client,
@@ -1369,6 +1398,7 @@ def _run_phase(
                 write_pool=write_pool,
                 fetch_pipeline=fetch_pipeline,
                 observed_holidays=observed_holidays,
+                all_filtered_breaker=af_breaker,
                 breaker_health_probe=breaker_canary,
                 storm_breaker=storm_breaker,
                 market_closed=market_closed,

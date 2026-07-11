@@ -4571,6 +4571,7 @@ def cmd_fetch(
     # throttled mint / a stale read-only re-read) never alert — carved back out via
     # `is_terminal_auth_failure` at the except site (they re-raise unchanged, exactly
     # as they propagated before this tuple caught them).
+    from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import (
         VendorDownError,
@@ -4926,6 +4927,18 @@ def cmd_fetch(
             floors=load_vendor_floors(floor_store, floor_symbols),
         )
         ledger = begin_pull_ledger(resolved, dry_run=_no_persist)
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+        # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per pull — HOISTED ABOVE the
+        # cold-start reconcile below so the seed's continuity gate and the
+        # fetch-time completeness detectors judge ONE consistent overlay snapshot;
+        # threaded into the detectors' margin arithmetic + the seed gate ONLY (an
+        # observed holiday is not a data hole) — NEVER into window planning or the
+        # session filter. A ``--dry-run`` threads the empty overlay (the
+        # ``detect_completeness_gaps`` gating pattern); the loader never raises
+        # (missing/corrupt -> empty).
+        from brutex.calendars.observed_sessions import load_observed_holidays
+
+        observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
         if ledger is not None:
             # Seed the durable ledger in the SAME (market, tile-width) namespace the
             # Groww spot spine fetches+records in (DEC-DASHBOARD-GROWW-SPOT-001 fixed
@@ -4956,6 +4969,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                observed=observed_holidays,
                 symbol_windows=floor_windows,
             )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
@@ -5049,14 +5063,6 @@ def cmd_fetch(
         # ``None`` so it can never observe synthetic outcomes (the same gating as
         # ``detect_completeness_gaps`` below).
         storm_breaker = None if dry_run else resolve_error_storm_breaker()
-        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
-        # per pull and threaded into the completeness detectors' margin arithmetic
-        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
-        # A ``--dry-run`` threads the empty overlay (the ``detect_completeness_gaps``
-        # gating pattern); the loader never raises (missing/corrupt -> empty).
-        from brutex.calendars.observed_sessions import load_observed_holidays
-
-        observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
         # Mid-run market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001): a `brutex fetch`
         # launched at 01:30 IST (the start gate ALLOWED it) can run for hours and cross
         # 08:45 — the most-exposed path (legacy auto-resume re-launches it). Thread a
@@ -5066,6 +5072,17 @@ def cmd_fetch(
         # only the clock), `None` for `--dry-run`/`--inspect` (a synthetic adapter / no
         # persistence makes ZERO vendor calls, so those are exempt like the start gate).
         market_closed = None if (dry_run or inspect) else resolve_market_closed()
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4 — the CLI twin of pull_all_spot's wiring, the storm-breaker
+        # precedent above): resolved HERE and threaded into every pass / until-clean
+        # round so the trip LATCHES pull-wide — a per-pass fresh instance let a
+        # sub-floor retry round settle windows the trip alarm promised were halted.
+        # Resolved unconditionally: a ``--dry-run``'s windows are ineligible by
+        # construction (``detect_completeness_gaps=False`` → never observed).
+        af_breaker = resolve_all_filtered_breaker()
+        # (The observed-sessions overlay was loaded ONCE above, before the
+        # cold-start reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME
+        # ``observed_holidays`` snapshot feeds the fetch-time detectors below.)
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -5094,6 +5111,7 @@ def cmd_fetch(
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
                     observed_holidays=observed_holidays,
+                    all_filtered_breaker=af_breaker,
                     storm_breaker=storm_breaker,
                     # Learned-floor clamp + in-pull depth learner
                     # (DEC-CLI-DEPTH-FLOORS-001): the SAME `floor_windows` the

@@ -61,7 +61,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from brutex.calendars.nse import IST, is_holiday_data_available
+from brutex.calendars.nse import IST, is_holiday_data_available, is_trading_day
 from brutex.calendars.observed_sessions import is_trading_day_observed
 
 __all__ = [
@@ -168,11 +168,20 @@ def _interior_barless_runs(
     trading-session length. Only sessions BETWEEN the first and last covered date
     are considered (the interior), so a leading/trailing edge can never
     contribute; a non-trading day never breaks a run (only a COVERED trading
-    session does). An *observed* overlay day (DEC-CALENDAR-OBSERVED-SESSIONS-001)
-    is NOT a session, so an observed holiday can never inflate a hole —
-    remove-only: subtracting sessions can only SHRINK a run, never grow it.
-    O(trading days in the bracketed span). Returns ``[]`` when fewer than two
-    covered sessions exist (no interior to bracket).
+    session does). A NON-covered *observed* overlay day
+    (DEC-CALENDAR-OBSERVED-SESSIONS-001) is NOT a session, so an observed
+    holiday can never inflate a hole; a COVERED static session always breaks
+    its run BEFORE the overlay is consulted (DEC-SEED-OBSERVED-OVERLAY-001
+    review fold) — bars on an overlaid day are the drift-heal EVIDENCE that
+    the entry is STALE (an entry self-heals only when ``brutex
+    detect-session-drift`` next re-runs, NOT the moment bars appear, so
+    ``observed ∩ covered != ∅`` is a reachable shape between a backfill and
+    that re-run), and trusting the stale entry over the bars would MERGE the
+    two flanking runs. Remove-only is therefore STRUCTURAL: growing *observed*
+    can only SHRINK a run, never grow it — for EVERY overlay shape, not just
+    the disjoint production one. O(trading days in the bracketed span).
+    Returns ``[]`` when fewer than two covered sessions exist (no interior to
+    bracket).
     """
     if len(covered) < _MIN_BRACKETING_SESSIONS:
         return []
@@ -184,18 +193,26 @@ def _interior_barless_runs(
     cursor = covered[0] + timedelta(days=1)
     last = covered[-1]
     while cursor < last:
-        if is_trading_day_observed(cursor, observed=observed):
-            if cursor in have:
+        if cursor in have:
+            # A bar-CARRYING date breaks the run whenever the STATIC calendar
+            # says it is a session — the overlay is deliberately NOT consulted
+            # here: its bars are the drift-heal evidence that an overlay entry
+            # is stale (Golden Rule #1 — evidence over a stale annotation), so
+            # a stale entry can never MERGE two flanking runs (the docstring's
+            # structural shrink-only law). A covered date the static calendar
+            # calls a NON-session (a legacy weekend/holiday bar leak) stays
+            # inert exactly as before — it neither breaks nor extends a run.
+            if is_trading_day(cursor):
                 if run_first is not None and run_last is not None:
                     runs.append((run_first, run_last, run))
                 run_first = None
                 run_last = None
                 run = 0
-            else:
-                if run_first is None:
-                    run_first = cursor
-                run_last = cursor
-                run += 1
+        elif is_trading_day_observed(cursor, observed=observed):
+            if run_first is None:
+                run_first = cursor
+            run_last = cursor
+            run += 1
         cursor += timedelta(days=1)
     if run_first is not None and run_last is not None:
         runs.append((run_first, run_last, run))
@@ -244,7 +261,9 @@ def classify_interior_gap_dates(
     observed
         Observed-holiday overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
         remove-only; default empty = byte-identical back-compat). An overlaid
-        date is not a session, so it never counts toward an interior hole.
+        date is not a session, so it never counts toward an interior hole —
+        but a COVERED session still breaks its run even when overlaid (a
+        stale entry never merges runs; see :func:`_interior_barless_runs`).
 
     Returns
     -------
@@ -323,13 +342,18 @@ def interior_gap_runs(
     (:func:`_interior_barless_runs`), the tolerance (same
     ``BRUTEX_INTERIOR_GAP_TOLERANCE_SESSIONS`` knob — ONE tunable for fetch-time
     and seed-time, CLAUDE.md §11 COMMON) and the abstain rules with the
-    classifier, so those THREE dimensions can never drift. HONEST (Golden Rule
-    #10): the *observed* drift overlay is NOT one of them — it is a per-call
-    argument, and the seed chokepoint currently calls without it while the
-    fetch-time detector passes ``observed=observed_holidays``
-    (DEC-CALENDAR-OBSERVED-SESSIONS-001); the overlay is remove-only, so that
-    divergence is conservative-only for the seed (a run can only read LONGER —
-    see ``seed_enclosed_windows``'s honest-residuals note).
+    classifier, so those THREE dimensions can never drift. The *observed* drift
+    overlay is a per-call argument and — since DEC-SEED-OBSERVED-OVERLAY-001
+    CLOSED the named follow-up — the seed chokepoint
+    (``seed_enclosed_windows``) threads the SAME per-pull
+    ``observed=observed_holidays`` snapshot the fetch-time detector passes
+    (DEC-CALENDAR-OBSERVED-SESSIONS-001), so seed-time and fetch-time verdicts
+    share ONE calendar (the run-walker breaks a run on every COVERED static
+    session BEFORE consulting the overlay, so threading the remove-only
+    overlay only ever SHORTENS runs — the seed became strictly MORE
+    permissive for EVERY overlay shape, a STALE entry over a
+    since-backfilled covered day included; property-pinned without a
+    disjointness restriction).
 
     Returns
     -------
@@ -394,7 +418,9 @@ def classify_interior_gap(
     observed
         Observed-holiday overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
         remove-only; default empty = byte-identical back-compat). An overlaid
-        date is not a session, so it never counts toward an interior hole.
+        date is not a session, so it never counts toward an interior hole —
+        but a COVERED session still breaks its run even when overlaid (a
+        stale entry never merges runs; see :func:`_interior_barless_runs`).
 
     Returns
     -------

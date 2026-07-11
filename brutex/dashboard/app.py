@@ -8020,7 +8020,8 @@ def build_app(
         DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
         security_id / interval /
         window dates / status / bars / attempts / last_error / streak / in-pull
-        fetches / deduped net-new bars). READ-ONLY:
+        fetches / deduped net-new bars / streak provenance —
+        DEC-STREAK-PROVENANCE-001). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
         matches the DuckDB-table grid so the /db viewer renders it identically.
@@ -8061,6 +8062,10 @@ def build_app(
             "bars_net_new",
             "empty_retries",
             "transient_retries",
+            # The per-bump streak lineage (DEC-STREAK-PROVENANCE-001) — a trailing
+            # append, so the positional IST cells (idx 9/10) are untouched and the
+            # column-generic /db grid renders it with ZERO JS change.
+            "streak_provenance",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)

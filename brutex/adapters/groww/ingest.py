@@ -67,6 +67,7 @@ from time import sleep as _time_sleep
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
 from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
 from brutex.adapters.error_storm_breaker import (
     ErrorStormBreaker,
@@ -343,6 +344,7 @@ def ingest_spot(
     detect_completeness_gaps: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
@@ -420,6 +422,21 @@ def ingest_spot(
         global stop — the pull halts loudly instead of settling poisoned windows), and a
         tripped breaker suppresses every remaining EMPTY settle at ledger-record time.
         ``None`` (unit-test / legacy callers) observes nothing — byte-identical behaviour.
+    all_filtered_breaker
+        Optional per-pull :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker`
+        (DEC-ALLFILTERED-MASS-BREAKER-001) — the mass ALL-FILTERED counter shared by
+        every window worker of EVERY pass of the pull (the pull entrypoints resolve
+        ONE instance threaded through each retry pass — review round 4; the
+        run-ingest layer's ``None`` fallback serves direct callers).
+        Each ELIGIBLE window's boundary verdict is observed at the consumer tail; a
+        mass event (SPREAD/FRACTION rules) latches ONCE, auto-rescinds the same-pull
+        pre-trip ``ALL_FILTERED`` settles, emits ONE count-naming alarm, and
+        suppresses further ``ALL_FILTERED`` SKIPPED-settles for the pull via the
+        record-time ``record(allow_degraded_settle=…)`` re-check (the breaker's
+        ``allow_settle``, evaluated UNDER the ledger lock — review round 1 TOCTOU
+        closure; windows stay FAILED + re-pullable; deliberately NOT a pull
+        stop). ``None`` (unit-test / legacy callers) observes nothing —
+        byte-identical behaviour.
     storm_breaker
         Optional per-pull :class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`
         (DEC-VENDOR-DOWN-BREAKER-001) — the vendor-down error-storm breaker + the
@@ -536,6 +553,7 @@ def ingest_spot(
                 detect_completeness_gaps=detect_completeness_gaps,
                 observed_holidays=observed_holidays,
                 empty_breaker=empty_breaker,
+                all_filtered_breaker=all_filtered_breaker,
                 storm_breaker=storm_breaker,
                 write_breaker=write_breaker,
                 floor_learner=floor_learner,
@@ -685,6 +703,7 @@ def _ingest_one_window(
     detect_completeness_gaps: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
@@ -755,6 +774,7 @@ def _ingest_one_window(
             detect_completeness_gaps=detect_completeness_gaps,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            all_filtered_breaker=all_filtered_breaker,
             write_breaker=write_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
@@ -781,6 +801,7 @@ def _ingest_one_window(
             detect_completeness_gaps=detect_completeness_gaps,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            all_filtered_breaker=all_filtered_breaker,
             write_breaker=write_breaker,
         )
         if result_outcome.transient:
@@ -964,6 +985,7 @@ def _fetch_window_raw(
                         bars_net_new=0,  # the failed fetch stored nothing (a known 0)
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
+                        pull_id=pull_id,
                         # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): every prior
                         # ladder fetch was a clean empty (the loop re-iterates
                         # only on one) and THIS fetch is the one transient — the
@@ -1108,6 +1130,7 @@ def _process_window_tail(
     detect_completeness_gaps: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
 ) -> _WindowOutcome:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
@@ -1256,6 +1279,7 @@ def _process_window_tail(
                 bars_net_new=0,  # the deferred write stored nothing (a known 0)
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
+                pull_id=pull_id,
                 # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): the fetch ladder's own
                 # facts — the defer is a WRITE-side stall, not a vendor transient,
                 # so the transient half is the payload's structural 0 (see
@@ -1411,6 +1435,62 @@ def _process_window_tail(
         degraded_reason = SUSPECTED_PARTIAL
     else:
         degraded_reason = None
+    # Mass ALL-FILTERED breaker feed (DEC-ALLFILTERED-MASS-BREAKER-001): observe every
+    # ELIGIBLE window's boundary verdict — the eligibility mirrors the demotion's own
+    # ``detect_completeness_gaps`` + ``interval != _DAILY`` gate (a dry-run/synthetic
+    # pull never feeds the breaker; a derived-1day window is never boundary-judged)
+    # plus the session-exempt + raw-bars>0 conjuncts, so a genuine EMPTY window never
+    # inflates the denominator and an exempt symbol (GIFTNIFTY) joins NEITHER the
+    # numerator NOR the denominator. The breaker's DEFAULT dedupe key
+    # ("<series>|<start>|<end>", review round 6) IS this spine's window ledger
+    # identity — series = "<symbol>:<interval>" — so a retry pass re-attempting
+    # the same still-FAILED window updates its verdict in place instead of
+    # re-counting it. Observe BEFORE the record below — the
+    # trip-crossing window suppresses ITSELF through the record-time
+    # ``allow_degraded_settle`` re-check (evaluated inside ``record()`` UNDER the
+    # ledger lock, serialized with the trip's rescind — review round 1 TOCTOU
+    # closure: a settle in flight at the trip instant is either suppressed or
+    # captured in ``_af_settled_keys`` and rescinded, never leaked).
+    af_eligible = (
+        detect_completeness_gaps
+        and interval != _DAILY
+        and not is_session_exempt(instrument.symbol_name)
+        and len(raw_bars) > 0
+    )
+    if all_filtered_breaker is not None and af_eligible:
+        af_series = f"{instrument.symbol_name}:{interval}"
+        if all_filtered_breaker.observe(
+            af_series,
+            all_filtered=all_boundary_filtered,
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+        ):
+            # The trip TRANSITION (returned True exactly once per pull): auto-rescind
+            # the same-pull pre-trip ALL_FILTERED settles, then emit the ONE loud
+            # count-naming alarm (structlog ERROR + CRITICAL Telegram) from the COMMON
+            # helper both spines share. Deliberately NOT a pull stop — a filter-side
+            # event poisons SETTLING only, never fetching/storage. Lazy import: the
+            # notifications module is pulled in at most once per pull, at trip time.
+            from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
+
+            rescinded = ledger.rescind_all_filtered_settles() if ledger is not None else 0
+            emit_mass_all_filtered_alert(
+                all_filtered_breaker.trip_snapshot(), rescinded=rescinded, pull_id=pull_id
+            )
+    # Mass ALL-FILTERED suppression seam (DEC-ALLFILTERED-MASS-BREAKER-001): the
+    # breaker is handed to ``record()`` as its ``allow_degraded_settle`` callable
+    # and consulted INSIDE the ledger lock — NEVER pre-computed in this tail (the
+    # review-round-1 TOCTOU fix: a tail-time boolean raced the sibling trip's
+    # one-shot rescind, so a settle in flight at the trip instant escaped BOTH
+    # suppression and rescind). The conjunct with ``all_filtered`` is deliberate:
+    # the spot-only INTERIOR_GAP / SUSPECTED_PARTIAL demotions are ORTHOGONAL
+    # evidence channels and stay byte-unchanged even while the all-filtered
+    # breaker is tripped.
+    af_allow_settle: Callable[[], bool] | None = (
+        all_filtered_breaker.allow_settle
+        if all_filtered and all_filtered_breaker is not None
+        else None
+    )
     # Record the window's outcome in the unified ledger: SUCCESS when the vendor returned
     # COMPLETE bars, EMPTY on a clean 0-bar response, or a DEMOTED re-pullable FAILED when the
     # bars are incomplete (interior gap / truncation). ``raw_bars`` (NOT
@@ -1437,6 +1517,8 @@ def _process_window_tail(
             degraded=degraded,
             degraded_reason=degraded_reason,
             suppress_settle=suppress_settle,
+            allow_degraded_settle=af_allow_settle,
+            pull_id=pull_id,
         )
     if on_success is not None:
         on_success()
