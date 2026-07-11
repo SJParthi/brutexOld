@@ -185,6 +185,10 @@ def _add_parity_routes(app: Any) -> None:
                 "query": request.url.query,
                 "host": request.headers.get("host"),
                 "hop_marker_seen": "x-per-hop" in request.headers,
+                # Reflect an arbitrary END-TO-END request header VALUE so a
+                # mutation dropping forwarded headers (Authorization-class) is
+                # caught positively: absent reads null, delivered reads its value.
+                "end_to_end": request.headers.get("x-end-to-end"),
                 "body": payload.decode("latin-1"),
             }
         )
@@ -378,6 +382,19 @@ def test_static_traversal_refused_by_front(stack: Stack) -> None:
         assert b"def cmd_dashboard" not in front.body, target
 
 
+def test_missing_static_file_body_matches_direct(stack: Stack) -> None:
+    """LOW-2: a genuine MISS under /static is proxied through, so the body,
+    status and content-type equal the direct Starlette ``StaticFiles`` 404 —
+    NOT brutexd's own local plain 404 (which would diverge)."""
+    front, direct = _both(stack, "GET", "/static/definitely-absent-xyz.js")
+    assert front.status == direct.status == 404
+    assert front.body == direct.body, (
+        f"miss body drift\nfront={front.body[:200]!r}\ndirect={direct.body[:200]!r}"
+    )
+    assert front.first("content-type") == direct.first("content-type")
+    _assert_transparent(front, direct, context="missing static file")
+
+
 # ── (b) health ───────────────────────────────────────────────────────────────
 
 
@@ -460,6 +477,18 @@ def test_hop_by_hop_request_headers_are_stripped(stack: Stack) -> None:
     )
     assert front.status == 200
     assert b'"hop_marker_seen":false' in front.body.replace(b" ", b"")
+
+
+def test_end_to_end_request_header_round_trips(stack: Stack) -> None:
+    """LOW-3: an arbitrary end-to-end request header (Authorization-class)
+    reaches the upstream through the proxy — a mutation dropping forwarded
+    headers is caught POSITIVELY (the echo reflects null instead of the value)."""
+    front, direct = _both(stack, "GET", "/parity/echo", headers={"X-End-To-End": "sentinel-abc123"})
+    _assert_transparent(front, direct, context="end-to-end request header")
+    assert front.status == 200
+    # POSITIVE pin: the upstream actually SAW the value through the hop.
+    assert b'"end_to_end":"sentinel-abc123"' in front.body.replace(b" ", b"")
+    assert b'"end_to_end":"sentinel-abc123"' in direct.body.replace(b" ", b"")
 
 
 def test_streamed_chunked_response_is_inert(stack: Stack) -> None:

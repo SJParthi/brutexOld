@@ -434,6 +434,35 @@ def test_run_refuses_when_brutexd_dies_before_uvicorn(tmp_path: Path) -> None:
     assert "kill" not in proc.calls
 
 
+def test_run_tears_down_child_when_liveness_probe_raises(tmp_path: Path) -> None:
+    """LOW-1: a liveness_probe that RAISES (e.g. KeyboardInterrupt during the
+    startup-grace sleep) must not orphan the spawned brutexd — the child is
+    terminated before the exception propagates ("never an orphan by design")."""
+    binary = _fake_binary(tmp_path)
+    proc = _FakeProc(poll_result=None)  # ALIVE — a leak would be a real orphan
+    uvicorn_called: list[bool] = []
+
+    def fake_uvicorn(app: Any, *, host: str, port: int, log_config: Any) -> None:
+        uvicorn_called.append(True)  # pragma: no cover — must never run
+
+    def raising_probe(_p: rust_front.ProcessHandle) -> int | None:
+        raise KeyboardInterrupt("interrupted during startup grace")
+
+    with pytest.raises(KeyboardInterrupt, match="startup grace"):
+        run_with_rust_front(
+            object(),
+            host="127.0.0.1",
+            port=9080,
+            uvicorn_run=fake_uvicorn,
+            env={ENV_BRUTEXD_BIN: str(binary)},
+            popen=lambda _command: proc,
+            liveness_probe=raising_probe,
+        )
+    assert uvicorn_called == []  # never sailed into uvicorn
+    # The alive child WAS torn down (terminate → wait), not leaked.
+    assert proc.calls == ["poll", "terminate", "wait"]
+
+
 def test_default_liveness_probe_sleeps_then_polls() -> None:
     """The default probe waits ONE bounded grace then reports poll() — injectable
     sleep keeps it deterministic (no wall-clock wait in tests)."""

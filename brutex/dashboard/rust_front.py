@@ -364,13 +364,23 @@ def run_with_rust_front(
         upstream_port=plan.upstream_port,
     )
     proc = popen(command)  # nosec B603 — fixed argv from build_command, no shell
-    returncode = liveness_probe(proc)
-    if returncode is not None:
-        raise RustFrontError(
-            f"brutexd exited immediately (code {returncode}) before uvicorn could bind "
-            f"the operator port {plan.listen_host}:{plan.listen_port} — port busy? bad "
-            "--host? see docs/runbooks/rust-front.md"
-        )
+    # The spawn+probe pair is supervised too: if ``liveness_probe`` RAISES
+    # (e.g. a KeyboardInterrupt during the startup-grace sleep) OR the child
+    # is found already dead, the spawned brutexd is torn down BEFORE the
+    # exception propagates — never leaked (the module's "never an orphan by
+    # design" law). ``_shutdown`` no-ops safely on an already-dead child
+    # (its ``poll()`` guard), so the dead-child path terminates nothing.
+    try:
+        returncode = liveness_probe(proc)
+        if returncode is not None:
+            raise RustFrontError(
+                f"brutexd exited immediately (code {returncode}) before uvicorn could bind "
+                f"the operator port {plan.listen_host}:{plan.listen_port} — port busy? bad "
+                "--host? see docs/runbooks/rust-front.md"
+            )
+    except BaseException:
+        _shutdown(proc)
+        raise
     try:
         uvicorn_run(app, host="127.0.0.1", port=plan.upstream_port, log_config=None)
     finally:

@@ -37,13 +37,23 @@ fn upstream_router() -> Router {
             .to_owned();
         let xhop = parts.headers.contains_key("x-per-hop");
         let te = parts.headers.contains_key(header::TRANSFER_ENCODING);
+        // Reflect an arbitrary END-TO-END request header VALUE so a mutation
+        // that drops forwarded headers (Authorization-class) is caught: the
+        // absent case reads `<none>`, a delivered header reads its value.
+        let e2e = parts
+            .headers
+            .get("x-end-to-end")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<none>")
+            .to_owned();
         let text = format!(
-            "method={} uri={} host={} x-per-hop={} te={} body={}",
+            "method={} uri={} host={} x-per-hop={} te={} x-end-to-end={} body={}",
             parts.method,
             parts.uri,
             host,
             xhop,
             te,
+            e2e,
             String::from_utf8_lossy(&body),
         );
         ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response()
@@ -70,6 +80,18 @@ fn upstream_router() -> Router {
             .into_response()
     }
 
+    // A distinguishable 404 fallback: a proxied static MISS lands here, so the
+    // test can prove the miss was forwarded (this body) and NOT answered by
+    // brutexd's own local `plain_404` ("not found\n").
+    async fn upstream_404() -> Response {
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "upstream-404\n",
+        )
+            .into_response()
+    }
+
     Router::new()
         .route("/test/echo", any(echo))
         .route("/test/echo/", any(echo))
@@ -79,6 +101,7 @@ fn upstream_router() -> Router {
         )
         .route("/test/stream", get(stream))
         .route("/test/error422", get(error422))
+        .fallback(upstream_404)
 }
 
 struct Harness {
@@ -222,6 +245,50 @@ async fn static_missing_traversal_and_symlink_all_404() {
     );
 }
 
+#[tokio::test]
+async fn static_miss_is_proxied_for_body_parity() {
+    // LOW-2: a genuine miss (clean path, no symlink, file simply absent) is
+    // PROXIED so the body equals the upstream's own 404 — NOT brutexd's local
+    // plain 404. This makes /static transparent even for a miss.
+    let h = harness().await;
+    let (status, _, body) = get_raw(&h.client, h.front_addr, "/static/genuinely-absent.js").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        &body[..],
+        b"upstream-404\n",
+        "miss must be proxied, not local"
+    );
+    // …and it is byte-identical to the direct upstream response.
+    let (d_status, _, d_body) =
+        get_raw(&h.client, h.upstream_addr, "/static/genuinely-absent.js").await;
+    assert_eq!(status, d_status);
+    assert_eq!(body, d_body);
+}
+
+#[tokio::test]
+async fn static_security_refusal_stays_a_local_404_never_proxied() {
+    // LOW-2: a traversal / backslash refusal is answered LOCALLY (the attack
+    // path is never forwarded upstream) — brutexd's own plain 404 body, which
+    // is DISTINCT from the upstream fallback proved above.
+    let h = harness().await;
+    for path in ["/static/a%5Cb.js", "/static/%2e%2e/secret"] {
+        let (status, _, body) = get_raw(&h.client, h.front_addr, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "path {path}");
+        assert_eq!(
+            &body[..],
+            b"not found\n",
+            "refusal must be local, not proxied: {path}"
+        );
+    }
+    // A symlinked leaf is a refusal too (local 404, unix-only fixture).
+    #[cfg(unix)]
+    {
+        let (status, _, body) = get_raw(&h.client, h.front_addr, "/static/link.js").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(&body[..], b"not found\n", "symlinked leaf refused locally");
+    }
+}
+
 // ── proxy transparency ───────────────────────────────────────────────────
 
 #[tokio::test]
@@ -263,6 +330,31 @@ async fn proxy_passes_method_query_host_and_body_verbatim() {
             .get(header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok()),
         Some(direct_body.len().to_string().as_str())
+    );
+}
+
+#[tokio::test]
+async fn proxy_passes_arbitrary_end_to_end_request_headers() {
+    // LOW-3: an arbitrary end-to-end request header (Authorization-class) must
+    // ARRIVE at the upstream through the proxy — a mutation dropping forwarded
+    // headers makes the echo read `<none>` and this test fail.
+    let h = harness().await;
+    let (_, _, body) = request_raw(
+        &h.client,
+        h.front_addr,
+        "GET",
+        "/test/echo",
+        None,
+        &[
+            ("host", "operator.example:9080"),
+            ("x-end-to-end", "sentinel-xyz"),
+        ],
+    )
+    .await;
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("x-end-to-end=sentinel-xyz"),
+        "end-to-end header must reach upstream: {text}"
     );
 }
 
