@@ -768,10 +768,19 @@ class TestLakeUniquenessSkipHonesty:
 
     def test_engine_schema_drift_fails(self, tmp_path: Path) -> None:
         # SENSEX (BSE-index) is an engine coord — the engine-scoped scan reaches it.
+        # DEC-ALIEN-SCHEMA-READ-HEAL-001 (MIGRATION.md #1645): a schema-drifted
+        # engine parquet is now a real ``SchemaAlienFile`` FINDING (named +
+        # healer-quarantined) AND counted UNREADABLE-skipped — the doctor detail
+        # takes the poisoned-partitions arm with the skip note, no longer the
+        # skip-only "census INCOMPLETE" arm (which ``test_engine_garbage_fails``
+        # / ``test_malformed_engine_path_fails`` still pin for unreadable bytes
+        # / an unparseable path).
         _plant_engine_drift(tmp_path, symbol="SENSEX", exchange="BSE")
         result = check_lake_uniqueness(tmp_path)
         assert result.status == "FAIL"
-        assert "census INCOMPLETE" in result.detail
+        assert "engine-index partitions poisoned" in result.detail
+        assert "bars/BSE/INDEX/SENSEX/1minute/2025/09.parquet" in result.detail
+        assert "1 engine-index file(s) UNREADABLE (skipped)" in result.detail
 
     def test_dup_and_skip_fails_naming_both(self, tmp_path: Path) -> None:
         _plant_dup_partition(tmp_path, symbol="NIFTY")
