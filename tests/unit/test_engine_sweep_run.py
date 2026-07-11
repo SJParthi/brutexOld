@@ -3343,7 +3343,7 @@ class TestLazyRunIdHardening:
         assert legacy_peak - digest_peak > digest.evaluated * 48
 
 
-# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738) ──────
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
 # The apriori census artifact (EMIT-ON-apriori tallies key) + the per-cell
 # hit-count memo seam. The frozen generator itself is gated by its own suite;
 # these tests pin the sweep_run WIRING: census rows bit-equal to the module's
@@ -3352,7 +3352,7 @@ class TestLazyRunIdHardening:
 # artifacts determinism, and memo-on == memo-off byte identity.
 
 
-#: The FROZEN legacy FLUSH/COMPLETE payload key-set (pre-#1738 shape): a
+#: The FROZEN legacy FLUSH/COMPLETE payload key-set (pre-#1752 shape): a
 #: legacy tuple must carry EXACTLY these keys — the EMIT-ON-apriori law's
 #: teeth (a new unconditional key would break byte-identity for every
 #: legacy tree).
@@ -3400,7 +3400,7 @@ class TestAprioriCensusArtifact:
     def test_legacy_payload_carries_no_apriori_key_frozen_keyset(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A LEGACY tuple's FLUSH/COMPLETE payload is the FROZEN pre-#1738 key-set."""
+        """A LEGACY tuple's FLUSH/COMPLETE payload is the FROZEN pre-#1752 key-set."""
         pytest.importorskip("polars")
         monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
         bars = _trending_bars()

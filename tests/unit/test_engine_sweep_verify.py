@@ -2562,7 +2562,7 @@ class TestCellRecountCodes:
 
 
 class TestRecordedAprioriFromAudit:
-    """DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738): the tree's OWN
+    """DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752): the tree's OWN
     recorded exploration mode, read off the first mode-carrying START record
     (EMIT-ON-apriori law: key absent == legacy — pre-flip trees classify
     correctly for free; no record == None abstain)."""

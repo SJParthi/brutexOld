@@ -2294,7 +2294,7 @@ class TestBrokenProcessPoolQuarantine:
         assert "SUPERVISOR_ABORT" in actions
 
 
-# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738) ──────
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
 # The parallel driver's apriori wiring: the spawn workers' env-inherited
 # per-cell hit-count memo, the #1608 watchdog work cap (min(raw, k×budget)
 # iff apriori is ON — legacy raw byte-identical), the EMIT-ON-apriori

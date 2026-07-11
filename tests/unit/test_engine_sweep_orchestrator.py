@@ -966,7 +966,7 @@ class TestRunSweepGridRollSchedule:
         assert _run("foreign", {"NSE-NIFTY-FUT": _FUT_SCHEDULE}) == base
 
 
-# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738) ──────
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
 # The grid driver's apriori wiring: the ONE hit_memo_cell_key builder, the
 # per-cell memo threading (reset on a cell change, None on legacy), the
 # EMIT-ON-apriori START/COMPLETE payload keys, and the DISTINCT

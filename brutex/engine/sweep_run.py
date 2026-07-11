@@ -197,7 +197,7 @@ _TRADE_SIM_CHUNK_MASKS: Final[int] = 256
 _TRADE_SIM_CHUNK_CELLS: Final[int] = 4 << 20
 
 #: Per-cell hit-count memo capacity (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md
-#: #1738). Counts are a PURE function of ``(bar_bits, mask)`` — per-mask
+#: #1752). Counts are a PURE function of ``(bar_bits, mask)`` — per-mask
 #: independent — so memoising them across a cell's k-ladder is identity-free by
 #: construction (memo-on == memo-off bytes, parity-pinned). Beyond this cap the
 #: memo becomes pure PASS-THROUGH (computed values are still returned, just not
@@ -1442,7 +1442,7 @@ def run_persisted_sweep(
         VIX columns differ.
     hit_count_memo
         Optional per-CELL superset-hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001,
-        MIGRATION.md #1738): a ``{mask: hits}`` mapping the caller owns across a
+        MIGRATION.md #1752): a ``{mask: hits}`` mapping the caller owns across a
         cell's whole k-ladder, wrapped around the ONE shared ``_count_hits``
         (consumed by BOTH the Apriori frequent-frontier build and the Stage-1B
         pre-filter, so target-level counts seed the next tuple's frontier for
@@ -1995,7 +1995,7 @@ def run_persisted_sweep(
     }
     if apriori_on:
         # EMIT-ON-apriori census artifact (DEC-SWEEP-APRIORI-DEFAULT-001,
-        # MIGRATION.md #1738): the per-level |C_j|/|F_j| curve + wall timings
+        # MIGRATION.md #1752): the per-level |C_j|/|F_j| curve + wall timings
         # land on the FLUSH + COMPLETE audit payloads (hash-chained JSONL —
         # additive keys are chain-safe, the DEC-TRIAL-STATS-WRITE-001
         # precedent) + the ``sweep_run.complete`` log. A LEGACY tuple carries

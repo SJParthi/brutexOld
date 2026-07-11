@@ -1,4 +1,4 @@
-"""CLI exploration-mode resolution tests (DEC-SWEEP-APRIORI-DEFAULT-001, #1738).
+"""CLI exploration-mode resolution tests (DEC-SWEEP-APRIORI-DEFAULT-001, #1752).
 
 The ONE pure resolver ``brutex.cli.resolve_sweep_exploration`` behind every grid
 surface's ``--k`` (sweep-all / sweep-daemon / sweep-verify / nightly share

@@ -450,7 +450,7 @@ def resolve_stall_min_mask_bars_per_sec(env: dict[str, str] | None = None) -> fl
 def apriori_tuple_work(*, k: int, n_unique: int, n_bars: int, max_mask_bars: int) -> float:
     """The capped LADDER-CUMULATIVE ``mask·bar`` work estimate for one apriori tuple.
 
-    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738, review fix round 1 M1):
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752, review fix round 1 M1):
     a target-``k`` apriori tuple walks EVERY level ``1..k`` (each level's
     candidates are hit-counted before the next frontier builds), so the honest
     raw estimate is the CUMULATIVE ``Σ_{j=1..k} C(n_unique, j) × n_bars`` — NOT
@@ -1574,7 +1574,7 @@ class ParallelGridDriver:
         heavy-grid stall bound (:meth:`_effective_stall_seconds`); never in
         results. O(1) — ``count_combos`` is a single ``math.comb``.
 
-        APRIORI arm (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1738; review
+        APRIORI arm (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752; review
         fix round 1 M1): the LADDER-CUMULATIVE capped estimate
         :func:`apriori_tuple_work` — ``min(Σ_{j=1..k} C(n_unique, j) × N_bars,
         k × max_mask_bars)``. The cumulative raw keeps the estimate MONOTONE in

@@ -45,7 +45,7 @@ DEFAULT_INTERVALS: Final[str] = "1minute,5minute,15minute"
 #: Default trade directions (both legs of a directional edge).
 DEFAULT_DIRECTIONS: Final[str] = "BUY,SELL"
 #: Default conditions-per-combo K values (mirrors the CLI ``--k`` default —
-#: since DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1738, the
+#: since DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752, the
 #: Apriori-to-EXTINCTION token: per cell the k-ladder runs k=1,2,3,… until no
 #: combo survives min-hits. The ONE sanctioned second copy of the CLI token
 #: (`brutex.cli.EXTINCTION_K_TOKEN` — the dashboard must not import the CLI at
@@ -430,7 +430,7 @@ def run_sweep_from_request(  # pragma: no cover — orchestration shim over the 
     integration tests; the dashboard route tests replace THIS function with an
     offline fake (no lake, no sweep) to keep the unit suite hermetic.
 
-    ENV HYGIENE (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1738): this is
+    ENV HYGIENE (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752): this is
     the ONE in-process embedder of ``cmd_sweep_all``, whose extinction default
     setdefault-writes ``BRUTEX_SWEEP_APRIORI`` into the process env for the
     spawn workers. The dashboard process OUTLIVES the sweep job (unlike a CLI

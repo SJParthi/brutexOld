@@ -758,7 +758,7 @@ def hit_memo_cell_key(
 ) -> tuple[Any, ...]:
     """Return the CELL key the per-cell hit-count memo lives under (§11 COMMON).
 
-    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738): the memo caches
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752): the memo caches
     superset-hit counts, which are a pure function of the tuple's ``bar_bits``
     matrix — so the key is EXACTLY the resident-kernel cache's determinant set
     (``instrument``, ``tf.label``, flattened proximity bps, ``prior_n``,

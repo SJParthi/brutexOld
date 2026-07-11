@@ -1249,7 +1249,7 @@ def test_summary_and_guards_are_frozen() -> None:
         summary.persisted = 9  # type: ignore[misc]
 
 
-# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738) ──────
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
 # The supervised driver's apriori wiring: EMIT-ON-apriori START/COMPLETE
 # payload keys, the DISTINCT tuples_failed_apriori_budget counter, and the
 # per-cell hit-count memo threading (reset on a cell change; None on legacy).

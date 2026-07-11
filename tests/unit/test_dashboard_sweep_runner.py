@@ -338,7 +338,7 @@ def test_lowercase_in_scope_symbol_is_refused_with_a_did_you_mean_hint() -> None
     assert "'NIFTY'" in str(excinfo.value)
 
 
-# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738) ──────
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
 # The dashboard's extinction default: DEFAULT_K flips to the ONE sanctioned
 # second copy of the CLI token (drift-pinned below), _normalise_k accepts the
 # token / refuses a token+number mix, and run_sweep_from_request — the ONE

@@ -249,7 +249,7 @@ def parse_condition_ids(raw: str) -> list[int]:
 
 
 #: The self-documenting ``--k`` token that selects the Apriori-to-EXTINCTION
-#: exploration mode (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1738) — the
+#: exploration mode (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752) — the
 #: DEFAULT on every grid surface sharing ``_add_sweep_grid_args`` (sweep-all /
 #: sweep-daemon / sweep-verify / nightly). A numeric CSV is the legacy
 #: byte-identical arm; exactly ONE token, no aliases.
@@ -303,7 +303,7 @@ def resolve_sweep_exploration(
 ) -> SweepExplorationPlan:
     """Resolve the ``--k`` grammar + env law into a :class:`SweepExplorationPlan`.
 
-    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738) — the ONE pure resolver
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) — the ONE pure resolver
     behind every grid surface's ``--k``:
 
     * A NUMERIC CSV (anything but the token) is the LEGACY arm — parsed exactly
@@ -6673,7 +6673,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         )
         return EXIT_USER_ERROR
     # Exploration-mode resolution (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md
-    # #1738): the condition bits parse FIRST (the resolver needs n_unique +
+    # #1752): the condition bits parse FIRST (the resolver needs n_unique +
     # the u128 width guard), then the ONE pure resolver maps the --k grammar +
     # the BRUTEX_SWEEP_APRIORI tri-state onto the ladder — EAGERLY, before any
     # lake I/O (the resolve_results_depth_enabled precedent), so a junk env
