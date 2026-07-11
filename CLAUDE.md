@@ -2074,7 +2074,8 @@ hostile-review pass._
   #1713) is in flight on the Slice-1 PR, NOT on main at this HEAD. **PR-1 SHIPPED on
   this branch (same DEC — the #1726 PR-1 segment):** NEW standalone crate
   `rust/brutex-lake/` (pyo3 0.29 abi3-py312 maturin, the fno-math layout; in NO
-  workspace, built ONLY by its own lane; polars git-pinned `py-1.42.1` + restated
+  workspace, built ONLY by its own lane; polars REV-pinned `0df0c25d…` (= the
+  commit the movable `py-1.42.1` tag pointed at — the L5 rev-pin fold) + restated
   object_store patch + the zstd trio via the COMMITTED Cargo.lock — 0.13.3/7.2.4/
   2.0.16 = libzstd 1.5.7; lockstep pins cargo-tested; the render mirrors the wheel's
   streaming-engine `sink_parquet` chain verbatim into an in-memory Dyn sink; panics
@@ -5279,8 +5280,9 @@ hostile-review pass._
   keep-Python verdict OPERATOR-OVERRIDDEN to Rust-everywhere; the
   byte-identity-gated conversion roadmap is adopted as ADR-0019, and
   **PR-1 is SHIPPED on this branch** — the `parquet_writer` render seam
-  re-hosted on the NEW `rust/brutex-lake` crate (polars git-pinned
-  `py-1.42.1`, zstd trio via the committed Cargo.lock), default-OFF
+  re-hosted on the NEW `rust/brutex-lake` crate (polars REV-pinned
+  `0df0c25d…` = the commit `py-1.42.1` pointed at, zstd trio via the
+  committed Cargo.lock), default-OFF
   behind `BRUTEX_LAKE_RUST_RENDER` with import/version guards + the
   16-render burn-in autorevert (schema-shape-gated since the review
   round), Python as the live parity oracle; the byte-parity corpus (the
