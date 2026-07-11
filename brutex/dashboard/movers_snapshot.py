@@ -50,9 +50,17 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.calendars.nse import previous_trading_session
+from brutex.calendars.nse import has_muhurat_session, previous_trading_session
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_stored_read import read_stored_day_frame
+from brutex.dashboard.movers_underlying_class import (
+    KIND_UNKNOWN,
+    class_echo,
+    class_note_suffix,
+    filter_by_underlying_class,
+    normalize_underlying_class,
+    spot_kind_from_segment,
+)
 from brutex.data.derive_lock import derive_in_progress
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -74,6 +82,7 @@ __all__ = [
     "compute_snapshot",
     "compute_spot_candidates",
     "filter_to_ist_minute",
+    "info_prev_baseline_muhurat",
     "interval_minutes",
     "is_intraday_interval",
     "make_expected_session_resolver",
@@ -230,13 +239,33 @@ class MoverSnapshot:
     prev_close_contiguous
         ``True`` when ``prev_close_session`` IS the immediately-preceding NSE
         session of the snapshot day
-        (:func:`brutex.calendars.nse.previous_trading_session`), ``False`` when
-        the calendar proves a nearer session should exist (a lake hole — the
-        served %-change baselines on an OLDER session, stamped honestly),
-        ``None`` when no baseline resolved OR the calendar abstained
-        (out-of-coverage snapshot day). The row projector emits the pair ONLY
-        on ``False`` (EMIT-ON-FALSE — contiguous and abstain payloads stay
-        byte-identical to the pre-fix wire).
+        (:func:`brutex.calendars.nse.previous_trading_session`) — OR the
+        legitimate Diwali Muhurat close of the day-after boundary
+        (``prev_close_muhurat`` below, DEC-PREVSESSION-MUHURAT-COHERENCE-001);
+        ``False`` when the calendar proves the served baseline provably
+        skipped a nearer REGULAR session, or a stray non-session bar served it
+        (a lake defect either way — the served %-change baselines on the wrong
+        session, stamped honestly); ``None`` when no baseline resolved OR the
+        calendar abstained (out-of-coverage snapshot day). The row projector
+        emits the pair ONLY on ``False`` (EMIT-ON-FALSE — contiguous and
+        abstain payloads stay byte-identical to the pre-fix wire).
+    prev_close_muhurat
+        ``True`` iff the served baseline is a Diwali **Muhurat** session's
+        close sitting AFTER the calendar's prior REGULAR session — a REAL NSE
+        session the lake legitimately carries (the ingest keeps Muhurat bars,
+        DEC-INGEST-BOUNDARY-INTEGRITY-001), NOT a lake hole. The DISPLAY
+        baseline law serves it (this screen); the ENGINE anchor law
+        deliberately skips it (``stage1a.muhurat_prev_day_anchor_skip``,
+        DEC-SWEEP-DATA-EDGE-GUARDS-001 #1616) — the recorded two-law design of
+        DEC-PREVSESSION-MUHURAT-COHERENCE-001. Emitted ON TRUE ONLY, so every
+        non-Muhurat row stays byte-identical.
+    underlying_kind
+        The resolved index-vs-stock class of this instrument
+        (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
+        for SPOT it is derived from the lake segment (the stored reflection of the
+        master's ``is_index``). Additive + defaulted (``unknown``); consumed ONLY
+        by the rank-time ``All | Indices | Stocks`` filter, never emitted in a row,
+        so the default payload is byte-identical.
     """
 
     instrument: ScreenInstrument
@@ -249,6 +278,8 @@ class MoverSnapshot:
     bar_count: int
     prev_close_session: str | None = None
     prev_close_contiguous: bool | None = None
+    prev_close_muhurat: bool = False
+    underlying_kind: str = KIND_UNKNOWN
 
     @property
     def ltp_inr(self) -> str:
@@ -484,6 +515,12 @@ def _row(snap: MoverSnapshot) -> dict[str, Any]:
     if snap.prev_close_contiguous is False:
         row["prev_close_session"] = snap.prev_close_session
         row["prev_close_contiguous"] = snap.prev_close_contiguous
+    # EMIT-ON-TRUE-ONLY (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the baseline
+    # is the Diwali Muhurat session's close — a real NSE session the lake
+    # legitimately carries under the DISPLAY baseline law, never a lake hole.
+    # Every non-Muhurat row stays byte-identical to the pre-fix wire.
+    if snap.prev_close_muhurat:
+        row["prev_close_muhurat"] = True
     return row
 
 
@@ -499,6 +536,7 @@ def build_snapshot_payload(
     stored_reads: int = 0,
     resampled_reads: int = 0,
     latest_time: str | None = None,
+    underlying_class: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -532,33 +570,47 @@ def build_snapshot_payload(
     is unchanged); ``echo == cut`` in value by construction.
     """
     floor = normalize_min_volume(min_volume)
+    # DEC-MOVERS-UNDERLYING-CLASS-001: RANK-time `All | Indices | Stocks` filter over
+    # the SAME cached candidate set — never a re-scan (the DEC-MOVERS-MIN-VOLUME-001
+    # template). `all` (the default) returns the set unchanged with zero excluded, so
+    # the payload below is byte-identical; a class filter drops non-matching + counts
+    # the unclassified (KIND_UNKNOWN) exclusions for the honest note.
+    wanted_class = normalize_underlying_class(underlying_class)
+    ranked_snapshots, excluded_unclassified = filter_by_underlying_class(snapshots, wanted_class)
     ranked: dict[str, list[dict[str, Any]]] = {
         category: [
             _row(s)
             for s in (
-                _by_volume(snapshots, top_n, min_volume=floor)
+                _by_volume(ranked_snapshots, top_n, min_volume=floor)
                 if category == "volume"
-                else rank_fn(snapshots, top_n)
+                else rank_fn(ranked_snapshots, top_n)
             )
         ]
         for category, rank_fn in _SPOT_CATEGORIES.items()
     }
-    instrument_count = len(snapshots) + skipped
-    if instrument_count == 0:
+    class_note = class_note_suffix(wanted_class, excluded_unclassified)
+    instrument_count = len(ranked_snapshots) + skipped
+    # The "empty lake" message keys on the UNFILTERED population so a class filter
+    # that legitimately empties the ranked set never mis-reads as "no spot pulled"
+    # (for `all` the two counts are equal — byte-identical default).
+    lake_population = len(snapshots) + skipped
+    if lake_population == 0:
         note = (
             "No spot data in the lake yet — pull spot first on the Coverage page, "
-            "then refresh. (Reference-only lake view, CLAUDE.md §3.)"
+            "then refresh. (Reference-only lake view, CLAUDE.md §3.)" + class_note
         )
     elif not any(ranked.values()):
         note = (
             f"{instrument_count} instrument(s) in the lake, but none had a bar at "
             f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
+            + class_note
         )
     else:
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the previous day's close, volume is the fresh session."
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
+            + class_note
         )
     return {
         "interval": interval,
@@ -572,6 +624,7 @@ def build_snapshot_payload(
         "resampled_reads": resampled_reads,
         "latest_time": latest_time,
         "note": note,
+        **class_echo(wanted_class, excluded_unclassified),
         **ranked,
     }
 
@@ -1178,18 +1231,34 @@ def prev_baseline_provenance(
     *,
     exchange: str | None,
     expected_session: date_cls | None | EllipsisType = ...,
-) -> tuple[str | None, bool | None]:
+) -> tuple[str | None, bool | None, bool]:
     """Judge a resolved baseline's calendar contiguity (pure, side-effect-free).
 
-    DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — the ONE COMMON verdict shared by the
-    spot close, futures close/OI, and options close/OI stampings:
+    DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 (+ the Muhurat coherence fold,
+    DEC-PREVSESSION-MUHURAT-COHERENCE-001) — the ONE COMMON verdict shared by
+    the spot close, futures close/OI, and options close/OI stampings. Returns
+    ``(session_iso, contiguous, muhurat_baseline)``:
 
-    * ``found_date is None`` (no baseline resolved) → ``(None, None)``;
+    * ``found_date is None`` (no baseline resolved) → ``(None, None, False)``;
     * the calendar ABSTAINS (:func:`brutex.calendars.nse.previous_trading_session`
       returns ``None`` — out-of-coverage snapshot day) →
-      ``(found_iso, None)`` — the value is still served, contiguity unknown;
-    * otherwise → ``(found_iso, found_date == expected)`` — ``False`` means the
-      served baseline provably skipped a nearer NSE session (a lake hole).
+      ``(found_iso, None, False)`` — the value is still served, contiguity
+      unknown;
+    * ``found_date == expected`` → ``(found_iso, True, False)`` — the ordinary
+      contiguous baseline;
+    * ``found_date > expected`` AND
+      :func:`brutex.calendars.nse.has_muhurat_session` confirms *found_date* →
+      ``(found_iso, True, True)`` — the day-after-Diwali boundary: the served
+      baseline is the **Muhurat** session's close, a REAL NSE session the lake
+      legitimately carries (never a lake hole; previously false-flagged
+      ``False`` annually on a healthy lake). This is the DISPLAY baseline law;
+      the ENGINE anchor law deliberately uses the prior REGULAR session
+      instead (``stage1a.muhurat_prev_day_anchor_skip``, #1616) — a recorded,
+      deliberate two-law divergence, not a drift;
+    * otherwise → ``(found_iso, False, False)`` — the served baseline provably
+      skipped a nearer REGULAR session, or a stray non-session bar served it
+      (a lake defect either way; a Muhurat bar BEHIND the expected regular
+      session stays a genuine hole — the direction guard is strict).
 
     *expected_session* is a pure perf seam: the expected previous session is
     invariant per ``(snapshot_day, exchange)``, so the candidate builds hoist
@@ -1199,15 +1268,19 @@ def prev_baseline_provenance(
     every existing call site/test byte-valid. Same verdict either way.
     """
     if found_date is None:
-        return None, None
+        return None, None, False
     expected = (
         previous_trading_session(snapshot_day, exchange=exchange)
         if isinstance(expected_session, EllipsisType)
         else expected_session
     )
     if expected is None:
-        return found_date.isoformat(), None
-    return found_date.isoformat(), found_date == expected
+        return found_date.isoformat(), None, False
+    if found_date == expected:
+        return found_date.isoformat(), True, False
+    if found_date > expected and has_muhurat_session(found_date):
+        return found_date.isoformat(), True, True
+    return found_date.isoformat(), False, False
 
 
 def make_expected_session_resolver(
@@ -1248,18 +1321,23 @@ class _NoncontiguousWarnState:
     Function-local per ``compute_*_candidates`` call (never module-global —
     CLAUDE.md §4 no global mutable state): ``emitted`` counts sent warnings,
     ``seen`` dedupes per ``(symbol, kind)``, ``suppressed`` counts past-cap
-    drops. :meth:`reset` is the test seam.
+    drops, ``muhurat_info_emitted`` is the one-shot latch for the
+    informational ``movers.prev_baseline_muhurat`` event
+    (DEC-PREVSESSION-MUHURAT-COHERENCE-001 — at most ONE per candidate
+    build, never a per-row flood). :meth:`reset` is the test seam.
     """
 
     emitted: int = 0
     seen: set[tuple[str, str]] = field(default_factory=set)
     suppressed: int = 0
+    muhurat_info_emitted: bool = False
 
     def reset(self) -> None:
         """Reset the state (test seam — a fresh build constructs a fresh state)."""
         self.emitted = 0
         self.seen.clear()
         self.suppressed = 0
+        self.muhurat_info_emitted = False
 
 
 def warn_prev_baseline_noncontiguous(
@@ -1306,6 +1384,40 @@ def warn_prev_baseline_noncontiguous(
         snapshot_day=snapshot_day.isoformat(),
         found_session=found_session,
         expected_session=(expected_session.isoformat() if expected_session is not None else None),
+    )
+
+
+def info_prev_baseline_muhurat(
+    state: _NoncontiguousWarnState,
+    *,
+    kind: str,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    snapshot_day: date_cls,
+    found_session: str,
+) -> None:
+    """Emit AT MOST ONE ``movers.prev_baseline_muhurat`` INFO per candidate build.
+
+    DEC-PREVSESSION-MUHURAT-COHERENCE-001: the day-after-Diwali boundary is a
+    HEALTHY lake — the served baseline is the Muhurat session's real close, so
+    it is informational (INFO, never a WARN) and one-shot per build (the
+    ``muhurat_info_emitted`` latch on the shared per-build *state* — up to 21
+    index/contract rows share one boundary, and the 39-key warm grid must not
+    flood the log annually). The event names the FIRST such row; *kind* names
+    the baseline (``"prev_close"`` / ``"oi"``).
+    """
+    if state.muhurat_info_emitted:
+        return
+    state.muhurat_info_emitted = True
+    _LOG.info(
+        "movers.prev_baseline_muhurat",
+        kind=kind,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        snapshot_day=snapshot_day.isoformat(),
+        found_session=found_session,
     )
 
 
@@ -1559,13 +1671,27 @@ def compute_spot_candidates(
         # Baseline calendar-contiguity provenance (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001):
         # stamp the session the served prev_close actually came from + whether it IS
         # the immediately-preceding NSE session; a strictly-False verdict also gets
-        # ONE capped WARN. The VALUE served above is untouched in every branch.
+        # ONE capped WARN. The VALUE served above is untouched in every branch. A
+        # legitimate day-after-Diwali Muhurat baseline is contiguous-True + flagged
+        # `prev_close_muhurat` with ONE per-build INFO instead (never a false WARN —
+        # DEC-PREVSESSION-MUHURAT-COHERENCE-001).
         cal_exchange = _calendar_exchange(dataset["exchange"])
         expected_session = expected_session_for(cal_exchange)
-        session_iso, contiguous = prev_baseline_provenance(
+        session_iso, contiguous, muhurat = prev_baseline_provenance(
             baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
-        snap = replace(snap, prev_close_session=session_iso, prev_close_contiguous=contiguous)
+        # DEC-MOVERS-UNDERLYING-CLASS-001: resolve the index-vs-stock class from the
+        # lake segment (the stored reflection of the master's `is_index` — CLAUDE.md
+        # §6), attached once here so the rank-time `All | Indices | Stocks` filter
+        # (build_snapshot_payload) never re-reads the master. Additive/defaulted, so
+        # the default (`all`) payload stays byte-identical.
+        snap = replace(
+            snap,
+            prev_close_session=session_iso,
+            prev_close_contiguous=contiguous,
+            prev_close_muhurat=muhurat,
+            underlying_kind=spot_kind_from_segment(dataset["segment"]),
+        )
         if session_iso is not None and contiguous is False:
             warn_prev_baseline_noncontiguous(
                 warn_state,
@@ -1576,6 +1702,16 @@ def compute_spot_candidates(
                 snapshot_day=day,
                 found_session=session_iso,
                 expected_session=expected_session,
+            )
+        if muhurat and session_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="prev_close",
+                exchange=dataset["exchange"],
+                segment=dataset["segment"],
+                symbol=dataset["symbol"],
+                snapshot_day=day,
+                found_session=session_iso,
             )
         # Read-path provenance (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): count
         # ONLY the instruments that contributed a snapshot, by which path

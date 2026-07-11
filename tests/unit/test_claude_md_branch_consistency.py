@@ -134,20 +134,21 @@ class TestHeaderRoundNarrationRetired:
     The header now carries a stale-proof POINTER to the two authoritative
     per-round records instead; these pins keep the narration from returning.
 
-    Anchoring note (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 rebase reconcile):
-    the pin originally sliced ``_Last updated: .. Earlier:`` — valid only
-    while the stats-manifest blurb held the ``_Last updated:`` slot. Header
-    succession demotes that blurb VERBATIM to an ``Earlier:`` item (house
-    convention), so the pin now anchors on the stats-manifest blurb itself
-    wherever it lives in the compressed header chain — the teeth are about
-    the BLURB's shape, not the slot (the module docstring's own DYNAMIC
-    stay-green-across-future-branches intent).
+    2026-07-09 merge-reconcile (DEC-PREOPEN-PREVDAY-COMMON-002 — renamed from -001 — landing on
+    top): a NEWER decision now heads the ``_Last updated:`` region and the
+    DEC-LAKE-STATS-MANIFEST-001 blurb was demoted verbatim to the header
+    chain's first ``Earlier:`` slot — so the pin anchors on THAT blurb's own
+    ``(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #`` marker (renumber-proof,
+    position-independent) instead of assuming it still heads the file. The
+    guarded law is unchanged: the compressed blurb carries the pointer, not
+    the per-round story.
     """
 
     def test_header_points_at_the_authoritative_records(self) -> None:
         text = _CLAUDE_MD.read_text(encoding="utf-8")
-        start = text.index("(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #")
-        header = " ".join(text[start : text.index("Earlier:", start)].split())
+        header = _normalized_region(
+            text, "(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #", "Earlier:"
+        )
         assert "review round 1 (which" not in header, (
             "the CLAUDE.md _Last updated: header resurrected per-round narration — "
             "it froze at round 2 once (endgame round 2); keep the pointer, not the story"

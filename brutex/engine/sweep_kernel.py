@@ -98,6 +98,16 @@ class ResidentSweepKernel:
         built against (DEC-NIFTY-FIB-AXIS-001). Recorded so the sweep can fail-fast
         when a kernel is reused under a DIFFERENT anchor (the ``bar_bits`` matrix is
         anchor-specific — R-1). Defaults to :attr:`FibAnchorKind.PREV_DAY`.
+    roll_schedule
+        ADR-0012 futures roll schedule (DEC-STAGE1A-ROLL-RESET-001) the
+        ``bar_bits`` were built against — recorded for the schedule-mismatch
+        fail-fast (the roll twin of the anchor guard). ``None`` (the default)
+        is the byte-identical spot path.
+    apply_1day_mask
+        D12 honesty flag (see :func:`brutex.engine.stage1a.build_bar_bits`).
+        Default False (byte-identical). Recorded so the sweep can fail-fast
+        when a kernel is reused under a DIFFERENT flag (the D12 twin of the
+        anchor/schedule guards — review round-1 finding 5).
 
     Raises
     ------
@@ -105,7 +115,14 @@ class ResidentSweepKernel:
         If ``bars`` is empty.
     """
 
-    __slots__ = ("_bar_bits", "_bars", "_fib_anchor", "_resident")
+    __slots__ = (
+        "_apply_1day_mask",
+        "_bar_bits",
+        "_bars",
+        "_fib_anchor",
+        "_resident",
+        "_roll_schedule",
+    )
 
     def __init__(
         self,
@@ -114,12 +131,23 @@ class ResidentSweepKernel:
         proximity: ProximityParams | None = None,
         prior_n: int = 3,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        roll_schedule: tuple[int, ...] | None = None,
+        apply_1day_mask: bool = False,
     ) -> None:
         if not bars:
             raise ValueError("ResidentSweepKernel: bars must be non-empty")
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._fib_anchor: FibAnchorKind = fib_anchor
-        self._bar_bits: list[int] = build_bar_bits(self._bars, proximity, prior_n, fib_anchor)
+        self._roll_schedule: tuple[int, ...] | None = roll_schedule
+        self._apply_1day_mask: bool = apply_1day_mask
+        self._bar_bits: list[int] = build_bar_bits(
+            self._bars,
+            proximity,
+            prior_n,
+            fib_anchor,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
+        )
         self._resident: ResidentBarBuffer = ResidentBarBuffer(self._bar_bits)
 
     @property
@@ -131,6 +159,16 @@ class ResidentSweepKernel:
     def fib_anchor(self) -> FibAnchorKind:
         """The Fib anchor this kernel's ``bar_bits`` were built against (R-1 guard)."""
         return self._fib_anchor
+
+    @property
+    def roll_schedule(self) -> tuple[int, ...] | None:
+        """The roll schedule this kernel's ``bar_bits`` were built against (roll guard)."""
+        return self._roll_schedule
+
+    @property
+    def apply_1day_mask(self) -> bool:
+        """The D12 flag this kernel's ``bar_bits`` were built against (D12 guard)."""
+        return self._apply_1day_mask
 
     @property
     def bar_bits(self) -> list[int]:
@@ -238,7 +276,15 @@ class ResidentKernelCache:
         self._capacity: int = capacity
         self._builder: Callable[..., ResidentSweepKernel] = builder
         self._cache: OrderedDict[
-            tuple[str, str, ProximityParams | None, int, FibAnchorKind], ResidentSweepKernel
+            tuple[
+                str,
+                str,
+                ProximityParams | None,
+                int,
+                FibAnchorKind,
+                tuple[int, ...] | None,
+            ],
+            ResidentSweepKernel,
         ] = OrderedDict()
         self._builds: int = 0
         self._hits: int = 0
@@ -266,8 +312,10 @@ class ResidentKernelCache:
         proximity: ProximityParams | None,
         prior_n: int,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        roll_schedule: tuple[int, ...] | None = None,
+        apply_1day_mask: bool = False,
     ) -> ResidentSweepKernel:
-        """Return the kernel for ``(instrument, tf_label, proximity, prior_n, fib_anchor)``, building on miss.
+        """Return the kernel for ``(instrument, tf_label, proximity, prior_n, fib_anchor, roll_schedule)``, building on miss.
 
         On a hit the resident kernel is returned (and marked most-recently-used)
         WITHOUT rebuilding ``bar_bits`` or re-marshalling the bar window. On a miss
@@ -292,19 +340,35 @@ class ResidentKernelCache:
             anchor sharing one ``(instrument, tf, proximity, prior_n)`` must get its
             OWN kernel, never a stale prev-day one. Defaults to
             :attr:`FibAnchorKind.PREV_DAY`.
+        roll_schedule
+            ADR-0012 futures roll schedule — part of the key
+            (belt-and-braces: within one launch the schedule is constant per
+            instrument, but a long-lived daemon process re-launching over a
+            changed lake must never serve a stale-schedule kernel —
+            DEC-STAGE1A-ROLL-RESET-001). ``None`` is the spot path.
+        apply_1day_mask
+            D12 honesty flag — a pure function of ``(instrument, tf_label)``,
+            both already in the key, so it needs no key slot of its own.
 
         Returns
         -------
         ResidentSweepKernel
             The (cached or freshly built) kernel for this bar window.
         """
-        key = (instrument, tf_label, proximity, prior_n, fib_anchor)
+        key = (instrument, tf_label, proximity, prior_n, fib_anchor, roll_schedule)
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
             self._hits += 1
             return cached
-        kernel = self._builder(bars, proximity=proximity, prior_n=prior_n, fib_anchor=fib_anchor)
+        kernel = self._builder(
+            bars,
+            proximity=proximity,
+            prior_n=prior_n,
+            fib_anchor=fib_anchor,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
+        )
         self._builds += 1
         self._cache[key] = kernel
         if len(self._cache) > self._capacity:

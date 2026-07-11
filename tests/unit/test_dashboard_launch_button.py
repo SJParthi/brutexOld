@@ -26,6 +26,26 @@ from brutex.dashboard.app import DashboardState, build_app
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def hermetic_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the disk probe deterministic (DEC-LAUNCH-DISK-GATE-HERMETIC-001).
+
+    The POST gate re-checks ``disk_free >= DEFAULT_MIN_DISK_FREE_BYTES``
+    (20 GiB) against the REAL runner disk; on a CI runner with < 20 GiB free
+    that 412'd 7 tests in this file and dragged ``launch_button.py`` below
+    the 100% gate. Every test here rides a deterministic plenty-free probe
+    via the ``_default_disk_usage`` module seam; the disk-refusal arm
+    (``test_low_disk_412_nothing_spawned``) re-pins the seam to a LOW value
+    explicitly — the gate itself stays byte-identical in production.
+    """
+    plenty = 4 * lb.DEFAULT_MIN_DISK_FREE_BYTES
+
+    def _plenty_free(path: str) -> Any:
+        return SimpleNamespace(total=plenty * 2, used=plenty, free=plenty)
+
+    monkeypatch.setattr(lb, "_default_disk_usage", _plenty_free)
+
+
 @pytest.fixture
 def lake(tmp_path: Path) -> Path:
     # M4: the presence precondition covers ALL 21 interval partitions.
@@ -102,14 +122,44 @@ class TestLaunchStateRoute:
         names = {c["name"] for c in payload["preconditions"]}
         assert "nifty_interval_partitions" in names
         assert "no_active_launch" in names
+        # hermetic disk seam: the pinned plenty-free probe reads GREEN
+        # deterministically — never the real runner disk.
+        verdicts = {c["name"]: c["ok"] for c in payload["preconditions"]}
+        assert verdicts["disk_free"] is True
         assert payload["cards"]["spot"]["enabled"] is True
         # coordinator delta: base command display carries NO ack flag
         assert lb.SLA_ACK_FLAG not in payload["cards"]["spot"]["command_display"]
         assert payload["cards"]["spot"]["sla_ack_flag"] == lb.SLA_ACK_FLAG
-        # On main the futures alias layer (PR #1264) is absent — honest verdict.
+        # On this branch the PR #1264 alias layer IS merged — the request-time
+        # probe (the REAL scope classifier; zero code change in launch_button,
+        # exactly as its docstring promises) honestly reads available and the
+        # futures card goes live.
+        assert payload["futures"]["available"] is True
+        assert payload["cards"]["futures"]["enabled"] is True
+        assert "PR #1264" not in payload["cards"]["futures"]["reason"]
+
+    def test_futures_card_disabled_when_alias_unavailable(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The UNAVAILABLE futures CARD arm: disabled + the probe's reason.
+
+        Covers ``_card_payload``'s ``reason = futures.reason`` branch (the
+        #1311-fold flip of ``test_state_payload`` to available=True left it
+        unexercised) via a monkeypatched probe, mirroring the 400-arm test.
+        """
+        monkeypatch.setattr(
+            lb,
+            "probe_futures_alias",
+            lambda: lb.FuturesAvailability(available=False, reason=lb.FUTURES_DEPENDENCY_NOTE),
+        )
+        payload = client.get("/api/v1/launch/state").json()
         assert payload["futures"]["available"] is False
-        assert payload["cards"]["futures"]["enabled"] is False
-        assert "PR #1264" in payload["cards"]["futures"]["reason"]
+        card = payload["cards"]["futures"]
+        assert card["enabled"] is False
+        assert card["reason"] == lb.FUTURES_DEPENDENCY_NOTE
+        assert "PR #1264" in card["reason"]
+        # The spot card is untouched by the futures probe.
+        assert payload["cards"]["spot"]["enabled"] is True
 
     def test_state_without_store_is_honest(self, bare_client: TestClient) -> None:
         payload = bare_client.get("/api/v1/launch/state").json()
@@ -138,7 +188,16 @@ class TestLaunchSweepRoute:
         resp = bare_client.post("/api/v1/launch/sweep?card=spot")
         assert resp.status_code == 503
 
-    def test_futures_unavailable_400_on_main(self, client: TestClient) -> None:
+    def test_futures_unavailable_400_when_alias_absent(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The alias layer IS merged on this branch, so the honest-refusal arm
+        # (the pre-#1264 posture) is pinned via a monkeypatched probe.
+        monkeypatch.setattr(
+            lb,
+            "probe_futures_alias",
+            lambda: lb.FuturesAvailability(available=False, reason=lb.FUTURES_DEPENDENCY_NOTE),
+        )
         resp = client.post("/api/v1/launch/sweep?card=futures")
         assert resp.status_code == 400
         assert "PR #1264" in resp.json()["detail"]
@@ -154,6 +213,29 @@ class TestLaunchSweepRoute:
             resp = c.post("/api/v1/launch/sweep?card=spot")
         assert resp.status_code == 412
         assert "nifty_interval_partitions" in resp.json()["detail"]
+        assert "argv" not in fake_spawner
+
+    def test_low_disk_412_nothing_spawned(
+        self, lake: Path, fake_spawner: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The disk-refusal arm, HERMETIC: an injected low probe still 412s.
+
+        DEC-LAUNCH-DISK-GATE-HERMETIC-001 teeth — the seam refactor must not
+        weaken the gate: a probe under the 20 GiB floor refuses the POST with
+        412 naming ``disk_free`` and spawns nothing, regardless of the real
+        runner disk.
+        """
+        low = lb.DEFAULT_MIN_DISK_FREE_BYTES - 1
+
+        def _low_free(path: str) -> Any:
+            return SimpleNamespace(total=low * 2, used=low, free=low)
+
+        monkeypatch.setattr(lb, "_default_disk_usage", _low_free)
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
+            resp = c.post("/api/v1/launch/sweep?card=spot")
+        assert resp.status_code == 412
+        assert "disk_free" in resp.json()["detail"]
         assert "argv" not in fake_spawner
 
     def test_failed_launch_500_with_detail(

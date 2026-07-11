@@ -54,7 +54,12 @@ Honest envelope (Golden Rule #10)
   (``sweep_results.run_id_conflict`` WARNING). The engine's
   :meth:`~brutex.engine.results_store.ResultsStore.append` RAISES on the same
   conflict (Golden Rule #4) — that strictness stays engine-side; the read-only
-  dashboard must still render (DEC-RESULTS-SURFACE-HONESTY-001).
+  dashboard must still render (DEC-RESULTS-SURFACE-HONESTY-001). A duplicate
+  differing ONLY on the REFERENCE-ONLY VIX trio (DEC-VIX-STAMP-WIRE-001 — the
+  India-VIX lake moved between writes / a pre-VIX store beside a stamped one)
+  is classified separately: the more-informed row wins and the distinct
+  ``sweep_results.vix_only_divergence`` WARNING fires instead — never the
+  corruption-grade counter.
 
 The discovery + read is ``O(stores × rows)`` — bounded by the funnel's final
 10²–10⁴ finalist rows per tuple (``TRACK1_BACKTEST_SPEC.md`` §"Result Row Schema")
@@ -70,14 +75,19 @@ zero store loads + zero audit reads; a repeat poll is an O(1) cache hit.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
 import structlog
 
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
-from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
+from brutex.engine.results_store import (
+    VIX_FIELDS,
+    ResultRow,
+    ResultsStore,
+    ResultsStoreError,
+)
 from brutex.money import format_inr, paisa_to_rupees
 from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_preset
 
@@ -527,7 +537,14 @@ def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, i
     sorted, so first-wins is discovery-order-independent — but is COUNTED in
     ``run_id_conflicts`` + logged as a ``sweep_results.run_id_conflict`` WARNING
     (DEC-RESULTS-SURFACE-HONESTY-001); an IDENTICAL duplicate stays a silent,
-    conflict-free dedup. The engine's ``ResultsStore.append`` RAISES on the same
+    conflict-free dedup. A duplicate differing ONLY on the REFERENCE-ONLY VIX
+    trio (:func:`_differs_only_in_vix` over the public
+    :data:`~brutex.engine.results_store.VIX_FIELDS`) is NOT that family — VIX
+    sits deliberately OUTSIDE the run identity (DEC-VIX-STAMP-WIRE-001: the
+    India-VIX lake moved between the writes, or a pre-VIX store sits beside a
+    stamped one), so it keeps the MORE-INFORMED row, logs the distinct
+    ``sweep_results.vix_only_divergence`` WARNING, and is NOT counted in
+    ``run_id_conflicts``. The engine's ``ResultsStore.append`` RAISES on the same
     divergence (Golden Rule #4) — the dashboard must render regardless, so it
     counts instead of raising (the engine's strictness stays engine-side).
     """
@@ -556,14 +573,53 @@ def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, i
             if existing is None:
                 by_run_id[row.run_id] = row
             elif existing != row:
-                run_id_conflicts += 1
-                _LOG.warning(
-                    "sweep_results.run_id_conflict",
-                    run_id=row.run_id,
-                    dropped_from=str(path),
-                    policy="first-wins",
-                )
+                if _differs_only_in_vix(existing, row):
+                    # NOT the corruption-grade family: the REFERENCE-ONLY VIX
+                    # trio sits deliberately OUTSIDE the run identity
+                    # (DEC-VIX-STAMP-WIRE-001) — a VIX-only cross-store
+                    # difference means the India-VIX lake moved between the
+                    # two writes, or a pre-VIX store sits beside a stamped
+                    # one. Keep the MORE-INFORMED row (more known trio
+                    # fields; tie → the deterministic FIRST — *paths* is
+                    # sorted) and log the DISTINCT event, never
+                    # ``run_id_conflict``'s false non-determinism diagnosis.
+                    if _vix_known_count(row) > _vix_known_count(existing):
+                        by_run_id[row.run_id] = row
+                    _LOG.warning(
+                        "sweep_results.vix_only_divergence",
+                        run_id=row.run_id,
+                        source=str(path),
+                        policy="most-informed-wins",
+                    )
+                else:
+                    run_id_conflicts += 1
+                    _LOG.warning(
+                        "sweep_results.run_id_conflict",
+                        run_id=row.run_id,
+                        dropped_from=str(path),
+                        policy="first-wins",
+                    )
     return list(by_run_id.values()), store_count, skipped, run_id_conflicts
+
+
+def _differs_only_in_vix(existing: ResultRow, row: ResultRow) -> bool:
+    """``True`` iff the two rows differ ONLY on the REFERENCE-ONLY VIX trio.
+
+    The SAME nulling law ``sweep_verify`` uses — ``replace()`` over the public
+    :data:`brutex.engine.results_store.VIX_FIELDS` (§11 COMMON) — so a fourth
+    trio field can never desync this classification. ``dict[str, Any]``: the
+    trio fields are typed non-``None`` on the generated ``replace()``
+    signature, so a ``dict[str, None]`` splat fails strict mypy even though
+    ``None`` is the valid null for every nullable trio column (the
+    ``sweep_verify`` precedent).
+    """
+    nulled: dict[str, Any] = dict.fromkeys(VIX_FIELDS)
+    return replace(existing, **nulled) == replace(row, **nulled)
+
+
+def _vix_known_count(row: ResultRow) -> int:
+    """How many VIX trio fields *row* carries as KNOWN (non-``None``) values."""
+    return sum(getattr(row, name) is not None for name in VIX_FIELDS)
 
 
 def _snapshot_eras(sweeps_root: Path) -> dict[_EraKey, frozenset[str]]:
