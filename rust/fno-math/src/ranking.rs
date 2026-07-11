@@ -263,6 +263,44 @@ pub fn gate_reasons_core(m: &GateInputs) -> Vec<&'static str> {
     reasons
 }
 
+/// Assemble per-candidate [`GateInputs`] rows from equal-length columns —
+/// the row-assembly core of BOTH batched gate wrappers.
+///
+/// Lives in the PURE-CORE section (round-4 review): the `#[pyfunction]`
+/// wrappers construct `PyErr`, so under the crate's `extension-module`
+/// no-libpython `cargo test` link NO Rust test can call them — every
+/// killable branch (the length guard + the positional field assembly)
+/// must therefore live in a plain-`Result` core the in-file mutation
+/// tests can drive (the `python.rs` `add_u64_checked` split).
+fn gate_rows(
+    total_trades: &[i64],
+    profit_factor: &[Option<f64>],
+    max_drawdown_pct: &[f64],
+    win_rate: &[f64],
+    win_loss_ratio: &[Option<f64>],
+    max_consecutive_losses: &[i64],
+) -> Result<Vec<GateInputs>, String> {
+    let n = total_trades.len();
+    if profit_factor.len() != n
+        || max_drawdown_pct.len() != n
+        || win_rate.len() != n
+        || win_loss_ratio.len() != n
+        || max_consecutive_losses.len() != n
+    {
+        return Err("ranking gates: unequal column lengths".to_string());
+    }
+    Ok((0..n)
+        .map(|i| GateInputs {
+            total_trades: total_trades[i],
+            profit_factor: profit_factor[i],
+            max_drawdown_pct: max_drawdown_pct[i],
+            win_rate: win_rate[i],
+            win_loss_ratio: win_loss_ratio[i],
+            max_consecutive_losses: max_consecutive_losses[i],
+        })
+        .collect())
+}
+
 /// Twin of `brutex.ranking._f`: a `None` composite term contributes 0.
 #[inline]
 fn f_or_zero(value: Option<f64>) -> f64 {
@@ -390,6 +428,60 @@ pub fn composite_term_inputs_core(m: &TermInputs) -> Result<[f64; N_COMPOSITE_TE
     ])
 }
 
+/// Assemble per-survivor [`TermInputs`] rows from equal-length columns and
+/// project each through [`composite_term_inputs_core`] — the batched
+/// `composite_term_inputs` twin's row core (one 7-element row per
+/// survivor; the `Vec<Vec<f64>>` row container is deliberate — a 7-tuple
+/// return type was measured to explode the cargo-mutants
+/// value-enumeration ~45× on the wrapper and the same law holds here).
+///
+/// Lives in the PURE-CORE section (round-4 review): the guard + assembly
+/// previously sat INLINE in the PyErr-constructing `#[pyfunction]`
+/// wrapper, where no `cargo test` can link a call — their mutants were
+/// structurally unkillable. Plain `Result<_, String>` here restores the
+/// in-file mutation teeth (the `python.rs` `add_u64_checked` split).
+#[allow(clippy::too_many_arguments)]
+fn composite_term_input_rows(
+    sharpe_ratio: &[Option<f64>],
+    sortino_ratio: &[Option<f64>],
+    calmar_ratio: &[Option<f64>],
+    profit_factor: &[Option<f64>],
+    recovery_factor: &[Option<f64>],
+    win_rate: &[f64],
+    win_loss_ratio: &[Option<f64>],
+    avg_mfe_paisa: &[i64],
+    avg_mae_paisa: &[i64],
+) -> Result<Vec<Vec<f64>>, String> {
+    let n = sharpe_ratio.len();
+    if sortino_ratio.len() != n
+        || calmar_ratio.len() != n
+        || profit_factor.len() != n
+        || recovery_factor.len() != n
+        || win_rate.len() != n
+        || win_loss_ratio.len() != n
+        || avg_mfe_paisa.len() != n
+        || avg_mae_paisa.len() != n
+    {
+        return Err("ranking_composite_term_inputs: unequal column lengths".to_string());
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let terms = composite_term_inputs_core(&TermInputs {
+            sharpe_ratio: sharpe_ratio[i],
+            sortino_ratio: sortino_ratio[i],
+            calmar_ratio: calmar_ratio[i],
+            profit_factor: profit_factor[i],
+            recovery_factor: recovery_factor[i],
+            win_rate: win_rate[i],
+            win_loss_ratio: win_loss_ratio[i],
+            avg_mfe_paisa: avg_mfe_paisa[i],
+            avg_mae_paisa: avg_mae_paisa[i],
+        })?;
+        out.push(terms.to_vec());
+    }
+    Ok(out)
+}
+
 /// Twin of `brutex.ranking.composite_scores` — z-normalise the 7 term
 /// columns ([`zscores_core`] each) and fold the weighted composite per
 /// survivor, strictly LEFT-ASSOCIATED with the DSR term LAST (no
@@ -504,38 +596,11 @@ pub fn overfit_verdicts_core(dsrs: &[Option<f64>], dsr_min: f64) -> Vec<bool> {
 
 // ────────────────────────────────────────────────────────────────────────
 // Thin #[pyfunction] wrappers — argument conversion + `map_err` ONLY
-// (no math past this line; the pure cores above are the contract).
+// (no math past this line; the pure cores above are the contract, and
+// every wrapper's body constructs a `PyErr`, so — measured, see
+// python.rs's test-section header — no `cargo test` can link a call to
+// any of them: NOTHING killable may live below this banner).
 // ────────────────────────────────────────────────────────────────────────
-
-/// Assemble per-candidate [`GateInputs`] rows from equal-length columns.
-fn gate_rows(
-    total_trades: &[i64],
-    profit_factor: &[Option<f64>],
-    max_drawdown_pct: &[f64],
-    win_rate: &[f64],
-    win_loss_ratio: &[Option<f64>],
-    max_consecutive_losses: &[i64],
-) -> Result<Vec<GateInputs>, String> {
-    let n = total_trades.len();
-    if profit_factor.len() != n
-        || max_drawdown_pct.len() != n
-        || win_rate.len() != n
-        || win_loss_ratio.len() != n
-        || max_consecutive_losses.len() != n
-    {
-        return Err("ranking gates: unequal column lengths".to_string());
-    }
-    Ok((0..n)
-        .map(|i| GateInputs {
-            total_trades: total_trades[i],
-            profit_factor: profit_factor[i],
-            max_drawdown_pct: max_drawdown_pct[i],
-            win_rate: win_rate[i],
-            win_loss_ratio: win_loss_ratio[i],
-            max_consecutive_losses: max_consecutive_losses[i],
-        })
-        .collect())
-}
 
 /// Batched `passes_gates` twin over scalar columns (slice-4 PR-1).
 #[pyfunction]
@@ -601,7 +666,9 @@ pub fn ranking_zscores(values: Vec<f64>) -> PyResult<Vec<f64>> {
 /// Python side — the wrapper compares/consumes by VALUE, so the row
 /// container type is not load-bearing; a 7-tuple return type was measured
 /// to explode the cargo-mutants value-enumeration ~45× and was
-/// deliberately avoided).
+/// deliberately avoided). Pure pass-through to
+/// [`composite_term_input_rows`] — the guard + assembly live in the
+/// mutation-gated core above.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn ranking_composite_term_inputs(
@@ -615,37 +682,18 @@ pub fn ranking_composite_term_inputs(
     avg_mfe_paisa: Vec<i64>,
     avg_mae_paisa: Vec<i64>,
 ) -> PyResult<Vec<Vec<f64>>> {
-    let n = sharpe_ratio.len();
-    if sortino_ratio.len() != n
-        || calmar_ratio.len() != n
-        || profit_factor.len() != n
-        || recovery_factor.len() != n
-        || win_rate.len() != n
-        || win_loss_ratio.len() != n
-        || avg_mfe_paisa.len() != n
-        || avg_mae_paisa.len() != n
-    {
-        return Err(PyValueError::new_err(
-            "ranking_composite_term_inputs: unequal column lengths",
-        ));
-    }
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let terms = composite_term_inputs_core(&TermInputs {
-            sharpe_ratio: sharpe_ratio[i],
-            sortino_ratio: sortino_ratio[i],
-            calmar_ratio: calmar_ratio[i],
-            profit_factor: profit_factor[i],
-            recovery_factor: recovery_factor[i],
-            win_rate: win_rate[i],
-            win_loss_ratio: win_loss_ratio[i],
-            avg_mfe_paisa: avg_mfe_paisa[i],
-            avg_mae_paisa: avg_mae_paisa[i],
-        })
-        .map_err(PyValueError::new_err)?;
-        out.push(terms.to_vec());
-    }
-    Ok(out)
+    composite_term_input_rows(
+        &sharpe_ratio,
+        &sortino_ratio,
+        &calmar_ratio,
+        &profit_factor,
+        &recovery_factor,
+        &win_rate,
+        &win_loss_ratio,
+        &avg_mfe_paisa,
+        &avg_mae_paisa,
+    )
+    .map_err(PyValueError::new_err)
 }
 
 /// `composite_scores` twin (z-normalise 7 columns + weighted fold).
@@ -892,6 +940,255 @@ mod tests {
             ]
         );
         assert!(!passes_gates_core(&m));
+    }
+
+    // ── gate_rows / composite_term_input_rows — the batched row-assembly
+    //    cores (round-4 review). The #[pyfunction] wrappers construct
+    //    PyErr, so no cargo test can LINK a call to them (the measured
+    //    extension-module boundary in python.rs) — every killable branch
+    //    lives in these plain-Result cores and is mutation-gated HERE.
+    //    Assertion values sit OUTSIDE every cargo-mutants replacement
+    //    constant (never 0, 1, -1, empty, or default). ──────────────────
+
+    #[test]
+    fn gate_rows_assembles_every_field_positionally() {
+        // Kills `gate_rows -> Ok(vec![])` (content + length asserted) and
+        // every `!=`→`==` guard flip (equal-length columns MUST pass).
+        let rows = gate_rows(
+            &[50, 7],
+            &[Some(1.5), None],
+            &[5.25, 42.5],
+            &[0.6, 0.35],
+            &[Some(1.75), Some(9.25)],
+            &[2, 12],
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].total_trades, 50);
+        assert_eq!(rows[0].profit_factor, Some(1.5));
+        assert_eq!(bits(rows[0].max_drawdown_pct), bits(5.25));
+        assert_eq!(bits(rows[0].win_rate), bits(0.6));
+        assert_eq!(rows[0].win_loss_ratio, Some(1.75));
+        assert_eq!(rows[0].max_consecutive_losses, 2);
+        assert_eq!(rows[1].total_trades, 7);
+        assert_eq!(rows[1].profit_factor, None);
+        assert_eq!(bits(rows[1].max_drawdown_pct), bits(42.5));
+        assert_eq!(bits(rows[1].win_rate), bits(0.35));
+        assert_eq!(rows[1].win_loss_ratio, Some(9.25));
+        assert_eq!(rows[1].max_consecutive_losses, 12);
+    }
+
+    #[test]
+    fn gate_rows_rejects_each_short_column_alone() {
+        // ONE column short per case — kills every `||`→`&&` in the guard
+        // chain (a && arm needs TWO simultaneous mismatches to fire).
+        let tt = [50i64, 7];
+        let pf = [Some(1.5), None];
+        let dd = [5.25, 42.5];
+        let wr = [0.6, 0.35];
+        let wlr = [Some(1.75), Some(9.25)];
+        let mcl = [2i64, 12];
+        let expect_err = |r: Result<Vec<GateInputs>, String>| {
+            assert_eq!(r.unwrap_err(), "ranking gates: unequal column lengths");
+        };
+        expect_err(gate_rows(&tt, &pf[..1], &dd, &wr, &wlr, &mcl));
+        expect_err(gate_rows(&tt, &pf, &dd[..1], &wr, &wlr, &mcl));
+        expect_err(gate_rows(&tt, &pf, &dd, &wr[..1], &wlr, &mcl));
+        expect_err(gate_rows(&tt, &pf, &dd, &wr, &wlr[..1], &mcl));
+        expect_err(gate_rows(&tt, &pf, &dd, &wr, &wlr, &mcl[..1]));
+    }
+
+    #[test]
+    fn gate_rows_empty_columns_yield_an_empty_ok() {
+        // The n = 0 boundary: every guard arm compares 0 == 0 → Ok([]).
+        assert_eq!(gate_rows(&[], &[], &[], &[], &[], &[]).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn composite_term_input_rows_matches_the_per_row_core() {
+        // Kills the fabricated `-> Ok(vec![…])` replacements (content +
+        // length) and every `!=`→`==` guard flip; row values chosen so no
+        // projected term is a cargo-mutants constant (row 0 term 7 is
+        // 750/300 = 2.5, term 4 is 1.8 − 1.0 = 0.8, …).
+        let rows = composite_term_input_rows(
+            &[Some(1.25), None],
+            &[Some(0.75), Some(-2.5)],
+            &[None, Some(3.5)],
+            &[Some(1.8), Some(0.6)],
+            &[Some(4.5), None],
+            &[0.6, 0.35],
+            &[Some(2.5), None],
+            &[750, -125],
+            &[300, 0],
+        )
+        .unwrap();
+        let expected: Vec<Vec<f64>> = [
+            TermInputs {
+                sharpe_ratio: Some(1.25),
+                sortino_ratio: Some(0.75),
+                calmar_ratio: None,
+                profit_factor: Some(1.8),
+                recovery_factor: Some(4.5),
+                win_rate: 0.6,
+                win_loss_ratio: Some(2.5),
+                avg_mfe_paisa: 750,
+                avg_mae_paisa: 300,
+            },
+            TermInputs {
+                sharpe_ratio: None,
+                sortino_ratio: Some(-2.5),
+                calmar_ratio: Some(3.5),
+                profit_factor: Some(0.6),
+                recovery_factor: None,
+                win_rate: 0.35,
+                win_loss_ratio: None,
+                avg_mfe_paisa: -125,
+                avg_mae_paisa: 0,
+            },
+        ]
+        .iter()
+        .map(|m| composite_term_inputs_core(m).unwrap().to_vec())
+        .collect();
+        let as_bits = |rs: &[Vec<f64>]| -> Vec<Vec<u64>> {
+            rs.iter()
+                .map(|r| r.iter().map(|&v| bits(v)).collect())
+                .collect()
+        };
+        assert_eq!(as_bits(&rows), as_bits(&expected));
+        // Landmark spot-values (independent of the core call above).
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].len(), N_COMPOSITE_TERMS);
+        assert_eq!(bits(rows[0][6]), bits(2.5)); // 750 / 300
+        assert_eq!(bits(rows[0][3]), bits(1.8 - 1.0)); // PF − 1.0
+        assert_eq!(bits(rows[1][5]), bits(0.35 * 0.0)); // None wlr → 0.0
+    }
+
+    #[test]
+    fn composite_term_input_rows_rejects_each_short_column_alone() {
+        // ONE column short per case — kills every `||`→`&&` guard flip.
+        let sh = [Some(1.25), None];
+        let so = [Some(0.75), Some(-2.5)];
+        let ca = [None, Some(3.5)];
+        let pf = [Some(1.8), Some(0.6)];
+        let re = [Some(4.5), None];
+        let wr = [0.6, 0.35];
+        let wl = [Some(2.5), None];
+        let mfe = [750i64, -125];
+        let mae = [300i64, 0];
+        let expect_err = |r: Result<Vec<Vec<f64>>, String>| {
+            assert_eq!(
+                r.unwrap_err(),
+                "ranking_composite_term_inputs: unequal column lengths"
+            );
+        };
+        expect_err(composite_term_input_rows(
+            &sh,
+            &so[..1],
+            &ca,
+            &pf,
+            &re,
+            &wr,
+            &wl,
+            &mfe,
+            &mae,
+        ));
+        expect_err(composite_term_input_rows(
+            &sh,
+            &so,
+            &ca[..1],
+            &pf,
+            &re,
+            &wr,
+            &wl,
+            &mfe,
+            &mae,
+        ));
+        expect_err(composite_term_input_rows(
+            &sh,
+            &so,
+            &ca,
+            &pf[..1],
+            &re,
+            &wr,
+            &wl,
+            &mfe,
+            &mae,
+        ));
+        expect_err(composite_term_input_rows(
+            &sh,
+            &so,
+            &ca,
+            &pf,
+            &re[..1],
+            &wr,
+            &wl,
+            &mfe,
+            &mae,
+        ));
+        expect_err(composite_term_input_rows(
+            &sh,
+            &so,
+            &ca,
+            &pf,
+            &re,
+            &wr[..1],
+            &wl,
+            &mfe,
+            &mae,
+        ));
+        expect_err(composite_term_input_rows(
+            &sh,
+            &so,
+            &ca,
+            &pf,
+            &re,
+            &wr,
+            &wl[..1],
+            &mfe,
+            &mae,
+        ));
+        expect_err(composite_term_input_rows(
+            &sh,
+            &so,
+            &ca,
+            &pf,
+            &re,
+            &wr,
+            &wl,
+            &mfe[..1],
+            &mae,
+        ));
+        expect_err(composite_term_input_rows(
+            &sh,
+            &so,
+            &ca,
+            &pf,
+            &re,
+            &wr,
+            &wl,
+            &mfe,
+            &mae[..1],
+        ));
+    }
+
+    #[test]
+    fn composite_term_input_rows_propagates_the_envelope_error() {
+        // An out-of-envelope paisa magnitude aborts the WHOLE call via `?`
+        // (the Python wrapper then serves the call from the oracle).
+        let big = (1i64 << 53) + 1;
+        let err = composite_term_input_rows(
+            &[Some(1.25)],
+            &[None],
+            &[None],
+            &[None],
+            &[None],
+            &[0.5],
+            &[None],
+            &[big],
+            &[3],
+        )
+        .unwrap_err();
+        assert!(err.contains("2^53"), "{err}");
     }
 
     // ── py_float_sum — the CPython-3.12 builtin-sum transliteration ─────

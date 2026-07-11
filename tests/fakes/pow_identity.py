@@ -12,12 +12,16 @@ oracle's bits on any mismatch.
 The probe is DETERMINISTIC (fixed-seed corpus + fixed adversarial values),
 so a host's verdict is stable across runs — the gated strong test legs
 (hard bit-equality differentials, zero-autorevert golden assertions) can
-key on it without flake. Measured 2026-07-11 on this repo's Linux/glibc
-build container: the identity FAILS (~170 ``pow(x,2)`` + ~190
-``pow(x,0.5)`` mismatches per 200k samples) — on such hosts the (b*)
-families serve oracle bits per call and MAY latch; on identity hosts (the
-production M4-Pro's macOS libm is the merge-precondition probe target) the
-kernels are expected bit-identical.
+key on it without flake. Measured 2026-07-11 by THIS shipped probe
+(``pow_identity_verdict()``: 4 regimes × ``_SAMPLES_PER_REGIME`` + the
+adversarial values = 80,015 samples) on this repo's Linux/glibc build
+container: the identity FAILS — 61 ``pow(x,2)`` + 65 ``pow(x,0.5)``
+bit-mismatches over the 80,015 samples (an earlier, larger exploratory
+200k-sample sweep that first caught the divergence is superseded by the
+shipped probe's own figures — round-4 review honesty fix). On such hosts
+the (b*) families serve oracle bits per call and MAY latch; on identity
+hosts (the production M4-Pro's macOS libm is the merge-precondition probe
+target) the kernels are expected bit-identical.
 """
 
 from __future__ import annotations

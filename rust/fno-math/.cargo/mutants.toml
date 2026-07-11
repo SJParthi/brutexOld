@@ -39,12 +39,25 @@
 # the scope — the rank-time gates / z-scores / composite / rank-order kernels
 # are ENGINE-critical (they feed the persisted leaderboard when
 # BRUTEX_RANKING_RUST is ON). Re-measured 2026-07-11 with ranking.rs in scope:
-# `cargo mutants --list | wc -l` from this dir = 915 (599 prior + 316 from
-# ranking.rs; an interim ranking.rs shape measured 897/298 before the final
-# hardening — restated per this file's own SHIPPED-tree law; a 7-tuple
-# wrapper return type was measured to explode the value-enumeration to 6,847
-# ranking mutants and was reshaped to Vec<Vec<f64>> — see
-# ranking_composite_term_inputs). +52.8% growth is NOT
+# `cargo mutants --list | wc -l` from this dir = 920 (599 prior + 321 from
+# ranking.rs; interim ranking.rs shapes measured 897/298 then 915/316 before
+# the round-4 review fix — restated per this file's own SHIPPED-tree law; a
+# 7-tuple wrapper return type was measured to explode the value-enumeration
+# to 6,847 ranking mutants and was reshaped to Vec<Vec<f64>> — see
+# ranking_composite_term_inputs). The round-4 review fix moved the
+# wrapper-INLINE length guards + row assembly into the pure `gate_rows` /
+# `composite_term_input_rows` cores with in-file killing tests: a
+# PyErr-constructing #[pyfunction] body cannot be LINKED by any cargo test
+# (the measured extension-module boundary trading-core's python.rs
+# test-section header documents), so its interior mutants were VIABLE yet
+# structurally unkillable — 25 guaranteed survivors, refuter-reproduced;
+# post-fix the whole 47-mutant scope re-ran 30 caught / 17 unviable /
+# 0 missed / 0 timeout in 86 s (measured 2026-07-11: `cargo mutants
+# --in-place --test-tool cargo --no-shuffle --timeout 300 --re
+# 'gate_rows|composite_term_input_rows|ranking_composite_term_inputs'`;
+# the 17 unviable = the 16 PyResult-alias wrapper replacements + the
+# no-Default GateInputs fabrication — the documented 27.1.0 behaviour).
+# +53.6% growth is NOT
 # small, so the fno-math matrix takes the #1597 pre-decided shard dial TWICE
 # (6 → 8 in .github/workflows/mutation.yml — its own comment says the same;
 # the 7-shard matrix there is trading-core's); ranking.rs mutants are cheap
