@@ -37,6 +37,7 @@ HONEST envelope (Golden Rule #10):
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess  # nosec B404 — fixed-argv node invocation, test-only
 from pathlib import Path
@@ -127,6 +128,16 @@ class TestV29PollerConsolidation:
         assert "'✅ Sweep ' + p.state + ' — ' + (p.survivors || 0)" in html
 
     def test_heartbeat_slots_subscribe_to_the_widget_polls(self) -> None:
+        """The heartbeat slots subscribe to the widgets' own polls.
+
+        Semantics note (review NIT-3, ledgered in MIGRATION.md #1720): the
+        ``__bxSweepProgressFailSubs`` fan-out passes the consecutive-failure
+        COUNT (bx-oneclick's ``failures`` counter), not an HTTP status/error
+        like the old inline hook — the heartbeat error message is static, so
+        the argument is informational only. Recorded here + in the ledger
+        instead of a v29.html comment: v29.html deliberately stays
+        byte-identical to the measured AFTER SHA (31e9022c).
+        """
         html = _tpl("v29.html")
         assert (
             "(window.__bxPullRateSubs = window.__bxPullRateSubs || []).push(renderHbPull);" in html
@@ -268,6 +279,81 @@ class TestDebouncedInputs:
 
 
 # ---------------------------------------------------------------------------
+# Review MAJOR fix — the fetch_windows/completeness tick fetches are BOUNDED
+# with the abort timer armed THROUGH the body read, honoring the timeoutMs
+# BXPoll passes to the custom fetchJson seam (pre-fix the ticks kept bare
+# un-timed `fetch`, so under BXPoll's one-in-flight scheduling a
+# headers-then-stalled-body response hung the tick promise forever and the
+# poller never rescheduled — the frozen-tab class the migration exists to
+# prevent).
+# ---------------------------------------------------------------------------
+
+
+class TestBoundedTickFetch:
+    @pytest.mark.parametrize("name", ["fetch_windows.html", "completeness.html"])
+    def test_tick_fetch_is_bounded_through_the_body_read(self, name: str) -> None:
+        html = _tpl(name)
+        # The bounded-fetch token: timer armed through the BODY read.
+        assert "function fetchTextBounded(url, timeoutMs) {" in html
+        assert "/* timer deliberately still armed through the body read */" in html
+        assert "await fetchTextBounded(" in html
+        # The custom seam threads BXPoll's own timeout bound into the tick.
+        assert "fetchJson: function (_url, timeoutMs) {" in html
+        assert "return poll(timeoutMs).then(function (ok) {" in html
+        # The legacy no-BXPoll arm defaults to the sibling pages' 12 s bound.
+        assert '(typeof timeoutMs === "number" && timeoutMs > 0) ? timeoutMs : 12000;' in html
+
+    def test_bare_untimed_tick_fetches_are_gone(self) -> None:
+        assert 'await fetch("/api/v1/completeness/scoreboard")' not in _tpl("completeness.html")
+        assert 'await fetch("/api/v1/coverage/windows?"' not in _tpl("fetch_windows.html")
+
+
+# ---------------------------------------------------------------------------
+# Review NIT-1 fix — the "every touched template's inline <script> parses
+# under node" claim gets executable teeth: extract the inline (src-less)
+# script bodies and `node --check` each.
+# ---------------------------------------------------------------------------
+
+_TOUCHED_TEMPLATES = [
+    "completeness.html",
+    "coverage.html",
+    "expired_options.html",
+    "fetch_windows.html",
+    "launch.html",
+    "reports.html",
+    "results.html",
+    "screener.html",
+    "spot_coverage.html",
+    "v29.html",
+]
+
+_INLINE_SCRIPT = re.compile(
+    r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE
+)
+
+
+@pytest.mark.skipif(_NODE is None, reason="node not installed")
+@pytest.mark.parametrize("name", _TOUCHED_TEMPLATES)
+def test_touched_template_inline_scripts_parse_under_node_check(name: str, tmp_path: Path) -> None:
+    """Every src-less inline ``<script>`` block of a touched template parses."""
+    blocks = [b for b in _INLINE_SCRIPT.findall(_tpl(name)) if b.strip()]
+    assert blocks, f"{name}: expected at least one inline script block"
+    for i, body in enumerate(blocks):
+        target = tmp_path / f"{name}.{i}.js"
+        target.write_text(body, encoding="utf-8")
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            [str(_NODE), "--check", str(target)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"{name} inline script block #{i} failed node --check: {proc.stderr}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Fix 5 — in-place tbody row patch (completeness + spot_coverage).
 # ---------------------------------------------------------------------------
 
@@ -317,6 +403,13 @@ class TestReportsChipsBuildOnce:
         html = _tpl("reports.html")
         assert "function applySelection() {" in html
         assert 'chip.classList.toggle("on", selected.has(sym));' in html
+        # Review MINOR fix: the chip map keys symbol + exchange (a dual-listed
+        # NSE+BSE symbol keeps BOTH chips — a symbol-only key kept just the
+        # LAST one, leaving the other chip's highlight stale on bulk-select
+        # clicks); the `selected` set stays symbol-keyed (wire unchanged).
+        assert 'chipBySymbol.set(s.symbol + "\\u001f" + s.exchange, chip);' in html
+        assert 'const sym = key.split("\\u001f")[0];' in html
+        assert "chipBySymbol.set(s.symbol, chip);" not in html
         # The XSS discipline of the build path is untouched (also pinned by
         # test_dashboard_reports_template_xss.py against the rendered page).
         assert "nameEl.textContent = s.symbol;" in html

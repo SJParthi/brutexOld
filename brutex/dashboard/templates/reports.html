@@ -309,7 +309,13 @@ let chipBySymbol = new Map();
 let chipSetKey = null;
 
 function applySelection() {
-  for (const [sym, chip] of chipBySymbol) {
+  /* The map key is symbol + "\u001f" + exchange (mirrors the setKey fields —
+     review fix: a symbol-only key kept just the LAST chip of a dual-listed
+     NSE+BSE symbol, so bulk-select clicks left the other chip's highlight
+     stale); the `selected` SET stays symbol-keyed — the wire semantics
+     (symbols joined) are unchanged, every same-symbol chip toggles together. */
+  for (const [key, chip] of chipBySymbol) {
+    const sym = key.split("\u001f")[0];
     chip.classList.toggle("on", selected.has(sym));
   }
 }
@@ -357,7 +363,7 @@ function renderChips() {
       chip.classList.toggle("on");
       refreshCount();
     };
-    chipBySymbol.set(s.symbol, chip);
+    chipBySymbol.set(s.symbol + "\u001f" + s.exchange, chip);
     symsEl.appendChild(chip);
   }
 }

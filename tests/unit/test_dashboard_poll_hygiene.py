@@ -82,9 +82,14 @@ def test_uniform_poller_rides_the_shared_bxpoll_core(name: str) -> None:
     assert "window.BXPoll.createPoller({" in js, f"{name}: the BXPoll migration is missing"
     # The tick keeps its OWN render/degrade semantics: the poller consumes it
     # through the custom fetchJson seam and a failed tick throws (→ backoff).
-    assert "return poll().then(function (ok) {" in js, (
-        f"{name}: the tick must feed BXPoll through the custom fetchJson seam"
-    )
+    # fetch_windows/completeness thread BXPoll's timeoutMs into the tick
+    # (the DEC-FRONTEND-LATENCY-HARDENING-001 review MAJOR — their fetches are
+    # bounded through the body read; pinned in TestBoundedTickFetch); the
+    # other pollers keep the plain seam.
+    assert (
+        "return poll().then(function (ok) {" in js
+        or "return poll(timeoutMs).then(function (ok) {" in js
+    ), f"{name}: the tick must feed BXPoll through the custom fetchJson seam"
     assert "poll tick failed" in js or "surfaces failed" in js, (
         f"{name}: a failed tick must throw into BXPoll's counted-failure backoff"
     )
@@ -126,7 +131,11 @@ def test_completeness_ships_payload_diff_gate() -> None:
     """The ~750-row options table no longer rebuilds every 4 s unconditionally."""
     js = _tpl("completeness.html")
     assert "let lastBoardTxt = null;" in js
-    assert "const txt = await r.text();" in js
+    # The body text now arrives through the BOUNDED text fetch (the
+    # DEC-FRONTEND-LATENCY-HARDENING-001 review MAJOR — abort armed through
+    # the body read); the compare gate is still the raw response text.
+    assert "return r.text().then(function (txt) {" in js
+    assert "const txt = res.text;" in js
     # `return true` since DEC-FRONTEND-LATENCY-HARDENING-001: a skipped tick is
     # a SUCCESSFUL tick for BXPoll's failure counting (same skip semantics).
     assert "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return true; }" in js

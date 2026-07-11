@@ -141,7 +141,12 @@ def test_poller_template_reads_body_as_text_for_the_compare(name: str) -> None:
     the only honest client-side gate).
     """
     html = _template(name)
-    assert "await r.text()" in html, f"{name}: the guard must compare the raw body text"
+    # fetch_windows/completeness read the body text inside the BOUNDED text
+    # fetch (DEC-FRONTEND-LATENCY-HARDENING-001 review MAJOR — the abort timer
+    # stays armed through `r.text()`); the other pollers keep the plain await.
+    assert "await r.text()" in html or "return r.text().then(function (txt) {" in html, (
+        f"{name}: the guard must compare the raw body text"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +366,12 @@ _BASELINE_INNERHTML_SINKS: dict[str, int] = {
     "fetch_windows.html": 2,
     "expired_options.html": 2,
     "spot_coverage.html": 2,
+    # completeness.html joined the guard in the DEC-FRONTEND-LATENCY-HARDENING-001
+    # review round (MIGRATION.md #1720) — 7 sinks measured on THAT PR's tree
+    # (the pre-existing card/table full rebuilds + the two sanctioned tbody
+    # patches; review-verified every builder esc()-wraps payload values).
+    # Guard coverage, not a bug fix: any NEW sink over 7 now fails here.
+    "completeness.html": 7,
     "db.html": 27,
     "movers.html": 9,
     "v29.html": 10,

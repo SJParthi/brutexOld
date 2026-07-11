@@ -351,15 +351,40 @@ function renderOptions(rows) {
 let lastBoardTxt = null;
 let lastLiveLine = "";
 
-async function poll() {
+/* Bounded text fetch (DEC-FRONTEND-LATENCY-HARDENING-001 review fix): the
+   abort timer stays ARMED through the BODY read (the bx-poll.js bxFetchJson
+   precedent) so a headers-then-stalled-body response aborts too — under
+   BXPoll's one-in-flight scheduling an unresolved tick would never
+   reschedule (the frozen-tab class the migration exists to prevent).
+   timeoutMs is the seam's own bound (BXPoll passes FETCH_TIMEOUT_MS); the
+   legacy no-BXPoll arm defaults to the sibling pages' 12 s. */
+function fetchTextBounded(url, timeoutMs) {
+  const ms = (typeof timeoutMs === "number" && timeoutMs > 0) ? timeoutMs : 12000;
+  const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  const timer = setTimeout(function () { if (ctrl) { ctrl.abort(); } }, ms);
+  const init = ctrl ? { signal: ctrl.signal } : {};
+  return fetch(url, init)
+    .then(function (r) {
+      /* timer deliberately still armed through the body read */
+      return r.text().then(function (txt) {
+        return { ok: r.ok, status: r.status, text: txt };
+      });
+    })
+    .then(
+      function (res) { clearTimeout(timer); return res; },
+      function (err) { clearTimeout(timer); throw err; }
+    );
+}
+
+async function poll(timeoutMs) {
   try {
-    const r = await fetch("/api/v1/completeness/scoreboard");
-    if (!r.ok) { lastBoardTxt = null; liveTxt.textContent = "error " + r.status; return false; }
+    const res = await fetchTextBounded("/api/v1/completeness/scoreboard", timeoutMs);
+    if (!res.ok) { lastBoardTxt = null; liveTxt.textContent = "error " + res.status; return false; }
     /* Skip-render-when-unchanged (DEC-DASHBOARD-POLL-HYGIENE-001): the ~750-row
        options table is a full innerHTML rebuild — compare the RAW response text
        and replay the heartbeat line instead of rebuilding identical DOM every
        4 s (the coverage.html / fetch_windows.html sibling memo). */
-    const txt = await r.text();
+    const txt = res.text;
     if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return true; }
     lastBoardTxt = txt;
     const board = JSON.parse(txt);
@@ -395,8 +420,8 @@ function startPolling() {
     window.BXPoll.createPoller({
       url: "/api/v1/completeness/scoreboard", // informational — the tick owns its own fetch
       pollMs: 4000,
-      fetchJson: function () {
-        return poll().then(function (ok) {
+      fetchJson: function (_url, timeoutMs) {
+        return poll(timeoutMs).then(function (ok) {
           if (!ok) { throw new Error("completeness poll tick failed"); }
           return { ok: true };
         });

@@ -2095,9 +2095,10 @@ hostile-review pass._
   `setInterval(pollPull, 5000)` · `setInterval(pollProof, 10000)` · `setInterval(pollState, 2000)`) are
   negative-pinned and /api/v1/state rides BXPoll at its unchanged 2 s. MEASURED BEFORE (coordinator harness, headless
   Chromium, origin/main @ a268bd4c, idle `/`, 120 s visible): 336 requests — sweep-progress 99 / pull-rate 63 /
-  liveproof 36 = the summed duplicates this closes. MEASURED AFTER (same harness, head 31e9022c — whose
-  templates/static tree is byte-identical to this branch's head, verified empty diff; only docs/commit-message
-  differ): 240 requests/120 s = 2.000 req/s (−96, −28.6%) — sweep-progress 99→39, pull/rate 63→39, liveproof
+  liveproof 36 = the summed duplicates this closes. MEASURED AFTER (same harness, head 31e9022c — validity
+  scoped PER FILE: the five files the page-`/` measurement depends on — v29.html + bx-oneclick.js +
+  bx-rate-monitor.js + bx-liveproof.js + bx-poll.js — are byte-identical to this branch's head, verified
+  empty diff): 240 requests/120 s = 2.000 req/s (−96, −28.6%) — sweep-progress 99→39, pull/rate 63→39, liveproof
   36→24, state 60→60, universe/pull-progress 39→39, oneclick/runs 39→39; the same six endpoints on both runs.
   HONEST: hidden-tab was 0 req/s measured on BOTH SHAs — no hidden-tab
   win claimed; the pollRunSweep no-guard/no-backoff/un-timed-fetch gap is source-asserted (armed only mid-sweep,
@@ -2124,7 +2125,14 @@ hostile-review pass._
   static/*.js + killed-token/subscription/debounce/tbody/chips pins + a node-EXECUTED fan-out isolation golden);
   every touched template's inline scripts parse clean under node. HONEST envelope: source-string pins + node syntax
   gates, no in-CI browser measurement — BEFORE/AFTER measured out-of-CI by the coordinator harness (AFTER on
-  31e9022c, frontend byte-identical to this head). ENGINE UNCHANGED —
+  31e9022c; the five measured-page files byte-identical to this head). HOSTILE-REVIEW FIX ROUND folded
+  (pre-open, FIX-FIRST verdict — the per-item record lives in MIGRATION.md #1720): the fetch_windows/
+  completeness tick fetches are now BOUNDED through the body read via a per-template `fetchTextBounded`
+  honoring the seam's timeoutMs (the MAJOR — a headers-then-stalled-body tick would have wedged BXPoll's
+  one-in-flight chain forever; the ledger's "bare un-timed fetches closed" claim was ahead of the code, now
+  true + pinned); /reports' chip map keys symbol+exchange (the dual-listed stale-highlight MINOR); the
+  touched templates' inline scripts gain an executable node --check pin; completeness.html joins the
+  innerHTML-sink baseline guard at 7. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
   Earlier: `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
   renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
