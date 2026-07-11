@@ -30,6 +30,14 @@ def test_mirror_default_is_home_brutex_runs() -> None:
     assert dest == Path.home() / ".brutex" / "runs" / _RUN_ID
 
 
+def test_mirror_env_name_literal_pinned() -> None:
+    """Drift pin: the suite-wide conftest isolation fixture sets the LITERAL
+    ``"BRUTEX_RUN_MIRROR_ROOT"`` (importing brutex.engine there would abort the
+    wheel-less redteam-nightly collector — run 29145422566). If this constant
+    ever renames, the conftest literal must move with it."""
+    assert MIRROR_ROOT_ENV == "BRUTEX_RUN_MIRROR_ROOT"
+
+
 def test_mirror_override_root_used() -> None:
     """A non-empty ``BRUTEX_RUN_MIRROR_ROOT`` names the mirror root directly."""
     dest = mirror_run_dir(_RUN_ID, env={MIRROR_ROOT_ENV: "/mnt/internal"})
