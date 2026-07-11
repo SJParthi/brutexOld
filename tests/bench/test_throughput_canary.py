@@ -87,7 +87,8 @@ _SEED: int = 42
 # trips — still no threshold change, purely more de-noising.
 _TIMING_REPEATS: int = 15
 
-# Ratio gate ceiling — matches `test_store_o1.py:162` pattern (5× ratio
+# Ratio gate ceiling — matches the historical `test_store_o1.py` pattern
+# (deleted with its module — MIGRATION.md #1727b; 5× ratio
 # allows for CI jitter; a real O(n) regression would show ratio >> 5×).
 # Ratio ceiling — bumped from 5.0 → 8.0 per PR #46 hotfix.
 # Diagnostic agent measured `test_vectorized_mask_and_ratio` has only 1.10×
@@ -138,7 +139,8 @@ class TestThroughputCanary:
         """numpy vectorized `(arr & MASK) == MASK` — O(1) per element check.
 
         Time per element at N=100K vs N=1M must be roughly constant.
-        Ratio ceiling: 5× (test_store_o1.py pattern). A real regression
+        Ratio ceiling: 5× (the deleted test_store_o1.py's pattern —
+        MIGRATION.md #1727b). A real regression
         (e.g. accidental O(n²) wrapper) would show ratio >> 10×.
         """
         warmup_n = 10_000
@@ -340,7 +342,8 @@ class TestEvaluateAtomsCanary:
     def test_evaluate_atoms_ratio(self) -> None:
         """`evaluate_atoms` per-call latency must be O(1) regardless of N.
 
-        Ratio ceiling: 5× (test_store_o1.py:162 pattern). A real
+        Ratio ceiling: 5× (the deleted test_store_o1.py's pattern —
+        MIGRATION.md #1727b). A real
         regression (e.g. accidental O(n) loop over prior bars
         instead of O(1) PriorBarHistory check) would show ratio >> 10×.
         """

@@ -11,7 +11,8 @@ This is the read-side counterpart to the honest envelope in
 refresh is O(files) and is NOT what this bench measures (the cache is primed
 first, then every timed call is a hit).
 
-Strategy (mirrors ``tests/bench/test_store_o1.py``): warm up, then time many
+Strategy (mirrors the historical ``tests/bench/test_store_o1.py``, deleted
+with ``orchestrator/store.py`` — MIGRATION.md #1727b): warm up, then time many
 clean-hit ``get_or_refresh`` calls at 10 vs 1000 datasets and assert the latency
 ratio stays under ``ratio_ceiling(5.0)`` — 5× on the shared GHA runner, tightened
 to the strict 1.1× M4-Pro tier via ``tests/bench/_o1_tiers.py``. A regression

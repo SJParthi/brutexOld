@@ -81,7 +81,7 @@ absolute-throughput, the honest 33B-SLA `xfail`) — none are breakage.
 | Total tests | **~3,558** across 225 files (unit/integration/property/golden/bench/smoke/stress/redteam) |
 | Blocking CI gates | **26 jobs** in the required `ci-ok` aggregate (mypy+pyright strict, ruff, bandit, CodeQL, semgrep, trivy, SBOM, vulture, duplication, rust, golden, …) |
 | Coverage | global floor **90%** (not 100%); **103 modules** held at strict **100% line+branch**; 8 orchestrator modules excluded (PyO3 ABI) |
-| Mutation testing | per-PR on **`state.py` only** (≥98%); broader Python + Rust mutation is **weekly/advisory** |
+| Mutation testing | per-PR on **`data/parser.py` only** (33/33 killed; retargeted from the deleted `orchestrator/state.py` — MIGRATION.md #1727b); broader Python + Rust mutation is **weekly/advisory** |
 | Fuzzing | 🔴 **stub only** (README, zero targets, no CI) |
 | Stress / soak | 1 nightly test (not per-PR) |
 | Standards decree-vs-reality | repo's own honest count: **15 🟢 fully-enforced / 2 🟡 partial / 1 📋 roadmap / 3 👁️ manual of 21 (~71%)** |

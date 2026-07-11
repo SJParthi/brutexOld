@@ -2166,7 +2166,8 @@ hostile-review pass._
   DEC-EXECUTION-TRIO-DELETE-001 pattern, exact keep-set from a deletion-phase grep-proof pass); Bloom
   STAYS (already Rust where it counts). LAWS: goldens-first (a port flips ON only when it reproduces the
   frozen goldens BIT-FOR-BIT) · default-OFF env flag + burn-in self-check + RETAINED Python oracle (the
-  #1531–#1532 pattern) · the ESCALATION clause (unreproducible bytes/verdicts/f64 bits escalate to the
+  #1531–#1532 pattern, ADAPTED: that pattern shipped default-ON — this slice ships default-OFF, the burn-in
+  machinery is what carries over) · the ESCALATION clause (unreproducible bytes/verdicts/f64 bits escalate to the
   coordinator — a divergent port is NEVER shipped). SHIPPED IN THIS PASS (zero brutex/ source lines):
   NEW `tests/golden/test_audit_chain_parity_golden.py` (+ generator + 2 SHA-256-manifested fixtures,
   NEVER regenerated — a REAL 10-entry AuditWriter chain over the CPython float-repr/json.dumps hazard
@@ -5883,8 +5884,10 @@ bruteX/
 │   ├── options/                    ← expiry/strike/lot-size rules (lake)
 │   ├── orchestrator/               ← audit chain + rate limiter +
 │   │                                 live pipeline event shapes (the dead
-│   │                                 FSM/retry/pipeline/store scaffolding
-│   │                                 was DELETED — MIGRATION.md #1727b)
+│   │                                 FSM/retry/pipeline/store/
+│   │                                 adaptive_rate_limiter scaffolding was
+│   │                                 DELETED + quota_tracker TRIMMED to its
+│   │                                 live exceptions — MIGRATION.md #1727b)
 │   ├── ranking/                    ← composite ranking + rejection gates
 │   ├── strategies/                 ← 52-vocabulary engine (Phase 3)
 │   └── vocabulary/                 ← 52-condition evaluator (→ trading_core)

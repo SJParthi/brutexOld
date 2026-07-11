@@ -73,7 +73,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 |----------|----------------|----------|---------------|
 | Per-bar condition eval | u64 bit test `(bar_bits & mask)==mask` | `combo_mask.py` | throughput canary 8× |
 | Combo uniqueness/dedup | BLAKE3 9-field hash → Bloom → LMDB | `strategies/combo.py`, `engine/sweep_cache.py` | bloom property P-05 |
-| Bar / indicator lookup | resident array index | `sweep_kernel.py` | `test_store_o1.py` 3× |
+| Bar / indicator lookup | resident array index | `sweep_kernel.py` | `test_store_o1.py` 3× *(since deleted with `orchestrator/store.py`; the live ratio gate is `test_lmdb_membership_o1.py` — MIGRATION.md #1727b)* |
 | Window-skip (ingest) | O(1) coverage set | `data/fetch_coverage.py:22-38` | — |
 
 > **What is NOT and CANNOT be O(1):** the *total* sweep wall-time. Enumerating

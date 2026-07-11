@@ -32,7 +32,7 @@ Counts are file-level, not test-level.
 | 6 | Stress (`tests/stress/`) | 1 (audit chain sustained) | 0 | 1 | ~~24h-sustained on each hot path~~ multi-hour sustained per hot path **(CORRECTED — DEC-SOAK-REAL-TIER-001 #1580: no tier delivers a 24h single run; ≤ 20 h per dispatch, SEC9-1)** | nightly ~5-min regression gate via `stress-nightly.yml` + weekly self-hosted multi-hour soak via `soak-selfhosted.yml` (#1580) |
 | 7 | Smoke (`tests/smoke/`) | 1 | 0 | 1 (pre-push, 12 tests, < 30 sec) | < 30s pre-push sanity | DEC-PHASE1-SMOKE-AND-SKELETONS-001 |
 | 8 | Fuzz (`rust/fno-math/fuzz/`) | 1 README directory marker | 1 (whole dir is README + ROADMAP for 7 targets) | 0 | 7 cargo-fuzz targets each running 10 min/night | activates per-target alongside each Phase 2 hot-path landing |
-| 9 | Mutation (`.cargo/mutants.toml` + `mutation.yml`) | 1 config + 1 workflow | 0 | 1 weekly workflow exists | ≥ 85% mutation score Python + Rust | mutation.yml runs weekly; Python state.py gated at 85% (DEC-P0-003) |
+| 9 | Mutation (`.cargo/mutants.toml` + `mutation.yml`) | 1 config + 1 workflow | 0 | 1 weekly workflow exists | ≥ 85% mutation score Python + Rust | mutation.yml runs weekly; Python state.py gated at 85% (DEC-P0-003) *(state.py has since been deleted; the per-PR gate now targets `data/parser.py` — MIGRATION.md #1727b)* |
 
 **All 9 layers have at least 1 file present.** This is the Phase 1
 exit criterion per `docs/TRACK1_PHASE_PLAN.md` line 113.
@@ -89,10 +89,10 @@ Per `docs/TRACK1_VERIFICATION_PYRAMID.md §5`.
 
 | Hot path | Test file | Status | Gate |
 |---|---|---|---|
-| Bar lookup by ts | (covered by `test_store_o1.py` — LMDB lookup proxy) | ✅ ratio gate live | p99(N=1M)/p99(N=100K) ≤ 8× per DEC-P0-020 (relaxed for shared CI) |
+| Bar lookup by ts | (covered by `test_store_o1.py` — LMDB lookup proxy; since deleted with `orchestrator/store.py` — the live proxy is `test_lmdb_membership_o1.py`, MIGRATION.md #1727b) | ✅ ratio gate live | p99(N=1M)/p99(N=100K) ≤ 8× per DEC-P0-020 (relaxed for shared CI) |
 | Indicator value get | (covered by `test_throughput_canary.py`) | ✅ ratio gate live | numpy mask AND throughput |
-| Bloom dedup pre-check | (covered by `test_store_o1.py` Bloom path) | ✅ ratio gate live | < 200 ns p99 target |
-| LMDB dedup confirm | `test_store_o1.py` | ✅ working | 3× relaxed ratio gate per DEC-P0-020 |
+| Bloom dedup pre-check | (covered by `test_store_o1.py` Bloom path; since deleted — the Bloom invariants live in `tests/property/test_bloom_invariants.py`, MIGRATION.md #1727b) | ✅ ratio gate live | < 200 ns p99 target |
+| LMDB dedup confirm | `test_store_o1.py` *(since deleted; the live gate is `test_lmdb_membership_o1.py` — MIGRATION.md #1727b)* | ✅ working | 3× relaxed ratio gate per DEC-P0-020 |
 | Strategy mask u64 AND | `test_throughput_canary.py` | ✅ working | numpy throughput ratio |
 | Result Parquet append | 📋 PHASE 2 | not yet — needs writer | 5 µs/row target |
 | Full-sweep extrapolation | `test_full_sweep_extrapolation.py` | ✅ working | projects to 33B trials wall-time |
@@ -117,7 +117,7 @@ Per `.github/workflows/`.
 | `bench-m4pro.yml` | self-hosted M4 Pro runner only | skip-when-not-online; no CI failure (DEC-M4PRO-ABSOLUTE-001) |
 | `branch-protection-drift.yml` | daily 03:30 UTC | reports drift; no CI failure on the branch under review |
 | `dep-freshness-nightly.yml` | nightly | report-only; no CI failure |
-| `mutation.yml` | weekly | runs cargo-mutants + mutmut; Python state.py gated at 85% (DEC-P0-003) |
+| `mutation.yml` | weekly | runs cargo-mutants + mutmut; Python state.py gated at 85% (DEC-P0-003) *(since retargeted to `data/parser.py` after state.py's deletion — MIGRATION.md #1727b)* |
 | `redteam-nightly.yml` | nightly | runs `tests/redteam/`; report-only on PR |
 | `release.yml` | tag push | Release Please |
 | `safety.yml` | every push | bandit + secrets scan + gitleaks |
