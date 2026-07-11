@@ -18,6 +18,7 @@ than passing vacuously (the engaged-assertion law).
 
 from __future__ import annotations
 
+import ast
 import math
 import struct
 import sys
@@ -39,7 +40,9 @@ from brutex.metrics.rust_stats import (
     SELF_CHECK_SAMPLES,
     STATS_RUST_DEFAULT,
     STATS_RUST_ENV,
+    _bounded_text,  # pyright: ignore[reportPrivateUsage]
     _consume_self_check_sample,  # pyright: ignore[reportPrivateUsage]
+    _safe_context,  # pyright: ignore[reportPrivateUsage]
     _self_check_pending,  # pyright: ignore[reportPrivateUsage]
     _valid_pass_count,  # pyright: ignore[reportPrivateUsage]
     cpcv_pass_count_via_kernel,
@@ -142,7 +145,9 @@ def test_flag_unrecognised_fails_safe_off_with_one_warning(
     assert len(events) == 1
     assert events[0]["reason"] == "flag_unrecognised"
     assert events[0]["fn"] == "flag"
-    assert events[0]["value"] == value
+    # Round 4: the env value is not seam-controlled — it rides the total,
+    # bounded ``_safe_context`` (repr-quoted, control chars escaped).
+    assert events[0]["value"] == repr(value)
 
 
 def test_flag_engine_unavailable_degrades_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -366,7 +371,10 @@ def test_kernel_error_falls_back_with_one_warning(
         assert _call_kernel() is None
     events = [e for e in logs if e["event"] == "rust_stats.fallback"]
     assert [e["reason"] for e in events] == ["kernel_error"]
-    assert repr(exc) in str(events[0]["error"])
+    # Round 4: the context rides ``_safe_context`` — a benign exception's
+    # repr passes through EXACTLY (the totality guard changes nothing on
+    # the healthy path).
+    assert events[0]["error"] == repr(exc)
 
 
 def test_memory_error_propagates_bare(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -397,8 +405,10 @@ def test_refused_result_is_loud_once_and_falls_back(
     events = [e for e in logs if e["event"] == "rust_stats.kernel_result_refused"]
     assert len(events) == 1
     assert events[0]["fn"] == "cpcv"
+    # Round 4: both contexts ride ``_safe_context`` — benign reprs pass
+    # through exactly; ``n_total`` is stringified (bounded-total law).
     assert events[0]["result"] == repr(poison)
-    assert events[0]["n_total"] == 6
+    assert events[0]["n_total"] == "6"
     # Whitebox: the refusal memo key is the documented ``fn:reason`` form.
     assert "cpcv:kernel_result_refused" in rust_stats._OBSERVABILITY_MEMO  # pyright: ignore[reportPrivateUsage]
 
@@ -652,7 +662,13 @@ def test_min_sharpe_int_past_float_range_refuses_not_crashes(huge: int) -> None:
     assert struct.pack("<d", on) == struct.pack("<d", off)
     events = [e for e in logs if e["event"] == "rust_stats.fallback"]
     assert [e["reason"] for e in events] == ["min_sharpe_inexact"]
-    assert events[0]["min_sharpe"] == repr(huge)
+    # Round 4 (sanctioned change over the round-2 exact-repr pin): every
+    # context is length-clamped — all three trio members repr past the
+    # 200-char bound, so the context carries the truncated prefix + the
+    # honest marker naming the omitted count (never a log-bloating value).
+    full = repr(huge)
+    assert len(full) > 200  # every trio member exercises the clamp
+    assert events[0]["min_sharpe"] == full[:200] + f"<+{len(full) - 200} chars truncated>"
     assert budgets_before == rust_stats._SELF_CHECK_REMAINING  # pyright: ignore[reportPrivateUsage]
     assert kernel_disabled("cpcv") is False
     assert not any(e["event"] == "rust_stats.engaged" for e in logs)
@@ -872,6 +888,295 @@ def test_min_sharpe_int_past_repr_digit_limit_refuses_not_crashes() -> None:
     assert not any(e["event"] == "rust_stats.engaged" for e in logs)
 
 
+# ── kernel-OUTPUT context totality (refuter round 4) ─────────────────────
+# Refuter-round-4 CONFIRMED defect (fix round 5): the kernel-OUTPUT-side
+# warn contexts bare-repr()'d a KERNEL-controlled object —
+# ``kernel_result_refused``'s ``result=repr(result)`` and ``kernel_error``'s
+# ``error=repr(exc)`` — so a byzantine wheel returning a >4300-digit int
+# (case A), raising ValueError(10**5000) (case B), or raising an exception
+# subclass with a hostile ``__repr__`` (case C) made the seam's OWN refusal
+# logging raise ON-only where OFF returns a rate (the round-3 INPUT-context
+# fix, un-generalized on the output side). Fix round 5 ends the CLASS: ONE
+# total, bounded helper (``_safe_context`` over ``_bounded_text``) carries
+# EVERY not-seam-controlled context value, kernel results are exact-TYPE
+# validated (``_valid_pass_count``: ``type(result) is int`` — no foreign
+# comparison dispatch on the output side either), and the AST structural
+# pin (TestLogContextStructuralPin) forbids re-opening the class.
+
+
+class _HostileReprError(ValueError):
+    """Round-4 case C verbatim (r4_repro_refused_context.py): a ValueError
+    SUBCLASS — squarely inside the narrow catch — whose ``__repr__`` raises."""
+
+    def __repr__(self) -> str:
+        raise RuntimeError("boom from exception __repr__")
+
+
+class _RaisingRepr:
+    """A plain object whose ``__repr__`` raises (the helper-level shape)."""
+
+    def __repr__(self) -> str:
+        raise RuntimeError("hostile __repr__")
+
+
+class _OomRepr:
+    """A ``__repr__`` raising MemoryError — the global-stop carve-out."""
+
+    def __repr__(self) -> str:
+        raise MemoryError
+
+
+class _EvilStr(str):
+    """A str SUBCLASS a hostile ``__repr__`` can smuggle past ``repr()``
+    (CPython's PyUnicode_Check accepts subclasses) — lying ``__len__``/
+    slicing dispatch could then detonate inside the clamp or renderer."""
+
+
+class _SmuggleRepr:
+    """``__repr__`` returning the str SUBCLASS above — must be refused."""
+
+    def __repr__(self) -> str:
+        return _EvilStr("evil")
+
+
+class _HostileInt(int):
+    """Byzantine kernel RESULT: an int SUBCLASS whose comparisons and repr
+    all raise — pre-fix ``_valid_pass_count``'s ``0 <= result`` dispatched
+    the subclass's own ``__ge__`` FIRST (subclass reflected-operand
+    priority) and raised ON-only where OFF returns a rate."""
+
+    __hash__ = int.__hash__
+
+    def __ge__(self, other: int) -> bool:
+        raise RuntimeError("hostile __ge__")
+
+    def __le__(self, other: int) -> bool:
+        raise RuntimeError("hostile __le__")
+
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError("hostile __eq__")
+
+    def __ne__(self, other: object) -> bool:
+        raise RuntimeError("hostile __ne__")
+
+    def __repr__(self) -> str:
+        raise RuntimeError("hostile __repr__")
+
+
+class _PlainIntSub(int):
+    """A benign int subclass — the sanctioned-narrowing pin (previously
+    ADOPTED as a valid result; now refused by the exact-type output gate)."""
+
+
+def test_bounded_text_boundary_and_marker_pinned() -> None:
+    """The length-clamp law: AT the cap untouched; one char past truncates
+    with the exact honest marker naming the omitted count (kills the
+    cap-value, ``<=``→``<``, slice-index and marker-literal mutants)."""
+    assert rust_stats._CONTEXT_MAX_CHARS == 200  # pyright: ignore[reportPrivateUsage]
+    assert _bounded_text("") == ""
+    assert _bounded_text("x" * 200) == "x" * 200
+    assert _bounded_text("x" * 201) == "x" * 200 + "<+1 chars truncated>"
+    assert _bounded_text("y" * 500) == "y" * 200 + "<+300 chars truncated>"
+
+
+def test_safe_context_benign_values_are_exact_bounded_reprs() -> None:
+    """The healthy path is byte-identical to a bare ``repr`` (the totality
+    guard changes nothing for well-behaved values) — and a reprable-but-huge
+    value is clamped, never served whole."""
+    assert _safe_context(7) == "7"
+    assert _safe_context("x") == "'x'"
+    assert _safe_context(None) == "None"
+    assert _safe_context(ValueError("boom")) == "ValueError('boom')"
+    out = _safe_context("x" * 250)  # repr = 252 chars
+    assert out == "'" + "x" * 199 + "<+52 chars truncated>"
+
+
+def test_safe_context_raising_repr_degrades_to_typed_placeholder() -> None:
+    assert _safe_context(_RaisingRepr()) == "<_RaisingRepr repr-failed>"
+
+
+def test_safe_context_memory_error_propagates_bare() -> None:
+    """OOM is a GLOBAL stop — never swallowed into a log placeholder (the
+    documented carve-out, the same law as the kernel call's narrow catch)."""
+    with pytest.raises(MemoryError):
+        _safe_context(_OomRepr())
+
+
+def test_safe_context_str_subclass_repr_is_refused() -> None:
+    """A ``repr`` returning a str SUBCLASS is refused into the placeholder
+    (kills the ``type(text) is str`` exactness-check mutants)."""
+    out = _safe_context(_SmuggleRepr())
+    assert out == "<_SmuggleRepr repr-failed>"
+    assert type(out) is str
+
+
+def test_safe_context_placeholder_names_type_via_c_level_slot() -> None:
+    """Compound hostile shape: a raising ``__repr__`` on an instance whose
+    TYPE carries the round-3 hostile metaclass — the placeholder still
+    names the REAL type (``_type_name``'s C-level getset, no metaclass
+    dispatch; the placeholder arm has no second failure mode)."""
+
+    class _HostileBoth(metaclass=_MetaRaisingName):
+        def __repr__(self) -> str:
+            raise RuntimeError("boom")
+
+    assert _safe_context(_HostileBoth()) == "<_HostileBoth repr-failed>"
+
+
+def test_safe_context_huge_int_digit_cap_placeholder() -> None:
+    """``int.__repr__`` raising past the digit cap degrades to the typed
+    placeholder (the case-A helper-level shape)."""
+    limit_before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)  # pin the CPython DEFAULT — deterministic
+    try:
+        assert _safe_context(10**5000) == "<int repr-failed>"
+    finally:
+        sys.set_int_max_str_digits(limit_before)
+
+
+def test_byzantine_huge_int_result_refused_total_on_off_bit_equal() -> None:
+    """Round-4 case A verbatim (r4_repro_refused_context.py): a byzantine
+    kernel returns 10**5000 — domain-invalid, so the refusal fires, and
+    pre-fix the refusal's OWN ``result=repr(result)`` raised ValueError
+    (digit cap) ON-only where OFF returns a rate. Post-fix: ONE
+    kernel_result_refused ERROR carrying the typed placeholder, the oracle
+    serves, ON≡OFF bit-equal, the repeat call is memo-silent."""
+    returns = [0.01, -0.02, 0.03, -0.01, 0.02, 0.005, -0.015, 0.025]
+    limit_before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(STATS_RUST_ENV, "0")
+            off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+            mp.setattr(fno_math, "stats_cpcv_pass_count", lambda *_args: 10**5000)
+            mp.setenv(STATS_RUST_ENV, "1")
+            reset_self_check_for_tests("cpcv")
+            with capture_logs() as logs:
+                on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+                on_repeat = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+    finally:
+        sys.set_int_max_str_digits(limit_before)
+    assert struct.pack("<d", on) == struct.pack("<d", off)
+    assert struct.pack("<d", on_repeat) == struct.pack("<d", off)
+    events = [e for e in logs if e["event"] == "rust_stats.kernel_result_refused"]
+    assert len(events) == 1  # loud once; the repeat takes the silent memo path
+    assert events[0]["result"] == "<int repr-failed>"
+    assert events[0]["n_total"] == "6"
+    assert kernel_disabled("cpcv") is False
+    assert not any(e["event"] == "rust_stats.engaged" for e in logs)
+
+
+def test_byzantine_kernel_error_huge_int_arg_total_on_off_bit_equal() -> None:
+    """Round-4 case B verbatim: the kernel raises ValueError(10**5000) —
+    inside the narrow catch, but pre-fix the fallback's OWN
+    ``error=repr(exc)`` re-raised the digit-cap ValueError ON-only.
+    Post-fix: one kernel_error warn carrying the typed placeholder, the
+    oracle serves, ON≡OFF bit-equal, no latch."""
+    returns = [0.01, -0.02, 0.03, -0.01, 0.02, 0.005, -0.015, 0.025]
+
+    def _raise_huge(*_args: object) -> int:
+        raise ValueError(10**5000)
+
+    limit_before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(STATS_RUST_ENV, "0")
+            off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+            mp.setattr(fno_math, "stats_cpcv_pass_count", _raise_huge)
+            mp.setenv(STATS_RUST_ENV, "1")
+            reset_self_check_for_tests("cpcv")
+            with capture_logs() as logs:
+                on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+    finally:
+        sys.set_int_max_str_digits(limit_before)
+    assert struct.pack("<d", on) == struct.pack("<d", off)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["kernel_error"]
+    assert events[0]["error"] == "<ValueError repr-failed>"
+    assert kernel_disabled("cpcv") is False
+
+
+def test_byzantine_kernel_error_hostile_repr_total_on_off_bit_equal() -> None:
+    """Round-4 case C verbatim: the kernel raises a ValueError SUBCLASS
+    whose ``__repr__`` raises RuntimeError — pre-fix the fallback's OWN
+    ``repr(exc)`` re-raised it ON-only. Post-fix: the placeholder names the
+    real exception type, the oracle serves, ON≡OFF bit-equal, no latch."""
+    returns = [0.01, -0.02, 0.03, -0.01, 0.02, 0.005, -0.015, 0.025]
+
+    def _raise_hostile(*_args: object) -> int:
+        raise _HostileReprError("boom")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+        mp.setattr(fno_math, "stats_cpcv_pass_count", _raise_hostile)
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv")
+        with capture_logs() as logs:
+            on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+    assert struct.pack("<d", on) == struct.pack("<d", off)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["kernel_error"]
+    assert events[0]["error"] == "<_HostileReprError repr-failed>"
+    assert kernel_disabled("cpcv") is False
+
+
+def test_valid_pass_count_refuses_int_subclass_without_dispatch() -> None:
+    """The exact-TYPE output gate (round-4 completeness sweep): an int
+    SUBCLASS result is refused BEFORE any comparison can dispatch its
+    foreign ``__ge__``/``__le__`` (pre-fix ``0 <= result`` raised the
+    hostile RuntimeError via subclass reflected-operand priority), and a
+    benign subclass is refused too (SANCTIONED NARROWING — previously
+    adopted; the oracle serves, ON≡OFF either way)."""
+    assert _valid_pass_count(_HostileInt(1), 6) is False  # no raise = no dispatch
+    assert _valid_pass_count(_PlainIntSub(1), 6) is False
+
+
+def test_byzantine_int_subclass_result_refused_on_off_bit_equal() -> None:
+    """End-to-end: a byzantine kernel returning ``_HostileInt(1)`` — a
+    domain-plausible VALUE wearing a hostile TYPE. Pre-fix the validation
+    itself raised ON-only from the subclass ``__ge__``; post-fix the
+    exact-type gate refuses it with no dispatch (the context degrades to
+    the typed placeholder — its ``__repr__`` raises too) and the oracle
+    serves ON≡OFF bit-equal."""
+    returns = [0.01, -0.02, 0.03, -0.01, 0.02, 0.005, -0.015, 0.025]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+        mp.setattr(fno_math, "stats_cpcv_pass_count", lambda *_args: _HostileInt(1))
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv")
+        with capture_logs() as logs:
+            on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+    assert struct.pack("<d", on) == struct.pack("<d", off)
+    events = [e for e in logs if e["event"] == "rust_stats.kernel_result_refused"]
+    assert len(events) == 1
+    assert events[0]["result"] == "<_HostileInt repr-failed>"
+    assert kernel_disabled("cpcv") is False
+
+
+def test_min_sharpe_foreign_long_type_name_context_bounded() -> None:
+    """A foreign threshold whose TYPE NAME is attacker-sized: the total
+    ``_type_name`` lookup still cannot bloat the log — the foreign-type
+    context rides ``_bounded_text`` (kills the bound-drop mutant at the
+    foreign warn site)."""
+    long_named = type("T" * 300, (float,), {})
+    returns = [0.01, 0.02, -0.005, 0.03, 0.015, -0.01, 0.02, 0.01]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=long_named(0.5))
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv")
+        with capture_logs() as logs:
+            on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=long_named(0.5))
+    assert struct.pack("<d", on) == struct.pack("<d", off)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_foreign_type"]
+    assert events[0]["min_sharpe_type"] == "T" * 200 + "<+100 chars truncated>"
+    assert kernel_disabled("cpcv") is False
+
+
 # ── the FFI call site: burn-in + engagement ─────────────────────────────
 
 
@@ -903,8 +1208,11 @@ def test_burn_in_mismatch_ships_oracle_value_and_latches() -> None:
     events = [e for e in logs if e["event"] == "rust_stats.kernel_autoreverted"]
     assert len(events) == 1
     assert events[0]["reason"] == "self_check_mismatch"
-    assert events[0]["got"] == 1
-    assert events[0]["want"] == 2
+    # Round 4: got/want ride ``_safe_context`` at the binding's call site
+    # (bounded-total strings — a huge-but-in-domain count can never
+    # detonate the render of a raw int context past the digit cap).
+    assert events[0]["got"] == "1"
+    assert events[0]["want"] == "2"
     assert kernel_disabled("cpcv") is True
     assert _call_kernel(oracle_value=2) is None  # latched — Python serves
 
@@ -935,6 +1243,101 @@ def test_kernel_matches_python_oracle_on_real_inputs() -> None:
             count, mean, m2, k, 0.0, n_total=math.comb(s, k), oracle=lambda: -1
         )
         assert got == expected
+
+
+# ── the round-4 STRUCTURAL pin: log-context totality by construction ─────
+
+
+class TestLogContextStructuralPin:
+    """AST law ending the rounds-2→4 whack-a-mole (input conversion → input
+    contexts → output contexts): NO value the seam does not control can
+    reach a log context except through the sanctioned total helpers.
+
+    Parsed from the module SOURCE, so a future edit cannot silently re-open
+    the class: every argument of a ``_LOG.*`` / ``warn_fallback_once`` /
+    ``disable_kernel`` call must be a constant, an allowed routing name, or
+    a call to a sanctioned total helper — a bare ``repr(...)`` /
+    ``str(...)`` / f-string context fails this pin at the exact line — and
+    the ``repr``/``str`` builtins may appear ONLY inside the sanctioned
+    helper bodies (where they are guarded + bounded).
+    """
+
+    _SANCTIONED_HELPERS = frozenset(
+        {"_safe_context", "_inexact_threshold_context", "_bounded_text"}
+    )
+    _REPR_OWNERS = frozenset({"_safe_context", "_inexact_threshold_context"})
+    _ALLOWED_CONTEXT_NAMES = frozenset({"fn", "reason", "attr"})
+    _CHOKEPOINTS = frozenset({"warn_fallback_once", "disable_kernel"})
+
+    @classmethod
+    def _calls_with_owner(cls) -> list[tuple[str | None, ast.Call]]:
+        """Every Call node in the module, tagged with its enclosing
+        top-level function name (``None`` = module level)."""
+        module_file = rust_stats.__file__
+        assert module_file is not None
+        tree = ast.parse(Path(module_file).read_text(encoding="utf-8"))
+        owned: list[tuple[str | None, ast.Call]] = []
+        in_function: set[int] = set()
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        owned.append((node.name, sub))
+                        in_function.add(id(sub))
+        for sub in ast.walk(tree):
+            if isinstance(sub, ast.Call) and id(sub) not in in_function:
+                owned.append((None, sub))
+        return owned
+
+    @staticmethod
+    def _is_context_call(call: ast.Call) -> bool:
+        func = call.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            return func.value.id == "_LOG"
+        return isinstance(func, ast.Name) and func.id in {"warn_fallback_once", "disable_kernel"}
+
+    def test_every_log_context_value_is_total_by_construction(self) -> None:
+        context_calls = [(o, c) for o, c in self._calls_with_owner() if self._is_context_call(c)]
+        assert len(context_calls) >= 12  # anti-vacuity: the module's real call census
+        for owner, call in context_calls:
+            where = f"{owner or '<module>'}:{call.lineno}"
+            for arg in call.args:
+                assert isinstance(arg, ast.Constant | ast.Name), (
+                    f"{where}: positional log/warn args must be constants or plain names"
+                )
+            for kw in call.keywords:
+                if kw.arg is None:  # **context forwarding
+                    assert owner in self._CHOKEPOINTS, (
+                        f"{where}: **context forwarding is allowed only inside the chokepoints"
+                    )
+                    continue
+                value = kw.value
+                ok = (
+                    isinstance(value, ast.Constant)
+                    or (isinstance(value, ast.Name) and value.id in self._ALLOWED_CONTEXT_NAMES)
+                    or (
+                        isinstance(value, ast.Call)
+                        and isinstance(value.func, ast.Name)
+                        and value.func.id in self._SANCTIONED_HELPERS
+                    )
+                )
+                assert ok, (
+                    f"{where}: context key {kw.arg!r} must be a constant, an allowed routing "
+                    "name, or a sanctioned total-helper call — a bare repr()/str()/f-string "
+                    "context re-opens the refuter-round-2..4 detonation class"
+                )
+
+    def test_repr_and_str_builtins_only_inside_sanctioned_helpers(self) -> None:
+        guarded_reprs = 0
+        for owner, call in self._calls_with_owner():
+            func = call.func
+            if isinstance(func, ast.Name) and func.id in {"repr", "str"}:
+                assert owner in self._REPR_OWNERS, (
+                    f"{owner or '<module>'}:{call.lineno}: bare {func.id}() outside the "
+                    "sanctioned total helpers"
+                )
+                guarded_reprs += 1
+        assert guarded_reprs >= 2  # anti-vacuity: both helpers really guard a repr
 
 
 # ── mutation-workflow wiring pin ────────────────────────────────────────

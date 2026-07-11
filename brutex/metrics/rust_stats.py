@@ -54,6 +54,11 @@ rule as :mod:`brutex.engine.rust_metrics`'s — a mismatch never changes
 RESULTS, only which engine computes them; :func:`reset_self_check_for_tests`
 restores a fresh process view. Plain dict writes (no lock): a racing thread
 can at worst run a handful of extra self-checks — never a wrong result.
+A fork-context child inherits this state verbatim — the fail-safe direction
+(an inherited latch keeps the child on the oracle; an inherited exhausted
+burn-in runs the child's kernel unchecked on the same already-validated
+process image); production pools SPAWN, so each child runs its own fresh
+burn-in (refuter round 4, verified empirically on both start methods).
 
 ## Fallback + engagement observability (Golden Rule #10)
 
@@ -108,7 +113,21 @@ fresh view for test isolation.
   descriptor, bypassing a hostile metaclass ``__name__`` property — the
   seam dispatches no operation to the foreign INSTANCE
   (dunder-instrumentation-verified) and reads type metadata only through
-  C-level slots, never metaclass-controlled attribute hooks. Nothing is
+  C-level slots, never metaclass-controlled attribute hooks. Round 4
+  generalized that totality to the KERNEL-OUTPUT side and made it
+  STRUCTURAL: every value the seam does not fully control (kernel results,
+  kernel exceptions, the raw env flag value, the burn-in got/want pair)
+  enters a log context ONLY through the guarded, length-bounded
+  :func:`_safe_context` (a raising or str-subclass-returning ``repr``
+  degrades to a typed placeholder; output clamped at
+  :data:`_CONTEXT_MAX_CHARS` with an honest truncation marker;
+  ``MemoryError`` re-raises BARE — the same global-stop carve-out as the
+  kernel call's narrow catch), kernel results are exact-TYPE validated
+  (``type(result) is int`` — an ``int``-SUBCLASS result from a byzantine
+  wheel is REFUSED before any comparison can dispatch its foreign
+  ``__ge__``/``__ne__``, the output-side twin of the input gate), and the
+  unit suite's AST structural pin forbids any future bare
+  ``repr``/``str``/f-string context from bypassing the helpers. Nothing is
   normalized on the OFF arm
   (it stays byte-identical for every input). SANCTIONED NARROWING (round
   2): ``np.float64``/``np.int64`` thresholds previously engaged the kernel
@@ -183,6 +202,15 @@ _SELF_CHECK_REMAINING: Final[dict[str, int]] = dict(SELF_CHECK_SAMPLES)
 #: kernel is disabled for this process (same documented exception).
 _KERNEL_DISABLED_REASON: Final[dict[str, str]] = {}
 
+#: Hard cap (chars) on any single log-context value the seam emits. The
+#: LENGTH half of the round-4 context-totality law: a context that cannot
+#: raise can still be enormous (a reprable ~4000-digit int under the default
+#: digit cap, an arbitrarily long hostile type name) — every context string
+#: rides :func:`_bounded_text`, so one refusal can never bloat the log
+#: stream. Chosen well above every healthy context (float reprs, short
+#: kernel error strings) and well below log-bloat territory.
+_CONTEXT_MAX_CHARS: Final[int] = 200
+
 
 def stats_rust_enabled() -> bool:
     """Resolve the Rust-statistics flag over :data:`STATS_RUST_DEFAULT`.
@@ -247,8 +275,11 @@ def stats_rust_enabled() -> bool:
         return verdict
     # An unrecognised NON-EMPTY value fails SAFE to OFF, loudly (the
     # rust_metrics precedent) — a typo'd opt-in must never silently arm
-    # nor a typo'd kill switch silently follow a future ON default.
-    warn_fallback_once(_FLAG_FN, "flag_unrecognised", value=raw)
+    # nor a typo'd kill switch silently follow a future ON default. The
+    # offending value is an ENV value the seam does not control, so it
+    # rides the total, bounded ``_safe_context`` (repr-quoted — control
+    # characters escaped — and length-clamped; round 4).
+    warn_fallback_once(_FLAG_FN, "flag_unrecognised", value=_safe_context(raw))
     return False
 
 
@@ -266,7 +297,10 @@ def disable_kernel(fn: str, reason: str, **context: object) -> None:
     signal, never throttled below the operator's view); repeat calls are
     no-ops. The latch is PER FUNCTION: a poisoned ``cpcv`` kernel never
     disables a sibling function's kernel. Even the mismatching call ships
-    the ORACLE value (the binding's contract).
+    the ORACLE value (the binding's contract). Context values follow the
+    same pre-stringified-total contract as :func:`warn_fallback_once` —
+    any value the seam does not control goes through :func:`_safe_context`
+    at the call site (enforced in-module by the unit suite's AST pin).
     """
     if fn not in _KERNEL_DISABLED_REASON:
         _KERNEL_DISABLED_REASON[fn] = reason
@@ -281,6 +315,14 @@ def warn_fallback_once(fn: str, reason: str, **context: object) -> None:
     kernel) would flood the logs; the first occurrence is loud (WARNING),
     repeats fall back silently. The fallback itself is bit-exact regardless
     (the Python oracle serves the call).
+
+    The memo keys on ``(fn, reason)`` ONLY — deliberate flood-safety
+    (refuter-round-4 INFO, documented): a later occurrence carrying a
+    DIFFERENT context value (e.g. a different unrecognised flag string) is
+    silent; only the first occurrence's value is ever logged. Context
+    values must be pre-stringified TOTAL text — any value the seam does not
+    control goes through :func:`_safe_context` at the call site (enforced
+    in-module by the unit suite's AST structural pin).
     """
     key = f"{fn}:{reason}"
     if key in _OBSERVABILITY_MEMO:
@@ -361,12 +403,21 @@ def _resolve_kernel(fn: str, attr: str) -> Callable[..., object] | None:
 def _valid_pass_count(result: object, n_total: int) -> TypeGuard[int]:
     """Cheap domain validation of a kernel pass-count — the refuse-poison gate.
 
-    ``O(1)``: exactly ``int`` (``bool`` excluded — ``True`` is an ``int``
-    subtype a buggy wrapper could leak) within ``[0, n_total]``. A result
-    inside this domain that is nonetheless WRONG is the burn-in compare's +
-    the parity/golden suites' layer to catch.
+    ``O(1)``: EXACTLY ``int`` — ``type(result) is int``, the OUTPUT-side
+    twin of the ``min_sharpe`` exact-TYPE gate (round-4 completeness
+    sweep; SANCTIONED NARROWING — the previous ``isinstance`` accepted an
+    ``int`` SUBCLASS, whose range check ``0 <= result`` dispatched the
+    subclass's own ``__ge__`` FIRST, so a byzantine wheel returning a
+    hostile-comparison subclass raised ON-only, and an adopted benign
+    subclass would have dispatched its foreign ``__ne__``/``__truediv__``
+    downstream; the real Rust kernel returns an exact ``int``, and a
+    refused subclass is served by the oracle — ON≡OFF either way).
+    ``bool`` is excluded for free (``type(True)`` is ``bool``, not
+    ``int``); the ``[0, n_total]`` range check on the proven-exact int is
+    C-level total. A result inside this domain that is nonetheless WRONG
+    is the burn-in compare's + the parity/golden suites' layer to catch.
     """
-    return isinstance(result, int) and not isinstance(result, bool) and 0 <= result <= n_total
+    return type(result) is int and 0 <= result <= n_total
 
 
 def _type_name(tp: type) -> str:
@@ -386,6 +437,62 @@ def _type_name(tp: type) -> str:
     return name
 
 
+def _bounded_text(text: str) -> str:
+    """Clamp *text* to :data:`_CONTEXT_MAX_CHARS` with an honest marker.
+
+    The LENGTH half of the round-4 context-totality law: a context value
+    that cannot raise can still be enormous (a reprable ~4000-digit int
+    under the default digit cap, a hostile million-char type name) — every
+    context string the seam emits rides this clamp, so one refusal can
+    never bloat the log stream. The marker names the exact omitted char
+    count (never a silent cut). Callers pass an EXACT ``str`` (the
+    :func:`_safe_context` gate refuses str subclasses before this runs).
+    """
+    if len(text) <= _CONTEXT_MAX_CHARS:
+        return text
+    return f"{text[:_CONTEXT_MAX_CHARS]}<+{len(text) - _CONTEXT_MAX_CHARS} chars truncated>"
+
+
+def _safe_context(value: object) -> str:
+    """TOTAL, BOUNDED ``repr`` for a log-context value the seam does not own.
+
+    Round-4 refuter finding (fix round 5): the kernel-OUTPUT-side warn
+    contexts (``kernel_error``'s ``error=repr(exc)``,
+    ``kernel_result_refused``'s ``result=repr(result)``) bare-``repr``'d a
+    KERNEL-controlled object, so a byzantine wheel returning a >4300-digit
+    int (``int.__repr__`` raises ValueError past the digit cap), raising
+    ``ValueError(10**5000)``, or raising an exception subclass with a
+    hostile ``__repr__`` made the seam's OWN refusal logging raise ON-only
+    where OFF returns a rate — the exact defect class round 3 closed on
+    the ``min_sharpe`` INPUT contexts, left un-generalized on the output
+    side. This helper is the ONE total mechanism every not-seam-controlled
+    context value now rides (kernel results, kernel exceptions, the raw
+    env flag value, the burn-in got/want pair):
+
+    * a ``repr`` that raises (ANY ``Exception``) degrades to a typed
+      placeholder built from C-level type metadata only (:func:`_type_name`
+      — no foreign dispatch, no second failure mode);
+    * a ``repr`` returning a ``str`` SUBCLASS is refused into the same
+      placeholder (a hostile subclass could smuggle lying
+      ``__len__``/slicing dispatch into the clamp or the renderer);
+    * the output is length-clamped via :func:`_bounded_text`;
+    * ``MemoryError`` re-raises BARE — the documented global-stop
+      carve-out, the same law as the kernel call's narrow catch (OOM is
+      never swallowed into a log placeholder; the one deliberate ON-only
+      raise this helper keeps, inside the module's disclosed exception
+      envelope).
+    """
+    try:
+        text: object = repr(value)
+    except MemoryError:
+        raise
+    except Exception:  # pylint: disable=broad-exception-caught — totality IS the contract here
+        text = None
+    if type(text) is str:
+        return _bounded_text(text)
+    return _bounded_text(f"<{_type_name(type(value))} repr-failed>")
+
+
 def _inexact_threshold_context(min_sharpe: float) -> str:
     """Digit-limit-safe ``repr`` of an exact-type refusal threshold.
 
@@ -399,10 +506,15 @@ def _inexact_threshold_context(min_sharpe: float) -> str:
     ``bit_length()`` (O(1), conversion-free). Only exact-type
     ``float``/``int``/``bool`` values reach this helper (the gate's
     earlier arms) — never a foreign object's ``__repr__``; float repr is
-    total, so the placeholder arm is reachable only for huge ints.
+    total, so the placeholder arm is reachable only for huge ints. The
+    reprable arm rides the round-4 :func:`_bounded_text` length clamp (a
+    type-legal ~4000-digit int under the default digit cap reprs FINE at
+    ~4000 chars — bounded, never a log-bloating context); this helper is
+    the exact-type-specialized sibling of :func:`_safe_context`, kept
+    separate for its ``bit_length`` forensics.
     """
     try:
-        return repr(min_sharpe)
+        return _bounded_text(repr(min_sharpe))
     except ValueError:
         bits = int(min_sharpe).bit_length()
         return f"<int past the int->str digit limit; bit_length={bits}>"
@@ -474,8 +586,12 @@ def cpcv_pass_count_via_kernel(
     own structural arms; ``TypeError`` / ``OverflowError`` — PyO3
     argument-conversion failures); any OTHER exception type PROPAGATES and
     ``MemoryError`` re-raises BARE (OOM is a GLOBAL stop — never swallowed
-    into a fallback). During burn-in a compare MISMATCH ships the ORACLE
-    value and latches this function's kernel (module docstring).
+    into a fallback). Every fallback/refusal CONTEXT the kernel can
+    influence (the caught exception, the refused result + ``n_total``, the
+    burn-in got/want pair) rides the total, bounded :func:`_safe_context`,
+    so a hostile ``repr`` can never out-raise the refusal that exists to
+    serve the call (round 4). During burn-in a compare MISMATCH ships the
+    ORACLE value and latches this function's kernel (module docstring).
 
     FFI cost (disclosed): three ``O(n_groups)`` list conversions per call —
     48 scalars at the production S=16; negligible next to the
@@ -569,8 +685,12 @@ def cpcv_pass_count_via_kernel(
         # scoped claim: the seam dispatches NO operation to the foreign
         # INSTANCE (dunder-instrumentation-verified) and reads type
         # metadata only through C-level slots, never metaclass-controlled
-        # attribute hooks.
-        warn_fallback_once(fn, "min_sharpe_foreign_type", min_sharpe_type=_type_name(ms_type))
+        # attribute hooks. The name is additionally length-clamped
+        # (round 4): a type NAME is attacker-sized (``type("T" * 10**6,
+        # (float,), {})``), so even the total lookup rides the bound.
+        warn_fallback_once(
+            fn, "min_sharpe_foreign_type", min_sharpe_type=_bounded_text(_type_name(ms_type))
+        )
         return None
     kernel = _resolve_kernel(fn, "stats_cpcv_pass_count")
     if kernel is None:
@@ -586,28 +706,46 @@ def cpcv_pass_count_via_kernel(
     except (ValueError, TypeError, OverflowError) as exc:
         # The kernel's structural ValueError arms + PyO3 conversion errors
         # degrade to the bit-exact oracle; any OTHER exception type (incl.
-        # MemoryError — a GLOBAL stop) propagates.
-        warn_fallback_once(fn, "kernel_error", error=repr(exc))
+        # MemoryError — a GLOBAL stop) propagates. The caught exception is
+        # KERNEL-controlled — its context rides the guarded, bounded
+        # ``_safe_context`` (round 4: a byzantine ``ValueError(10**5000)``
+        # or a hostile exception ``__repr__`` previously detonated the
+        # seam's OWN fallback logging ON-only, where OFF returns a rate).
+        warn_fallback_once(fn, "kernel_error", error=_safe_context(exc))
         return None
     if not _valid_pass_count(result, n_total):
         # A domain-invalid result is a kernel BUG: refuse it LOUDLY (never
-        # silently adopted) and serve the call from the Python oracle.
+        # silently adopted) and serve the call from the Python oracle. The
+        # refused object is KERNEL-controlled and ``n_total`` is
+        # caller-sized (``math.comb`` can exceed the int→str digit cap at
+        # adversarial shapes) — both contexts ride ``_safe_context``
+        # (round 4: a >4300-digit refused result previously detonated the
+        # refusal's own ``repr`` ON-only).
         key = f"{fn}:kernel_result_refused"
         if key not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add(key)
             _LOG.error(
                 "rust_stats.kernel_result_refused",
                 fn=fn,
-                result=repr(result),
-                n_total=n_total,
+                result=_safe_context(result),
+                n_total=_safe_context(n_total),
             )
         return None
     if _self_check_pending(fn):
         expected = oracle()
         if result != expected:
             # SHIP THE ORACLE VALUE — correctness first — and latch this
-            # function's kernel for the rest of the process.
-            disable_kernel(fn, "self_check_mismatch", got=result, want=expected)
+            # function's kernel for the rest of the process. got/want are
+            # kernel-/oracle-produced counts — bounded totals via
+            # ``_safe_context`` (round 4: a huge-but-in-domain count under
+            # an adversarial ``n_total`` would detonate structlog's own
+            # render of a raw int context past the digit cap).
+            disable_kernel(
+                fn,
+                "self_check_mismatch",
+                got=_safe_context(result),
+                want=_safe_context(expected),
+            )
             return expected
         _consume_self_check_sample(fn)
     _log_engaged_once(fn)
