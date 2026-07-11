@@ -2025,8 +2025,8 @@ hostile-review pass._
   Rust==Python differential properties; the DEFAULT-OFF == TODAY bomb-kernel
   byte-identity pin; a dedicated ci.yml dual-arm step (`BRUTEX_EXEC_RUST=1`
   over the 19-file covering set). GATES: `exec_rust.py` 100% line+branch
-  standalone (new ci gate) + local mutmut ZERO-survivor (84/84 at the final
-  run; 94/94 re-proven post-review-round-1); all four
+  standalone (new ci gate) + local mutmut ZERO-survivor — 145/145 KILLED
+  (final, post-round-2 hardening; history 84/84 → 94/94); all four
   dispatch modules' per-module gates measure 100%; mutation.yml gains the
   exec_rust + calculator mutmut pairs (both locally de-survivored;
   futures_costs deferred to DEC-EXEC-COSTS-MUTMUT-001 — early survivors, never
@@ -2068,7 +2068,8 @@ hostile-review pass._
   the pre-existing options SHORT gross-sign code-vs-spec contradiction
   (buy−sell vs §4/§13 sell−buy; production-unreachable — DEC-EXEC-008
   BUY-only) REGISTERED as CALCULATOR_SPEC §16 item 20, never silently
-  decided; ci.yml 19f1 comment re-measured 198/68; the OFF-arm docstring
+  decided; ci.yml 19f1 comment re-measured — 200/70 final (198/68 at the
+  round-2 head); the OFF-arm docstring
   discloses the one-time first-dispatch fno_math import. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; trading-core FROZEN
   untouched; no scope/vocab/rate/lake-schema change).
