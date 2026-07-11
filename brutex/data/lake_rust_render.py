@@ -70,8 +70,9 @@ silently. (The same wheel-boundary reasoning is why
 1. **Import guard** — the crate is resolved lazily on first engaged render;
    an absent/broken ``brutex_lake`` install logs ONE
    ``lake_rust_render.crate_unavailable`` WARN and LATCHES the seam OFF for
-   the process. The resolved module's API surface is VERIFIED (all three
-   callables present — a name-collision / hand-broken ``brutex_lake`` that
+   the process. The resolved module's API surface is VERIFIED (all FOUR
+   callables present, all-or-nothing across both profiles — a
+   name-collision / hand-broken / stale-PR-1 ``brutex_lake`` that
    imports but lacks the API latches the SAME ``crate_unavailable``, never
    an ``AttributeError`` into the pull spine), and a metadata pyfunction
    that RAISES latches ``crate_metadata_error`` (a foreign/stale install
@@ -703,9 +704,7 @@ def render_parquet_bytes(
         # non-bytes return is a crate BUG — never persisted, served loudly
         # from the oracle. Structurally unreachable through the real crate
         # (its FFI constructs PyBytes); guards a stale/foreign install.
-        _warn_once(
-            "render_result_refused", profile=profile, result_type=type(rust_bytes).__name__
-        )
+        _warn_once("render_result_refused", profile=profile, result_type=type(rust_bytes).__name__)
         return python_render()
     engaged_key = _engaged_memo_key(profile)
     if engaged_key not in _OBSERVABILITY_MEMO:

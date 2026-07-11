@@ -365,3 +365,47 @@ allocation failure aborts/panics on BOTH the wheel and the crate — the
 seam neither narrows nor widens that envelope. FLIP PRECONDITION: byte
 identity is enforced only by the NON-REQUIRED parity lane — the default-ON
 flip DEC must make it required or cite a fresh green run.
+
+## 10. PR-2 shipped surface (2026-07-11 — appended when PR-2 landed on its branch, same DEC)
+
+The §3 PR-2 gate set is IMPLEMENTED on the stacked PR-2 branch (full record:
+the PR-2 draft segment of MIGRATION.md — steward-assigned row): the option
+writer's ALL-DEFAULTS render seam — the ENTIRE `option_parquet_writer.py`
+diff confined to `_atomic_write_parquet`'s body + one new module-level
+oracle helper `_defaults_python_render` (flag-OFF is the LITERAL legacy
+`atomic_write_via(dest, df.write_parquet)`, mechanism-verbatim,
+never-routes spy-pinned; `lake_heal.py` + `atomic_io.py` ship ZERO diff) —
+routed through the SAME `lake_rust_render` facade under a NEW render-PROFILE
+registry (`PROFILE_BARS` default = PR-1 back-compat;
+`PROFILE_OPTIONS_DEFAULTS` = the zero-kwarg `df.write_parquet(path)` byte
+shape: statistics min/max/null_count ON + distinct OFF, `Zstd(None)`,
+`row_group_size=None` → the streaming sink's 122,880-row split). ONE flag,
+ONE shared latch (fail-closed across BOTH profiles), per-PROFILE 16-render
+burn-in budgets, profile-prefixed shape tokens with a 64-entry seen-set cap
+(the honest correction of PR-1's "two writer shapes" bound — the heal path
+re-renders arbitrary stored schemas; saturation degrades to compare-always),
+`_CRATE_API` grown to 4 all-or-nothing (a stale PR-1 crate latches BOTH
+surfaces — atomic pin), `ipc_handoff_bytes` hoisted COMMON. Crate side: ONE
+shared parameterized render core (`render_parquet_with_options_impl` — the
+pre-refactor bars tests run UNMODIFIED as the frozen-behavior gate) + the
+thin `render_parquet_defaults_from_ipc` pyfunction over the factored FFI
+shell, with the defaults-mapping / 122,880-split / `dyn_sink_equals_
+file_sink_defaults` (the P2 standing pin — judge-probed PASS 7/7 pre-design)
+cargo pins. Gates EXECUTED: the 12-case options corpus (the probe's 7 +
+all-null-nullables / single-side / exact 122,880 + 122,881 boundaries /
+long-string truncation sentinel / NaN+inf heal shape; real-writer
+provenance) — 12/12 sha256 + raw-bytes MATCH through the REAL seam
+steady-state, with the per-profile vacuous-green guard + the three
+whole-path ON/OFF layers (write · heal_partition · merge_partition_frame ·
+the end-to-end `heal_findings` batch twin) + statistics diagnostic pins;
+the P1 standing pin (BytesIO ≡ path target — judge-probed 7/7, now pinned
+crate-free in main CI); rails regressions R1–R14. EMPIRICAL CORRECTION
+recorded: the probe report's "`binary_statistics_truncate_length=None` =
+untruncated" reading is WRONG at the stats layer — the pinned rev resolves
+it to a 64-byte truncate with max-increment (wheel and crate share it —
+parity unaffected; the o11 sentinel pins the OBSERVED policy as data).
+Deviations from §3's sketch: none new (the IPC handoff + burn-in-as-probe
+deviations carry over from PR-1). Locks + error mapping still did not move
+(PR-3/PR-4 territory); PR-3..PR-4 and the waves remain future work under
+the same apparatus. Payoff ≈ 0 banner holds — the options render is
+heal-/option-pull-driven O(month-file) glue; no speed claim.

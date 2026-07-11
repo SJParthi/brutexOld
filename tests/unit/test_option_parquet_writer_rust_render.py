@@ -32,6 +32,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import polars as pl
 import pytest
@@ -252,7 +253,10 @@ class TestP1BytesIoEqualsPathTarget:
         [
             pytest.param([_bar(minute=i) for i in range(8)], id="ce-only"),
             pytest.param(
-                [_bar(side=("CE" if i % 2 else "PE"), minute=i, oi=(None if i % 3 else 10 + i)) for i in range(20)],
+                [
+                    _bar(side=("CE" if i % 2 else "PE"), minute=i, oi=(None if i % 3 else 10 + i))
+                    for i in range(20)
+                ],
                 id="mixed-sparse-nulls",
             ),
             pytest.param([_bar(minute=i, oi=None) for i in range(6)], id="all-null-nullables"),
@@ -318,10 +322,8 @@ class TestFlagOnRouting:
 
         def _capture(**kwargs: object) -> bytes:
             captured.update(kwargs)
-            bio = io.BytesIO()
-            render = kwargs["python_render"]
-            assert callable(render)
-            return bytes(render())
+            render = cast("Callable[[], bytes]", kwargs["python_render"])
+            return render()
 
         monkeypatch.setattr(lrr, "render_parquet_bytes", _capture)
         monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")

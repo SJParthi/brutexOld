@@ -15,20 +15,32 @@
 #      constants — plus the IPC→parquet round-trip, row-group boundary,
 #      error paths).
 #   2. maturin wheel build + install beside the repo's Python deps.
-#   3. The REAL-crate byte-parity corpus
-#      (tests/golden/test_lake_rust_render_parity.py — the spike's 5 cases
-#      + the review-round all-null-overlay case, regenerated through the
-#      REAL ParquetWriter._render_bytes, Rust vs Python sha256 + raw bytes
-#      equal, plus the whole-write-path ON/OFF parity through
-#      ParquetWriter.write) and the crate-free facade unit suites.
+#   3. The REAL-crate byte-parity corpora — BOTH profiles (PR-2):
+#      tests/golden/test_lake_rust_render_parity.py (bars — the spike's 5
+#      cases + the review-round all-null-overlay case, through the REAL
+#      ParquetWriter._render_bytes) AND
+#      tests/golden/test_option_lake_rust_render_parity.py (options
+#      defaults — the PR-2 probe's 7 cases + 5 statistics-surface cases,
+#      through the REAL OptionParquetWriter write/heal entries), Rust vs
+#      Python sha256 + raw bytes equal, plus the whole-path ON/OFF parity
+#      twins — and the crate-free facade/seam unit suites.
+#   4. The flag-ON heal-suite twin (PR-2 — the non-perturbation leg): the
+#      FULL option-writer + lake-heal suites re-run VERBATIM under
+#      BRUTEX_LAKE_RUST_RENDER=1 with the real crate installed. Honesty:
+#      that step proves the 18-round DEC-LAKE-HEAL-OPTIONS-FOREIGN-001
+#      rails are UNPERTURBED with the seam armed (a fully-degrading crate
+#      is equivalent to flag-OFF — itself a pass for that property);
+#      crate-genuinely-rendered teeth live exclusively in the corpora's
+#      per-profile vacuous-green guards.
 #
 # NOT a required gate (coordinator ruling): it gates the FUTURE default-ON
 # flip, not every PR — a red run here blocks re-engaging the flag, never an
 # unrelated merge. HONESTY (review-round fold): byte-identity is therefore
 # enforced ONLY by this non-required lane (+ local runs) — the future
 # default-ON flip DEC must either make this lane required or cite a fresh
-# green run of it as a stated precondition. Path-triggered on the crate +
-# the seam + the schema module + the suites + itself, plus
+# green run of it (BOTH corpora — bars AND options-defaults — are flip
+# preconditions) as a stated precondition. Path-triggered on the crate +
+# the seams + the schema module + the suites + itself, plus
 # workflow_dispatch for the lockstep ritual's manual re-run
 # (docs/runbooks/lake-rust-render-lockstep.md).
 #
@@ -49,23 +61,29 @@ on:
     paths:
       - "rust/brutex-lake/**"
       - "brutex/data/parquet_writer.py"
+      - "brutex/data/option_parquet_writer.py"
       - "brutex/data/lake_rust_render.py"
-      # models.py defines the CandleBar/FnoGreeksBar schema that dictates
-      # the rendered frame's byte surface (review-round fold).
+      # models.py defines the CandleBar/FnoGreeksBar/OptionBar schemas that
+      # dictate the rendered frames' byte surfaces (review-round fold).
       - "brutex/data/models.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
+      - "tests/unit/test_option_parquet_writer_rust_render.py"
       - "tests/golden/test_lake_rust_render_parity.py"
+      - "tests/golden/test_option_lake_rust_render_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   pull_request:
     paths:
       - "rust/brutex-lake/**"
       - "brutex/data/parquet_writer.py"
+      - "brutex/data/option_parquet_writer.py"
       - "brutex/data/lake_rust_render.py"
       - "brutex/data/models.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
+      - "tests/unit/test_option_parquet_writer_rust_render.py"
       - "tests/golden/test_lake_rust_render_parity.py"
+      - "tests/golden/test_option_lake_rust_render_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   workflow_dispatch: {}
 
@@ -92,7 +110,7 @@ jobs:
   lake-rust-parity:
     name: brutex-lake build + byte-parity corpus
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: .
@@ -193,12 +211,49 @@ jobs:
                 f"(libzstd {brutex_lake.linked_zstd_version()})")
           EOF
 
-      - name: Byte-parity corpus + facade suites
+      - name: Morsel-env hygiene (assert-unset — R14)
+        # POLARS_IDEAL_SINK_MORSEL_SIZE_ROWS/_BYTES move the defaults
+        # profile's row-group split on BOTH engines identically (parity
+        # holds per-identical-env), so a runner image / future workflow
+        # edit exporting one would let the options corpus "pass" on a
+        # NON-production split. Assert-unset, never silently-unset — the
+        # in-suite RG-split pins are the belt inside the tests themselves.
+        run: |
+          fail=0
+          for v in POLARS_IDEAL_SINK_MORSEL_SIZE_ROWS POLARS_IDEAL_SINK_MORSEL_SIZE_BYTES; do
+            if [ -n "$(printenv "$v" || true)" ]; then
+              echo "::error title=morsel env leak::$v is set in the runner env — the defaults corpus would prove parity on a non-production row-group split" >&2
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: Byte-parity corpora (BOTH profiles) + facade/seam suites
         # With the wheel force-aligned above, the corpus module-level
-        # version-guard skip cannot fire here — -rs still surfaces any skip
+        # version-guard skips cannot fire here — -rs still surfaces any skip
         # reason in the log as belt-and-suspenders.
         run: |
           pytest -rs -q \
             tests/golden/test_lake_rust_render_parity.py \
+            tests/golden/test_option_lake_rust_render_parity.py \
             tests/unit/test_lake_rust_render.py \
-            tests/unit/test_parquet_writer_rust_render.py
+            tests/unit/test_parquet_writer_rust_render.py \
+            tests/unit/test_option_parquet_writer_rust_render.py
+
+      - name: Heal + option-writer suites with the Rust seam ENGAGED (flag-ON twin)
+        # The PR-2 non-perturbation leg: the 18-round
+        # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 suites run VERBATIM (zero
+        # test-line edits) with the seam armed + the REAL crate installed.
+        # Any test failing ONLY under the flag is a perturbation finding —
+        # fix-or-refuse, never a test edit. Honesty: this proves
+        # NON-PERTURBATION (a fully-degrading crate ≡ flag-OFF is itself a
+        # pass for that property); crate-genuinely-rendered teeth live in
+        # the corpora's per-profile vacuous-green guards, exclusively.
+        env:
+          BRUTEX_LAKE_RUST_RENDER: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_option_parquet_writer.py \
+            tests/unit/test_option_parquet_writer_stats_manifest.py \
+            tests/unit/test_lake_heal.py \
+            tests/unit/test_lake_invariants.py

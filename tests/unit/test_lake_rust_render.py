@@ -1135,7 +1135,7 @@ class TestRenderProfiles:
             schema_token="tok",
             profile=lrr.PROFILE_OPTIONS_DEFAULTS,
         )
-        assert lrr._BURN_IN_SHAPES_SEEN == {f"{lrr.PROFILE_OPTIONS_DEFAULTS}|tok"}
+        assert {f"{lrr.PROFILE_OPTIONS_DEFAULTS}|tok"} == lrr._BURN_IN_SHAPES_SEEN
 
 
 # ---------------------------------------------------------------------------

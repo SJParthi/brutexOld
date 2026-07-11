@@ -28,8 +28,10 @@ Statistics-byte DIAGNOSTIC pins ((a)–(e) — the triage layer for bump-time
 trips; byte equality stays the ONE gate): stats-present negative control ·
 footer stats-shape (min/max + EXACT null_count where values exist, all-null
 columns carry null_count==rows with NO min/max, distinct_count ABSENT) ·
-RG-split ([122880] / [122880, 1] / [122880, 122880, 54240]) · untruncated
-long-string sentinel · NaN-exclusion / inf-as-max.
+RG-split ([122880] / [122880, 1] / [122880, 122880, 54240]) · the
+long-string truncation sentinel (OBSERVED pinned-rev policy: 64-byte
+truncate + max-increment — the probe's "None = untruncated" reading is
+empirically corrected in pin (d)) · the NaN-omits-min/max policy.
 
 Deliberately ABSENT cases, with reasons: the EMPTY frame (structurally
 unreachable — ``write()`` returns 0 on empty bars, the healer's kept==0 arm
@@ -67,9 +69,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:  # pragma: no cover — typing only (the runtime `pl` below is
+    # an importorskip-resolved VARIABLE, not usable in type expressions)
+    import polars
 
 brutex_lake = pytest.importorskip(
     "brutex_lake",
@@ -129,8 +135,10 @@ _COORD = OptionSeriesCoordinate(
 
 #: o11's coordinate: a ≥256-char Utf8 column value (LEGAL — `_safe_segment`
 #: constrains the partition KEY, not this column) so the corpus BYTES are
-#: sensitive to `binary_statistics_truncate_length` (None = untruncated at
-#: the pinned rev — the most plausible upstream drift, probe caveat 2).
+#: sensitive to the binary-statistics truncation default (OBSERVED at the
+#: pinned rev: 64-byte truncate + max-increment even under the write
+#: option's `binary_statistics_truncate_length=None` — pin (d); the most
+#: plausible upstream drift, probe caveat 2).
 _LONG_SYMBOL = "NIFTY-TRUNCATION-SENTINEL-" + "X" * 240
 _LONG_COORD = OptionSeriesCoordinate(
     exch_id="NSE",
@@ -143,7 +151,9 @@ _LONG_COORD = OptionSeriesCoordinate(
 )
 
 
-def _mk_bar(i: int, side: str, *, sparse_nulls: bool, second_spacing: int | None = None) -> OptionBar:
+def _mk_bar(
+    i: int, side: str, *, sparse_nulls: bool, second_spacing: int | None = None
+) -> OptionBar:
     """The probe generator's bar shape (seeded — deterministic regeneration)."""
     rng = random.Random(i * 7919 + (0 if side == "CE" else 1))
     base = Decimal(rng.randrange(1_000, 250_000)) / 100
@@ -211,7 +221,7 @@ class _Case:
     """One corpus case: the seam-captured frame + the flag-OFF on-disk bytes."""
 
     name: str
-    frame: pl.DataFrame
+    frame: polars.DataFrame
     off_bytes: bytes
     note: str
     expected_rgs: list[int] | None = None
@@ -265,10 +275,10 @@ def _build_corpus() -> dict[str, _Case]:
     if _CORPUS_CACHE:
         return _CORPUS_CACHE
     mp = pytest.MonkeyPatch()
-    captured: list[tuple[Path, pl.DataFrame]] = []
+    captured: list[tuple[Path, polars.DataFrame]] = []
     real_awp = opw._atomic_write_parquet
 
-    def _capturing(dest: Path, df: pl.DataFrame) -> None:
+    def _capturing(dest: Path, df: polars.DataFrame) -> None:
         captured.append((dest, df))
         real_awp(dest, df)
 
@@ -412,9 +422,7 @@ def _build_corpus() -> dict[str, _Case]:
         # ── o12: NaN/+inf iv heal (hand-planted, healed through the REAL entry) ──
         lake12 = _mkdtemp("pr2-o12-")
         writer12 = OptionParquetWriter(lake_root=lake12)
-        writer12.write(
-            partition_key=_PK, coordinate=_COORD, bars=_bars_mix(40, sparse_nulls=False)
-        )
+        writer12.write(partition_key=_PK, coordinate=_COORD, bars=_bars_mix(40, sparse_nulls=False))
         dest12 = _dest(lake12)
         df12 = pl.read_parquet(dest12, glob=False)
         planted = df12.with_columns(
@@ -479,7 +487,7 @@ def _assert_options_crate_rendered() -> None:
     assert not fallbacks, f"oracle fallback fired mid-corpus: {sorted(fallbacks)}"
 
 
-def _rust_bytes_via_seam(frame: pl.DataFrame, monkeypatch: pytest.MonkeyPatch) -> bytes:
+def _rust_bytes_via_seam(frame: polars.DataFrame, monkeypatch: pytest.MonkeyPatch) -> bytes:
     """Render *frame* through the PRODUCTION seam, flag-ON steady-state.
 
     ``remaining=0`` means the on-disk bytes are the CRATE's output with no
@@ -549,9 +557,7 @@ class TestSeamByteParity:
 
 
 class TestWholePathWriteParity:
-    def test_write_on_off_byte_and_manifest_parity(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_write_on_off_byte_and_manifest_parity(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from brutex.data import lake_stats_manifest as lsm
 
         first = _bars_mix(40)
@@ -591,7 +597,9 @@ class TestWholePathWriteParity:
         _assert_options_crate_rendered()
 
         assert on_added == off_added
-        off_files = sorted(p.relative_to(off_lake) for p in (off_lake / "options").rglob("*.parquet"))
+        off_files = sorted(
+            p.relative_to(off_lake) for p in (off_lake / "options").rglob("*.parquet")
+        )
         on_files = sorted(p.relative_to(on_lake) for p in (on_lake / "options").rglob("*.parquet"))
         assert off_files == on_files and off_files
         for rel in off_files:
@@ -621,9 +629,20 @@ class TestWholePathWriteParity:
 
 
 def _tree_state(root: Path) -> dict[str, str]:
+    """Recursive relpath → sha256 (the heal-suite idiom), MINUS ``.locks/``.
+
+    The flock sidecar names are ``sha256(<absolute dest>)`` — path-derived,
+    so two twin lakes at different tmp roots legitimately carry different
+    (empty) lock filenames; comparing them would fail on apparatus, not
+    data. Everything else — options tree, quarantine before-images, the
+    heal sentinel — is compared byte-for-byte.
+    """
     out: dict[str, str] = {}
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        out[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith(".locks/"):
+            continue
+        out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
     return out
 
 
@@ -769,9 +788,7 @@ def _footer(data: bytes) -> Any:
 
 
 class TestStatisticsPins:
-    @pytest.mark.parametrize(
-        "case_name", ["o4_heal_nullside_keyed_removal_50", "o9_multi_rg_300k"]
-    )
+    @pytest.mark.parametrize("case_name", ["o4_heal_nullside_keyed_removal_50", "o9_multi_rg_300k"])
     def test_a_stats_present_negative_control(
         self, case_name: str, corpus: dict[str, _Case]
     ) -> None:
@@ -825,28 +842,49 @@ class TestStatisticsPins:
             rgs = [meta.row_group(i).num_rows for i in range(meta.num_row_groups)]
             assert rgs == case.expected_rgs, f"{case_name}: RG split {rgs}"
 
-    def test_d_untruncated_long_string_sentinel(self, corpus: dict[str, _Case]) -> None:
-        """(d) the footer min/max byte-equal the FULL ≥256-char planted string
-        — the day a bump ships a non-None truncation default, the corpus
+    def test_d_long_string_truncation_sentinel(self, corpus: dict[str, _Case]) -> None:
+        """(d) the binary-stats truncation SENTINEL — pins the OBSERVED
+        pinned-rev policy as data.
+
+        EMPIRICAL CORRECTION of the probe-report reading (verified
+        2026-07-11 on the installed 1.42.1 wheel): the write option
+        ``binary_statistics_truncate_length = None`` does NOT mean
+        untruncated — polars-parquet resolves it to an INTERNAL default,
+        observed as truncate-at-64-bytes with the max's last byte
+        INCREMENTED (a valid exclusive-style upper bound; ≤64-byte strings
+        ride verbatim). The parity gate is unaffected (wheel and crate share
+        the policy — the o11 BYTES matched), and the sentinel keeps its
+        purpose: the day a bump moves the truncation default, the corpus
         byte-FAILS and THIS pin names why in the same run."""
         case = corpus["o11_long_string_stats_sentinel_40"]
         meta = _footer(case.off_bytes)
         col_idx = case.frame.columns.index("underlying_symbol")
         stats = meta.row_group(0).column(col_idx).statistics
         assert stats is not None and stats.has_min_max
-        assert stats.min == stats.max == _LONG_SYMBOL  # UNTRUNCATED, full 266 chars
         assert len(_LONG_SYMBOL) >= 256
+        assert stats.min == _LONG_SYMBOL[:64]  # truncated 64-byte prefix, verbatim
+        # max = the truncated prefix with its LAST byte incremented (still a
+        # correct upper bound for the column).
+        assert stats.max == _LONG_SYMBOL[:63] + chr(ord(_LONG_SYMBOL[63]) + 1)
+        assert len(stats.min) == len(stats.max) == 64
 
-    def test_e_nan_excluded_inf_is_max(self, corpus: dict[str, _Case]) -> None:
-        """(e) Float64 non-finite stats policy: NaN never appears in min/max;
-        the planted +inf reads back as the column max."""
+    def test_e_nan_carrying_column_omits_min_max(self, corpus: dict[str, _Case]) -> None:
+        """(e) Float64 non-finite stats policy — pins the OBSERVED pinned-rev
+        behavior as data: a NaN-CARRYING column omits min/max ENTIRELY
+        (stronger than per-value NaN exclusion; a NaN can never appear in a
+        stats page), while null_count stays exact. (An inf-only column keeps
+        min/max with inf as max — probed 2026-07-11 — but o12's NaN removes
+        the whole pair; the byte-parity layer still covers the inf/NaN VALUE
+        encoding.)"""
         case = corpus["o12_nan_inf_iv_heal_40"]
         iv = case.frame.get_column("iv")
-        assert any(math.isnan(v) for v in iv.to_list() if v is not None)  # NaN present
+        values = [v for v in iv.to_list() if v is not None]
+        assert any(math.isnan(v) for v in values)  # NaN present
+        assert any(math.isinf(v) for v in values)  # +inf present
         meta = _footer(case.off_bytes)
         col_idx = case.frame.columns.index("iv")
         stats = meta.row_group(0).column(col_idx).statistics
-        assert stats is not None and stats.has_min_max
-        assert not math.isnan(stats.min) and not math.isnan(stats.max)
-        assert stats.max == float("inf")  # the planted +inf is the max
-        assert math.isfinite(stats.min)
+        assert stats is not None
+        assert not stats.has_min_max  # the NaN drops the WHOLE min/max pair
+        assert stats.has_null_count
+        assert stats.null_count == iv.null_count()

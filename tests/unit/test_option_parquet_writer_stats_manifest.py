@@ -193,9 +193,7 @@ class TestHookFires:
             stat = os.stat(_dest(tmp_path))
             assert (row.mtime_ns, row.size) == (stat.st_mtime_ns, stat.st_size)
             assert not lrr.rust_render_disabled()  # the seam genuinely engaged
-            assert lsm.load_valid_dataset_stats(
-                tmp_path, kind=lsm.KIND_OPTIONS, key=_SERIES_KEY
-            )
+            assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_OPTIONS, key=_SERIES_KEY)
         finally:
             lrr.reset_lake_rust_render_for_tests()
 
