@@ -1860,6 +1860,38 @@ mod tests {
     }
 
     #[test]
+    fn cross_session_backward_session_ordinal_still_closes_boundary() {
+        // The (A2) compare is an EQUALITY law: ANY session-ordinal CHANGE
+        // closes the open position — either direction, not only forward.
+        // `build_columns` admits any i64 `session_idx` (the ordinal is
+        // "compared for equality ONLY" — no monotonicity check), so a
+        // DECREASING ordinal is API-reachable; production sweep feeds are
+        // chronological (Catalog/ReplayFeed sorted), hence LOW — which is
+        // exactly why the r8 mutation sweep found the `!=`→`>` mutant (M14)
+        // surviving BOTH language nets: no prior test fed a backward session
+        // change to an OPEN position. (The Python walker carries the same
+        // law's defense-in-depth twin on its IST-date compare.)
+        // Signal bar0 → entry open[1]=10000 (session 5); bar1 folds
+        // (10120, 9950) → mfe 120 / mae 50, last close 10110. bar2 DROPS to
+        // session 4 → the guard closes retroactively at close[1]=10110 with
+        // exit_idx = last_idx = 1 (pnl 110, holding 1). Under the `>` mutant
+        // 4 > 5 is false, so the backward bar folds into the position and it
+        // rides to the end-of-data close[3]=9610 (pnl −390) — the killer.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 9500, 9600],
+            vec![10100, 10120, 9550, 9650],
+            vec![9900, 9950, 9400, 9500],
+            vec![10000, 10110, 9500, 9610],
+            vec![false, false, false, false],
+            vec![5, 5, 4, 4],
+            vec![1, 0, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(out, vec![(110i64, 120i64, 50i64, 1u64, 1u64, 1u64)]);
+    }
+
+    #[test]
     fn same_session_multi_bar_hold_does_not_close_early() {
         // The `!=`→`==` mutant killer on the guard's session compare (the
         // `same_session_pending_entry_still_fills` pattern): a multi-bar hold

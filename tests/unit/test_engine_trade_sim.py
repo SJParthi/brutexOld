@@ -1302,6 +1302,44 @@ class TestOpenPositionSessionGapClose:
         ]
         assert [d.exit_reason for d in sink] == ["end_of_data"]
 
+    def test_backward_session_date_change_still_closes_session_gap(self) -> None:
+        """The (A2) compare is an EQUALITY law: ANY IST session-date CHANGE
+        closes the open position — either direction, not only forward (the
+        Python defense-in-depth twin of the Rust r8 M14 ``!=``→``>`` mutant
+        killer ``cross_session_backward_session_ordinal_still_closes_boundary``).
+
+        ``push()`` derives each bar's session date from that bar's OWN
+        timestamp and enforces no monotonicity ("chronologically ordered" is a
+        documented input contract, not a checked one — verified before adding
+        this test), so a backward-dated bar IS API-reachable; production sweep
+        feeds are chronological (Catalog/ReplayFeed sorted), hence
+        LOW/defense-in-depth. Under a ``day_ist > pos.entry_day_ist`` mutant
+        the earlier-dated bar folds into the open position and it rides to a
+        wrong end_of_data finish at the backward bar's close instead of the
+        session_gap boundary close.
+        """
+        bars = [
+            _bar(11, 10, "100", "100", "100", "100", day=_NEXT_DAY),  # signal
+            _bar(11, 11, "100", "102", "99", "101", day=_NEXT_DAY),  # entry @ open 100.00
+            _bar(11, 12, "100", "101", "99", "100", day=_DAY),  # EARLIER IST date
+        ]
+        signals = [True, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=100,  # 11:11 close 101.00 − entry 100.00
+                mfe_paisa=200,  # high 102.00 folded by the same-push manage
+                mae_paisa=100,  # low 99.00
+                holding_bars=1,
+                entry_ts=_ts(11, 11, day=_NEXT_DAY),
+                exit_ts=_ts(11, 11, day=_NEXT_DAY),  # never the backward bar
+                direction=Side.BUY,
+            )
+        ]
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+        assert sink[0].exit_fill_paisa == 10_100  # day-D+1 11:11 CLOSE
+
 
 class TestSessionGapFinishEquivalence:
     """The finish()-equivalence pin (suffix independence by construction).
