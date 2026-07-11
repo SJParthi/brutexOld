@@ -13,9 +13,9 @@ crate side lives in ``rust/brutex-lake/src/lib.rs``.
 Resolved per call like the sibling sweep flags: a truthy literal
 (``1/true/yes/on``) → ON; a falsy literal (``0/false/no/off``) → OFF; unset or
 whitespace-empty → the default (OFF); any OTHER value → OFF with one loud
-``lake_rust_render.flag_unrecognised`` WARN per process — a typo'd opt-in is
-never silently honoured, and (since the default is OFF) never silently
-armed either. The truthy/falsy vocabulary DELIBERATELY mirrors the sweep
+``lake_rust_render.fallback`` WARN (reason ``flag_unrecognised``) per
+process — a typo'd opt-in is never silently honoured, and (since the
+default is OFF) never silently armed either. The truthy/falsy vocabulary DELIBERATELY mirrors the sweep
 flags' COMMON :func:`brutex.engine.sweep_lookahead.env_flag_tristate`
 byte-for-byte, but the classifier is a LOCAL twin: importing anything under
 ``brutex.engine`` executes ``brutex/engine/__init__.py``, which hard-imports
@@ -232,9 +232,10 @@ def lake_rust_render_enabled() -> bool:
     * a :data:`_FALSY` value → ``False`` (the explicit, silent OFF);
     * unset / whitespace-empty → ``False`` (the default);
     * any OTHER non-empty value → ``False`` with one loud
-      ``lake_rust_render.flag_unrecognised`` WARN per process — a typo'd
-      opt-in (``onn``, ``ture``) must be VISIBLE, never silently ignored
-      (the ``rust_metrics`` flag posture, inverted default).
+      ``lake_rust_render.fallback`` WARN (reason ``flag_unrecognised``)
+      per process — a typo'd opt-in (``onn``, ``ture``) must be VISIBLE,
+      never silently ignored (the ``rust_metrics`` flag posture, inverted
+      default).
 
     Read per call (one ``os.environ`` probe against a multi-ms render) so
     parallel workers resolve their own inherited environment — no global
