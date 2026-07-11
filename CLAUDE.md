@@ -2156,6 +2156,13 @@ hostile-review pass._
   836-mutant cargo kill loop was NOT run in-session — a 74-mutant bounded
   spot-check (0 missed) is the local evidence, the first green scheduled
   mutation.yml 8-shard run is the completion proof (the #1597 pattern).
+  COORDINATOR LAND-CLEARANCE (2026-07-11): the accepted residuals — the
+  futures-executor production wiring (or its explicit re-scope, the #1543
+  seam), the DEC-EXEC-RUST-STAGE2-001 orchestration-port decision, the
+  DEC-EXEC-COSTS-MUTMUT-001 futures_costs zero-survivor pair, and the
+  measured payoff figure replacing UNKNOWN-expected-small — are all four
+  REQUIRED pre-flip gates before DEC-EXEC-RUST-FLIP-001 may flip the
+  default (MIGRATION.md #1724).
   REVIEW ROUND 1 folded (5-reviewer panel, same branch pre-merge): the
   `bench(...)` interior commit subject reworded via commit-tree (trees
   byte-identical; conv-commits green over all 9); the calculator ternary
