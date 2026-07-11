@@ -30,11 +30,12 @@ Python — the anti-drift core), 16-element per-process burn-in bit-compare +
 autorevert latch (mismatch or batch fault ships the ORACLE values;
 MemoryError re-raises raw), chunk cap 65,536. OFF (default) arm byte- AND
 log-identical (bomb-spy + zero-event + OFF-cost-bench teeth); ON arm's ONLY
-deltas on a COMPLETING pass are three fault/engagement-scoped events (a
-mid-target crash on an out-of-band-corrupt row makes ON's log stream a
-content SUPERSET of OFF's — later rows' pass-1 events OFF never reaches,
-then the identical raise; disclosed in #1724, zero stored/status/counter
-delta); the
+deltas on a COMPLETING pass are three fault/engagement-scoped events (on
+a mid-target crash from out-of-band-corrupt rows the proven bounds are:
+zero writes both arms, same target_errored fence + equal counts, siblings
+bit-identical, ON's pre-raise log stream = OFF-prefix + pass-1-WARN tail —
+while WHICH poison's exception surfaces may differ between arms when
+several are present; disclosed in #1724); the
 EXISTING enrich golden
 reproduces byte-identically with the flag ON (fixture untouched,
 engaged-INFO anti-vacuous pin). HONEST: both arms O(rows) — ON/OFF wall
@@ -2233,16 +2234,17 @@ hostile-review pass._
   env (zero `_GreeksWorkerContext` change). **Sanctioned ON-arm log deltas — exactly three on a
   COMPLETING pass:** `rust_batch_engaged` (INFO once/process) · `rust_batch_autoreverted` (ERROR,
   fault only) · `rust_batch_flag_unrecognised` (WARNING once/process) — plus the ONE disclosed
-  crash-path delta: ON's stream is a content SUPERSET of OFF's before the identical raise
-  (#1724, refuter-2B F1); OFF arm ZERO delta (bomb-spy + zero-event
-  + OFF-cost-bench teeth). EVIDENCE: extended 12e gate 261 passed — `greeks_enrich.py` (598/148) +
+  crash-path delta (#1724, refuter-2B F1 + refuter-5B F1″: ON's pre-raise stream is a content
+  superset of OFF's; which poison's exception surfaces may differ under multiple corrupt rows);
+  OFF arm ZERO delta (bomb-spy + zero-event
+  + OFF-cost-bench teeth). EVIDENCE: extended 12e gate 262 passed — `greeks_enrich.py` (598/148) +
   `spot_join.py` 100.00%; 12d 55 passed — `options/greeks.py` (71/16) 100.00%; cargo test default
   (lib 109 + greeks_batch.rs 2) AND `--features python,serde` (lib 176) green; fmt + clippy
   (`-D warnings`, the CI invocation) clean; the EXISTING enrich golden byte-identical with the flag
   ON (fixture untouched, engaged-INFO anti-vacuous pin) + the 2-worker REAL-spawn sha256 parity
   golden + the hypothesis OFF≡ON property + the hostile status matrix (BELOW_INTRINSIC ±1-ULP band
   CE AND PE, T-floor µs boundary, reuse hit + per-term misses, NaN-OHLC skip, invalid-spot WARN,
-  repr-boundary spot 100.005, interleave ordering, log-SEQUENCE equality on COMPLETING passes — a mid-target CRASH on an out-of-band-corrupt row is the ONE disclosed log-stream ordering delta: ON's deferred finish emits later rows' pass-1 WARNs before the identical exception OFF raises earlier; same exception/fence, zero stored/status/counter delta, refuter-repro'd — see #1724). HONEST: both arms
+  repr-boundary spot 100.005, interleave ordering, log-SEQUENCE equality on COMPLETING passes — the ONE disclosed crash-path delta is bounded by the four PROVEN invariants in #1724: zero writes both arms · same target_errored fence + equal errored counts · siblings bit-identical · ON's pre-raise stream = OFF-prefix + pass-1-WARN tail; which corrupt row's exception (type+message, hence the target_errored string) surfaces may DIFFER between arms when several are present — single-poison identical, multi-poison divergent, refuter-executed both). HONEST: both arms
   O(rows) — NO O(1) claim; ON/OFF wall ≈1.0× measured on the sandbox (run-to-run noise straddles
   1.0 — independent reruns read 0.96–1.00×; NO speedup claimed, printed by the bench and gated only
   at the generous ≤1.5× no-regression ceiling; the retained Python
