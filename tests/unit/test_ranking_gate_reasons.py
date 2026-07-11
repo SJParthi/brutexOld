@@ -15,7 +15,6 @@ import inspect
 import math
 from pathlib import Path
 
-import brutex.ranking
 import pytest
 from brutex.metrics.compute import ResultMetrics
 from brutex.ranking import (
@@ -244,7 +243,7 @@ class TestTwinWlrProjectionStructuralParity:
     @staticmethod
     def _wlr_projection(func_name: str) -> ast.expr:
         """The ``wlr = …`` projection expression inside ``func_name``'s body."""
-        source = Path(inspect.getfile(brutex.ranking)).read_text(encoding="utf-8")
+        source = Path(inspect.getfile(gate_reasons)).read_text(encoding="utf-8")
         module = ast.parse(source)
         func = next(
             node
