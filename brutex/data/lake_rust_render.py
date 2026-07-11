@@ -3,8 +3,9 @@
 DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). When — and ONLY when —
 ``BRUTEX_LAKE_RUST_RENDER`` is set truthy, :meth:`ParquetWriter._render_bytes`
 routes its frame → parquet-bytes render through the ``brutex_lake`` crate (a
-Rust build of polars pinned to the git tag matching the installed Python
-wheel; the frame crosses as uncompressed Arrow IPC bytes). This module owns
+Rust build of polars REV-pinned at the commit the installed Python wheel's
+release tag pointed at — tags are movable, so the manifest pins the commit;
+the frame crosses as uncompressed Arrow IPC bytes). This module owns
 the flag, the three fail-closed layers, and the process-local latches; the
 crate side lives in ``rust/brutex-lake/src/lib.rs``.
 
@@ -450,7 +451,8 @@ def render_parquet_bytes(
             "polars_version_mismatch",
             installed_polars=polars_version,
             crate_pinned_polars=pinned,
-            remedy="align the wheel and the crate tag, then re-run the parity corpus "
+            remedy="align the wheel and the crate's pinned polars rev, then "
+            "re-run the parity corpus "
             "(docs/runbooks/lake-rust-render-lockstep.md)",
         )
         return python_render()

@@ -3,8 +3,9 @@
 `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1726). This crate re-hosts
 the ONE bars-writer parquet render seam
 (`brutex/data/parquet_writer.py::_render_bytes` — frame → parquet bytes) on a
-Rust build of polars pinned to the git tag matching the installed Python
-wheel, so its output is **bit-identical** to the wheel's
+Rust build of polars REV-pinned at the commit the installed Python wheel's
+release tag pointed at (tags are movable, so the manifest pins the commit —
+see the ATOMIC-pin table below), so its output is **bit-identical** to the wheel's
 `DataFrame.write_parquet(use_pyarrow=False)` under the writer's options
 (zstd level 3, `row_group_size=100_000`, statistics off).
 

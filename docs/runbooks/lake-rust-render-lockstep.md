@@ -6,8 +6,10 @@
 `.github/workflows/lake-rust-parity.yml` (the parity lane).
 
 The Rust render is byte-identical to the Python render **ONLY under version
-lockstep**: the crate's linked polars must be the git tag matching the
-installed Python wheel, and the bundled libzstd must match on both sides.
+lockstep**: the crate's linked polars must be REV-pinned at the commit the
+installed Python wheel's release tag pointed at (tags are movable, so the
+manifest pins the commit — §2 step 1 below is the tag → rev resolution), and
+the bundled libzstd must match on both sides.
 There is NO version-independent parity (spike caveat #1). The runtime version
 guard makes a broken lockstep SAFE (flag refuses, Python renders); this
 runbook is how you RESTORE it.
@@ -102,8 +104,9 @@ errors, no behaviour change beyond which engine encodes):
 ```
 [warning ] lake_rust_render.rust_path_disabled reason=polars_version_mismatch
            installed_polars=1.43.0 crate_pinned_polars=1.42.1
-           remedy=align the wheel and the crate tag, then re-run the parity
-           corpus (docs/runbooks/lake-rust-render-lockstep.md)
+           remedy=align the wheel and the crate's pinned polars rev, then
+           re-run the parity corpus
+           (docs/runbooks/lake-rust-render-lockstep.md)
 ```
 
 Sibling shapes: `reason=crate_unavailable` (crate not installed — remedy

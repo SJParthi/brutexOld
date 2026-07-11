@@ -3,8 +3,9 @@
 //! DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Re-hosts the ONE
 //! bars-writer parquet render (`brutex/data/parquet_writer.py::_render_bytes`
 //! — frame → parquet bytes; zstd level 3, `row_group_size = 100_000`,
-//! statistics OFF) on a Rust build of polars pinned to the git tag matching
-//! the installed Python wheel (`py-1.42.1`), so the rendered bytes are
+//! statistics OFF) on a Rust build of polars REV-pinned at the commit the
+//! installed Python wheel's release tag (`py-1.42.1`) pointed at — git tags
+//! are movable, so the manifest pins the commit — so the rendered bytes are
 //! BIT-IDENTICAL to the wheel's output — the FEASIBLE-BY-LOCKSTEP design the
 //! 2026-07-11 spike proved on the full 5-case corpus (sha256 AND raw `cmp`
 //! equal, debug and release, thread-count invariant).

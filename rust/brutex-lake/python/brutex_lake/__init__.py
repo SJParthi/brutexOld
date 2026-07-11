@@ -14,8 +14,9 @@ Python render" (one loud WARN), so a missing wheel can never break a lake
 write.
 
 Lockstep law (the crate's whole reason to exist): the linked polars must be
-the git tag matching the installed Python wheel, or the rendered bytes may
-silently differ. ``pinned_polars_version()`` is the crate's side of that
+REV-pinned at the commit the installed Python wheel's release tag pointed at
+(tags are movable, so the manifest pins the commit), or the rendered bytes
+may silently differ. ``pinned_polars_version()`` is the crate's side of that
 handshake; the facade refuses to engage when it differs from the installed
 ``polars.__version__``. Bump ritual:
 ``docs/runbooks/lake-rust-render-lockstep.md``.
