@@ -357,3 +357,53 @@ landed. Every §3 zero-production-caller claim was RE-PROVEN by grep at head
 * **F3 (`phase_throughput.py`) remains OPEN** — dormant but outside the
   ratified deletion set.
 
+
+## 9. Phase 2b-2 execution record — the rate-math port + the structlog-pin fix (2026-07-11)
+
+**Part C landed (DEC-RATE-MATH-RUST-001, the LAST live conversion, D1.3):**
+NEW `rust/fno-math/src/rate_math.rs` ports exactly the FOUR pure IEEE f64
+expressions (`bucket_refill` / `bucket_consume` / `bucket_more_wait` /
+`bucket_set_rate_state` — the last named `_state` on the wheel to say
+plainly it returns the drained post-state pair, not that it sets anything).
+Two transcription laws proved load-bearing and are pinned in-crate:
+operation ORDER transcribed verbatim (no re-association; scalar Rust f64
+never auto-fuses to FMA), and **CPython `min`/`max` POSITIONAL semantics**
+(`b if b < a else a`) transcribed comparison-based — `f64::min`/`f64::max`
+are IEEE minNum/maxNum (non-NaN operand wins; `-0.0` on the signed-zero
+tie), which would diverge from the oracle. Wheel surface: 4 symbols added
+additively (`lib.rs` own-block + `__init__.py`/`.pyi`/`EXPECTED_BUILD.json`
+same-commit; **NO version bump** — 0.4.0 is the one slice-9 bump, D5
+unchanged); mutants.toml `examine_globs` + `src/rate_math.rs`, MEASURED
+1,149 total (rate_math 78) — the mutation.yml re-shard stays the named
+slice-9 follow-up. Python seam in `orchestrator/rate_limiter.py`:
+default-OFF `BRUTEX_RUST_RATE_MATH`, burn-in = 16 double-computes compared
+on exact f64 BYTES (`struct.pack("<d")` — `==` would pass a `-0.0` swap),
+mismatch ships the Python values + latches + logs
+`rate_math.kernel_autoreverted`, wheel-absent/stale warns once and falls
+back; the retained verbatim Python expressions are the oracle and the OFF
+arm. **The D1.3 care point is DECIDED: the `math.isclose(rel_tol=1e-6)`
+upshift/downshift gates STAY PYTHON** (per the implementation spec §3 —
+they sit inside event-object-building branches whose seam cost exceeds the
+four expressions; the deque/locks/clock/`_ACQUIRE_LOOP_CAP` escape hatch
+stay too). §2 Rule 6 held: zero cap/floor/ladder/governor value moved; the
+AIMD suites (243 tests) pass green under BOTH flag arms. Parity here is
+EXACT, not statistical: the hypothesis bit-pattern differential
+(`tests/property/test_rate_math_rust_parity.py` — raw 64-bit patterns
+filtered finite, subnormals/±0.0/overflow-adjacent kept) found **ZERO
+divergent f64s**; the D4 escalation clause was defined not to apply to
+Part C (a divergence would be a transcription bug) and was not needed.
+
+**Phase-2b-1 regression fixed (the #1630 structlog pin):** the audit seam's
+commit had added `import structlog` to `orchestrator/audit.py` for its
+seam-state events, tripping the DEC-SWEEP-LOG-VOLUME-GUARD-001
+`TestAuditChainIsNotStructlog` honesty pin (the hash-chained audit writers
+are DIRECT file appends — no logging config may ever filter/reformat
+them). Resolution keeps the pin as the law (test byte-untouched):
+`audit.py` is structlog-free again, and the seam-state WARN/ERROR events
+(`audit.rust_kernel_unavailable` / `audit.rust_envelope_fallback` /
+`audit.kernel_autoreverted` — seam STATE, never audit records) route
+through the NEW sibling `brutex/orchestrator/audit_seam_log.py` via a
+late-bound function-local import (logger deliberately named
+`brutex.orchestrator.audit` so operators keep the owning-module
+attribution). Event names/levels/fields byte-identical; the flag-ON golden
+replay + the full seam battery pass unmodified.
