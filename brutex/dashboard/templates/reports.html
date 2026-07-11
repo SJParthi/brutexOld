@@ -297,12 +297,46 @@ function showSkeleton() {
   symsEl.innerHTML = Array.from({ length: 14 }, () => '<span class="skel-chip"></span>').join("");
 }
 
+/* Chips are built ONCE per symbol SET and selection changes only toggle the
+   `.on` class in place (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md
+   #1720 — the universe.html selectInstrument class-swap precedent): the
+   All / Clear / F&O-only / index-pick buttons previously rebuilt all ~750
+   chip nodes per click. renderChips() rebuilds the DOM only when the SET of
+   symbols (symbol + exchange + option_pullable) actually changed — i.e. a
+   fresh loadSymbols(); every other call is an O(chips) class sweep with
+   ZERO node creation. */
+let chipBySymbol = new Map();
+let chipSetKey = null;
+
+function applySelection() {
+  /* The map key is symbol + "\u001f" + exchange (mirrors the setKey fields —
+     review fix: a symbol-only key kept just the LAST chip of a dual-listed
+     NSE+BSE symbol, so bulk-select clicks left the other chip's highlight
+     stale); the `selected` SET stays symbol-keyed — the wire semantics
+     (symbols joined) are unchanged, every same-symbol chip toggles together. */
+  for (const [key, chip] of chipBySymbol) {
+    const sym = key.split("\u001f")[0];
+    chip.classList.toggle("on", selected.has(sym));
+  }
+}
+
 function renderChips() {
   if (allSymbols.length === 0) {
+    chipBySymbol = new Map();
+    chipSetKey = null;
     symsEl.innerHTML = '<div class="empty"><span class="art">📭</span>'
       + 'no report-eligible symbols in the lake yet — pull a stock\'s spot (1m + 1d) first</div>';
     return;
   }
+  const setKey = allSymbols
+    .map(s => s.symbol + "\u001f" + s.exchange + "\u001f" + (s.option_pullable ? 1 : 0))
+    .join("\u001e");
+  if (setKey === chipSetKey && chipBySymbol.size) {
+    applySelection();   // selection-only change: class toggles, no rebuild
+    return;
+  }
+  chipSetKey = setKey;
+  chipBySymbol = new Map();
   symsEl.innerHTML = "";
   for (const s of allSymbols) {
     const chip = document.createElement("span");
@@ -329,6 +363,7 @@ function renderChips() {
       chip.classList.toggle("on");
       refreshCount();
     };
+    chipBySymbol.set(s.symbol + "\u001f" + s.exchange, chip);
     symsEl.appendChild(chip);
   }
 }

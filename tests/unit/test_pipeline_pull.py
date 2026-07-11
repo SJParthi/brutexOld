@@ -2066,3 +2066,69 @@ class TestStrictGateSequencer:
             assert report.post_steps_strict_skipped is False
             assert "post-steps SKIPPED" not in report.note
         assert f"quarantined: {quarantined_name}" in report.note  # headlined either way
+
+
+# --------------------------------------------------------------------------- #
+# DEC-LEDGER-LOAD-SPACE-V1-001 — one ledger load per pipeline run
+# --------------------------------------------------------------------------- #
+
+
+class TestSharedLedgerScopeInPipeline:
+    """The fails-before pin: 2 full ledger loads per pipeline run → 1.
+
+    `run_full_pipeline` wraps the fetch phases in ONE
+    `shared_pull_ledger_scope`, so the spot phase's whole-ledger
+    materialisation is REUSED by the historical phase (pre-fix: each phase's
+    `begin_pull_ledger` re-loaded the full O(rows) ledger — two loads + two
+    co-resident copies). The scope closes BEFORE the post-steps, so the
+    prebuild sees a fresh (un-shared) begin — the lifetime-tightness pin.
+    """
+
+    def test_one_ledger_load_per_pipeline_run(
+        self, tmp_path: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pathlib import Path
+
+        import brutex.data.window_ledger_store as wls
+
+        lake = Path(str(tmp_path))
+        real = wls.load_or_migrate_window_ledger
+        loads: list[Path] = []
+
+        def _spy(lake_root: Path, **kwargs: object) -> object:
+            loads.append(lake_root)
+            return real(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(wls, "load_or_migrate_window_ledger", _spy)
+
+        phase_ledgers: list[object] = []
+        post_ledgers: list[object] = []
+
+        def run_spot() -> BulkSpotReport:
+            # The spot phase's own begin (what pull_all_spot does internally).
+            phase_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _spot()
+
+        def run_historical(prior: PriorStepsVerdict) -> CompositePullReport:
+            # The historical phase's own begin (what _run_phase does internally).
+            phase_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _composite(historical=_historical_inner())
+
+        def run_prebuild(_excluded: frozenset[str]) -> PrebuildOutcome:
+            # A post-step begin — must be OUTSIDE the scope (fresh load).
+            post_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _outcome()
+
+        report = run_full_pipeline(
+            run_spot=run_spot,
+            run_metadata=_metadata,
+            run_historical=run_historical,
+            run_prebuild=run_prebuild,
+        )
+        assert report.stopped_after is None
+        # ONE shared instance across the two fetch phases (pre-fix: distinct).
+        assert phase_ledgers[0] is phase_ledgers[1]
+        # ONE load for both phases + ONE fresh post-step load (the scope closed
+        # before the prebuild — the ledger is released, not held through it).
+        assert len(loads) == 2
+        assert post_ledgers[0] is not phase_ledgers[0]
