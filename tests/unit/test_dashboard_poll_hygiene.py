@@ -18,27 +18,43 @@ polling concern). It also:
 
 (The reports.html sweep-poll hardening this pack originally shipped was dropped
 once DEC-OPERATOR-PAGE-REAL-001 moved the Run-Sweep surface off ``/reports``;
-its dedicated pin was removed with it. DEC-DASHBOARD-POLL-HYGIENE-002 re-homed
-that hardening onto the Operator page's ``pollRunSweep`` in ``v29.html`` —
-pinned at the bottom of this file.)
+its dedicated pin was removed with it. DEC-DASHBOARD-POLL-HYGIENE-002's v29
+in-place sweep-poller hardening + its pins here were likewise RETIRED at the
+2026-07-11 merge-reconcile: DEC-FRONTEND-LATENCY-HARDENING-001 (#1720) deleted
+those pollers for the shared-poller subscription, and the four defect classes
+stay pinned at the BXPoll core — hidden guard / through-body abort / capped
+backoff / visibilitychange catch-up in
+``test_dashboard_oneclick_frontend.py::TestPollDiscipline`` plus the v29
+subscription pins in ``test_dashboard_frontend_latency.py``.)
+
+SUPERSESSION (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): the
+five uniform 4 s pollers no longer own an inline ``if (document.hidden)``
+guard + bare ``setInterval(poll, 4000)`` — their SCHEDULING moved onto the ONE
+shared ``BXPoll.createPoller`` core (``bx-poll.js``), which provides the SAME
+guarantees this suite pinned (hidden-tab guard BEFORE any fetch, catch-up on
+tab return) PLUS a one-in-flight chain, a 10 s fetch abort and capped
+3 s→30 s failure backoff. The pins below therefore now assert the NEW
+mechanism with the SAME intent: a hidden tab fires zero fetches, the 4 s
+visible cadence survives (``pollMs: 4000``), and a tab return re-polls
+immediately (BXPoll wires its own visibilitychange catch-up in ``start()``;
+the no-BXPoll degrade path keeps an explicit guarded interval + catch-up).
 
 HONEST envelope (Golden Rule #10): these are SOURCE-STRING pins — the repo has
-no JS runtime in CI — not a browser-executed behavioural test. Visible-tab
-cadence/data is byte-identical (the guard is a first-statement early return;
-the ``setInterval`` cadence lines are unchanged where they existed).
+no JS runtime in CI — not a browser-executed behavioural test. bx-poll.js's
+own discipline (hidden guard / backoff / catch-up) is pinned at its source by
+``test_dashboard_oneclick_frontend.py`` and node-golden-tested for its pure
+parts.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
 
 _TEMPLATES = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates"
 
-#: The five uniform ``poll(); setInterval(poll, 4000)`` pages: the guard is the
-#: first statement of ``poll()`` and the catch-up re-polls ``poll()`` on return.
+#: The five uniform 4 s-poller pages, now scheduled through BXPoll.createPoller.
 _UNIFORM_POLLERS = (
     "coverage.html",
     "spot_coverage.html",
@@ -47,9 +63,6 @@ _UNIFORM_POLLERS = (
     "expired_options.html",
 )
 
-_HIDDEN_GUARD = "if (document.hidden) return;"
-_UNIFORM_CATCHUP = "if (!document.hidden) poll();"
-
 
 def _tpl(name: str) -> str:
     text = (_TEMPLATES / name).read_text(encoding="utf-8")
@@ -57,48 +70,64 @@ def _tpl(name: str) -> str:
     return text
 
 
-# ── The five uniform 4 s pollers: guard + cadence intact + catch-up ──────────
+# ── The five uniform 4 s pollers: BXPoll discipline + cadence + degrade ──────
 
 
 @pytest.mark.parametrize("name", _UNIFORM_POLLERS)
-def test_uniform_poller_has_hidden_guard_before_first_fetch(name: str) -> None:
-    """``if (document.hidden) return;`` opens ``poll()`` — ahead of every fetch.
+def test_uniform_poller_rides_the_shared_bxpoll_core(name: str) -> None:
+    """The tick is scheduled by ``BXPoll.createPoller`` — never a bare interval.
 
-    A hidden tab returns before either endpoint fetch fires (the whole point of
-    the pause). The 4 s ``setInterval`` cadence line is left intact so a visible
-    tab's behaviour is byte-identical.
+    BXPoll's ``poll()`` checks ``document.hidden`` BEFORE invoking the tick
+    (zero fetches while hidden — the original intent of the inline guard this
+    supersedes), runs a ONE-in-flight self-scheduling chain (a slow tick can
+    never overlap the next one), and backs off 3 s→30 s on counted failures.
     """
     js = _tpl(name)
-    assert js.count("async function poll() {") == 1, f"{name}: expected one poll()"
-    body = js.index("async function poll() {") + len("async function poll() {")
-    assert _HIDDEN_GUARD in js[body:], f"{name}: the document.hidden guard is missing"
-    guard_pos = js.index(_HIDDEN_GUARD, body)
-    # The guard must precede poll()'s first network call.
-    fetch_candidates = [
-        pos
-        for pos in (
-            js.find("fetch(", body),
-            js.find("doFetch(", body),
-            js.find("Promise.allSettled(", body),
-        )
-        if pos != -1
-    ]
-    assert fetch_candidates, f"{name}: no network call found in poll()"
-    assert guard_pos < min(fetch_candidates), f"{name}: the guard must precede poll()'s first fetch"
-    # The interval cadence line still exists (visible-tab behaviour unchanged).
-    assert "setInterval(poll, 4000);" in js, f"{name}: the 4 s poll cadence must survive"
+    assert '<script defer src="/static/bx-poll.js"></script>' in js, (
+        f"{name}: the shared bx-poll.js core must be loaded"
+    )
+    assert "window.BXPoll.createPoller({" in js, f"{name}: the BXPoll migration is missing"
+    # The tick keeps its OWN render/degrade semantics: the poller consumes it
+    # through the custom fetchJson seam and a failed tick throws (→ backoff).
+    # fetch_windows/completeness thread BXPoll's timeoutMs into the tick
+    # (the DEC-FRONTEND-LATENCY-HARDENING-001 review MAJOR — their fetches are
+    # bounded through the body read; pinned in TestBoundedTickFetch); the
+    # other pollers keep the plain seam.
+    assert (
+        "return poll().then(function (ok) {" in js
+        or "return poll(timeoutMs).then(function (ok) {" in js
+    ), f"{name}: the tick must feed BXPoll through the custom fetchJson seam"
+    assert "poll tick failed" in js or "surfaces failed" in js, (
+        f"{name}: a failed tick must throw into BXPoll's counted-failure backoff"
+    )
+    # The old inline-guard mechanism is fully superseded — no bare interval.
+    assert "setInterval(poll, 4000);" not in js, (
+        f"{name}: the bare 4 s setInterval must not survive beside BXPoll"
+    )
 
 
 @pytest.mark.parametrize("name", _UNIFORM_POLLERS)
-def test_uniform_poller_has_visibilitychange_catch_up(name: str) -> None:
-    """ONE ``visibilitychange`` listener fires an immediate ``poll()`` on return."""
+def test_uniform_poller_keeps_the_4s_cadence(name: str) -> None:
+    """The visible-tab cadence is unchanged: ``pollMs: 4000``."""
     js = _tpl(name)
-    assert _UNIFORM_CATCHUP in js, f"{name}: the !document.hidden catch-up poll() is missing"
-    # The catch-up lives inside a visibilitychange listener registered AFTER the
-    # interval (the v29/liveproof order).
-    assert 'addEventListener("visibilitychange"' in js, f"{name}: no visibilitychange listener"
-    assert js.index("setInterval(poll, 4000);") < js.index(_UNIFORM_CATCHUP), (
-        f"{name}: the catch-up listener must register after the interval"
+    assert "pollMs: 4000," in js, f"{name}: the 4 s cadence token (pollMs: 4000) must survive"
+
+
+@pytest.mark.parametrize("name", _UNIFORM_POLLERS)
+def test_uniform_poller_starts_at_domcontentloaded_with_guarded_degrade(name: str) -> None:
+    """The poller starts once deferred scripts are guaranteed executed, and a
+    missing bx-poll.js degrades to a legacy HIDDEN-GUARDED interval + catch-up
+    (the page never goes pollerless, and even the degrade path keeps the
+    zero-fetches-while-hidden law + the tab-return catch-up)."""
+    js = _tpl(name)
+    assert 'document.addEventListener("DOMContentLoaded", startPolling);' in js, (
+        f"{name}: the poller must start at DOMContentLoaded"
+    )
+    assert "if (!document.hidden) void poll();" in js, (
+        f"{name}: the degrade path lost its hidden guard / catch-up"
+    )
+    assert 'addEventListener("visibilitychange"' in js, (
+        f"{name}: the degrade path lost its visibilitychange catch-up"
     )
 
 
@@ -109,8 +138,14 @@ def test_completeness_ships_payload_diff_gate() -> None:
     """The ~750-row options table no longer rebuilds every 4 s unconditionally."""
     js = _tpl("completeness.html")
     assert "let lastBoardTxt = null;" in js
-    assert "const txt = await r.text();" in js
-    assert "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return; }" in js
+    # The body text now arrives through the BOUNDED text fetch (the
+    # DEC-FRONTEND-LATENCY-HARDENING-001 review MAJOR — abort armed through
+    # the body read); the compare gate is still the raw response text.
+    assert "return r.text().then(function (txt) {" in js
+    assert "const txt = res.text;" in js
+    # `return true` since DEC-FRONTEND-LATENCY-HARDENING-001: a skipped tick is
+    # a SUCCESSFUL tick for BXPoll's failure counting (same skip semantics).
+    assert "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return true; }" in js
     # The parse now rides the memoised raw text, not a second r.json().
     assert "const board = JSON.parse(txt);" in js
     assert "renderOptions(board.options.per_underlying || []);" in js
@@ -189,156 +224,3 @@ def test_movers_gated_retry_pauses_while_hidden() -> None:
     assert "if (!document.hidden && wasGated) { clearTimeout(gateTimer); load(); }" in js, (
         "movers.html: the gated catch-up listener is missing"
     )
-
-
-# ── v29.html: the Operator Run-Sweep poller (DEC-DASHBOARD-POLL-HYGIENE-002) ──
-#
-# The MAJOR-12 re-homed follow-up (the #1623 dropped-as-superseded note):
-# DEC-OPERATOR-PAGE-REAL-001 moved Run-Sweep from /reports onto the Operator
-# page (v29.html), so the original reports.html hardening is re-applied there —
-# hidden-tab guard + counted-failure capped backoff (skip-N-ticks on the fixed
-# setInterval, NEVER a give-up) + a visibilitychange catch-up scoped to an
-# ARMED poll, with BOTH pollers riding the COMMON BXPoll.fetchJson (bounded
-# through the BODY read; non-ok THROWS) + BXPoll.backoffDelayMs and a
-# per-poller generation guard. pollSweepProgress (guard + catch-up
-# pre-existing) gains the same backoff. HONEST envelope: SOURCE-STRING pins,
-# not a browser-executed test.
-
-
-def test_v29_run_sweep_poller_is_hidden_guarded() -> None:
-    """``pollRunSweep`` opens with the hidden guard, ahead of its fetch."""
-    js = _tpl("v29.html")
-    assert js.count("async function pollRunSweep() {") == 1
-    body = js.index("async function pollRunSweep() {")
-    guard_pos = js.index(_HIDDEN_GUARD, body)
-    fetch_pos = js.index("window.BXPoll.fetchJson(", body)
-    assert guard_pos < fetch_pos, (
-        "v29.html: pollRunSweep's document.hidden guard must precede its fetch"
-    )
-    # The 1.2 s interval registration itself is unchanged (visible-tab cadence).
-    assert "sweepPoll = setInterval(pollRunSweep, 1200);" in js
-
-
-def test_v29_sweep_pollers_ride_the_common_bounded_fetch() -> None:
-    """BOTH sweep pollers fetch via ``BXPoll.fetchJson`` — bounded through the
-    BODY read (abort armed across ``r.json()``; non-ok THROWS), so a
-    headers-then-stalled-body response counts as a failure instead of hanging
-    the poll forever with the Run button disabled. No bare ``fetch()`` of the
-    sweep-progress endpoint remains, and no inline copy of the backoff law
-    exists (defer guarantees BXPoll is defined before any INTERVAL tick or
-    click callback fires; the one exception — the parse-time immediate
-    kickoff — is DOMContentLoaded-guarded, pinned below).
-    """
-    js = _tpl("v29.html")
-    call = (
-        "window.BXPoll.fetchJson(\n"
-        "          '/api/v1/sweep-progress', window.BXPoll.DEFAULTS.FETCH_TIMEOUT_MS)"
-    )
-    assert js.count(call) == 2, (
-        "v29.html: both sweep pollers must ride the COMMON bounded fetchJson"
-    )
-    assert "fetch('/api/v1/sweep-progress')" not in js, (
-        "v29.html: no bare unbounded fetch of /api/v1/sweep-progress may remain"
-    )
-    assert "bxSweepPollBackoffMs" not in js, (
-        "v29.html: the inline backoff fallback is dead code — COMMON core only"
-    )
-
-
-def test_v29_sweep_progress_immediate_kickoff_is_load_order_guarded() -> None:
-    """The parse-time first poll must NOT be a bare synchronous call.
-
-    This classic inline ``<script>`` executes DURING parsing, BEFORE the
-    deferred ``bx-poll.js`` — a bare ``pollSweepProgress();`` kickoff would
-    TypeError on ``window.BXPoll`` on every fresh load of ``/`` (and blip a
-    spurious ``__bxHbSweepErr`` heartbeat error). The kick is guarded: call
-    now when BXPoll exists, else defer to DOMContentLoaded (defer scripts
-    complete before DOMContentLoaded fires). Interval ticks + click callbacks
-    fire post-load and need no guard.
-    """
-    js = _tpl("v29.html")
-    guarded = (
-        "if (window.BXPoll) pollSweepProgress(); "
-        "else document.addEventListener('DOMContentLoaded', pollSweepProgress);"
-    )
-    assert guarded in js, "v29.html: the DOMContentLoaded-guarded kickoff is missing"
-    # No bare synchronous parse-time kick may re-drift in (the catch-up
-    # listener's post-load call rides inside a braced block, not a bare line).
-    assert re.search(r"^\s*pollSweepProgress\(\);\s*$", js, re.MULTILINE) is None, (
-        "v29.html: a bare synchronous pollSweepProgress(); kick re-drifted in"
-    )
-
-
-def test_v29_run_sweep_poller_has_counted_failure_backoff() -> None:
-    """Failures count into a nextAllowedTs skip-tick gate — never a give-up.
-
-    Every failure mode (non-ok status, rejection, abort, malformed body)
-    funnels through fetchJson's throw into ONE counted catch; the gate is
-    checked at the top of the poller and the delay rides the COMMON
-    ``BXPoll.backoffDelayMs`` (quick retries then 3 s→30 s capped doubling).
-    No clearInterval lives in the failure path — the terminal clearInterval
-    is the sweep-finished arm only.
-    """
-    js = _tpl("v29.html")
-    assert "let runSweepFailures = 0;" in js
-    assert "let runSweepNextTs = 0;" in js
-    assert "if (Date.now() < runSweepNextTs) return;" in js
-    assert "runSweepNextTs = Date.now() + window.BXPoll.backoffDelayMs(runSweepFailures);" in js
-    assert "runSweepFailures = 0; runSweepNextTs = 0;" in js
-    assert "'Could not read sweep progress (retrying): '" in js
-
-
-def test_v29_sweep_pollers_carry_generation_guards() -> None:
-    """Per-poller generation counters drop superseded in-flight responses.
-
-    The visibilitychange catch-up (and any slower-than-cadence response) can
-    overlap a scheduled tick; the gen guard (the gbPollGen / BXPoll pollSeq
-    precedent) ensures a stale late response neither repaints out of order
-    nor mis-counts a failure — checked before render AND in the catch.
-    """
-    js = _tpl("v29.html")
-    assert "let runSweepGen = 0;" in js
-    assert "const gen = ++runSweepGen;" in js
-    assert js.count("if (gen !== runSweepGen) return;") == 2, (
-        "v29.html: pollRunSweep must gen-guard both the success and catch arms"
-    )
-    assert "let sweepProgressGen = 0;" in js
-    assert "const gen = ++sweepProgressGen;" in js
-    assert js.count("if (gen !== sweepProgressGen) return;") == 2, (
-        "v29.html: pollSweepProgress must gen-guard both the success and catch arms"
-    )
-
-
-def test_v29_run_sweep_visibilitychange_catch_up_is_armed_scoped() -> None:
-    """On tab return an ARMED run-sweep poll fires immediately (gate cleared).
-
-    The catch-up is scoped to ``sweepPoll`` non-null so an idle Operator tab
-    (no sweep started from this page) fires no fetch on a visibility flip.
-    """
-    js = _tpl("v29.html")
-    needle = "if (!document.hidden && sweepPoll) { runSweepNextTs = 0; pollRunSweep(); }"
-    assert needle in js, "v29.html: the armed-scoped run-sweep catch-up is missing"
-
-
-def test_v29_sweep_progress_poller_gains_the_same_backoff() -> None:
-    """pollSweepProgress (guard + catch-up pre-existing) adds the backoff gate.
-
-    Every failure mode funnels through fetchJson's throw into ONE counted
-    catch (the heartbeat error hook still fires there), and the existing
-    catch-up now also clears the backoff gate so a tab return always reads
-    fresh.
-    """
-    js = _tpl("v29.html")
-    assert "let sweepProgressFailures = 0;" in js
-    assert "let sweepProgressNextTs = 0;" in js
-    assert "if (Date.now() < sweepProgressNextTs) return;" in js
-    assert (
-        "sweepProgressNextTs = Date.now() + window.BXPoll.backoffDelayMs(sweepProgressFailures);"
-        in js
-    ), "v29.html: the pollSweepProgress counted catch must set the backoff gate"
-    assert "sweepProgressFailures = 0; sweepProgressNextTs = 0;" in js
-    # The heartbeat error hook still fires inside the ONE counted catch.
-    assert "if (window.__bxHbSweepErr) window.__bxHbSweepErr(e);" in js
-    # The 2 s cadence + the (gate-clearing) catch-up survive.
-    assert "setInterval(pollSweepProgress, 2000);" in js
-    assert "{ sweepProgressNextTs = 0; pollSweepProgress(); }" in js

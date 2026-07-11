@@ -1367,14 +1367,19 @@ class TestWindowLedgerApi:
         tail = client.get("/api/v1/db/window-ledger?limit=10&offset=999").json()
         assert tail["rows"] == [] and tail["total"] == 5
 
-    def test_paging_clicks_parse_the_ledger_once_per_generation(
+    def test_paging_clicks_never_run_the_python_ledger_parse(
         self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """D3 read-count SPY (DEC-SUSPICION-SWEEP-FIXES-001): the route previously
-        re-PARSED the whole ledger Parquet (~841k rows measured on a full-universe
-        options pull) on EVERY paging click. Now every click within one ledger
-        generation rides ONE cached parse (``db_view.window_ledger_rows_cached``);
-        a ledger flush (mtime bump) costs exactly one more."""
+        """The D3 read-count SPY, TIGHTENED by DEC-DB-LATENCY-HARDENING-001
+        (MIGRATION.md #1719): the route previously re-PARSED the whole ledger
+        Parquet on EVERY paging click (pre-D3), then ONE cached
+        ``load_window_ledger`` Python parse per ledger stamp (D3 — measured
+        7,177.5 ms of a 7,628 ms request at 400k rows). The route now serves
+        the page via the DuckDB fast path (``query_window_ledger_page``), so a
+        healthy full-schema ledger pays ZERO Python record parses — the spy
+        bound tightens 1 → 0 (the legacy parse remains ONLY the degrade path,
+        pinned in tests/unit/test_dashboard_db_view_window_ledger_page.py).
+        The byte-parity half of the original pin is unchanged below."""
         from datetime import UTC, date, datetime
 
         from brutex.data.fetch_coverage import WindowKey
@@ -1409,8 +1414,11 @@ class TestWindowLedgerApi:
         full = client.get("/api/v1/db/window-ledger?limit=500&offset=0").json()
         page1 = client.get("/api/v1/db/window-ledger?limit=2&offset=0").json()
         page2 = client.get("/api/v1/db/window-ledger?limit=2&offset=2").json()
-        assert parses["n"] == 1  # three clicks, ONE parse (was one parse PER click)
-        # The cached read serves byte-identical pages (sort + derived cols intact).
+        # DEC-DB-LATENCY-HARDENING-001: ZERO Python parses — the DuckDB fast
+        # path serves every click (was 1 cached parse per stamp; pre-D3, 1 PER
+        # click). Fails against the pre-fix route (parses == 1).
+        assert parses["n"] == 0
+        # The fast path serves byte-identical pages (sort + derived cols intact).
         assert page1["rows"] == full["rows"][0:2]
         assert page2["rows"] == full["rows"][2:4]
         assert full["total"] == 4

@@ -90,7 +90,7 @@ from brutex.data.coverage_ledger import (
     CoverageRecord,
     classify_cell,
 )
-from brutex.data.errors import StoreWriteDeadlineExceeded
+from brutex.data.errors import MarketHoursHalt, StoreWriteDeadlineExceeded
 from brutex.data.registry_store import RegistryStore
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import (
@@ -613,6 +613,7 @@ def pull_expiries_contracts(
     today: date | None = None,
     run_id: str = DEFAULT_METADATA_RUN_ID,
     form_preference: SymbolFormPreference | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> MetadataPullReport:
     """Enumerate + PERSIST F&O expiries + contracts for *instruments* — NO candles.
 
@@ -808,7 +809,14 @@ PersistentSymbolFormPreference`; ``None`` (the default — every existing
         *underlying* (``preference_key``), never the queried spelling form, so the
         learned winner is shared with the candle phase (DEC-FORM-WINNER-PERSIST-001).
         A canonical symbol carries one form → exactly one call, byte-unchanged.
+
+        Market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001): consulted FIRST — a
+        metadata phase that CROSSES 08:45 IST raises ``MarketHoursHalt`` before this
+        cell's ``get_expiries`` vendor call, so no metadata storm leaks into the NSE
+        trading window; ``run_two_phase`` re-raises it as a pull-wide global stop.
         """
+        if market_closed is not None and market_closed():
+            raise MarketHoursHalt()
         exchange, underlying, year = cell
         forms = forms_by_key.get((exchange, underlying), (underlying,))
         expiries = _first_nonempty_over_forms(
@@ -936,7 +944,13 @@ PersistentSymbolFormPreference`; ``None`` (the default — every existing
         always the PRIMARY (Phase-1) key, so the registry stays keyed consistently
         regardless of which form answered the vendor — and the ``&``-form memory keys
         on the SAME primary (``preference_key``; DEC-FORM-WINNER-PERSIST-001).
+
+        Market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001): consulted FIRST — a
+        Phase-2 job that runs after the clock crosses 08:45 IST raises
+        ``MarketHoursHalt`` before its ``get_contracts`` vendor call.
         """
+        if market_closed is not None and market_closed():
+            raise MarketHoursHalt()
         nonlocal contracts_persisted
         exchange, underlying, expiry = job
         forms = forms_by_key.get((exchange, underlying), (underlying,))

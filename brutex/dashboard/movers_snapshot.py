@@ -79,6 +79,7 @@ __all__ = [
     "PrevDayBaseline",
     "ScreenInstrument",
     "SpotCandidates",
+    "asof_through_label",
     "build_snapshot_payload",
     "compute_snapshot",
     "compute_spot_candidates",
@@ -92,6 +93,7 @@ __all__ = [
     "parse_snapshot_date",
     "pending_asset_payload",
     "prev_baseline_provenance",
+    "resolve_asof_cutoff",
     "resolve_prev_close",
     "run_movers_snapshot",
     "session_bar_times",
@@ -538,6 +540,7 @@ def build_snapshot_payload(
     resampled_reads: int = 0,
     latest_time: str | None = None,
     underlying_class: str | None = None,
+    resolved_through: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -569,6 +572,14 @@ def build_snapshot_payload(
     explicit *time*, a daily interval, or an empty lake — the frontend then
     renders a plain "latest" label. It NEVER affects the ranked numbers (the cut
     is unchanged); ``echo == cut`` in value by construction.
+
+    *resolved_through* is the ADDITIVE display-only provenance echoed as
+    ``asof_through`` (``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001``): when an explicit
+    bucket-ANCHOR *time* was resolved FORWARD to the completed bucket's final
+    minute (:func:`asof_through_label`), it is that ``"HH:MM"`` and the note
+    reads "``HH:MM`` bucket · through ``HH:MM``"; ``None`` (the default) for a
+    daily / whole-day / TF-1minute / non-anchor coordinate keeps the payload +
+    note byte-identical to the pre-fix wire.
     """
     floor = normalize_min_volume(min_volume)
     # DEC-MOVERS-UNDERLYING-CLASS-001: RANK-time `All | Indices | Stocks` filter over
@@ -610,6 +621,11 @@ def build_snapshot_payload(
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the previous day's close, volume is the fresh session."
+            + (
+                f" {time} bucket · through {resolved_through}."
+                if resolved_through is not None and time
+                else ""
+            )
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
             + class_note
         )
@@ -624,6 +640,7 @@ def build_snapshot_payload(
         "stored_reads": stored_reads,
         "resampled_reads": resampled_reads,
         "latest_time": latest_time,
+        "asof_through": resolved_through,
         "note": note,
         **class_echo(wanted_class, excluded_unclassified),
         **ranked,
@@ -697,6 +714,79 @@ def _cutoff_minute(time_str: str | None) -> int | None:
         return int(hh) * 60 + int(mm)
     except ValueError as exc:
         raise ValueError(f"malformed time {time_str!r} — expected HH:MM") from exc
+
+
+def resolve_asof_cutoff(interval: str, time: str | None) -> int | None:
+    """Resolve the EFFECTIVE as-of minute-of-day cutoff for a snapshot coordinate.
+
+    THE one COMMON as-of resolution seam every ``/movers`` tab shares
+    (spot / futures / options — CLAUDE.md §11 COMMON), replacing the three
+    copy-pasted ``None if daily else _cutoff_minute(time)`` computations.
+
+    ``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001`` — the explicit-bucket-time fix. The
+    frontend "time" dropdown offers the 09:15-anchored bucket-ANCHOR grid
+    (:func:`session_bar_times`), so a picked ``HH:MM`` names a bucket's OPEN
+    minute. Cutting the raw 1-minute frame at that anchor kept only the FIRST
+    minute of the bucket → a PARTIAL forming bucket whose LTP is the
+    bucket-open minute's close, NOT the completed bucket's close (the operator
+    repro: NIFTYIT 2026-07-07, 3-minute @ 15:27 showed ₹27,932.80, not the
+    completed 15:27–15:29 bucket close ₹27,940.85 = the broker's). This seam
+    resolves an anchor pick FORWARD to the bucket's FINAL minute so the selected
+    candle IS the completed candle:
+
+    * daily / unknown interval, or blank *time* → ``None`` (whole-day cut,
+      byte-identical to the pre-fix and the ``latest`` default —
+      ``DEC-MOVERS-ASOF-LATEST-DEFAULT-001``);
+    * an explicit *time* that lands on a bucket ANCHOR of *interval*'s
+      09:15-grid → ``min(anchor + minutes - 1, _SESSION_CLOSE_MIN - 1)`` (the
+      bucket's final minute, clamped to the session's last minute 15:29);
+      TF = 1-minute has ``minutes == 1`` so ``anchor == end`` (identity —
+      byte-unchanged);
+    * an explicit *time* that is NOT a grid anchor (a hand-crafted query — the
+      dropdown never emits one) → the raw picked minute (the pre-fix partial
+      cut, honest for a genuine mid-bucket as-of).
+
+    The ``<= cutoff`` filter (:func:`filter_to_ist_minute`) that consumes this
+    naturally caps at the day's latest available minute (no bar past the bucket
+    end exists to include), so the resolved cut never leaks a minute past the
+    completed bucket — NO look-ahead (Golden Rule #1).
+
+    Raises :class:`ValueError` on a malformed *time* (propagated from
+    :func:`_cutoff_minute`; the route maps it to a 400).
+    """
+    minutes = interval_minutes(interval)
+    if minutes is None or minutes >= _DAILY_MIN_FLOOR:
+        return None
+    raw = _cutoff_minute(time)
+    if raw is None:
+        return None
+    if _SESSION_OPEN_MIN <= raw < _SESSION_CLOSE_MIN and (raw - _SESSION_OPEN_MIN) % minutes == 0:
+        return min(raw + minutes - 1, _SESSION_CLOSE_MIN - 1)
+    return raw
+
+
+def asof_through_label(interval: str, time: str | None) -> str | None:
+    """The resolved bucket-END ``HH:MM`` when an explicit anchor pick was extended, else ``None``.
+
+    Display-only provenance (``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001``): returns
+    the ``HH:MM`` of :func:`resolve_asof_cutoff` ONLY when it resolved an
+    explicit anchor pick FORWARD past the picked minute (a coarse-TF bucket) —
+    so the note can honestly read "picked HH:MM · through HH:MM". Returns
+    ``None`` for the whole-day / latest cut, a daily interval, TF = 1-minute
+    (anchor == end), and a non-anchor pick (no extension) — every case whose
+    payload/note stays byte-identical to the pre-fix wire.
+
+    Pure + O(1). ``time`` is guaranteed valid whenever :func:`resolve_asof_cutoff`
+    returns non-``None`` (it parses *time* via :func:`_cutoff_minute` first), so
+    the second parse here never raises for a resolved coordinate.
+    """
+    resolved = resolve_asof_cutoff(interval, time)
+    if resolved is None:
+        return None
+    raw = _cutoff_minute(time)
+    if raw is None or resolved == raw:
+        return None
+    return minute_to_hhmm(resolved)
 
 
 def _row_to_bar(row: Mapping[str, Any]) -> CandleBar:
@@ -1594,7 +1684,10 @@ def compute_spot_candidates(
         return SpotCandidates(snapshots=(), skipped=0, date=date_str)
 
     is_daily = minutes >= _DAILY_MIN_FLOOR
-    cutoff_min = None if is_daily else _cutoff_minute(time)
+    # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001: the ONE COMMON as-of seam — an explicit
+    # bucket-anchor pick resolves FORWARD to the bucket's final minute (the
+    # completed candle), daily/blank stays whole-day, TF=1minute is identity.
+    cutoff_min = resolve_asof_cutoff(interval, time)
     resolved_names = names or {}
     # A daily snapshot reads the `1day` partitions directly (the `1day` series is
     # DERIVED from the fetched 1-minute — DEC-1MINUTE-ONLY-DERIVE-1DAY-001); an

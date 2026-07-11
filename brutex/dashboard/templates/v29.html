@@ -3303,38 +3303,32 @@
     // only; backend payloads are frozen (no generation field added).
     let lastFunnelPayload = '';
 
-    async function pollState() {
-      // Hidden-tab pause (DEC-DASHBOARD-UX-ANIMATE-001): a background tab
-      // holds no socket open for this poll; visibilitychange below fires an
-      // immediate refresh tick on return. Pure scheduling — the skip-render
-      // memo + bound-field semantics are unchanged.
-      if (document.hidden) return;
-      try {
-        const res = await fetch('/api/v1/state');
-        if (!res.ok) return;  // server hiccup; next tick retries
-        const snap = await res.json();
-        // Sweep funnel may be null when no sweep has started yet —
-        // the honest em-dash placeholders stay in that case (the manifest
-        // fill in bx-oneclick.js covers the completed-run view — C-M2).
-        const funnel = snap.sweep_funnel;
-        if (!funnel) return;
-        const payload = JSON.stringify(funnel);
-        if (payload === lastFunnelPayload) return;  // unchanged → skip render
-        lastFunnelPayload = payload;
-        stateBoundEls.forEach(function (el) {
-          const key = el.getAttribute('data-bind');
-          if (funnel[key] !== undefined && funnel[key] !== null) {
-            el.textContent = formatNumber(funnel[key]);
-          }
-        });
-        // C-M2 funnel write precedence: the LIVE writer stamps its
-        // provenance beside the funnel (bx-oneclick's manifest fill labels
-        // the completed-run side) — two sources never interleave silently.
-        const prov = document.getElementById('ocFunnelProvenance');
-        if (prov && window.BXOneclick) {
-          prov.textContent = 'funnel source: ' + window.BXOneclick.funnelProvenance('live', funnel.sweep_id || '');
+    // Render one /api/v1/state snapshot (the fetch/scheduling moved onto the
+    // shared BXPoll core below — DEC-FRONTEND-LATENCY-HARDENING-001,
+    // MIGRATION.md #1720; the skip-render memo + bound-field semantics are
+    // byte-identical to the old pollState body).
+    function renderStateSnap(snap) {
+      // Sweep funnel may be null when no sweep has started yet —
+      // the honest em-dash placeholders stay in that case (the manifest
+      // fill in bx-oneclick.js covers the completed-run view — C-M2).
+      const funnel = snap.sweep_funnel;
+      if (!funnel) return;
+      const payload = JSON.stringify(funnel);
+      if (payload === lastFunnelPayload) return;  // unchanged → skip render
+      lastFunnelPayload = payload;
+      stateBoundEls.forEach(function (el) {
+        const key = el.getAttribute('data-bind');
+        if (funnel[key] !== undefined && funnel[key] !== null) {
+          el.textContent = formatNumber(funnel[key]);
         }
-      } catch (e) { /* network blip; next tick retries */ }
+      });
+      // C-M2 funnel write precedence: the LIVE writer stamps its
+      // provenance beside the funnel (bx-oneclick's manifest fill labels
+      // the completed-run side) — two sources never interleave silently.
+      const prov = document.getElementById('ocFunnelProvenance');
+      if (prov && window.BXOneclick) {
+        prov.textContent = 'funnel source: ' + window.BXOneclick.funnelProvenance('live', funnel.sweep_id || '');
+      }
     }
 
     // Cadence per §6.0: 2s while running (caller can adjust by reading
@@ -3343,37 +3337,52 @@
     // Skip when offline / file:// — the mockup is served standalone
     // from the docs folder for design review; the poller only matters
     // when the file is served by the FastAPI app on 127.0.0.1:9080.
+    // Scheduling rides the ONE shared BXPoll discipline core (bx-poll.js —
+    // hidden-tab guard, one-in-flight chain, 10 s fetch abort, capped
+    // 3 s→30 s failure backoff, visibilitychange catch-up); the poller
+    // starts at DOMContentLoaded, by which every deferred script has
+    // executed. bx-poll.js failing to load degrades to the legacy guarded
+    // interval — the funnel never goes pollerless.
     if (window.location.protocol !== 'file:') {
-      pollState();  // first call immediate so the page is fresh on load
-      setInterval(pollState, 2000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) pollState(); });
+      const startStatePolling = () => {
+        if (window.BXPoll) {
+          window.BXPoll.createPoller({
+            url: '/api/v1/state',
+            pollMs: 2000,
+            onData: renderStateSnap
+          }).start();
+        } else {
+          const legacyTick = async () => {
+            if (document.hidden) return;
+            try {
+              const res = await fetch('/api/v1/state');
+              if (!res.ok) return;  // server hiccup; next tick retries
+              renderStateSnap(await res.json());
+            } catch (e) { /* network blip; next tick retries */ }
+          };
+          legacyTick();
+          setInterval(legacyTick, 2000);
+          document.addEventListener('visibilitychange', () => { if (!document.hidden) legacyTick(); });
+        }
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startStatePolling);
+      } else {
+        startStatePolling();
+      }
     }
   })();
 
-  // Poll hygiene (DEC-DASHBOARD-POLL-HYGIENE-002 — the MAJOR-12 follow-up
-  // re-homed from /reports; MIGRATION.md #1623's dropped-as-superseded note):
-  // the two sweep pollers below ride the COMMON bx-poll.js core directly —
-  // BXPoll.fetchJson (the abort timer stays ARMED through the BODY read, so
-  // a headers-then-stalled-body response throws instead of hanging r.json()
-  // forever; a non-ok status THROWS) + BXPoll.backoffDelayMs (quick retries
-  // then 3 s→30 s capped doubling). bx-poll.js is a deferred script:
-  // defer guarantees BXPoll is defined before any INTERVAL tick or click
-  // callback fires — the ONE exception is the parse-time immediate kickoff
-  // below (this classic inline script runs DURING parsing, BEFORE deferred
-  // scripts execute), which is therefore DOMContentLoaded-guarded. No
-  // inline copy of the backoff law exists here (Golden Rule #11). NEVER
-  // a give-up: the delay is finite and the interval keeps ticking — backoff
-  // is skip-N-ticks (a nextAllowedTs gate at the top of each poller), the
-  // DEC-PULL-UI-STALENESS-001 posture. Each poller also carries a
-  // generation guard (the gbPollGen precedent) so a visibilitychange
-  // catch-up or a slower-than-cadence response never repaints stale
-  // progress out of order.
-
-  // Live sweep-progress poller (DEC-SWEEP-WIRE-GA-001) — fetches the dedicated
-  // /api/v1/sweep-progress route every 2s and fills every [data-sweep="<field>"]
-  // element. Idle until the supervisor's first snapshot; the panel un-hides once
-  // a sweep is running or done. HONEST envelope: rate/percent are at the grid
-  // TUPLE grain (the supervised unit), not per-mask.
+  // Live sweep-progress renderer (DEC-SWEEP-WIRE-GA-001) — fills every
+  // [data-sweep="<field>"] element. Idle until the supervisor's first
+  // snapshot; the panel un-hides once a sweep is running or done. HONEST
+  // envelope: rate/percent are at the grid TUPLE grain (the supervised
+  // unit), not per-mask. Since DEC-FRONTEND-LATENCY-HARDENING-001
+  // (MIGRATION.md #1720) this block owns NO timer: it SUBSCRIBES to the ONE
+  // /api/v1/sweep-progress poller (bx-oneclick.js progressPoller, the
+  // BXPoll-disciplined 3 s consumer) — the former second 2 s setInterval on
+  // the same endpoint is gone (measured BEFORE: 99 sweep-progress requests
+  // per idle 120 s = the two pollers summed).
   (function () {
     function fmtEta(secs) {
       if (secs === null || secs === undefined) return '—';
@@ -3393,70 +3402,38 @@
     // tick). CLIENT-side compare only; backend payloads are frozen.
     const sweepBoundEls = document.querySelectorAll('[data-sweep]');
     let lastSweepPayload = '';
-    // Backoff state (DEC-DASHBOARD-POLL-HYGIENE-002): counted failures gate
-    // the next tick via nextAllowedTs — skip-N-ticks on the fixed interval,
-    // never a give-up, never a re-armed timer. The generation counter drops
-    // a superseded in-flight response (never an out-of-order repaint).
-    let sweepProgressFailures = 0;
-    let sweepProgressNextTs = 0;
-    let sweepProgressGen = 0;
-    async function pollSweepProgress() {
-      // Hidden-tab pause — see pollState; visibilitychange refreshes on return.
-      if (document.hidden) return;
-      if (Date.now() < sweepProgressNextTs) return;  // backoff: skip this tick
-      const gen = ++sweepProgressGen;  // stale-response guard (gbPollGen precedent)
-      try {
-        // Bounded through the BODY read via the COMMON core; a non-ok status
-        // THROWS — every failure mode funnels into the counted catch below
-        // and never settles state (DEC-DASHBOARD-POLL-HYGIENE-002).
-        const sp = await window.BXPoll.fetchJson(
-          '/api/v1/sweep-progress', window.BXPoll.DEFAULTS.FETCH_TIMEOUT_MS);
-        if (gen !== sweepProgressGen) return;  // superseded by a newer poll
-        sweepProgressFailures = 0; sweepProgressNextTs = 0;  // recovered
-        // Heartbeat hook: the hero's sweep slot rides THIS fetch — zero extra
-        // sockets. Fires before the idle-return so "idle" renders honestly.
-        if (window.__bxHbSweep) window.__bxHbSweep(sp);
-        if (!sp || sp.state === 'idle') return;  // nothing running yet
-        const panel = document.getElementById('sweepProgressPanel');
-        // Un-hide BEFORE the skip gate so the first running snapshot always
-        // reveals the panel (re-assigning hidden=false is a no-op after that).
-        if (panel) panel.hidden = false;
-        const payload = JSON.stringify(sp);
-        if (payload === lastSweepPayload) return;  // unchanged → skip render
-        lastSweepPayload = payload;
-        sweepBoundEls.forEach(function (el) {
-          const key = el.getAttribute('data-sweep');
-          let v = sp[key];
-          if (key === 'eta_seconds') v = fmtEta(v);
-          else if (key === 'combos_per_sec') v = fmtRate(v);
-          else if (key === 'percent') v = (v === null || v === undefined) ? '0' : v;
-          el.textContent = (v === null || v === undefined) ? '' : String(v);
-        });
-      } catch (e) {
-        if (gen !== sweepProgressGen) return;  // superseded — do not count/paint
-        // Heartbeat hook (DEC-DASHBOARD-UX-ANIMATE-001): surface the honest
-        // "unreachable — retrying" state; the panel keeps its silent-retry
-        // contract. Counted failure — non-ok status, rejection, abort and
-        // malformed body alike; a later tick retries after the capped
-        // backoff (DEC-DASHBOARD-POLL-HYGIENE-002).
-        if (window.__bxHbSweepErr) window.__bxHbSweepErr(e);
-        sweepProgressFailures += 1;
-        sweepProgressNextTs = Date.now() + window.BXPoll.backoffDelayMs(sweepProgressFailures);
-      }
+    function renderSweepProgress(sp) {
+      // Heartbeat hook: the hero's sweep slot rides the SAME shared poll —
+      // zero extra sockets. Fires before the idle-return so "idle" renders
+      // honestly.
+      if (window.__bxHbSweep) window.__bxHbSweep(sp);
+      if (!sp || sp.state === 'idle') return;  // nothing running yet
+      const panel = document.getElementById('sweepProgressPanel');
+      // Un-hide BEFORE the skip gate so the first running snapshot always
+      // reveals the panel (re-assigning hidden=false is a no-op after that).
+      if (panel) panel.hidden = false;
+      const payload = JSON.stringify(sp);
+      if (payload === lastSweepPayload) return;  // unchanged → skip render
+      lastSweepPayload = payload;
+      sweepBoundEls.forEach(function (el) {
+        const key = el.getAttribute('data-sweep');
+        let v = sp[key];
+        if (key === 'eta_seconds') v = fmtEta(v);
+        else if (key === 'combos_per_sec') v = fmtRate(v);
+        else if (key === 'percent') v = (v === null || v === undefined) ? '0' : v;
+        el.textContent = (v === null || v === undefined) ? '' : String(v);
+      });
     }
     if (window.location.protocol !== 'file:') {
-      // Immediate first poll — guarded (DEC-DASHBOARD-POLL-HYGIENE-002
-      // round 2): this classic inline script executes DURING parsing,
-      // BEFORE the deferred bx-poll.js, so a bare synchronous kickoff here
-      // would TypeError on window.BXPoll (and blip a spurious
-      // __bxHbSweepErr) on every fresh load. Defer scripts complete before
-      // DOMContentLoaded, so the deferred kickoff still paints promptly;
-      // interval ticks + click callbacks fire post-load and need no guard.
-      if (window.BXPoll) pollSweepProgress(); else document.addEventListener('DOMContentLoaded', pollSweepProgress);
-      setInterval(pollSweepProgress, 2000);
-      // Catch-up on tab return — clears the backoff gate so the return always
-      // reads fresh (DEC-DASHBOARD-POLL-HYGIENE-002).
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) { sweepProgressNextTs = 0; pollSweepProgress(); } });
+      // Subscribe to the ONE shared sweep-progress poller (bx-oneclick.js
+      // reads these arrays at CALL time, so registering before the deferred
+      // file executes is safe). The failure twin surfaces the honest
+      // "unreachable — retrying" heartbeat state; BXPoll's hidden guard +
+      // backoff + visibilitychange catch-up cover this renderer for free.
+      (window.__bxSweepProgressSubs = window.__bxSweepProgressSubs || []).push(renderSweepProgress);
+      (window.__bxSweepProgressFailSubs = window.__bxSweepProgressFailSubs || []).push(function (failures) {
+        if (window.__bxHbSweepErr) window.__bxHbSweepErr(failures);
+      });
     }
   })();
 
@@ -3464,9 +3441,10 @@
   // Live system-heartbeat hero: three async slots, each resolving skeleton →
   // data / honest idle / honest "unreachable — retrying". All DOM writes go
   // through textContent (zero innerHTML sinks). The sweep slot rides the
-  // existing /api/v1/sweep-progress poller via the window.__bxHbSweep hooks;
-  // pull-rate + liveproof poll on their own gentle cadences (5 s / 10 s),
-  // paused while the tab is hidden.
+  // shared /api/v1/sweep-progress poller via the window.__bxHbSweep hooks;
+  // the pull-rate + liveproof slots ride the site-wide widgets' OWN polls
+  // via the __bxPullRateSubs / __bxLiveproofSubs fan-outs
+  // (DEC-FRONTEND-LATENCY-HARDENING-001) — this hero owns ZERO timers.
   (function () {
     const hb = document.getElementById('bxHeartbeat');
     if (!hb) return;
@@ -3529,30 +3507,29 @@
       setSlot('sweep', 'bad', 'sweep feed unreachable — retrying', 'the 2 s poller keeps retrying automatically');
     };
 
-    // ── pull slot: /api/v1/pull/rate every 5 s ──
-    async function pollPull() {
-      if (document.hidden) return;
-      try {
-        const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/pull/rate', 10000) : fetch('/api/v1/pull/rate'));
-        if (!r.ok) { setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 5 s'); return; }
-        const d = await r.json();
-        const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
-        if (state === 'flowing') {
-          setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
-            'pull active · measured completed rate');
-        } else if (state === 'stalled') {
-          setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
-        } else if (state === 'done') {
-          setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
-        } else {
-          setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
-        }
-      } catch (e) {
-        setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'retries every 5 s');
+    // ── pull slot: fed by the site-wide bx-rate-monitor.js widget's ONE
+    //    /api/v1/pull/rate poll via the __bxPullRateSubs fan-out
+    //    (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720) — the
+    //    former second 5 s setInterval on the same endpoint is gone
+    //    (measured BEFORE: 63 pull/rate requests per idle 120 s = the two
+    //    pollers summed). ──
+    function renderHbPull(d) {
+      const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
+      if (state === 'flowing') {
+        setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
+          'pull active · measured completed rate');
+      } else if (state === 'stalled') {
+        setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
+      } else if (state === 'done') {
+        setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
+      } else {
+        setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
       }
     }
 
-    // ── proof slot: /api/v1/liveproof every 10 s ──
+    // ── proof slot: fed by the site-wide bx-liveproof.js widget's ONE
+    //    /api/v1/liveproof poll via the __bxLiveproofSubs fan-out (same law:
+    //    the former second 10 s setInterval is gone). ──
     const KIND_TONE = { pass: 'ok', na: 'idle', warn: 'warn', fail: 'bad', error: 'bad' };
     const KIND_RANK = { ok: 0, idle: 1, warn: 2, bad: 3 };
     function verdictTone(block) {
@@ -3560,36 +3537,36 @@
       if (!v) return null;
       return KIND_TONE[v.kind] || 'warn';
     }
-    async function pollProof() {
-      if (document.hidden) return;
-      try {
-        const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/liveproof', 10000) : fetch('/api/v1/liveproof'));
-        if (!r.ok) { setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 10 s'); return; }
-        const d = await r.json();
-        const pre = verdictTone(d && d.preflight);
-        const prb = verdictTone(d && d.probes);
-        if (pre === null && prb === null) {
-          setSlot('proof', 'idle', 'not yet run', 'preflight + probes run around the first real pull');
-          return;
-        }
-        const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
-        const head = (d.preflight && d.preflight.verdict && d.preflight.verdict.headline) ||
-                     (d.probes && d.probes.verdict && d.probes.verdict.headline) || '';
-        if (worst === 'ok') setSlot('proof', 'ok', 'all checks pass', head);
-        else if (worst === 'idle') setSlot('proof', 'idle', 'not applicable', head);
-        else if (worst === 'warn') setSlot('proof', 'warn', 'checks degraded', head);
-        else setSlot('proof', 'bad', 'checks FAILING', head || 'see the live-proof pill for the failing stages');
-      } catch (e) {
-        setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'retries every 10 s');
+    function renderHbProof(d) {
+      const pre = verdictTone(d && d.preflight);
+      const prb = verdictTone(d && d.probes);
+      if (pre === null && prb === null) {
+        setSlot('proof', 'idle', 'not yet run', 'preflight + probes run around the first real pull');
+        return;
       }
+      const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
+      const head = (d.preflight && d.preflight.verdict && d.preflight.verdict.headline) ||
+                   (d.probes && d.probes.verdict && d.probes.verdict.headline) || '';
+      if (worst === 'ok') setSlot('proof', 'ok', 'all checks pass', head);
+      else if (worst === 'idle') setSlot('proof', 'idle', 'not applicable', head);
+      else if (worst === 'warn') setSlot('proof', 'warn', 'checks degraded', head);
+      else setSlot('proof', 'bad', 'checks FAILING', head || 'see the live-proof pill for the failing stages');
     }
 
     if (window.location.protocol !== 'file:') {
-      pollPull();
-      pollProof();
-      setInterval(pollPull, 5000);
-      setInterval(pollProof, 10000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollPull(); pollProof(); } });
+      // Both slots SUBSCRIBE to the widgets' own polls (the fan-out arrays
+      // are read at call time inside bx-rate-monitor.js / bx-liveproof.js,
+      // so registering before those deferred files execute is safe). The
+      // widgets own the hidden guard, 10 s fetch abort, capped 3 s→30 s
+      // backoff and visibilitychange catch-up — this page adds NO timer.
+      (window.__bxPullRateSubs = window.__bxPullRateSubs || []).push(renderHbPull);
+      (window.__bxPullRateFailSubs = window.__bxPullRateFailSubs || []).push(function () {
+        setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'rides the shared pull-rate widget poll (backoff capped at 30 s)');
+      });
+      (window.__bxLiveproofSubs = window.__bxLiveproofSubs || []).push(renderHbProof);
+      (window.__bxLiveproofFailSubs = window.__bxLiveproofFailSubs || []).push(function () {
+        setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'rides the shared live-proof widget poll (backoff capped at 30 s)');
+      });
     } else {
       // Standalone design review (file://): no endpoints exist — resolve the
       // skeletons to an honest static note instead of infinite shimmer.
@@ -3609,7 +3586,15 @@
     const sweepBar = document.getElementById('sweep-bar');
     const sweepFill = document.getElementById('sweep-bar-fill');
     if (!sweepBtn || !sweepMsg) return;
-    let sweepPoll = null;
+    // Watching flag (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720):
+    // the former THIRD /api/v1/sweep-progress poller (a 1.2 s setInterval with
+    // no hidden guard / backoff / fetch timeout, armed on the Run click) is
+    // replaced by a SUBSCRIPTION to the ONE shared bx-oneclick progressPoller
+    // (BXPoll-disciplined, 3 s). The Run click flips `watching` on + fires an
+    // immediate shared pollNow(); the terminal snapshot flips it off. The
+    // progress bar therefore updates at the shared 3 s cadence (was 1.2 s) —
+    // an accepted trade for one-poller-per-endpoint.
+    let watching = false;
 
     function renderSweep(p) {
       const pct = Math.max(0, Math.min(100, p.percent || 0));
@@ -3622,42 +3607,21 @@
         ' · ' + rate + ' combos/sec';
     }
 
-    // Poll hygiene (DEC-DASHBOARD-POLL-HYGIENE-002 — the MAJOR-12 follow-up
-    // re-homed here from /reports by DEC-OPERATOR-PAGE-REAL-001): hidden-tab
-    // guard + counted-failure capped backoff (skip-N-ticks on the fixed
-    // 1.2 s interval — NEVER a give-up; the fetch rides the COMMON
-    // BXPoll.fetchJson, bounded through the BODY read, so a
-    // headers-then-stalled-body response aborts+counts instead of hanging
-    // the poll with the Run button disabled forever; a non-ok/malformed
-    // poll THROWS — counted, never rendered, never settles the terminal ✅
-    // state) + a generation guard + the visibilitychange catch-up below.
-    let runSweepFailures = 0;
-    let runSweepNextTs = 0;
-    let runSweepGen = 0;
-    async function pollRunSweep() {
-      // Hidden-tab pause — see pollState; visibilitychange refreshes on return.
-      if (document.hidden) return;
-      if (Date.now() < runSweepNextTs) return;  // backoff: skip this tick
-      const gen = ++runSweepGen;  // stale-response guard (gbPollGen precedent)
-      try {
-        const p = await window.BXPoll.fetchJson(
-          '/api/v1/sweep-progress', window.BXPoll.DEFAULTS.FETCH_TIMEOUT_MS);
-        if (gen !== runSweepGen) return;  // superseded by a newer poll
-        runSweepFailures = 0; runSweepNextTs = 0;  // recovered
-        renderSweep(p);
-        if (!p.running && p.state !== 'idle') {
-          clearInterval(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
-          sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
-            ' survivor(s). The report above refreshes from the new run artifacts.';
-        }
-      } catch (e) {
-        if (gen !== runSweepGen) return;  // superseded — do not count/paint
-        // Counted failure — the poll keeps running (capped backoff, no stop).
-        runSweepFailures += 1;
-        runSweepNextTs = Date.now() + window.BXPoll.backoffDelayMs(runSweepFailures);
-        sweepMsg.textContent = 'Could not read sweep progress (retrying): ' + e;
+    function onRunSweepProgress(p) {
+      if (!watching || !p) return;
+      renderSweep(p);
+      if (!p.running && p.state !== 'idle') {
+        watching = false; sweepBtn.disabled = false;
+        sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
+          ' survivor(s). The report above refreshes from the new run artifacts.';
       }
     }
+    (window.__bxSweepProgressSubs = window.__bxSweepProgressSubs || []).push(onRunSweepProgress);
+    (window.__bxSweepProgressFailSubs = window.__bxSweepProgressFailSubs || []).push(function (failures) {
+      if (!watching) return;
+      sweepMsg.textContent = 'Could not read sweep progress (poll failure ×' + failures +
+        ') — the shared poller keeps retrying.';
+    });
 
     sweepBtn.onclick = async () => {
       sweepBtn.disabled = true;
@@ -3695,23 +3659,14 @@
         }
         sweepMsg.textContent = 'Sweep started — ' + j.symbols + ' · ' + j.intervals +
           ' · ' + j.start + ' → ' + j.end + '. Watching progress…';
-        if (sweepPoll) clearInterval(sweepPoll);
-        sweepPoll = setInterval(pollRunSweep, 1200);
-        pollRunSweep();
+        watching = true;
+        // Immediate refresh through the ONE shared poller (no second timer).
+        if (window.__bxSweepProgressPollNow) window.__bxSweepProgressPollNow();
       } catch (e) {
         sweepMsg.textContent = 'Sweep request failed: ' + e;
         sweepBtn.disabled = false;
       }
     };
-
-    // Catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-002): an ARMED
-    // run-sweep poll (sweepPoll non-null — a sweep was started from this
-    // page) fires immediately when the tab becomes visible again; the
-    // backoff gate is cleared so the return always reads fresh. No poll is
-    // armed → no fetch (an idle Operator tab stays silent).
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && sweepPoll) { runSweepNextTs = 0; pollRunSweep(); }
-    });
 
     const cascadeBtn = document.getElementById('run-cascade');
     const cascadeMsg = document.getElementById('cascade-msg');
