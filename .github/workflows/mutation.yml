@@ -434,6 +434,7 @@ jobs:
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
+            "brutex/engine/results_rollup.py:tests/unit/test_results_rollup.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do

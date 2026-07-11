@@ -2219,6 +2219,15 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
           fi
+          # DEC-RESULTS-TOPK-ROLLUP-001 (MIGRATION.md #1732): the persisted
+          # /results top-K rollup — the union-superset trim, the V1-V5 serve
+          # ladder, the fenced merge hook + the AuditCursor tail resume.
+          # 100% line+branch on results_rollup.py from its dedicated suite.
+          if compgen -G "tests/unit/test_results_rollup.py" > /dev/null; then
+            pytest --cov=brutex.engine.results_rollup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_results_rollup.py
+          else
+            echo "(brutex.engine.results_rollup test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated
           # unit suite (the package-wide brutex.engine gate above also runs
