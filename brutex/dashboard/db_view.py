@@ -3822,14 +3822,24 @@ def _bad_tick_seed_bar(
     if not page_ts:
         return None
     earliest = min(page_ts)
+    # The same-session bound is an IST-date equality through the COMMON
+    # :data:`_IST_DATE_EXPR` (never a bare ``CAST(... AS DATE)``, which resolves
+    # in the ambient DuckDB session TimeZone and would SPLIT an IST session
+    # across two local dates under e.g. America/New_York — the
+    # DEC-DB-TZ-MONEYNESS-FIXES-001 hazard class; the Python side mirrors it
+    # with an explicit ``astimezone(_IST)``, naive timestamps read as UTC per
+    # the lake contract).
+    earliest_utc = (
+        earliest.replace(tzinfo=UTC) if earliest.tzinfo is None else earliest.astimezone(UTC)
+    )
     window = _execute_parquet_resilient(
         conn,
         base,
-        'SELECT "timestamp", "open", "high", "low", "close" '
+        'SELECT "timestamp", "open", "high", "low", "close" '  # noqa: S608  # nosec B608 - constant expr over read_parquet(?) with bound params
         "FROM read_parquet(?, union_by_name=true) "
-        'WHERE "timestamp" < ? AND CAST("timestamp" AS DATE) = CAST(? AS DATE) '
+        f'WHERE "timestamp" < ? AND {_IST_DATE_EXPR} = ? '
         'ORDER BY "timestamp" DESC LIMIT ?',
-        [earliest, earliest, _BAD_TICK_SEED_WINDOW],
+        [earliest, earliest_utc.astimezone(_IST).date(), _BAD_TICK_SEED_WINDOW],
         source=skip_source,
     )
     if not window:
