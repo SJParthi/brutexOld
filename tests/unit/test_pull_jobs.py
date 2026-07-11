@@ -1790,3 +1790,27 @@ class TestRunningJobKind:
         )
         captured[0]()
         assert job.running_job_kind is None
+
+    def test_last_job_kind_is_retained_between_runs(self) -> None:
+        """DEC-OPERATOR-HEALTH-TRUTH-001: ``last_job_kind`` disambiguates the
+        RETAINED progress snapshot — a finished SWEEP's ``done`` must never be
+        claimed as a pull outcome. Unlike ``running_job_kind`` (None when idle)
+        it reports the LAST start's kind; before the first start it reads the
+        constructor default (pull — the snapshot is then ``idle`` anyway)."""
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+        )
+        assert job.last_job_kind == pull_jobs.JOB_KIND_PULL  # constructor default
+
+        assert job.start(lambda _h: None, total=1, job_kind=pull_jobs.JOB_KIND_SWEEP) is True
+        captured.pop()()  # drain → idle
+        assert job.running_job_kind is None
+        assert job.last_job_kind == pull_jobs.JOB_KIND_SWEEP, (
+            "the finished run's kind is RETAINED alongside the progress snapshot"
+        )
+
+        assert job.start(lambda _h: None, total=1) is True
+        captured.pop()()
+        assert job.last_job_kind == pull_jobs.JOB_KIND_PULL

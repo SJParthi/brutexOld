@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
+_Last updated: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
+the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
+green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
+`/api/v1/pull/rate` payload gains the ADDITIVE `last_pull` OUTCOME block (NEW pure
+`brutex/dashboard/pull_outcome.py` classifying the job slot's RECORDED state +
+the pull-verdict holder, colours via the ONE `verdict_banner.banner_for`
+authority) so a HALTED pull (disk-full / OOM / market-hours / quota / breaker)
+renders its NAMED degraded state, a market-hours deferral its own honest state,
+and green appears ONLY on the classified clean (the unclassified `completed`
+never claims "cleanly"); the formerly-swallowed `failing`/`local` flow states
+render honestly. (2) ONE unified HEALTH HUB — NEW `GET /api/v1/health/hub` +
+`brutex/dashboard/health_hub.py` + the `bx-health-hub.js` BXPoll widget (one
+poller per endpoint, the #1720 law) — folds nightly-chain (`report.json`) ·
+backup-dead-man (the PURE `evaluate_deadman` reused verbatim, read-only) ·
+doctor-daily · mutation · pull lanes green/red from DURABLE LOCAL state; the
+HONESTY LAW: a lane with NO local signal reads the explicit "not wired"
+(doctor/mutation are GitHub-Actions-only, no local artifact), corrupt state
+reads a NAMED `unknown` degrade — NEVER a fabricated green, never a 500. Honest
+O-envelope: TTL-memoised file lanes (one bounded scandir + three tiny JSON reads
+per refresh; never a lake scan). READ-side dashboard/observability only —
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1747.)
+Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
 the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
 pollers consolidate onto ONE BXPoll-disciplined consumer per endpoint (subscriber
 fan-outs added to bx-oneclick.js / bx-rate-monitor.js / bx-liveproof.js; the
@@ -2168,7 +2190,46 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
+- **Active branch:** `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
+  the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
+  heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
+  only "no pull running + a fresh rate tick" (`pull_rate_view.py`) — a HALTED pull (LakeWriteHalt disk_full/OOM ·
+  MarketHoursHalt · quota · vendor-down/mass-empty breaker · any worker failure) showed the SAME green. The
+  `/api/v1/pull/rate` payload gains the ADDITIVE `last_pull` OUTCOME block — NEW pure `brutex/dashboard/pull_outcome.py`
+  classifies the job slot's RECORDED evidence (the `PullProgress` snapshot's state/detail/failed/stalled/wedged, the NEW
+  O(1) `BackgroundPullJob.last_job_kind` so a finished SWEEP is never claimed as a pull outcome, and the last-pull-verdict
+  holder colour-mapped through the ONE `verdict_banner.banner_for` authority — §11 COMMON, grey folds to WARN never green)
+  into the stable vocabulary never_run · running · running_stalled_suspect · wedged · clean · completed (never worded
+  "cleanly") · completed_with_failures · verdict_<kind> · deferred_market_hours · halted_market_hours ·
+  halted_disk_full/oom/lake_write/quota/pool_broken/vendor_down/mass_empty/auth · refused_busy · error · unknown, with
+  `tone` ∈ ok/warn/bad/idle = the heartbeat setSlot palette 1:1 (the halt names + the deferral prefix are DRIFT-PINNED
+  against the REAL exception classes + a REAL in-window `start()` refusal); v29's `renderHbPull` joins the block — a
+  degraded LAST outcome stays visible after the tick ages to idle, and the formerly-swallowed `failing`/`local` states
+  render honestly (red FAILING / amber local). The frozen pull-rate key-set pin is consciously extended (`_LAST_PULL_KEYS`).
+  PART 2 (the unified health hub): NEW `GET /api/v1/health/hub` (threadpool-offloaded) + `brutex/dashboard/health_hub.py`
+  fold five lanes from DURABLE LOCAL state — pull (the Part-1 probe, never TTL-delayed) · nightly (the newest
+  `<results>/sweeps/nightly/<id>/report.json` the R9 chain writes: ok→green, >30 h→WARN overdue [stated policy],
+  suspect→WARN, breaker→RED naming the blocker; corrupt/oversized[1 MiB cap]/schema-drift → NAMED `unknown`, never a
+  500) · backup_deadman (the PURE `brutex.backup.deadman.evaluate_deadman` REUSED VERBATIM, READ-ONLY — never writes the
+  checker sidecar, never alerts; FRESH/RUNNING→green, every alarm verdict→RED; an UNCONFIGURED box reads `not_wired`, not
+  the checker's NEVER_SUCCEEDED — "never installed" ≠ "installed and silent") · doctor_daily + mutation HONESTLY NOT
+  WIRED (GitHub-Actions-only gates, no local verdict artifact — investigated, not guessed). Fold law documented: bad iff
+  any lane bad; else warn iff any warn OR unknown; idle/not_wired neutral but always VISIBLE + counted in the headline.
+  Honest O-envelope: a poll within the 5 s TTL is O(1); a refresh is one bounded scandir (O(retained nightly dirs) names)
+  + three tiny JSON reads — never a lake scan; NOT literal O(1)-total (stated). FRONTEND: NEW `static/bx-health-hub.js` —
+  ONE `BXPoll.createPoller` (the #1720 one-poller-per-endpoint law; NO bare setInterval, negative-pinned), the house
+  `__bxHealthHubSubs`/`__bxHealthHubFailSubs` call-time fan-outs with throwing-subscriber isolation, textContent/
+  createElement-only DOM (zero innerHTML sinks), skip-render on unchanged payloads, honest degraded note when bx-poll.js
+  is missing. HONEST LIMITS: the pull lane covers THIS dashboard process (a CLI pull's bridge carries rate, no outcome —
+  its halt stays Telegram/exit-code visible); the verdict holder is process-local + un-timestamped (THIS run's own
+  `failed` tally outranks it; the `completed*` arms never claim "cleanly"); doctor/mutation stay `not_wired` until a
+  local artifact exists (named follow-up seam). TESTS: `pull_outcome.py` (85/38) + `health_hub.py` (161/32) BOTH 100.00%
+  line+branch on NEW ci.yml standalone gates; 17 route-integration tests drive clean · completed-with-failures ·
+  halted-disk-full/OOM/market-hours/quota · deferred · running · never-run · sweep-done through a REAL BackgroundPullJob
+  + the REAL routes; 16 frontend pins incl. the killed unconditional-green token + node-EXECUTED helper goldens;
+  ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
   the dashboard FRONTEND latency-hardening pack, CLIENT-side only (templates + static JS + tests + docs; ZERO
   route/payload/backend change — byte-stable wire): (Fix 1) the v29 operator page's DUPLICATE pollers consolidate onto
   ONE BXPoll-disciplined consumer per endpoint — bx-oneclick.js's progressPoller fans out to
@@ -5511,7 +5572,20 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/frontend-latency-hardening-r2`
+- **Active feature branch:** `claude/operator-health-truth`
+  (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
+  HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
+  completed cleanly" on `flow_state === 'done'` is KILLED — the pull-rate
+  payload gains the additive `last_pull` OUTCOME block (NEW pure
+  `pull_outcome.py` over the job slot's recorded state + the pull-verdict
+  holder) so a HALTED pull renders its named degraded state and green appears
+  only on the classified clean; plus ONE unified health hub
+  (`GET /api/v1/health/hub` + `health_hub.py` + the bx-health-hub.js BXPoll
+  widget) folding nightly · backup-dead-man · doctor · mutation · pull lanes
+  from durable local state — unwired lanes read the explicit "not wired",
+  never a fabricated green; READ-side only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/frontend-latency-hardening-r2`
   (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the dashboard
   FRONTEND latency-hardening pack: v29 duplicate pollers consolidated onto ONE
   BXPoll-disciplined consumer per endpoint (measured BEFORE: 336 req/120 s idle

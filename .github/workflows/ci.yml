@@ -2270,6 +2270,25 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
           fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the pure
+          # last-pull OUTCOME classifier — a HALTED pull (disk-full /
+          # market-hours / quota / …) must never render the clean-completion
+          # green. 100% line+branch on pull_outcome.py.
+          if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+          else
+            echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
+          # health-hub fold (nightly · backup dead-man · doctor · mutation ·
+          # pull) — unwired lanes read the explicit "not wired", corrupt state
+          # files read NAMED degrades, never a 500 and never a fabricated
+          # green. 100% line+branch on health_hub.py.
+          if compgen -G "tests/unit/test_health_hub.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.health_hub --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_health_hub.py
+          else
+            echo "(brutex.dashboard.health_hub test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated
           # unit suite (the package-wide brutex.engine gate above also runs

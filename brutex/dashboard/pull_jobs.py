@@ -1498,6 +1498,25 @@ class BackgroundPullJob:
             return self._job_kind if self._running else None
 
     @property
+    def last_job_kind(self) -> str:
+        """The MOST-RECENTLY-STARTED job's kind (retained after run end) — O(1).
+
+        DEC-OPERATOR-HEALTH-TRUTH-001: the honest last-pull-outcome projection
+        (:func:`brutex.dashboard.pull_outcome.classify_last_pull_outcome`) must
+        know whether the job slot's retained ``done``/``error`` snapshot belongs
+        to a vendor PULL or to the zero-vendor-call SWEEP sharing the slot — a
+        finished sweep must never be claimed as a pull outcome.  Unlike
+        :attr:`running_job_kind` (``None`` when idle), this reports the kind
+        the LAST :meth:`start` stamped, RETAINED between runs exactly like the
+        progress snapshot it disambiguates; before the first start it reads the
+        constructor default :data:`JOB_KIND_PULL` (the progress state is then
+        ``idle``, which the classifier resolves to ``never_run`` regardless).
+        One lock acquisition, O(1).
+        """
+        with self._lock:
+            return self._job_kind
+
+    @property
     def counters(self) -> CoverageCounters:
         """The incremental coverage counters fed by the write funnel — O(1)."""
         return self._counters
