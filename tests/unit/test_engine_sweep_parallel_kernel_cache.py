@@ -84,6 +84,7 @@ from brutex.engine.sweep_orchestrator import (
     count_sweep_tuples,
     iter_sweep_tuples,
     make_store_for,
+    tuple_store_path,
 )
 from brutex.engine.sweep_progress import SweepProgress
 from brutex.engine.sweep_run import ComboDedup
@@ -425,7 +426,15 @@ class TestWorkerInitKernelCache:
         assert len(cache) == 0
 
     def test_off_constructs_no_cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The OFF arm never builds a cache object (spy-proven zero constructions)."""
+        """The OFF arm never builds a cache object (spy-proven zero constructions)
+        AND actively RESETS stale module globals to ``None`` (rebase-round-10
+        FE-M3 pin: pre-seeding ON-era objects gives the ``else``-arm Nones
+        teeth — severing them would leave the mechanism silently live while
+        the ctx says OFF; the autouse reset fixture alone can never see that)."""
+        # FE-M3 pre-seed: stale ON-era objects the OFF init must clear (built
+        # via the test file's DIRECT import, untouched by the spy patch below).
+        mod._WORKER_KERNEL_CACHE = ResidentKernelCache(capacity=1)
+        mod._WORKER_BARS_MEMO = OrderedDict({("STALE", "1minute"): _BARS})
         calls: list[object] = []
 
         class _Spy:
@@ -1134,6 +1143,77 @@ class TestRunTupleInWorkerKernelCache:
         assert sim_bars[1] is first_bars
         assert kernel_bars[1] is first_bars
         assert sim_bars[1] is not fresh_copy
+
+
+# ───── #1445 store-quarantine × kernel-cache interaction (rebase round 10) ─────
+
+
+class TestWorkerQuarantineWithKernelCache:
+    """The G1 worker store quarantine (#1445) × the per-worker kernel cache.
+
+    The interaction is SOUND by construction — pinned here so it stays so:
+    ``run_one_tuple``'s quarantine retry re-calls the ``_attempt()`` closure
+    INSIDE the same call (``sweep_orchestrator.py`` — ``store_quarantine(...)``
+    then ``summary = _attempt()``), which closes over the SAME ``bars`` (our
+    interned resident) and the SAME ``kernel`` (fetched ONCE, before the first
+    attempt) — never a re-dispatch, never a second ``kernel_cache.get``, never
+    a mixed bars/kernel pairing. Only ``store_for(tuple_)`` is re-called fresh
+    (the quarantine's actual subject is the on-disk trio, which never touches
+    bars). Corollary: telemetry counts the build EXACTLY ONCE across the
+    quarantine + retry lifecycle.
+    """
+
+    def test_quarantined_then_retried_tuple_on_equals_off(self, tmp_path: Path) -> None:
+        """A quarantine-retried tuple against a WARM kernel cache: exactly one
+        QUARANTINE event, exactly ONE hit-count increment (never a per-attempt
+        double count, never a rebuild), and results byte-identical to the
+        no-cache arm — the coordinator-confirmed reachable combined path."""
+        grid = _grid()
+        tuples = list(iter_sweep_tuples(grid))
+        results: dict[str, list[mod.TupleWorkResult]] = {}
+        roots: dict[str, Path] = {}
+        for arm, on in (("off", False), ("on", True)):
+            root = tmp_path / arm / "out"
+            roots[arm] = root
+            ctx = mod._WorkerContext(
+                grid=grid, root=root, worker_kernel_cache=on, worker_kernel_capacity=2
+            )
+            mod._worker_init(ctx)
+            # Dispatch tuples[0] CLEAN first — on the ON arm this WARMS the
+            # cache (build) for the shared (instrument, tf) key.
+            first = mod._run_tuple_in_worker(0, tuples[0], list(_BARS))
+            # Pre-corrupt tuples[1]'s store, then dispatch it: the worker's G1
+            # quarantine + in-frame retry runs against the WARM cache.
+            store = tuple_store_path(root, tuples[1], grid)
+            store.parent.mkdir(parents=True, exist_ok=True)
+            store.write_bytes(b"garbage - not parquet")
+            second = mod._run_tuple_in_worker(1, tuples[1], list(_BARS))
+            results[arm] = [first, second]
+        for arm in ("off", "on"):
+            first, second = results[arm]
+            assert first.summary is not None
+            assert first.quarantine_events == ()
+            assert second.summary is not None  # the retry regenerated cleanly
+            assert second.failed_error is None
+            assert len(second.quarantine_events) == 1  # exactly ONE record
+            dest_rel, reason = second.quarantine_events[0]
+            assert dest_rel.startswith(".quarantine/runtime/")
+            assert "ResultsStoreSchemaError" in reason
+        # Byte-identity: the regenerated store + sidecars + the quarantined
+        # forensic trio form IDENTICAL trees ON vs OFF.
+        assert _tree(roots["off"]) == _tree(roots["on"])
+        assert len(_tree(roots["on"])) > 0
+        # Telemetry: the warm build, then EXACTLY ONE hit increment across the
+        # whole quarantine + retry lifecycle (the kernel is fetched ONCE,
+        # before the first attempt — sweep_orchestrator.py:1061 — and the
+        # in-frame retry at :1108 re-runs the _attempt closure over the SAME
+        # kernel, never a second kernel_cache.get). OFF stamps honest Nones.
+        off_first, off_second = results["off"]
+        assert off_first.worker_pid is None
+        assert off_second.worker_pid is None
+        on_first, on_second = results["on"]
+        assert (on_first.kernel_builds, on_first.kernel_hits) == (1, 0)
+        assert (on_second.kernel_builds, on_second.kernel_hits) == (1, 1)
 
 
 # ──────────── parent telemetry fold (fix-round-2, refuter-3 F3) ────────────
