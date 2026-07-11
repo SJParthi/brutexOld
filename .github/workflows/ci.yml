@@ -3239,11 +3239,19 @@ jobs:
   # not hours (the R38 "2-day run in miniature" budget claim).
   # Budget raised 15 -> 30 (DEC-CI-SWEEP-REHEARSAL-TIMEOUT-001, #1765):
   # on PR #1462 (2026-07-11) the rehearsal's 21 tests PASSED
-  # (tuples_failed=0) but the JOB hit the old 15-min cap at 17:48 — a
-  # transient ~37x contention spike on a shared runner, not a sweep
-  # slowdown. The raise gives budget for that transient spike; a real
-  # sweep regression would be fixed in the sweep, not the timeout
-  # (Golden Rule #10).
+  # (tuples_failed=0) but the JOB hit the old 15-min cap at 17:48. That
+  # wall-time was dominated by the job's install + the two from-source
+  # cargo Rust wheel builds (fno-math + trading-core, each with a 3x
+  # network-retry loop) — the flaky, contention-sensitive setup phases
+  # — NOT sweep compute. The sweep-compute leg has its own hard in-test
+  # ceiling `seconds_first < 300.0`
+  # (tests/integration/test_sweep_full_chain_rehearsal.py:255), which
+  # the 21 tests PASSED on #1462 — so the sweep ran in under 5 min even
+  # during the contended run, and this timeout raise CANNOT mask a
+  # sweep regression (a real slowdown trips that 300s assertion and
+  # fails the tests regardless of the job timeout). The raise gives
+  # budget for the setup/build spike; a real sweep regression is fixed
+  # in the sweep, not the timeout (Golden Rule #10).
   # ─────────────────────────────────────────────────────────────────
   sweep-rehearsal:
     name: Sweep full-chain rehearsal (R38)
