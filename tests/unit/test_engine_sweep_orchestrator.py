@@ -1093,14 +1093,21 @@ class TestRunSweepGridAprioriWiring:
     def test_budget_trip_counts_distinctly(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A SweepAprioriBudgetError is counted APART from generic failures."""
+        """A SweepAprioriBudgetError is counted APART from generic failures —
+        by EXACT isinstance, so a LOOK-ALIKE class name is never miscounted
+        (review fix round 1 m8)."""
         from brutex.engine.sweep_run import SweepAprioriBudgetError
+
+        class SweepAprioriBudgetErrorX(SweepComboError):
+            """The impostor: a name-PREFIX collision that must never count."""
 
         monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
         grid = _grid(k_values=[1, 2, 3])
 
         def _fake(grid_: object, tuple_: object, **kwargs: object) -> object:
             k = tuple_.k  # type: ignore[attr-defined]
+            if k == 1:
+                raise SweepAprioriBudgetErrorX("an impostor class name")
             if k == 2:
                 raise SweepAprioriBudgetError("apriori cell 'x': k=2 ... exceeds ...")
             if k == 3:
@@ -1117,7 +1124,7 @@ class TestRunSweepGridAprioriWiring:
                 dedup=_dedup(),
                 audit=audit,
             )
-        assert summary.tuples_failed == 2
+        assert summary.tuples_failed == 3
         assert summary.tuples_failed_apriori_budget == 1  # the k=2 trip ONLY
         complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
         assert complete.payload["tuples_failed_apriori_budget"] == 1

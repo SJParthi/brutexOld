@@ -1332,13 +1332,20 @@ class TestSupervisorAprioriWiring:
     def test_budget_trip_counts_distinctly_beside_generic_failures(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The EXACT-isinstance classifier (review fix round 1 m8): a LOOK-ALIKE
+        class name (``SweepAprioriBudgetErrorX``) is never miscounted."""
         from brutex.engine.sweep_run import SweepAprioriBudgetError
+
+        class SweepAprioriBudgetErrorX(SweepComboError):
+            """The impostor: a name-PREFIX collision that must never count."""
 
         monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
         grid = _grid(k_values=[1, 2, 3])
 
         def _fake(_grid: object, tuple_: object, **_kwargs: object) -> object:
             k = tuple_.k  # type: ignore[attr-defined]
+            if k == 1:
+                raise SweepAprioriBudgetErrorX("an impostor class name")
             if k == 2:
                 raise SweepAprioriBudgetError("apriori cell 'x': k=2 ... exceeds ...")
             if k == 3:
@@ -1346,8 +1353,8 @@ class TestSupervisorAprioriWiring:
             return None
 
         summary, _memos = self._run_with_fake(tmp_path, grid, monkeypatch, _fake)
-        assert summary.tuples_failed == 2
-        assert summary.tuples_failed_apriori_budget == 1
+        assert summary.tuples_failed == 3
+        assert summary.tuples_failed_apriori_budget == 1  # the k=2 trip ONLY
         entries = list(read_entries(tmp_path / "sup.jsonl"))
         complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
         assert complete.payload["tuples_failed_apriori_budget"] == 1

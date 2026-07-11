@@ -829,8 +829,14 @@ def run_supervised_grid(
                     hit_count_memo=hit_count_memo,
                 )
             except (SweepComboError, VixTrioConflictError) as exc:
+                # Local import (review fix round 1 m8): the EXACT class, not a
+                # name-string compare — a look-alike `SweepAprioriBudgetErrorX`
+                # must never count as a budget trip. Function-local like the
+                # generator's own lazy import (no new module-top edge).
+                from brutex.engine.sweep_run import SweepAprioriBudgetError
+
                 tuples_failed += 1
-                if type(exc).__name__ == "SweepAprioriBudgetError":
+                if isinstance(exc, SweepAprioriBudgetError):
                     # The DISTINCT budget-trip counter
                     # (DEC-SWEEP-APRIORI-DEFAULT-001): a trip is
                     # target-invariant — the cell's deeper-k tuples re-trip

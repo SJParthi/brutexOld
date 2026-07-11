@@ -201,8 +201,17 @@ _TRADE_SIM_CHUNK_CELLS: Final[int] = 4 << 20
 #: independent — so memoising them across a cell's k-ladder is identity-free by
 #: construction (memo-on == memo-off bytes, parity-pinned). Beyond this cap the
 #: memo becomes pure PASS-THROUGH (computed values are still returned, just not
-#: retained), bounding the memo at ~48 B/entry × 2^20 ≈ 50 MiB worst case while
-#: keeping every returned count identical.
+#: retained), bounding the memo at ~100 MiB worst case (MEASURED, review fix
+#: round 1 m3 — the earlier "~48 B/entry ≈ 50 MiB" figure ignored the boxed
+#: PyLong keys/values: a full 2^20-entry ``dict[int, int]`` is ~40 MiB of dict
+#: shell + ~60 MiB of PyLong objects). Worst case across the 8-worker parallel
+#: envelope: ~800 MiB — inside the CLAUDE.md §8 48 GB envelope. AXIS-ORDER
+#: caveat (review fix round 1 m6): ``iter_sweep_tuples`` nests proximity /
+#: fib-anchor INSIDE k and both are cell-key determinants, so with
+#: ``|proximities| × |fib_anchors| > 1`` the drivers' single-cell
+#: reset-on-change memo delivers ZERO cross-k reuse (correctness unaffected —
+#: the memo is pure pass-through; a multi-cell memo is a deliberately-deferred
+#: perf follow-up). Every returned count stays identical either way.
 HIT_MEMO_MAX_ENTRIES: Final[int] = 1_048_576
 
 
@@ -1729,6 +1738,11 @@ def run_persisted_sweep(
             min_hits=cfg.min_hits,
             count_hits=_census_count_hits,
             n_bars=len(bar_bits),
+            # The budget resolved ONCE above (review fix round 1 n4) — passing
+            # it forward halves the per-tuple env re-resolve, so a junk
+            # BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS warns once per tuple here,
+            # not twice; the value is identical by construction.
+            max_mask_bars=apriori_max_mask_bars,
             cell_label=subject,
         )
         apriori_generator_ms = round((time.monotonic() - t_gen) * 1000.0, 3)
@@ -1737,14 +1751,18 @@ def run_persisted_sweep(
         # truth is the ``backtested`` tally on the same payload) and no
         # counter call of its own (``count_ms`` null). ``k == 1`` therefore
         # yields exactly ONE row (zero counter calls), matching the module.
-        apriori_levels.append(
-            {
-                "level": cfg.k,
-                "candidates": len(apriori_candidates),
-                "frequent": None,
-                "count_ms": None,
-            }
-        )
+        # ``k == 0`` mirrors the module 1:1 too (review fix round 1 m9): the
+        # frozen generator emits NO census row for the single empty mask, so
+        # this wrapper must not invent one — the levels list stays EMPTY.
+        if cfg.k > 0:
+            apriori_levels.append(
+                {
+                    "level": cfg.k,
+                    "candidates": len(apriori_candidates),
+                    "frequent": None,
+                    "count_ms": None,
+                }
+            )
         mask_source = apriori_candidates
     else:
         mask_source = iter_masks_k_of_bits(cfg.condition_bits, cfg.k)

@@ -3482,6 +3482,24 @@ class TestAprioriCensusArtifact:
         ]
         assert rows[0]["candidates"] == summary.enumerated == 5  # every singleton
 
+    def test_k0_census_emits_no_rows_mirroring_the_module(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``k == 0``: the frozen module emits NO census row for the single
+        empty mask, so the wrapper's levels list stays EMPTY too (review fix
+        round 1 m9 — the wrapper previously invented a target row the module
+        never emits, a census-vs-module divergence)."""
+        pytest.importorskip("polars")
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 1], k=0, min_hits=5)
+        with capture_logs() as logs:
+            summary = _run_sweep(tmp_path, "k0", bars, cfg, digest="abad1deaabad1dea")
+        assert _census_log_rows(logs) == []  # the module emits nothing at k=0
+        artifact = _flush_payload(tmp_path / "k0.jsonl")["apriori"]
+        assert artifact["levels"] == []  # the wrapper mirrors the module 1:1
+        assert summary.enumerated == 1  # the single empty mask
+
     def test_extinct_cell_census_shape(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

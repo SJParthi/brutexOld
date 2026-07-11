@@ -447,6 +447,66 @@ def resolve_stall_min_mask_bars_per_sec(env: dict[str, str] | None = None) -> fl
     )
 
 
+def apriori_tuple_work(*, k: int, n_unique: int, n_bars: int, max_mask_bars: int) -> float:
+    """The capped LADDER-CUMULATIVE ``mask·bar`` work estimate for one apriori tuple.
+
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738, review fix round 1 M1):
+    a target-``k`` apriori tuple walks EVERY level ``1..k`` (each level's
+    candidates are hit-counted before the next frontier builds), so the honest
+    raw estimate is the CUMULATIVE ``Σ_{j=1..k} C(n_unique, j) × n_bars`` — NOT
+    the single-level ``C(n_unique, k) × n_bars``, which COLLAPSES past the
+    binomial peak (``C(60, 60) = 1`` → a deep-k tuple would read as ~free work
+    and fall back to the flat 300 s base bound, re-arming the #1608
+    false-abort + resume-livelock at the grid tail). The estimate is capped at
+    ``k × max_mask_bars`` (each of the ``k`` levels' work is breaker-bounded or
+    the tuple trips — ``sweep_apriori._budget_check`` at every level), keeping
+    the stall bound FINITE at mid-ladder k where the raw cumulative sum
+    explodes (~1e23). Both terms are monotone non-decreasing in ``k``, so the
+    ``min`` is too — the estimate can never fall below a smaller-``k`` tuple's.
+    O(k) ``math.comb`` calls. Used ONLY to size stall/watchdog bounds; never in
+    results.
+
+    Parameters
+    ----------
+    k
+        The tuple's target combo size (``>= 1``).
+    n_unique
+        ``len(set(condition_bits))``.
+    n_bars
+        The tuple's bar-window length.
+    max_mask_bars
+        The resolved per-level mask·bar breaker budget
+        (:func:`brutex.engine.sweep_apriori.resolve_max_mask_bars` — the caller
+        resolves it ONCE per run so a junk env value warns once, not per tuple).
+
+    Returns
+    -------
+    float
+        The capped cumulative ``mask·bar`` work estimate.
+    """
+    raw = float(sum(count_combos(j, n_unique) for j in range(1, k + 1))) * float(n_bars)
+    return min(raw, float(k) * float(max_mask_bars))
+
+
+def apriori_ladder_stall_bound_seconds(*, k: int, n_unique: int, n_bars: int) -> float:
+    """The apriori tuple's work-scaled stall bound in SECONDS (§11 COMMON).
+
+    ``apriori_tuple_work(...) / resolve_stall_min_mask_bars_per_sec()`` — the
+    EXACT bound :meth:`ParallelGridDriver._effective_stall_seconds` derives for
+    the heaviest in-flight tuple, exposed for the CLI's Telegram
+    :class:`~brutex.engine.sweep_watchdog.SweepWatchdog` so a healthy
+    mid-ladder extinction level (legitimately hours of counting between tuple
+    completions) never fires a false CRITICAL "hung sweep" alert
+    (DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 1 m7). Resolves the breaker
+    budget + throughput floor from the environment ONCE per call; the caller
+    floors the result at its own base timeout. O(k).
+    """
+    work = apriori_tuple_work(
+        k=k, n_unique=n_unique, n_bars=n_bars, max_mask_bars=resolve_max_mask_bars()
+    )
+    return work / resolve_stall_min_mask_bars_per_sec()
+
+
 #: The minimum worker count the parallel driver accepts (one core is the
 #: writer-actor, so a pool needs at least one EVAL worker). ``1`` means "run the
 #: sequential path" and is dispatched by the caller, never by this driver.
@@ -841,7 +901,15 @@ _WORKER_CTX: _WorkerContext | None = None
 #: Reset whenever the worker sees a NEW cell key (:func:`hit_memo_cell_key`).
 #: HONEST (Golden Rule #10): the index-dispatched pool interleaves cells
 #: across workers, so the worst case is one frontier ladder per WORKER per
-#: cell — not one per k — a stated residual, never hidden. Identity-free by
+#: cell — not one per k — a stated residual, never hidden. AXIS-ORDER caveat
+#: (review fix round 1 m6): ``iter_sweep_tuples`` nests proximity/fib-anchor
+#: INSIDE k, and both are cell-key determinants — so with
+#: ``|proximities| × |fib_anchors| > 1`` consecutive tuples flip the cell key
+#: every step and this single-cell reset-on-change memo delivers ZERO cross-k
+#: reuse (correctness unaffected — pure pass-through; a multi-cell memo is a
+#: deliberately-deferred perf follow-up, never restructured here). Worst-case
+#: retained size ~100 MiB per worker (see
+#: :data:`brutex.engine.sweep_run.HIT_MEMO_MAX_ENTRIES`). Identity-free by
 #: construction: counts are a pure per-mask function, memo-on == memo-off
 #: bytes (parity-pinned sequential + 2-worker spawn).
 _WORKER_HIT_MEMO: tuple[tuple[Any, ...], dict[int, int]] | None = None
@@ -1081,11 +1149,13 @@ class ParallelGridDriver:
     """
 
     __slots__ = (
+        "_apriori_on",
         "_bars_for",
         "_grid",
         "_guards",
         "_heap",
         "_ingest_audit",
+        "_max_mask_bars",
         "_monotonic",
         "_n_unique",
         "_next_apply",
@@ -1199,6 +1269,14 @@ class ParallelGridDriver:
         #: ``C(n_unique, k)`` over these unique condition bits sizes each tuple's
         #: mask count — the heavy-grid work estimate (DEC-SWEEP-STALL-OOM-GUARDS-001).
         self._n_unique = len(set(grid.condition_bits))
+        #: Apriori mode + the breaker budget, resolved ONCE per driver run
+        #: (DEC-SWEEP-APRIORI-DEFAULT-001, review fix round 1 n4): a driver is
+        #: constructed per grid run, so resolving here keeps a junk
+        #: ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` to ONE loud WARN per run —
+        #: the per-dispatch ``_tuple_work`` re-resolve previously warned
+        #: ~O(tuples) times. The budget is 0 (unread) on the legacy arm.
+        self._apriori_on = apriori_enabled()
+        self._max_mask_bars = resolve_max_mask_bars() if self._apriori_on else 0
         self._monotonic = monotonic
         self._roll_schedule_by_instrument = (
             dict(roll_schedule_by_instrument) if roll_schedule_by_instrument is not None else None
@@ -1230,10 +1308,11 @@ class ParallelGridDriver:
         self._guards.checkpoint.load()
         resume_from = self._guards.checkpoint.next_index
 
-        # Resolved ONCE per parallel run (DEC-SWEEP-APRIORI-DEFAULT-001): gates
-        # the EMIT-ON-apriori START/COMPLETE payload keys — a legacy run's
-        # payloads stay byte-identical (frozen-key-set pinned).
-        apriori_on = apriori_enabled()
+        # Resolved ONCE per parallel run — at driver construction, review fix
+        # round 1 n4 (DEC-SWEEP-APRIORI-DEFAULT-001): gates the EMIT-ON-apriori
+        # START/COMPLETE payload keys — a legacy run's payloads stay
+        # byte-identical (frozen-key-set pinned).
+        apriori_on = self._apriori_on
         self._guards.progress.start(enumerated=total, detail=self._subject)
         start_payload: dict[str, Any] = {
             "sweep_id": sweep_id,
@@ -1254,7 +1333,7 @@ class ParallelGridDriver:
             # consumed by sweep-verify's recorded-mode gate; absence == legacy.
             start_payload["apriori"] = {
                 "enabled": True,
-                "max_mask_bars": resolve_max_mask_bars(),
+                "max_mask_bars": self._max_mask_bars,
             }
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_START,
@@ -1487,30 +1566,38 @@ class ParallelGridDriver:
         return None
 
     def _tuple_work(self, tuple_: SweepTuple, n_bars: int) -> float:
-        """The tuple's ``mask·bar`` work estimate = ``C(n_unique, k) × N_bars``.
+        """The tuple's ``mask·bar`` work estimate for the stall bound.
 
-        The exact per-tuple work the trade sim performs (each of the ``C(n_unique,
-        k)`` enumerated masks walks the ``N_bars`` bars). Used ONLY to size the
-        heavy-grid stall bound (:meth:`_effective_stall_seconds`); never in results.
-        O(1) — ``count_combos`` is a single ``math.comb``.
+        LEGACY arm: the exact per-tuple work the trade sim performs —
+        ``C(n_unique, k) × N_bars`` (each enumerated mask walks the bars),
+        byte-identical to the pre-apriori estimate. Used ONLY to size the
+        heavy-grid stall bound (:meth:`_effective_stall_seconds`); never in
+        results. O(1) — ``count_combos`` is a single ``math.comb``.
 
-        APRIORI CAP (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1738): with
-        the Apriori mode enabled the raw ``C(n_unique, k) × N_bars`` estimate
-        explodes at mid-ladder k (``C(60,30) × n_bars ≈ 1e23`` — an effectively
-        INFINITE stall bound that would de-facto DISARM the #1608 watchdog), so
-        the estimate is capped at ``k × max_mask_bars``: a target-k tuple
-        performs at most ``k`` breaker-bounded LEVELS of counting (each level's
-        mask·bar work ≤ the breaker budget, or it trips —
-        ``sweep_apriori._budget_check`` at every level). Legacy runs keep the
-        raw estimate byte-identical (predicate-gated). HONEST consequence
-        (Golden Rule #10): wedge-detection latency on a deep-k tuple is
-        O(k × the budget's implied wall time) — finite, stated (the #1608
-        ~4× philosophy stretched, not broken).
+        APRIORI arm (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1738; review
+        fix round 1 M1): the LADDER-CUMULATIVE capped estimate
+        :func:`apriori_tuple_work` — ``min(Σ_{j=1..k} C(n_unique, j) × N_bars,
+        k × max_mask_bars)``. The cumulative raw keeps the estimate MONOTONE in
+        ``k``: the earlier single-level ``C(n_unique, k) × N_bars`` raw
+        COLLAPSED past the binomial peak (k >= 57 at n_unique=60 → below the
+        base bound → the flat 300 s again → the #1608 false-abort +
+        resume-livelock at the grid TAIL, the exact class the cap was meant to
+        close). The cap keeps the mid-ladder bound FINITE (raw ≈ 1e23 would
+        de-facto DISARM the watchdog). HONEST consequence (Golden Rule #10):
+        wedge-detection latency on a deep-k tuple is O(k × the budget's implied
+        wall time) — finite, stated (the #1608 ~4× philosophy stretched, not
+        broken). Mode + budget are resolved ONCE per driver run (``__init__``)
+        so a junk ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` warns once, never per
+        dispatch (review fix round 1 n4).
         """
-        raw = float(count_combos(tuple_.k, self._n_unique)) * float(n_bars)
-        if apriori_enabled():
-            return min(raw, float(tuple_.k) * float(resolve_max_mask_bars()))
-        return raw
+        if self._apriori_on:
+            return apriori_tuple_work(
+                k=tuple_.k,
+                n_unique=self._n_unique,
+                n_bars=n_bars,
+                max_mask_bars=self._max_mask_bars,
+            )
+        return float(count_combos(tuple_.k, self._n_unique)) * float(n_bars)
 
     def _effective_stall_seconds(self, max_inflight_work: float) -> float:
         """The heavy-grid-aware stall bound for the current in-flight set.
@@ -1706,8 +1793,11 @@ class ParallelGridDriver:
             # so the class-name prefix identifies the deterministic breaker trip
             # apart from generic tuple failures (the cell's deeper-k tuples
             # re-trip identically — the done-line names the ONE remediation).
+            # The prefix is ANCHORED on the ": " separator (review fix round 1
+            # m8) so a look-alike class name — `SweepAprioriBudgetErrorX` —
+            # can never be miscounted as a budget trip.
             if outcome.failed_error is not None and outcome.failed_error.startswith(
-                "SweepAprioriBudgetError"
+                "SweepAprioriBudgetError: "
             ):
                 acc.tuples_failed_apriori_budget += 1
             acc.had_failure = True
@@ -2104,6 +2194,8 @@ __all__ = [
     "SweepWorkerPoolBrokenError",
     "TupleWorkResult",
     "append_quarantine_entries",
+    "apriori_ladder_stall_bound_seconds",
+    "apriori_tuple_work",
     "auto_sweep_workers",
     "load_quarantined_tuple_labels",
     "quarantine_sidecar_path",
