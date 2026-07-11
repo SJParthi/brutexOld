@@ -79,7 +79,7 @@ from brutex.data.fno_candle_lake import (
 )
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_provenance import greeks_status_label
-from brutex.data.lake_keys import spot_recovery_candidates
+from brutex.data.lake_keys import StockDriftMap, spot_recovery_candidates
 from brutex.data.lake_manifest import (
     ledger_stat_token,
     load_manifest_datasets,
@@ -2880,6 +2880,7 @@ def query_candles(
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
     registry_path: Path | None = None,
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
     use_stats_manifest: bool = False,
     retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
@@ -3390,6 +3391,11 @@ def query_candles(
             registry_path=registry_path,
             count_cache=count_cache,
             generation=generation,
+            # The evidence-grounded stock drift rung for the moneyness spot-join
+            # (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001) — default ``None`` at every
+            # layer keeps the pure-function callers byte-identical; the dashboard
+            # injects its composite-token-memoised loader (see ``build_app``).
+            stock_drift_loader=stock_drift_loader,
         )
         extra_cells: list[tuple[Any, ...]] = [
             (*spot_pair, *fno) for spot_pair, fno in zip(derived, fno_cells, strict=True)
@@ -4174,6 +4180,7 @@ def _underlying_spot_close_by_ts(
     underlying: str,
     interval: str,
     ts_values: list[datetime],
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
 ) -> tuple[dict[datetime, Decimal], str | None]:
     """Read ``{bar_instant: underlying_spot_close}`` for an F&O contract's underlying.
 
@@ -4196,13 +4203,27 @@ def _underlying_spot_close_by_ts(
     I/O and NO log on the hot path), the COMMON spot-key drift-recovery ladder
     (:func:`~brutex.data.lake_keys.spot_recovery_candidates` — index aliases BOTH
     directions + the ``BRUTEX_FNO_INDEX_ALIASES`` env override + the
-    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs) is walked in
+    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs + the
+    evidence-grounded STOCK drift rung supplied by *stock_drift_loader*) is walked in
     order, returning the FIRST candidate with any joined spot bar and emitting ONE
     ``db_view.spot_key_recovered`` info naming both keys
     (DEC-DB-MONEYNESS-KEY-RECOVER-001 — pre-fix, a verbose-symbol index such as
     ``MIDCPNIFTY`` over a ``NIFTYMIDSELECT``-keyed spot dir read moneyness UNKNOWN on
     every bar even though the spot data existed on disk). Ladder exhaustion returns
     the honest empty map — never a fabricated spot.
+
+    *stock_drift_loader* (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 — the /db moneyness
+    twin of the Greeks ladder's DEC-GREEKS-SPOTJOIN-STOCK-001 stock arm) lazily
+    supplies the master-verified :data:`~brutex.data.lake_keys.StockDriftMap`; it is
+    invoked AT MOST ONCE per call and ONLY on the already-cold exhausted-primary path
+    (the exact-key hot path pays zero extra I/O), so a drifted stock spot dir
+    (``BAJAJ-AUTO`` vs the chain's ``BAJAJAUTO``) now classifies moneyness instead of
+    reading ``"?"`` on every bar. ``None`` (the default) or a loader returning
+    ``None``/empty is byte-identical to the pre-stock ladder (the pinned
+    :func:`spot_recovery_candidates` prefix invariant); the one recovery log gains
+    the additive ``rung`` field (``"stock_drift"`` / ``"alias_ladder"``), attributed
+    exactly as the Greeks twin attributes it (indices past the 2-arg ladder length
+    are uniquely stock-sourced).
 
     **1-minute fallback on a partially-prebuilt lake (DEC-DB-FNO-DISPLAY-TRUTH-001
     item 9):** when the whole walk at the display *interval* joins nothing AND
@@ -4270,11 +4291,30 @@ def _underlying_spot_close_by_ts(
             return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
         return {}
 
+    # The drift map is resolved lazily AT MOST ONCE per call (both _walk passes
+    # share the memo), and only on the recovery path — the exact-key hot path
+    # never touches the loader (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001).
+    drift_memo: list[StockDriftMap | None] = []
+
+    def _drift() -> StockDriftMap | None:
+        if not drift_memo:
+            drift_memo.append(stock_drift_loader() if stock_drift_loader is not None else None)
+        return drift_memo[0]
+
     def _walk(probe_interval: str) -> dict[datetime, Decimal]:
         spots = _probe(underlying, probe_interval)
         if spots:
             return spots
-        for candidate in spot_recovery_candidates(underlying, exchange):
+        stock_drift = _drift()
+        candidates = spot_recovery_candidates(underlying, exchange, stock_drift=stock_drift)
+        alias_count = len(candidates)
+        if stock_drift:
+            # The extra 2-arg call runs only on the already-cold exhausted-primary
+            # path with a truthy map — pure string ops, O(1)-bounded (the exact
+            # rung-attribution mechanism of the Greeks twin,
+            # ``greeks_enrich.read_spot_join_with_recovery``).
+            alias_count = len(spot_recovery_candidates(underlying, exchange))
+        for idx, candidate in enumerate(candidates):
             recovered = _probe(candidate, probe_interval)
             if recovered:
                 _LOG.info(
@@ -4283,6 +4323,7 @@ def _underlying_spot_close_by_ts(
                     recovered_key=candidate,
                     exchange=exchange,
                     interval=probe_interval,
+                    rung="stock_drift" if idx >= alias_count else "alias_ladder",
                 )
                 return recovered
         return spots
@@ -4422,6 +4463,7 @@ def _fno_derived_rows(
     registry_path: Path | None = None,
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
 ) -> tuple[
     list[tuple[str, str | None, str | None, str | None, int | None, str]],
     StepConfidence | None,
@@ -4553,6 +4595,12 @@ def _fno_derived_rows(
         underlying=underlying,
         interval=interval,
         ts_values=ts_values,
+        # The evidence-grounded stock drift rung (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001)
+        # — the injected lazy loader is consulted only on the exhausted-primary
+        # recovery path, so a drifted stock spot dir classifies moneyness exactly
+        # as the Greeks ladder recovers its spot join; the healthy exact-key page
+        # pays zero extra I/O.
+        stock_drift_loader=stock_drift_loader,
     )
     rows: list[tuple[str, str | None, str | None, str | None, int | None, str]] = []
     for row in raw_rows:
