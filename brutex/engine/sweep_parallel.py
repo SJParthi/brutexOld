@@ -534,6 +534,9 @@ WORKER_KERNEL_CACHE_DEFAULT: Final[bool] = False
 #: (non-integer / ``< 1``) falls back to the default and is logged LOUDLY at
 #: WARNING (the :func:`resolve_stall_seconds` invalid-env loudness); a value
 #: above :data:`WORKER_KERNEL_CAPACITY_MAX` is CLAMPED to it, logged LOUDLY.
+#: A smaller capacity trades builds for RSS, never correctness; a LARGER
+#: capacity above the grid's prox×anchor fan-out multiplies PINNED BARS
+#: sets, not just kernel state — see :data:`WORKER_KERNEL_CAPACITY_MAX`.
 WORKER_KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
 
 #: Upper clamp on the per-worker kernel-cache capacity — the env override
@@ -541,12 +544,21 @@ WORKER_KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
 #: derived default previously bypassed the ceiling). 64 sits comfortably
 #: above any real ``proximities × fib_anchors`` product (a handful of
 #: proximities × ≤4 anchors) while keeping the LRU bound a REAL memory
-#: bound: each resident kernel retains ~30 MB-class state beyond the shared
-#: bars, and the bound multiplies by POOL SIZE here (unlike the sequential
-#: path's single process-wide cache), so a pathological override
-#: (e.g. ``=100000000``) — or a hypothetical >64-product grid — would
-#: otherwise disable eviction entirely and silently defeat the capacity law
-#: this cache ships under. Env values above it are clamped with ONE loud
+#: bound: each resident kernel retains ~30 MB-class state beyond the bars
+#: it pins — and bars are shared only WITHIN one ``(instrument, tf)``
+#: block, so an env capacity above the grid's prox×anchor fan-out pins one
+#: UNSHARED ~318 MB bars set per block the kernel LRU spans (measured
+#: 8–16 pinned bars sets ≈ 2.5–5 GB/worker at the 64 ceiling with fan-out
+#: 4 — refuter round 3a attack 1b; the 64 ceiling BOUNDS that worst case,
+#: it does not shrink it, while the DEFAULT capacity law == the fan-out
+#: keeps the ledgered ~0.66–0.73 GB/worker envelope; the feature is
+#: default-OFF and the default-ON flip is soak-gated on REAL RSS —
+#: :data:`WORKER_KERNEL_CACHE_DEFAULT`). The bound multiplies by POOL SIZE
+#: here (unlike the sequential path's single process-wide cache), so a
+#: pathological override (e.g. ``=100000000``) — or a hypothetical
+#: >64-product grid — would otherwise disable eviction entirely and
+#: silently defeat the capacity law this cache ships under. Env values
+#: above it are clamped with ONE loud
 #: ``sweep_parallel.worker_kernel_capacity.clamped`` WARNING naming the
 #: requested value (the fail-safe env convention — never a silent accept);
 #: the derived default clamps silently (a documented law, not operator
@@ -558,7 +570,7 @@ WORKER_KERNEL_CAPACITY_MAX: Final[int] = 64
 #: ``(instrument, tf)`` keys in one contiguous run each (outer-loop
 #: enumeration order), so one ACTIVE key + one straggler suffice; the memo
 #: exists so every kernel sharing ``(instrument, tf)`` retains ONE resident
-#: bars copy instead of one 330 MB-class copy per kernel (the A.4 memory
+#: bars copy instead of one ~318 MB copy per kernel (the A.4 memory
 #: bound of the design; DEC-SWEEP-WORKER-KERNEL-CACHE-001). An LRU-evicted
 #: key that later RE-ARRIVES fail-safe-disables the whole mechanism (see
 #: :func:`_intern_bars` — the identity serve guard cannot re-verify an
@@ -2047,7 +2059,10 @@ class ParallelGridDriver:
             # are invariant; a downstream consumer must never treat either
             # figure as reproducible. The summary is SKIPPED outright on a
             # broken-pool abort (_quarantine_broken_pool raises above, before
-            # this block — the run is aborting loudly there anyway).
+            # this block — the run is aborting loudly there anyway); a
+            # SweepStallError / memory-quarantine abort raised inside the
+            # drive loop likewise propagates past this block — ANY abort
+            # skips the summary.
             _LOG.info(
                 "sweep_parallel.kernel_reuse_summary",
                 builds_total=sum(b for b, _ in self._kernel_stats.values()),
