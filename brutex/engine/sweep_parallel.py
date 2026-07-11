@@ -150,7 +150,7 @@ import heapq
 import multiprocessing
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED as _FIRST_COMPLETED
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
@@ -161,6 +161,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
 import structlog
 
 from brutex.engine.combo_mask import count_combos
+from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_mem_budget import MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -202,6 +203,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.sweep_progress import SweepProgressSnapshot
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
@@ -819,14 +821,19 @@ class _WorkerContext:
     """Immutable per-pool context handed to each worker via the pool initializer.
 
     Picklable (a frozen dataclass of a ``SweepGridConfig`` + a ``Path`` + the
-    driver's worker count); the worker rebuilds its ``store_for`` factory from
-    ``(root, grid)`` via
-    :func:`~brutex.engine.sweep_orchestrator.make_store_for`, so the un-picklable
-    parent closure never crosses the process boundary. ``sweep_concurrency`` is
-    the driver's TOTAL worker budget (DEC-SWEEP-SCALE-GUARDS-001) — forwarded to
-    each ``run_one_tuple`` so the per-tuple rank-memory budget is the
-    whole-machine figure divided across the tuples running concurrently in the
-    pool, never the full budget per worker (which would OOM the box).
+    driver's worker count + an optional
+    :class:`~brutex.engine.reference_series.TradeReferenceStamper` — itself a
+    frozen slotted dataclass over plain ``datetime → Decimal`` dicts, so it
+    crosses the SPAWN boundary verbatim, pinned by test); the worker rebuilds
+    its ``store_for`` factory from ``(root, grid)`` via
+    :func:`~brutex.engine.sweep_orchestrator.make_store_for`, so the
+    un-picklable parent closure never crosses the process boundary.
+    ``sweep_concurrency`` is the driver's TOTAL worker budget
+    (DEC-SWEEP-SCALE-GUARDS-001) — forwarded to each ``run_one_tuple`` so the
+    per-tuple rank-memory budget is the whole-machine figure divided across
+    the tuples running concurrently in the pool, never the full budget per
+    worker (which would OOM the box). ``reference_stamper`` is defaulted LAST
+    (DEC-VIX-STAMP-WIRE-001) so a pre-wiring construction stays valid.
     """
 
     grid: SweepGridConfig
@@ -836,6 +843,12 @@ class _WorkerContext:
     #: construction without it stays safe; the production driver always passes
     #: its resolved ``workers`` explicitly (see :meth:`ParallelGridDriver.run`).
     sweep_concurrency: int = 1
+    #: ADR-0012 futures roll schedules keyed by instrument symbol
+    #: (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — a picklable plain dict, threaded
+    #: into every worker's ``run_one_tuple`` (identity-safe argument plumbing;
+    #: ``None`` — every spot grid — is the byte-identical pre-launch path).
+    roll_schedule_by_instrument: dict[str, tuple[int, ...]] | None = None
+    reference_stamper: TradeReferenceStamper | None = None
 
 
 #: The per-worker-PROCESS context, set ONCE by :func:`_worker_init`. A module
@@ -890,9 +903,13 @@ def _run_tuple_in_worker(
     audit lines (the worker never opens the real chain), a ``_NoDedup`` proves the
     digest path never consults dedup, and the ``bars`` are passed IN (already in
     parent memory) via a trivial ``bars_for`` so no un-picklable loader crosses
-    the boundary. A ``SweepComboError`` is caught → returned as a failed marker
-    ("Resilient: skip + continue"); a ``MemoryError`` (OOM) or any OTHER exception
-    propagates. A worker OOM typically KILLS the worker process, so the pool breaks
+    the boundary. A ``SweepComboError`` — or a
+    :class:`~brutex.engine.results_store.VixTrioConflictError`
+    (DEC-VIX-STAMP-WIRE-001: a redo whose REFERENCE-ONLY VIX trio disagrees
+    because the VIX lake moved between runs) — is caught → returned as a failed
+    marker ("Resilient: skip + continue"); a ``MemoryError`` (OOM) and any OTHER
+    exception (including the PLAIN ``ResultsStoreError`` run-identity conflict)
+    propagate. A worker OOM typically KILLS the worker process, so the pool breaks
     and the parent sees :class:`BrokenProcessPool` on the next ``result()`` — which
     the parent QUARANTINES (DEC-SWEEP-STALL-OOM-GUARDS-001,
     :meth:`ParallelGridDriver._quarantine_broken_pool`) rather than looping on it.
@@ -938,8 +955,12 @@ def _run_tuple_in_worker(
             # (DEC-SWEEP-SCALE-GUARDS-001) — the whole-machine budget per worker
             # would OOM the box (8 concurrent k=5 tuples ≈ 42 GB on a 48 GB box).
             sweep_concurrency=ctx.sweep_concurrency,
+            roll_schedule_by_instrument=ctx.roll_schedule_by_instrument,
+            # The pool-wide stamper (DEC-VIX-STAMP-WIRE-001): every worker
+            # binds the SAME pickled stamper, so parallel == sequential.
+            reference_stamper=ctx.reference_stamper,
         )
-    except SweepComboError as exc:
+    except (SweepComboError, VixTrioConflictError) as exc:
         return TupleWorkResult(
             index=index,
             summary=None,
@@ -1088,6 +1109,8 @@ class ParallelGridDriver:
         "_on_quarantine",
         "_on_tuple",
         "_quarantined",
+        "_reference_stamper",
+        "_roll_schedule_by_instrument",
         "_root",
         "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
@@ -1112,6 +1135,8 @@ class ParallelGridDriver:
         on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
         on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
         on_quarantine: Callable[[str, str], None] | None = None,
+        roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
+        reference_stamper: TradeReferenceStamper | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -1172,6 +1197,17 @@ class ParallelGridDriver:
             flight recorder logs a ``QUARANTINE`` record for a corrupt store the
             worker quarantined + retried — forensic parity with the sequential
             G1 path. ``None`` (default) is byte-identical to before.
+        roll_schedule_by_instrument
+            ADR-0012 futures roll schedules keyed by instrument symbol
+            (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — marshalled to every worker
+            via the pool context (identity-safe argument plumbing; see
+            :func:`~brutex.engine.sweep_orchestrator.run_sweep_grid`). ``None``
+            (the default) is the byte-identical spot path.
+        reference_stamper
+            Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) carried into
+            the picklable :class:`_WorkerContext` so EVERY spawn worker binds
+            the same stamper — parallel output stays byte-identical to the
+            sequential run (regression-pinned).
 
         Raises
         ------
@@ -1216,6 +1252,10 @@ class ParallelGridDriver:
         self._on_progress = on_progress
         self._on_tuple = on_tuple
         self._on_quarantine = on_quarantine
+        self._roll_schedule_by_instrument = (
+            dict(roll_schedule_by_instrument) if roll_schedule_by_instrument is not None else None
+        )
+        self._reference_stamper = reference_stamper
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
@@ -1288,7 +1328,13 @@ class ParallelGridDriver:
         pool_size = self._workers - 1
         max_inflight = pool_size * _INFLIGHT_MULTIPLIER
         heap_cap = pool_size * _HEAP_CAP_MULTIPLIER
-        ctx = _WorkerContext(grid=self._grid, root=self._root, sweep_concurrency=self._workers)
+        ctx = _WorkerContext(
+            grid=self._grid,
+            root=self._root,
+            sweep_concurrency=self._workers,
+            roll_schedule_by_instrument=self._roll_schedule_by_instrument,
+            reference_stamper=self._reference_stamper,
+        )
         try:
             with ProcessPoolExecutor(
                 max_workers=pool_size,
@@ -2114,6 +2160,8 @@ def run_parallel_grid(
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     on_quarantine: Callable[[str, str], None] | None = None,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -2153,6 +2201,8 @@ def run_parallel_grid(
         on_progress=on_progress,
         on_tuple=on_tuple,
         on_quarantine=on_quarantine,
+        roll_schedule_by_instrument=roll_schedule_by_instrument,
+        reference_stamper=reference_stamper,
     )
     return driver.run()
 

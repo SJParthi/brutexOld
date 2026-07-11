@@ -292,7 +292,9 @@ def test_candles_route_single_bar_returns_every_column_without_projection(
     ).json()
     assert body["total"] == 1 and len(body["rows"]) == 1
     assert set(body["columns"]) >= set(_SPOT_OHLCV)
-    assert body["columns"][-2:] == ["change_pct", "open_gap_pct"]
+    # DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001: the prev-close contiguity honesty
+    # flag is appended after the two derived %-columns.
+    assert body["columns"][-3:] == ["change_pct", "open_gap_pct", "prev_close_contiguous"]
     assert len(body["rows"][0]) == len(body["columns"])  # every column has a cell
     assert body["applied_range"] == {"start": "2020-01-01", "end": _today_ist()}
 
@@ -313,14 +315,19 @@ def test_fno_candles_route_returns_derived_columns_without_projection(
         },
     ).json()
     assert set(body["columns"]) >= set(_SPOT_OHLCV)
-    assert body["columns"][-7:] == [
+    # DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001: prev_close_contiguous is appended
+    # after the two spot derived %-columns, ahead of the six F&O derived columns
+    # (incl. the decoded greeks_status — DEC-DB-FNO-DISPLAY-TRUTH-001).
+    assert body["columns"][-9:] == [
         "change_pct",
         "open_gap_pct",
+        "prev_close_contiguous",
         "moneyness",
         "spot",
         "intrinsic",
         "time_value",
         "days_to_expiry",
+        "greeks_status",
     ]
     assert body["applied_range"] == {"start": "2025-01-02", "end": "2025-01-02"}
 

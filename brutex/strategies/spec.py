@@ -91,13 +91,21 @@ SPEC_STRATEGY_ID_PREFIX: Final[str] = "spec:"
 #: id 0 is RESERVED (the unassigned sentinel — construction rejects it).
 #: NEVER renumber an existing pair and NEVER rename a label in place (a
 #: rename-keeping-id would mis-decode every historical strategy_id); a new
-#: instrument gets the next free id in a reviewed PR (the NIFTY-futures id is
-#: deliberately NOT pre-assigned — it lands with the futures-sweep PR once
-#: its real instrument label exists). Golden-pinned in both directions.
+#: instrument gets the next free id in a reviewed PR (the NIFTY-futures id
+#: landed as row 4 with the futures-sweep launch PR —
+#: DEC-FUTURES-ADDRESSING-PIN-001). Golden-pinned in both directions.
 _SYMBOL_ID_TABLE: Final[tuple[tuple[str, int], ...]] = (
     ("NSE-NIFTY", 1),
     ("NSE-BANKNIFTY", 2),
     ("BSE-SENSEX", 3),
+    # ADR-0012 NIFTY-futures dynamic-strategy track — the SERIES-level label
+    # (== brutex.universe.NIFTY_FUTURES_SERIES_SYMBOL, import-identity-pinned),
+    # appended by DEC-FUTURES-ADDRESSING-PIN-001 per the #1138 [C16] reservation.
+    # ONE row for the track — per-contract labels are deliberately NOT registered
+    # (an append-only-forever registry cannot absorb ~12 immortal rows/year;
+    # per-contract grain rides mask_run_id's verbatim instrument + the
+    # full-content data_snapshot_hash, which are per-launch by construction).
+    ("NSE-NIFTY-FUT", 4),
 )
 
 

@@ -161,7 +161,7 @@ def write_exit_status(
     # for RUNNING too, so a mid-run RUNNING write (e.g. mark_suspect's
     # never-launder belt) can no longer reset the start to the suspect-latch
     # instant and truncate a SUSPECT run's reported duration (hostile-review
-    # round 3, #1594). ``ended`` alone distinguishes RUNNING (None) from a
+    # round 3, #1712). ``ended`` alone distinguishes RUNNING (None) from a
     # terminal state (now).
     prior_started = _finite_float(prior.get("wall_started_utc")) if prior else None
     started = prior_started if prior_started is not None else now

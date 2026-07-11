@@ -73,9 +73,9 @@ from brutex.engine.cascade_wire import (
     spec_from_store_rows,
 )
 from brutex.engine.combo_mask import popcount
-from brutex.engine.results_store import ResultRow, ResultsStore
+from brutex.engine.results_store import ResultRow, ResultsStore, VixTrioConflictError
 from brutex.engine.snapshot_hash import data_snapshot_hash
-from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.stage3_refine import (
     Evaluator,
     RefineBudget,
@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     # Annotation-only — keeps brutex.orchestrator.audit (and anything it pulls)
     # out of this module's runtime import graph, mirroring the sweep_run /
     # sweep_orchestrator discipline for the strict per-module coverage gates.
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.metrics.compute import ResultMetrics
     from brutex.orchestrator.audit import AuditWriter
 
@@ -257,7 +258,10 @@ def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
 
 
 def recover_survivor_cell(
-    row: ResultRow, grid: SweepGridConfig
+    row: ResultRow,
+    grid: SweepGridConfig,
+    *,
+    roll_schedule: tuple[int, ...] | None = None,
 ) -> tuple[int, int, ProximityParams | None, FibAnchorKind]:
     """Recover *row*'s grid cell ``(sl_paisa, tp_paisa, proximity, fib_anchor)`` by identity match.
 
@@ -279,6 +283,13 @@ def recover_survivor_cell(
         The persisted Stage-2 survivor row.
     grid
         The grid it was swept under (axes + shared identity context).
+    roll_schedule
+        ADR-0012 futures roll schedule for the row's instrument
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — a futures row's ``run_id``
+        folds ``roll_schedule`` into ``canonical_trade_params``, so the
+        re-derivation must carry the SAME schedule or no cell reproduces.
+        ``None`` (every spot row) is byte-identical to the pre-launch
+        derivation.
 
     Returns
     -------
@@ -303,6 +314,7 @@ def recover_survivor_cell(
             proximity=proximity,
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
+            roll_schedule=roll_schedule,
         )
         candidate = mask_run_id(
             mask=row.mask_bits,
@@ -374,12 +386,15 @@ def _make_evaluator(
     side: Side,
     tf_minutes: int,
     start_equity_paisa: int,
+    reference_stamper: TradeReferenceStamper | None,
 ) -> Evaluator:
     """Bind one survivor's FULL-backtest evaluator over the TRAIN slice (condition 7).
 
     The production binding of the slice-4 engine seam: each call is one
     standalone :func:`~brutex.engine.sweep_driver.metrics_for_mask` backtest at
     a quantized on-grid ``(sl_paisa, tp_paisa)`` — O(bars) per call, never O(1).
+    The run's India-VIX stamper rides each evaluation's trade sim
+    (DEC-VIX-STAMP-WIRE-001; required, no default — the caller decides).
     """
 
     def _evaluate(sl_paisa: int, tp_paisa: int) -> ResultMetrics:
@@ -392,6 +407,7 @@ def _make_evaluator(
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
+            reference_stamper=reference_stamper,
         )
 
     return _evaluate
@@ -452,7 +468,16 @@ class Stage3PassReport:
         Leaderboards skipped because their train slice was empty (a window no
         longer than the lockbox window leaves nothing to train on).
     cells
-        Every refined cell written, in deterministic order.
+        Every refined cell written, in deterministic order (a VIX-conflicted
+        cell is EXCLUDED — it was not written this pass).
+    cells_conflicted
+        Refined cells SKIPPED because their pre-existing store's REFERENCE-ONLY
+        VIX trio conflicts with this pass's re-derivation
+        (:class:`~brutex.engine.results_store.VixTrioConflictError` — the
+        India-VIX lake moved between launches). Each skip leaves the on-disk
+        cell store + sidecar untouched, WARNs ``stage3_wire.cell_vix_conflict``
+        with the quarantine remedy, and makes the launch verdict non-zero —
+        the stage-3 twin of the grid drivers' #904 tuple-skip contract.
     """
 
     enabled: bool
@@ -466,6 +491,7 @@ class Stage3PassReport:
     skipped_empty_train: int
     cells: tuple[Stage3RefinedCell, ...]
     sidecars_written: int = 0
+    cells_conflicted: int = 0
 
 
 def _cell_sort_key(cell: SweepTuple) -> tuple[str, str, str, int, int, int, tuple[int, int, int]]:
@@ -501,6 +527,8 @@ def run_stage3_pass(
     segment: str,
     start: str,
     end: str,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
+    stamper_for: Callable[[], TradeReferenceStamper | None] | None = None,
 ) -> Stage3PassReport:
     """Run the Stage-3 refinement post-pass over a persisted grid — single-threaded.
 
@@ -525,7 +553,13 @@ def run_stage3_pass(
        :class:`~brutex.engine.results_store.ResultRow` stamped with the train
        hash.
     6. Write each refined cell's rows to its OWN Parquet file (review F3) in
-       deterministic cell order via the load-or-create store (idempotent).
+       deterministic cell order via the load-or-create store (idempotent). A
+       cell whose PRE-EXISTING store's VIX trio conflicts with this pass's
+       re-derivation (the India-VIX lake moved between launches —
+       :class:`~brutex.engine.results_store.VixTrioConflictError`) is SKIPPED
+       + counted (``cells_conflicted``) + WARNed with the quarantine remedy,
+       its on-disk store/sidecar untouched — the stage-3 arm of the #904
+       skip-and-continue contract, never a whole-launch abort.
     7. Emit ``STAGE_3_PASS_COMPLETE`` with the full tally.
 
     Parameters
@@ -543,6 +577,25 @@ def run_stage3_pass(
     exchange, segment, start, end
         The data-scope labels the launcher hashed its full window with —
         reused verbatim for the train-slice hash derivation.
+    roll_schedule_by_instrument
+        ADR-0012 futures roll schedules keyed by instrument symbol
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — threaded into the survivor-cell
+        run_id re-derivation, the refined-row identities AND the train-slice
+        ``bar_bits`` memo (the recovered survivor cells must re-derive against
+        the SAME schedule the sweep built with). ``None`` (the default) is the
+        byte-identical spot path.
+    stamper_for
+        Optional ZERO-ARG provider of the run's India-VIX stamper
+        (DEC-VIX-STAMP-WIRE-001). The production launchers (``cmd_sweep_all``
+        + the sweep-verify recount) pass ``lambda: reference_stamper`` over
+        their ONE eagerly-built launch stamper — never a second lake read;
+        the lazy :func:`~brutex.engine.reference_wire.vix_stamper_provider`
+        closure also fits this seam but has no production consumer today
+        (its docstring states the dormancy honestly). Invoked LAZILY, once,
+        AFTER the ``stage3_enable`` fast path (a disabled pass never resolves
+        the provider); the resolved stamper (or
+        an honest ``None``) rides every refinement evaluation AND the
+        persisted refined-row projection. ``None`` (default) = unstamped.
 
     Returns
     -------
@@ -569,6 +622,10 @@ def run_stage3_pass(
             cells=(),
         )
     ensure_stage3_runtime()
+    # LAZY stamper resolution (DEC-VIX-STAMP-WIRE-001): resolved exactly once,
+    # strictly AFTER the disabled fast path above — a stage3-disabled grid
+    # never reads the VIX lake through this seam.
+    reference_stamper: TradeReferenceStamper | None = None if stamper_for is None else stamper_for()
 
     grid_rows: list[ResultRow] = []
     for tuple_ in iter_sweep_tuples(grid):
@@ -612,24 +669,40 @@ def run_stage3_pass(
     skipped_empty_train = 0
     cell_rows: dict[SweepTuple, list[ResultRow]] = {}
     cell_sharpes: dict[SweepTuple, dict[str, float | None]] = {}
-    bits_memo: dict[tuple[str, str, ProximityParams | None, FibAnchorKind], Sequence[int]] = {}
+    bits_memo: dict[
+        tuple[str, str, ProximityParams | None, FibAnchorKind, tuple[int, ...] | None],
+        Sequence[int],
+    ] = {}
     for key, survivors in leaderboards.items():
         train_bars = train_slices.get((key.instrument, key.tf), ())
         if not train_bars:
             skipped_empty_train += 1
             continue
         tf = _timeframe_for_label(key.tf, grid)
+        roll_schedule = (
+            roll_schedule_by_instrument.get(key.instrument)
+            if roll_schedule_by_instrument is not None
+            else None
+        )
         for row in survivors:
             side = _side_for_direction(row.direction)
-            start_sl, start_tp, proximity, fib_anchor = recover_survivor_cell(row, grid)
-            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001),
-            # so the memo key + the build carry the recovered anchor — a survivor is
-            # refined against ITS OWN anchor's Group-4 Fib levels, never a stale one.
-            memo_key = (key.instrument, key.tf, proximity, fib_anchor)
+            start_sl, start_tp, proximity, fib_anchor = recover_survivor_cell(
+                row, grid, roll_schedule=roll_schedule
+            )
+            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001)
+            # AND roll-schedule-specific (DEC-STAGE1A-ROLL-RESET-001), so the memo
+            # key + the build carry both — a survivor is refined against ITS OWN
+            # anchor's Group-4 Fib levels + ITS OWN roll boundaries, never stale ones.
+            memo_key = (key.instrument, key.tf, proximity, fib_anchor, roll_schedule)
             bar_bits = bits_memo.get(memo_key)
             if bar_bits is None:
                 bar_bits = build_bar_bits(
-                    train_bars, proximity=proximity, prior_n=grid.prior_n, fib_anchor=fib_anchor
+                    train_bars,
+                    proximity=proximity,
+                    prior_n=grid.prior_n,
+                    fib_anchor=fib_anchor,
+                    roll_schedule=roll_schedule,
+                    apply_1day_mask=apply_1day_mask_for(key.instrument, key.tf),
                 )
                 bits_memo[memo_key] = bar_bits
             report = refine_mask(
@@ -643,6 +716,7 @@ def run_stage3_pass(
                     side=side,
                     tf_minutes=tf.minutes,
                     start_equity_paisa=grid.start_equity_paisa,
+                    reference_stamper=reference_stamper,
                 ),
                 budget=budget,
                 audit=sink,
@@ -664,6 +738,7 @@ def run_stage3_pass(
                         proximity=proximity,
                         start_equity_paisa=grid.start_equity_paisa,
                         fib_anchor=fib_anchor,
+                        roll_schedule=roll_schedule,
                     ),
                     data_snapshot_hash=train_hash,
                     indicator_version=grid.indicator_version,
@@ -689,6 +764,9 @@ def run_stage3_pass(
                     tf_minutes=tf.minutes,
                     sl_paisa=refined_eval.sl_paisa,
                     tp_paisa=refined_eval.tp_paisa,
+                    # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the refined
+                    # row's re-simulation feeds the PERSISTED cell store.
+                    reference_stamper=reference_stamper,
                 )
                 cell = SweepTuple(
                     instrument=row.instrument,
@@ -708,16 +786,51 @@ def run_stage3_pass(
 
     rows_appended = 0
     sidecars_written = 0
+    cells_conflicted = 0
     cells: list[Stage3RefinedCell] = []
     for cell in sorted(cell_rows, key=_cell_sort_key):
         cell_path = tuple_store_path(results_root, cell, train_grid)
-        store = load_or_create_store(cell_path)
-        for refined_row in cell_rows[cell]:
-            # Identical re-derived rows (re-runs; the same refined cell reached
-            # from two survivors of the same mask) are idempotent no-ops.
-            if store.append(refined_row):
-                rows_appended += 1
-        cell_flush = store.flush()
+        cell_appended = 0
+        try:
+            # The LOAD sits inside the same try as the appends (round-4 panel
+            # consistency fold): ``ResultsStore.load`` re-appends each stored
+            # record, so a cell parquet holding duplicate-run_id rows that
+            # differ ONLY in non-None VIX values (tamper-grade — the dict-keyed
+            # flush can never write one) raises ``VixTrioConflictError`` at
+            # LOAD time; the grid drivers tuple-skip the same file, so the
+            # pass must cell-skip it too, never abort the launch.
+            store = load_or_create_store(cell_path)
+            for refined_row in cell_rows[cell]:
+                # Identical re-derived rows (re-runs; the same refined cell reached
+                # from two survivors of the same mask) are idempotent no-ops.
+                if store.append(refined_row):
+                    cell_appended += 1
+            cell_flush = store.flush()
+        except VixTrioConflictError as exc:
+            # The India-VIX lake moved between two launches and this cell's
+            # PRE-EXISTING store carries the old trio (DEC-VIX-STAMP-WIRE-001
+            # round-3 panel MAJOR: the pass re-appends into existing cell
+            # stores on EVERY resume — the dominant redo path for this
+            # reference-only conflict, which the grid drivers' #904 tuple-skip
+            # never sees because sentinel-resumed tuples skip their appends).
+            # Mirror the grid contract: skip + count THIS ONE cell — the flush
+            # is skipped so its on-disk store + sidecar stay untouched, the
+            # cell is excluded from the cascade-spec list, and the launch
+            # verdict goes non-zero via ``cells_conflicted`` — never a
+            # whole-launch abort over a reference-only annotation.
+            cells_conflicted += 1
+            _LOG.warning(
+                "stage3_wire.cell_vix_conflict",
+                cell_path=str(cell_path),
+                error=str(exc),
+                remediation=(
+                    "quarantine/delete this cell's results store so a redo "
+                    "re-persists it against the current VIX series, or re-run "
+                    "after the VIX lake settles"
+                ),
+            )
+            continue
+        rows_appended += cell_appended
         # Per-cell trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001): the pass
         # re-derives every cell deterministically, so recompute-and-overwrite
         # is the idempotent policy HERE (the grid tuples' preserve-on-skips
@@ -757,6 +870,7 @@ def run_stage3_pass(
         "cells_written": len(cells),
         "rows_appended": rows_appended,
         "sidecars_written": sidecars_written,
+        "cells_conflicted": cells_conflicted,
         "skipped_empty_train": skipped_empty_train,
         "train_snapshot_hash": train_hash,
     }
@@ -774,6 +888,7 @@ def run_stage3_pass(
         skipped_empty_train=skipped_empty_train,
         cells=tuple(cells),
         sidecars_written=sidecars_written,
+        cells_conflicted=cells_conflicted,
     )
 
 

@@ -407,18 +407,60 @@ class TestCandleRowsFromDbPayload:
             "low": 99.5,
             "close": 100.5,
         }
-        # The unparseable-timestamp row is SKIPPED, never a NaN coordinate.
+        # The unparseable-timestamp row is SKIPPED **and COUNTED** — never a
+        # NaN coordinate, never an uncounted silent drop.
         assert len(out["rows"]) == 2
+        assert out["skipped"] == 1
 
     def test_missing_timestamp_column_is_named_never_a_silent_empty(self) -> None:
         payload = {"columns": ["ts", "open", "high", "low", "close"], "rows": [[1, 2, 3, 4, 5]]}
         out = _node_call("C.candleRowsFromDbPayload(ARGS[0])", json.dumps(payload))
-        assert out == {"rows": [], "missing": "timestamp"}
+        assert out == {"rows": [], "missing": "timestamp", "skipped": 0}
 
     def test_empty_payload_maps_to_no_rows(self) -> None:
         out = _node_call("C.candleRowsFromDbPayload(ARGS[0])", json.dumps({}))
         # No columns at all: the FIRST required column is named.
-        assert out == {"rows": [], "missing": "timestamp"}
+        assert out == {"rows": [], "missing": "timestamp", "skipped": 0}
+
+    def test_corrupt_ohlc_rows_are_skipped_and_counted_never_coerced(self) -> None:
+        """Finder NITs (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): a null OHLC
+        value previously coerced through ``Number(null) === 0`` — a fabricated
+        0-price candle — and an unreadable row vanished UNCOUNTED. Every
+        corrupt-OHLC shape now skips the row and the counter says so."""
+        payload = {
+            "columns": ["timestamp", "open", "high", "low", "close"],
+            "rows": [
+                ["2024-01-02 10:15:00", 100.0, 101.0, 99.5, 100.5],  # clean — kept
+                ["2024-01-02 10:16:00", None, 101.0, 99.5, 100.5],  # null open
+                ["2024-01-02 10:17:00", 100.0, "junk", 99.5, 100.5],  # NaN high
+                ["2024-01-02 10:18:00", 100.0, 101.0, None, 100.5],  # null low
+                ["junk-not-a-time", 100.0, 101.0, 99.5, 100.5],  # unparseable ts
+            ],
+        }
+        out = _node_call("C.candleRowsFromDbPayload(ARGS[0])", json.dumps(payload))
+        assert out["missing"] is None
+        assert len(out["rows"]) == 1  # only the clean row plots
+        assert out["rows"][0]["open"] == 100.0
+        assert out["skipped"] == 4
+        # The pre-fix trap, pinned: Number(null) IS 0 — exactly why the
+        # mapper must never coerce a null price.
+        assert _node_call("Number(null)") == 0
+
+    def test_bar_price_guards_every_corrupt_shape(self) -> None:
+        """bxBarPrice: finite numbers (and numeric strings — the pre-fix
+        Number() behaviour for legitimate values) pass; null/undefined/
+        blank/boolean/NaN/Infinity read null (⇒ row skipped)."""
+        assert _node_call("C.barPrice(ARGS[0])", json.dumps(100.5)) == 100.5
+        assert _node_call("C.barPrice(ARGS[0])", json.dumps("101.25")) == 101.25
+        for bad in ("null", "undefined", '""', "true", '"junk"', "NaN", "Infinity"):
+            assert _node_call(f"C.barPrice({bad})") is None, bad
+
+    def test_skipped_rows_note_wording_golden(self) -> None:
+        """The honest note the /strategy coords line appends when > 0."""
+        assert _node_call("C.skippedRowsNote(0)") == ""
+        assert _node_call("C.skippedRowsNote(-1)") == ""
+        assert _node_call("C.skippedRowsNote(ARGS[0])", json.dumps(None)) == ""
+        assert _node_call("C.skippedRowsNote(3)") == "3 row(s) skipped (unreadable)"
 
     @pytest.mark.parametrize("tz", ["America/New_York", "Asia/Kolkata"])
     def test_arrow_placement_is_tz_invariant_end_to_end(self, tz: str) -> None:

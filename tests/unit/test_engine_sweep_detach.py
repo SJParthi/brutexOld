@@ -229,7 +229,7 @@ def test_r7_handle_is_frozen(tmp_path: Path) -> None:
 def test_r7_child_env_carries_detach_sentinel(tmp_path: Path) -> None:
     """The spawned child's environment carries BRUTEX_SWEEP_DETACHED=1.
 
-    This is the fork-bomb guard (hostile-review round 3, #1594): the child
+    This is the fork-bomb guard (hostile-review round 3, #1712): the child
     consults the sentinel (NOT its raw argv) before re-detaching, so an
     abbreviated ``--det`` that survives the argv filter can never fork another
     detached generation.

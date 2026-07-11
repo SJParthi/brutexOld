@@ -259,7 +259,10 @@ def sweep_all_exit_code(tuples_failed: int) -> int:
     Parameters
     ----------
     tuples_failed
-        The count from the :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary`.
+        The count from the :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary`
+        (``cmd_sweep_all`` folds the stage-3 pass's ``cells_conflicted`` —
+        VIX-trio-conflicted refined cells skipped under the same
+        skip-and-continue contract — into this count).
 
     Returns
     -------
@@ -654,7 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
     lake_audit.add_argument(
         "--no-options",
         action="store_true",
-        help="Skip the expired-options tree (options/<series>/ dup census)",
+        help="Skip the expired-options tree (options/<series>/ dup/foreign/overlap census)",
     )
 
     # ── reopen-skipped (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) — un-cement settles ──
@@ -2131,9 +2134,13 @@ def cmd_lake_audit_unique(
     NEVER heals; the command is read-only by contract — then folds the
     per-segment census and prints it as a human table or ``--json`` (the SAME
     dict shape ``GET /api/v1/universe/lake-uniqueness`` serves). Exit codes
-    (the ``cmd_audit_verify`` semantics): :data:`EXIT_OK` (0) clean,
-    :data:`EXIT_USER_ERROR` (1) re-documented here as "poisoned partitions
-    found", :data:`EXIT_INTERNAL_ERROR` (2) the scan itself errored.
+    (the cron-facing contract, DEC-AUDIT-CENSUS-HONESTY-001): :data:`EXIT_OK`
+    (0) ONLY when the scan is COMPLETE and clean — zero findings AND zero
+    skipped/unreadable files; :data:`EXIT_USER_ERROR` (1) on ANY poisoned
+    finding OR ANY skipped file (a skip leaves the census incomplete, so it can
+    never certify clean — the disambiguation line names whether the cause is
+    engine data or a reference-only file, and a missing lake root also raises
+    this); :data:`EXIT_INTERNAL_ERROR` (2) the scan itself errored.
 
     HONEST cost (Golden Rule #10): the scan is O(files-in-scope) with one
     key-column read per file (NOT O(1)) — bound it with the coordinate
@@ -2154,6 +2161,14 @@ def cmd_lake_audit_unique(
     )
 
     resolved = _resolve_lake_root(lake_root)
+    # OPS-2 (DEC-AUDIT-CENSUS-HONESTY-001): refuse a nonexistent lake root the
+    # SAME way the sibling read commands do (`catalog reconcile`,
+    # `enrich-greeks`) — a typo'd / dead-mount path previously scanned 0 files
+    # and reported "CLEAN — 0 findings over 0 files" rc=0 forever (a silent
+    # green over a lake that simply is not there). Raised OUTSIDE the try below
+    # so the CliUserError → rc=1 net fires (the try maps every exception to the
+    # rc=2 internal-error arm).
+    _require_lake_dir(resolved, command="lake audit-unique")
     try:
         report = scan_lake_invariants(
             resolved,
@@ -2182,20 +2197,51 @@ def cmd_lake_audit_unique(
             f"{'foreign':>9}{'overlap':>9}{'drift-dirs':>12}"
         )
         for row in census.segments:
-            if row.segment == OPTIONS_SEGMENT:
-                # Foreign/overlap/drift are OUT of the options-tree census scope
-                # (a named DEC-LAKE-HEAL-001 follow-up) — shown as "-", never a fake 0.
-                foreign, overlap, drift = "-", "-", "-"
-            else:
-                foreign = str(row.foreign_files)
-                overlap = str(row.overlap_files)
-                drift = str(row.drift_dirs)
+            # Foreign/overlap are REAL for the options tree since
+            # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 (closed the DEC-LAKE-HEAL-001
+            # named follow-up); drift stays "-" — honestly N/A, no
+            # legacy-key-drift concept exists for series dirs.
+            foreign = str(row.foreign_files)
+            overlap = str(row.overlap_files)
+            drift = "-" if row.segment == OPTIONS_SEGMENT else str(row.drift_dirs)
             print(
                 f"{row.segment:<9}{row.files:>7}{row.clean:>7}{row.dup_files:>6}"
                 f"{foreign:>9}{overlap:>9}{drift:>12}"
             )
+        # OPS-1 (DEC-AUDIT-CENSUS-HONESTY-001): surface UNREADABLE/skipped files
+        # — a skip means the census could NOT read a file, so "0 findings" would
+        # be a silent green over corruption. An engine-index skip reads UNREADABLE
+        # (a distinct verdict, never a fake CLEAN).
+        print(
+            f"skipped (unreadable): {census.files_skipped}"
+            f"  (engine-index: {census.engine_files_skipped})"
+        )
+        # A skipped file makes the census INCOMPLETE, so the rc=1 red must NAME
+        # its cause — an ENGINE-index skip is the operator's data; a purely
+        # reference/F&O skip is NOT, and must never be misread as engine
+        # corruption (DEC-AUDIT-CENSUS-HONESTY-001, coordinator sign-off).
+        if census.files_skipped:
+            if census.engine_files_skipped:
+                print(
+                    "scan INCOMPLETE: ENGINE-INDEX DATA UNREADABLE — "
+                    f"{census.engine_files_skipped} engine-index file(s) "
+                    "(NIFTY/BANKNIFTY/SENSEX) could not be read; this rc=1 red "
+                    "IS your engine data (see the engine verdict below)."
+                )
+            else:
+                print(
+                    "scan INCOMPLETE: "
+                    f"{census.files_skipped} reference/non-engine file(s) "
+                    "unreadable (REFERENCE_ONLY / F&O) — ENGINE indexes "
+                    "(NIFTY/BANKNIFTY/SENSEX) verified CLEAN; this rc=1 red is "
+                    "the incomplete scan, NOT engine corruption. "
+                    f"first unreadable: {census.first_skipped_path}"
+                )
         label, _, rest = census.engine_detail.partition(": ")
-        verdict = "CLEAN" if census.engine_clean else "POISONED"
+        if not census.engine_clean:
+            verdict = "UNREADABLE" if census.engine_files_skipped else "POISONED"
+        else:
+            verdict = "CLEAN"
         print(f"engine indexes ({label.replace('/', ' / ')}): {verdict} — {rest}")
         last_heal = payload["last_heal_utc"] or "never"
         print(
@@ -2203,7 +2249,11 @@ def cmd_lake_audit_unique(
             f"quarantined_files_total={payload['quarantined_files_total']}  "
             f"last_heal={last_heal}"
         )
-    return EXIT_OK if census.findings_total == 0 else EXIT_USER_ERROR
+    # NON-green (rc=1) on ANY finding OR ANY skipped file: a skipped file leaves
+    # the census INCOMPLETE, so it can never honestly certify a clean rc=0. A
+    # genuinely clean lake with zero skips is still rc=0.
+    clean = census.findings_total == 0 and census.files_skipped == 0
+    return EXIT_OK if clean else EXIT_USER_ERROR
 
 
 def cmd_reopen_skipped(
@@ -3050,212 +3100,86 @@ def _start_instrument_autoload(
     ).start()
 
 
-def _auto_resume_child_argv(lake_root: Path) -> list[str]:
-    """Return the argv that resumes an in-progress pull for *lake_root*.
-
-    Runs ``brutex fetch --until-clean --lake-root <lake_root>`` via the SAME
-    Python interpreter (``sys.executable -m brutex``) so the resumed pull
-    inherits this exact venv + install — robust whether or not the ``brutex``
-    console script is on ``PATH`` (mirrors :func:`_supervisor_child_argv`).
-
-    ``fetch --until-clean`` (NOT the legacy ``--universe`` form) is LOAD-BEARING
-    (DEC-AUTO-RESUME-ARGV-FIX-001): ``--universe`` is RETIRED — :func:`cmd_fetch`
-    refuses it with ``EXIT_USER_ERROR`` before any pull work (the DEC-DHAN-FINALIZE-001
-    retirement notice), so a child spawned with it exits immediately having resumed
-    NOTHING while the boot log still read ``verdict=resumed`` (the silent-dead-resume
-    BLOCKER this fixes). ``fetch --until-clean`` is the CURRENT CLI pull entry: it
-    re-runs the spot ingest over the SHARED durable window ledger in bounded
-    until-clean rounds — re-fetching ONLY the unsettled (PLANNED / FAILED) windows,
-    the keep-first sink no-oping the settled ones. HONEST limit (Golden Rule #10):
-    ``cmd_fetch``'s live path binds ``fetch_instruments = _resolve_brute_force_instruments()``,
-    which filters to ONLY the 3 brute-force INDICES (NIFTY / BANKNIFTY / SENSEX), so
-    this child resumes ONLY the 3 index SPOT windows. Outstanding NON-index spot
-    windows (the ~750 reference underlyings) AND all F&O contract windows are NOT
-    settled by this child (the CLI has no composite-pipeline subcommand) — they
-    re-trigger a bounded, once-per-boot resume every restart until they are re-pulled
-    via the dashboard ``/pull-pipeline``. This is a partial (index-spot) resume, not a
-    full-universe one; auto-settling the rest is the ledger's job on the next dashboard pull.
-
-    The explicit ``--lake-root`` is LOAD-BEARING (hostile-review MAJOR): the
-    dashboard resolved the ledger from *lake_root* (which may be an explicit
-    ``--lake-root /data/lake`` with ``$BRUTEX_LAKE_ROOT`` unset), but a child with
-    NO ``--lake-root`` would fall back to ``~/.brutex/lake`` in :func:`cmd_fetch`
-    — re-pulling into the WRONG lake AND missing the single-flight lock (which is
-    KEYED by lake root), so it would not contend with a real pull on the operator's
-    lake (the very double-pull this feature exists to prevent). Passing the
-    resolved root keeps the child on the SAME lake the ledger was read from, so the
-    resume re-pulls the right windows AND shares the account-wide lock.
-
-    ``--until-clean`` re-runs bounded rounds over the SHARED window ledger —
-    re-fetching ONLY the unsettled windows (the keep-first sink no-ops the settled
-    ones) — until the ledger is clean, the token dies, or the round budget is spent
-    (DEC-TOKEN-PREFLIGHT-001).
-    """
-    return [
-        sys.executable,
-        "-m",
-        "brutex",
-        "fetch",
-        "--until-clean",
-        "--lake-root",
-        str(lake_root),
-    ]
-
-
-#: Best-effort early-exit probe window (seconds) for the spawned auto-resume child
-#: (DEC-AUTO-RESUME-ARGV-FIX-001): a child that dies with a usage / user error exits
-#: well inside this window, so the resume verdict can read ERROR instead of a false
-#: ``resumed``. Runs on the boot DAEMON thread (never the uvicorn bind path), so
-#: waiting this long never blocks or delays the boot.
-_AUTO_RESUME_EARLY_EXIT_PROBE_S = 2.0
-
-
-def _validate_auto_resume_argv(argv: list[str]) -> None:
-    """Prove *argv* dispatches to the REAL ``fetch`` pull entry — raise on ANY drift.
-
-    The guard that makes a dead auto-resume LOUD (DEC-AUTO-RESUME-ARGV-FIX-001):
-    the child argv is re-parsed through the REAL :func:`build_parser` BEFORE the
-    subprocess is spawned, and rejected (``ValueError``) unless it (a) runs
-    ``python -m brutex``, (b) parses cleanly, (c) dispatches to the ``fetch``
-    subcommand, (d) avoids the modes that exit WITHOUT pulling (the RETIRED
-    ``--universe`` refusal + the load-master-and-exit ``--instruments``), and
-    (e) carries ``--until-clean`` (the bounded resume-until-done contract of
-    DEC-AUTO-RESUME-ON-BOOT-001). A raise propagates into
-    :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot`'s guard, which
-    logs ``auto_resume.error`` and returns the honest ``error`` verdict — never
-    ``resumed`` — while the boot itself is unaffected (the never-raises contract).
-
-    Pure over *argv* (one parser build + parse; no subprocess, no I/O beyond
-    argparse's own stderr usage line on a reject — deliberately loud).
-    """
-    prefix = [sys.executable, "-m", "brutex"]
-    if argv[: len(prefix)] != prefix:
-        raise ValueError(f"auto-resume child argv must run `python -m brutex`: {argv!r}")
-    tokens = argv[len(prefix) :]
-    if not tokens:
-        raise ValueError("auto-resume child argv carries no CLI subcommand tokens")
-    parser = build_parser()
-    try:
-        args = parser.parse_args(tokens)
-    except SystemExit as exc:
-        # argparse rejected the tokens (unknown flag / bad value) via parser.error —
-        # the exact usage-error a spawned child would die on with EXIT_USER_ERROR.
-        raise ValueError(f"auto-resume child argv rejected by the CLI parser: {tokens!r}") from exc
-    if args.command != "fetch":
-        raise ValueError(f"auto-resume child argv must dispatch to `fetch`, got {args.command!r}")
-    if args.universe:
-        # The retired legacy three-phase flag: cmd_fetch refuses it with
-        # EXIT_USER_ERROR before any pull work — the dead-resume BLOCKER.
-        raise ValueError("auto-resume child argv carries the RETIRED `--universe` flag")
-    if args.instruments:
-        raise ValueError(
-            "auto-resume child argv carries `--instruments` (loads the master and exits — no pull)"
-        )
-    if not args.until_clean:
-        raise ValueError("auto-resume child argv must carry `--until-clean`")
-
-
-def _spawn_auto_resume_pull(
-    incomplete: Any, lake_root: Path, log: Any
-) -> None:  # pragma: no cover — live subprocess spawn (the fetch spine is tested separately)
-    """Spawn a detached ``brutex fetch --until-clean`` on *lake_root* to resume.
-
-    The injected resume ACTION for
-    :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot`. A SEPARATE
-    process (not an in-server job) is deliberate: the CLI fetch spine is already
-    fully tested + honours the account-wide cross-process single-flight lock
-    (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001), so a concurrent dashboard click can never
-    double the Groww request rate — the second pull is simply refused. The child is
-    launched with ``start_new_session=True`` (its own process group) so it is
-    DELIBERATELY un-reaped + re-parented to init on dashboard exit — a
-    fire-and-forget resume, NOT the supervisor's supervised child (which DOES
-    reap via ``child.wait()``); the child manages its OWN lifetime (it exits when
-    the ledger is clean / the token dies / the round budget is spent). Any spawn
-    error is caught by the ``maybe_resume_on_boot`` guard, so it can never crash
-    the boot.
-
-    Two dead-resume guards (DEC-AUTO-RESUME-ARGV-FIX-001), each surfacing as the
-    honest ``error`` verdict instead of a false ``resumed``:
-
-    1. the argv is validated against the REAL parser BEFORE spawning
-       (:func:`_validate_auto_resume_argv` — the retired ``--universe`` regression
-       class can never ship a child the CLI refuses); and
-    2. a bounded best-effort early-exit probe AFTER spawning — a child that dies
-       within :data:`_AUTO_RESUME_EARLY_EXIT_PROBE_S` with a non-zero exit
-       (a usage / user error) raises into the ``maybe_resume_on_boot`` guard.
-       Runs on the boot daemon thread, so the probe never blocks the port bind;
-       a child that outlives the probe stays the un-reaped fire-and-forget resume.
-    """
-    import subprocess  # nosec B404 — stdlib subprocess, list-argv launch, no shell (see B603 below)
-
-    argv = _auto_resume_child_argv(lake_root)
-    _validate_auto_resume_argv(argv)
-    log.info(
-        "auto_resume.spawn",
-        outstanding=incomplete.outstanding,
-        planned=incomplete.planned,
-        failed=incomplete.failed,
-        lake_root=str(lake_root),
-    )
-    # nosec B603: `argv` is a fixed list built from `sys.executable` + literal
-    # subcommand tokens + the operator-resolved lake root (see _auto_resume_child_argv)
-    # — NOT a shell string and NOT untrusted network input; `shell=` is never set, so
-    # there is no shell-injection surface. `start_new_session=True` isolates the child's
-    # process group so the resumed pull outlives a dashboard restart (re-parented to init,
-    # deliberately un-reaped — a fire-and-forget resume, unlike the supervised child).
-    child = subprocess.Popen(  # nosec B603  # noqa: S603 — list argv, no shell, trusted CLI
-        argv,
-        start_new_session=True,
-    )
-    try:
-        returncode = child.wait(timeout=_AUTO_RESUME_EARLY_EXIT_PROBE_S)
-    except subprocess.TimeoutExpired:
-        # Still running after the probe — the normal fire-and-forget resume path
-        # (deliberately un-reaped; the kernel re-parents it on dashboard exit).
-        return
-    if returncode != 0:
-        # An immediate non-zero exit is a usage / user error (e.g. an argv the CLI
-        # refuses) — the resume did NOT happen. Raise into the maybe_resume_on_boot
-        # guard so the boot log reads the honest `error` verdict, never `resumed`.
-        raise RuntimeError(
-            f"auto-resume child exited immediately with code {returncode} (argv={argv!r})"
-        )
-    # A clean immediate exit means the child found nothing left to pull (the
-    # ledger settled between the detect and the spawn) — a successful resume.
-    log.info("auto_resume.child_completed", returncode=returncode)
-
-
 def _start_auto_resume_on_boot(
     lake_root: Path,
     log: Any,
     *,
     intent_store: Any = None,
     resume_pipeline: Callable[[], None] | None = None,
-) -> None:  # pragma: no cover — daemon thread + live ledger read / subprocess spawn
+    resume_legacy: Callable[[], object] | None = None,
+) -> None:  # pragma: no cover — daemon-thread launcher over the 100%-tested decision layers
     """Run the opt-in boot-time auto-resume for *lake_root* in a background daemon thread.
 
     Wires :func:`~brutex.orchestrator.auto_resume.maybe_resume_on_boot` (the
     gated, best-effort decision) to (a) the durable window-ledger read of
-    *lake_root* and (b) the subprocess resume action THAT RE-PULLS THE SAME
-    *lake_root* (the explicit ``--lake-root`` on the child — the hostile-review
-    MAJOR fix, so the ledger read and the resumed pull can never diverge to two
-    different lakes). Run in a daemon thread so the ledger read / spawn never
-    blocks the uvicorn port bind — the SAME instant-launch seam
-    :func:`_start_instrument_autoload` uses (DEC-DASHBOARD-INSTANT-LAUNCH-001). The
-    whole decision is a no-op unless ``BRUTEX_AUTO_RESUME_ON_BOOT`` is truthy
-    (default OFF — DEC-AUTO-RESUME-ON-BOOT-001), so a dev / CI boot is never
-    surprised by a spontaneous pull. ``maybe_resume_on_boot`` never raises, so a
-    failed resume trigger only logs — the boot is unaffected (Golden Rule #10).
+    *lake_root* and (b) an IN-PROCESS resume action — the app's
+    ``app.state.brutex_resume_legacy`` seam (*resume_legacy*), which routes the
+    legacy ledger-triggered resume through the dashboard's OWN ``/pull-pipeline``
+    launcher via :func:`~brutex.dashboard.pull_intent.run_legacy_resume`
+    (DEC-AUTO-RESUME-INPROCESS-001). This REPLACES the deleted
+    ``brutex fetch --until-clean`` subprocess child, which was DOA on every
+    opted-in boot — BOTH DuckDB files the child must open are exclusively
+    locked against it: its ``cmd_fetch`` first opens
+    ``Catalog.open(<lake>/catalog.duckdb)``, which the dashboard's boot-time
+    L3 lake-heal ``StartupSweeper`` (launched right after this launcher) holds
+    for its sweep window — the incident's actual first-raising site
+    (``catalog.py`` ``duckdb.connect``, production traceback
+    2026-07-09T02:47:24Z) — and even when that is momentarily free the child
+    dies one step later at ``_resolve_brute_force_instruments`` →
+    ``InstrumentStore.open(<lake>/instruments.duckdb)``, which the dashboard
+    holds READ-WRITE for its LIFETIME (read-only opens also refused). Exit 1
+    in ~0.3 s with inherited (never captured) stderr — the outstanding
+    windows stranded silently. In-process, no second catalog/store handle is
+    ever opened, so the whole lock class is structurally gone; the resume
+    also inherits the intent machinery's restart cap + CRITICAL alert + red
+    banner + single-flight peer probe.
+
+    An UNWIRED *resume_legacy* (the intent-store build failed, so the app never
+    exposed the seam) makes the legacy arm raise into ``maybe_resume_on_boot``'s
+    guard — ONE honest ``auto_resume.error`` log naming why, verdict ``error``,
+    never a false ``resumed`` and NEVER a DOA child. Run in a daemon thread so
+    the ledger read / launch never blocks the uvicorn port bind — the SAME
+    instant-launch seam :func:`_start_instrument_autoload` uses
+    (DEC-DASHBOARD-INSTANT-LAUNCH-001). The whole decision is a no-op unless
+    ``BRUTEX_AUTO_RESUME_ON_BOOT`` is truthy (default OFF —
+    DEC-AUTO-RESUME-ON-BOOT-001), so a dev / CI boot is never surprised by a
+    spontaneous pull. ``maybe_resume_on_boot`` never raises, so a failed resume
+    trigger only logs — the boot is unaffected (Golden Rule #10).
 
     DEC-PULL-INTENT-RESUME-001 (the ONE decision point): when *intent_store* (a
     :class:`~brutex.dashboard.pull_intent.PullIntentStore`) and *resume_pipeline*
     (the app's ``app.state.brutex_resume_pipeline`` seam) are BOTH wired and a
     durable ``.pull_intent.json`` is present (escape hatch
     ``BRUTEX_PULL_INTENT_RESUME`` not OFF), the dashboard PIPELINE resume runs
-    EXCLUSIVELY — the legacy spot-only CLI child is NOT spawned this boot, so
-    the two resumes can never race the account-wide single-flight ``flock``.
-    With no intent (or either seam unwired) the legacy path is byte-identical.
+    EXCLUSIVELY — the legacy arm does not fire this boot, so the two resumes
+    can never race the account-wide single-flight ``flock``. With no intent
+    (or either seam unwired) the legacy arm below runs as before — now
+    in-process instead of via the deleted child.
+
+    MASTER KILL SWITCH (``BRUTEX_AUTO_RESUME``, default OFF): checked FIRST —
+    before the intent wiring, before any ``.pull_intent.json`` read, and before
+    the daemon thread is spawned — so a leftover intent file can NEVER silently
+    trigger a full-universe pull on boot. Disabled ⇒ nothing starts (neither
+    arm) and ONE ``auto_resume.disabled_by_default`` line is logged. This is a
+    DELIBERATE behaviour change by operator directive (Golden Rule #10): the
+    crash-recovery boot-resume is now OPT-IN, overriding the prior default-ON of
+    the intent arm. The two per-arm sub-gates (``BRUTEX_PULL_INTENT_RESUME`` /
+    ``BRUTEX_AUTO_RESUME_ON_BOOT``) are unchanged and still apply BENEATH this
+    master gate once it is on.
     """
+    from brutex.orchestrator.auto_resume import (
+        AUTO_RESUME_MASTER_ENV,
+        resolve_auto_resume_master,
+    )
+
+    if not resolve_auto_resume_master():
+        log.info(
+            "auto_resume.disabled_by_default",
+            env=AUTO_RESUME_MASTER_ENV,
+            hint="set BRUTEX_AUTO_RESUME=1 to enable boot-time auto-resume",
+        )
+        return
+
     import threading
 
     from brutex.data.window_ledger_store import load_window_ledger
@@ -3270,10 +3194,34 @@ def _start_auto_resume_on_boot(
 
         intent_present = _intent_present
 
+    def _resume_in_process(incomplete: Any) -> None:
+        """The legacy arm's injected resume action — in-process, never a child."""
+        if resume_legacy is None:
+            # The app never exposed the in-process seam (the intent-store build
+            # failed at boot). Refuse LOUDLY: the raise lands in
+            # maybe_resume_on_boot's guard, which logs `auto_resume.error`
+            # naming this reason and returns the honest `error` verdict — never
+            # a false `resumed`, never a DOA subprocess
+            # (DEC-AUTO-RESUME-INPROCESS-001).
+            raise RuntimeError(
+                "in-process legacy auto-resume unavailable: the dashboard's "
+                "pull-intent store / resume seam is not wired (the intent-store "
+                "build failed at boot) — no resume fired; restart the dashboard "
+                "or start the pull manually from /universe"
+            )
+        log.info(
+            "auto_resume.inprocess",
+            outstanding=incomplete.outstanding,
+            planned=incomplete.planned,
+            failed=incomplete.failed,
+            lake_root=str(lake_root),
+        )
+        resume_legacy()
+
     def _run() -> None:
         verdict = maybe_resume_on_boot(
             load_ledger=lambda: load_window_ledger(lake_root),
-            resume=lambda incomplete: _spawn_auto_resume_pull(incomplete, lake_root, log),
+            resume=_resume_in_process,
             intent_present=intent_present,
             resume_intent=resume_pipeline,
         )
@@ -3579,24 +3527,28 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             _log.warning("liveproof.launch_failed", error=str(exc))
     # Opt-in boot-time auto-resume (DEC-AUTO-RESUME-ON-BOOT-001): if
     # BRUTEX_AUTO_RESUME_ON_BOOT is truthy AND the durable window ledger shows an
-    # in-progress pull (PLANNED / FAILED windows), auto-continue it by spawning
-    # `brutex fetch --until-clean --lake-root <resolved>` — so a fresh
-    # container / redeploy / restart picks up an unfinished pull with ZERO clicks
-    # (§11 AUTOMATED). Runs in a daemon thread so the ledger read / spawn never blocks
-    # the uvicorn bind, and is a no-op unless the flag is set (default OFF — a dev / CI
-    # boot is never surprised). Best-effort on the BIND path: the launcher itself only
-    # spawns a daemon thread (the resume DECISION never raises), but wrapping the launch
-    # in a guard so even a thread-spawn failure logs + the dashboard still binds honours
-    # the "never crashes boot" contract (Golden Rule #10).
+    # in-progress pull (PLANNED / FAILED windows), auto-continue it IN-PROCESS
+    # through the app's own /pull-pipeline launcher (app.state.brutex_resume_legacy
+    # → run_legacy_resume, DEC-AUTO-RESUME-INPROCESS-001 — the old subprocess
+    # child was DOA on DuckDB's exclusive instruments.duckdb lock every opted-in
+    # boot and is DELETED) — so a fresh container / redeploy / restart picks up
+    # an unfinished pull with ZERO clicks (§11 AUTOMATED). Runs in a daemon
+    # thread so the ledger read / launch never blocks the uvicorn bind, and is a
+    # no-op unless the flag is set (default OFF — a dev / CI boot is never
+    # surprised). Best-effort on the BIND path: the launcher itself only spawns
+    # a daemon thread (the resume DECISION never raises), but wrapping the
+    # launch in a guard so even a thread-spawn failure logs + the dashboard
+    # still binds honours the "never crashes boot" contract (Golden Rule #10).
     # DEC-PULL-INTENT-RESUME-001 extends this seam: with a durable pull intent
     # present, the PIPELINE resume (app.state.brutex_resume_pipeline) runs
-    # EXCLUSIVELY and the legacy spot-only CLI child is not spawned this boot.
+    # EXCLUSIVELY and the legacy in-process resume does not fire this boot.
     try:
         _start_auto_resume_on_boot(
             _resolve_lake_root(lake_root),
             _log,
             intent_store=pull_intent_store,
             resume_pipeline=getattr(app.state, "brutex_resume_pipeline", None),
+            resume_legacy=getattr(app.state, "brutex_resume_legacy", None),
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
         _log.warning("auto_resume.launch_failed", error=str(exc))
@@ -6051,7 +6003,10 @@ def cmd_sweep(
     """Brute-force sweep over lake bars → print the ranked top-combo table.
 
     Loads the bars for one ``(symbol, interval)`` window from the Parquet lake via
-    the SAME ``Catalog`` / ``ReplayFeed`` path the engine uses, runs the assembled
+    the ONE alias-aware loader (``brutex.feed.series_load.load_sweep_slice`` — the
+    SAME ``Catalog`` / ``ReplayFeed`` path the engine uses; the NIFTY-futures
+    series alias ``NSE-NIFTY-FUT`` is roll-resolved + stitched,
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), runs the assembled
     funnel (sweep → Stage-1B prune → hard gates → composite rank), and prints the
     self-describing leaderboard (``brutex.engine.sweep_report``). Signal-only —
     nothing is persisted (DEC-SWEEP-CLI-001). ``--exchange`` / ``--segment`` /
@@ -6059,15 +6014,23 @@ def cmd_sweep(
     (segment ``INDEX`` for the spot indexes — the lake partition label, NOT the Groww
     API's ``IDX_I`` request segment).
     """
+    from brutex.calendars.nse import IST
     from brutex.data.catalog import Catalog
+    from brutex.data.futures_series import (
+        FuturesSeriesError,
+        FuturesSeriesResolution,
+        is_futures_series_symbol,
+        resolve_futures_series,
+    )
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.stage1a import apply_1day_mask_for
     from brutex.engine.sweep_report import sweep_report
 
     # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2):
     # refuse an out-of-engine-scope launch BEFORE any lake I/O. Report-only
     # command, but an out-of-scope brute-force IS the violation.
     from brutex.engine.sweep_scope import check_sweep_scope
-    from brutex.feed.replay import ReplayFeed
+    from brutex.feed.series_load import load_sweep_slice, require_series_coordinates
     from brutex.ranking import MIN_TRADES
     from brutex.strategies.types import Side
 
@@ -6083,11 +6046,21 @@ def cmd_sweep(
         print(f"[brutex] {scope.override_warning()}")
         structlog.get_logger("brutex.sweep").warning(
             "sweep.scope_override",
-            symbols=[verdict.symbol for verdict in scope.refused],
+            # repr(): an operator-typed symbol may embed \n/ESC — never let a
+            # hostile name forge log lines (#907/#919 repr-naming convention).
+            symbols=[repr(verdict.symbol) for verdict in scope.refused],
             exchange=exchange,
             segment=segment,
         )
 
+    # Honest 1day-grid launch note (Golden Rule #10, review round-8 finding 1):
+    # the 1day axis builds bar_bits but can rank nothing under the
+    # intraday-only trade law — say so up front, never a silent empty report.
+    from brutex.engine.sweep_preflight import one_day_trade_law_note
+
+    one_day_note = one_day_trade_law_note([interval])
+    if one_day_note is not None:
+        print(f"[brutex] {one_day_note}")
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
@@ -6102,18 +6075,40 @@ def cmd_sweep(
     from brutex.observability.power_keepawake import keep_awake
 
     with keep_awake("brutex sweep"):
-        with Catalog.open(catalog, require_exists=True) as cat:
-            feed = ReplayFeed(
-                catalog=cat,
-                lake_root=resolved_lake,
-                exchange=exchange,
-                segment=segment,
-                symbols=[symbol],
-                interval=interval,
-                start=_parse_dt(start),
-                end=_parse_dt(end),
-            )
-            bars = [event.bar for event in feed]
+        start_dt, end_dt = _parse_dt(start), _parse_dt(end)
+        # ADR-0012: resolve the futures series ONCE (vendor lake dirs → ownership
+        # windows + the roll schedule); a spot symbol resolves to None and takes
+        # the byte-identical verbatim-dir path inside the loader.
+        resolution: FuturesSeriesResolution | None = None
+        try:
+            if is_futures_series_symbol(symbol):
+                # Coordinate pin BEFORE the resolve (review round-8 finding 9):
+                # under --allow-out-of-scope with a foreign --exchange/--segment
+                # on a box with NO pinned tree, resolving first would name the
+                # wrong problem ("no NSE/FNO lake tree — run the pipeline pull")
+                # instead of the coordinate.
+                require_series_coordinates(symbol, exchange=exchange, segment=segment)
+                resolution = resolve_futures_series(
+                    resolved_lake,
+                    start=start_dt.astimezone(IST).date(),
+                    end=end_dt.astimezone(IST).date(),
+                )
+            with Catalog.open(catalog, require_exists=True) as cat:
+                bars = load_sweep_slice(
+                    cat=cat,
+                    lake_root=resolved_lake,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=interval,
+                    start=start_dt,
+                    end=end_dt,
+                    reconcile=False,  # cmd_sweep's no-reconcile law, preserved
+                    resolution=resolution,
+                )
+        except FuturesSeriesError as exc:
+            print(f"[brutex] sweep error: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
         if not bars:
             print(
                 f"[brutex] no bars for {symbol} {interval} {start}→{end} "
@@ -6122,6 +6117,19 @@ def cmd_sweep(
             )
             return EXIT_USER_ERROR
         try:
+            # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): `brutex
+            # sweep` renders a TEXT leaderboard and persists nothing — the report
+            # bytes are regression-pinned IDENTICAL stamped-vs-unstamped
+            # (test_engine_vix_stamper_wiring.py::TestSweepReportSeam::
+            # test_sweep_report_bytes_identical_stamped_vs_unstamped — the report
+            # surface carries no VIX column), so a stamp here is provably
+            # unobservable and a stamper
+            # build would be pure wasted lake I/O. The stream is EXPLICITLY
+            # unstamped via this literal (an enumerated sanctioned literal-None
+            # site, AST-pinned by tests/unit/test_vix_stamper_binding_pin.py —
+            # this call previously OMITTED the kwarg, the silent-omission class
+            # the pin now polices). REVERT LEVER: bind a build_vix_stamper(...)
+            # here if the report ever grows a VIX surface.
             report = sweep_report(
                 bars,
                 instrument=symbol,
@@ -6137,6 +6145,9 @@ def cmd_sweep(
                 sort_by=sort_by,
                 validate_oos=validate_oos,
                 oos_only=oos_only,
+                roll_schedule=resolution.roll_schedule if resolution is not None else None,
+                apply_1day_mask=apply_1day_mask_for(symbol, interval),
+                reference_stamper=None,
             )
         except ValueError as exc:
             # Honest user errors (over-cap sweep, bad k, --oos-only on a < 2-day window)
@@ -6272,8 +6283,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
     The launch entry point for DEC-SWEEP-ORCHESTRATOR-001: it pre-loads every
-    ``(symbol, interval)`` slice from the Parquet lake (the SAME Catalog/ReplayFeed
-    path :func:`cmd_sweep` uses), derives a REAL reproducibility context (git SHA,
+    ``(symbol, interval)`` slice from the Parquet lake (the ONE alias-aware
+    ``load_sweep_slice`` loader :func:`cmd_sweep` also uses — the NIFTY-futures
+    series alias is roll-resolved + stitched, DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001),
+    derives a REAL reproducibility context (git SHA,
     indicator-stack version, a content fingerprint of the loaded bars — never
     placeholders, Golden Rule #1), then drives
     :func:`brutex.engine.sweep_orchestrator.run_sweep_grid` with a shared
@@ -6282,9 +6295,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.sweep_apriori import apriori_enabled, effective_max_combos
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
     from brutex.engine.sweep_checkpoint import SweepCheckpointStore
+    from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
     from brutex.engine.sweep_launch import (
         plan_launch_dedup,
         resolve_launch_cache_knobs,
@@ -6305,7 +6320,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         run_supervised_grid,
     )
     from brutex.engine.sweep_watchdog import SweepWatchdog
-    from brutex.feed.replay import ReplayFeed
     from brutex.feed.resampler import INTERVAL_SECONDS
     from brutex.orchestrator.audit import AuditWriter
     from brutex.ranking import OverfitGateConfig
@@ -6323,7 +6337,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # ``--detach`` abbreviation (argparse's default allow_abbrev matches
     # ``--det`` → detach=True) is IGNORED in the child and the real sweep runs
     # instead of forking another detached generation (fork-bomb guard,
-    # hostile-review round 3, #1594).
+    # hostile-review round 3, #1712).
     from brutex.engine.sweep_detach import running_as_detached_child, spawn_detached_sweep
 
     if detach and not running_as_detached_child():
@@ -6353,7 +6367,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {scope.override_warning()}")
         structlog.get_logger("brutex.sweep").warning(
             "sweep.scope_override",
-            symbols=[verdict.symbol for verdict in scope.refused],
+            # repr(): an operator-typed symbol may embed \n/ESC — never let a
+            # hostile name forge log lines (#907/#919 repr-naming convention).
+            symbols=[repr(verdict.symbol) for verdict in scope.refused],
             exchange=exchange,
             segment=segment,
         )
@@ -6366,6 +6382,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 file=sys.stderr,
             )
             return EXIT_USER_ERROR
+    # Honest 1day-grid launch note (Golden Rule #10, review round-8 finding 1):
+    # the 1day axis builds bar_bits but can rank nothing under the
+    # intraday-only trade law — say so up front, never a silent empty grid.
+    from brutex.engine.sweep_preflight import one_day_trade_law_note
+
+    one_day_note = one_day_trade_law_note(interval_list)
+    if one_day_note is not None:
+        print(f"[brutex] {one_day_note}")
     direction_list = [
         Side.BUY if d.strip().upper() == "BUY" else Side.SELL
         for d in directions.split(",")
@@ -6451,7 +6475,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # deliberately NOT gated — sweep-all reconciles the catalog from the lake
     # below, so it must keep rebuilding a missing catalog inside a REAL lake.
     _require_lake_dir(resolved_lake, command="sweep-all")
-
     # keep_awake (DEC-SWEEP-KEEPAWAKE-001): hold the macOS host awake for the
     # WHOLE sweep — the lake preload + the supervised grid + stage-3 +
     # options-sim + cascade. A §8 full grid is a 2-4 DAY wall-clock run and
@@ -6468,44 +6491,75 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.observability.power_keepawake import keep_awake
 
     with keep_awake("brutex sweep-all"):
-        # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is a real
-        # content fingerprint and each tuple reuses the cached bars (no re-read).
-        # G10 (DEC-SWEEP-UNKILLABLE-CORE-001): hold the SHARED lake read-guard
-        # across the PRELOAD ONLY — a concurrent pull/heal (EX holder) refuses this
-        # launch loudly; once the bars are in memory the guard is released.
-        slices: dict[tuple[str, str], list[Any]] = {}
-        with lake_read_guard(resolved_lake), Catalog.open(catalog) as cat:
-            # Rebuild the catalog from the on-disk Parquet truth for the swept
-            # coordinates BEFORE reading, so a lake whose partitions were never
-            # registered (every production ingest sink historically passed
-            # catalog=None — DEC-CATALOG-RECONCILE-WIRE-001) is still sweep-able
-            # with no re-pull. O(P) one-time over the requested partitions, not in
-            # the per-combo hot loop (Golden Rule #10).
-            from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
-            for symbol in symbol_list:
-                for interval in interval_list:
-                    reconcile_catalog_from_lake(
-                        lake_root=resolved_lake,
-                        catalog=cat,
-                        exchange=exchange,
-                        segment=segment,
-                        symbol=symbol,
-                        interval=interval,
-                    )
-            for symbol in symbol_list:
-                for interval in interval_list:
-                    feed = ReplayFeed(
-                        catalog=cat,
-                        lake_root=resolved_lake,
-                        exchange=exchange,
-                        segment=segment,
-                        symbols=[symbol],
-                        interval=interval,
-                        start=_parse_dt(start),
-                        end=_parse_dt(end),
-                    )
-                    slices[(symbol, interval)] = [event.bar for event in feed]
+        # ADR-0012 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): resolve the NIFTY-futures
+        # series alias ONCE up front — vendor lake dirs → per-contract ownership
+        # windows + the ONE roll schedule every consumer below shares (loader cut,
+        # Stage-1A cursor, run identity, freshness-gate expansion). A resolution
+        # refusal (interior hole, empty series, …) is a clean user error whose
+        # message IS the remediation.
+        from brutex.calendars.nse import IST
+        from brutex.data.futures_series import (
+            FuturesSeriesError,
+            FuturesSeriesResolution,
+            is_futures_series_symbol,
+            resolve_futures_series,
+        )
+        from brutex.feed.series_load import load_sweep_slice, require_series_coordinates
+
+        start_dt, end_dt = _parse_dt(start), _parse_dt(end)
+        resolution: FuturesSeriesResolution | None = None
+        roll_schedule_by_instrument: dict[str, tuple[int, ...]] | None = None
+        futures_symbols = [s for s in symbol_list if is_futures_series_symbol(s)]
+        try:
+            if futures_symbols:
+                # Coordinate pin BEFORE the resolve (review round-8 finding 9) —
+                # names the coordinate, not a misleading "no NSE/FNO lake tree".
+                require_series_coordinates(futures_symbols[0], exchange=exchange, segment=segment)
+                resolution = resolve_futures_series(
+                    resolved_lake,
+                    start=start_dt.astimezone(IST).date(),
+                    end=end_dt.astimezone(IST).date(),
+                )
+                roll_schedule_by_instrument = dict.fromkeys(futures_symbols, resolution.roll_schedule)
+
+            # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is
+            # a real content fingerprint and each tuple reuses the cached bars (no
+            # re-read). The ONE alias-aware loader reconciles the catalog from the
+            # on-disk Parquet truth per physical dir BEFORE reading
+            # (DEC-CATALOG-RECONCILE-WIRE-001 — O(P) one-time, not per combo) and
+            # roll-stitches the futures alias per contract.
+            # DEC-SWEEP-RECONCILE-STATCACHE-001: stat_cache=True — a WARM
+            # (byte-unchanged) launch skips the redundant full-bytes sha256 +
+            # timestamp re-read of every partition on a stat-only
+            # (mtime_ns, size, ino) token match; the loaded bars — hence
+            # data_snapshot_hash / run identity — are byte-identical (get_bars
+            # re-reads the actual file content). The launcher discards findings +
+            # heals nothing here, so suppressing the L1 classification on an
+            # unchanged file is sound; the SHARED heal/census callers keep the
+            # default stat_cache=False.
+            # G10 (DEC-SWEEP-UNKILLABLE-CORE-001): hold the SHARED lake read-guard
+            # across the PRELOAD ONLY — a concurrent pull/heal (EX holder) refuses
+            # this launch loudly; once the bars are in memory the guard is released.
+            slices: dict[tuple[str, str], list[Any]] = {}
+            with lake_read_guard(resolved_lake), Catalog.open(catalog) as cat:
+                for symbol in symbol_list:
+                    for interval in interval_list:
+                        slices[(symbol, interval)] = load_sweep_slice(
+                            cat=cat,
+                            lake_root=resolved_lake,
+                            exchange=exchange,
+                            segment=segment,
+                            symbol=symbol,
+                            interval=interval,
+                            start=start_dt,
+                            end=end_dt,
+                            resolution=resolution,
+                            stat_cache=True,
+                        )
+        except FuturesSeriesError as exc:
+            print(f"[brutex] sweep-all REFUSED: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
 
         loaded = {key: len(bars) for key, bars in slices.items() if bars}
         if not loaded:
@@ -6555,12 +6609,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
         from brutex.engine.sweep_preflight import preflight_derived_freshness
 
+        # G1 expansion (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the futures ALIAS names
+        # no lake dir — probing `bars/NSE/FNO/NSE-NIFTY-FUT/` would silently abstain
+        # (a gate bypass) — so the gate probes the resolved CONTRACT dirs instead.
+        # HONEST envelope (pre-existing #1492): the gate stays OI-blind
+        # (`read_lake_bars_frame` drops open_interest) and 1day-abstaining —
+        # results-safe, no condition bit reads OI.
+        freshness_symbols = [s for s in symbol_list if not is_futures_series_symbol(s)]
+        if resolution is not None:
+            freshness_symbols.extend(resolution.contract_symbols)
         freshness = preflight_derived_freshness(
             lake_derived_freshness_verdicts(
                 resolved_lake,
                 exchange=exchange,
                 segment=segment,
-                symbols=symbol_list,
+                symbols=freshness_symbols,
                 intervals=interval_list,
             )
         )
@@ -6601,8 +6664,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         }
         if max_tuples is not None:
             grid_kwargs["max_tuples"] = max_tuples
-        if max_combos is not None:
-            grid_kwargs["max_combos"] = max_combos
+        # Apriori-aware max_combos pre-flight (DEC-SWEEP-APRIORI-TUPLE-001): the Apriori
+        # bypass replaces ONLY the DEFAULT max_combos guard value — with the flag ON the
+        # deterministic MAX_MASK_BARS breaker is the real guardrail, so the raw C(n,k)
+        # pre-flight is auto-raised to ADMIT every requested k (otherwise a full-vocab
+        # k>=4 grid is refused before Apriori ever runs). An EXPLICIT operator
+        # --max-combos always WINS (never auto-raised); the non-Apriori path returns the
+        # requested value unchanged, so setting the default explicitly == the field
+        # default and the grid is byte-identical. `--max-combos` argparse default is None
+        # → None means "not passed" (the built-in default, not explicit).
+        grid_kwargs["max_combos"] = effective_max_combos(
+            apriori_enabled=apriori_enabled(),
+            k_values=k_list,
+            n_unique=len(set(condition_bits)),
+            requested_max_combos=max_combos if max_combos is not None else DEFAULT_MAX_COMBOS,
+            requested_is_explicit=max_combos is not None,
+        )
         if overfit_gate:
             grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
         if scope.overridden:
@@ -6705,6 +6782,52 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # in the per-tuple completion sentinel + tuple digest, not this sink; the
         # LMDB-backed TUPLE tier (``SweepCache``) stays, now operator-tunable.
         audit_path = out_root / "audit" / "sweep-all.jsonl"
+        # ADR-0012 resume-honesty gate (review round-2 finding 11): a SCHEDULE-ONLY
+        # lake drift (a sessionless-span successor contract appeared — snapshot
+        # byte-identical, roll_schedule grew) would let every completed tuple
+        # short-circuit at its sentinel (rows minted under the RECORDED schedule)
+        # while Stage-3/cascade recovery re-derives identities under the FRESH
+        # schedule → an uncaught grid-mismatch crash blaming the wrong cause.
+        # Compare the tree's recorded schedule against the fresh one UP FRONT and
+        # refuse with the evidence named (the 100%-tested helper owns the logic).
+        if roll_schedule_by_instrument is not None:
+            from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+            from brutex.engine.sweep_verify import stale_roll_schedule_refusal
+            from brutex.engine.tuple_complete import completion_sentinel_path
+
+            # Round-5 finding 11: the digest-aware fresh-sentinel probe — the only
+            # evidence that separates a MID-FILE-lossy audit (a matching-generation
+            # SPOT start survived; the futures ones were lost) from the legitimate
+            # crash-resume over FOREIGN-generation sentinels. The tuple digest folds
+            # this launch's data_snapshot_hash, so only a sentinel at one of THESE
+            # exact paths can short-circuit this grid's tuples. O(grid) path
+            # derivations once per futures launch (a few ms of BLAKE3 over small
+            # descriptors); existence is probed lazily by the gate, and only on the
+            # missing-recorded-schedule arm.
+            fresh_sentinel_paths: dict[str, list[Path]] = {}
+            for grid_tuple in iter_sweep_tuples(grid):
+                fresh_sentinel_paths.setdefault(grid_tuple.instrument, []).append(
+                    completion_sentinel_path(tuple_store_path(out_root, grid_tuple, grid))
+                )
+            schedule_refusal = stale_roll_schedule_refusal(
+                audit_path,
+                fresh_snapshot=snapshot,
+                # Round-8 finding 10: a generation is the FULL context triple —
+                # a code-upgrade re-launch (same snapshot, new commit) re-keys
+                # every tuple digest, so the prior commit's recorded schedules
+                # must abstain here exactly like a moved snapshot.
+                fresh_indicator_version=grid.indicator_version,
+                fresh_code_commit_sha=grid.code_commit_sha,
+                roll_schedule_by_instrument=roll_schedule_by_instrument,
+                # Round-3 finding 8: an absent/rotated audit over a tree that DOES
+                # hold futures completion sentinels refuses too (the recorded
+                # schedule those rows were minted under cannot be verified).
+                results_root=out_root,
+                fresh_sentinel_paths=fresh_sentinel_paths,
+            )
+            if schedule_refusal is not None:
+                print(f"[brutex] sweep-all REFUSED: {schedule_refusal}", file=sys.stderr)
+                return EXIT_USER_ERROR
         audit_path.parent.mkdir(parents=True, exist_ok=True)
         # G&A layer (DEC-SWEEP-WIRE-GA-001): one BLAKE3 supervisor audit chain, a
         # crash-safe resume checkpoint keyed on the grid identity, a Bloom→LMDB
@@ -6800,6 +6923,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             sweep_abort_alert(_emit_pull_halt_alert),
         ):
             core.stage("sweep")
+            # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
+            # launch from the lake's NSE/INDEX/INDIAVIX partitions over the swept
+            # window, then handed to every observable trade surface below (grid
+            # finalist projection, Stage-3 refined rows, Stage-4 cascade). An
+            # absent / empty VIX lake degrades honestly to None (observe-only WARN
+            # inside the builder — the sweep proceeds with unstamped trades, never
+            # a fabricated stamp and never a refused launch). Built INSIDE the
+            # abort-alert wrap (round-3 panel): load_lake_slice runs the L1 heal —
+            # a WRITE-capable lake path whose LakeWriteHalt (disk-full/OOM during
+            # a heal rewrite) is an infrastructure abort that must fire the
+            # CRITICAL push, unlike the clean user-config errors gated above.
+            from brutex.engine.reference_wire import build_vix_stamper
+
+            reference_stamper = build_vix_stamper(
+                lake_root=resolved_lake,
+                start=_parse_dt(start),
+                end=_parse_dt(end),
+                catalog_path=catalog,
+            )
             with (
                 AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
                 SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
@@ -6823,6 +6965,40 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                             "segment": segment,
                         },
                     )
+                if roll_schedule_by_instrument is not None:
+                    # Durable launch-generation context (review round-7 finding 1):
+                    # on the PARALLEL driver — the production default — the EVAL
+                    # worker durably writes the per-tuple store + completion
+                    # sentinel while its SWEEP_START reaches this audit only when
+                    # the parent's strictly in-order apply cursor replays the
+                    # buffered records, so a parent crash inside the launch window
+                    # left fresh-digest sentinels with ZERO fresh-generation audit
+                    # entries — and the resume gate above (whose "SWEEP_START
+                    # precedes the sentinel" premise held only on the sequential
+                    # driver) permanently condemned the sanctioned crash-resume as
+                    # a tail-lossy/restored audit. ONE fsynced SWEEP_LAUNCH line
+                    # per futures instrument BEFORE grid dispatch makes the
+                    # premise true on BOTH drivers: any crash thereafter leaves
+                    # this generation's roll_schedule durably recorded, so the
+                    # re-launch compares recorded == fresh instead of refusing.
+                    # Spot launches append nothing — their audit stays
+                    # byte-identical.
+                    from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
+
+                    for fut_instrument in sorted(roll_schedule_by_instrument):
+                        ingest_audit.append(
+                            action=SWEEP_LAUNCH_ACTION,
+                            subject=f"sweep-all:launch:{fut_instrument}",
+                            payload={
+                                "instrument": fut_instrument,
+                                "data_snapshot_hash": grid.data_snapshot_hash,
+                                "indicator_version": grid.indicator_version,
+                                "code_commit_sha": grid.code_commit_sha,
+                                "params": {
+                                    "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
+                                },
+                            },
+                        )
                 dedup = plan_launch_dedup(grid, digest_path=True)
                 guards = SweepGuards(
                     audit=sup_audit,
@@ -6868,6 +7044,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         # determinism lane still covers parallel runs).
                         on_tuple=core.on_tuple,
                         on_quarantine=core.record_worker_quarantine,
+                        roll_schedule_by_instrument=roll_schedule_by_instrument,
+                        reference_stamper=reference_stamper,
                     )
                 else:
                     result = run_supervised_grid(
@@ -6882,6 +7060,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
                         diffcheck=core.diffcheck,
                         store_quarantine=core.store_quarantine,
+                        roll_schedule_by_instrument=roll_schedule_by_instrument,
+                        reference_stamper=reference_stamper,
                     )
                 core.grid_done(result)
                 core.stage("stage3")
@@ -6908,6 +7088,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         segment=segment,
                         start=start,
                         end=end,
+                        roll_schedule_by_instrument=roll_schedule_by_instrument,
+                        # The launch's already-built stamper (never a second lake
+                        # read); resolved lazily by the pass so a stage3-disabled
+                        # grid pays nothing extra.
+                        stamper_for=lambda: reference_stamper,
                     )
                 )
             # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
@@ -6935,8 +7120,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
                     f"evals={stage3_report.evals_total} cells={len(stage3_report.cells)} "
                     f"rows_appended={stage3_report.rows_appended} "
+                    f"cells_conflicted={stage3_report.cells_conflicted} "
                     f"skipped_empty_train={stage3_report.skipped_empty_train} "
                     f"train_snapshot={stage3_report.train_snapshot_hash}"
+                )
+            if stage3_report.cells_conflicted > 0:
+                # The stage-3 twin of the tuples_failed warning (Golden Rule #10):
+                # a VIX-conflicted refined cell was SKIPPED (store untouched) — the
+                # India-VIX lake moved between launches; the verdict goes non-zero.
+                print(
+                    f"[brutex] WARNING: {stage3_report.cells_conflicted} stage-3 cell(s) hold a "
+                    f"REFERENCE-ONLY VIX trio conflicting with this launch's re-derivation and "
+                    "were SKIPPED — see the stage3_wire.cell_vix_conflict log lines; "
+                    "quarantine/delete those cell stores to re-persist against the current VIX "
+                    "series (exit code non-zero).",
+                    file=sys.stderr,
                 )
             print(
                 f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}"
@@ -7012,12 +7210,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     sweep_id=sweep_id,
                     specs=cascade_specs,
                     bars_for=_bars_for,
-                    bars_context=BarsContext(
-                        exchange=exchange, segment=segment, start=start, end=end
-                    ),
+                    bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
                     cascade_config=cascade_config_for_sweep(sweep_id),
                     stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                     leaderboard_trials=leaderboard_trials,
+                    # ADR-0012 (review round-1): the SAME resolved schedule map the
+                    # grid swept under drives the Stage-4 futures pools' hard
+                    # resets AND is recorded in the manifest for the MANUAL replay
+                    # — never a schedule-blind re-score of a futures winner.
+                    roll_schedule_by_instrument=roll_schedule_by_instrument,
+                    # No stamper seam: the cascade candidate re-simulations are
+                    # DISCARDED trade streams (DEC-VIX-STAMP-WIRE-001 round-6 —
+                    # see cascade_wire.build_candidate_input's sanctioned
+                    # literal-None), so the launch stamper deliberately does NOT
+                    # ride into Stage-4.
                 )
                 core.cascade_done(cascade_report)
                 print(
@@ -7084,9 +7290,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 )
 
             # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
-            # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
+            # EXIT_OK; any tuple skipped after a SweepComboError — or any stage-3 cell
+            # skipped on a VIX-trio conflict — makes the exit non-zero.
             core.stage("artifacts")
-            exit_code = sweep_all_exit_code(result.tuples_failed)
+            exit_code = sweep_all_exit_code(result.tuples_failed + stage3_report.cells_conflicted)
             core.set_exit_code(exit_code)
             return exit_code
 
@@ -7442,9 +7649,14 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
     the sweep wrote under ``--results-root`` (default ``<lake>/sweeps``), re-reads
     the SAME bars from the lake, and re-runs the cascade through the identical
     pure core — so the regenerated ``cascade-report.json`` is byte-identical to the
-    one the sweep produced. A missing/invalid manifest, or a ``run_id`` that does
-    not match the manifest's, surfaces as a clear user error, never a traceback.
+    one the sweep produced. A missing/invalid manifest, a ``run_id`` that does
+    not match the manifest's, a futures lake whose contract set CHANGED since
+    the sweep (the replay's frozen-vs-re-derived roll-schedule cross-check,
+    review round-2 findings 1/4/9), or a futures-series resolution refusal
+    (interior hole / empty owned window) surfaces as a clear user error,
+    never a traceback (DEC-CLI-USER-ERROR-HYGIENE-001).
     """
+    from brutex.data.futures_series import FuturesSeriesError
     from brutex.engine.cascade_wire import (
         CascadeWireError,
         load_bars_for_manifest,
@@ -7469,8 +7681,23 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
         )
         return EXIT_USER_ERROR
 
-    bars_for = load_bars_for_manifest(manifest, lake_root=resolved_lake, catalog_path=catalog)
-    report = run_and_write_from_manifest(root, bars_for=bars_for)
+    # The replay's schedule cross-check (CascadeWireError) + a futures-series
+    # resolution refusal from the CURRENT lake (FuturesSeriesError — e.g. an
+    # interior hole that appeared since the launch) are OPERATOR-remediable
+    # lake states, not code bugs — clean one-liners, never a traceback
+    # (review round-2 findings 10/12). A raw ValueError is deliberately NOT
+    # caught: with the loader and the frozen schedule cross-checked above, a
+    # Stage-1A desync raise is a genuine bug again and must stay loud.
+    # NO VIX stamper build here (DEC-VIX-STAMP-WIRE-001 round-6): the replayed
+    # candidates' trades are DISCARDED streams (report bytes identical either
+    # way), so the old per-replay vix_stamper_for_manifest build paid a full
+    # window-bounded VIX lake read for zero observable output.
+    try:
+        bars_for = load_bars_for_manifest(manifest, lake_root=resolved_lake, catalog_path=catalog)
+        report = run_and_write_from_manifest(root, bars_for=bars_for)
+    except (CascadeWireError, FuturesSeriesError) as exc:
+        print(f"[brutex] cascade error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     print(
         f"[brutex] cascade done — sweep={manifest.sweep_id[:16]} pools={len(report.groups)} "
         f"candidates={report.n_input} survivors={report.n_survived}"
@@ -7498,8 +7725,10 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     sweep eval (DEC-LOOKAHEAD-BARRIER-001; the deleted ``BacktestDriver``
     built the same barrier until DEC-EXECUTION-TRIO-DELETE-001). It loads
     one ``(symbol, interval)`` window
-    from the lake via the SAME ``Catalog`` / ``ReplayFeed`` path the engine
-    uses, then walks those bars **forward** through a recording
+    from the lake via the ONE alias-aware ``load_sweep_slice`` loader the
+    engine uses (the NIFTY-futures series alias is roll-stitched,
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), then walks those bars **forward**
+    through a recording
     :class:`~brutex.feed.lookahead.LookAheadBarrier` — advancing the cursor to
     bar ``i`` and accessing index ``i`` — and reports the
     :class:`~brutex.feed.lookahead.LookAheadReport` verdict via
@@ -7515,24 +7744,29 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     strategy-consumption oracle. An empty slice is a user error.
     """
     from brutex.data.catalog import Catalog
+    from brutex.data.futures_series import FuturesSeriesError
     from brutex.feed.lookahead import LookAheadBarrier, verify_with_barrier
-    from brutex.feed.replay import ReplayFeed
+    from brutex.feed.series_load import load_sweep_slice
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
     _require_catalog_exists(catalog)
-    with Catalog.open(catalog, require_exists=True) as cat:
-        feed = ReplayFeed(
-            catalog=cat,
-            lake_root=resolved_lake,
-            exchange=exchange,
-            segment=segment,
-            symbols=[symbol],
-            interval=interval,
-            start=_parse_dt(start),
-            end=_parse_dt(end),
-        )
-        bars = [event.bar for event in feed]
+    try:
+        with Catalog.open(catalog, require_exists=True) as cat:
+            bars = load_sweep_slice(
+                cat=cat,
+                lake_root=resolved_lake,
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                start=_parse_dt(start),
+                end=_parse_dt(end),
+                reconcile=False,  # this mouth never reconciled; law preserved
+            )
+    except FuturesSeriesError as exc:
+        print(f"[brutex] verify-lookahead: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     if not bars:
         print(
             f"[brutex] verify-lookahead: no bars for {symbol} {interval} {start}→{end} "
@@ -7622,7 +7856,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         SweepVerifyError,
         compare_recount,
         plan_expected_stores,
-        recorded_context_from_audit,
+        recorded_audit_facts,
         verify_identity,
         verify_structural,
     )
@@ -7639,20 +7873,61 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     reports = [structural]
 
     # The recorded context (review condition 2a): the tree describes itself
-    # via its audit chain; explicit flags override; NEVER the operator's memory.
+    # via its audit chain; explicit flags override; NEVER the operator's
+    # memory. ONE shared audit parse derives BOTH the context and the F16
+    # recorded roll schedules (review round-4 finding 5 — a production
+    # futures audit holds one SWEEP_START per grid tuple, so the prior
+    # two-reader shape parsed thousands of lines twice per invocation),
+    # SCOPED to ONE generation (review round-5 finding 6): the sanctioned
+    # sweep-daemon root accretes a NEW context + a GROWN futures schedule
+    # every moved-snapshot cycle, so the whole-file derivation permanently
+    # refused the flagship production tree as 'inconsistent recorded
+    # context'. A generation is keyed by the FULL context TRIPLE (review
+    # round-7 finding 7 — one snapshot does not imply one launch: a
+    # code-upgrade re-launch records a second code_commit_sha under the SAME
+    # snapshot, and snapshot-only keying raised the same lockout with no
+    # flag able to rescue); facts come from the last generation matching
+    # every explicit flag given, else the LATEST recorded one, and the other
+    # generations are an honest warn-grade note below, never a usage refusal.
     try:
-        recorded = recorded_context_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        recorded, recorded_schedules, other_generations = recorded_audit_facts(
+            out_root / "audit" / "sweep-all.jsonl",
+            snapshot=data_snapshot_hash,
+            indicator_version=indicator_version,
+            code_commit_sha=code_commit_sha,
+        )
     except SweepVerifyError as exc:
         print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
+    if other_generations:
+        scoped_to = (
+            "the explicitly flagged generation"
+            if (data_snapshot_hash or indicator_version or code_commit_sha)
+            else "the LATEST recorded generation"
+        )
+        # repr(): audit-sourced strings may embed \n/ESC — never let a
+        # tampered line forge output lines (#907/#919 repr-naming convention).
+        shown = ", ".join(repr(snap) for snap in other_generations[:5])
+        more = len(other_generations) - 5
+        if more > 0:
+            shown += f" (+{more} more)"
+        print(
+            f"[brutex] sweep-verify: the audit records {len(other_generations)} other "
+            f"generation(s) (data_snapshot_hash: {shown}) — the sanctioned multi-launch "
+            f"daemon root; recorded facts scoped to {scoped_to} (other generations' "
+            "stores verify as unattributed; pass --data-snapshot-hash / "
+            "--indicator-version / --code-commit-sha to scope another)"
+        )
     snapshot = data_snapshot_hash or (recorded.data_snapshot_hash if recorded else None)
     indicator = indicator_version or (recorded.indicator_version if recorded else None)
     code_sha = code_commit_sha or (recorded.code_commit_sha if recorded else None)
     if snapshot is None or indicator is None or code_sha is None:
         print(
-            "[brutex] sweep-verify: no recorded context (no audit log under the tree) "
-            "and no --data-snapshot-hash/--indicator-version/--code-commit-sha "
-            "overrides — identity/recount tiers skipped (structural-only verdict)"
+            "[brutex] sweep-verify: no recorded context for this generation (audit "
+            "log absent, SWEEP_START-less, or no entry under the --data-snapshot-hash "
+            "generation) and no --data-snapshot-hash/--indicator-version/"
+            "--code-commit-sha overrides — identity/recount tiers skipped "
+            "(structural-only verdict)"
         )
         return EXIT_OK if structural.clean else EXIT_VERIFY_FINDINGS
 
@@ -7688,7 +7963,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             print(f"[brutex] {scope.override_warning()}")
             structlog.get_logger("brutex.sweep").warning(
                 "sweep.scope_override",
-                symbols=[verdict.symbol for verdict in scope.refused],
+                # repr(): an operator-typed symbol may embed \n/ESC — never let a
+                # hostile name forge log lines (#907/#919 repr-naming convention).
+                symbols=[repr(verdict.symbol) for verdict in scope.refused],
                 exchange=exchange,
                 segment=segment,
             )
@@ -7775,12 +8052,69 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     with contextlib.suppress(CascadeWireError):
         stage3 = load_manifest(out_root).stage3
 
+    # Gate-folded store addresses (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001
+    # merge re-derivation over DEC-STAGE3-RECOUNT-001): `_tuple_digest` now
+    # folds the ACTIVE gate config into every tuple/cell store ADDRESS, so a
+    # stage-3-enabled tree's expected paths are derivable ONLY from a grid
+    # carrying the tree's RECORDED Stage-3 knobs. Resolve them exactly as the
+    # recount tier does — the tree's OWN audit first (condition B1), the
+    # operator --stage3-* flags as the audit-less fallback (condition B8) —
+    # and fold them into the verify grid so `plan_expected_stores` + the
+    # shadow re-sweep address the SAME files the launcher wrote. A gate-less
+    # tree emits NO fragment (default-elision), so its verify grid — and every
+    # pre-fold verdict — is byte-identical to before. HONEST residual: an
+    # overfit-gated tree (--dsr-min at launch) has no recorded-knob channel
+    # here yet, so its identity pairing still reads grid_mismatch — re-verify
+    # with a matching config (the #1336 remediation wording).
+    if stage3 is not None and stage3.enabled:
+        import dataclasses as _dc
+
+        from brutex.engine.sweep_verify import recorded_stage3_from_audit
+
+        _addr_audit = recorded_stage3_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        _addr_knobs = _addr_audit.knobs if _addr_audit.consistent else None
+        if _addr_knobs is not None:
+            grid = _dc.replace(
+                grid,
+                stage3_enable=True,
+                stage3_top_k=_addr_knobs.stage3_top_k,
+                stage3_max_fevals=_addr_knobs.max_fevals,
+                stage3_max_restarts=_addr_knobs.max_restarts,
+            )
+        elif stage3_enable:
+            _flag_fold: dict[str, Any] = {"stage3_enable": True}
+            for _key, _value in (
+                ("stage3_top_k", stage3_top_k),
+                ("stage3_max_fevals", stage3_fevals),
+                ("stage3_max_restarts", stage3_restarts),
+            ):
+                if _value is not None:
+                    _flag_fold[_key] = _value
+            grid = _dc.replace(grid, **_flag_fold)
+        else:
+            print(
+                "[brutex] sweep-verify: the tree records an ENABLED stage-3 pass but "
+                "its audit carries no consistent knobs and no --stage3-* flags were "
+                "given — the gate-folded store addresses cannot be re-derived "
+                "(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so identity pairing may "
+                "honestly read grid_mismatch"
+            )
+
     current_sha = _resolve_code_commit_sha()
     current_indicator = _indicator_version()
     vocabulary_trusted = code_sha == current_sha and indicator == current_indicator
+    # ADR-0012 futures trees are SELF-DESCRIBING (DEC-NIFTY-FUTURES-SWEEP-
+    # LAUNCH-001 F16): each futures run's SWEEP_START params carries its
+    # roll_schedule, so Tier 2 re-derives futures row identities from the
+    # tree's OWN recorded schedule — never the operator's memory
+    # (`recorded_schedules` from the ONE shared audit parse above).
     try:
         identity = verify_identity(
-            out_root, grid, stage3=stage3, vocabulary_trusted=vocabulary_trusted
+            out_root,
+            grid,
+            stage3=stage3,
+            vocabulary_trusted=vocabulary_trusted,
+            roll_schedule_by_instrument=recorded_schedules or None,
         )
     except SweepVerifyError as exc:
         print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
@@ -7792,14 +8126,20 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     if recount:
         import tempfile
 
+        from brutex.calendars.nse import IST
         from brutex.data.catalog import Catalog
-        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+        from brutex.data.futures_series import (
+            FuturesSeriesError,
+            FuturesSeriesResolution,
+            is_futures_series_symbol,
+            resolve_futures_series,
+        )
         from brutex.engine.sweep_launch import plan_launch_dedup
         from brutex.engine.sweep_orchestrator import (
             make_store_for,
             run_sweep_grid,
         )
-        from brutex.feed.replay import ReplayFeed
+        from brutex.feed.series_load import load_sweep_slice, require_series_coordinates
         from brutex.orchestrator.audit import AuditWriter
 
         catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -7807,29 +8147,43 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). Like sweep-all the
         # catalog FILE is NOT gated — the recount reconciles it from the lake.
         _require_lake_dir(resolved_lake, command="sweep-verify --recount")
+        # The recount MUST load bars through the SAME alias-aware loader +
+        # resolver the launch used, or Tier 3 false-fails on a futures tree
+        # (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16).
+        start_dt, end_dt = _parse_dt(start), _parse_dt(end)
+        resolution: FuturesSeriesResolution | None = None
+        roll_schedule_by_instrument: dict[str, tuple[int, ...]] | None = None
+        recount_futures = [s for s in symbol_list if is_futures_series_symbol(s)]
         slices: dict[tuple[str, str], list[Any]] = {}
-        with Catalog.open(catalog) as cat:
-            for symbol in symbol_list:
-                for interval in interval_list:
-                    reconcile_catalog_from_lake(
-                        lake_root=resolved_lake,
-                        catalog=cat,
-                        exchange=exchange,
-                        segment=segment,
-                        symbol=symbol,
-                        interval=interval,
-                    )
-                    feed = ReplayFeed(
-                        catalog=cat,
-                        lake_root=resolved_lake,
-                        exchange=exchange,
-                        segment=segment,
-                        symbols=[symbol],
-                        interval=interval,
-                        start=_parse_dt(start),
-                        end=_parse_dt(end),
-                    )
-                    slices[(symbol, interval)] = [event.bar for event in feed]
+        try:
+            if recount_futures:
+                # Coordinate pin BEFORE the resolve (review round-8 finding 9).
+                require_series_coordinates(recount_futures[0], exchange=exchange, segment=segment)
+                resolution = resolve_futures_series(
+                    resolved_lake,
+                    start=start_dt.astimezone(IST).date(),
+                    end=end_dt.astimezone(IST).date(),
+                )
+                roll_schedule_by_instrument = dict.fromkeys(
+                    recount_futures, resolution.roll_schedule
+                )
+            with Catalog.open(catalog) as cat:
+                for symbol in symbol_list:
+                    for interval in interval_list:
+                        slices[(symbol, interval)] = load_sweep_slice(
+                            cat=cat,
+                            lake_root=resolved_lake,
+                            exchange=exchange,
+                            segment=segment,
+                            symbol=symbol,
+                            interval=interval,
+                            start=start_dt,
+                            end=end_dt,
+                            resolution=resolution,
+                        )
+        except FuturesSeriesError as exc:
+            print(f"[brutex] sweep-verify --recount: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
         if not any(slices.values()):
             print(
                 f"[brutex] sweep-verify --recount: no bars for any {symbol_list} × "
@@ -7851,6 +8205,43 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             )
             if rec != cur
         ]
+        # F16 schedule evidence (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): a lake
+        # that gained/lost a contract since the recorded run is surfaced with
+        # BOTH schedules named — not just a bare snapshot-hash diff.
+        for fut_symbol in recount_futures:
+            recorded_schedule = recorded_schedules.get(fut_symbol)
+            derived_schedule = (
+                roll_schedule_by_instrument.get(fut_symbol)
+                if roll_schedule_by_instrument is not None
+                else None
+            )
+            if recorded_schedule is not None and recorded_schedule != derived_schedule:
+                mismatches.append(
+                    f"roll_schedule[{fut_symbol}]: recorded {list(recorded_schedule)!r} "
+                    f"vs re-derived {list(derived_schedule or ())!r} — the lake's "
+                    "futures contract set changed since the recorded run"
+                )
+            elif recorded_schedule is None:
+                # Verdict honesty (review round-4 finding 9, upgrading round-1
+                # finding 23's informational note): the roll_schedule IS
+                # recorded context for a futures tree — it enters
+                # canonical_trade_params, hence every futures row's run_id —
+                # and with the audit absent/rotated it CANNOT be matched even
+                # when the snapshot is byte-identical (the schedule can drift
+                # via a SESSIONLESS successor contract while the snapshot
+                # stays unchanged — the resume gate's own drift class). A
+                # shadow re-sweep under the FRESH schedule would byte-diverge
+                # from a healthy tree and condemn it verdict-grade CORRUPT
+                # (with a heal plan). Treat it as a context MISMATCH so
+                # divergence degrades to INCONCLUSIVE — the Tier-3 twin of
+                # Tier-2's honest `row_identity_underivable` WARN.
+                mismatches.append(
+                    f"roll_schedule[{fut_symbol}]: no RECORDED roll_schedule for "
+                    f"{fut_symbol} (audit/sweep-all.jsonl absent or rotated) — recount "
+                    f"identities would derive from the CURRENT lake's schedule "
+                    f"{list(derived_schedule or ())!r} only, which cannot be verified "
+                    "against the schedule the tree's rows were minted under"
+                )
         context_match = not mismatches
         if mismatches:
             print(
@@ -7983,6 +8374,30 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
             audit_path = scratch / "audit.jsonl"
             audit_path.parent.mkdir(parents=True, exist_ok=True)
+            # The shadow re-sweep must stamp EXACTLY like the launcher did
+            # (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER): cmd_sweep_all binds
+            # the window-bounded India-VIX stamper into every persisted row,
+            # so an UNSTAMPED recount over a stamped tree would byte-diverge
+            # on the VIX trio and false-condemn every good store as
+            # 'corrupt'. Same build law as the launcher; None-degrade on a
+            # VIX-less lake reproduces a SAME-generation unstamped tree
+            # byte-identically. A PRE-VIX-generation tree (no trio columns
+            # on disk) can NEVER be byte-identical — the reflush appends the
+            # three all-null trio columns — and is attributed as the
+            # non-corrupt schema-migration 'backfill' variant (round-5
+            # panel; _is_pre_vix_schema_migration), never condemned.
+            # RESIDUAL envelope: VIX sits OUTSIDE the recorded context, so a
+            # VIX lake that moved BETWEEN the run and this recount still
+            # diverges the trio — compare_recount classifies that case as
+            # the non-corrupt `recount_vix_divergence` warn, never heal-grade.
+            from brutex.engine.reference_wire import build_vix_stamper
+
+            recount_stamper = build_vix_stamper(
+                lake_root=resolved_lake,
+                start=_parse_dt(start),
+                end=_parse_dt(end),
+                catalog_path=catalog,
+            )
             train_hash_ok = True
             # Dead launch Bloom KILLED here too (R2-SL-F1, the cmd_sweep_all
             # twin): the shadow re-sweep runs the SAME digest path
@@ -7999,6 +8414,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     store_for=make_store_for(scratch, grid),
                     dedup=plan_launch_dedup(grid, digest_path=True),
                     audit=audit,
+                    roll_schedule_by_instrument=roll_schedule_by_instrument,
+                    reference_stamper=recount_stamper,
                 )
                 # "Resilient: skip + continue" (DEC-ENGINE-TUPLE-SKIP-RESILIENT-001):
                 # run_sweep_grid now SKIPS a raising tuple and completes a PARTIAL
@@ -8026,6 +8443,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         segment=segment,
                         start=start,
                         end=end,
+                        roll_schedule_by_instrument=roll_schedule_by_instrument,
+                        # The SAME recount stamper — stage3 cell stores carry
+                        # the trio too (they ride ranked_combo_to_result_row).
+                        stamper_for=lambda: recount_stamper,
                     )
                     # Condition B6: the recomputed train hash must match the
                     # manifest's recorded one — the cell path digests fold it.
@@ -8550,13 +8971,12 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     bar's OPEN is the spot at entry; the expiry is resolved per the calendar).
     """
     from brutex.data.catalog import Catalog
-    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.combo_mask import mask_to_entry_signals
     from brutex.engine.stage1a import build_bar_bits
     from brutex.engine.trade_sim import simulate_trades
-    from brutex.feed.replay import ReplayFeed
     from brutex.feed.resampler import INTERVAL_SECONDS
+    from brutex.feed.series_load import load_sweep_slice
     from brutex.options.executor import signals_from_spot_trades
     from brutex.options.lot_size_history import OptionsUnderlying
     from brutex.options.strike_rules import TradeDirection
@@ -8570,34 +8990,51 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     is_bull = row.direction.lower() in ("bull", "buy", "long")
     side = Side.BUY if is_bull else Side.SELL
     direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
+    # A futures winner row (instrument == the ADR-0012 series alias) raises
+    # ValueError HERE — caught + honestly SKIPPED by the caller's existing
+    # per-row net (futures→options translation is the ADR-0012 PR-6 named
+    # follow-up, DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), so the loader below only
+    # ever sees spot rows on this path today.
     underlying = OptionsUnderlying(row.instrument)
 
     with Catalog.open(catalog_path) as cat:
-        reconcile_catalog_from_lake(
+        bars = load_sweep_slice(
+            cat=cat,
             lake_root=lake_root,
-            catalog=cat,
             exchange=exchange,
             segment=segment,
             symbol=row.instrument,
             interval=interval,
-        )
-        feed = ReplayFeed(
-            catalog=cat,
-            lake_root=lake_root,
-            exchange=exchange,
-            segment=segment,
-            symbols=[row.instrument],
-            interval=interval,
             start=_parse_dt(start),
             end=_parse_dt(end),
         )
-        bars = [event.bar for event in feed]
 
     if not bars:
         return []
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
-    trades = simulate_trades(bars, entry_signals, direction=side, tf_minutes=tf_minutes)
+    # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
+    # replayed trades exist ONLY to become SpotSignals — the very next call,
+    # signals_from_spot_trades, reads entry_ts/exit_ts/direction and NOTHING
+    # else (SpotSignal carries no VIX field; _render_options_leaderboard
+    # renders no VIX column), so a stamp here is DISCARDED at conversion and
+    # can never reach any output. The Stage-B bind at this site was
+    # provably-dead work costing a full window-bounded VIX lake read per
+    # invocation (misdescribed as feeding an "OBSERVABLE leaderboard") — the
+    # stream is therefore EXPLICITLY unstamped via this literal (one of the
+    # enumerated sanctioned literal-None seam bindings, AST-pinned with
+    # exact counts by tests/unit/test_vix_stamper_binding_pin.py). REVERT
+    # LEVER: to surface VIX on the options-sim output, re-thread a stamper
+    # kwarg here + bind builds at cmd_options_sim /
+    # _maybe_run_options_sim_on_winners — a conscious follow-up that ALSO
+    # needs a VIX field on SpotSignal + a leaderboard column.
+    trades = simulate_trades(
+        bars,
+        entry_signals,
+        direction=side,
+        tf_minutes=tf_minutes,
+        reference_stamper=None,
+    )
     # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
     # is LAST-wins on a duplicated timestamp — the COMMON gate keeps the first
     # bar + WARNs (the catalog gate upstream already collapses; belt-and-braces).
@@ -8734,8 +9171,28 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+    # A futures-series winner cannot be options-simmed yet: the AUTOMATIC
+    # winners hook skips such rows via its per-row net, but this MANUAL path
+    # had none, so `OptionsUnderlying(row.instrument)` deep in the replay
+    # raised a raw ValueError traceback (review round-1 finding 9). Refuse
+    # with the DEC-CLI-USER-ERROR-HYGIENE-001 one-liner instead.
+    from brutex.data.futures_series import is_futures_series_symbol
+
+    if is_futures_series_symbol(row.instrument):
+        print(
+            f"[brutex] options-sim: run-id {run_id[:12]}… is a NIFTY-futures series "
+            f"winner ({row.instrument}) — futures→options translation is the "
+            "ADR-0012 PR-6 named follow-up (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) "
+            "and is not supported yet",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
 
     audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
+    # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
+    # replay's stamps were provably discarded at the SpotSignal conversion —
+    # see the sanctioned literal-None site in _replay_spot_signals_for_row —
+    # so the Stage-B build here paid a full VIX lake read for zero output.
     results = _options_sim_for_row(
         row,
         lake_root=resolved_lake,
@@ -8793,6 +9250,11 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
         return
     winners = store.top_k(top, by="net_pnl_paisa")
     print(f"[brutex] options-sim: pricing options for top {len(winners)} winner(s)…")
+    # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
+    # Stage-B build at this hook was a SECOND full VIX lake read per
+    # sweep-all --options-sim launch (the launch stamper was already built,
+    # and it even ran for ZERO winners) whose stamps were then discarded at
+    # the SpotSignal conversion — see _replay_spot_signals_for_row.
     for row in winners:
         audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
         try:
