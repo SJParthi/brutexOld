@@ -34,6 +34,18 @@ Design (driven by the CLAUDE.md §9 4-agent hostile review)
   re-flushes the SAME finalist rows and produces a byte-identical file. Without
   this preload a resume against a populated dedup would flush an *empty* store
   over good results (the hostile review's P0 data-loss finding).
+  HONEST CARVE-OUT (DEC-VIX-STAMP-WIRE-001): byte-identity is guaranteed for
+  the run identity + every non-VIX column; the REFERENCE-ONLY nullable
+  ``vix_mean``/``vix_min``/``vix_max`` trio derives from the India-VIX *lake*,
+  which sits deliberately OUTSIDE the run identity — a re-run after the VIX
+  lake legitimately moved (a re-pull backfilled missing VIX bars, or the
+  derived ``1day`` partition was re-derived latest-wins) may DIRECTIONALLY
+  BACKFILL a ``None`` trio field (``results_store.vix_backfill``), and a
+  value-vs-value trio clash raises the typed
+  :class:`~brutex.engine.results_store.VixTrioConflictError`, which the grid
+  drivers demote to a #904 tuple-skip (that ONE tuple redoes after the
+  operator quarantines its store; the grid completes) — never a grid abort
+  and never a silent overwrite.
 * **Shared dedup + single audit chain across the grid.** The dedup is keyed on
   the 9-field run-identity (instrument/tf/direction/mode/params all participate),
   so two tuples never alias each other; sharing one
@@ -61,7 +73,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
@@ -71,7 +83,8 @@ import blake3
 import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
-from brutex.engine.results_store import ResultsStore, ResultsStoreError
+from brutex.engine.results_store import ResultsStore, ResultsStoreError, VixTrioConflictError
+from brutex.engine.stage1a import apply_1day_mask_for
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_identity import (
     _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
@@ -95,6 +108,7 @@ if TYPE_CHECKING:
     # so the strict per-module `--cov=brutex.engine` gate stays clean (the same
     # constraint sweep_run.py observes). Both are *received*, never constructed.
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.sweep_run import DedupSink
     from brutex.orchestrator.audit import AuditSink
 
@@ -322,8 +336,8 @@ class SweepGridConfig:
                         f"SweepGridConfig.instruments contains {symbol!r}, which is "
                         "outside the brute-force engine scope — allowed: the 3 spot "
                         "indexes NIFTY/BANKNIFTY/SENSEX (CLAUDE.md §2 Rule 3) plus "
-                        "NIFTY futures (ADR-0012; series-key 'NIFTY-FUT-YYYY-MM-DD' "
-                        "or a lake 'NSE-NIFTY-<DDMmmYY>-FUT' contract symbol). "
+                        "the NIFTY-futures series alias 'NSE-NIFTY-FUT' (ADR-0012 / "
+                        "DEC-FUTURES-ADDRESSING-PIN-001). "
                         "Research escape hatch: construct with "
                         "unsafe_allow_out_of_scope_instruments=True "
                         "(the CLI flag is --allow-out-of-scope)"
@@ -465,7 +479,12 @@ class SweepTuple:
     proximity: ProximityParams | None
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
 
-    def to_run_config(self, grid: SweepGridConfig) -> SweepRunConfig:
+    def to_run_config(
+        self,
+        grid: SweepGridConfig,
+        *,
+        roll_schedule: tuple[int, ...] | None = None,
+    ) -> SweepRunConfig:
         """Build the single-slice :class:`SweepRunConfig` for this tuple under *grid*.
 
         Threads the grid's shared context (mode + the three reproducibility
@@ -478,6 +497,14 @@ class SweepTuple:
         ----------
         grid
             The owning :class:`SweepGridConfig`.
+        roll_schedule
+            ADR-0012 futures roll schedule for this tuple's instrument
+            (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — argument-plumbed, never a
+            grid field, so ``_tuple_digest`` / ``_grid_descriptor`` /
+            ``_tuple_cache_params`` stay byte-identical for spot grids.
+            ``None`` (every spot tuple) is byte-identical to the pre-launch
+            config; the :class:`~brutex.engine.sweep_run.SweepRunConfig`
+            instrument⟺schedule invariant enforces consistency.
 
         Returns
         -------
@@ -506,6 +533,7 @@ class SweepTuple:
             top_k=grid.top_k,
             min_hits=grid.min_hits,
             overfit=grid.overfit,
+            roll_schedule=roll_schedule,
         )
 
 
@@ -531,7 +559,10 @@ class SweepGridSummary:
         summed across every tuple that ran.
     tuples_failed
         Tuples whose combo evaluation raised a
-        :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep and were
+        :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep — or whose
+        store append raised the typed
+        :class:`~brutex.engine.results_store.VixTrioConflictError`
+        (DEC-VIX-STAMP-WIRE-001) — and were
         SKIPPED ("Resilient: skip + continue"): the remaining tuples still ran,
         but a non-zero count makes the grid verdict NON-ZERO and leaves each
         failed tuple un-sentineled / un-cached for a deterministic redo next run.
@@ -924,6 +955,8 @@ def run_one_tuple(
     kernel_cache: ResidentKernelCache | None = None,
     diffcheck: TupleDiffCheck | None = None,
     store_quarantine: StoreQuarantine | None = None,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
 
@@ -980,6 +1013,23 @@ def run_one_tuple(
         so the grid counts the tuple failed and CONTINUES (previously a
         corrupt store aborted the whole grid). ``None`` (default) re-raises
         the original error unchanged (byte-identical to before).
+    roll_schedule_by_instrument
+        ADR-0012 futures roll schedules keyed by instrument symbol
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — argument-plumbed alongside
+        ``bars_for`` (identity-safe: enters NO digest / descriptor / cache
+        params). ``None`` / an absent key means no schedule (every spot
+        tuple), byte-identical to the pre-launch path.
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001), forwarded verbatim to
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` — the run's
+        stamper reaches the finalist projection through this ONE conduit.
+        REFERENCE ONLY: the ``run_id`` and every non-VIX column are
+        byte-identical with or without it — ONLY the three nullable
+        ``vix_mean``/``vix_min``/``vix_max`` columns differ (Stage C persists
+        the trio; the pre-Stage-C "persisted bytes identical" wording was
+        reconciled by the round-2 panel, MINOR).
 
     Returns
     -------
@@ -1003,6 +1053,11 @@ def run_one_tuple(
                 f"(skip_empty=False)"
             )
         return None
+    roll_schedule = (
+        roll_schedule_by_instrument.get(tuple_.instrument)
+        if roll_schedule_by_instrument is not None
+        else None
+    )
     kernel = (
         kernel_cache.get(
             bars,
@@ -1011,6 +1066,8 @@ def run_one_tuple(
             proximity=tuple_.proximity,
             prior_n=grid.prior_n,
             fib_anchor=tuple_.fib_anchor,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
         )
         if kernel_cache is not None
         else None
@@ -1019,7 +1076,7 @@ def run_one_tuple(
     def _attempt() -> SweepRunSummary:
         return run_persisted_sweep(
             bars,
-            tuple_.to_run_config(grid),
+            tuple_.to_run_config(grid, roll_schedule=roll_schedule),
             store=store_for(tuple_),
             dedup=dedup,
             audit=audit,
@@ -1027,10 +1084,18 @@ def run_one_tuple(
             # Enables the per-tuple trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001):
             # the digest is the same collision guard the store filename carries.
             trial_stats_digest=_tuple_digest(tuple_, grid),
+            reference_stamper=reference_stamper,
         )
 
     try:
         summary = _attempt()
+    except VixTrioConflictError:
+        # DEC-VIX-STAMP-WIRE-001: NOT store corruption — the VIX lake moved
+        # between two runs. Although it subclasses ResultsStoreError, it must
+        # sail PAST the G1 quarantine (quarantining + a fresh retry would
+        # silently regenerate the tuple and MASK the loud tuple-skip
+        # contract); the grid drivers catch it beside SweepComboError.
+        raise
     except ResultsStoreError as exc:
         # G1 (DEC-SWEEP-UNKILLABLE-CORE-001): a corrupt on-disk store no longer
         # aborts the WHOLE grid — quarantine the trio (forensics kept) + ONE
@@ -1065,6 +1130,8 @@ def run_sweep_grid(
     reuse_bar_bits: bool = True,
     diffcheck: TupleDiffCheck | None = None,
     store_quarantine: StoreQuarantine | None = None,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SweepGridSummary:
     """Run the full grid sweep: enumerate the outer product + persist every tuple.
 
@@ -1081,12 +1148,19 @@ def run_sweep_grid(
     (``skip_empty=False``) — never an opaque mid-grid traceback.
 
     "Resilient: skip + continue": a tuple whose combo evaluation raises a
-    :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep is SKIPPED (its
+    :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep — or whose
+    store append raises the typed
+    :class:`~brutex.engine.results_store.VixTrioConflictError` (a redo whose
+    REFERENCE-ONLY VIX trio disagrees because the VIX lake moved between
+    runs, DEC-VIX-STAMP-WIRE-001) — is SKIPPED (its
     store is left un-sentineled so it redoes next run), counted in
     ``tuples_failed``, and recorded as a ``TUPLE_FAILED`` audit line naming the
     exact offending combo; the grid finishes the remaining tuples and a non-zero
     ``tuples_failed`` makes the run's verdict NON-ZERO. Every OTHER exception
-    still propagates uncaught (global abort) — only ``SweepComboError`` is caught.
+    still propagates uncaught (global abort) — including the PLAIN
+    :class:`~brutex.engine.results_store.ResultsStoreError` run-identity
+    conflict (a genuine reproducibility breach); only the two typed
+    tuple-scoped errors above are caught.
 
     Honest envelope (Golden Rule #10): the loop is O(T) tuples, each O(N) masks;
     no part is O(1) total. This function's own memory is O(1) in ``T`` (scalar
@@ -1128,6 +1202,20 @@ def run_sweep_grid(
         The optional DEC-SWEEP-UNKILLABLE-CORE-001 seams, threaded verbatim to
         :func:`run_one_tuple` (see there); ``None`` defaults are byte-identical
         to before.
+    roll_schedule_by_instrument
+        ADR-0012 futures roll schedules keyed by instrument symbol
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), resolved ONCE by the launcher
+        (:func:`brutex.data.futures_series.resolve_futures_series`) and
+        argument-plumbed here alongside ``bars_for`` — IDENTITY-SAFE like
+        ``unsafe_allow_out_of_scope_instruments``: it enters NONE of
+        ``_tuple_digest`` / ``_grid_descriptor`` / ``_tuple_cache_params``
+        (spot grids' digests are byte-identical with and without it); per-run
+        identity moves ONLY via ``SweepRunConfig.roll_schedule`` →
+        ``canonical_trade_params``. ``None`` (the default) is the
+        byte-identical spot path.
+    reference_stamper
+        Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001), forwarded to
+        every tuple's :func:`run_one_tuple` — ONE stamper per grid run.
 
     Returns
     -------
@@ -1190,8 +1278,12 @@ def run_sweep_grid(
         # not a transient single combo), count it, audit the fingerprint, and
         # finish the remaining tuples; the failed tuple is left un-sentineled
         # (run_persisted_sweep raised before its flush/mark/sentinel writes) so
-        # it redoes deterministically next run. Only SweepComboError is caught —
-        # every other exception still propagates (global abort).
+        # it redoes deterministically next run. VixTrioConflictError rides the
+        # SAME skip (DEC-VIX-STAMP-WIRE-001): a redo whose REFERENCE-ONLY VIX
+        # trio disagrees with the stored one means the VIX lake moved between
+        # runs — tuple-scoped by construction, never grounds to abort the
+        # grid. Every other exception still propagates (global abort),
+        # including the PLAIN ResultsStoreError run-identity conflict.
         try:
             summary = run_one_tuple(
                 grid,
@@ -1204,8 +1296,10 @@ def run_sweep_grid(
                 kernel_cache=kernel_cache,
                 diffcheck=diffcheck,
                 store_quarantine=store_quarantine,
+                roll_schedule_by_instrument=roll_schedule_by_instrument,
+                reference_stamper=reference_stamper,
             )
-        except SweepComboError as exc:
+        except (SweepComboError, VixTrioConflictError) as exc:
             tuples_failed += 1
             label = (
                 f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"

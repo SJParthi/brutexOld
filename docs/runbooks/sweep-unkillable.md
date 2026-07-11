@@ -1,6 +1,6 @@
 # Runbook — unkillable sweep run core
 
-**DEC-SWEEP-UNKILLABLE-CORE-001 (MIGRATION.md #1594, ADR-0019).** Operator
+**DEC-SWEEP-UNKILLABLE-CORE-001 (MIGRATION.md #1712, ADR-0019).** Operator
 procedures for the Phase-2 run core: resume, quarantine forensics, SUSPECT
 triage, the failure matrix, the TUPLE_DONE decimation policy, and the human
 R/G traceability table.
@@ -132,7 +132,7 @@ stride `ceil(total / 10_000)` (small grids record every tuple). Losslessness:
 - stage, milestone, failure, quarantine, tripwire, SUSPECT, halt and
   run-boundary records are NEVER decimated.
 
-Honesty note (ledgered in #1594): R41's literal "every event = one record"
+Honesty note (ledgered in #1712): R41's literal "every event = one record"
 wording is met for every material-event kind; the per-tuple done stream is
 the ONE deliberately decimated kind, with the cumulative counters making the
 decimation information-lossless.

@@ -110,7 +110,7 @@ def test_g5_running_schema_exact(tmp_path: Path) -> None:
 
 
 def test_g5_running_write_preserves_prior_wall_started(tmp_path: Path) -> None:
-    """A mid-run RUNNING write preserves the prior launch start (round-3 fix, #1594).
+    """A mid-run RUNNING write preserves the prior launch start (round-3 fix, #1712).
 
     ``mark_suspect``'s never-launder belt writes ``state=RUNNING, suspect=True``
     mid-run; that write must NOT reset ``wall_started_utc`` to the suspect-latch

@@ -83,7 +83,7 @@ DETACH_PIDFILE_NAME: Final[str] = "detached-sweep.pid"
 #: ``--deta`` / ``--detac`` → ``detach=True``) that survives the parent's
 #: exact-string argv filter can NEVER re-trigger detach in the child. The
 #: sentinel is spelling-immune where a raw ``sys.argv`` string match is not —
-#: it closes the fork-bomb re-exec loop (hostile-review round 3, #1594).
+#: it closes the fork-bomb re-exec loop (hostile-review round 3, #1712).
 DETACHED_ENV_SENTINEL: Final[str] = "BRUTEX_SWEEP_DETACHED"
 
 
@@ -218,7 +218,7 @@ def spawn_detached_sweep(
     log.parent.mkdir(parents=True, exist_ok=True)
     # Stamp the spelling-immune re-detach sentinel on top of the child env so
     # the child ignores any surviving ``--detach`` abbreviation (fork-bomb
-    # guard — hostile-review round 3, #1594).
+    # guard — hostile-review round 3, #1712).
     base_env = os.environ if env is None else env
     child_env = {**base_env, DETACHED_ENV_SENTINEL: "1"}
     with log.open("ab") as log_file:

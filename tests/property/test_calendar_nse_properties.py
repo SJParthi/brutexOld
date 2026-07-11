@@ -124,3 +124,31 @@ def test_previous_trading_session_is_a_strictly_prior_trading_day(d: date) -> No
     while probe < d:
         assert not is_trading_day(probe)
         probe += timedelta(days=1)
+
+
+@given(_DATES)
+def test_previous_trading_session_empty_observed_is_identity(d: date) -> None:
+    # DEC-PREOPEN-PREVDAY-COMMON-002 parity law: the new remove-only
+    # ``observed`` kwarg's default frozenset() is byte-identical back-compat —
+    # explicit-empty == omitted for EVERY date (incl. abstains).
+    assert previous_trading_session(d, observed=frozenset()) == previous_trading_session(d)
+
+
+@given(
+    _DATES,
+    st.frozensets(st.dates(min_value=date(2020, 1, 1), max_value=date(2026, 12, 31)), max_size=8),
+)
+def test_previous_trading_session_observed_is_remove_only(
+    d: date, observed: frozenset[date]
+) -> None:
+    # REMOVE-ONLY invariant: a non-None overlaid result is never an overlay
+    # member, is still a real trading day, and is never LATER than the plain
+    # result (a member can only push the walk further back, never forward).
+    plain = previous_trading_session(d)
+    overlaid = previous_trading_session(d, observed=observed)
+    if overlaid is None:
+        return  # abstain (coverage floor) — pinned by the sibling property
+    assert overlaid not in observed
+    assert is_trading_day(overlaid) is True
+    assert plain is not None
+    assert overlaid <= plain
