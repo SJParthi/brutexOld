@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
+_Last updated: 2026-07-11 (DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738 —
+Rust kernel track slice 1: the sweep's enumerate+prune mask-source segment
+(`iter_masks_k_of_bits` + per-mask `has_conflict`) gains the fused Rust
+kernel `fno_math.sweep_enum_conflict_free` behind the default-OFF
+`BRUTEX_SWEEP_RUST_ENUM` — SHIPS INERT; kernel survivors bit- AND
+order-identical to the Python loop (the itertools.combinations lex order
+law; digest-path-only seam — Apriori + the legacy no-digest arm stay
+Python; the untouched loop serves every fallback). MEASURED (Linux CI
+sandbox, NOT the §8 M4 Pro): the C(60,5) segment 15.59 s → 0.50 s —
+SEGMENT-level only, NO whole-sweep claim (the trade sim dominates a full
+k=5 1-minute tuple; enum ≈ 1-3% of wall). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; flag-OFF
+byte-identical (frozen sweep goldens pass unmodified); `rust_enum.py` 100%
+line+branch on its ci.yml gate; the per-fix record lives in the §1
+Active-branch blurb + MIGRATION.md #1738 — this header carries the
+one-line summary, never the story).
+Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
 the DB/query-latency hardening pack, READ-side only: (1) the `/db`
 window-ledger pager rides a DuckDB LIMIT/OFFSET fast path over the #1533
 delta-folded ledger scan source (`db_view.query_window_ledger_page` —
@@ -2146,7 +2162,48 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
+- **Active branch:** `claude/rust-sweep-enum-slice1` (**DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738** —
+  Rust kernel track slice 1 (the DEC-RUST-FIRST-MANDATE-001 umbrella's first kernel PR; the umbrella's
+  ledger row is queued/in-flight — cited as QUEUED, never asserted merged): the sweep's enumerate+prune
+  mask-source segment is served by the NEW fused Rust kernel `fno_math.sweep_enum_conflict_free`
+  (NEW `rust/fno-math/src/enum_kernel.rs` — pure `Result` core + thin `#[pyfunction]`; a literal odometer
+  transcription of the CPython `itertools.combinations` advance, deliberately NEVER Gosper: position-lex ≠
+  numeric order from n=4 and enumeration order feeds chunk boundaries / `SweepComboError` attribution /
+  stable-sort ties / sidecar counters, so a set-equal order-drifted list would write DIFFERENT durable
+  bytes; conflict pairs cross the FFI AS DATA — `sorted(CONFLICT_PAIRS)`, never re-minted in Rust; `< 128`-
+  validated shifts, checked u64 binomial, `try_reserve_exact` → `MemoryError`, everything else a clean
+  `ValueError` — never a panic under the crate's `panic="abort"` profile) behind the NEW wrapper
+  `brutex/engine/rust_enum.py` (the `rust_metrics.py` template with the default INVERTED: per-call COMMON
+  `env_flag_tristate` flag `BRUTEX_SWEEP_RUST_ENUM`, `SWEEP_RUST_ENUM_DEFAULT = False` — SHIPS INERT, the
+  default-ON flip is a SEPARATE later ADR per the ADR-0017 lever pattern; lazy `_resolve_kernel` with
+  warn-once `wheel_missing`/`wheel_stale`; SILENT pre-validation so invalid input falls to the untouched
+  generator's canonical `ValueError` — the error contract is flag-invariant BY CONSTRUCTION; the
+  `ENUM_KERNEL_MAX_MASKS = 1<<24` ceiling — `C(60,5) = 5,461,512` fits; narrow FFI except with
+  `MemoryError` re-raised BARE — the global-stop law; the O(1) domain gate refusing counter/shape/spot-check
+  poison `kernel_result_refused`; the 16-call burn-in vs the LIVE oracle — full-list ≤ 65,536 enumerated,
+  4096-survivor prefix above — with the `disable_kernel` autorevert latch; engaged-once INFO
+  `sweep_rust_enum.engaged`, the anti-vacuous golden hook). THE ONE SEAM in `sweep_run.py`'s mask-source
+  block engages DIGEST-path only (`not apriori_enabled() and bypass_dedup` — the loop's only effects there
+  are the survivors appends + the two tallies); Apriori WINS over the kernel; the legacy no-digest dedup
+  arm stays pure Python; every fallback runs the verbatim pre-existing loop. EVIDENCE (MEASURED 2026-07-11,
+  Linux CI sandbox — NOT the §8 M4 Pro): the C(60,5) segment 15.59 s Python → 0.500 s kernel-served (31.2×;
+  first engaged call with the armed burn-in 0.539 s; the kernel wall INCLUDES the PyO3 Vec<u128>→4.7M-PyLong
+  conversion); k=3 94.6 ms → 3.6 ms; full k=5 survivor-list equality verified in-session. HONEST: a
+  SEGMENT-level payoff only — NO whole-sweep claim (the sim dominates a full k=5 1-minute tuple at ~7-37
+  min; enum ≈ 1-3% of that wall; the honest whole-tuple band is the regime-dependent ~1.3-3.1× where
+  Stage-1B prunes hard); no O-class change; no GIL release (serial, GIL-held — the recorded crate stance);
+  the domain gate + prefix burn-in cannot catch a tail-region divergence after burn-in — that layer is the
+  hypothesis differential (production + synthetic ≥64-bit pair tables + the pairs-as-data round-trip), the
+  ON-vs-OFF byte-identical golden (store hash/parquet/sidecar/sentinel + the FM-7 flag-flip crash-redo
+  rewrite + the legacy never-engages run), the in-crate proptest vs an independent recursive reference, and
+  the mutation gates (mutants.toml `examine_globs` += enum_kernel.rs — re-measured 704 mutants, +17.5%, so
+  the fno-math matrix took the #1597 +1-shard dial again, 6 → 7). Same-commit wheel handshake:
+  lib.rs registration + `_EXPECTED_COMPILED_SYMBOLS`/stub/`EXPECTED_BUILD.json` + the math-facade frozen
+  surface extension. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+  flag-OFF byte-identical by construction (frozen sweep goldens pass UNMODIFIED); `rust_enum.py` 100.00%
+  line+branch (151/66) standalone on its NEW ci.yml gate; ruff/ruff-format clean, `mypy --strict` clean,
+  pyright at the pre-change baseline; cargo fmt/clippy `-D warnings`/test green.)
+  Earlier: `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
   the DB/query-latency hardening pack, READ-side only, three evidence-driven fixes off the 2026-07-11
   profiling run (a 1,178-file real-writer lake, 400k-row ledger + 5 deltas, real routes via
   `build_app` + `TestClient`): **(1)** the `/db` window-ledger pager — NEW
@@ -5437,7 +5494,15 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-latency-hardening`
+- **Active feature branch:** `claude/rust-sweep-enum-slice1`
+  (DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738 — Rust kernel track slice 1:
+  the sweep's enumerate+prune mask-source segment served by the fused
+  `fno_math.sweep_enum_conflict_free` kernel behind the default-OFF
+  `BRUTEX_SWEEP_RUST_ENUM` (SHIPS INERT; digest-path-only seam; survivors
+  bit- AND order-identical to the Python loop; segment-level payoff only —
+  NO whole-sweep claim); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1738 for the full blurb)
+  Earlier: `claude/db-latency-hardening`
   (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 — the DB/query-latency
   hardening pack, READ-side only: the /db window-ledger DuckDB page fast path
   (7.3–8.8 s cold at 400k rows → 0.56 s, zero Python parses), the pre-open
