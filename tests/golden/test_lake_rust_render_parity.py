@@ -10,7 +10,13 @@ temp lake. The Rust bytes are obtained through the PRODUCTION seam in
 steady-state mode (burn-in budget 0 — the returned bytes are the crate's,
 no oracle compare cushions the equality) so nothing here replicates the
 frame construction: any drift in `_render_bytes`' schema branching is
-automatically part of the tested surface.
+automatically part of the tested surface. Every engaged render additionally
+runs :func:`_assert_crate_rendered` (refuter round 1): the seam's warn-only
+degrade paths (``render_error`` / ``render_result_refused``) serve ORACLE
+bytes WITHOUT latching ``rust_render_disabled``, so without that witness a
+crate raising on every render would green the gate comparing
+python-to-python — the guard asserts the engaged-once INFO fired and zero
+fallback reasons are in the warn memo, so green MEANS the crate rendered.
 
 REQUIRES the compiled crate + version lockstep. Auto-SKIPS loudly when
 either is missing — the dedicated ``.github/workflows/lake-rust-parity.yml``
@@ -163,16 +169,49 @@ def _python_bytes(bars: list[CandleBar], monkeypatch: pytest.MonkeyPatch) -> byt
     return ParquetWriter._render_bytes(bars)
 
 
+def _assert_crate_rendered() -> None:
+    """The vacuous-green guard (refuter round 1): prove the CRATE served the bytes.
+
+    ``rust_render_disabled()`` alone is BLIND to the warn-only degrade paths:
+    ``render_error`` / ``render_result_refused`` return ORACLE bytes without
+    latching, so a crate that raises a degrade-set error (or returns
+    non-bytes) on every render would green a bare byte-equality assert by
+    comparing python-to-python — exactly the crate-broken class this corpus
+    exists to catch. The complete witness is three-legged:
+
+    * no latch (``crate_unavailable`` / ``crate_metadata_error`` /
+      ``polars_version_mismatch`` / ``crate_panic`` / burn-in autorevert all
+      set it);
+    * the engaged-once INFO fired — it is recorded ONLY after the crate
+      returned genuine ``bytes`` (and the per-test reset clears the memo, so
+      it attests THIS test's renders, not a prior test's);
+    * NO fallback reason is in the warn memo — ``render_error`` and
+      ``render_result_refused`` cover the two non-latching oracle serves
+      (a multi-render test could otherwise engage on render 1 and silently
+      degrade on render 2).
+    """
+    assert not lrr.rust_render_disabled(), "the Rust path latched OFF mid-corpus"
+    assert lrr._ENGAGED_KEY in lrr._OBSERVABILITY_MEMO, (
+        "lake_rust_render.engaged never fired — the crate never served a render "
+        "(vacuous green: the bytes under comparison would both be the oracle's)"
+    )
+    fallbacks = lrr._OBSERVABILITY_MEMO - {lrr._ENGAGED_KEY}
+    assert not fallbacks, f"oracle fallback fired mid-corpus: {sorted(fallbacks)}"
+
+
 def _rust_bytes(bars: list[CandleBar], monkeypatch: pytest.MonkeyPatch) -> bytes:
     """Render through the PRODUCTION seam in steady-state (post-burn-in) mode.
 
     ``remaining=0`` means the returned bytes are the CRATE's output with no
-    oracle compare in the path — a genuine cross-engine byte witness.
+    oracle compare in the path — and :func:`_assert_crate_rendered` proves
+    the crate genuinely produced them (a degrade-to-oracle serve fails the
+    test instead of greening vacuously), so the equality is a genuine
+    cross-engine byte witness.
     """
     monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
     lrr.reset_lake_rust_render_for_tests(remaining=0)
     rendered = ParquetWriter._render_bytes(bars)
-    assert not lrr.rust_render_disabled(), "the Rust path latched OFF mid-corpus"
+    _assert_crate_rendered()
     return rendered
 
 
@@ -205,7 +244,7 @@ class TestRenderByteParity:
         lrr.reset_lake_rust_render_for_tests()  # full burn-in budget
         rendered = ParquetWriter._render_bytes(bars)
         assert rendered == expected
-        assert not lrr.rust_render_disabled()
+        _assert_crate_rendered()
 
     def test_shape_gate_compares_first_greeks_shape_after_spot_burn_in(
         self, monkeypatch: pytest.MonkeyPatch
@@ -224,7 +263,7 @@ class TestRenderByteParity:
         ParquetWriter._render_bytes(spot)
         rendered = ParquetWriter._render_bytes(greeks)  # first-ever Greeks shape
         assert rendered == expected_greeks
-        assert not lrr.rust_render_disabled()
+        _assert_crate_rendered()
 
 
 class TestWholePathParity:
@@ -253,7 +292,7 @@ class TestWholePathParity:
         lrr.reset_lake_rust_render_for_tests(remaining=0)  # steady state — crate bytes
         on_lake = tmp_path / "on"
         on_result = ParquetWriter(lake_root=on_lake).write(bars=list(bars), **coords)
-        assert not lrr.rust_render_disabled()
+        _assert_crate_rendered()
 
         off_files = sorted(p.relative_to(off_lake) for p in off_lake.rglob("*.parquet"))
         on_files = sorted(p.relative_to(on_lake) for p in on_lake.rglob("*.parquet"))
