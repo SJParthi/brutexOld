@@ -32,6 +32,10 @@ __all__ = [
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
+    "bucket_consume",
+    "bucket_more_wait",
+    "bucket_refill",
+    "bucket_set_rate_state",
     "canonical_json",
     "count_supermask_u64s",
     "count_supermasks_u64s",
@@ -195,6 +199,34 @@ def forced_exit_seconds_s(close_s: int) -> int:
 
 def session_last_bar_complete_s(close_s: int, last_bar_s: int) -> bool:
     """``last_bar + 1 minute >= close`` over SAME-DATE seconds-of-day."""
+    ...
+
+def bucket_refill(tokens: float, burst: float, rps: float, elapsed: float) -> float:
+    """``AdaptiveTokenBucket._refill_locked``'s token expression
+    (DEC-RATE-MATH-RUST-001): ``tokens`` unchanged when ``elapsed <= 0``,
+    else ``min(burst, tokens + elapsed * rps)`` with CPython min-order
+    semantics — bit-exact IEEE f64; no cap/ladder VALUE lives Rust-side.
+    """
+    ...
+
+def bucket_consume(tokens: float, rps: float) -> tuple[float, float]:
+    """``acquire``'s consume step → ``(new_tokens, wait_seconds)``:
+    ``tokens >= 1.0`` consumes one token (wait 0.0), else quotes
+    ``(1.0 - tokens) / rps`` with tokens unchanged.
+    """
+    ...
+
+def bucket_more_wait(tokens: float, rps: float, eps: float) -> float:
+    """The acquire retry-loop wait step:
+    ``max((1.0 - tokens) / rps, eps)`` with CPython max-order semantics.
+    """
+    ...
+
+def bucket_set_rate_state(new_rps: float) -> tuple[float, float]:
+    """``set_rate``'s post-state → ``(0.0, new_rps / 2.0)`` — the
+    drain-to-empty law (DEC-DHAN-RATE-SINGLE-BUCKET-001); validation and
+    every state write stay Python.
+    """
     ...
 
 def add_u64(a: int, b: int) -> int:

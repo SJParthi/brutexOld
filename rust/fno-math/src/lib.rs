@@ -84,6 +84,13 @@ pub mod audit_chain;
 /// parity-gated on the frozen 2,557-day calendar verdict-table golden.
 pub mod calendar_verdict;
 
+/// DEC-RATE-MATH-RUST-001 (slice 9, ADR-0019 / #1727a): the adaptive
+/// token-bucket's FOUR pure IEEE f64 expressions (refill / consume /
+/// retry-wait / set-rate post-state) — bit-exact CPython min/max order
+/// semantics; locks, clock, deque window, and every cap/ladder VALUE stay
+/// Python (§2 Rule 6).
+pub mod rate_math;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -186,5 +193,12 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
         calendar_verdict::session_last_bar_complete_s_py,
         m
     )?)?;
+    // ── slice-9 rate-limiter token math (DEC-RATE-MATH-RUST-001) ──
+    // The AdaptiveTokenBucket's four pure f64 expressions; every constant
+    // (caps, ladder, eps) stays owned by brutex/orchestrator/rate_limiter.py.
+    m.add_function(wrap_pyfunction!(rate_math::bucket_refill_py, m)?)?;
+    m.add_function(wrap_pyfunction!(rate_math::bucket_consume_py, m)?)?;
+    m.add_function(wrap_pyfunction!(rate_math::bucket_more_wait_py, m)?)?;
+    m.add_function(wrap_pyfunction!(rate_math::bucket_set_rate_state_py, m)?)?;
     Ok(())
 }
