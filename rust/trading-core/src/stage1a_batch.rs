@@ -66,17 +66,21 @@ pub const MIN_PRIOR_N: usize = 1;
 pub const MAX_PRIOR_N: usize = 4;
 
 /// Upper bound for `fractal_k` (the BOS/CHoCH swing look-back; production
-/// passes the literal 2). [`MarketStructureState::new`] computes a `2*k + 1`
-/// deque capacity under `overflow-checks = true` + `panic = "abort"`, so an
-/// unbounded hostile `k` (e.g. `2^64 - 1`, or `2^62` via capacity overflow)
-/// would SIGABRT the whole interpreter through the FFI (refuter RF-B F2);
-/// rejected in [`validate_structure`] so the panic is unreachable. 64 is
-/// comfortably above every conceivable production value while keeping the
-/// allocation trivially safe — a swing needs `2k + 1` bars to confirm, so a
-/// larger `k` could never fire on a real intraday stream anyway. NOTE: the
-/// pre-existing frozen `MarketStructureState` PYCLASS has the same abort
-/// behaviour for a direct hostile construction — deliberately NOT touched
-/// (frozen TickVault-shared surface, out of this slice's scope).
+/// passes the literal 2 — `Stage1AMatrixBuilder` hardcodes
+/// `MarketStructureState()`, there is no config knob).
+/// [`MarketStructureState::new`] computes a `2*k + 1` deque capacity under
+/// `overflow-checks = true` + `panic = "abort"`, so an unbounded hostile `k`
+/// (e.g. `2^64 - 1`, or `2^62` via capacity overflow) would SIGABRT the
+/// whole interpreter through the FFI (refuter RF-B F2); the bound exists to
+/// keep that panic unreachable through this pyfunction, and 64 is
+/// comfortably above every conceivable production value. HONEST (RF-I
+/// round-3 F3): a `k > 64` IS satisfiable on real streams — `k = 65` needs
+/// only 131 bars (one NSE session is 375) and the structure state persists
+/// across days within a contract — the bound is a hostile-input safety cap,
+/// NOT a market-physics limit. NOTE: the pre-existing frozen
+/// `MarketStructureState` PYCLASS has the same abort behaviour for a direct
+/// hostile construction — deliberately NOT touched (frozen TickVault-shared
+/// surface, out of this slice's scope).
 pub const MAX_FRACTAL_K: usize = 64;
 
 /// The flat column/table view of one Stage-1A batch build.
@@ -847,17 +851,9 @@ mod tests {
     const REAL_FIB_DEP: u128 = 0x3ff80000;
     const REAL_APPLIES_1DAY: u128 = 0xfcf0fffffffffff;
 
-    /// Refuter RF-B F1(c): the mixed-direction ROLLING-WINDOW value pin.
-    ///
-    /// Directions B,B,B,R,R,R,B,B with `prior_n = 3` — expected masks derived
-    /// ONCE from the Python oracle (`Stage1AMatrixBuilder(prior_n=3).build`)
-    /// over the identical `collect_batch_inputs` columns. Kills BOTH
-    /// demonstrated survivors: `flags.remove(0)` → `pop()` freezes the FIRST
-    /// window ([B,B,B] forever — bar 6 would read all-BULLISH instead of the
-    /// oracle's all-BEARISH) and `push(close > open)` → `push(close < open)`
-    /// inverts every non-doji flag.
-    #[test]
-    fn mixed_direction_rolling_window_matches_the_python_oracle() {
+    /// The pin-1 columns (directions B,B,B,R,R,R,B,B on 2024-01-02) — shared
+    /// by the rolling-window pin and the RF-I F1 `apply_1day_mask` pin.
+    fn pin1_cols() -> Cols {
         let mut c = cols(8);
         c.open = vec![
             10_000, 10_500, 11_000, 11_500, 11_000, 10_500, 10_000, 10_500,
@@ -876,29 +872,84 @@ mod tests {
             33_300, 33_360, 33_420, 33_480, 33_540, 33_600, 33_660, 33_720,
         ];
         c.session_day = vec![738_887; 8];
+        c
+    }
+
+    /// The Python-oracle masks for [`pin1_cols`] under the REAL dependency
+    /// masks (`Stage1AMatrixBuilder(prior_n=3).build`, derived once).
+    const PIN1_MASKS: [u128; 8] = [
+        0x10040240000000,
+        0x10140240000000,
+        0x10140240000000,
+        0x10102280000000,
+        0x20100280000000,
+        0x20180280000000,
+        0x20104240000000,
+        0x10100240000000,
+    ];
+
+    /// Refuter RF-B F1(c): the mixed-direction ROLLING-WINDOW value pin.
+    ///
+    /// Directions B,B,B,R,R,R,B,B with `prior_n = 3` — expected masks derived
+    /// ONCE from the Python oracle (`Stage1AMatrixBuilder(prior_n=3).build`)
+    /// over the identical `collect_batch_inputs` columns. Kills BOTH
+    /// demonstrated survivors: `flags.remove(0)` → `pop()` freezes the FIRST
+    /// window ([B,B,B] forever — bar 6 would read all-BULLISH instead of the
+    /// oracle's all-BEARISH) and `push(close > open)` → `push(close < open)`
+    /// inverts every non-doji flag.
+    #[test]
+    fn mixed_direction_rolling_window_matches_the_python_oracle() {
+        let c = pin1_cols();
         let mut v = view(&c); // prior_n = 3, fractal_k = 2, bps 10/10/10
         v.anchor_dependent_mask = REAL_ANCHOR_DEP;
         v.fib_dependent_mask = REAL_FIB_DEP;
         v.applies_to_1day_mask = REAL_APPLIES_1DAY;
         let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
-        assert_eq!(
-            masks,
-            vec![
-                0x10040240000000,
-                0x10140240000000,
-                0x10140240000000,
-                0x10102280000000,
-                0x20100280000000,
-                0x20180280000000,
-                0x20104240000000,
-                0x10100240000000,
-            ]
-        );
+        assert_eq!(masks, PIN1_MASKS.to_vec());
         // Anti-vacuous: the Group-6 window genuinely ROLLS across the stream
         // (all-bullish at bar 3, all-bearish at bar 6 — a frozen-first-window
         // mutant cannot reproduce both).
         assert_ne!(masks[3] & (1u128 << crate::bits::BIT_PRIOR_N_BULLISH), 0);
         assert_ne!(masks[6] & (1u128 << crate::bits::BIT_PRIOR_N_BEARISH), 0);
+    }
+
+    /// Refuter RF-I round-3 F1: the D12 `apply_1day_mask` AND is value-pinned
+    /// with a NONZERO incoming mask — the gate's one missed survivor
+    /// (`mask &= applies` → `mask |=`) FABRICATES every applies-mask bit ON,
+    /// while the oracle (`Stage1AMatrixBuilder(prior_n=3,
+    /// apply_1day_mask=True).build`, re-derived + verified) equals
+    /// `pin ∧ APPLIES` exactly. The older `apply_1day_mask_ands_the_final_mask`
+    /// unit was vacuous against `|=` (applies-mask 0 into an already-0 mask).
+    #[test]
+    fn apply_1day_mask_matches_the_python_oracle_on_the_pin_stream() {
+        let c = pin1_cols();
+        let mut v = view(&c);
+        v.anchor_dependent_mask = REAL_ANCHOR_DEP;
+        v.fib_dependent_mask = REAL_FIB_DEP;
+        v.applies_to_1day_mask = REAL_APPLIES_1DAY;
+        v.apply_1day_mask = true;
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        let expected: Vec<u128> = PIN1_MASKS.iter().map(|m| m & REAL_APPLIES_1DAY).collect();
+        assert_eq!(
+            expected,
+            vec![
+                0x40240000000,
+                0x40240000000,
+                0x40240000000,
+                0x2280000000,
+                0x280000000,
+                0x80280000000,
+                0x4240000000,
+                0x240000000,
+            ],
+            "the ∧-law self-check drifted from the oracle-derived literals"
+        );
+        assert_eq!(masks, expected);
+        // Anti-vacuous: the AND genuinely REMOVES bits on every bar (so an
+        // `|=` mutant, which can only ADD, must diverge on all 8).
+        for (m, e) in PIN1_MASKS.iter().zip(&masks) {
+            assert!(m != e, "the 1day clear removed nothing — vacuous pin");
+        }
     }
 
     /// Refuter RF-B F1(c): the all-BULL prior-flag pin (`prior_n = 2`) —
@@ -933,6 +984,136 @@ mod tests {
         );
         assert_ne!(masks[2] & (1u128 << crate::bits::BIT_PRIOR_N_BULLISH), 0);
         assert_eq!(masks[2] & (1u128 << crate::bits::BIT_PRIOR_N_BEARISH), 0);
+    }
+
+    /// Refuter RF-I round-3 F2(a): fib ROW-MAPPING teeth — for every fib row
+    /// slot, a warm day whose slot value is the ONLY level near the close
+    /// must fire EXACTLY that slot's near-fib bit. Kills any
+    /// `fib_from_row` `row[i] → row[j]` remap (the demonstrated M5 survivor:
+    /// `retrace_38: row[2] → row[4]`). Slots 7..=10 (ext up) and 11..=14
+    /// (ext down) share bits 26..=29 — the evaluator ORs the up/down pair,
+    /// so a same-rung up↔down swap is definitionally equivalent and cannot
+    /// (and need not) be distinguished.
+    #[test]
+    fn each_fib_row_slot_feeds_exactly_its_own_near_bit() {
+        const EXPECTED_BIT: [u32; FIB_ROW_LEN] =
+            [19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 26, 27, 28, 29];
+        const FIB_BIT_FAMILY: u128 = 0x3ff8_0000; // bits 19..=29
+        for (slot, expected_bit) in EXPECTED_BIT.iter().enumerate() {
+            let mut c = cols(1);
+            c.day_has_pivot = vec![true];
+            c.day_has_fib = vec![true];
+            // Every level FAR from close (10_050) and mutually distinct, so a
+            // remapped slot reads a far value and the near bit goes dark.
+            c.day_pivots = (0..PIVOT_ROW_LEN as i64)
+                .map(|i| 20_000 + 1_000 * i)
+                .collect();
+            c.day_fibs = (0..FIB_ROW_LEN as i64)
+                .map(|i| 40_000 + 1_000 * i)
+                .collect();
+            c.day_fibs[slot] = 10_050; // == close → near under fib_bps = 10
+            let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+            assert_eq!(
+                masks[0] & FIB_BIT_FAMILY,
+                1u128 << expected_bit,
+                "fib slot {slot} fed the wrong near bit"
+            );
+        }
+    }
+
+    /// Refuter RF-I round-3 F2(a), pivot half: every pivot row slot pinned to
+    /// its own bit. Slots 0..=6 → near-pivot bits 6..=12; slot 7 (pdh) → 17;
+    /// slot 8 (pdl) → 18; slots 10/11 (r5/s5) → 54/55; slot 9 (pdc) has no
+    /// near bit — it is pinned below via the 0.5%-threshold GAP verdict.
+    #[test]
+    fn each_pivot_row_slot_feeds_exactly_its_own_bit() {
+        const NEAR_SLOTS: [(usize, u32); 11] = [
+            (0, 6),
+            (1, 7),
+            (2, 8),
+            (3, 9),
+            (4, 10),
+            (5, 11),
+            (6, 12),
+            (7, 17),
+            (8, 18),
+            (10, 54),
+            (11, 55),
+        ];
+        const PIVOT_NEAR_FAMILY: u128 = (0x7f << 6) | (0x3 << 17) | (0x3 << 54);
+        for (slot, bit_pos) in NEAR_SLOTS {
+            let mut c = cols(1);
+            c.day_has_pivot = vec![true];
+            c.day_pivots = (0..PIVOT_ROW_LEN as i64)
+                .map(|i| 20_000 + 1_000 * i)
+                .collect();
+            c.day_pivots[slot] = 10_050; // == close → near under pivot/pp bps = 10
+            let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+            assert_eq!(
+                masks[0] & PIVOT_NEAR_FAMILY,
+                1u128 << bit_pos,
+                "pivot slot {slot} fed the wrong bit"
+            );
+        }
+        // pdc (slot 9): far BELOW the 10_000 open → GAP-UP fires; every other
+        // slot value sits far ABOVE the open, so ANY remap of slot 9 flips
+        // the verdict to GAP-DOWN.
+        let mut c = cols(1);
+        c.day_has_pivot = vec![true];
+        c.day_pivots = (0..PIVOT_ROW_LEN as i64)
+            .map(|i| 20_000 + 1_000 * i)
+            .collect();
+        c.day_pivots[9] = 5_000;
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        assert_ne!(masks[0] & (1u128 << crate::bits::BIT_GAP_UP_DAY), 0);
+        assert_eq!(masks[0] & (1u128 << crate::bits::BIT_GAP_DOWN_DAY), 0);
+    }
+
+    /// Refuter RF-I round-3 F2(b): a `pre_open = true` bar must be EXCLUDED
+    /// from the session VWAP (vwap.rs skips it). Feed a 20_000-typical
+    /// pre-open bar then a 10_000-typical regular bar: the pristine VWAP is
+    /// 10_000, so the 10_050 close reads ABOVE (bit 52); the demonstrated
+    /// M12 mutant (`inp.pre_open[i]` → `false`) folds the auction bar in
+    /// (VWAP 15_000) and flips the verdict to BELOW (bit 53).
+    #[test]
+    fn pre_open_bar_is_excluded_from_the_session_vwap() {
+        let mut c = cols(2);
+        c.pre_open = vec![true, false];
+        c.typical = vec![20_000, 10_000];
+        c.tod = vec![9 * 3600, 9 * 3600 + 16 * 60];
+        let mut v = view(&c);
+        v.anchor_dependent_mask = 0; // cold-day clear disarmed — bits observable
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_ne!(masks[1] & (1u128 << crate::bits::BIT_CLOSE_ABOVE_VWAP), 0);
+        assert_eq!(masks[1] & (1u128 << crate::bits::BIT_CLOSE_BELOW_VWAP), 0);
+    }
+
+    /// Refuter RF-I round-3 F2(c): the reset arm's `current_day = None`
+    /// day-cursor drop is DEFENSIVE-semantics teeth. A reset WITHOUT a
+    /// day_index bump is structurally LEGAL (`validate_structure` allows a
+    /// step of 0 and does not couple `contract_reset` to the day cursor —
+    /// stated: the wrapper does NOT reject this shape), even though the
+    /// sanctioned prepass always pairs a roll with a new day row. Pinned:
+    /// the post-reset bar RE-SEEDS the day extremes (close == the reseeded
+    /// day high → bit 40); the demonstrated M7 mutant (delete
+    /// `current_day = None`) carries the stale 20_000 day high across the
+    /// reset and the bit goes dark.
+    #[test]
+    fn reset_arm_reseeds_the_day_extremes_via_the_day_cursor() {
+        let mut c = cols(2);
+        c.contract_reset = vec![false, true];
+        c.high = vec![20_000, 10_050];
+        c.low = vec![9_900, 9_900];
+        c.open = vec![10_000, 10_000];
+        c.close = vec![10_050, 10_050];
+        let mut v = view(&c);
+        v.anchor_dependent_mask = 0; // cold-day clear disarmed — bit 40 observable
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_ne!(
+            masks[1] & (1u128 << crate::bits::BIT_CLOSE_AT_DAY_HIGH),
+            0,
+            "the reset did not re-seed the day extremes"
+        );
     }
 
     #[test]
