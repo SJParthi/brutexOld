@@ -32,9 +32,10 @@ MemoryError re-raises raw), chunk cap 65,536. OFF (default) arm byte- AND
 log-identical (bomb-spy + zero-event + OFF-cost-bench teeth); ON arm's ONLY
 deltas are three fault/engagement-scoped events; the EXISTING enrich golden
 reproduces byte-identically with the flag ON (fixture untouched,
-engaged-INFO anti-vacuous pin). HONEST: both arms O(rows) — measured ON/OFF
-≈1.0× on the sandbox (0.996× solve-heavy / 0.960× reuse-heavy — stated,
-never claimed as a win; the retained Python work dominates); ships INERT —
+engaged-INFO anti-vacuous pin). HONEST: both arms O(rows) — ON/OFF wall
+≈1.0× measured on the sandbox (run-to-run noise straddles 1.0 — reruns read
+0.96–1.00×; no speedup claimed, ceiling-gated ONLY at the 1.5× no-regression
+bound; the retained Python work dominates); ships INERT —
 a default flip needs its own DEC/ADR. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
 GREEKS_FORMULA_VERSION stays 2; `greeks_enrich.py` + `spot_join.py` +
@@ -2235,8 +2236,9 @@ hostile-review pass._
   golden + the hypothesis OFF≡ON property + the hostile status matrix (BELOW_INTRINSIC ±1-ULP band
   CE AND PE, T-floor µs boundary, reuse hit + per-term misses, NaN-OHLC skip, invalid-spot WARN,
   repr-boundary spot 100.005, interleave ordering, log-SEQUENCE equality). HONEST: both arms
-  O(rows) — NO O(1) claim; measured ON/OFF ≈1.0× sandbox (0.996× solve-heavy / 0.960× reuse-heavy —
-  printed by the bench, gated only at a generous ≤1.5× no-regression ceiling; the retained Python
+  O(rows) — NO O(1) claim; ON/OFF wall ≈1.0× measured on the sandbox (run-to-run noise straddles
+  1.0 — independent reruns read 0.96–1.00×; NO speedup claimed, printed by the bench and gated only
+  at the generous ≤1.5× no-regression ceiling; the retained Python
   Decimal/bar-construction work dominates — the slice lands the safe FFI stepping-stone, the
   judge's honest position); ships INERT — a default flip needs its own DEC/ADR with real-lake soak
   + zero autoreverts + mutation-green; the Vec-alloc abort residual is the same disclosed envelope
@@ -5603,8 +5605,8 @@ hostile-review pass._
   default-OFF `BRUTEX_GREEKS_RUST_BATCH` batch-solve seam in
   `enrich_option_bars` (shared-single-copy screens, 16-element burn-in +
   autorevert latch, chunk cap 65,536); OFF arm byte- and log-identical, the
-  existing enrich golden byte-identical with the flag ON; measured ON/OFF
-  ≈1.0× (stated, not claimed); crate stays 0.3.1; ENGINE UNCHANGED —
+  existing enrich golden byte-identical with the flag ON; ON/OFF wall
+  ≈1.0× measured (no speedup claimed; 1.5× no-regression ceiling only); crate stays 0.3.1; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1724 for the full blurb)
   Earlier: `claude/frontend-latency-hardening-r2`
