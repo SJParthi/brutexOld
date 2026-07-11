@@ -45,3 +45,8 @@ python-source = "python"
 module-name = "brutex_lake._brutex_lake"
 features = ["pyo3/extension-module"]
 strip = true
+# Enforce the committed Cargo.lock on every wheel build (cargo --locked):
+# the lock IS the byte pin (rev-locked polars graph + the zstd trio) — a
+# silent in-place re-resolution would be silently different rendered bytes
+# (review-round fold; the CI lane's cargo steps carry --locked too).
+locked = true

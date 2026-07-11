@@ -42,12 +42,23 @@
 //! ## FFI boundary contract
 //!
 //! * Errors cross as clean `PyErr`s (`ValueError` for a bad/empty payload or
-//!   a polars render error) — never a panic: every `#[pyfunction]` body runs
-//!   under `std::panic::catch_unwind`, mapping a panic to a `RuntimeError`
-//!   (the Python facade's degrade-to-oracle catch is `(ValueError,
-//!   RuntimeError, ...)`; a `pyo3_runtime.PanicException` is a
+//!   a polars render error) — never a panic: the render AND the result
+//!   construction (`PyBytes::new` — a result-buffer allocation can panic)
+//!   each run under `std::panic::catch_unwind`, mapping a panic to a
+//!   `RuntimeError` (the Python facade's degrade-to-oracle catch is
+//!   `(ValueError, RuntimeError, ...)`; a `pyo3_runtime.PanicException` is a
 //!   `BaseException` subclass that would ESCAPE it — hence the explicit
-//!   boundary).
+//!   boundary; the facade additionally carries a `BaseException` belt that
+//!   latches OFF + serves the oracle should one nonetheless escape).
+//!   HONEST RESIDUAL: `Engine::Streaming` may run render work on ITS OWN
+//!   worker threads; polars-stream propagates a worker panic back to the
+//!   collector (as a `PolarsError` or a caller-thread re-panic → caught
+//!   here), but that propagation is a polars property we rely on, not one
+//!   this crate can prove in a unit test — recorded in the runbook hazard
+//!   table, and bounded by the facade belt above.
+//! * The render runs WITHOUT the GIL (`Python::detach`) — the wheel's own
+//!   `write_parquet` releases it too, so an engaged render never
+//!   serializes sibling writer/dashboard threads.
 //! * The input frame is `rechunk_mut()`-ed after the IPC read so the memory
 //!   layout matches the single-chunk frame the Python writer builds from
 //!   per-column lists (spike-proven byte-relevant discipline).
@@ -55,8 +66,11 @@
 //! ## The ATOMIC pin (ADR-0019 §7 hazards 1 + 2)
 //!
 //! [`PINNED_POLARS_PY_VERSION`] is the single source for "which wheel this
-//! crate byte-matches"; the manifest's `tag = "py-<version>"` is cargo-tested
-//! against it, and [`PINNED_LIBZSTD_VERSION`] pins the bundled libzstd the
+//! crate byte-matches"; every manifest polars git dependency is REV-pinned
+//! at [`PINNED_POLARS_GIT_REV`] (the commit the upstream `py-1.42.1` tag
+//! pointed at — tags are movable, revs are not; manifest AND the committed
+//! `Cargo.lock` are cargo-tested against it), and
+//! [`PINNED_LIBZSTD_VERSION`] pins the bundled libzstd the
 //! committed `Cargo.lock` resolves (zstd 0.13.3 / zstd-safe 7.2.4 /
 //! zstd-sys 2.0.16 → libzstd 1.5.7). The Python facade
 //! (`brutex/data/lake_rust_render.py`) refuses to engage whenever the
@@ -87,12 +101,21 @@ use pyo3::types::PyBytes;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The Python polars wheel version this crate's linked polars byte-matches —
-/// the SINGLE SOURCE for the lockstep pin. The manifest's git tag
-/// (`py-1.42.1`) is asserted against this constant in `manifest_tag_matches_
-/// pinned_version` (cargo test), and the Python facade's version guard
-/// compares the installed `polars.__version__` against
+/// the SINGLE SOURCE for the lockstep pin. The manifest carries the matching
+/// commit as [`PINNED_POLARS_GIT_REV`] (asserted in
+/// `manifest_rev_matches_pinned_rev`, cargo test), and the Python facade's
+/// version guard compares the installed `polars.__version__` against
 /// [`pinned_polars_version`] before every engagement.
 pub const PINNED_POLARS_PY_VERSION: &str = "1.42.1";
+
+/// The EXACT polars commit every git dependency in `Cargo.toml` is pinned
+/// to — the commit the upstream tag `py-1.42.1` pointed at when the
+/// lockstep was proven (2026-07-11). REV-pinned because git tags are
+/// MOVABLE (review-round fold): a moved tag re-resolving to a newer commit
+/// would silently change rendered bytes. `manifest_rev_matches_pinned_rev`
+/// holds the manifest to it and `lockfile_resolves_pinned_rev` holds the
+/// committed `Cargo.lock` to it (belt over CI's `cargo --locked`).
+pub const PINNED_POLARS_GIT_REV: &str = "0df0c25d4db895ec8cad773bedc4e98400e3135e";
 
 /// The bundled libzstd version the committed `Cargo.lock` resolves (zstd
 /// 0.13.3 / zstd-safe 7.2.4 / zstd-sys 2.0.16+zstd.1.5.7 — byte-equal to the
@@ -236,22 +259,40 @@ fn libzstd_version_string() -> String {
 /// `DataFrame.write_parquet(use_pyarrow=False)`.
 ///
 /// Raises `ValueError` on an empty/undecodable payload or a polars render
-/// error, `RuntimeError` if the render panics (caught at this boundary —
-/// a panic never crosses the FFI).
+/// error, `RuntimeError` if the render — or the result construction —
+/// panics (both caught at this boundary; a panic never crosses the FFI).
+/// The render itself runs WITHOUT the GIL (`Python::detach` — the wheel's
+/// own `write_parquet` releases it too, so an engaged render never
+/// serializes sibling writer threads; sound: the input is an immutable
+/// `bytes` buffer kept alive by the call arguments). `PyBytes::new` runs
+/// back UNDER the GIL inside its own panic guard (review-round fold: a
+/// result-buffer allocation panic previously escaped as
+/// `pyo3_runtime.PanicException`).
 #[pyfunction]
 fn render_parquet_from_ipc(py: Python<'_>, ipc_bytes: &[u8]) -> PyResult<Py<PyBytes>> {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        render_parquet_from_ipc_impl(ipc_bytes)
-    }));
-    match outcome {
-        Ok(Ok(bytes)) => Ok(PyBytes::new(py, &bytes).into()),
-        Ok(Err(err)) => Err(PyValueError::new_err(format!(
-            "brutex-lake parquet render failed: {err}"
-        ))),
-        Err(_) => Err(PyRuntimeError::new_err(
-            "brutex-lake parquet render panicked (caught at the FFI boundary)",
-        )),
-    }
+    let rendered =
+        py.detach(|| std::panic::catch_unwind(|| render_parquet_from_ipc_impl(ipc_bytes)));
+    let bytes = match rendered {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(err)) => {
+            return Err(PyValueError::new_err(format!(
+                "brutex-lake parquet render failed: {err}"
+            )));
+        }
+        Err(_) => {
+            return Err(PyRuntimeError::new_err(
+                "brutex-lake parquet render panicked (caught at the FFI boundary)",
+            ));
+        }
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PyBytes::new(py, &bytes).unbind()
+    }))
+    .map_err(|_| {
+        PyRuntimeError::new_err(
+            "brutex-lake parquet result construction panicked (caught at the FFI boundary)",
+        )
+    })
 }
 
 /// The Python polars wheel version this crate byte-matches (`"1.42.1"`).
@@ -409,13 +450,14 @@ mod tests {
     }
 
     #[test]
-    fn manifest_tag_matches_pinned_version() {
-        // The lockstep law: every polars git dependency in Cargo.toml rides
-        // the tag derived from PINNED_POLARS_PY_VERSION — the constant is
-        // the single source, the manifest is held to it.
+    fn manifest_rev_matches_pinned_rev() {
+        // The lockstep law (rev-pinned since the review round — git tags
+        // are MOVABLE): every polars git dependency in Cargo.toml rides the
+        // exact commit PINNED_POLARS_GIT_REV — the constant is the single
+        // source, the manifest is held to it.
         let manifest = include_str!("../Cargo.toml");
-        let expected = format!("tag = \"py-{PINNED_POLARS_PY_VERSION}\"");
-        // Count DEPENDENCY lines only (comments may also mention the tag).
+        let expected = format!("rev = \"{PINNED_POLARS_GIT_REV}\"");
+        // Count DEPENDENCY lines only (comments may also mention the repo).
         let dep_lines: Vec<&str> = manifest
             .lines()
             .filter(|l| l.contains("pola-rs/polars"))
@@ -430,6 +472,35 @@ mod tests {
             assert!(
                 line.contains(&expected),
                 "a polars git dependency is not pinned at {expected}: {line}"
+            );
+        }
+        // No dependency line may carry a movable `tag =` reference.
+        for line in manifest.lines().filter(|l| l.contains("pola-rs/polars")) {
+            assert!(
+                !line.contains("tag ="),
+                "a polars git dependency still rides a movable tag: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn lockfile_resolves_pinned_rev() {
+        // The committed Cargo.lock is the byte pin's ground truth: every
+        // polars source line it records must resolve PINNED_POLARS_GIT_REV
+        // (belt over CI's `cargo --locked`, which refuses a stale lock).
+        let lock = include_str!("../Cargo.lock");
+        let polars_sources: Vec<&str> = lock
+            .lines()
+            .filter(|l| l.contains("pola-rs/polars"))
+            .collect();
+        assert!(
+            !polars_sources.is_empty(),
+            "Cargo.lock records no polars git sources — lock out of sync"
+        );
+        for line in polars_sources {
+            assert!(
+                line.contains(PINNED_POLARS_GIT_REV),
+                "a Cargo.lock polars source drifted off the pinned rev: {line}"
             );
         }
     }
