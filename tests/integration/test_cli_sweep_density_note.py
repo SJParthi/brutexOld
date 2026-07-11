@@ -140,8 +140,9 @@ def test_kill_switch_silences_the_preflight_note_too(
     (review round-1 fix): the SAME holey lake that prints the note under the
     default-ON switch prints NOTHING with BRUTEX_SESSION_DENSITY_CENSUS=0 —
     the consumption is gated at the cli call site on
-    ``session_density_census_enabled()`` (the classifier stays pure), so the
-    docstring's "disables ALL census output" claim is genuinely true. Fails
+    ``session_density_census_enabled()`` (the classifier carries no
+    kill-switch read of its own — round-2 wording truth), so the docstring's
+    "disables ALL census output" claim is genuinely true. Fails
     without the cli.py gate."""
     monkeypatch.setenv(SESSION_DENSITY_KILL_ENV, "0")
     lake_root, catalog_path = _seed(tmp_path, holey=True)

@@ -7016,9 +7016,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # one_day_trade_law_note posture): the sweep proceeds; remediation is a
     # re-pull of the named window(s). The ONE census kill switch
     # (BRUTEX_SESSION_DENSITY_CENSUS) gates THIS consumption too — the
-    # classifier/note builder stays pure (no env read inside it); callers
-    # gate, exactly like observe_session_density's ingest-tail check — so the
-    # switch genuinely kills ALL census output (review round-1 fix).
+    # classifier/note builder carries no KILL-SWITCH read (its two threshold
+    # tunables stay documented fail-soft internal reads when not injected);
+    # callers gate, exactly like observe_session_density's ingest-tail check
+    # — so the switch genuinely kills ALL census output (review round-1 fix).
     from brutex.data.session_density import session_density_census_enabled
     from brutex.engine.sweep_preflight import preflight_session_density
 

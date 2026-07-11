@@ -4,10 +4,12 @@ DEC-SESSION-DENSITY-CENSUS-001. 100% line+branch STANDALONE (the ci.yml
 per-module gate): the deficiency law (abs-floor AND fraction, both boundary
 sides), every abstain reason (out_of_coverage · non_trading · observed-overlay
 · muhurat · forming_session · boundary), the interior zero-bar
-``missing_session`` arm, the shape taxonomy + gap bounds, the known-irregular
-INFO arm (2021-02-24's 375/465 + the 2020 halt days), the fail-soft env knobs
-+ the default-ON kill switch, the cap-20 + suppressed-summary emit discipline,
-and the error-guard twin (an emitter crash never propagates).
+``missing_session`` arm, the shape taxonomy + gap bounds, the ``tf_minutes>1``
+scaling arm (review round-2 mutant killers — bucket division + both duration
+clamps), the known-irregular INFO arm (2021-02-24's 375/465 + the 2020 halt
+days), the fail-soft env knobs + the injected-override seams + the default-ON
+kill switch, the cap-20 + suppressed-summary emit discipline, and the
+error-guard twin (an emitter crash never propagates).
 """
 
 from __future__ import annotations
@@ -317,6 +319,107 @@ class TestDeficiencyLaw:
         assert SESSION_DENSITY_MIN_FRACTION == 0.90
         assert SESSION_DENSITY_ABS_FLOOR == 30
         assert SESSION_DENSITY_WARN_CAP == 20
+
+
+class TestTfScaling:
+    """The ``tf_minutes > 1`` arm of ``_judge_session`` (review round-2).
+
+    Both production wirings hard-gate to ``1minute``, but ``tf_minutes`` is an
+    advertised public parameter and ``expected_bars_for_session`` is
+    TF-generic (derived-TF use is plausible) — so the tf-scaling arithmetic
+    stays and gets teeth: the bucket division ``(m - open_min) // tf_minutes``,
+    the gap-LENGTH clamp ``min(run_len * tf, duration)``, and the gap-END
+    clamp ``min((end_slot + 1) * tf, duration)`` at the truncated final
+    bucket. A regular session at tf=30 expects only ``ceil(375/30) = 13``
+    buckets — below the default 30-bar abs floor — so these cases inject
+    ``abs_floor`` (the round-2 injection seam that also makes the census
+    golden hermetic).
+    """
+
+    def test_tf30_missing_session_engages_both_duration_clamps(self) -> None:
+        # A fully-missing interior Wednesday at tf=30: the largest missing run
+        # is slots 0..12, whose UNclamped scaled length is 13*30 = 390 > the
+        # 375-minute session duration:
+        #   * largest_gap_minutes == 375 kills the gap-LENGTH clamp mutant
+        #     (dropping min(..., duration) would read 390);
+        #   * gap_end == 15:30 kills the gap-END clamp mutant (dropping
+        #     min(..., duration) would read open + 390min = 15:45).
+        verdict = classify_session_density(
+            _bracketed([]), tf_minutes=30, abs_floor=1, today_ist=_FAR_FUTURE
+        )
+        assert len(verdict.flags) == 1
+        flag = verdict.flags[0]
+        assert flag.session == _WED
+        assert (flag.expected, flag.observed) == (13, 0)
+        assert flag.shape == SHAPE_MISSING_SESSION
+        assert flag.fraction == 0.0
+        assert flag.largest_gap_minutes == 375
+        assert (flag.gap_start_ist, flag.gap_end_ist) == (time(9, 15), time(15, 30))
+
+    def test_tf30_partial_tail_hole_clamps_gap_end_at_session_close(self) -> None:
+        # Buckets 0..9 present (one bar at each 30-min bucket open), tail
+        # buckets 10..12 missing: the run ENDS at the TRUNCATED final bucket
+        # (slot 12 covers only 15:15..15:29), so the gap-END clamp engages
+        # ((12+1)*30 = 390 > 375 → 15:30) while the gap-LENGTH clamp does NOT
+        # (3*30 = 90 <= 375) — kills the gap-end mutant INDEPENDENTLY of the
+        # gap-length one (unclamped gap_end would read 15:45).
+        present = [_minute_ts(_WED, *divmod(9 * 60 + 15 + slot * 30, 60)) for slot in range(10)]
+        verdict = classify_session_density(
+            _bracketed(present), tf_minutes=30, abs_floor=1, today_ist=_FAR_FUTURE
+        )
+        assert len(verdict.flags) == 1
+        flag = verdict.flags[0]
+        assert (flag.expected, flag.observed) == (13, 10)
+        assert flag.shape == SHAPE_INTRADAY_HOLE
+        assert flag.largest_gap_minutes == 90  # bucket-granular: 2 full + the 15-min tail
+        assert flag.gap_start_ist == time(14, 15)
+        assert flag.gap_end_ist == time(15, 30)  # NOT 15:45 — clamped at close
+
+    def test_tf30_two_bars_in_one_bucket_count_one_observed(self) -> None:
+        # The bucket-division mutant killer: 09:15 + 09:16 land in bucket 0
+        # (ONE observed bucket, never two raw minute offsets) beside a lone
+        # 12:15 bar in bucket 6 — dropping ``// tf_minutes`` would read
+        # observed == 3 (raw offsets {0, 1, 180}) and a different largest run.
+        bars = [
+            _minute_ts(_WED, 9, 15),
+            _minute_ts(_WED, 9, 16),  # same 30-min bucket as 09:15
+            _minute_ts(_WED, 12, 15),  # bucket 6
+        ]
+        verdict = classify_session_density(
+            _bracketed(bars), tf_minutes=30, abs_floor=1, today_ist=_FAR_FUTURE
+        )
+        assert len(verdict.flags) == 1
+        flag = verdict.flags[0]
+        assert (flag.expected, flag.observed) == (13, 2)
+        # Largest missing run = buckets 7..12 (six buckets beat 1..5's five).
+        assert flag.largest_gap_minutes == 180
+        assert flag.gap_start_ist == time(12, 45)
+        assert flag.gap_end_ist == time(15, 30)
+
+    def test_injected_abs_floor_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The injection seam wins over the env knob: a permissive env floor of
+        # 1 would flag the 45-min hole; the injected 100 saves it.
+        monkeypatch.setenv("BRUTEX_SESSION_DENSITY_ABS_FLOOR", "1")
+        hole = set(range(600, 645))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)),
+            abs_floor=100,
+            today_ist=_FAR_FUTURE,
+        )
+        assert verdict.flags == ()
+        assert verdict.sessions_checked == 1
+
+    def test_env_abs_floor_reaches_the_law_when_not_injected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The None fallback still reads the env knob (fail-soft law kept):
+        # env floor 46 saves the 45-missing-bar hole that flags by default.
+        monkeypatch.setenv("BRUTEX_SESSION_DENSITY_ABS_FLOOR", "46")
+        hole = set(range(600, 645))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)), today_ist=_FAR_FUTURE
+        )
+        assert verdict.flags == ()
 
 
 class TestAbstains:

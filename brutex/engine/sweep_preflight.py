@@ -259,11 +259,14 @@ def preflight_session_density(
     double-report every hole). Empty slices are skipped (the zero-bar
     :func:`preflight_slices` refusal owns those). WARN-only by decree — the
     caller prints, never refuses. Deliberately NOT kill-switch-gated HERE
-    (pure — no env read): the ONE census kill switch
+    (no KILL-SWITCH env read inside the classifier/note builder — its two
+    threshold tunables remain documented fail-soft internal reads when not
+    injected): the ONE census kill switch
     (:data:`~brutex.data.session_density.SESSION_DENSITY_KILL_ENV`) is
     honored by the consumer — ``cmd_sweep_all`` gates this call on
     :func:`~brutex.data.session_density.session_density_census_enabled` — so
-    the switch kills ALL census output while the note builder stays pure.
+    the switch kills ALL census output while the note builder carries no
+    kill-switch read of its own.
     """
     flagged: list[tuple[str, str, SessionDensityFlag]] = []
     checked = 0

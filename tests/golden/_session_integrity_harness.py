@@ -25,7 +25,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from brutex.data.models import CandleBar
-from brutex.data.session_density import classify_session_density
+from brutex.data.session_density import (
+    SESSION_DENSITY_ABS_FLOOR,
+    SESSION_DENSITY_MIN_FRACTION,
+    classify_session_density,
+)
 from brutex.engine.trade_sim import simulate_trades
 from brutex.strategies.types import Side
 
@@ -115,8 +119,20 @@ def census_bar_timestamps() -> list[datetime]:
 
 
 def census_payload() -> dict[str, Any]:
-    """The frozen census-verdict payload over the synthetic-hole span."""
-    verdict = classify_session_density(census_bar_timestamps(), today_ist=date(2026, 12, 31))
+    """The frozen census-verdict payload over the synthetic-hole span.
+
+    HERMETIC oracle (review round-2): BOTH deficiency thresholds are pinned
+    explicitly to the module defaults, so an exported operator env knob
+    (``BRUTEX_SESSION_DENSITY_MIN_FRACTION`` / ``_ABS_FLOOR``) can never move
+    the frozen bytes — the classifier's fail-soft env fallbacks are reached
+    only when an override is not injected.
+    """
+    verdict = classify_session_density(
+        census_bar_timestamps(),
+        min_fraction=SESSION_DENSITY_MIN_FRACTION,
+        abs_floor=SESSION_DENSITY_ABS_FLOOR,
+        today_ist=date(2026, 12, 31),
+    )
     return {
         "note": (
             "REAL 2024-01-02..04 calendar anchor, FABRICATED 45-min hole "

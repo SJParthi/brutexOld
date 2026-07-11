@@ -55,8 +55,11 @@ when the census runs; the sweep-preflight note is O(already-loaded slice
 bars). The #1614 lake stats manifest is deliberately NOT consumed — its
 per-month-file granularity cannot answer per-session counts.
 
-Everything here is pure (no I/O beyond two env reads), stdlib + structlog +
-:mod:`brutex.calendars.nse` only (the observed-sessions layering law).
+Everything here is pure modulo the documented fail-soft env reads (the kill
+switch inside :func:`session_density_census_enabled` — never the classifier —
+plus the two threshold tunables the classifier reads only when the matching
+override is not injected), stdlib + structlog + :mod:`brutex.calendars.nse`
+only (the observed-sessions layering law).
 """
 
 from __future__ import annotations
@@ -119,9 +122,10 @@ SESSION_DENSITY_ABS_FLOOR: Final[int] = 30
 #: BOTH the ingest-tail emitter (:func:`observe_session_density` checks it
 #: FIRST) and the sweep-preflight note consumption (``cmd_sweep_all`` gates
 #: its ``preflight_session_density`` call on
-#: :func:`session_density_census_enabled`). The pure classifier
+#: :func:`session_density_census_enabled`). The classifier
 #: (:func:`classify_session_density`) itself stays un-gated BY DESIGN —
-#: callers gate, so purity is preserved and no env read hides inside it.
+#: callers gate, so NO kill-switch read hides inside it (its two threshold
+#: tunables remain documented fail-soft internal reads when not injected).
 SESSION_DENSITY_KILL_ENV: Final[str] = "BRUTEX_SESSION_DENSITY_CENSUS"
 
 #: Per-emit cap on ``window.session_density_low`` WARN lines (house cap 20 —
@@ -370,6 +374,7 @@ def classify_session_density(
     *,
     tf_minutes: int = 1,
     min_fraction: float | None = None,
+    abs_floor: int | None = None,
     today_ist: date | None = None,
     observed: AbstractSet[date] = frozenset(),
 ) -> SessionDensityVerdict:
@@ -381,7 +386,8 @@ def classify_session_density(
     → ``boundary``), and judges each remaining INTERIOR session — including
     interior zero-bar trading days — against the deficiency law. O(bars) to
     group + O(days in span) to walk + O(expected buckets) per judged session;
-    zero I/O beyond the two fail-soft env reads.
+    zero I/O beyond the two fail-soft env reads, each taken only when its
+    override parameter is not injected.
 
     Parameters
     ----------
@@ -396,6 +402,10 @@ def classify_session_density(
         Override the deficiency fraction. ``None`` reads
         ``BRUTEX_SESSION_DENSITY_MIN_FRACTION`` (fail-soft) falling back to
         :data:`SESSION_DENSITY_MIN_FRACTION`.
+    abs_floor
+        Override the absolute missing-bars noise floor. ``None`` reads
+        ``BRUTEX_SESSION_DENSITY_ABS_FLOOR`` (fail-soft) falling back to
+        :data:`SESSION_DENSITY_ABS_FLOOR`.
     today_ist
         The forming-session cutoff (dates ``>= today_ist`` abstain).
         ``None`` reads the live IST clock (:func:`brutex.calendars.nse.now_ist`).
@@ -409,7 +419,11 @@ def classify_session_density(
         if min_fraction is not None
         else _tunable_fraction("BRUTEX_SESSION_DENSITY_MIN_FRACTION", SESSION_DENSITY_MIN_FRACTION)
     )
-    abs_floor = _tunable_floor("BRUTEX_SESSION_DENSITY_ABS_FLOOR", SESSION_DENSITY_ABS_FLOOR)
+    floor = (
+        abs_floor
+        if abs_floor is not None
+        else _tunable_floor("BRUTEX_SESSION_DENSITY_ABS_FLOOR", SESSION_DENSITY_ABS_FLOOR)
+    )
     by_date: dict[date, set[int]] = {}
     for ts in bar_timestamps:
         ist = ts.astimezone(IST)
@@ -450,7 +464,7 @@ def classify_session_density(
             by_date.get(d, frozenset()),
             tf_minutes=tf_minutes,
             min_fraction=fraction,
-            abs_floor=abs_floor,
+            abs_floor=floor,
         )
         if flag is None:
             continue

@@ -42,7 +42,13 @@ def test_extended_day_trade_exits_at_1650_not_1520() -> None:
     assert trade["pnl_paisa"] == 60  # entry 100.10 @15:19-next-open ... forced @100.70
 
 
-def test_census_verdict_matches_frozen_bytes() -> None:
+def test_census_verdict_matches_frozen_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hermetic against the operator env knobs (review round-2): the harness
+    # pins both thresholds explicitly; deleting the vars here is belt-and-
+    # braces so a future harness edit can never silently re-couple the frozen
+    # oracle to the shell (the test_session_density per-test pattern).
+    monkeypatch.delenv("BRUTEX_SESSION_DENSITY_MIN_FRACTION", raising=False)
+    monkeypatch.delenv("BRUTEX_SESSION_DENSITY_ABS_FLOOR", raising=False)
     assert GOLDEN_CENSUS.exists(), "run tests/golden/generate_session_integrity_golden.py once"
     assert render(census_payload()) == GOLDEN_CENSUS.read_bytes()
 
