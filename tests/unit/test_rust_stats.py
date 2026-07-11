@@ -19,6 +19,7 @@ than passing vacuously (the engaged-assertion law).
 from __future__ import annotations
 
 import math
+import struct
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,7 @@ from brutex.metrics.cpcv import (
     _fold_pass_count,  # pyright: ignore[reportPrivateUsage]
     _group_bounds,  # pyright: ignore[reportPrivateUsage]
     _group_moments,  # pyright: ignore[reportPrivateUsage]
+    cpcv_pass_rate,
 )
 from brutex.metrics.rust_stats import (
     SELF_CHECK_SAMPLES,
@@ -142,6 +144,36 @@ def test_flag_unrecognised_fails_safe_off_with_one_warning(
     assert events[0]["value"] == value
 
 
+def test_flag_engine_unavailable_degrades_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SET flag in an environment where ``brutex.engine`` cannot import
+    (e.g. the trading_core wheel absent/stale — ``engine/__init__`` eagerly
+    imports stage1a → trading_core) degrades to :data:`STATS_RUST_DEFAULT`
+    with ONE warn-once ``flag_engine_unavailable`` event: the ImportError
+    must never propagate out of ``cpcv_pass_rate`` (the "wheel state can
+    never change results or error behaviour" contract covers BOTH wheels).
+    """
+    returns = np.linspace(-0.01, 0.01, 32)
+    # The pure-Python oracle answer, computed BEFORE the import is poisoned.
+    monkeypatch.setenv(STATS_RUST_ENV, "0")
+    expected = cpcv_pass_rate(returns)
+    monkeypatch.setenv(STATS_RUST_ENV, "1")
+    # ``None`` in sys.modules makes ``from X import Y`` raise ImportError
+    # even if the module was ALREADY imported earlier in the process (the
+    # ``fno_math`` wheel-missing trick); ``monkeypatch.setitem`` restores
+    # the prior entry — or its absence — when the test ends.
+    monkeypatch.setitem(sys.modules, "brutex.engine.sweep_lookahead", None)
+    with capture_logs() as logs:
+        # The default constant, NOT a hardcoded False (flip-lever contract).
+        assert stats_rust_enabled() is STATS_RUST_DEFAULT
+        rate = cpcv_pass_rate(returns)  # no crash — the Python oracle serves
+        assert stats_rust_enabled() is STATS_RUST_DEFAULT  # warn-once probe
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert len(events) == 1  # three resolutions above → exactly ONE warn
+    assert events[0]["reason"] == "flag_engine_unavailable"
+    assert events[0]["fn"] == "flag"
+    assert struct.pack("<d", rate) == struct.pack("<d", expected)
+
+
 def test_flag_env_name_and_default_pinned() -> None:
     """Literal pins (mutation teeth): the env var name and the default-OFF
     constant are operator-facing contracts."""
@@ -201,6 +233,12 @@ def test_reset_self_check_named_function_and_remaining() -> None:
     assert _self_check_pending("cpcv") is False
     reset_self_check_for_tests("cpcv")
     assert _self_check_pending("cpcv") is True
+    # A named reset also unlatches exactly that function.
+    disable_kernel("cpcv", "self_check_mismatch")
+    disable_kernel("pbo", "self_check_mismatch")
+    reset_self_check_for_tests("cpcv")
+    assert kernel_disabled("cpcv") is False
+    assert kernel_disabled("pbo") is True  # sibling latch untouched
     # An unknown function name defaults to a zero budget (no KeyError).
     reset_self_check_for_tests("nonesuch")
     assert _self_check_pending("nonesuch") is False
@@ -213,6 +251,21 @@ def test_reset_self_check_all_functions() -> None:
     reset_self_check_for_tests()
     assert kernel_disabled("cpcv") is False
     assert all(_self_check_pending(fn) for fn in SELF_CHECK_SAMPLES)
+
+
+def test_reset_all_clears_extraneous_keys() -> None:
+    """The ``fn=None`` arm restores the EXACT fresh-process view: a budget
+    key inserted by a prior targeted reset of a never-registered name, and
+    a latch on a never-registered name, are both CLEARED — never left
+    behind as a superset of the registered set."""
+    reset_self_check_for_tests("extraneous_fn_pin")  # inserts a stray key
+    disable_kernel("extraneous_fn_pin", "self_check_mismatch")
+    reset_self_check_for_tests()
+    remaining = rust_stats._SELF_CHECK_REMAINING  # pyright: ignore[reportPrivateUsage]
+    assert set(remaining) == set(SELF_CHECK_SAMPLES)
+    assert remaining == dict(SELF_CHECK_SAMPLES)  # values at the defaults
+    assert rust_stats._KERNEL_DISABLED_REASON == {}  # pyright: ignore[reportPrivateUsage]
+    assert kernel_disabled("extraneous_fn_pin") is False
 
 
 def test_consume_self_check_clamps_at_zero() -> None:

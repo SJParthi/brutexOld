@@ -424,8 +424,10 @@ def cpcv_pass_rate(
     if rust_stats.stats_rust_enabled():
         # The flag-gated Rust fold kernel (DEC-METRICS-RUST-STATS-001).
         # ``None`` — latched / wheel-absent / kernel error / refused result —
-        # falls through to the retained-forever Python oracle, so wheel
-        # state can never change results or error behaviour.
+        # falls through to the retained-forever Python oracle, and the flag
+        # resolution above degrades to the default (warn-once) when the
+        # engine package itself cannot import — so wheel state (fno_math OR
+        # trading_core) can never change results or error behaviour.
         n_pass = rust_stats.cpcv_pass_count_via_kernel(
             count,
             mean,

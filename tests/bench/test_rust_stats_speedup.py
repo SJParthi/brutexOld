@@ -39,8 +39,10 @@ from structlog.testing import capture_logs
 #: Production CPCV shape (CascadeConfig defaults): C(16, 8) = 12,870 folds.
 _N = 5_000
 
-#: Conservative shared-CI floor, far below the sandbox measurement (~19×) so
-#: noise cannot flake while an order-of-magnitude regression still fails.
+#: Conservative shared-CI floor, far below the sandbox measurement (63.8× @
+#: n=5,000 on 2026-07-11; re-confirmed 62.2× same-day at fix round 1 — see
+#: the module docstring) so noise cannot flake while an order-of-magnitude
+#: regression still fails.
 _FLOOR = 3.0
 
 

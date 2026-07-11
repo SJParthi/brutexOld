@@ -22,7 +22,13 @@ vocabulary is never copied). Resolution: a truthy value forces ON, a falsy
 value forces OFF, unset/whitespace-empty falls to :data:`STATS_RUST_DEFAULT`
 (**False — default-OFF**; the flip to ON-by-default is a SEPARATE later ADR,
 the DEC-SWEEP-RUST-METRICS-001 → ADR-0017 precedent), and any OTHER value
-fails SAFE to OFF with one warn-once ``flag_unrecognised`` event. OFF keeps
+fails SAFE to OFF with one warn-once ``flag_unrecognised`` event. Flag
+resolution itself NEVER raises: a SET flag in an environment where
+``brutex.engine`` cannot import (its ``__init__`` pulls the trading_core
+wheel) degrades to :data:`STATS_RUST_DEFAULT` with one warn-once
+``flag_engine_unavailable`` event — so wheel state (fno_math OR
+trading_core) changes only WHICH engine computes, never results or error
+behaviour. OFF keeps
 every caller on the verbatim pure-Python path, byte-identical by
 construction — the Python originals are RETAINED FOREVER as the parity
 oracles (operator exception).
@@ -159,8 +165,13 @@ def stats_rust_enabled() -> bool:
     inside this body — :mod:`brutex.metrics` must never import
     :mod:`brutex.engine` at module scope (import-time cycle guard); this
     function owns only the default + warn policy for the ``None`` verdict.
-    Read per call (one ``os.environ`` probe) so parallel workers read their
-    own inherited environment and no module-global flag state exists.
+    If that engine import itself fails (``brutex.engine.__init__`` eagerly
+    pulls the trading_core wheel — absent/stale wheels raise ImportError),
+    the SET flag degrades to :data:`STATS_RUST_DEFAULT` with one warn-once
+    ``flag_engine_unavailable`` event instead of propagating — flag
+    resolution never raises. Read per call (one ``os.environ`` probe) so
+    parallel workers read their own inherited environment and no
+    module-global flag state exists.
     """
     raw = os.environ.get(STATS_RUST_ENV, "")
     if not raw.strip():
@@ -175,7 +186,17 @@ def stats_rust_enabled() -> bool:
     # brutex.metrics.cascade, so a module-scope metrics→engine import here
     # would be a cycle hazard. The body-level import is a sys.modules dict
     # hit after the first flagged call.
-    from brutex.engine.sweep_lookahead import env_flag_tristate
+    try:
+        from brutex.engine.sweep_lookahead import env_flag_tristate
+    except ImportError:
+        # ``brutex.engine``'s own import chain pulls the trading_core wheel
+        # (``engine/__init__`` eagerly imports stage1a → trading_core), so a
+        # SET flag in a wheel-absent/stale environment must degrade to the
+        # default with one warn-once — an ImportError must never propagate
+        # out of a statistics call (the "wheel state can never change
+        # results or error behaviour" contract covers BOTH wheels).
+        warn_fallback_once(_FLAG_FN, "flag_engine_unavailable")
+        return STATS_RUST_DEFAULT
 
     verdict = env_flag_tristate(raw)
     if verdict is not None:
@@ -227,11 +248,17 @@ def warn_fallback_once(fn: str, reason: str, **context: object) -> None:
 def reset_self_check_for_tests(fn: str | None = None, *, remaining: int | None = None) -> None:
     """Reset burn-in budgets + autorevert latches (test isolation ONLY).
 
-    ``fn=None`` resets EVERY function; a named *fn* resets just that one.
+    ``fn=None`` restores the EXACT fresh-process view — extraneous budget
+    keys inserted by prior TARGETED resets (a never-registered *fn*) and
+    latches on never-registered names are CLEARED too, never left behind as
+    a superset. A named *fn* resets just that one (budget + latch).
     ``remaining=0`` puts the target(s) in the post-burn-in steady state
     (used by the speedup bench); ``remaining=None`` restores each target's
     :data:`SELF_CHECK_SAMPLES` default. Never called from production paths.
     """
+    if fn is None:
+        _SELF_CHECK_REMAINING.clear()
+        _KERNEL_DISABLED_REASON.clear()
     targets = list(SELF_CHECK_SAMPLES) if fn is None else [fn]
     for target in targets:
         default = SELF_CHECK_SAMPLES.get(target, 0)
