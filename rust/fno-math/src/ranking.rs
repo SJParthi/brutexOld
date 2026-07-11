@@ -1260,6 +1260,18 @@ mod tests {
     }
 
     #[test]
+    fn zscores_negative_outlier_clamps_at_exactly_minus_three() {
+        // The M6 LOWER-clamp arm: a finite NEGATIVE outlier drives its z
+        // below −3, and `py_max(-Z_CLAMP, …)` clamps it to the exact −3.0
+        // bit pattern (Python oracle verified: `max(-3.0, min(3.0, z))`
+        // over [0.0]*100 + [-1_000_000.0] yields z[100] == -3.0).
+        let mut values = vec![0.0; 100];
+        values.push(-1_000_000.0);
+        let z = zscores_core(&values).unwrap();
+        assert_eq!(bits(z[100]), bits(-3.0));
+    }
+
+    #[test]
     fn zscores_nan_input_clamps_to_exactly_positive_three() {
         // NaN propagates through mean/std into every z; the py_min/py_max
         // clamp maps NaN → exactly +3.0 (the CPython argument-order law).
@@ -1270,10 +1282,25 @@ mod tests {
     }
 
     #[test]
-    fn zscores_pos_inf_clamps_to_plus_three_neg_inf_to_minus_three() {
-        // inf in the pool → mean/variance NaN → all-NaN z → all +3.0
+    fn zscores_pos_inf_input_clamps_all_to_plus_three() {
+        // +inf in the pool → mean/variance NaN → all-NaN z → all +3.0
         // (matches Python: (v-mean)/std with NaN std is NaN everywhere).
         let z = zscores_core(&[f64::INFINITY, 0.0]).unwrap();
+        for v in z {
+            assert_eq!(bits(v), bits(3.0));
+        }
+    }
+
+    #[test]
+    fn zscores_neg_inf_input_also_clamps_all_to_plus_three() {
+        // −inf does NOT reach −3.0: mean = −inf, so (−inf − −inf) = NaN
+        // poisons the squared-deviation sum → NaN variance/std → all-NaN
+        // z → the py_min(3.0, NaN)=3.0 clamp maps every z to exactly
+        // +3.0, same as +inf (Python oracle verified:
+        // `_zscores([float('-inf'), 0.0]) == [3.0, 3.0]`). The −3.0
+        // lower clamp is exercised by the finite negative-outlier test
+        // above, never by an infinite input.
+        let z = zscores_core(&[f64::NEG_INFINITY, 0.0]).unwrap();
         for v in z {
             assert_eq!(bits(v), bits(3.0));
         }
