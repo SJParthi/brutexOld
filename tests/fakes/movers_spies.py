@@ -30,14 +30,26 @@ MOVERS_READER_NAMES: tuple[str, ...] = (
 
 
 def spy_all_movers_readers(module: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
-    """Wrap every per-contract reader in *module* with a call counter."""
+    """Wrap every per-contract reader with a call counter.
+
+    Each seam is patched on the module that actually CALLS it: a reader
+    imported into *module*'s namespace is patched there; a reader *module* no
+    longer holds is patched at its :mod:`brutex.dashboard.movers_futures` home
+    (the DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in moved the spot probe
+    behind ``_SpotLtpResolver``, whose exact-key ``_probe`` calls the
+    module-global ``_underlying_spot_ltp`` there — the one-exact-spot-read-
+    per-contract law is pinned UNCHANGED through the resolver).
+    """
+    from brutex.dashboard import movers_futures
+
     counts = dict.fromkeys(MOVERS_READER_NAMES, 0)
     for name in MOVERS_READER_NAMES:
-        real = getattr(module, name)
+        target = module if hasattr(module, name) else movers_futures
+        real = getattr(target, name)
 
         def _counting(*args: Any, _name: str = name, _real: Any = real, **kwargs: Any) -> Any:
             counts[_name] += 1
             return _real(*args, **kwargs)
 
-        monkeypatch.setattr(module, name, _counting)
+        monkeypatch.setattr(target, name, _counting)
     return counts

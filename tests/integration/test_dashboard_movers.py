@@ -916,30 +916,37 @@ class TestMoversAsofLatestDefault:
     def test_teeth_old_per_tf_default_slot_would_differ(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
-        # The bug reproduction: the OLD per-TF default pinned 3minute to its last
-        # grid slot 15:27 → the 15:27 partial-bucket close 21800, DIFFERENT from
-        # the new default's 15:29 latest close 22000. Explicit times still cut honestly.
+        # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 UPDATE: an explicit bucket-anchor pick
+        # now resolves FORWARD to the COMPLETED bucket, so 3minute @ 15:27 reads the
+        # completed 15:27–15:29 bucket close (22000 — the broker's), NOT the old
+        # partial 15:27 close (21800). That partial close is still observable on
+        # 1minute @ 15:27 (identity). DEC-MOVERS-ASOF-LATEST-DEFAULT-001's invariant
+        # (the no-time DEFAULT reaches the latest minute 22000 on every TF) holds.
         _seed_finalized_day_lake(tmp_path)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
-        at_1527 = client.get(
+        at_1527_3m = client.get(
             "/api/v1/movers",
             params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "15:27"},
         ).json()
-        at_0915 = client.get(
+        at_1527_1m = client.get(
             "/api/v1/movers",
-            params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "09:15"},
+            params={"asset": "spot", "interval": "1minute", "date": "2024-06-13", "time": "15:27"},
         ).json()
-        # Read the LTP from the volume category (always includes the row — at 09:15
-        # the pct change is 0% so it is not a gainer/loser).
-        assert at_1527["volume"][0]["ltp"] == "₹21,800.00"
-        assert at_0915["volume"][0]["ltp"] == "₹20,000.00"
-        # The per-TF slots DIFFER from each other AND from the new default's 22000 —
-        # exactly the operator-reported divergence the default fix removes.
-        assert at_1527["volume"][0]["ltp"] != at_0915["volume"][0]["ltp"]
+        # Read the LTP from the volume category (always includes the row).
+        # 3minute @ 15:27 = the completed bucket close 22000; 1minute @ 15:27 = the
+        # partial 15:27 close 21800 (the value the OLD 3minute default wrongly froze).
+        assert at_1527_3m["volume"][0]["ltp"] == "₹22,000.00"
+        assert at_1527_1m["volume"][0]["ltp"] == "₹21,800.00"
+        assert at_1527_3m["volume"][0]["ltp"] != at_1527_1m["volume"][0]["ltp"]
+        # Provenance is honest: the 3minute pick echoes its resolved bucket end.
+        assert at_1527_3m["asof_through"] == "15:29"
+        assert "15:27 bucket · through 15:29" in at_1527_3m["note"]
+        # The no-time DEFAULT reaches the latest minute (22000) — the completed bucket.
         default = client.get(
             "/api/v1/movers", params={"asset": "spot", "interval": "3minute"}
         ).json()
         assert default["price_gainers"][0]["ltp"] == "₹22,000.00"
+        assert default["asof_through"] is None  # no explicit pick → no bucket provenance
 
     def test_default_intraday_echoes_latest_time_and_null_time(
         self, store: InstrumentStore, tmp_path: Path
