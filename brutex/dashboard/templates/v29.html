@@ -3635,7 +3635,14 @@
           const r = await fetch('/api/v1/sweep/cancel', { method: 'POST' });
           const j = await r.json();
           if (!j.cancelling) {
-            sweepMsg.textContent = 'No running sweep to cancel.';
+            // Continuation-v2 fix: the route's refusal payload carries an
+            // actionable `error` exactly when a sweep IS running but the
+            // cancel sidecar write failed (ENOSPC / read-only lake) — render
+            // it (textContent-only, the cascade handler's j.error precedent)
+            // instead of the factually false "No running sweep to cancel.".
+            sweepMsg.textContent = j.error
+              ? ('Cancel failed: ' + j.error + ' — fix the lake volume and retry')
+              : 'No running sweep to cancel.';
             stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop';
           }
         } catch (e) {

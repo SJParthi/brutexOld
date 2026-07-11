@@ -3806,3 +3806,82 @@ class TestCooperativeCancel:
         report = pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
         assert report.cancelled is False
         assert report.to_dict()["cancelled"] is False
+
+    def test_cancelled_group_settle_event_reads_clean_false(self, tmp_path: Path) -> None:
+        """Continuation-v2 fix (fails-before): a cancelled group's settle is NOT clean.
+
+        ``PullCancelled`` is consumed inside ``_run_phase``, so the truncated
+        group still emits its ``pull.step.settled`` event with the unissued
+        windows left PLANNED (``group_failed == 0``) — pre-fix the event read
+        a false ``clean=True``. The ``final_cancelled`` latch now folds into
+        the ``clean=`` conjunction exactly like the adjacent market-hours /
+        auth / quota / mass-empty latches.
+        """
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=True,
+                now=_BULK_NOW,
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        settled = [log for log in logs if log["event"] == "pull.step.settled"]
+        assert settled, "the cancelled group must still emit its settle event"
+        assert all(log["clean"] is False for log in settled)
+
+    def test_uncancelled_group_settle_event_stays_clean(self, tmp_path: Path) -> None:
+        """The clean-run settle event stays ``clean=True`` — the latch fold is additive."""
+        with capture_logs() as logs:
+            pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        settled = [log for log in logs if log["event"] == "pull.step.settled"]
+        assert settled
+        assert all(log["clean"] is True for log in settled)
+
+    def test_cancel_withholds_post_drain_heal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Continuation-v2 fix (fails-before): a cancelled pull skips the L2 heal, loudly.
+
+        ``PullCancelled`` is consumed inside ``_run_phase`` so execution reaches
+        ``fetch_phases_ok = True``, and the finally's O(pulled-scope)
+        ``_heal_after_pull`` previously ran AFTER the operator's Stop —
+        contradicting the "finishing current window, then stop" latency
+        contract (the F&O twin was fixed in combined-PR round 2 via
+        ``cancelled_tail``; this is its spot mirror). The heal is now WITHHELD
+        with ONE ``pull.cancel_heal_skipped`` WARN naming the next-pull cover.
+        """
+        calls: list[str] = []
+        monkeypatch.setattr(pull_controller, "_heal_after_pull", lambda **_kw: calls.append("heal"))
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        assert calls == []
+        events = {log["event"] for log in logs}
+        assert "pull.cancel_heal_skipped" in events
+
+    def test_uncancelled_pull_still_runs_post_drain_heal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The no-cancel pull keeps the L2 heal — the withholding is cancel-gated only."""
+        calls: list[str] = []
+        monkeypatch.setattr(pull_controller, "_heal_after_pull", lambda **_kw: calls.append("heal"))
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+        assert report.cancelled is False
+        assert calls == ["heal"]
+        events = {log["event"] for log in logs}
+        assert "pull.cancel_heal_skipped" not in events

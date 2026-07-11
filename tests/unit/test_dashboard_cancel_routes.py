@@ -448,6 +448,26 @@ def test_universe_template_carries_the_on_load_pull_attach(client: TestClient) -
     assert "metadata phase is honored only at the next phase boundary" in html.lower()
 
 
+def test_v29_sweep_stop_refusal_renders_the_route_error(client: TestClient) -> None:
+    """The v29 sweep Stop handler renders the route's actionable ``error`` on refusal.
+
+    Continuation-v2 fix (honest substring-presence pin — the repo's
+    no-headless-JS envelope): ``POST /api/v1/sweep/cancel`` answers
+    ``{"cancelling": false, "error": "cancel sidecar write failed: <Type>"}``
+    precisely when a sweep IS running but the ENOSPC / read-only sidecar write
+    failed — the moment the operator most needs the truth — yet the v29
+    handler's only refusal message discarded ``j.error`` and asserted the
+    factually false "No running sweep to cancel." above a live progress panel.
+    The handler now renders ``j.error`` when present (textContent-only, the
+    cascade handler's ``j.error`` precedent) and keeps the idle label for the
+    genuine nothing-running refusal.
+    """
+    html = client.get("/").text
+    assert "Cancel failed: " in html
+    assert "j.error" in html
+    assert "No running sweep to cancel." in html  # the genuine-idle label stays
+
+
 def test_sweep_cancel_no_lake_configured() -> None:
     """A store whose ``path`` is not a real lake path → a clean 400, never a 500."""
     fake_store = SimpleNamespace(path="not-a-real-path", get=lambda _k: None)

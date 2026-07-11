@@ -2511,7 +2511,12 @@ def pull_all_spot(
                 # ``clean`` folds the group's TERMINAL quarantine count
                 # (``_GroupSettle.quarantined`` — the F&O ``failed_pairs``
                 # term; ``still_failed`` alone is the pairs-side transient
-                # residual and reads 0 over a quarantined symbol).
+                # residual and reads 0 over a quarantined symbol) AND every
+                # global-stop latch — including the operator-cancel latch
+                # (continuation-v2 fix: ``PullCancelled`` is consumed inside
+                # ``_run_phase``, so the truncated group's unissued windows
+                # stay PLANNED with ``group_failed == 0`` and the settle
+                # previously read a false ``clean=True``).
                 _LOG.info(
                     "pull.step.settled",
                     step=step.label,
@@ -2522,6 +2527,7 @@ def pull_all_spot(
                         and not final_auth_aborted
                         and not final_quota_exhausted
                         and final_mass_empty_cause is None
+                        and not final_cancelled
                         and not final_market_hours_blocked
                     ),
                     bars=group_settle.bars,
@@ -2674,14 +2680,32 @@ def pull_all_spot(
             # reads clean 1-minute. SUCCESS-path only (``fetch_phases_ok``);
             # LakeWriteHalt re-raises inside (graceful pull-halt), any other
             # heal error is swallowed — it can never fail the pull.
-            if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
-                _heal_after_pull(
-                    instruments=instruments,
-                    lake_root=lake_root,
-                    start=start.date(),
-                    end=end.date(),
-                    pull_id=pid,
-                )
+            # OPERATOR CANCEL (continuation-v2 fix — the SPOT twin of the F&O
+            # round-2 ``cancelled_tail`` withholding in ``historical_pull``):
+            # ``PullCancelled`` is consumed inside ``_run_phase``, so execution
+            # reaches ``fetch_phases_ok = True`` and the O(pulled-scope) heal
+            # previously ran AFTER the operator's Stop — contradicting the
+            # "finishing current window, then stop" latency contract. On cancel
+            # the heal is WITHHELD with one loud WARN (never a data loss: the
+            # next pull's L2 heal — plus L1/L3 — covers the slice).
+            if fetch_phases_ok and not dry_run:
+                if final_cancelled:
+                    _LOG.warning(
+                        "pull.cancel_heal_skipped",
+                        pull_id=pid,
+                        note=(
+                            "operator cancel — post-drain L2 lake heal withheld; "
+                            "the next pull's L2 heal (plus L1/L3) covers the slice"
+                        ),
+                    )
+                else:  # pragma: no cover — raw lake I/O glue
+                    _heal_after_pull(
+                        instruments=instruments,
+                        lake_root=lake_root,
+                        start=start.date(),
+                        end=end.date(),
+                        pull_id=pid,
+                    )
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
             # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean

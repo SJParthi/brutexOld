@@ -136,6 +136,31 @@ class TestMissingSessionsRoute:
         assert row["missing_count"] > 0
         assert "2024-01-22" not in row["missing_dates"]
 
+    def test_future_range_end_is_clamped_to_today_ist(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """Continuation-v2 fix (fails-before): a future ``?range_end=`` never fabricates gaps.
+
+        The only end-side guard was the holiday-coverage year check, so an
+        explicit future ``range_end`` counted every not-yet-occurred trading
+        session into ``missing_count``/``total_missing`` — presented by the
+        route, the drill caption and the ledger as re-pullable vendor holes.
+        The route now injects ``now_ist().date()`` and the audit end clamps to
+        it, NAMED per row via ``range_end_clamped_to_today``.
+        """
+        from brutex.calendars.nse import now_ist
+
+        _write_nifty(tmp_path, [date(2024, 1, 2), date(2024, 1, 3)])
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        before = now_ist().date().isoformat()
+        body = client.get("/api/v1/coverage/missing-sessions?range_end=2999-12-31").json()
+        after = now_ist().date().isoformat()
+        row = body["rows"][0]
+        assert row["range_end_clamped_to_today"] is True
+        assert row["range_end"] in {before, after}  # today-IST (midnight-tolerant)
+        assert row["abstained"] is False
+        assert all(d <= after for d in row["missing_dates"])
+
     def test_empty_lake_never_500(self, store: InstrumentStore) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         resp = client.get("/api/v1/coverage/missing-sessions")

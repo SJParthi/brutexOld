@@ -247,8 +247,10 @@ class TestComputeMissingSessions:
             "missing_truncated",
             "abstained",
             "abstain_reason",
+            "range_end_clamped_to_today",
         }
         assert isinstance(d["missing_dates"], list)
+        assert d["range_end_clamped_to_today"] is False  # no clamp without an injected today
 
     def test_pre_stored_span_split_under_floor_override(self) -> None:
         """Combined-PR fix round 2: an override before the first stored session SPLITS.
@@ -302,6 +304,145 @@ class TestComputeMissingSessions:
         result = compute_missing_sessions("NSE", "INDEX", "NIFTY", DRILL_INTERVAL, None, None, None)
         assert result.abstained
         assert result.missing_before_first_stored is None
+
+
+class TestFutureEndClamp:
+    """Continuation-v2 fix: a FUTURE audit end never fabricates "sessions to re-pull".
+
+    Fails-before: the only end-side guard was ``end.year > HOLIDAY_COVERAGE_LAST_YEAR``,
+    so an explicit ``range_end`` later in the coverage year passed and every
+    not-yet-occurred trading session counted into ``missing_count``/``total_missing`` —
+    which the route, the drill caption and the ledger all present as re-pullable vendor
+    holes. The audit end is now clamped at the injected *today* (the route binds
+    ``now_ist().date()``; the module stays pure) with the clamp NAMED on the verdict.
+    """
+
+    def test_future_range_end_clamped_to_today_and_named(self) -> None:
+        stored = frozenset(trading_days_between(date(2024, 1, 2), date(2024, 1, 5)))
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            stored,
+            range_end="2024-06-30",
+            today=date(2024, 1, 10),
+        )
+        assert not result.abstained
+        assert result.range_end == "2024-01-10"  # the AUDITED (clamped) end is echoed
+        assert result.range_end_clamped_to_today is True
+        expected = trading_days_between(date(2024, 1, 2), date(2024, 1, 10))
+        assert result.expected_count == len(expected)
+        # No fabricated future session — every missing date is on/before today.
+        assert all(d <= "2024-01-10" for d in result.missing_dates)
+
+    def test_no_today_applies_no_clamp(self) -> None:
+        # Pure/offline callers (today=None) keep the prior behaviour byte-identical:
+        # the future range_end is audited verbatim (the pre-fix envelope).
+        stored = frozenset(trading_days_between(date(2024, 1, 2), date(2024, 1, 5)))
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            stored,
+            range_end="2024-06-30",
+        )
+        assert result.range_end == "2024-06-30"
+        assert result.range_end_clamped_to_today is False
+        assert any(d > "2024-01-10" for d in result.missing_dates)
+
+    def test_past_end_is_not_clamped(self) -> None:
+        stored = frozenset(trading_days_between(date(2024, 1, 2), date(2024, 1, 5)))
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            stored,
+            today=date(2024, 2, 1),
+        )
+        assert result.range_end == "2024-01-05"
+        assert result.range_end_clamped_to_today is False
+        assert result.missing_count == 0
+
+    def test_end_exactly_today_is_not_clamped(self) -> None:
+        # The boundary law: end == today is a legitimate (completed-or-forming)
+        # session — only a STRICTLY future end clamps.
+        stored = frozenset(trading_days_between(date(2024, 1, 2), date(2024, 1, 5)))
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            stored,
+            today=date(2024, 1, 5),
+        )
+        assert result.range_end == "2024-01-05"
+        assert result.range_end_clamped_to_today is False
+
+    def test_fully_future_range_abstains_with_clamp_named(self) -> None:
+        # Both bounds after today: the clamp collapses the span (end < start) →
+        # the honest NO_RANGE abstain still NAMES the clamp (never a fabricated
+        # future-only gap list, never a silent clamp).
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            frozenset({date(2024, 1, 2)}),
+            range_start="2024-02-01",
+            range_end="2024-03-01",
+            today=date(2024, 1, 10),
+        )
+        assert result.abstained
+        assert result.abstain_reason == ABSTAIN_NO_RANGE
+        assert result.range_end == "2024-01-10"
+        assert result.range_end_clamped_to_today is True
+
+    def test_out_of_coverage_future_year_clamps_then_serves(self) -> None:
+        # The clamp runs BEFORE the coverage-year check, so a far-future
+        # range_end audits honestly up to today instead of abstaining
+        # out_of_coverage (the served-vs-abstain ordering pin).
+        high_year = HOLIDAY_COVERAGE_LAST_YEAR + 1
+        stored = frozenset(trading_days_between(date(2024, 1, 2), date(2024, 1, 5)))
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-05",
+            stored,
+            range_end=f"{high_year}-01-05",
+            today=date(2024, 1, 10),
+        )
+        assert not result.abstained
+        assert result.range_end == "2024-01-10"
+        assert result.range_end_clamped_to_today is True
+
+    def test_payload_threads_today_to_every_row(self) -> None:
+        rows = [
+            _row("NIFTY", DRILL_INTERVAL, "2024-01-02", "2024-01-05", [date(2024, 1, 2)]),
+        ]
+        payload = build_missing_sessions_payload(
+            rows, range_end="2024-06-30", today=date(2024, 1, 10)
+        )
+        assert payload["datasets"] == 1
+        row = payload["rows"][0]
+        assert row["range_end_clamped_to_today"] is True
+        assert row["range_end"] == "2024-01-10"
+        assert all(d <= "2024-01-10" for d in row["missing_dates"])
 
 
 def _row(

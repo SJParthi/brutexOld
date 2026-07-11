@@ -46,7 +46,13 @@ with no override, a reversed span, a degenerate
 zero-session range, OR a bound outside the published holiday coverage
 (:data:`~brutex.calendars.HOLIDAY_COVERAGE_FIRST_YEAR` /
 :data:`~brutex.calendars.HOLIDAY_COVERAGE_LAST_YEAR` — an out-of-coverage weekday's
-trading-day verdict would turn on a missing holiday list).
+trading-day verdict would turn on a missing holiday list). A FUTURE audit end
+(continuation-v2 fix — an explicit ``range_end`` later than the caller-injected IST
+*today*) is CLAMPED to *today* with the clamp NAMED on the verdict
+(``range_end_clamped_to_today``) — a not-yet-occurred trading session is never a
+re-pullable vendor hole, so it must never count into ``missing_count``; the module stays
+PURE (*today* is injected — the route binds ``now_ist().date()``; ``today=None`` applies
+no clamp).
 """
 
 from __future__ import annotations
@@ -111,6 +117,12 @@ class MissingSessions:
     missing_truncated: bool
     abstained: bool
     abstain_reason: str | None
+    #: Continuation-v2 fix — True iff a FUTURE audit end (an explicit
+    #: ``range_end`` past the injected *today*, or a corrupt future stored
+    #: bound) was clamped to *today*: a not-yet-occurred trading session is
+    #: never a re-pullable vendor hole, and the clamp is NAMED here (the
+    #: PAGE_LIMIT_MAX naming precedent) instead of silently applied.
+    range_end_clamped_to_today: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """JSON projection — the exact wire shape the route serialises."""
@@ -129,6 +141,7 @@ class MissingSessions:
             "missing_truncated": self.missing_truncated,
             "abstained": self.abstained,
             "abstain_reason": self.abstain_reason,
+            "range_end_clamped_to_today": self.range_end_clamped_to_today,
         }
 
 
@@ -163,6 +176,7 @@ def compute_missing_sessions(
     *,
     range_start: str | None = None,
     range_end: str | None = None,
+    today: date | None = None,
     expected_cache: dict[tuple[date, date, str | None], tuple[date, ...]] | None = None,
 ) -> MissingSessions:
     """Expected NSE/BSE sessions over the audited range MINUS the stored dates.
@@ -191,6 +205,17 @@ def compute_missing_sessions(
         for a late-listed symbol those are un-pullable pre-listing dates, not
         vendor holes; the verdict's ``missing_before_first_stored`` splits them
         out of ``missing_count`` so the two classes are never conflated.
+    today
+        The audit clock (continuation-v2 fix): the caller-injected IST *today*
+        (the module stays PURE — the route binds ``now_ist().date()``). A
+        resolved audit end STRICTLY AFTER *today* (an explicit future
+        ``range_end``, or a corrupt future stored bound) is CLAMPED to *today*
+        with the clamp NAMED on the verdict (``range_end_clamped_to_today`` +
+        the clamped ``range_end`` echo) — a not-yet-occurred trading session
+        must never count into ``missing_count``/``total_missing``, which every
+        consumer presents as re-pullable vendor holes. ``None`` (the default —
+        pure/offline callers) applies NO clamp, byte-identical to the prior
+        behaviour.
     expected_cache
         Optional mutable memo keyed ``(start, end, calendar_exchange)`` →
         the expected-session tuple. The payload builder passes ONE dict per payload
@@ -226,19 +251,52 @@ def compute_missing_sessions(
 
     start = _parse_iso_date(start_override) or _parse_iso_date(first_date)
     end = _parse_iso_date(end_override) or _parse_iso_date(last_date)
+    # Future-end clamp (continuation-v2 fix): an audit end past the injected
+    # *today* would count every not-yet-occurred trading session into
+    # ``missing_count`` — fabricated "sessions to re-pull". Clamp BEFORE the
+    # range/coverage checks (so a far-future ``range_end`` audits honestly up
+    # to today instead of abstaining out-of-coverage) and NAME the clamp on
+    # the verdict; ``today is None`` (pure callers) applies no clamp.
+    end_clamped = False
+    if today is not None and end is not None and end > today:
+        end = today
+        end_clamped = True
     start_iso = start.isoformat() if start is not None else None
     end_iso = end.isoformat() if end is not None else None
     if start is None or end is None or end < start:
-        return _abstain(exchange, segment, symbol, interval, start_iso, end_iso, ABSTAIN_NO_RANGE)
+        return _abstain(
+            exchange,
+            segment,
+            symbol,
+            interval,
+            start_iso,
+            end_iso,
+            ABSTAIN_NO_RANGE,
+            range_end_clamped=end_clamped,
+        )
     if start.year < HOLIDAY_COVERAGE_FIRST_YEAR or end.year > HOLIDAY_COVERAGE_LAST_YEAR:
         return _abstain(
-            exchange, segment, symbol, interval, start_iso, end_iso, ABSTAIN_OUT_OF_COVERAGE
+            exchange,
+            segment,
+            symbol,
+            interval,
+            start_iso,
+            end_iso,
+            ABSTAIN_OUT_OF_COVERAGE,
+            range_end_clamped=end_clamped,
         )
 
     expected = _expected_sessions(start, end, _calendar_exchange(exchange), expected_cache)
     if not expected:
         return _abstain(
-            exchange, segment, symbol, interval, start_iso, end_iso, ABSTAIN_NO_SESSIONS
+            exchange,
+            segment,
+            symbol,
+            interval,
+            start_iso,
+            end_iso,
+            ABSTAIN_NO_SESSIONS,
+            range_end_clamped=end_clamped,
         )
 
     stored = frozenset(session_dates)
@@ -275,6 +333,7 @@ def compute_missing_sessions(
         missing_truncated=truncated,
         abstained=False,
         abstain_reason=None,
+        range_end_clamped_to_today=end_clamped,
     )
 
 
@@ -323,8 +382,16 @@ def _abstain(
     range_start: str | None,
     range_end: str | None,
     reason: str,
+    *,
+    range_end_clamped: bool = False,
 ) -> MissingSessions:
-    """An abstaining verdict — every count ``None``, an honest reason, no fabricated zero."""
+    """An abstaining verdict — every count ``None``, an honest reason, no fabricated zero.
+
+    *range_end_clamped* carries the future-end clamp flag through the POST-clamp
+    abstains (e.g. a fully-future range collapsing to ``end < start``), so the
+    clamp stays NAMED even when the audit then abstains; pre-clamp abstains keep
+    the ``False`` default.
+    """
     return MissingSessions(
         exchange=exchange,
         segment=segment,
@@ -340,6 +407,7 @@ def _abstain(
         missing_truncated=False,
         abstained=True,
         abstain_reason=reason,
+        range_end_clamped_to_today=range_end_clamped,
     )
 
 
@@ -361,6 +429,7 @@ def build_missing_sessions_payload(
     interval: str | None = None,
     range_start: str | None = None,
     range_end: str | None = None,
+    today: date | None = None,
 ) -> dict[str, Any]:
     """Project ``summarize_spot_datasets`` rows into the missing-sessions drill payload.
 
@@ -377,7 +446,11 @@ def build_missing_sessions_payload(
     sessions to re-pull" headline) and ``total_missing_before_first_stored`` sums the
     pre-stored-span split (combined-PR fix round 2 — under an explicit range override a
     late-listed symbol's un-pullable pre-listing dates land in the split, not silently
-    in the re-pull headline's interior-hole reading). ONE per-payload ``expected_cache`` dict memoises the
+    in the re-pull headline's interior-hole reading). *today* (continuation-v2 fix) is the
+    caller-injected IST audit clock threaded to every per-dataset audit — a FUTURE audit
+    end is clamped to it with the clamp NAMED per row (``range_end_clamped_to_today``), so
+    not-yet-occurred sessions never inflate ``total_missing``; ``None`` (pure/offline
+    callers) applies no clamp. ONE per-payload ``expected_cache`` dict memoises the
     expected-session calendar walk per distinct ``(start, end, exchange)`` range, so the
     common unfiltered many-datasets-one-range case pays the O(span-days) walk once — not
     once per dataset.
@@ -408,6 +481,7 @@ def build_missing_sessions_payload(
                 raw_dates if raw_dates is None else frozenset(raw_dates),
                 range_start=range_start,
                 range_end=range_end,
+                today=today,
                 expected_cache=expected_cache,
             )
         )

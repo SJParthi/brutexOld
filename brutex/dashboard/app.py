@@ -5082,7 +5082,9 @@ def build_app(
         (the O(pulled-scope) L2 heal + the FULL Greeks-enrichment pass) is
         WITHHELD on cancel (combined-PR fix round 2 — the note reads "withheld
         (cancelled) — re-attempted next pull"; the next pull heals + re-enriches,
-        nothing is lost). CANCEL-BLIND SPANS (review fold — the pipeline probes
+        nothing is lost), and the SPOT post-drain L2 heal is likewise WITHHELD
+        (continuation-v2 — one ``pull.cancel_heal_skipped`` WARN; the next
+        pull's L2 heal, plus L1/L3, covers the slice). CANCEL-BLIND SPANS (review fold — the pipeline probes
         only BETWEEN phases): a Stop acked mid-METADATA (~750 underlyings ×
         ``get_expiries``+``get_contracts`` at the paced vendor rate — minutes)
         is observed only once that WHOLE phase settles (its spine has no
@@ -5455,8 +5457,12 @@ def build_app(
         for a late-listed symbol those are un-pullable pre-listing dates, NOT vendor
         holes; each row's ``missing_before_first_stored`` (+ the payload's
         ``total_missing_before_first_stored``) splits them out of the "sessions to
-        re-pull" counts so the two classes are never conflated. READ-ONLY — no pull
-        logic.
+        re-pull" counts so the two classes are never conflated. FUTURE-end clamp
+        (continuation-v2 fix): a ``range_end`` LATER than today-IST would count
+        every not-yet-occurred trading session as a re-pullable vendor hole — the
+        audit end is clamped to ``now_ist().date()`` with the clamp NAMED per row
+        (``range_end_clamped_to_today`` + the clamped ``range_end`` echo), never
+        silently applied. READ-ONLY — no pull logic.
 
         **Honest envelope (Golden Rule #10):** the distinct stored dates come from a
         SEPARATE ``session_dates``-enriched execution of the same scan SHAPE
@@ -5510,6 +5516,10 @@ def build_app(
                 interval=interval,
                 range_start=range_start,
                 range_end=range_end,
+                # The IST audit clock (continuation-v2 fix): a future range_end
+                # is clamped to today so not-yet-occurred sessions never read
+                # as re-pullable holes; the pure module takes it injected.
+                today=now_ist().date(),
             )
 
         return JSONResponse(await run_in_threadpool(_work))
