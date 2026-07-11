@@ -176,7 +176,9 @@ def read_1m_bars(symbol_dir: Path, *, months: set[tuple[int, int]] | None = None
     seen: set[datetime] = set()
     bars: list[Bar1m] = []
     for file in files:
-        frame = pl.read_parquet(file)
+        # glob=False — a `[`/`*`/`?`-named symbol dir must read its LITERAL
+        # file, never a glob-matched sibling (the #1594-R15 class; round 1 M2).
+        frame = pl.read_parquet(file, glob=False)
         for row in frame.iter_rows(named=True):
             ts = row["timestamp"]
             if ts.tzinfo is None:

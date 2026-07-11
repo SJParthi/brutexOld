@@ -238,17 +238,64 @@ class TestPairBound:
         assert sub.structural is True
         assert sub.evidence["pairs_total"] == 6
         assert sub.evidence["max_pairs_per_rolling_minute"] == 5
-        assert sub.evidence["chains"]["spot-ingest.jsonl"] == "chain_ok"
-        assert sub.evidence["chains"]["fno-ingest.jsonl"] == "absent"
+        assert sub.evidence["tails"]["spot-ingest.jsonl"]["tail_only"] is False
+        assert sub.evidence["tails"]["fno-ingest.jsonl"] == "absent"
+        # The full-chain walk is deliberately NOT run for evidence (round 1
+        # complexity MAJOR-1); the report points at `brutex audit verify`.
+        assert "brutex audit verify" in sub.evidence["chain_verify"]
+        assert sub.evidence["tail_bytes_cap"] == rate.TAIL_BYTES_CAP
 
-    def test_broken_chain_reported_not_parsed(self, tmp_path: Path) -> None:
+    def test_broken_line_skipped_not_crashed(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)
         audit_dir = lake / "audit"
         audit_dir.mkdir(parents=True)
         (audit_dir / "spot-ingest.jsonl").write_text("{broken\n", encoding="utf-8")
         sub = _sub(rate.run(make_ctx(lake)), "rate.pair_bound")
-        assert "chain_error" in sub.evidence["chains"]["spot-ingest.jsonl"]
+        assert sub.evidence["tails"]["spot-ingest.jsonl"]["file_bytes"] > 0
         assert sub.evidence["pairs_total"] == 0
+
+    def test_junk_ts_utc_never_crashes(self, tmp_path: Path) -> None:
+        # N4 regression: a non-numeric ts_utc is skipped, never a check ERROR.
+        lake = make_twin(tmp_path)
+        audit_dir = lake / "audit"
+        audit_dir.mkdir(parents=True)
+        lines = [
+            json.dumps({"action": "INGEST_PAIR_DONE", "ts_utc": "not-a-number"}),
+            json.dumps({"action": "INGEST_PAIR_DONE", "ts_utc": None}),
+            json.dumps({"action": "INGEST_PAIR_DONE", "ts_utc": 10.0}),
+        ]
+        (audit_dir / "spot-ingest.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        sub = _sub(rate.run(make_ctx(lake)), "rate.pair_bound")
+        assert sub.evidence["pairs_total"] == 1
+
+    def test_unreadable_tail_reported_not_crashed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lake = make_twin(tmp_path)
+        audit_dir = lake / "audit"
+        audit_dir.mkdir(parents=True)
+        (audit_dir / "spot-ingest.jsonl").write_text("{}\n", encoding="utf-8")
+
+        def _boom(path: Path, *, cap_bytes: int = 0) -> tuple:
+            raise OSError("wedged read")
+
+        monkeypatch.setattr(rate, "tail_lines", _boom)
+        sub = _sub(rate.run(make_ctx(lake)), "rate.pair_bound")
+        assert sub.evidence["tails"]["spot-ingest.jsonl"] == "unreadable: OSError"
+
+    def test_tail_read_is_bounded(self, tmp_path: Path) -> None:
+        # Round 1 complexity MAJOR-1 regression: the read is a bounded
+        # seek-from-end tail — the partial first line is dropped and at most
+        # cap bytes are read no matter the file size.
+        path = tmp_path / "big.jsonl"
+        rows = [json.dumps({"action": "INGEST_PAIR_DONE", "ts_utc": float(i)}) for i in range(50)]
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        cap = 200
+        lines, bytes_read, file_bytes = rate.tail_lines(path, cap_bytes=cap)
+        assert file_bytes > cap
+        assert bytes_read <= cap
+        assert lines  # complete lines only
+        assert all(json.loads(line) for line in lines)
 
     def test_non_pair_lines_ignored(self, tmp_path: Path) -> None:
         from brutex.engine.sweep_audit import SweepAuditWriter
@@ -311,4 +358,24 @@ class TestPairBoundBlankLine:
         with path.open("a", encoding="utf-8") as fh:
             fh.write("\n")  # a trailing blank line must not crash the parse
         sub = _sub(rate.run(make_ctx(lake)), "rate.pair_bound")
-        assert sub.evidence["pairs_total"] in (0, 1)  # chain verdict decides
+        assert sub.evidence["pairs_total"] == 1
+
+
+class TestMarketHoursHeartbeats:
+    def test_heartbeats_are_never_vendor_attempts(self, tmp_path: Path) -> None:
+        # Round 1 MINOR regression (refuter-confirmed): journal HEARTBEAT
+        # records carry no dry_run field — they are liveness beats from ANY
+        # BackgroundPullJob (incl. vendor-free in-window-ALLOWED sweep /
+        # greeks-backfill jobs) and must never fold in as attempt stamps.
+        from datetime import UTC, datetime
+
+        from brutex.observability.pull_journal import record_pull_heartbeat
+
+        lake = make_twin(tmp_path)
+        in_window = datetime(2026, 7, 10, 4, 30, tzinfo=UTC)  # Friday 10:00 IST
+        record_pull_heartbeat(lake, pull_id="sweepjob", now_utc=in_window)
+        check = rate.run(make_ctx(lake))
+        hours = _sub(check, "rate.market_hours")
+        assert hours.evidence["attempts_examined"] == 0
+        assert hours.verdict is Verdict.ABSTAIN  # nothing genuine examined
+        assert hours.abstain_reason is AbstainReason.NOTHING_TO_CHECK

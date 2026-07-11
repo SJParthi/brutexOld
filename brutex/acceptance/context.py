@@ -34,6 +34,41 @@ PULL_ACTIVE_STALE_S: Final[float] = 900.0
 #: a lease file older than that is dead evidence.
 PULL_LEASE_STALE_S: Final[float] = 180.0
 
+#: Sentinel distinguishing "env var was absent" from "env var was empty".
+_ENV_UNSET: Final = object()
+
+
+class StoreUnavailable(RuntimeError):
+    """instruments.duckdb could not be opened READ-ONLY (locked / unreadable).
+
+    The acceptance path NEVER opens the instrument master read-write
+    (review round 1 M1): a plain ``InstrumentStore.open`` runs migration DDL
+    (an older-schema store gets its ``instruments`` table DROPped) and takes
+    the RW file lock a live dashboard/pull already holds. Callers map this to
+    ``ABSTAIN(no_instrument_store)`` — never a migration, never a write.
+    """
+
+
+def open_instrument_store_readonly(path: Path) -> Any:
+    """Open the instrument master STRICTLY read-only (no DDL, no migration).
+
+    Connects via ``duckdb.connect(path, read_only=True)`` and wraps the handle
+    in the production :class:`~brutex.data.instrument_store.InstrumentStore`
+    shape WITHOUT going through ``InstrumentStore.open`` (whose idempotent
+    schema apply DROPs older-schema tables — a verifier must observe, never
+    heal). Lock contention / an unreadable file raises
+    :class:`StoreUnavailable` (⇒ named ABSTAIN upstream).
+    """
+    import duckdb
+
+    from brutex.data.instrument_store import InstrumentStore
+
+    try:
+        conn = duckdb.connect(str(path), read_only=True)
+    except (duckdb.Error, OSError) as exc:
+        raise StoreUnavailable(f"read-only open of {path.name} refused: {exc}") from exc
+    return InstrumentStore(conn=conn, path=path)
+
 
 def stat_token(path: Path) -> str:
     """``mtime_ns:size`` content token for one file; ``absent`` when unreadable."""
@@ -84,6 +119,11 @@ class AcceptanceContext:
     _ledger_loads: int = field(default=0, repr=False)
     _client: Any = field(default=None, repr=False)
     _pull_active: bool | None = field(default=None, repr=False)
+    _store: Any = field(default=None, repr=False)
+    _env_lake_root_prev: Any = field(default=_ENV_UNSET, repr=False)
+    _env_lake_root_set: bool = field(default=False, repr=False)
+    _spot_datasets: list[tuple[str, str, str]] | None = field(default=None, repr=False)
+    _fno_contracts: list[str] | None = field(default=None, repr=False)
 
     # ── clocks ─────────────────────────────────────────────────────────
     def now_ist(self) -> datetime:
@@ -114,6 +154,22 @@ class AcceptanceContext:
         """How many real ledger loads happened (the single-load spy hook)."""
         return self._ledger_loads
 
+    def spot_datasets(self) -> list[tuple[str, str, str]]:
+        """The ONE per-run spot-dataset enumeration (memoised — never re-walked)."""
+        if self._spot_datasets is None:
+            from brutex.acceptance.sampling import enumerate_spot_datasets
+
+            self._spot_datasets = enumerate_spot_datasets(self.lake_root)
+        return self._spot_datasets
+
+    def fno_contracts(self) -> list[str]:
+        """The ONE per-run F&O contract-dir enumeration (memoised)."""
+        if self._fno_contracts is None:
+            from brutex.acceptance.sampling import enumerate_fno_contracts
+
+            self._fno_contracts = enumerate_fno_contracts(self.lake_root)
+        return self._fno_contracts
+
     def client(self) -> Any:
         """The ONE shared in-process dashboard client (surface-trial precedent)."""
         if self._client is None:
@@ -122,23 +178,68 @@ class AcceptanceContext:
         return self._client
 
     def _default_client_factory(self) -> Any:
-        """Build the real ``build_app`` + ``TestClient`` pair against the lake."""
+        """Build the real ``build_app`` + ``TestClient`` pair against the lake.
+
+        The instrument master is opened READ-ONLY (never ``InstrumentStore.open``
+        — its migration DDL would DROP an older-schema store's rows and its RW
+        handle contends with a live dashboard/pull; review round 1 M1). A
+        locked/unreadable master degrades to ``instrument_store=None`` (the
+        store-backed routes 503 → the movers/latency checks ABSTAIN loudly).
+        """
         from fastapi.testclient import TestClient
 
         from brutex.dashboard.app import DashboardState, build_app
-        from brutex.data.instrument_store import InstrumentStore
 
         store = None
         store_path = self.lake_root / "instruments.duckdb"
         if store_path.is_file():
-            store = InstrumentStore.open(store_path)
-        else:
-            # No master beside the lake: the app resolves the lake via env.
+            try:
+                store = open_instrument_store_readonly(store_path)
+            except StoreUnavailable as exc:
+                _LOG.warning(
+                    "acceptance.store_readonly_unavailable",
+                    path=repr(str(store_path)),
+                    error=str(exc),
+                )
+        if store is None:
+            # No usable master beside the lake: the app resolves the lake via
+            # env — SCOPED to this run and restored by :meth:`close` (MN1).
+            self._env_lake_root_prev = os.environ.get("BRUTEX_LAKE_ROOT", _ENV_UNSET)
+            self._env_lake_root_set = True
             os.environ["BRUTEX_LAKE_ROOT"] = str(self.lake_root)
+        self._store = store
         app = build_app(DashboardState(), instrument_store=store)
         # The dashboard's Host allowlist is loopback-only (R2-DS-F1) — the
         # default "testserver" base would 400 every probe.
         return TestClient(app, base_url="http://localhost")
+
+    def close(self) -> None:
+        """Release run-scoped resources: client, read-only store, env override.
+
+        Idempotent; called from ``run_acceptance``'s ``finally`` so an
+        in-process caller (the F1 nightly chain) never inherits a mutated
+        ``BRUTEX_LAKE_ROOT`` or a lingering read-only DuckDB handle.
+        """
+        client, self._client = self._client, None
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception as exc:
+                _LOG.warning("acceptance.client_close_failed", error=str(exc))
+        store, self._store = self._store, None
+        if store is not None and hasattr(store, "close"):
+            try:
+                store.close()
+            except Exception as exc:
+                _LOG.warning("acceptance.store_close_failed", error=str(exc))
+        if self._env_lake_root_set:
+            self._env_lake_root_set = False
+            prev = self._env_lake_root_prev
+            self._env_lake_root_prev = _ENV_UNSET
+            if prev is _ENV_UNSET:
+                os.environ.pop("BRUTEX_LAKE_ROOT", None)
+            else:
+                os.environ["BRUTEX_LAKE_ROOT"] = str(prev)
 
     # ── pull-activity probe (observed, never fought) ───────────────────
     def pull_active(self) -> bool:
@@ -180,7 +281,9 @@ class AcceptanceContext:
             _LOG.warning(
                 "acceptance.input_moved",
                 attempt=attempt,
-                movers=moved_paths[:5],
+                # repr() per the house #1594 log-injection convention — the
+                # path embeds vendor-influenceable dir names (MN4).
+                movers=[repr(p) for p in moved_paths[:5]],
             )
         return (
             None,

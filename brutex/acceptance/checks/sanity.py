@@ -17,7 +17,8 @@ from typing import Any
 
 import polars as pl
 
-from brutex.acceptance.context import AcceptanceContext
+from brutex.acceptance.checks import run_fingerprinted_check
+from brutex.acceptance.context import AcceptanceContext, StoreUnavailable
 from brutex.acceptance.model import (
     AbstainReason,
     CheckResult,
@@ -28,7 +29,9 @@ from brutex.acceptance.model import (
 )
 from brutex.acceptance.sampling import (
     VIX_COORD,
-    enumerate_spot_datasets,
+    month_bounded_files,
+    read_bars_frame_bounded,
+    recent_months,
     sample_datasets,
 )
 
@@ -45,13 +48,11 @@ def _repro(ctx: AcceptanceContext) -> str:
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
 
 
-def _read_frame(symbol_dir: Path, interval: str) -> pl.DataFrame | None:
-    from brutex.data.tf_autoderive import read_lake_bars_frame
-
-    root = symbol_dir / interval
-    if not root.is_dir() or not any(root.rglob("*.parquet")):
-        return None
-    return read_lake_bars_frame(symbol_dir, interval)
+def _read_frame(
+    symbol_dir: Path, interval: str, months: set[tuple[int, int]] | None = None
+) -> pl.DataFrame | None:
+    frame = read_bars_frame_bounded(symbol_dir, interval, months)
+    return None if frame is None or frame.height == 0 else frame
 
 
 def _with_ist(frame: pl.DataFrame) -> pl.DataFrame:
@@ -131,10 +132,6 @@ def _session_window_violations(frame_ist: pl.DataFrame) -> tuple[list[str], int]
 
 def run(ctx: AcceptanceContext) -> CheckResult:
     """Run the seven sanity sub-checks over the sampled datasets."""
-    from brutex.data.bad_tick import BAD_TICK_MAX_RATIO
-    from brutex.data.interior_gap_detect import interior_gap_runs
-    from brutex.data.price_sanity import count_price_violations
-
     if ctx.pull_active() and not ctx.force_during_pull:
         sub = make_subcheck(
             "sanity.price",
@@ -148,11 +145,39 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         return make_check(CHECK_ID, [sub], coverage=coverage, repro=_repro(ctx))
 
     plan = sample_datasets(
-        enumerate_spot_datasets(ctx.lake_root),
+        ctx.spot_datasets(),
         seed=ctx.seed,
         sample_n=ctx.sample_n,
         full=ctx.full,
     )
+    months = None if ctx.full else set(recent_months(ctx.run_date(), ctx.months))
+
+    def _paths() -> list[Path]:
+        paths: list[Path] = []
+        for exchange, segment, symbol in plan.selected:
+            symbol_dir = ctx.lake_root / "bars" / exchange / segment / symbol
+            for interval in ("1minute", "1day"):
+                paths.extend(month_bounded_files(symbol_dir / interval, months))
+        vix_dir = ctx.lake_root / "bars" / VIX_COORD[0] / VIX_COORD[1] / VIX_COORD[2]
+        paths.extend(month_bounded_files(vix_dir / "1minute", months))
+        return sorted(set(paths))
+
+    return run_fingerprinted_check(
+        ctx,
+        check_id=CHECK_ID,
+        sub_id="sanity.price",
+        paths_fn=_paths,
+        body=lambda: _run_body(ctx, plan=plan, months=months),
+    )
+
+
+def _run_body(
+    ctx: AcceptanceContext, *, plan: Any, months: set[tuple[int, int]] | None
+) -> CheckResult:
+    from brutex.data.bad_tick import BAD_TICK_MAX_RATIO
+    from brutex.data.interior_gap_detect import interior_gap_runs
+    from brutex.data.price_sanity import count_price_violations
+
     price_offenders: list[str] = []
     bad_ticks: list[str] = []
     grid_offenders: list[str] = []
@@ -167,7 +192,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         symbol_dir = ctx.lake_root / "bars" / exchange / segment / symbol
         key = f"{exchange}/{segment}/{symbol}"
         for interval in ("1minute", "1day"):
-            frame = _read_frame(symbol_dir, interval)
+            frame = _read_frame(symbol_dir, interval, months)
             if frame is None:
                 continue
             violations = count_price_violations(frame)
@@ -177,7 +202,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
             if grid:
                 grid_offenders.append(f"{key}@{interval}: {grid} off-grid row(s)")
             bars_scanned += frame.height
-        frame_1m = _read_frame(symbol_dir, "1minute")
+        frame_1m = _read_frame(symbol_dir, "1minute", months)
         if frame_1m is None or frame_1m.height == 0:
             continue
         datasets_scanned += 1
@@ -241,7 +266,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 
     # ── sanity.vix_presence — the acceptance-night incident, detected ──
     vix_dir = ctx.lake_root / "bars" / VIX_COORD[0] / VIX_COORD[1] / VIX_COORD[2]
-    vix_frame = _read_frame(vix_dir, "1minute")
+    vix_frame = _read_frame(vix_dir, "1minute", months)
     if latest_spot_date is None:
         vix_sub = make_subcheck(
             "sanity.vix_presence",
@@ -291,12 +316,29 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         ],
         coverage=coverage,
         repro=_repro(ctx),
+        limits=(
+            []
+            if months is None
+            else [
+                f"reads bounded to the last {ctx.months} months (--full lifts) — "
+                "contiguity holes older than the window are out of scope this run"
+            ]
+        ),
     )
 
 
 def _completeness_sub(ctx: AcceptanceContext) -> Any:
-    """Engine indexes must not read failed/none on the completeness scoreboard."""
-    from brutex.data.instrument_store import InstrumentStore
+    """Engine indexes must not read failed/none on the completeness scoreboard.
+
+    The master is opened READ-ONLY (never ``InstrumentStore.open`` — its
+    migration DDL DROPs an older-schema store; review round 1 M1). A locked /
+    unreadable / schema-foreign store ⇒ named ABSTAIN — never a migration,
+    never a write, never a crash.
+    """
+    import duckdb
+
+    from brutex.acceptance.context import open_instrument_store_readonly
+    from brutex.data.errors import CatalogError
 
     store_path = ctx.lake_root / "instruments.duckdb"
     if not store_path.is_file():
@@ -314,10 +356,30 @@ def _completeness_sub(ctx: AcceptanceContext) -> Any:
     )
     from brutex.dashboard.db_view import summarize_spot_datasets
 
-    store = InstrumentStore.open(store_path)
+    try:
+        store = open_instrument_store_readonly(store_path)
+    except StoreUnavailable as exc:
+        return make_subcheck(
+            "sanity.completeness",
+            Verdict.ABSTAIN,
+            units_checked=0,
+            evidence={"reason": f"instrument master not readable read-only: {exc}"},
+            abstain_reason=AbstainReason.NO_INSTRUMENT_STORE,
+            repro=_repro(ctx),
+        )
     try:
         instruments = store.list_index_equity_instruments()
         spot_rows = summarize_spot_datasets(store.connection, ctx.lake_root)
+    except (duckdb.Error, CatalogError) as exc:
+        # An older/foreign-schema store: observe-only means ABSTAIN, never DDL.
+        return make_subcheck(
+            "sanity.completeness",
+            Verdict.ABSTAIN,
+            units_checked=0,
+            evidence={"reason": f"instrument master query failed read-only: {exc}"},
+            abstain_reason=AbstainReason.NO_INSTRUMENT_STORE,
+            repro=_repro(ctx),
+        )
     finally:
         store.close()
     categories = categorize_instruments(

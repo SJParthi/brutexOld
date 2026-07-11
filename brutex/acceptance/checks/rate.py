@@ -46,6 +46,27 @@ CEILING_PER_MIN = 500
 #: The rolling-minute window the pair-bound evidence folds over, seconds.
 ROLLING_MINUTE_S = 60.0
 
+#: Byte cap for every rotating-log / audit tail read (the repo's 16 MiB
+#: bounded-read precedent, DEC-LAKE-STATS-MANIFEST-001) — a multi-GB file is
+#: NEVER read whole (review round 1 complexity MAJOR-1: measured ~70 s/GB +
+#: a 2.1x-file RSS spike for evidence that gates nothing).
+TAIL_BYTES_CAP = 16 * 1024 * 1024
+
+
+def tail_lines(path: Path, *, cap_bytes: int = TAIL_BYTES_CAP) -> tuple[list[str], int, int]:
+    """Bounded seek-from-end tail read: ``(lines, bytes_read, file_bytes)``.
+
+    Reads at most *cap_bytes* from the END of the file; when truncating, the
+    first (partial) line is dropped so every returned line is complete.
+    """
+    st = path.stat()
+    with path.open("rb") as fh:
+        if st.st_size > cap_bytes:
+            fh.seek(st.st_size - cap_bytes)
+            fh.readline()  # drop the partial first line
+        data = fh.read(cap_bytes)
+    return data.decode("utf-8", errors="replace").splitlines(), len(data), st.st_size
+
 
 def _repro(ctx: AcceptanceContext) -> str:
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
@@ -91,7 +112,12 @@ def _market_hours_sub(ctx: AcceptanceContext) -> Any:
     if ledger is not None:
         stamps.extend(r.last_attempt_at for r in ledger.records() if r.last_attempt_at)
     with contextlib.suppress(OSError):  # a wedged journal read is not a verdict
-        stamps.extend(str(e.wall_utc) for e in read_journal(ctx.lake_root) if not e.dry_run)
+        # ONLY genuine vendor-attempt records: a LIVE pull start carries
+        # dry_run=False explicitly. Heartbeats/finish records parse dry_run as
+        # None — they are liveness beats from ANY BackgroundPullJob (incl. the
+        # vendor-free in-window-ALLOWED sweep / greeks-backfill jobs) and must
+        # never count as attempts (review round 1 MINOR).
+        stamps.extend(str(e.wall_utc) for e in read_journal(ctx.lake_root) if e.dry_run is False)
     examined = 0
     excluded_pre_guard = 0
     offenders: list[str] = []
@@ -120,7 +146,13 @@ def _market_hours_sub(ctx: AcceptanceContext) -> Any:
             "offending_stamps": offenders[:ROW_CAP],
             "excluded_pre_guard": excluded_pre_guard,
             "block_window_ist": "08:45-15:35",
+            "journal_stamp_law": "pull-start records with dry_run=False only — "
+            "heartbeats are job liveness, never vendor attempts",
         },
+        limits=[
+            "the sanctioned #1692 per-contract finish overrun can stamp minutes "
+            "past 08:45 — an in-window offender needs operator judgment"
+        ],
         repro=_repro(ctx),
     )
 
@@ -175,10 +207,10 @@ def _log_window_sub(ctx: AcceptanceContext) -> Any:
     histogram: dict[str, int] = {}
     for path in rate_log_paths():
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            lines, _read, _size = tail_lines(path)
         except OSError:
             continue
-        for line in text.splitlines():
+        for line in lines:
             try:
                 event = json.loads(line)
             except ValueError:
@@ -212,43 +244,60 @@ def _log_window_sub(ctx: AcceptanceContext) -> Any:
             "rate_lines": rate_lines,
             "event_histogram": histogram,
             "over_cap_lines": over[:ROW_CAP],
+            "tail_bytes_cap": TAIL_BYTES_CAP,
         },
-        limits=["dashboard-launched pulls within log retention only"],
+        limits=[
+            "dashboard-launched pulls within log retention only",
+            f"bounded tail read — last {TAIL_BYTES_CAP} bytes per rotating file",
+        ],
         repro=_repro(ctx),
     )
 
 
 def _pair_bound_sub(ctx: AcceptanceContext) -> Any:
-    """Trend evidence from the hash-chained ingest audits — verdict ALWAYS abstains.
+    """Trend evidence from the ingest audits' bounded TAIL — verdict ALWAYS abstains.
 
     Pair-completion times are NOT call-issue times: pairs/min > 500 does not
     pigeonhole calls into a minute, so a verdict in either direction would be
-    fabricated. Numbers attach as evidence only.
+    fabricated. Numbers attach as evidence only — which is why this read is a
+    bounded seek-from-end tail (:data:`TAIL_BYTES_CAP`), never a whole-file
+    parse, and the full-chain ``verify_audit_file`` walk is deliberately NOT
+    run here (review round 1 complexity MAJOR-1: ~70 s/GB + a 2.1x-file RSS
+    spike for an ABSTAIN that gates nothing); chain verification stays the
+    EXISTING ``brutex audit verify`` command.
     """
-    from brutex.audit_verify import verify_audit_file
-
     max_per_minute = 0
     pairs_total = 0
-    chains: dict[str, Any] = {}
+    tails: dict[str, Any] = {}
     for name in ("spot-ingest.jsonl", "fno-ingest.jsonl"):
         path = ctx.lake_root / "audit" / name
         if not path.is_file():
-            chains[name] = "absent"
+            tails[name] = "absent"
             continue
         try:
-            verify_audit_file(path)
-            chains[name] = "chain_ok"
-        except Exception as exc:
-            chains[name] = f"chain_error: {type(exc).__name__}"
+            lines, bytes_read, file_bytes = tail_lines(path)
+        except OSError as exc:
+            tails[name] = f"unreadable: {type(exc).__name__}"
             continue
+        tails[name] = {
+            "file_bytes": file_bytes,
+            "bytes_read": bytes_read,
+            "tail_only": file_bytes > bytes_read,
+        }
         stamps: list[float] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in lines:
             if not line.strip():
                 continue
-            # chain-verified above — every non-blank line IS a JSON entry
-            entry = json.loads(line)
-            if entry.get("action") == "INGEST_PAIR_DONE":
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue  # un-verified tail — a torn/foreign line is skipped
+            if entry.get("action") != "INGEST_PAIR_DONE":
+                continue
+            try:
                 stamps.append(float(entry.get("ts_utc", 0.0)))
+            except (TypeError, ValueError):
+                continue  # a junk ts_utc never crashes the evidence fold (N4)
         stamps.sort()
         pairs_total += len(stamps)
         lo = 0
@@ -263,10 +312,15 @@ def _pair_bound_sub(ctx: AcceptanceContext) -> Any:
         evidence={
             "pairs_total": pairs_total,
             "max_pairs_per_rolling_minute": max_per_minute,
-            "chains": chains,
+            "tails": tails,
+            "tail_bytes_cap": TAIL_BYTES_CAP,
+            "chain_verify": "not run here — bounded evidence tail; verify via brutex audit verify",
         },
         abstain_reason=AbstainReason.NO_PER_CALL_LOG,
-        limits=["pair-completion times are not call-issue times — evidence only"],
+        limits=[
+            "pair-completion times are not call-issue times — evidence only",
+            f"bounded tail read — last {TAIL_BYTES_CAP} bytes per audit file",
+        ],
         repro=_repro(ctx),
     )
 

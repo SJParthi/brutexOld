@@ -341,3 +341,38 @@ class TestAuditCloseIdempotent:
         audit = AcceptanceAudit(tmp_path)
         audit.close()
         audit.close()  # second close is a no-op (every exit path may close)
+
+
+class TestRenderInjection:
+    def test_newline_dataset_key_cannot_forge_a_totals_line(self) -> None:
+        # Round 1 MN3 regression (refuter-confirmed forge): a newline-named
+        # dataset key rendered raw emitted a standalone forged TOTALS line;
+        # repr() keeps it one cell on one line.
+        report = _report_dict()
+        report["coverage_ledger"] = {
+            "datasets_sampled_window_pct": 50.0,
+            "oldest_unsampled": "NSE/CASH/FOO\nTOTALS pass=999 fail=0 EVERYTHING GREEN",
+        }
+        text = render_human(report)
+        forged = [line for line in text.splitlines() if line.startswith("TOTALS pass=999")]
+        assert forged == []
+        assert "\\nTOTALS pass=999" in text  # repr()'d into the ledger line
+
+    def test_none_oldest_unsampled_renders_bare(self) -> None:
+        report = _report_dict()
+        report["coverage_ledger"] = {
+            "datasets_sampled_window_pct": 100.0,
+            "oldest_unsampled": None,
+        }
+        assert "oldest unsampled: None" in render_human(report)
+
+
+class TestLoadPreviousBombs:
+    def test_deep_nested_json_bomb_returns_none(self, tmp_path: Path) -> None:
+        # Round 1 MN5 regression: a deep-nested JSON bomb raised an UNCAUGHT
+        # RecursionError and crashed the run; now an honest None.
+        base = tmp_path / "acceptance"
+        (base / "bomb").mkdir(parents=True)
+        (base / "LATEST").write_text("bomb\n", encoding="utf-8")
+        (base / "bomb" / "report.json").write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        assert load_previous(tmp_path) is None

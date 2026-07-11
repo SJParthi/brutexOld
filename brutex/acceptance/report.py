@@ -132,7 +132,8 @@ def load_previous(lake_root: Path) -> dict[str, Any] | None:
     try:
         run_id = (base / "LATEST").read_text(encoding="utf-8").strip()
         raw = json.loads((base / run_id / "report.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: a deep-nested JSON bomb must not crash the run (MN5).
         return None
     return raw if isinstance(raw, dict) else None
 
@@ -209,6 +210,15 @@ def compute_deltas(
 # ────────────────────────────────────────────────────────────────────────
 
 
+def _render_token(value: Any) -> str:
+    """One vendor-influenceable string cell, repr()'d (the #1594 convention).
+
+    ``None`` renders bare; everything else is repr()'d so an embedded newline /
+    ESC can never forge a standalone report line (review round 1 MN3).
+    """
+    return "None" if value is None else repr(str(value))
+
+
 def render_human(report: Mapping[str, Any]) -> str:
     """The operator-facing text render — ABSTAINs FIRST, never buried."""
     lines: list[str] = []
@@ -233,9 +243,11 @@ def render_human(report: Mapping[str, Any]) -> str:
         + (" · FULL" if inputs.get("full") else "")
     )
     if ledger.get("datasets_sampled_window_pct") is not None:
+        # repr() — the dataset key embeds vendor-influenceable dir names; a
+        # newline-named dir must never forge a report line (MN3).
         lines.append(
             f"coverage ledger: {ledger['datasets_sampled_window_pct']}% of datasets sampled "
-            f"in last 14 nights; oldest unsampled: {ledger.get('oldest_unsampled')}"
+            f"in last 14 nights; oldest unsampled: {_render_token(ledger.get('oldest_unsampled'))}"
         )
     abstains = [
         sub

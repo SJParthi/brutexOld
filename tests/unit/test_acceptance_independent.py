@@ -335,3 +335,29 @@ class TestEnumerate:
 
     def test_missing_tree(self, tmp_path: Path) -> None:
         assert ind.enumerate_spot_symbol_dirs(tmp_path) == []
+
+
+class TestGlobMetacharLiteralRead:
+    def test_bracket_named_dir_reads_its_literal_file(self, tmp_path: Path) -> None:
+        # Round 1 M2 regression (the #1594-R15 class): with real twin dirs
+        # X1(111.0) / X2(222.0) / X[12](999.0), the oracle read of X[12] must
+        # return the LITERAL file's close — never a glob-matched sibling's.
+        import polars as pl
+
+        seg = tmp_path / "bars" / "NSE" / "INDEX"
+        stamp = datetime(2026, 7, 9, 3, 45, tzinfo=UTC)
+        for name, close in (("X1", 111.0), ("X2", 222.0), ("X[12]", 999.0)):
+            root = seg / name / "1minute" / "2026"
+            root.mkdir(parents=True)
+            pl.DataFrame(
+                {
+                    "timestamp": [stamp.replace(tzinfo=None)],
+                    "open": [close],
+                    "high": [close],
+                    "low": [close],
+                    "close": [close],
+                    "volume": [1],
+                }
+            ).write_parquet(root / "07.parquet")
+        bars = ind.read_1m_bars(seg / "X[12]")
+        assert [float(b.close) for b in bars] == [999.0]

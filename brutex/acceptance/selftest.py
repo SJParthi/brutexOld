@@ -184,14 +184,14 @@ def _month_file(root: Path, symbol: str, interval: str, day: date) -> Path:
 def poison_duplicate_row(root: Path, *, symbol: str, day: date) -> None:
     """S1 — append a duplicate-timestamp row (surgical edit on writer output)."""
     path = _month_file(root, symbol, "1minute", day)
-    frame = pl.read_parquet(path)
+    frame = pl.read_parquet(path, glob=False)
     pl.concat([frame, frame.head(1)]).write_parquet(path)
 
 
 def poison_tf_high_x10(root: Path, *, symbol: str, day: date) -> None:
     """S2 — scale one stored 5m bar's HIGH x10 (the laundering class)."""
     path = _month_file(root, symbol, "5minute", day)
-    frame = pl.read_parquet(path)
+    frame = pl.read_parquet(path, glob=False)
     high = frame.get_column("high").to_list()
     high[0] = high[0] * 10
     frame.with_columns(pl.Series("high", high)).write_parquet(path)
@@ -449,7 +449,7 @@ def run_full_battery(
         # 4: a foreign-month row.
         def _p4(root: Path) -> bool:
             path = _month_file(root, "NIFTY", "1minute", days[1])
-            frame = pl.read_parquet(path)
+            frame = pl.read_parquet(path, glob=False)
             ts = frame.get_column("timestamp").to_list()
             ts[0] = ts[0] - timedelta(days=40)
             frame.with_columns(pl.Series("timestamp", ts)).write_parquet(path)
@@ -548,7 +548,7 @@ def run_full_battery(
         # 11-12: price-sanity poisons.
         def _price_poison(root: Path, column: str, value: float) -> bool:
             path = _month_file(root, "NIFTY", "1minute", days[1])
-            frame = pl.read_parquet(path)
+            frame = pl.read_parquet(path, glob=False)
             values = frame.get_column(column).to_list()
             values[0] = value
             frame.with_columns(pl.Series(column, values)).write_parquet(path)

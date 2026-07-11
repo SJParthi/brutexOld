@@ -239,6 +239,47 @@ class TestCompleteness:
         assert _cell_verdict_tokens(cell) == {"full", "failed"}
         assert _cell_verdict_tokens("not-a-dict") == set()
 
+    def test_readonly_never_migrates_older_schema_store(self, tmp_path: Path) -> None:
+        # Round 1 M1 regression: the completeness sub opens the master
+        # READ-ONLY — an older-schema store survives byte-identical (the old
+        # RW `InstrumentStore.open` DROPped its instruments table) and the
+        # verdict is a named ABSTAIN, never a migration.
+        import hashlib
+
+        from brutex.data.instrument_store import InstrumentStore
+
+        lake = make_twin(tmp_path)
+        path = lake / "instruments.duckdb"
+        store = InstrumentStore.open(path)
+        store._conn.execute("DROP TABLE instruments")  # a foreign/older shape
+        store._conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '1')"
+        )
+        store.close()
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        check = sanity.run(make_ctx(lake))
+        completeness = _sub(check, "sanity.completeness")
+        assert completeness.verdict is Verdict.ABSTAIN
+        assert completeness.abstain_reason is AbstainReason.NO_INSTRUMENT_STORE
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+    def test_rw_holder_abstains_never_crashes(self, tmp_path: Path) -> None:
+        import duckdb
+        from brutex.data.instrument_store import InstrumentStore
+
+        lake = make_twin(tmp_path)
+        path = lake / "instruments.duckdb"
+        InstrumentStore.open(path).close()
+        holder = duckdb.connect(str(path))  # a live RW holder (pull/dashboard)
+        try:
+            check = sanity.run(make_ctx(lake))
+        finally:
+            holder.close()
+        completeness = _sub(check, "sanity.completeness")
+        assert completeness.verdict is Verdict.ABSTAIN
+        assert completeness.abstain_reason is AbstainReason.NO_INSTRUMENT_STORE
+        assert "read-only" in str(completeness.evidence["reason"])
+
 
 class TestSanityEdges:
     def test_out_of_coverage_bars_and_hole_abstain(self, tmp_path: Path) -> None:
@@ -257,12 +298,35 @@ class TestSanityEdges:
                 *_twin_bars(date(2027, 1, 5), base=71.0),
             ],
         )
-        check = sanity.run(make_ctx(lake))
+        # --full lifts the backward month bound so the 2027 file is in scope.
+        check = sanity.run(make_ctx(lake, full=True))
         session = _sub(check, "sanity.session_window")
         assert session.verdict is Verdict.PASS
         assert session.evidence["out_of_coverage_bars_abstained"] == 62
         contiguity = _sub(check, "sanity.contiguity")
         assert contiguity.evidence["datasets_abstained"] >= 1
+
+    def test_months_bound_is_real_old_poison_out_of_window(self, tmp_path: Path) -> None:
+        # Round 1 complexity MAJOR-2 regression: --months actually bounds the
+        # sanity reads — an old-month poison is caught with a wide window and
+        # honestly OUT OF SCOPE (disclosed in limits) with a narrow one.
+        from brutex.data.parquet_writer import ParquetWriter
+
+        lake = make_twin(tmp_path)
+        old_day = date(2026, 2, 4)
+        ParquetWriter(lake_root=lake).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=_twin_bars(old_day, base=90.0),
+        )
+        _poison_column(lake, "NIFTY", old_day, "low", -5.0)
+        wide = sanity.run(make_ctx(lake, months=6))
+        assert _sub(wide, "sanity.price").verdict is Verdict.FAIL
+        narrow = sanity.run(make_ctx(lake, months=1))
+        assert _sub(narrow, "sanity.price").verdict is Verdict.PASS
+        assert any("bounded to the last 1 months" in note for note in narrow.limits)
 
     def test_partial_interval_datasets_skipped_cleanly(self, tmp_path: Path) -> None:
         from datetime import timedelta as _td

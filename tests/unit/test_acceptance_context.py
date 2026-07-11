@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.acceptance.context import (
@@ -20,7 +21,7 @@ from brutex.acceptance.context import (
 NOW = datetime(2026, 7, 10, 6, 0, tzinfo=UTC)  # 11:30 IST
 
 
-def _ctx(tmp_path: Path, **kwargs: object) -> AcceptanceContext:
+def _ctx(tmp_path: Path, **kwargs: Any) -> AcceptanceContext:
     return AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: NOW, **kwargs)
 
 
@@ -103,6 +104,7 @@ class TestClientFactory:
         assert os.environ.get("BRUTEX_LAKE_ROOT") == str(tmp_path)
         response = client.get("/api/v1/state")
         assert response.status_code == 200
+        ctx.close()
 
     def test_default_factory_opens_store_when_present(self, tmp_path: Path) -> None:
         pytest.importorskip("fastapi")
@@ -111,6 +113,115 @@ class TestClientFactory:
         InstrumentStore.open(tmp_path / "instruments.duckdb").close()
         ctx = _ctx(tmp_path)
         assert ctx.client().get("/api/v1/state").status_code == 200
+        ctx.close()
+
+    def test_env_override_scoped_and_restored(self, tmp_path: Path) -> None:
+        # MN1 regression: the BRUTEX_LAKE_ROOT override is run-scoped — an
+        # in-process caller (the F1 nightly chain) never inherits it.
+        pytest.importorskip("fastapi")
+        os.environ["BRUTEX_LAKE_ROOT"] = "/pre/existing"
+        try:
+            ctx = _ctx(tmp_path)
+            ctx.client()
+            assert os.environ["BRUTEX_LAKE_ROOT"] == str(tmp_path)
+            ctx.close()
+            assert os.environ["BRUTEX_LAKE_ROOT"] == "/pre/existing"
+        finally:
+            os.environ.pop("BRUTEX_LAKE_ROOT", None)
+
+    def test_env_override_removed_when_previously_unset(self, tmp_path: Path) -> None:
+        pytest.importorskip("fastapi")
+        os.environ.pop("BRUTEX_LAKE_ROOT", None)
+        ctx = _ctx(tmp_path)
+        ctx.client()
+        assert os.environ.get("BRUTEX_LAKE_ROOT") == str(tmp_path)
+        ctx.close()
+        assert "BRUTEX_LAKE_ROOT" not in os.environ
+        ctx.close()  # idempotent
+
+    def test_close_swallows_teardown_errors(self, tmp_path: Path) -> None:
+        class _Boom:
+            def close(self) -> None:
+                raise RuntimeError("teardown boom")
+
+        ctx = _ctx(tmp_path, client_factory=_Boom)
+        ctx.client()
+        ctx._store = _Boom()
+        ctx.close()  # never raises — teardown is best-effort
+
+
+class TestReadOnlyStore:
+    def test_older_schema_store_survives_byte_identical(self, tmp_path: Path) -> None:
+        # Round 1 M1 regression: the acceptance path must NEVER run the
+        # migration DDL — an older-schema store's bytes are untouched and the
+        # verdict path abstains instead of DROPping tables.
+        import hashlib
+
+        from brutex.acceptance.context import open_instrument_store_readonly
+        from brutex.data.instrument_store import InstrumentStore
+
+        path = tmp_path / "instruments.duckdb"
+        store = InstrumentStore.open(path)
+        store._conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '1')"
+        )
+        store.close()
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        ro = open_instrument_store_readonly(path)
+        version = ro._conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        ro.close()
+        assert version is not None and version[0] == "1"  # never re-stamped
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+    def test_rw_holder_raises_store_unavailable(self, tmp_path: Path) -> None:
+        import duckdb
+        from brutex.acceptance.context import StoreUnavailable, open_instrument_store_readonly
+        from brutex.data.instrument_store import InstrumentStore
+
+        path = tmp_path / "instruments.duckdb"
+        InstrumentStore.open(path).close()
+        holder = duckdb.connect(str(path))  # a live RW holder (pull/dashboard)
+        try:
+            with pytest.raises(StoreUnavailable):
+                open_instrument_store_readonly(path)
+        finally:
+            holder.close()
+
+    def test_client_factory_degrades_to_no_store_on_contention(self, tmp_path: Path) -> None:
+        pytest.importorskip("fastapi")
+        import duckdb
+        from brutex.data.instrument_store import InstrumentStore
+
+        path = tmp_path / "instruments.duckdb"
+        InstrumentStore.open(path).close()
+        holder = duckdb.connect(str(path))
+        ctx = _ctx(tmp_path)
+        try:
+            client = ctx.client()  # no crash — store=None + scoped env
+            assert client.get("/api/v1/state").status_code == 200
+            assert ctx._store is None
+        finally:
+            holder.close()
+            ctx.close()
+
+
+class TestEnumerationMemos:
+    def test_spot_datasets_and_contracts_memoised(self, tmp_path: Path) -> None:
+        bars = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        bars.mkdir(parents=True)
+        fno = tmp_path / "bars" / "NSE" / "FNO" / "NSE-NIFTY-30Jul26-FUT"
+        fno.mkdir(parents=True)
+        ctx = _ctx(tmp_path)
+        first = ctx.spot_datasets()
+        contracts = ctx.fno_contracts()
+        assert first == [("NSE", "INDEX", "NIFTY")]
+        assert contracts == ["NSE-NIFTY-30Jul26-FUT"]
+        # A dir added after the memo is NOT re-walked (one enumeration per run).
+        (tmp_path / "bars" / "NSE" / "INDEX" / "LATER").mkdir()
+        assert ctx.spot_datasets() is first
+        assert ctx.fno_contracts() is contracts
 
 
 class TestPullActiveProbe:
