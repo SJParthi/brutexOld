@@ -22,9 +22,13 @@ parallel sweep threads ONE per-worker-process
   ``run_persisted_sweep`` fail-fast THROUGH the worker path.
 * **T4 — bars-intern memo**: same-``(instrument, tf)`` dispatches share ONE
   resident bars copy (object identity); a mismatching fresh copy degrades
-  safely (WARN-once + fresh bars + entry dropped).
+  fail-safe (WARN-once + fresh bars + the WHOLE per-worker mechanism —
+  kernel cache AND memo — disabled for the rest of the worker, so a stale
+  resident kernel is UNREACHABLE — the fix-round-1 R1 fold).
 * **T5 — flag hygiene**: junk env → OFF + warn-once; invalid capacity →
-  grid default + loud warn; the OFF arm constructs NO cache (spy).
+  grid default + loud warn; capacity above ``WORKER_KERNEL_CAPACITY_MAX``
+  → clamped + loud warn (fix-round-1 R3 fold); the OFF arm constructs NO
+  cache (spy).
 * **T6 — memory bound**: the cache length never exceeds its capacity.
 * **SPAWN** — a REAL spawn pool (``workers=2`` → ONE EVAL worker, so the
   arithmetic is deterministic) reuses the kernel across tuples:
@@ -340,6 +344,34 @@ class TestResolveWorkerKernelCapacity:
         assert len(warned) == 1
         assert warned[0]["requested_env"] == repr(raw)
 
+    @pytest.mark.parametrize("raw", ["65", "100000000"])
+    def test_above_ceiling_clamps_and_warns(self, raw: str) -> None:
+        """Fix-round-1 R3 fold: a pathological-large override cannot disable
+        the LRU eviction — it clamps to WORKER_KERNEL_CAPACITY_MAX, loudly."""
+        grid = _grid()
+        with capture_logs() as logs:
+            got = mod.resolve_worker_kernel_capacity(grid, {mod.WORKER_KERNEL_CAPACITY_ENV: raw})
+        assert got == mod.WORKER_KERNEL_CAPACITY_MAX == 64
+        clamped = [
+            e for e in logs if e.get("event") == "sweep_parallel.worker_kernel_capacity.clamped"
+        ]
+        assert len(clamped) == 1
+        assert clamped[0]["requested_env"] == repr(raw)
+        assert clamped[0]["clamped_to"] == mod.WORKER_KERNEL_CAPACITY_MAX
+
+    def test_ceiling_boundary_is_verbatim_and_silent(self) -> None:
+        grid = _grid()
+        env = {mod.WORKER_KERNEL_CAPACITY_ENV: str(mod.WORKER_KERNEL_CAPACITY_MAX)}
+        with capture_logs() as logs:
+            got = mod.resolve_worker_kernel_capacity(grid, env)
+        assert got == mod.WORKER_KERNEL_CAPACITY_MAX
+        hygiene = [
+            e
+            for e in logs
+            if str(e.get("event", "")).startswith("sweep_parallel.worker_kernel_capacity")
+        ]
+        assert hygiene == []
+
     def test_reads_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(mod.WORKER_KERNEL_CAPACITY_ENV, "5")
         assert mod.resolve_worker_kernel_capacity(_grid()) == 5
@@ -365,7 +397,7 @@ class TestWorkerInitKernelCache:
         assert len(cache) == 0
 
     def test_off_constructs_no_cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The OFF arm is allocation-identical: no cache object is EVER built."""
+        """The OFF arm never builds a cache object (spy-proven zero constructions)."""
         calls: list[object] = []
 
         class _Spy:
@@ -438,24 +470,50 @@ class TestInternBars:
             fresh = [*first[:-1], _bar(3, 59, 999.0, 999.5)]
         with capture_logs() as logs:
             got = mod._intern_bars("NIFTY", "1minute", fresh)
-            # A SECOND mismatch on a re-seeded key warns no second time.
-            mod._intern_bars("NIFTY", "1minute", first)
+            # The disable is permanent for the worker: later calls run the
+            # legacy path — bars returned untouched, never a second warn.
+            got_disabled = mod._intern_bars("NIFTY", "1minute", first)
             got2 = mod._intern_bars("NIFTY", "1minute", fresh)
         assert got is fresh  # the FRESH bars are used, never the stale resident
+        assert got_disabled is first
         assert got2 is fresh
-        memo = mod._WORKER_BARS_MEMO
-        assert memo is not None
+        # Fail-safe OFF (fix-round-1 R1 fold): the memo is disabled outright.
+        assert mod._WORKER_BARS_MEMO is None
         warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
         assert len(warned) == 1  # warn-once per worker process
 
-    def test_mismatch_drops_the_entry(self) -> None:
+    def test_mismatch_with_latched_warn_still_disables_silently(self) -> None:
+        """Belt-and-braces arm: with the warn-once latch ALREADY set (only a
+        future memo re-enable path could reach this — the disable makes a
+        second natural mismatch per worker unreachable), a mismatch still
+        fail-safe-disables both globals, without a second WARN."""
         self._memo_on()
+        mod._WORKER_BARS_MEMO_WARNED = True
         first = list(_BARS)
         mod._intern_bars("NIFTY", "1minute", first)
-        mod._intern_bars("NIFTY", "1minute", first[:-1])  # mismatch → dropped
-        memo = mod._WORKER_BARS_MEMO
-        assert memo is not None
-        assert ("NIFTY", "1minute") not in memo
+        with capture_logs() as logs:
+            got = mod._intern_bars("NIFTY", "1minute", first[:-1])
+        assert got is not first
+        assert mod._WORKER_BARS_MEMO is None
+        assert mod._WORKER_KERNEL_CACHE is None
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert warned == []
+
+    def test_mismatch_disables_cache_and_memo(self) -> None:
+        """Fix-round-1 R1 fold: a mismatch fail-safe-disables BOTH globals.
+
+        ResidentKernelCache exposes no per-key eviction (call-only seam), so
+        the degrade sets the kernel cache AND the memo to ``None`` — every
+        previously-built kernel becomes unreachable for the rest of the
+        worker process.
+        """
+        self._memo_on()
+        mod._WORKER_KERNEL_CACHE = ResidentKernelCache(capacity=1)
+        first = list(_BARS)
+        mod._intern_bars("NIFTY", "1minute", first)
+        mod._intern_bars("NIFTY", "1minute", first[:-1])  # mismatch → fail-safe OFF
+        assert mod._WORKER_BARS_MEMO is None
+        assert mod._WORKER_KERNEL_CACHE is None
 
     def test_lru_bound_capacity_two(self) -> None:
         self._memo_on()
@@ -612,6 +670,48 @@ class TestRunTupleInWorkerKernelCache:
         assert cache.builds == 4  # 100% miss on the cycle — the LRU pathology
         assert cache.hits == 0
         assert len(cache) == 1  # T6: never exceeds capacity
+
+    def test_mismatch_never_serves_a_stale_kernel(self, tmp_path: Path) -> None:
+        """Fix-round-1 R1 fold: value-different bars for an already-built key
+        can never be paired with the stale resident kernel.
+
+        The R1 hypothetical: worker builds K1 on copy1 for key κ; a buggy
+        parent later ships value-DIFFERENT bars for the same (instrument, tf);
+        pre-fix a later same-κ hit served K1's bar_bits (built on copy1) while
+        the trade sim ran on the fresh bars — a silently mixed result. The
+        fix disables the whole per-worker mechanism on mismatch, so the stale
+        kernel is UNREACHABLE and the tuple runs the legacy byte-correct
+        per-tuple build on the bars it actually simulates.
+        """
+        grid = _grid()
+        mod._worker_init(_worker_ctx_on(tmp_path, grid))
+        tuples = list(iter_sweep_tuples(grid))
+        copy1 = list(_BARS)
+        first = mod._run_tuple_in_worker(0, tuples[0], copy1)
+        assert first.summary is not None
+        stale_cache = mod._WORKER_KERNEL_CACHE
+        assert stale_cache is not None
+        assert (stale_cache.builds, stale_cache.hits) == (1, 0)
+        # A value-DIFFERENT copy for the SAME (instrument, tf) key.
+        mutated = [_bar(0, 0, 999.0, 999.5), *copy1[1:]]
+        with capture_logs() as logs:
+            second = mod._run_tuple_in_worker(1, tuples[1], list(mutated))
+        assert second.summary is not None
+        # The degrade disabled the cache + memo for the rest of the worker...
+        assert mod._WORKER_KERNEL_CACHE is None
+        assert mod._WORKER_BARS_MEMO is None
+        # ...so the STALE kernel was never consulted (counters frozen — a
+        # pre-fix hit on K1 would read hits == 1 here)...
+        assert (stale_cache.builds, stale_cache.hits) == (1, 0)
+        # ...and the mismatching tuple ran the legacy path (no telemetry).
+        assert second.worker_pid is None
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert len(warned) == 1
+        # Byte-proof: the mismatching tuple's result equals a fresh legacy
+        # (no-cache) reference computed on the SAME mutated bars.
+        mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "ref"))
+        reference = mod._run_tuple_in_worker(1, tuples[1], list(mutated))
+        assert reference.summary == second.summary
 
     def test_bars_interned_across_same_key_dispatches(self, tmp_path: Path) -> None:
         """T4 integration: a fresh value-equal pickled copy is swapped for the

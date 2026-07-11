@@ -103,10 +103,18 @@ the flag, not a real production limitation.
   worker instead of once per TUPLE, byte-identically (the ON≡OFF golden).
   A tiny per-worker bars-intern memo (capacity 2) keeps same-``(instrument,
   tf)`` kernels sharing ONE resident bars copy (the memory bound). HONEST
-  envelope: default-OFF because the retained kernels ADD per-worker RSS
-  (MODELED +0.3–0.7 GB/worker) on top of the divided rank budget
-  (DEC-SWEEP-STALL-OOM-GUARDS-001); the default-ON flip is a separate
-  later one-constant ADR'd PR gated on §8 soak RSS + wall evidence.
+  envelope: default-OFF because the retained state ADDS per-worker RSS —
+  MODELED worst case ~0.66–0.73 GB/worker (two ~318 MB 555k-bar CandleBar
+  list copies dominate) ≈ +5.3–5.8 GB pool-wide at 8 workers — and that RSS
+  stacks on UNDIVIDED rank peaks: the per-tuple rank budget does NOT yet
+  divide across workers (``sweep_run`` resolves it at the default
+  ``workers=1``, so EVERY worker plans against the FULL total-RAM/6
+  allowance; the per-worker division is in-flight PR #1386,
+  DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001), and
+  DEC-SWEEP-STALL-OOM-GUARDS-001 is the REACTIVE OOM quarantine — a
+  backstop, never a divider. That tighter-than-it-looks boundary is a plain
+  reason this ships default-OFF; the default-ON flip is a separate later
+  one-constant ADR'd PR gated on §8 M4-Pro soak RSS + wall evidence.
 * ~~Raising the default worker count above 1~~ — DONE per ADR-0016
   (DEC-MULTICORE-SWEEP-AUTODEFAULT-001): an unset ``BRUTEX_SWEEP_WORKERS`` now
   resolves to the AUTO count ``max(1, min(cpu_count - 2, 8))`` with a
@@ -490,12 +498,21 @@ WORKER_KERNEL_CACHE_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CACHE"
 
 #: The per-worker kernel cache DEFAULT — **OFF** (DEC-SWEEP-WORKER-KERNEL-CACHE-001).
 #: The ONE later-ADR flip lever: the cache changes per-worker RSS (retained
-#: kernels + interned bars, MODELED +0.3–0.7 GB/worker) and interacts with the
-#: divided per-tuple rank budget (DEC-SWEEP-STALL-OOM-GUARDS-001 — a heavy k=5
-#: tuple already sits near the OOM-quarantine boundary), so default-ON ships
-#: only as a separate one-constant PR carrying the §8 soak RSS + wall-time
-#: evidence (the DEC-SWEEP-RUST-METRICS-001 → -DEFAULT-ON-001 two-step
-#: precedent). Results are byte-identical either way (golden-pinned).
+#: kernels + interned bars — MODELED worst case ~0.66–0.73 GB/worker, two
+#: ~318 MB 555k-bar CandleBar list copies dominate, ≈ +5.3–5.8 GB pool-wide
+#: at 8 workers), and that RSS stacks on UNDIVIDED rank peaks: TODAY each
+#: worker plans a heavy tuple against the FULL total-RAM/6 rank allowance
+#: (``sweep_run`` resolves ``memory_budget_bytes`` at the default
+#: ``workers=1``; the per-worker division is in-flight PR #1386,
+#: DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001), while
+#: DEC-SWEEP-STALL-OOM-GUARDS-001 is the REACTIVE OOM quarantine — a
+#: backstop, never a divider — and a heavy k=5 tuple already sits near that
+#: boundary. Hence default-ON ships only as a separate one-constant PR
+#: carrying the §8 M4-Pro soak RSS + wall-time evidence (the
+#: DEC-SWEEP-RUST-METRICS-001 → -DEFAULT-ON-001 two-step precedent).
+#: Results are byte-identical either way (ON≡OFF pinned via full
+#: result-tree + audit-chain + content-hash comparison over a real spawn
+#: pool; the frozen-hash goldens run flag-OFF unmodified).
 WORKER_KERNEL_CACHE_DEFAULT: Final[bool] = False
 
 #: Environment variable overriding the per-worker kernel-cache CAPACITY (a
@@ -503,8 +520,20 @@ WORKER_KERNEL_CACHE_DEFAULT: Final[bool] = False
 #: (:func:`worker_kernel_capacity_default` — the orchestrator's own
 #: ``len(proximities) × len(fib_anchors)`` sizing law); an INVALID value
 #: (non-integer / ``< 1``) falls back to the default and is logged LOUDLY at
-#: WARNING (the :func:`resolve_stall_seconds` invalid-env loudness).
+#: WARNING (the :func:`resolve_stall_seconds` invalid-env loudness); a value
+#: above :data:`WORKER_KERNEL_CAPACITY_MAX` is CLAMPED to it, logged LOUDLY.
 WORKER_KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
+
+#: Upper clamp on the env-overridden per-worker kernel-cache capacity.
+#: 64 sits comfortably above any real ``proximities × fib_anchors`` product
+#: (a handful of proximities × ≤4 anchors) while keeping the LRU bound a
+#: REAL memory bound: each resident kernel retains ~30 MB-class state beyond
+#: the shared bars, so a pathological override (e.g. ``=100000000``) would
+#: otherwise disable eviction entirely and silently defeat the capacity law
+#: this cache ships under. Values above it are clamped with ONE loud
+#: ``sweep_parallel.worker_kernel_capacity.clamped`` WARNING naming the
+#: requested value (the fail-safe env convention — never a silent accept).
+WORKER_KERNEL_CAPACITY_MAX: Final[int] = 64
 
 #: Capacity of the per-worker bars-INTERN memo — the tuple stream visits
 #: ``(instrument, tf)`` keys in one contiguous run each (outer-loop
@@ -582,12 +611,16 @@ def resolve_worker_kernel_capacity(grid: SweepGridConfig, env: dict[str, str] | 
 
     Reads :data:`WORKER_KERNEL_CAPACITY_ENV` from *env* (default
     :data:`os.environ`): unset/blank → :func:`worker_kernel_capacity_default`;
-    a valid integer ``>= 1`` → that value verbatim (the operator lever for a
-    memory-tight box — a smaller capacity trades builds for RSS, never
-    correctness); an INVALID value (non-integer / ``< 1``) → the default,
-    logged LOUDLY at WARNING on ``sweep_parallel.worker_kernel_capacity.invalid``
-    naming the value via ``repr`` (the :func:`resolve_stall_seconds`
-    invalid-env loudness). O(1).
+    a valid integer in ``[1, WORKER_KERNEL_CAPACITY_MAX]`` → that value
+    verbatim (the operator lever for a memory-tight box — a smaller capacity
+    trades builds for RSS, never correctness); an INVALID value (non-integer /
+    ``< 1``) → the default, logged LOUDLY at WARNING on
+    ``sweep_parallel.worker_kernel_capacity.invalid`` naming the value via
+    ``repr`` (the :func:`resolve_stall_seconds` invalid-env loudness); a value
+    ``> WORKER_KERNEL_CAPACITY_MAX`` → CLAMPED to the ceiling, logged LOUDLY
+    at WARNING on ``sweep_parallel.worker_kernel_capacity.clamped`` — an
+    over-large capacity would disable LRU eviction and silently defeat the
+    memory bound (a pure RSS footgun, never a correctness lever). O(1).
     """
     source = os.environ if env is None else env
     default = worker_kernel_capacity_default(grid)
@@ -605,6 +638,13 @@ def resolve_worker_kernel_capacity(grid: SweepGridConfig, env: dict[str, str] | 
             fallback=default,
         )
         return default
+    if parsed > WORKER_KERNEL_CAPACITY_MAX:
+        _LOG.warning(
+            "sweep_parallel.worker_kernel_capacity.clamped",
+            requested_env=repr(raw),
+            clamped_to=WORKER_KERNEL_CAPACITY_MAX,
+        )
+        return WORKER_KERNEL_CAPACITY_MAX
     return parsed
 
 
@@ -1025,8 +1065,9 @@ class _WorkerContext:
     #: (:func:`resolve_worker_kernel_cache` / :func:`resolve_worker_kernel_capacity`)
     #: and carried as defaulted-LAST additive fields (the ``reference_stamper``
     #: precedent) so a pre-wiring construction stays valid. The DEFAULT
-    #: ``False`` is the byte-identical + allocation-identical legacy path —
-    #: :func:`_worker_init` constructs NO cache when it is off.
+    #: ``False`` is the byte-identical legacy path (OFF adds only a few
+    #: None-returning helper calls per tuple) — :func:`_worker_init`
+    #: constructs NO cache when it is off.
     worker_kernel_cache: bool = False
     worker_kernel_capacity: int = 1
 
@@ -1040,7 +1081,8 @@ _WORKER_CTX: _WorkerContext | None = None
 #: The per-worker-PROCESS resident-kernel cache (DEC-SWEEP-WORKER-KERNEL-CACHE-001)
 #: — a sibling module global to :data:`_WORKER_CTX`, constructed by
 #: :func:`_worker_init` IFF the context enables it (the default-OFF path
-#: constructs NOTHING — byte- AND allocation-identical to the legacy path).
+#: constructs NOTHING — results byte-identical to the legacy path; OFF adds
+#: only a few None-returning helper calls per tuple).
 #: Workers persist for the pool lifetime (no ``max_tasks_per_child``), so the
 #: cache lives across every tuple the worker processes — the whole win.
 _WORKER_KERNEL_CACHE: ResidentKernelCache | None = None
@@ -1050,11 +1092,15 @@ _WORKER_KERNEL_CACHE: ResidentKernelCache | None = None
 #: kernels share ONE resident bars copy (each dispatch delivers a fresh pickled
 #: copy; :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel` retains bar
 #: REFERENCES, so without interning every kernel would retain its own
-#: value-identical multi-hundred-MB copy). ``None`` when the cache is off.
+#: value-identical multi-hundred-MB copy). ``None`` when the cache is off —
+#: or after a mismatch fail-safe disable (see :func:`_intern_bars`).
 _WORKER_BARS_MEMO: OrderedDict[tuple[str, str], Sequence[CandleBar]] | None = None
 
 #: Warn-once latch for :func:`_intern_bars`'s mismatch degrade (per worker
-#: process — reset by :func:`_worker_init`).
+#: process — reset by :func:`_worker_init`). Belt-and-braces since the
+#: fix-round-1 mismatch disable: a mismatch kills the memo outright, so a
+#: SECOND natural mismatch per worker is structurally unreachable — the
+#: latch guards only a future re-enable path (arm pinned by a direct test).
 _WORKER_BARS_MEMO_WARNED: bool = False
 
 
@@ -1105,7 +1151,8 @@ def _worker_init(ctx: _WorkerContext) -> None:
     # appended AFTER the existing initialisation (the RAYON_NUM_THREADS=1 pin
     # above is LOAD-BEARING for the published perf law and is untouched). The
     # flag + capacity were resolved ONCE in the parent and travel in the ctx;
-    # the OFF path constructs NOTHING (byte- + allocation-identical legacy).
+    # the OFF path constructs NOTHING (byte-identical legacy results; OFF
+    # adds only a few None-returning helper calls per tuple).
     global _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO, _WORKER_BARS_MEMO_WARNED  # noqa: PLW0603
     _WORKER_BARS_MEMO_WARNED = False
     if ctx.worker_kernel_cache:
@@ -1172,6 +1219,9 @@ def _run_tuple_in_worker(
     # resident cache through the EXISTING run_one_tuple(kernel_cache=) seam.
     # OFF path: _WORKER_KERNEL_CACHE is None → the memo is None → `bars` is
     # returned UNTOUCHED and kernel_cache=None is exactly the legacy default.
+    # ORDERING IS LOAD-BEARING: the cache global is read AFTER _intern_bars —
+    # a bars-memo MISMATCH disables the cache (fail-safe, see _intern_bars),
+    # and this tuple must observe that disable (never a stale-kernel serve).
     bars = _intern_bars(tuple_.instrument, tuple_.tf.label, bars)
     kernel_cache = _WORKER_KERNEL_CACHE
     builds_before = kernel_cache.builds if kernel_cache is not None else 0
@@ -1230,14 +1280,30 @@ def _intern_bars(instrument: str, tf_label: str, bars: Sequence[CandleBar]) -> S
 
     GUARD (never trust a proxy blindly): a memo hit is honored only when the
     fresh copy matches the resident one on length + first/last bar equality;
-    on a MISMATCH the entry is DROPPED and the FRESH bars are used (safe
-    degrade — a mismatch means a parent-memo bug that equally breaks the
-    sequential cache's documented same-bars contract) with ONE
+    on a MISMATCH the FRESH bars are used and the WHOLE per-worker mechanism
+    — the kernel cache AND this memo — is DISABLED for the rest of the worker
+    process (both module globals set ``None``), with ONE
     ``sweep_parallel.worker_bars_memo_mismatch`` WARNING per worker process.
+    WHY the full disable (the R1 review's stale-kernel hazard): a mismatch
+    means the parent shipped value-DIFFERENT bars for a key this worker may
+    already hold kernels for, so ANY later cache hit could pair ``bar_bits``
+    built on the STALE resident bars with a trade sim running on fresh bars.
+    :class:`~brutex.engine.sweep_kernel.ResidentKernelCache` exposes no
+    per-key eviction (the seam is CALL-ONLY — ``sweep_kernel.py`` belongs to
+    the kernel track), so the smallest SOUND degrade is fail-safe OFF: every
+    resident kernel becomes unreachable and the mismatching tuple — and every
+    later one in this worker — runs the legacy byte-correct per-tuple build
+    on the bars it actually simulates. (The state is unreachable in a real
+    sweep — ``bars_for`` is deterministic per the
+    DEC-SWEEP-RESIDENT-KERNEL-001 contract — this is belt-and-braces; the
+    worker's telemetry counters freeze at the pre-mismatch snapshot, so the
+    drain-end reuse summary undercounts on an already-WARNed-suspect run.)
     Cache OFF (memo ``None``) or an EMPTY bars sequence returns *bars*
     untouched. O(1) per call.
     """
-    global _WORKER_BARS_MEMO_WARNED  # noqa: PLW0603 — the per-worker warn-once latch
+    # The per-worker warn-once latch + the fail-safe mismatch disable both
+    # rewrite worker-process module globals (hence the lint waiver below).
+    global _WORKER_BARS_MEMO_WARNED, _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO  # noqa: PLW0603
     memo = _WORKER_BARS_MEMO
     if memo is None or not bars:
         return bars
@@ -1247,7 +1313,8 @@ def _intern_bars(instrument: str, tf_label: str, bars: Sequence[CandleBar]) -> S
         if len(resident) == len(bars) and resident[0] == bars[0] and resident[-1] == bars[-1]:
             memo.move_to_end(key)
             return resident
-        memo.pop(key)
+        _WORKER_KERNEL_CACHE = None
+        _WORKER_BARS_MEMO = None
         if not _WORKER_BARS_MEMO_WARNED:
             _WORKER_BARS_MEMO_WARNED = True
             _LOG.warning(
@@ -1866,6 +1933,13 @@ class ParallelGridDriver:
             # builds-vs-hits ledger of the per-worker kernel reuse. Emitted
             # only when at least one stamped result arrived (i.e. the flag was
             # ON and a worker ran) — an OFF run logs nothing new.
+            # HONESTY: builds_total/hits_total are WORKER-SPLIT-DEPENDENT (how
+            # tuples land across workers varies run-to-run for the same grid) —
+            # only the sum builds+hits and the builds ≤ keys × workers bound
+            # are invariant; a downstream consumer must never treat either
+            # figure as reproducible. The summary is SKIPPED outright on a
+            # broken-pool abort (_quarantine_broken_pool raises above, before
+            # this block — the run is aborting loudly there anyway).
             _LOG.info(
                 "sweep_parallel.kernel_reuse_summary",
                 builds_total=sum(b for b, _ in self._kernel_stats.values()),
@@ -2602,6 +2676,7 @@ __all__ = [
     "WORKER_KERNEL_CACHE_DEFAULT",
     "WORKER_KERNEL_CACHE_ENV",
     "WORKER_KERNEL_CAPACITY_ENV",
+    "WORKER_KERNEL_CAPACITY_MAX",
     "AuditWriterLike",
     "ParallelGridDriver",
     "SweepParallelUsageError",
