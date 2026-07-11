@@ -113,7 +113,8 @@ the flag, not a real production limitation.
   residuals (per-worker scope; frozen telemetry under-counts the summary;
   the probe is a detector, never the safety rail). HONEST
   envelope: default-OFF because the retained state ADDS per-worker RSS —
-  MODELED worst case ~0.66–0.73 GB/worker (two ~318 MB 555k-bar CandleBar
+  MODELED worst case ~0.66–0.73 GB/worker at the default capacity sizing
+  (two ~318 MB 555k-bar CandleBar
   list copies dominate) ≈ +5.3–5.8 GB pool-wide at 8 workers — and that RSS
   stacks on UNDIVIDED rank peaks: the per-tuple rank budget does NOT yet
   divide across workers (``sweep_run`` resolves it at the default
@@ -507,7 +508,8 @@ WORKER_KERNEL_CACHE_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CACHE"
 
 #: The per-worker kernel cache DEFAULT — **OFF** (DEC-SWEEP-WORKER-KERNEL-CACHE-001).
 #: The ONE later-ADR flip lever: the cache changes per-worker RSS (retained
-#: kernels + interned bars — MODELED worst case ~0.66–0.73 GB/worker, two
+#: kernels + interned bars — MODELED worst case ~0.66–0.73 GB/worker at the
+#: default capacity sizing, two
 #: ~318 MB 555k-bar CandleBar list copies dominate, ≈ +5.3–5.8 GB pool-wide
 #: at 8 workers), and that RSS stacks on UNDIVIDED rank peaks: TODAY each
 #: worker plans a heavy tuple against the FULL total-RAM/6 rank allowance
@@ -2523,8 +2525,9 @@ class ParallelGridDriver:
             f"sidecar {sidecar}: [{labels}]. An identical-config resume SKIPS them "
             f"(reported as tuples_quarantined_prior — they are NOT silently "
             f"recomputed). Remediation: relieve the memory pressure — reduce "
-            f"{SWEEP_WORKERS_ENV} (fewer workers raises each worker's per-tuple "
-            f"memory budget AND cuts total pressure), reduce the grid's k, or raise "
+            f"{SWEEP_WORKERS_ENV} (fewer workers cuts total concurrent memory "
+            f"pressure; the per-worker budget division is in-flight PR #1386), "
+            f"reduce the grid's k, or raise "
             f"{MEM_BUDGET_ENV} — then DELETE the tuples' entries from the sidecar "
             f"(or the whole file) and resume: the tuples are then genuinely "
             f"recomputed."
