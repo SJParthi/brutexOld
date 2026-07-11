@@ -54,6 +54,7 @@ from brutex.dashboard.db_view import (
     _WINDOW_KEY_COLUMNS,
     WINDOW_PAGE_CACHE_CAPACITY,
     _build_window_payload_duckdb,
+    _close_cursor,
     _compute_cursor,
     _ledger_scan_source,
     _ledger_stamp_token,
@@ -64,6 +65,7 @@ from brutex.dashboard.db_view import (
     build_window_payload,
     make_window_payload_caches,
     phase_progress_payload,
+    query_window_ledger_page,
 )
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.data import window_ledger_store as wls
@@ -1140,3 +1142,138 @@ class TestComputeCursor:
         for t in pollers:
             t.join(timeout=30)
         assert not errors, f"interleaved statements corrupted a result: {errors[0]!r}"
+
+    def test_store_locked_read_conn_yields_a_fresh_locked_view(self, tmp_path: Path) -> None:
+        """THE round-1 BLOCKER pin: the PRODUCTION conn (`store.connection`, a
+        `_LockedReadConn`) must never fall back to itself — `cursor()` yields
+        a FRESH view with its own hold state. Pre-fix, `_LockedReadConn` had
+        no `cursor()`, so `_compute_cursor` silently returned the ONE
+        single-thread-per-view instance the SWR revalidator daemons then
+        shared with the request thread — corrupting `_held` cross-thread and
+        leaking the store read lock (a permanent dashboard-read freeze, the
+        exact class this branch exists to fix)."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        try:
+            view = store.connection
+            isolated = _compute_cursor(view)
+            assert isolated is not view, "production store conn fell back to the shared view"
+            assert type(isolated) is type(view)
+            assert isolated.execute("SELECT 42").fetchone() == (42,)
+        finally:
+            store.close()
+
+    def test_concurrent_compute_on_store_conn_waits_never_corrupts(self, tmp_path: Path) -> None:
+        """The refuter's deterministic held-lock interleave, at db_view's own
+        seam: the request view HOLDS the read lock mid-statement (executed,
+        not yet fetched) while a background compute rides
+        `_compute_cursor(view)`. Pre-fix (same shared view) the background
+        `execute()` released the holder's lock from a NON-owner thread
+        (`RuntimeError: cannot release un-acquired lock`) and the holder then
+        LEAKED its acquisition — every later read deadlocked. Post-fix the
+        fresh view WAITS, completes cleanly, and the lock ends FREE."""
+        import threading as _threading
+
+        from brutex.data.instrument_store import InstrumentStore
+
+        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        try:
+            view = store.connection
+            view.execute("SELECT 1")  # the request thread's live hold — no fetch yet
+            errors: list[BaseException] = []
+            finished = _threading.Event()
+
+            def _revalidator() -> None:
+                try:
+                    assert _compute_cursor(view).execute("SELECT 2").fetchone() == (2,)
+                except BaseException as exc:  # the oracle collects everything
+                    errors.append(exc)
+                finally:
+                    finished.set()
+
+            reval = _threading.Thread(target=_revalidator, daemon=True)
+            reval.start()
+            # The isolated view must WAIT on the read lock, never break the holder.
+            assert not finished.wait(timeout=0.3), f"finished against a held lock: {errors!r}"
+            assert view.fetchone() == (1,)  # the holder completes + releases
+            assert finished.wait(timeout=5.0)
+            reval.join(timeout=5.0)
+            assert not errors, f"background compute corrupted the shared hold: {errors[0]!r}"
+            # The lock is FREE: a fresh view's read completes within the bound.
+            done = _threading.Event()
+
+            def _probe() -> None:
+                assert store.connection.execute("SELECT 3").fetchone() == (3,)
+                done.set()
+
+            probe = _threading.Thread(target=_probe, daemon=True)
+            probe.start()
+            assert done.wait(timeout=5.0), "store read lock leaked — later reads deadlock"
+            probe.join(timeout=5.0)
+        finally:
+            store.close()
+
+    def test_legacy_probe_raise_never_leaks_the_store_read_lock(self, tmp_path: Path) -> None:
+        """The `_close_cursor` hygiene regression: the legacy-shape probe
+        raises AFTER a description-only read, leaving its `_LockedReadConn`
+        view HOLDING the store read lock — without the compute's `finally`
+        close, that hold is stranded forever (deadlock on a legacy-shape
+        ledger; pre-fix this leaked on BOTH shapes — the shared request view
+        and, with `cursor()` alone, the per-compute view)."""
+        import threading as _threading
+
+        from brutex.data.instrument_store import InstrumentStore
+
+        _write_legacy_base(tmp_path, "EMPTYCO")
+        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        try:
+            rows, total = query_window_ledger_page(store.connection, tmp_path, limit=100, offset=0)
+            assert total == 1  # served by the byte-identical legacy parse
+            assert len(rows) == 1
+            done = _threading.Event()
+
+            def _probe() -> None:
+                assert store.connection.execute("SELECT 42").fetchone() == (42,)
+                done.set()
+
+            probe = _threading.Thread(target=_probe, daemon=True)
+            probe.start()
+            assert done.wait(timeout=5.0), (
+                "the legacy-shape probe's description-only raise stranded the "
+                "store read lock — later dashboard reads deadlock"
+            )
+            probe.join(timeout=5.0)
+        finally:
+            store.close()
+
+    def test_close_cursor_never_closes_the_shared_conn(self) -> None:
+        """The fallback arm (`cursor is conn` — the caller's own connection)
+        must never be closed out from under the request thread."""
+
+        class _Conn:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        conn = _Conn()
+        _close_cursor(conn, conn)
+        assert not conn.closed
+
+    def test_close_cursor_tolerates_missing_and_raising_close(self) -> None:
+        """Cleanup is best-effort: a cursor without `close()` is a no-op and a
+        raising `close()` is swallowed — hygiene never masks the compute's own
+        outcome or 500s a poll."""
+
+        class _NoClose:
+            pass
+
+        _close_cursor(_NoClose(), object())  # no close attr — a clean no-op
+
+        class _Boom:
+            def close(self) -> None:
+                raise RuntimeError("wedged mid-close")
+
+        _close_cursor(_Boom(), object())  # swallowed

@@ -366,6 +366,33 @@ class TestLifecycle:
     def test_stop_never_started_is_safe(self) -> None:
         LoopWatchdog().stop()  # no task, no monitor — a clean no-op
 
+    def test_restart_after_stop_rearms_the_monitor(self) -> None:
+        """Round-1 nit regression: `stop()` sets the stop event and the DEFAULT
+        monitor wait IS `_stop_event.wait`, so without `start()` clearing it a
+        restarted monitor's FIRST wait returns True and the thread exits
+        immediately — a silently-dead watchdog. FAILS-BEFORE: the restarted
+        monitor is no longer alive milliseconds after start."""
+        wd = LoopWatchdog()  # default wait_fn — the stop event's own wait
+
+        async def _cycle() -> None:
+            wd.start(asyncio.get_running_loop())
+            wd.stop()  # sets the stop event; join is fast (the wait returns True)
+            wd.start(asyncio.get_running_loop())
+            # With the event cleared the fresh monitor parks in its 1 s check
+            # wait; with it still SET the thread exits within microseconds.
+            await asyncio.sleep(0.05)
+            monitor = wd._monitor
+            assert monitor is not None and monitor.is_alive(), (
+                "restarted monitor exited immediately — stop event not cleared by start()"
+            )
+
+        try:
+            asyncio.run(_cycle())
+        finally:
+            wd.stop()
+        names = {t.name for t in threading.enumerate()}
+        assert "bx-loop-watchdog-monitor" not in names  # the final stop reaped it
+
     def test_monitor_loop_samples_until_stop(self) -> None:
         """The injectable wait_fn drives EXACT sample counts — no sleeps."""
         calls = {"n": 0}

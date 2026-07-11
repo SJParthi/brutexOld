@@ -378,6 +378,11 @@ class LoopWatchdog:
         """
         if self._started:
             return
+        # Re-arm after a prior stop(): the stop event stays set across the
+        # cycle, and the default monitor wait IS `_stop_event.wait` — without
+        # the clear, a restarted monitor's FIRST wait returns True and the
+        # thread exits immediately (a silently-dead watchdog; round-1 nit).
+        self._stop_event.clear()
         with self._beat_lock:
             self._last_beat = self._clock()
         task = loop.create_task(self._heartbeat(), name="bx-loop-watchdog-heartbeat")

@@ -155,9 +155,9 @@ class TestSpotCascadeFnoPrune:
         )
 
     def test_pruned_walk_equals_unpruned_filtered(self, lake: Path) -> None:
-        """Byte-equality: the pruned walk's spot rows == the unpruned walk's
-        rows through `filter_spot_datasets` (the belt) — walk path (no
-        manifest exists on this fresh lake)."""
+        """Field-equality (dataclass `__eq__`): the pruned walk's spot rows ==
+        the unpruned walk's rows through `filter_spot_datasets` (the belt) —
+        walk path (no manifest exists on this fresh lake)."""
         from brutex.dashboard.discovery_warm import filter_spot_datasets
         from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 

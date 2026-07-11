@@ -32,6 +32,7 @@ trigger an unbounded read.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
@@ -5530,13 +5531,23 @@ def _compute_cursor(conn: Any) -> Any:
     per-connection pending-result state, so interleaved statements corrupt
     each other's results (reproduced in-suite: a background counts fold
     fetched the request's 16-column page rows and died on the 3-tuple
-    unpack). ``conn.cursor()`` yields an independent connection over the same
-    database, isolating every CACHED compute's statements; the inline
-    single-flight computes ride the same cursor, which also closes the
-    pre-existing (rare) cross-request interleave on these families. A conn
-    without ``cursor()`` (test fakes / exotic injections) — or a raising
-    ``cursor()`` — falls back to *conn* itself (those callers drive computes
-    inline + single-threaded; isolation is best-effort, never a 500).
+    unpack). ``conn.cursor()`` yields an isolated statement holder for BOTH
+    production shapes (round-1 BLOCKER fix — the original fallback rationale
+    was FALSE for the store conn, which had no ``cursor()`` and silently
+    shared one single-thread-per-view instance across the revalidator
+    daemons): a raw DuckDB connection returns an independent engine
+    connection (its own pending-result state), and the store's
+    ``_LockedReadConn`` returns a FRESH locked view over the same read
+    cursor + read lock (independent per-view hold state; each compute's
+    execute→fetch stays atomic under the store read lock — never a shared
+    ``_held`` flag, whose cross-thread corruption leaked the read lock and
+    froze every later dashboard read). The inline single-flight computes ride
+    the same cursor, which also closes the pre-existing (rare) cross-request
+    interleave on these families. A conn without ``cursor()`` (test fakes /
+    exotic injections — genuinely single-threaded drivers) — or a raising
+    ``cursor()`` — falls back to *conn* itself (isolation is best-effort,
+    never a 500). Callers pair every isolated cursor with
+    :func:`_close_cursor` so a compute can never strand a held view.
     """
     factory = getattr(conn, "cursor", None)
     if factory is None:
@@ -5545,6 +5556,59 @@ def _compute_cursor(conn: Any) -> Any:
         return factory()
     except Exception:  # pylint: disable=broad-except — isolation is best-effort
         return conn
+
+
+def _close_cursor(cursor: Any, conn: Any) -> None:
+    """Best-effort close of a per-compute isolated cursor — NEVER the shared *conn*.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 round 1: an isolated cursor
+    can end its compute still HOLDING state — the legacy-shape probe
+    (`_ensure_full_schema`) raises ``ValueError`` after a description-only
+    read, which on a ``_LockedReadConn`` view leaves the store read lock
+    acquired (an abandoned hold = every later dashboard read deadlocks; the
+    request-shared view was previously rebalanced by the NEXT execute, a
+    per-compute view never is) — and a raw DuckDB cursor is an engine
+    connection worth freeing eagerly rather than at GC. The fallback arm
+    (``cursor is conn`` — the caller's own shared connection) is never
+    closed; a missing/raising ``close`` is swallowed (cleanup can never mask
+    the compute's own outcome or 500 a poll).
+    """
+    if cursor is conn:
+        return
+    close = getattr(cursor, "close", None)
+    if close is None:
+        return
+    with contextlib.suppress(Exception):  # cleanup is best-effort
+        close()
+
+
+def _isolated_counts_total(
+    conn: Any, source: _LedgerScanSource
+) -> tuple[dict[str, dict[str, int]], int]:
+    """:func:`_window_counts_total` on a per-compute isolated cursor (closed after).
+
+    The ONE compute body the flagged counts caches run — possibly on a
+    background SWR revalidator daemon concurrent with the request thread —
+    so it must never touch the caller's shared *conn* directly
+    (`_compute_cursor`) and must release its view even on a raise
+    (`_close_cursor`).
+    """
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_total(cursor, source)
+    finally:
+        _close_cursor(cursor, conn)
+
+
+def _isolated_counts_since(
+    conn: Any, source: _LedgerScanSource, since_iso: str
+) -> tuple[dict[str, dict[str, int]], int]:
+    """The per-run twin of :func:`_isolated_counts_total` — same isolation law."""
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_since(cursor, source, since_iso)
+    finally:
+        _close_cursor(cursor, conn)
 
 
 #: Resident-key bound for the shared ledger read cache: 2 key families
@@ -6614,8 +6678,11 @@ def query_window_ledger_page(
             schema (writer-pinned). Run at most once per fresh attempt; *c* is
             the calling compute's statement-isolated cursor (`_compute_cursor`
             — the flagged caches may run a compute on a background revalidator,
-            concurrent with the request thread's statements on the shared
-            conn)."""
+            concurrent with the request thread's statements; a production
+            store conn isolates via `_LockedReadConn.cursor()`), closed by the
+            compute's `finally` (`_close_cursor`) so the legacy-shape raise
+            below — thrown AFTER a description-only read — can never strand a
+            held read-lock view (round-1 BLOCKER hygiene)."""
             nonlocal probed
             if probed or not path.is_file():
                 return
@@ -6636,27 +6703,36 @@ def query_window_ledger_page(
 
         def _total() -> int:
             c = _compute_cursor(conn)
-            _ensure_full_schema(c)
-            # COUNT(*) over the fold = the number of DISTINCT window keys (the
-            # QUALIFY keeps exactly one row per key; a steady-state base holds
-            # unique keys by construction — save writes the folded to_rows()).
-            row = c.execute(
-                f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
-                list(source.params),
-            ).fetchone()
-            return int(row[0]) if row else 0
+            try:
+                _ensure_full_schema(c)
+                # COUNT(*) over the fold = the number of DISTINCT window keys (the
+                # QUALIFY keeps exactly one row per key; a steady-state base holds
+                # unique keys by construction — save writes the folded to_rows()).
+                row = c.execute(
+                    f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
+                    list(source.params),
+                ).fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                # The legacy-shape probe raises AFTER a description-only read —
+                # on a `_LockedReadConn` view that hold must be released here or
+                # the store read lock leaks forever (round-1 BLOCKER hygiene).
+                _close_cursor(c, conn)
 
         def _page() -> tuple[tuple[Any, ...], ...]:
             c = _compute_cursor(conn)
-            _ensure_full_schema(c)
-            # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
-            # source params bind FIRST (the subquery precedes them in the text).
-            cursor = c.execute(
-                f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
-                f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
-                [*source.params, limit, offset],
-            )
-            return tuple(_ledger_page_row(raw) for raw in cursor.fetchall())
+            try:
+                _ensure_full_schema(c)
+                # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
+                # source params bind FIRST (the subquery precedes them in the text).
+                cursor = c.execute(
+                    f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
+                    f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
+                    [*source.params, limit, offset],
+                )
+                return tuple(_ledger_page_row(raw) for raw in cursor.fetchall())
+            finally:
+                _close_cursor(c, conn)
 
         if count_cache is None:
             total = _total()
@@ -6925,13 +7001,17 @@ def phase_progress_payload(
             # #920 adaptive floor throttle mid-pull recomputes. The SAME key
             # `_build_window_payload_duckdb` uses, so the two routes share one
             # warm entry.
-            # The compute runs on a statement-isolated cursor: the flagged cache
-            # may execute it on a background revalidator, concurrent with this
-            # thread's own statements on the shared conn (`_compute_cursor`).
+            # The compute runs on a statement-isolated cursor, closed after
+            # (`_isolated_counts_total`): the flagged cache may execute it on a
+            # background revalidator, concurrent with this thread's own
+            # statements — and a production store conn's isolation rides
+            # `_LockedReadConn.cursor()` (a fresh per-compute view; the shared
+            # single-thread view corrupted its hold flag cross-thread and
+            # leaked the store read lock — round-1 BLOCKER).
             counts, _total = count_cache.get_or_compute(
                 f"window-counts|{ledger_file.as_posix()}",
                 generation=revision_generation(source.stamp_token),
-                compute=lambda: _window_counts_total(_compute_cursor(conn), source),
+                compute=lambda: _isolated_counts_total(conn, source),
             )
         return counts
 
@@ -7153,13 +7233,15 @@ def _build_window_payload_duckdb(
         if since is not None:
             counts_since, _since_total = _window_counts_since(conn, source, since)
     else:
-        # Computes run on a statement-isolated cursor (`_compute_cursor`): the
-        # flagged caches may execute them on a background revalidator daemon,
-        # concurrent with this thread's own statements on the shared conn.
+        # Computes run on a statement-isolated cursor, closed after
+        # (`_isolated_counts_total`): the flagged caches may execute them on a
+        # background revalidator daemon, concurrent with this thread's own
+        # statements — a production store conn isolates via
+        # `_LockedReadConn.cursor()` (fresh per-compute view, round-1 BLOCKER).
         counts, total = count_cache.get_or_compute(
             f"window-counts|{ledger_glob}",
             generation=stamp_generation,
-            compute=lambda: _window_counts_total(_compute_cursor(conn), source),
+            compute=lambda: _isolated_counts_total(conn, source),
         )
         if since is not None:
             # SAME memo pattern as the lifetime counts (REUSE, no new cache class —
@@ -7170,7 +7252,7 @@ def _build_window_payload_duckdb(
             counts_since, _since_total = count_cache.get_or_compute(
                 since_key,
                 generation=stamp_generation,
-                compute=lambda: _window_counts_since(_compute_cursor(conn), source, since),
+                compute=lambda: _isolated_counts_since(conn, source, since),
             )
 
     valid_buckets = ("spot", "options", "futures")
@@ -7236,17 +7318,24 @@ def _build_window_payload_duckdb(
             # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
             # a superseded row version can never resurrect through a filter); the
             # source params bind FIRST (the subquery precedes them in the SQL text).
-            # Statement-isolated cursor: this compute may run on the flagged page
-            # cache's background revalidator, concurrent with the request thread's
-            # own statements on the shared conn (`_compute_cursor`).
+            # Statement-isolated cursor, closed after: this compute may run on the
+            # flagged page cache's background revalidator, concurrent with the
+            # request thread's own statements — a production store conn isolates
+            # via `_LockedReadConn.cursor()` (fresh per-compute view; the shared
+            # single-thread view leaked the store read lock — round-1 BLOCKER).
             params: list[Any] = [*source.params, *where_params, limit, offset]
-            cursor = _compute_cursor(conn).execute(
-                f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
-                params,
-            )
-            out_columns = [str(col[0]) for col in (cursor.description or [])]
+            isolated = _compute_cursor(conn)
+            try:
+                cursor = isolated.execute(
+                    f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
+                    params,
+                )
+                out_columns = [str(col[0]) for col in (cursor.description or [])]
+                raw_rows = cursor.fetchall()
+            finally:
+                _close_cursor(isolated, conn)
             page: list[dict[str, Any]] = []
-            for raw in cursor.fetchall():
+            for raw in raw_rows:
                 # DuckDB returns native Python values (str for the string columns, int for the
                 # int64 ones, None for a null) — pass them straight to the shared `_window_row`
                 # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
