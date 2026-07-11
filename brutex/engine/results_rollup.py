@@ -924,36 +924,44 @@ class ScanLike(Protocol):
     """
 
     @property
-    def rows(self) -> tuple[ResultRow, ...]:  # pragma: no cover - protocol
+    def rows(self) -> tuple[ResultRow, ...]:
         """Every distinct (run_id-deduped) persisted finalist row."""
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     @property
-    def store_count(self) -> int:  # pragma: no cover - protocol
+    def store_count(self) -> int:
         """How many per-tuple stores the scan read."""
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     @property
-    def skipped(self) -> int:  # pragma: no cover - protocol
+    def skipped(self) -> int:
         """Unreadable stores skipped by the resilient loader."""
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     @property
-    def run_id_conflicts(self) -> int:  # pragma: no cover - protocol
+    def run_id_conflicts(self) -> int:
         """Cross-store same-run_id content conflicts observed."""
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     @property
-    def instruments(self) -> tuple[str, ...]:  # pragma: no cover - protocol
+    def instruments(self) -> tuple[str, ...]:
         """Sorted distinct instrument labels across the rows."""
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     @property
-    def timeframes(self) -> tuple[str, ...]:  # pragma: no cover - protocol
+    def timeframes(self) -> tuple[str, ...]:
         """Sorted distinct timeframe labels across the rows."""
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     @property
-    def directions(self) -> tuple[str, ...]:  # pragma: no cover - protocol
+    def directions(self) -> tuple[str, ...]:
         """Sorted distinct direction labels across the rows."""
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     @property
-    def snapshot_hashes(self) -> tuple[str, ...]:  # pragma: no cover - protocol
+    def snapshot_hashes(self) -> tuple[str, ...]:
         """Sorted distinct recorded data-snapshot eras."""
+        raise NotImplementedError  # structural Protocol stub — never executed
 
 
 @dataclass
