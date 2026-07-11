@@ -22,9 +22,8 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from structlog.testing import capture_logs
-
 from brutex.data import lake_rust_render as lrr
+from structlog.testing import capture_logs
 
 # ---------------------------------------------------------------------------
 # harness
@@ -97,9 +96,7 @@ class TestFlagParsing:
             assert lrr.lake_rust_render_enabled() is False
         assert logs == []
 
-    def test_whitespace_empty_defaults_off_silently(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_whitespace_empty_defaults_off_silently(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "   ")
         with capture_logs() as logs:
             assert lrr.lake_rust_render_enabled() is False
@@ -196,9 +193,7 @@ class TestVersionGuard:
         assert disabled[0]["installed_polars"] == "1.43.0"
         assert disabled[0]["crate_pinned_polars"] == "1.42.1"
 
-    def test_mismatch_never_calls_the_crate_render(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_mismatch_never_calls_the_crate_render(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[bytes] = []
 
         def _render(ipc: bytes) -> bytes:
@@ -461,4 +456,4 @@ class TestLatchAndReset:
         lrr.reset_lake_rust_render_for_tests()
         assert not lrr.rust_render_disabled()
         assert lrr._BURN_IN_REMAINING[0] == lrr.BURN_IN_SAMPLES
-        assert lrr._OBSERVABILITY_MEMO == set()
+        assert set() == lrr._OBSERVABILITY_MEMO

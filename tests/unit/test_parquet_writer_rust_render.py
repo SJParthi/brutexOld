@@ -22,12 +22,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from structlog.testing import capture_logs
-
 from brutex.data import lake_rust_render as lrr
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ROW_GROUP_SIZE, ZSTD_LEVEL, ParquetWriter, _ipc_bytes
+from structlog.testing import capture_logs
 
 
 @pytest.fixture(autouse=True)

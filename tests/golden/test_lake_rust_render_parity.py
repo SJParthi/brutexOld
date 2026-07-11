@@ -120,7 +120,7 @@ def _fresh_process_view() -> Iterator[None]:
 
 def _python_bytes(bars: list[CandleBar], monkeypatch: pytest.MonkeyPatch) -> bytes:
     monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
-    return ParquetWriter._render_bytes(bars)  # noqa: SLF001 - the seam under test
+    return ParquetWriter._render_bytes(bars)
 
 
 def _rust_bytes(bars: list[CandleBar], monkeypatch: pytest.MonkeyPatch) -> bytes:
@@ -131,7 +131,7 @@ def _rust_bytes(bars: list[CandleBar], monkeypatch: pytest.MonkeyPatch) -> bytes
     """
     monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
     lrr.reset_lake_rust_render_for_tests(remaining=0)
-    rendered = ParquetWriter._render_bytes(bars)  # noqa: SLF001
+    rendered = ParquetWriter._render_bytes(bars)
     assert not lrr.rust_render_disabled(), "the Rust path latched OFF mid-corpus"
     return rendered
 
@@ -163,7 +163,7 @@ class TestRenderByteParity:
         expected = _python_bytes(bars, monkeypatch)
         monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
         lrr.reset_lake_rust_render_for_tests()  # full burn-in budget
-        rendered = ParquetWriter._render_bytes(bars)  # noqa: SLF001
+        rendered = ParquetWriter._render_bytes(bars)
         assert rendered == expected
         assert not lrr.rust_render_disabled()
 
