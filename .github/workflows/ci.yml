@@ -340,7 +340,12 @@ jobs:
     # above) union-resolves to main's 150 = the higher of the concurrent
     # raises (same rule as the 2026-07-10 union note above). Wall-clock
     # budget only — no gate is weakened.
-    timeout-minutes: 150
+    # 150 -> 180 (2026-07-11: run 29150445450 measured the T1 train head
+    # needing >150 — whole-suite 100min + strict per-module gate 22min +
+    # touched-module discovery gate >26min, ZERO test failures; wall-clock
+    # budget only, no gate weakened; coverage-gate sharding stays the
+    # declared follow-up DEC-SWEEP-COVERAGE-SHARD-001)
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
         with:
