@@ -2060,7 +2060,52 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
+- **Active branch:** `claude/results-topk-rollup` (**DEC-RESULTS-TOPK-ROLLUP-001, MIGRATION.md #1732** —
+  the entry number coordinator-ASSIGNED from the reservation map; cross-cites the arch-eval
+  DEC-ARCH-EVAL-TRILLION-SCALE-001 (#1723) whose measured curve + store-builder recipe the fixtures/benches reuse —
+  the persisted cross-store top-K `/results` rollup: a preset-agnostic top-K UNION superset (K=1000 ≥ 2× the route's
+  MAX_TOP_N=500, import-time-enforced) of every serveable ordering axis — the 14 RANKABLE_COLUMNS DESC +
+  `max_drawdown_pct` ASC + the run_id-ASC prefix, each the exact `ResultsStore.top_k` two-pass total order, the axis
+  set DERIVED by probing the live preset key functions (a non-inert non-persisted axis raises the LOUD
+  `RollupRefusalError`, never a silently-wrong superset) — written as a `ResultsStore`-format Parquet + stamp-LAST
+  JSON sidecar at the SIBLING root `<lake>/sweeps_rollup/` (ratified-with-evidence, flagged for the coordinator:
+  `sweeps_revision` digests the sweeps tree's dir mtimes, so an in-tree write would self-invalidate — the sibling
+  root is pinned invisible to the revision digest, the store-discovery glob AND the sweep-verify walks). MEASURED:
+  legacy cold 227 ms @10 stores → 26.1 s @1000 stores/1M rows; rollup-served 176 → 354 ms (flat; ~74× at the
+  1000-store tier). NEW `brutex/engine/results_rollup.py` (100% line+branch on a new ci.yml-exact standalone gate +
+  wired into the weekly mutation loop): the V1 `code_token` folds every serving-law input (presets.py source hash +
+  the `_preset_rank_record` projection SOURCE + PRESET_INERT_AXES + the derived axis enumeration + MAX_TOP_N + the
+  ResultRow schema — invalidation teeth pinned); Hook A `RollupMergeHook` threaded to ALL FOUR drivers (sequential /
+  supervised / the parallel parent's canonical apply point / the Stage-3 one-merge-per-pass seam), each merge riding
+  the `ResultsStore.append` three-branch VIX law + the `AuditCursor` byte-offset tail-only era resume (O(new audit
+  lines) — claims the #1533 named follow-up; `orchestrator/audit.py` ZERO diff, its frozen mutation profile
+  untouched) + the atomic trim→Parquet→stamp-LAST write under the COMMON partition flock; THE BLOCKER-1 FENCE — the
+  entire merge body inside ONE broad except (KeyboardInterrupt/SystemExit/MemoryError carve-out): any failure logs
+  ONE `results_rollup.merge_failed`, latches merging OFF for the launch, best-effort stamps `conflict_suspect`, and
+  NEVER re-raises into the grid (regression-pinned through the REAL driver — an injected mid-grid merge failure
+  completes the grid with byte-identical stores); Hook B `rebuild_rollup` at `cmd_sweep_all` run-end (the fenced
+  `_run_results_rollup_reconcile` — a rollup failure never fails the sweep); Hook C rebuild-from-the-scan on the
+  route's fallback arm (once per revision), so the system converges with A/B as pure latency optimizations. SERVING:
+  the UNFILTERED leaderboard only (filters/empty-string params stay legacy, spy-pinned); the V1-V5 ladder
+  (`classify_rollup`) yields fresh / stale / rebuild with NAMED reasons; wire parity EXACT on the fresh serve
+  (parity goldens pin rollup-served == store-recomputed for EVERY preset × rank_by × top, incl. the
+  float(2**60)==float(2**60+1) precision teeth + total-tie run_id-ASC fixtures); additive EMIT-ON-nonzero/true
+  `rollup_behind_stores`/`rollup_conflict_suspect` note keys; (revision, reason)-deduped WARNs via the LRU `LogGate`.
+  FOLDED LAND-PASS RULING (a recorded deviation — the ratified doc was internally contradictory): the
+  behind/revision_drift STALE verdicts map onto the legacy-fallback + Hook-C reconcile (ONE scan per revision, never
+  worse than the incumbent #1533 cost; with Hook A healthy mid-grid polls classify FRESH), preserving the incumbent
+  next-poll-freshness contract (`test_dashboard_results_revision_key.py` passes UNMODIFIED) AND closing the
+  convergence hole a pure stale-serve had for out-of-band writers; `conflict_suspect` KEEPS the ratified MAJOR-1
+  stale-serve (a latched fence never costs per-poll O(stores × rows) rescans). HONEST: a served poll is NOT literal
+  O(1) — an O(stores) stat-glob per level-1 miss + one bounded O(K-union) Parquet load; "O(1) repeat poll" is scoped
+  to after grid settle; the softened parity claim verbatim — run_id-ordering and served-row parity preserved;
+  run_id_conflicts / conflict_suspect / stored-VIX-content are incremental approximations restored exactly by Hooks
+  B/C; total_rows can overcount until the next full fold (`total_rows_exact` flips False conservatively, said on the
+  stamp). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity / stored results bytes / ranking semantics /
+  scope / vocab / rate untouched; `brutex/ranking/` byte-untouched (the hard fence); `results_rollup.py` 100%
+  line+branch (497/128) + `sweep_results_view.py` 100% (196/56); ruff/ruff-format clean, `mypy --strict` clean,
+  pyright 0 new; the frozen sweep goldens + every existing /results + driver suite pass UNMODIFIED.)
+  Earlier: `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
   renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
   cascade reserved #1633–#1649 — see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history — and the in-flight
   cascade holds the band through #1672), then #1673 → #1692 per the coordinator reservation map (#1673 is reserved
@@ -5267,7 +5312,18 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/groww-market-hours-guard`
+- **Active feature branch:** `claude/results-topk-rollup`
+  (DEC-RESULTS-TOPK-ROLLUP-001, MIGRATION.md #1732 — coordinator-assigned from the
+  reservation map, cross-citing the arch-eval DEC-ARCH-EVAL-TRILLION-SCALE-001 #1723;
+  the persisted cross-store top-K `/results` rollup: a preset-agnostic top-K union
+  superset served from the sibling root `<lake>/sweeps_rollup/` so the unfiltered
+  /results poll is O(K-union) regardless of store count — measured 26.1 s → 354 ms at
+  1000 stores/1M rows; fenced Hook-A merges at all four driver seams + Hook-B run-end
+  reconcile + Hook-C serve-side rebuild; conflict_suspect stale-serves with honest
+  notes, behind/revision_drift reconcile via the legacy fallback (the folded land-pass
+  ruling); parity goldens pin rollup-served == store-recomputed for every preset;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/groww-market-hours-guard`
   (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE
   market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
   days, keeping the shared account free for TickVault's live feed; matches
