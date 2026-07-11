@@ -86,8 +86,11 @@ the flag, not a real production limitation.
 
 ## What is DEFERRED to follow-up PRs (honest, not shipped here)
 
-* **Block-partition kernel locality** — each worker rebuilds its resident kernel
-  per distinct ``(instrument, tf, proximity, prior_n, fib_anchor)``; contiguous
+* **Block-partition kernel locality** — kernel builds are bounded but not
+  locality-TUNED: the default-OFF arm rebuilds per TUPLE (``run_persisted_sweep``
+  takes its ``kernel is None`` fresh-build arm on every call) and the flag-ON arm
+  caches per distinct ``(instrument, tf, proximity, prior_n, fib_anchor,
+  roll_schedule)`` key per worker (the DONE bullet below); contiguous
   block dispatch to preserve the DEC-SWEEP-RESIDENT-KERNEL-001 reuse win is
   future work. This slice dispatches per-tuple (correct, just not locality-tuned).
 * ~~Resident-kernel reuse across the pool / a persistent worker kernel~~ —
@@ -1144,8 +1147,8 @@ _WORKER_KERNEL_CACHE: ResidentKernelCache | None = None
 _WORKER_BARS_MEMO: OrderedDict[tuple[str, str], Sequence[CandleBar]] | None = None
 
 #: Every ``(instrument, tf_label)`` key EVER registered in the memo by this
-#: worker process (reset by :func:`_worker_init`; strings only — no bars
-#: reference, so it pins zero bar memory). The identity serve guard's
+#: worker process (reset by :func:`_worker_init`; tuples of strings only —
+#: no bars reference, so it pins zero bar memory). The identity serve guard's
 #: eviction ledger: a key present here but ABSENT from the memo was
 #: LRU-evicted, and a kernel built from the evicted object may still be
 #: resident — an incoming fresh copy can never BE that object, so

@@ -583,6 +583,33 @@ class TestInternBars:
         assert len(memo) == mod._BARS_MEMO_CAPACITY == 2
         assert set(memo) == {("B", "1minute"), ("C", "1minute")}
 
+    def test_lru_recency_hit_protects_the_hit_key(self) -> None:
+        """Fix-round-5 (refuter R4-1 M20 kill): a value-probe HIT refreshes the
+        key's recency (``memo.move_to_end``) — the memo is a genuine LRU, not
+        a FIFO. Seed A, B; HIT A; seed C: the eviction must take B (the
+        genuinely least-recently-USED key), never the just-hit A — and a
+        follow-up A arrival is served the RESIDENT object with the mechanism
+        still ENABLED. Under the M20 mutant (``move_to_end`` deleted) C evicts
+        A instead, and the follow-up A arrival spuriously fires the
+        ``revisit_after_eviction`` fail-safe disable on a key in ACTIVE reuse.
+        """
+        self._memo_on()
+        a = list(_BARS)
+        mod._intern_bars("A", "1minute", a)
+        mod._intern_bars("B", "1minute", list(_BARS))
+        assert mod._intern_bars("A", "1minute", list(_BARS)) is a  # HIT refreshes recency
+        mod._intern_bars("C", "1minute", list(_BARS))  # must evict B, not the just-hit A
+        memo = mod._WORKER_BARS_MEMO
+        assert memo is not None
+        assert set(memo) == {("A", "1minute"), ("C", "1minute")}
+        with capture_logs() as logs:
+            got = mod._intern_bars("A", "1minute", list(_BARS))
+        assert got is a  # the resident A copy is served — still a live memo entry
+        assert mod._WORKER_BARS_MEMO is not None  # mechanism still ENABLED
+        assert mod._WORKER_KERNEL_CACHE is None  # untouched (never set in this test)
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert warned == []  # no spurious revisit_after_eviction disable
+
 
 # ─────────────── in-process worker reuse + counters (T1/T3/T6) ───────────────
 
