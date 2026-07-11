@@ -434,6 +434,32 @@ function bxFunnelProvenance(source, runId) {
   var EVENTS_PAGE_LIMIT = 200;
   var TRADES_PAGE_LIMIT = 100;
 
+  /**
+   * Fan a poll result out to page-registered subscribers
+   * (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): template
+   * inline scripts push callbacks onto `window.<listName>` (an array they
+   * lazily create BEFORE this deferred file executes), so ONE BXPoll
+   * consumer per endpoint feeds every render target on the page — v29's
+   * former second/third `setInterval` pollers on /api/v1/sweep-progress
+   * are replaced by subscriptions to THIS file's progressPoller. Read at
+   * call time (never captured) so load order cannot drop a subscriber; a
+   * throwing subscriber is isolated so it can never break the poll chain
+   * or a sibling subscriber.
+   */
+  function notifyPageSubs(listName, arg) {
+    var subs = window[listName];
+    if (!subs || !subs.length) {
+      return;
+    }
+    for (var i = 0; i < subs.length; i++) {
+      try {
+        subs[i](arg);
+      } catch (e) {
+        /* subscriber isolation — one bad subscriber never breaks the rest */
+      }
+    }
+  }
+
   var state = {
     selectedRunId: null,
     sweepRunning: false,
@@ -1247,8 +1273,21 @@ function bxFunnelProvenance(source, runId) {
         lastProgress = data;
         state.sweepRunning = !!(data && data.running);
         renderTicker(lastProgress, lastRuns);
+        // ONE poller per endpoint per page (DEC-FRONTEND-LATENCY-HARDENING-001):
+        // the v29 [data-sweep] panel + heartbeat sweep slot + run-controls
+        // renderer all subscribe here instead of owning their own timers.
+        notifyPageSubs("__bxSweepProgressSubs", data);
+      },
+      onFail: function (failures) {
+        notifyPageSubs("__bxSweepProgressFailSubs", failures);
       }
     });
+    // Immediate-refresh hook for the page (e.g. right after a Run click):
+    // pollNow() bumps the poller's own seq — a superseded in-flight response
+    // never renders, and no second poll chain is ever created.
+    window.__bxSweepProgressPollNow = function () {
+      progressPoller.pollNow();
+    };
 
     // Runs poller: run discovery + the ticker strip's run half + the run
     // selector options (textContent-built <option> nodes).
