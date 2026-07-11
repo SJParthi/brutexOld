@@ -19,16 +19,16 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-10 (DEC-LAKE-HEAL-STARTUP-EPOCH-001 +
-DEC-AUTO-RESUME-ZERO-SURPRISES-001, MIGRATION.md #1699a/#1699b — the
+DEC-AUTO-RESUME-ZERO-SURPRISES-001, MIGRATION.md #1735a/#1735b — the
 dashboard-startup slowness pack on `claude/dashboard-startup-slowness`:
-(#1699a) the L3 startup-sweep O(1) write-epoch gate — an UNCHANGED lake
+(#1735a) the L3 startup-sweep O(1) write-epoch gate — an UNCHANGED lake
 no longer re-pays the ~27-minute boot lstat walk (NEW
 `brutex/data/lake_write_epoch.py` hint bumped at every in-band writer
 chokepoint; Tier-1 epoch match within a 7-day valve ⇒ O(1) skip, any
 doubt ⇒ the full authoritative `lake_content_token`, semantics
 unchanged; boot-phase `_boot_mark` instrumentation; the sweep daemon's
 dedicated maintenance beat channel closes the boot-time `channel ''`
-WARN class); (#1699b) the zero-surprises auto-resume pack —
+WARN class); (#1735b) the zero-surprises auto-resume pack —
 announce-on-launch (amber notice, FIRED gated on a genuinely-STARTED
 launch), announce-on-failure (CRITICAL banner + best-effort Telegram),
 the durable `failed_streak`→terminal-SKIPPED `fetch_exhausted` verdict
@@ -37,7 +37,7 @@ cooperative `POST /api/v1/pull/stop` control — composing ADDITIVELY
 beneath main's `BRUTEX_AUTO_RESUME` master gate (#1698). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change; the per-item record lives in the §1 Active-branch blurb +
-MIGRATION.md #1699a/#1699b — this header carries pointers, never
+MIGRATION.md #1735a/#1735b — this header carries pointers, never
 narration.)
 Earlier: 2026-07-09 (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md
 #1646 — the `/movers` Futures contract-symbol parse is RIGHT-anchored via the
@@ -2118,8 +2118,8 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/dashboard-startup-slowness`
   (**DEC-LAKE-HEAL-STARTUP-EPOCH-001 + DEC-AUTO-RESUME-ZERO-SURPRISES-001,
-  MIGRATION.md #1699a/#1699b** — the dashboard-startup slowness pack, the
-  #1699a/#1699b suffix pair per the 613a/613b convention: (#1699a) the L3
+  MIGRATION.md #1735a/#1735b** — the dashboard-startup slowness pack, the
+  #1735a/#1735b suffix pair per the 613a/613b convention: (#1735a) the L3
   startup-sweep O(1) write-epoch gate — the boot change-detector
   `lake_content_token` (an lstat walk of every lake parquet, ~2.14M files
   ≈ 27 min) ran UNCONDITIONALLY before the sentinel compare; NEW
@@ -2138,7 +2138,7 @@ hostile-review pass._
   walk attribution); F4 the sweep daemon runs on a dedicated maintenance
   beat channel (additive `maintenance=True` in progress_beat) so its heal
   beats never emit foreign_beat_dropped nor mask ambient-beat semantics —
-  the operator's boot-time `channel ''` WARN class CLOSED. (#1699b) the
+  the operator's boot-time `channel ''` WARN class CLOSED. (#1735b) the
   zero-surprises auto-resume pack: announce-on-launch (amber notice banner +
   honest count headline; FIRED + notice gated on a genuinely-STARTED
   launch — a refused start reads an honest refusal banner, never
@@ -2161,7 +2161,7 @@ hostile-review pass._
   the notice banner retires when the announced run ends. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the
   touched leaves 100% line+branch on their gating suites; full details in
-  MIGRATION.md #1699a/#1699b.)
+  MIGRATION.md #1735a/#1735b.)
   Earlier: `claude/movers-futures-hyphen-parse` (**DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md
   #1646** — the `/movers` Futures contract-symbol parse is RIGHT-anchored via the ONE canonical grammar:
   `parse_future_symbol` DELEGATES to `data/fno_symbol.parse_fno_symbol` (FUT-restricted; the left-anchored local twin
@@ -5393,13 +5393,13 @@ hostile-review pass._
 
 - **Active feature branch:** `claude/dashboard-startup-slowness`
   (DEC-LAKE-HEAL-STARTUP-EPOCH-001 + DEC-AUTO-RESUME-ZERO-SURPRISES-001,
-  MIGRATION.md #1699a/#1699b — the dashboard-startup slowness pack:
-  (#1699a) the L3 startup-sweep O(1) write-epoch gate — an UNCHANGED lake
+  MIGRATION.md #1735a/#1735b — the dashboard-startup slowness pack:
+  (#1735a) the L3 startup-sweep O(1) write-epoch gate — an UNCHANGED lake
   no longer re-pays the ~27-minute boot lstat walk (NEW
   `brutex/data/lake_write_epoch.py` hint file + the Tier-1 gate in
   `run_startup_sweep`, 7-day valve, any doubt ⇒ the full authoritative
   `lake_content_token`; F2 `_boot_mark` boot-phase instrumentation; F4 the
-  sweep daemon's dedicated maintenance beat channel); (#1699b) the
+  sweep daemon's dedicated maintenance beat channel); (#1735b) the
   zero-surprises auto-resume pack — announce-on-launch (started-gated amber
   notice), announce-on-failure (CRITICAL banner + Telegram), the durable
   `fetch_exhausted` terminal verdict (K=5, exempt local-deferral classes,
