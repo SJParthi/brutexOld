@@ -64,7 +64,10 @@ def _round_to_paisa(amount_x_bps_x100: int) -> int:
     Used for non-statutory items (exchange / SEBI / IPFT) where
     commercial half-up rounding applies.
     """
-    if amount_x_bps_x100 >= 0:
+    # pragma: no mutate on the sign test: at 0 BOTH branches yield 0
+    # ((0 + half) // scale == 0 == -((0 + half) // scale)), so every
+    # comparison mutant (>, >= 1) is provably output-equivalent.
+    if amount_x_bps_x100 >= 0:  # pragma: no mutate
         return (amount_x_bps_x100 + 5_000_000) // 10_000_000
     # Round half AWAY from zero for negatives (mirror the positive branch).
     return -((-amount_x_bps_x100 + 5_000_000) // 10_000_000)
@@ -87,7 +90,8 @@ def _round_to_rupee(amount_paisa: int) -> int:
     Example: 1170 paisa (₹11.70) → 1200 paisa (₹12).
              50 paisa (₹0.50) → 100 paisa (₹1) [half-up rule].
     """
-    if amount_paisa >= 0:
+    # pragma: no mutate — the same at-zero equivalence as _round_to_paisa.
+    if amount_paisa >= 0:  # pragma: no mutate
         return ((amount_paisa + 50) // 100) * 100
     # Round half AWAY from zero for negatives (mirror the positive branch).
     return -(((-amount_paisa + 50) // 100) * 100)
@@ -260,7 +264,10 @@ def _charge_stack_py(
     buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
         entry_open_paisa,
         exit_open_paisa,
-        "long" if is_long else "short",
+        # pragma: no mutate on the else-literal: _apply_slippage branches on
+        # startswith("long") ONLY, so ANY non-long string is behaviourally
+        # identical — the literal mutant is provably equivalent.
+        "long" if is_long else "short",  # pragma: no mutate
     )
 
     # ── Step 3: notionals (paise) — lot size resolved by the caller ─────

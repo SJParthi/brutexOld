@@ -1177,12 +1177,23 @@ jobs:
           else
             echo "(brutex.costs.constants test file not present yet — gate inactive)"
           fi
-          # 19f · brutex.costs.calculator (63 stmts, 10 branches; same test)
+          # 19f · brutex.costs.calculator (88 stmts, 12 branches after the
+          #       DEC-EXEC-RUST-CORE-001 _charge_stack_py extraction; same test)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
             pytest --cov=brutex.costs.calculator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
           else
             echo "(brutex.costs.calculator test file not present yet — gate inactive)"
           fi
+          # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+          # 19f1 · brutex.exec_rust (146 stmts, 38 branches) — the
+          #        BRUTEX_EXEC_RUST default-OFF seam over the fno-math exec
+          #        cores; standalone 100% gate (the rust_metrics precedent).
+          if compgen -G "tests/unit/test_exec_rust_seam.py" > /dev/null; then
+            pytest --cov=brutex.exec_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_exec_rust_seam.py
+          else
+            echo "(brutex.exec_rust test file not present yet — gate inactive)"
+          fi
+          # --- end slice-7 exec ---
           # 19g · brutex.execution.costs gate removed with the deleted module
           #       (DEC-EXECUTION-TRIO-DELETE-001).
           # 19h · brutex.data.models (54 stmts, 24 branches, 21 tests)
@@ -2275,6 +2286,40 @@ jobs:
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
           fi
+      # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+      - name: Dual-arm exec-rust parity (BRUTEX_EXEC_RUST=1, covering set)
+        # The flag is default-OFF, so every step above exercised the Python
+        # oracle arm; this step re-runs the BOUNDED exec covering set with
+        # the kernel arm FORCED ON. Engagement is ASSERTED inside the suites
+        # (counting-proxy spies in the seam/gate files + the golden's
+        # engaged-assert fixture), so a silently-fallen-back kernel FAILS —
+        # the ON arm can never go vacuous (spec §5's dedicated red-gate
+        # step; never a matrix footnote). Zero fixture edits: the frozen
+        # goldens must pass IDENTICALLY under both arms.
+        env:
+          BRUTEX_EXEC_RUST: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_exec_rust_seam.py \
+            tests/unit/test_costs_calculator.py \
+            tests/unit/test_costs_regime_table.py \
+            tests/unit/test_costs_scope.py \
+            tests/unit/test_futures_costs.py \
+            tests/unit/test_options_executor.py \
+            tests/unit/test_options_executor_rejects.py \
+            tests/unit/test_options_lake_source.py \
+            tests/unit/test_futures_executor.py \
+            tests/unit/test_futures_executor_rejects.py \
+            tests/unit/test_futures_reference_sim.py \
+            tests/golden/test_costs_verified_examples.py \
+            tests/golden/test_options_executor_golden.py \
+            tests/golden/test_futures_executor_golden.py \
+            tests/golden/test_exec_rust_golden.py \
+            tests/property/test_cost_calculator_properties.py \
+            tests/property/test_options_executor_properties.py \
+            tests/property/test_futures_suffix_independence.py \
+            tests/property/test_exec_rust_differential.py
+      # --- end slice-7 exec ---
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS

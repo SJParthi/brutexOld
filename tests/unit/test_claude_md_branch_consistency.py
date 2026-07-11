@@ -180,8 +180,10 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # 1597 = DEC-MUTATION-RUNTIME-003 (merged in from main 2026-07-08): its
     # sharded-matrix / wedge-proofed-loop rationale comments in mutation.yml
     # and the 3-field pair-format note in the wiring pin's docstring cite
-    # THAT decision's entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597}),
+    # THAT decision's entry, not this one. 1724 = DEC-EXEC-RUST-CORE-001
+    # (slice 7 / P8): its exec mutmut-pair + cargo-mutants shard-growth
+    # comments cite ITS OWN entry, not this one.
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1724}),
     "brutex/data/lake_stats_manifest.py": frozenset({867}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),

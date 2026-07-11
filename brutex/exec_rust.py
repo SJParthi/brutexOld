@@ -113,12 +113,15 @@ def _import_kernel() -> ModuleType | None:
     return fno_math
 
 
-#: The kernel module — ``None`` on a wheel-free env; monkeypatch to ``None``
-#: as the test seam (the ``rust_trade_sim`` precedent).
-_rust: ModuleType | None = _import_kernel()
+#: The kernel module — ``None`` on a wheel-free env (the type is inferred
+#: from :func:`_import_kernel` — ``ModuleType | None``); monkeypatch to
+#: ``None`` as the test seam (the ``rust_trade_sim`` precedent).
+_rust = _import_kernel()
 
-#: Warn-once memo — LOG-VOLUME state only, never results-bearing.
-_warned: set[str] = set()
+#: Warn-once memo — LOG-VOLUME state only, never results-bearing. Keyed on
+#: the plain ``(event, reason)`` TUPLE (structural — a string-join key would
+#: carry killable-looking-but-equivalent formatting mutants).
+_warned: set[tuple[str, str]] = set()
 
 
 def reset_warn_memo_for_tests() -> None:
@@ -126,13 +129,13 @@ def reset_warn_memo_for_tests() -> None:
     _warned.clear()
 
 
-def _warn_once(event: str, **kw: object) -> None:
-    """Emit *event* at WARNING once per process per (event, reason) key."""
-    key = f"{event}:{kw.get('reason', '')}"
+def _warn_once(event: str, *, reason: str, **kw: object) -> None:
+    """Emit *event* at WARNING once per process per ``(event, reason)``."""
+    key = (event, reason)
     if key in _warned:
         return
     _warned.add(key)
-    _LOG.warning(event, **kw)
+    _LOG.warning(event, reason=reason, **kw)
 
 
 def exec_rust_enabled() -> bool:
@@ -336,7 +339,10 @@ def charge_stack_futures(
         lot_size,
         n_lots,
         brokerage_flat_paisa,
-        brokerage_turnover_bps_x100 if brokerage_turnover_bps_x100 is not None else 0,
+        # None carries no envelope check (the kernel takes Option<i64>); a
+        # present turnover is checked like every other int (structural
+        # empty-or-one splice — never a substituted sentinel value).
+        *(() if brokerage_turnover_bps_x100 is None else (brokerage_turnover_bps_x100,)),
         stt_rate,
         etc_rate,
         sebi_rate,
@@ -482,7 +488,8 @@ def materialize_futures_tail(
         lot_size,
         n_lots,
         brokerage_flat_paisa,
-        brokerage_turnover_bps_x100 if brokerage_turnover_bps_x100 is not None else 0,
+        # None carries no envelope check (Option<i64> at the kernel edge).
+        *(() if brokerage_turnover_bps_x100 is None else (brokerage_turnover_bps_x100,)),
         stt_rate,
         etc_rate,
         sebi_rate,

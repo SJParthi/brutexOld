@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from datetime import date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -125,6 +126,15 @@ def test_flag_unset_is_off_default() -> None:
     assert exec_rust.exec_rust_enabled() is False
 
 
+def test_env_flag_literal_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator-facing env var NAME is the pinned literal — the tests
+    above address it via ``exec_rust.ENV_FLAG``, which a renamed-flag mutant
+    would follow self-consistently; this literal pin kills that class."""
+    assert exec_rust.ENV_FLAG == "BRUTEX_EXEC_RUST"
+    monkeypatch.setenv("BRUTEX_EXEC_RUST", "1")
+    assert exec_rust.exec_rust_enabled() is True
+
+
 @pytest.mark.parametrize("value", ["", "   "])
 def test_flag_whitespace_follows_the_default(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv(exec_rust.ENV_FLAG, value)
@@ -142,6 +152,7 @@ def test_flag_unrecognised_fails_safe_off_with_one_warning(
         assert exec_rust.exec_rust_enabled() is False  # warn-once, still OFF
     events = [e for e in logs if e["event"] == "exec_rust.flag_unrecognised"]
     assert len(events) == 1
+    assert events[0]["reason"] == "flag_unrecognised"
     assert events[0]["value"] == "garbage"
     assert events[0]["resolved"] == "off"
 
@@ -253,6 +264,71 @@ def test_envelope_fallback_per_site(monkeypatch: pytest.MonkeyPatch, site: str) 
     events = [e for e in logs if e["event"] == "exec_rust.envelope_fallback"]
     assert len(events) == 1
     assert events[0]["site"] == site
+    assert events[0]["reason"] == f"envelope:{site}"
+
+
+def test_exact_i64_boundaries_are_in_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Values EXACTLY at i64::MIN / i64::MAX are IN-envelope — they must
+    reach the kernel (a raising stand-in proves the call happened: the
+    fallback is ``kernel_fallback``, never ``envelope_fallback``) — the
+    exact-boundary teeth for the ``<=`` comparisons in ``_fits_i64``."""
+    monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+    monkeypatch.setattr(
+        exec_rust, "_rust", _raising_kernel("exec_apply_slippage", ValueError("reached"))
+    )
+    for boundary in (2**63 - 1, -(2**63)):
+        exec_rust.reset_warn_memo_for_tests()
+        with capture_logs() as logs:
+            assert exec_rust.fill_slippage(boundary, 12_005, is_long=True) is None
+        events = {e["event"] for e in logs}
+        assert events == {"exec_rust.kernel_fallback"}, boundary
+
+
+def test_futures_tail_turnover_none_served_and_present_enveloped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The futures-tail turnover splice both ways: ``None`` is a LEGAL
+    kernel argument (the Zerodha flat-only arm — served, oracle-equal),
+    while a PRESENT out-of-envelope turnover routes to the Python arm via
+    the envelope guard (never a kernel call)."""
+    monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+
+    def tail(turnover: int | None) -> tuple[str, ChargeStack | None, int, int] | None:
+        args: dict[str, Any] = {**_FUTURES_ARGS, "brokerage_turnover_bps_x100": turnover}
+        return exec_rust.materialize_futures_tail(
+            2_200_000,
+            2_210_000,
+            entry_volume=10,
+            exit_volume=10,
+            path_highs_paisa=[2_201_000],
+            path_lows_paisa=[2_199_000],
+            reject_stale=True,
+            **args,
+        )
+
+    served = tail(None)
+    assert served is not None
+    kind, stack, _mae, _mfe = served
+    assert kind == "trade"
+    none_args: dict[str, Any] = {**_FUTURES_ARGS, "brokerage_turnover_bps_x100": None}
+    assert stack == _futures_charge_stack_py(2_200_000, 2_210_000, **none_args)
+    monkeypatch.setattr(exec_rust, "_rust", _BombKernel())
+    with capture_logs() as logs:
+        assert tail(_TOO_BIG) is None
+    assert [e["event"] for e in logs] == ["exec_rust.envelope_fallback"]
+
+
+def test_warn_once_dedupes_per_event_reason_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TWO distinct (event, reason) keys in ONE memo window each warn once —
+    the memo never collapses distinct keys onto one entry."""
+    monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+    monkeypatch.setattr(exec_rust, "_rust", _BombKernel())
+    calls = _envelope_calls()
+    with capture_logs() as logs:
+        assert calls["fill_slippage"]() is None
+        assert calls["fill_futures"]() is None
+    events = [e for e in logs if e["event"] == "exec_rust.envelope_fallback"]
+    assert [e["reason"] for e in events] == ["envelope:fill_slippage", "envelope:fill_futures"]
 
 
 # ── narrow kernel-call catch + MemoryError bare re-raise ────────────────
@@ -304,6 +380,7 @@ def test_kernel_error_falls_back_narrowly(monkeypatch: pytest.MonkeyPatch, site:
     events = [e for e in logs if e["event"] == "exec_rust.kernel_fallback"]
     assert len(events) == 1
     assert events[0]["site"] == site
+    assert events[0]["reason"] == f"kernel:{site}"
     assert events[0]["error_type"] == "ValueError"
 
 
@@ -581,7 +658,6 @@ def test_import_census_only_the_four_dispatch_sites_import_the_seam() -> None:
     private plumbing behind the seam (the import-census pin)."""
     import subprocess
     import sys
-    from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
     out = subprocess.run(
@@ -620,3 +696,19 @@ def test_import_census_only_the_four_dispatch_sites_import_the_seam() -> None:
     )
     assert out2.stdout.strip() == ""
     del subprocess, sys
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop
+    (DEC-EXEC-RUST-CORE-001 — the lake_stats_manifest precedent; the pair
+    rides the historical runner, hence the trailing ``:``). Local run
+    2026-07-11: 90 mutants, 0 survived. HONEST: pins the WIRING only — the
+    weekly run executes on its own schedule."""
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert '"brutex/exec_rust.py:tests/unit/test_exec_rust_seam.py:"' in text, (
+            "exec_rust.py is not wired into mutation.yml's per-module mutmut loop"
+        )
