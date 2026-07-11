@@ -62,6 +62,7 @@ import hashlib
 import os
 from collections import OrderedDict
 from collections.abc import Generator, Mapping, Sequence
+from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -78,6 +79,7 @@ from brutex.engine.sweep_checkpoint import SweepCheckpointStore
 from brutex.engine.sweep_kernel import ResidentKernelCache, ResidentSweepKernel
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
+    SweepTuple,
     Timeframe,
     count_sweep_tuples,
     iter_sweep_tuples,
@@ -651,6 +653,24 @@ class TestInternBars:
         warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
         assert warned == []
 
+    def test_disable_writes_the_warn_once_latch(self) -> None:
+        """Fix-round-8 (FC-N3 kill): the disable WRITES the module warn-once
+        latch — the belt-and-braces arm the latch exists for. A second DIRECT
+        disable (reachable naturally only via a future memo re-enable path —
+        any disable Nones the memo, so ``_intern_bars`` short-circuits) must
+        find the latch True and stay silent; with the latch write severed the
+        forced second disable would warn AGAIN, breaking the warn-once law.
+        """
+        self._memo_on()  # latch explicitly False
+        with capture_logs() as logs:
+            mod._disable_worker_kernel_cache("NIFTY", "1minute", "resident_value_mismatch")
+            assert mod._WORKER_BARS_MEMO_WARNED is True  # the WRITE arm, pinned
+            mod._disable_worker_kernel_cache("NIFTY", "1minute", "resident_value_mismatch")
+        assert mod._WORKER_BARS_MEMO is None
+        assert mod._WORKER_KERNEL_CACHE is None
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert len(warned) == 1  # the second disable is silent
+
     def test_mismatch_disables_cache_and_memo(self) -> None:
         """Fix-round-1 R1 fold: a mismatch fail-safe-disables BOTH globals.
 
@@ -747,6 +767,15 @@ class TestRunTupleInWorkerKernelCache:
         assert len(built) == 1
         assert built[0]["instrument"] == "NIFTY"
         assert built[0]["roll"] is False
+        # Fix-round-8 (FC-N1 kill): the FULL payload is pinned — every field is
+        # the truth at EMISSION time (after the first tuple's miss: one build,
+        # zero hits, one resident kernel), never a stale or fabricated stamp.
+        assert built[0]["tf"] == tuples[0].tf.label == "1minute"
+        assert built[0]["proximity"] == repr(tuples[0].proximity) == "None"
+        assert built[0]["fib_anchor"] == tuples[0].fib_anchor.value
+        assert built[0]["builds"] == 1
+        assert built[0]["hits"] == 0
+        assert built[0]["resident"] == 1 == len(cache)
         # Both tuples produced real summaries (the reuse is byte-safe).
         assert first.summary is not None
         assert second.summary is not None
@@ -1122,7 +1151,86 @@ class TestByteIdentityOnVsOff:
         assert seq_ckpt == par_ckpt
 
 
+class _StampedResultPool:
+    """A ``pool.submit``-compatible fake serving pre-minted results in-process.
+
+    The minimal local twin of the sibling suite's ``_FakePool`` (neither test
+    file imports the other — the standalone-import discipline): every submitted
+    index resolves immediately to an injected :class:`mod.TupleWorkResult`, so a
+    test controls EXACTLY which worker pids the parent observes.
+    """
+
+    def __init__(self, results: Mapping[int, mod.TupleWorkResult]) -> None:
+        self._results = dict(results)
+
+    def submit(
+        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+    ) -> Future[mod.TupleWorkResult]:
+        fut: Future[mod.TupleWorkResult] = Future()
+        fut.set_result(self._results[index])
+        return fut
+
+
 class TestRealSpawnWorkerReuse:
+    def test_summary_workers_counts_distinct_worker_pids(self, tmp_path: Path) -> None:
+        """Fix-round-8 (FC-N2 kill): the drain-end summary's ``workers`` field
+        is ``len(kernel_stats)`` — the count of DISTINCT worker pids observed
+        on stamped results — never a constant. Pinned at a value > 1: three
+        fake eval-worker pids are round-robined across the grid's tuples
+        through a deterministic in-process pool (the sibling ``_FakePool``
+        discipline — a REAL spawn pool's worker split is scheduler-dependent,
+        so the ≥2-participants guarantee is stamped, not raced: each pid's
+        first stamped result is its ≥1 build, the builds-bound pigeonhole).
+        """
+        grid = _grid()  # 4 tuples → pids A, B, C, A
+        pids = (11111, 22222, 33333)
+        results = {
+            i: mod.TupleWorkResult(
+                index=i,
+                summary=None,  # a no-bars-shaped result legitimately snapshots 1/0
+                failed_error=None,
+                audit_records=(),
+                worker_pid=pids[i % len(pids)],
+                kernel_builds=1,
+                kernel_hits=0,
+            )
+            for i in range(count_sweep_tuples(grid))
+        }
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            SweepAuditWriter.open(tmp_path / "sup.jsonl") as sup,
+            SweepCache.open(tmp_path / "cache", bloom_capacity=10_000) as cache,
+        ):
+            guards = SweepGuards(
+                audit=sup,
+                progress=SweepProgress(),
+                checkpoint=SweepCheckpointStore(
+                    path=tmp_path / "ckpt.json",
+                    sweep_id=grid_identity(grid),
+                    total_combos=count_sweep_tuples(grid),
+                ),
+                cache=cache,
+                watchdog=SweepWatchdog(),
+            )
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,  # 3 eval workers — matches the three stamped pids
+            )
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            with capture_logs() as logs:
+                driver._drive(_StampedResultPool(results), 0, 2, 4, acc)  # type: ignore[arg-type]
+        summaries = _summary_events(logs)
+        assert len(summaries) == 1
+        observed_pids = {r.worker_pid for r in results.values()}
+        assert summaries[0]["workers"] == len(observed_pids) == 3  # > 1, kills the constant
+        assert summaries[0]["builds_total"] == 3  # one ≥1-build fold per distinct pid
+        assert summaries[0]["hits_total"] == 0
+
     def test_single_eval_worker_reuses_across_tuples(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
