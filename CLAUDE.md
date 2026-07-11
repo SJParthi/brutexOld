@@ -30,7 +30,10 @@ Python — the anti-drift core), 16-element per-process burn-in bit-compare +
 autorevert latch (mismatch or batch fault ships the ORACLE values;
 MemoryError re-raises raw), chunk cap 65,536. OFF (default) arm byte- AND
 log-identical (bomb-spy + zero-event + OFF-cost-bench teeth); ON arm's ONLY
-deltas are three fault/engagement-scoped events; the EXISTING enrich golden
+deltas on a COMPLETING pass are three fault/engagement-scoped events (a
+mid-target crash on an out-of-band-corrupt row additionally reorders the
+log STREAM — disclosed in #1724, zero stored/status/counter delta); the
+EXISTING enrich golden
 reproduces byte-identically with the flag ON (fixture untouched,
 engaged-INFO anti-vacuous pin). HONEST: both arms O(rows) — ON/OFF wall
 ≈1.0× measured on the sandbox (run-to-run noise straddles 1.0 — reruns read
@@ -2225,9 +2228,10 @@ hostile-review pass._
   call + process latch + ONE `greeks_enrich.rust_batch_autoreverted` ERROR. **Flag:**
   `env_flag_tristate` IMPORTED from `sweep_lookahead` (never copied); truthy→ON, falsy→OFF,
   unset/blank→OFF silently, junk→OFF + warn-once; resolved PER CALL so spawn workers read their own
-  env (zero `_GreeksWorkerContext` change). **Sanctioned ON-arm log deltas — exactly three:**
-  `rust_batch_engaged` (INFO once/process) · `rust_batch_autoreverted` (ERROR, fault only) ·
-  `rust_batch_flag_unrecognised` (WARNING once/process); OFF arm ZERO delta (bomb-spy + zero-event
+  env (zero `_GreeksWorkerContext` change). **Sanctioned ON-arm log deltas — exactly three on a
+  COMPLETING pass:** `rust_batch_engaged` (INFO once/process) · `rust_batch_autoreverted` (ERROR,
+  fault only) · `rust_batch_flag_unrecognised` (WARNING once/process) — plus the ONE disclosed
+  crash-path log-STREAM reorder (#1724, refuter-2B F1); OFF arm ZERO delta (bomb-spy + zero-event
   + OFF-cost-bench teeth). EVIDENCE: extended 12e gate 261 passed — `greeks_enrich.py` (598/148) +
   `spot_join.py` 100.00%; 12d 55 passed — `options/greeks.py` (71/16) 100.00%; cargo test default
   (lib 109 + greeks_batch.rs 2) AND `--features python,serde` (lib 176) green; fmt + clippy
@@ -2235,7 +2239,7 @@ hostile-review pass._
   ON (fixture untouched, engaged-INFO anti-vacuous pin) + the 2-worker REAL-spawn sha256 parity
   golden + the hypothesis OFF≡ON property + the hostile status matrix (BELOW_INTRINSIC ±1-ULP band
   CE AND PE, T-floor µs boundary, reuse hit + per-term misses, NaN-OHLC skip, invalid-spot WARN,
-  repr-boundary spot 100.005, interleave ordering, log-SEQUENCE equality). HONEST: both arms
+  repr-boundary spot 100.005, interleave ordering, log-SEQUENCE equality on COMPLETING passes — a mid-target CRASH on an out-of-band-corrupt row is the ONE disclosed log-stream ordering delta: ON's deferred finish emits later rows' pass-1 WARNs before the identical exception OFF raises earlier; same exception/fence, zero stored/status/counter delta, refuter-repro'd — see #1724). HONEST: both arms
   O(rows) — NO O(1) claim; ON/OFF wall ≈1.0× measured on the sandbox (run-to-run noise straddles
   1.0 — independent reruns read 0.96–1.00×; NO speedup claimed, printed by the bench and gated only
   at the generous ≤1.5× no-regression ceiling; the retained Python
