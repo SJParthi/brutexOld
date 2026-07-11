@@ -252,6 +252,54 @@ def test_build_command_shape(tmp_path: Path) -> None:
     ]
 
 
+def _assert_parses_as_loopback_socketaddr(listen_value: str) -> None:
+    """Mirror the Rust ``SocketAddr`` loopback check on a rendered --listen value.
+
+    ``rust/brutexd/src/config.rs`` parses ``--listen`` as a numeric SocketAddr
+    and refuses non-loopback IPs. A bracketed IPv6 authority (``[::1]:9080``) or
+    a bare IPv4 (``127.0.0.1:9080``) must split into an IP that ``ipaddress``
+    accepts AND reports loopback — the same law the Rust parser enforces.
+    """
+    import ipaddress
+
+    host, _, port = listen_value.rpartition(":")
+    assert port.isdigit() and 0 < int(port) < 65536, listen_value
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]  # RFC 3986 bracketed IPv6 literal
+    assert ipaddress.ip_address(host).is_loopback, f"not loopback: {listen_value}"
+
+
+def test_build_command_renders_parseable_listen_for_every_loopback_host(tmp_path: Path) -> None:
+    """MED-1: every LOOPBACK_HOSTS spelling renders a --listen value the Rust
+    SocketAddr parser accepts — ``localhost`` → 127.0.0.1, ``::1`` → ``[::1]``,
+    an IP passes through. A bare ``localhost:9080``/``::1:9080`` would make
+    brutexd exit 2 and leave the operator port dead."""
+    binary = _fake_binary(tmp_path)
+    expected = {
+        "127.0.0.1": "127.0.0.1:9080",
+        "localhost": "127.0.0.1:9080",
+        "::1": "[::1]:9080",
+    }
+    # Coverage law: every accepted loopback spelling has a pinned rendering.
+    assert set(expected) == set(rust_front.LOOPBACK_HOSTS)
+    for host, want in expected.items():
+        plan = build_plan(
+            host=host, port=9080, env={ENV_BRUTEXD_BIN: str(binary)}, upstream_port=43210
+        )
+        assert plan.listen_host == host  # the operator spelling is PRESERVED on the plan
+        command = build_command(plan)
+        listen_value = command[command.index("--listen") + 1]
+        assert listen_value == want
+        _assert_parses_as_loopback_socketaddr(listen_value)
+
+
+def test_render_listen_passes_through_a_bare_ip() -> None:
+    """A non-mapped host (already an IP) renders verbatim."""
+    assert rust_front.render_listen("127.0.0.1", 9080) == "127.0.0.1:9080"
+    assert rust_front.render_listen("localhost", 1) == "127.0.0.1:1"
+    assert rust_front.render_listen("::1", 65535) == "[::1]:65535"
+
+
 # ── run_with_rust_front — supervised lifecycle ───────────────────────────────
 
 
@@ -310,6 +358,9 @@ def _run(
         "uvicorn_run": fake_uvicorn,
         "env": {ENV_BRUTEXD_BIN: str(binary)},
         "popen": fake_popen,
+        # Fast + deterministic liveness probe (no wall-clock wait): report the
+        # child's poll() directly so the healthy path proceeds to uvicorn.
+        "liveness_probe": lambda p: p.poll(),
     }
     if uvicorn_raises:
         with pytest.raises(RuntimeError, match="uvicorn crashed"):
@@ -329,8 +380,8 @@ def test_run_spawns_front_and_binds_uvicorn_private(tmp_path: Path) -> None:
     assert seen["uvicorn"]["port"] == upstream
     assert upstream != 9080
     assert seen["uvicorn"]["log_config"] is None
-    # Clean shutdown: terminate then ONE wait, no kill escalation.
-    assert proc.calls == ["poll", "terminate", "wait"]
+    # liveness poll (alive) → uvicorn → shutdown poll → terminate → ONE wait.
+    assert proc.calls == ["poll", "poll", "terminate", "wait"]
 
 
 def test_run_terminates_child_even_when_uvicorn_raises(tmp_path: Path) -> None:
@@ -342,14 +393,87 @@ def test_run_terminates_child_even_when_uvicorn_raises(tmp_path: Path) -> None:
 def test_run_escalates_to_kill_on_wait_timeout(tmp_path: Path) -> None:
     """terminate → wait timeout → kill → wait (the bounded escalation)."""
     _seen, proc = _run(tmp_path, proc=_FakeProc(wait_timeouts=1))
-    assert proc.calls == ["poll", "terminate", "wait", "kill", "wait"]
+    assert proc.calls == ["poll", "poll", "terminate", "wait", "kill", "wait"]
 
 
-def test_run_observes_an_early_dead_child(tmp_path: Path) -> None:
-    """A child that already exited is observed (logged), not re-signalled."""
-    _seen, proc = _run(tmp_path, proc=_FakeProc(poll_result=2))
+def test_run_refuses_when_brutexd_dies_before_uvicorn(tmp_path: Path) -> None:
+    """MED-2: a brutexd that exits immediately (bad --listen, port busy, static
+    dir gone) refuses LOUDLY and NEVER enters uvicorn — no half-up dashboard on
+    a dead operator port."""
+    binary = _fake_binary(tmp_path)
+    proc = _FakeProc(poll_result=2)
+    uvicorn_called: list[bool] = []
+
+    def fake_uvicorn(app: Any, *, host: str, port: int, log_config: Any) -> None:
+        uvicorn_called.append(True)  # pragma: no cover — must never run
+
+    with pytest.raises(RustFrontError, match="exited immediately"):
+        run_with_rust_front(
+            object(),
+            host="127.0.0.1",
+            port=9080,
+            uvicorn_run=fake_uvicorn,
+            env={ENV_BRUTEXD_BIN: str(binary)},
+            popen=lambda _command: proc,
+            liveness_probe=lambda p: p.poll(),
+        )
+    assert uvicorn_called == []
+    # The refusal names the operator port + the remediation runbook.
+    with pytest.raises(RustFrontError, match="rust-front.md"):
+        run_with_rust_front(
+            object(),
+            host="127.0.0.1",
+            port=9080,
+            uvicorn_run=fake_uvicorn,
+            env={ENV_BRUTEXD_BIN: str(binary)},
+            popen=lambda _command: proc,
+            liveness_probe=lambda p: p.poll(),
+        )
+    # A dead-before-uvicorn child is NOT re-signalled (raise is before _shutdown).
     assert "terminate" not in proc.calls
     assert "kill" not in proc.calls
+
+
+def test_default_liveness_probe_sleeps_then_polls() -> None:
+    """The default probe waits ONE bounded grace then reports poll() — injectable
+    sleep keeps it deterministic (no wall-clock wait in tests)."""
+    proc = _FakeProc(poll_result=None)
+    slept: list[float] = []
+    rc = rust_front._default_liveness_probe(  # pyright: ignore[reportPrivateUsage]
+        proc, sleep=slept.append
+    )
+    assert rc is None
+    assert slept == [rust_front.STARTUP_GRACE_S]
+    assert proc.calls == ["poll"]
+
+
+def test_default_liveness_probe_reports_a_dead_child() -> None:
+    """A child that already exited reports its code (drives the raise path)."""
+    proc = _FakeProc(poll_result=7)
+    rc = rust_front._default_liveness_probe(  # pyright: ignore[reportPrivateUsage]
+        proc, sleep=lambda _s: None
+    )
+    assert rc == 7
+
+
+def test_shutdown_observes_an_early_dead_child() -> None:
+    """A child already dead at teardown is observed (logged), not re-signalled.
+
+    ``_shutdown`` polls twice on this path (the guard + the logged returncode).
+    """
+    proc = _FakeProc(poll_result=2)
+    rust_front._shutdown(proc)  # pyright: ignore[reportPrivateUsage]
+    assert proc.calls == ["poll", "poll"]
+    assert "terminate" not in proc.calls
+    assert "kill" not in proc.calls
+
+
+def test_shutdown_survives_an_unkillable_child() -> None:
+    """LOW: a SIGKILLed child whose post-kill wait ALSO times out must not raise
+    from _shutdown (which would mask uvicorn's own exception) — log + return."""
+    proc = _FakeProc(wait_timeouts=2)
+    rust_front._shutdown(proc)  # pyright: ignore[reportPrivateUsage] — must not raise
+    assert proc.calls == ["poll", "terminate", "wait", "kill", "wait"]
 
 
 # ── cmd_dashboard wiring — the thin CLI delta ────────────────────────────────

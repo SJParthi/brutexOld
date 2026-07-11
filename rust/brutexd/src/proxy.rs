@@ -131,6 +131,15 @@ pub async fn forward(State(state): State<AppState>, mut req: Request<Body>) -> R
         Err(err) => return bad_gateway(&format!("uri rebuild failed: {err}")),
     };
     *req.uri_mut() = uri;
+    // Host is preserved verbatim (never rewritten to the private authority) —
+    // Starlette builds redirect Locations from it, so rewriting would leak the
+    // upstream port. NIT #4 (theoretical): a client that sends NO Host header
+    // is impossible over conforming HTTP/1.1 (RFC 7230 §5.4 mandates it), and
+    // axum would already have rejected such a request; if one ever arrived,
+    // hyper's client derives Host from the upstream authority (127.0.0.1:port)
+    // — a benign default that never reaches an end-to-end redirect, since the
+    // absent-Host case carries no operator-facing Host to preserve. Not
+    // defended against further by design (do-not-over-engineer ruling).
     strip_hop_by_hop(req.headers_mut());
     match state.client.request(req).await {
         Ok(resp) => {

@@ -122,6 +122,51 @@ mod tests {
     }
 
     #[test]
+    fn accepts_the_python_launcher_rendered_loopback_forms() {
+        // MED-1 regression: the Python launcher
+        // (`brutex/dashboard/rust_front.render_listen`) maps every
+        // LOOPBACK_HOSTS member to a token this parser accepts —
+        // `localhost` -> 127.0.0.1 and `::1` -> the RFC 3986 bracket form
+        // `[::1]`. A bare `localhost:9080` / `::1:9080` would be REJECTED as
+        // a numeric SocketAddr, so the launcher MUST render these exact
+        // shapes; pin that they parse + stay loopback here.
+        let dir = valid_static_dir();
+        for rendered in ["127.0.0.1:9080", "[::1]:9080"] {
+            let cfg = parse_args(&argv(&[
+                "--listen",
+                rendered,
+                "--upstream-port",
+                "4321",
+                "--static-dir",
+                &dir,
+            ]))
+            .unwrap_or_else(|e| panic!("rejected launcher-rendered {rendered:?}: {e}"));
+            assert!(cfg.listen.ip().is_loopback(), "not loopback: {rendered}");
+            assert_eq!(cfg.listen.port(), 9080);
+        }
+    }
+
+    #[test]
+    fn refuses_the_pre_fix_bare_loopback_spellings() {
+        // The exact forms that DID reach config.rs before MED-1 — proof the
+        // fix was load-bearing: a bare `localhost`/`::1` authority does NOT
+        // parse as a numeric SocketAddr.
+        let dir = valid_static_dir();
+        for bad in ["localhost:9080", "::1:9080"] {
+            let err = parse_args(&argv(&[
+                "--listen",
+                bad,
+                "--upstream-port",
+                "4321",
+                "--static-dir",
+                &dir,
+            ]))
+            .unwrap_err();
+            assert!(err.contains("invalid --listen"), "got: {err}");
+        }
+    }
+
+    #[test]
     fn refuses_non_loopback_listen() {
         let dir = valid_static_dir();
         let err = parse_args(&argv(&[

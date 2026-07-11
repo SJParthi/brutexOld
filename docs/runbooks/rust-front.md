@@ -70,10 +70,31 @@ and pins:
 - **Conditional requests:** brutexd's static serving does not replicate
   Starlette's `etag`/`last-modified` in Wave 1 — conditional requests get a
   full 200 (correct, never stale, just less cacheable).
+- **Startup liveness (child dies first):** after spawning brutexd and before
+  entering uvicorn, the launcher probes the child once (bounded grace, no
+  poll loop). If brutexd has already exited — a `--listen` the Rust parser
+  refuses (see below), the operator port already in use, or a vanished static
+  dir — the launcher raises loudly (`CliUserError` exit 1) naming the operator
+  port and this runbook, instead of sailing into uvicorn on the private port
+  and leaving the operator port dead with no error (the *half-up dashboard*).
+  This is the symmetric partner of the SIGKILL-orphan residual below: a child
+  that dies BEFORE uvicorn is surfaced loudly; a parent hard-killed AFTER
+  uvicorn starts cannot clean up.
+- **`--listen` rendering:** the operator `--host` (`localhost`, `::1`,
+  `127.0.0.1`) is rendered into the brutexd `--listen` argument so it always
+  parses as a Rust `SocketAddr` — `localhost` → `127.0.0.1`, `::1` → the
+  RFC 3986 bracket form `[::1]`. The operator-facing host semantics are
+  unchanged; only the concrete `--listen` token is normalized. (A bare
+  `localhost:9080` / `::1:9080` would make brutexd exit 2 — caught by the
+  startup-liveness probe above.)
 - **Supervision residual:** brutexd is terminated in a `finally` when
-  uvicorn exits or raises; a SIGKILLed parent cannot run its `finally`, so a
-  hard-killed `brutex dashboard` can leave a brutexd child serving 502s
-  until killed manually (`pkill brutexd`).
+  uvicorn exits or raises — so child teardown DEPENDS on uvicorn returning
+  (or raising) and on the parent surviving to run its `finally`. A SIGKILLed
+  parent cannot run its `finally`, so a hard-killed `brutex dashboard` can
+  leave a brutexd child serving 502s until killed manually (`pkill brutexd`);
+  likewise, if the post-kill `wait` itself times out (a wedged, uninterruptible
+  child) the launcher logs `rust_front.brutexd_unkillable` and returns rather
+  than raising — never masking uvicorn's own exception.
 - **Port allocation TOCTOU:** the private uvicorn port is allocated by
   bind-to-0-then-release; if another process steals it in the window,
   uvicorn's own bind fails loudly (the same failure mode a fixed port has).

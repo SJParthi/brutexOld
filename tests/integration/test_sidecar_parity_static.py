@@ -85,12 +85,12 @@ VOLATILE = frozenset({"date"})
 #: The pinned /health literal (must match rust/brutexd/src/health.rs).
 HEALTH_BODY = b"brutexd ok\n"
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("BRUTEX_BRUTEXD_BIN") is None and shutil.which("cargo") is None,
-    reason=(
-        "brutexd parity suite needs cargo (or a prebuilt BRUTEX_BRUTEXD_BIN); "
-        "the Rust-side laws are still covered by rust/brutexd/tests/integration.rs"
-    ),
+#: Reason string for the cargo-gated socket suite (applied in ``brutexd_binary``,
+#: NOT module-wide — the pure-text leanness pin below needs no toolchain and
+#: must run unconditionally).
+_NO_CARGO_SKIP = (
+    "brutexd parity suite needs cargo (or a prebuilt BRUTEX_BRUTEXD_BIN); "
+    "the Rust-side laws are still covered by rust/brutexd/tests/integration.rs"
 )
 
 
@@ -227,7 +227,15 @@ class Stack:
 
 @pytest.fixture(scope="session")
 def brutexd_binary() -> Path:
-    """The brutexd binary — BRUTEX_BRUTEXD_BIN override, else cargo build."""
+    """The brutexd binary — BRUTEX_BRUTEXD_BIN override, else cargo build.
+
+    The cargo/binary requirement is gated HERE (not module-wide) so the pure
+    -text ``test_brutexd_cargo_toml_declares_no_lake_dependencies`` — which needs
+    no toolchain — runs unconditionally; every socket test depends on ``stack``,
+    which depends on this fixture, so they still skip loudly without cargo.
+    """
+    if os.environ.get("BRUTEX_BRUTEXD_BIN") is None and shutil.which("cargo") is None:
+        pytest.skip(_NO_CARGO_SKIP)
     override = os.environ.get("BRUTEX_BRUTEXD_BIN")
     if override:
         binary = Path(override)

@@ -33,6 +33,7 @@ import os
 import shutil
 import socket
 import subprocess  # nosec B404 — fixed brutexd argv built below, no shell, no user input
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,18 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 #: How long to wait for brutexd to exit after terminate()/kill() (seconds).
 TERMINATE_TIMEOUT_S = 5.0
+
+#: How long to let brutexd prove it stayed up before entering uvicorn (seconds).
+#: A bounded ONE-TIME startup grace — not a poll loop; see ``_default_liveness_probe``.
+STARTUP_GRACE_S = 0.5
+
+#: Loopback ``--listen`` host rendering: the operator host spelling → a token
+#: that ALWAYS parses as a Rust ``SocketAddr`` when joined with ``:<port>``.
+#: ``rust/brutexd/src/config.rs`` parses ``--listen`` as a numeric ``SocketAddr``,
+#: so ``localhost`` (not an IP) and a bare ``::1`` (needs the RFC 3986 bracket
+#: form ``[::1]`` before the port) would be REJECTED verbatim — brutexd would
+#: exit 2 and the operator port would go dead. Every other host passes through.
+_LISTEN_HOST_RENDER = {"localhost": "127.0.0.1", "::1": "[::1]"}
 
 
 class RustFrontError(Exception):
@@ -244,12 +257,28 @@ def build_plan(
     )
 
 
+def render_listen(host: str, port: int) -> str:
+    """Render the brutexd ``--listen`` value so it ALWAYS parses as a SocketAddr.
+
+    The operator-facing host is preserved everywhere else (``RustFrontPlan``
+    keeps the requested spelling); ONLY the concrete ``--listen`` argument is
+    normalized — ``localhost`` → ``127.0.0.1`` and ``::1`` → ``[::1]`` — so the
+    Rust ``SocketAddr`` parse in ``rust/brutexd/src/config.rs`` accepts it
+    (a bare ``localhost:9080`` / ``::1:9080`` would be REJECTED, brutexd would
+    exit 2, and the operator port would be silently dead). A host already in IP
+    form passes through unchanged. The loopback-only law is upheld upstream by
+    :func:`build_plan` (a non-loopback host never reaches here), so the render
+    never widens the bind.
+    """
+    return f"{_LISTEN_HOST_RENDER.get(host, host)}:{port}"
+
+
 def build_command(plan: RustFrontPlan) -> list[str]:
     """Render the fixed brutexd argv for *plan* (no shell, no user input)."""
     return [
         str(plan.binary),
         "--listen",
-        f"{plan.listen_host}:{plan.listen_port}",
+        render_listen(plan.listen_host, plan.listen_port),
         "--upstream-port",
         str(plan.upstream_port),
         "--static-dir",
@@ -268,8 +297,32 @@ def _shutdown(proc: ProcessHandle) -> None:
     except subprocess.TimeoutExpired:
         _LOG.warning("rust_front.brutexd_kill_escalation")
         proc.kill()
-        proc.wait(timeout=TERMINATE_TIMEOUT_S)
+        try:
+            proc.wait(timeout=TERMINATE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            # A SIGKILLed child that STILL will not reap (a wedged uninterruptible
+            # syscall) must not mask uvicorn's own exception on the way out —
+            # log the anomaly and return rather than raise from the finally.
+            _LOG.warning("rust_front.brutexd_unkillable")
+            return
     _LOG.info("rust_front.brutexd_stopped")
+
+
+def _default_liveness_probe(
+    proc: ProcessHandle,
+    *,
+    grace_s: float = STARTUP_GRACE_S,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int | None:
+    """Give brutexd a bounded moment to fail fast, then report its exit code.
+
+    Returns ``None`` while the child is still alive (the healthy path) or the
+    exit code if brutexd already died (bad ``--listen``, operator port already
+    in use, static dir gone). ``sleep`` is injectable so tests are deterministic
+    without a real wall-clock wait.
+    """
+    sleep(grace_s)
+    return proc.poll()
 
 
 def run_with_rust_front(
@@ -280,6 +333,7 @@ def run_with_rust_front(
     uvicorn_run: Callable[..., Any],
     env: Mapping[str, str] | None = None,
     popen: Callable[[list[str]], ProcessHandle] = subprocess.Popen,
+    liveness_probe: Callable[[ProcessHandle], int | None] = _default_liveness_probe,
 ) -> None:
     """Run the two-process front topology for one dashboard session.
 
@@ -288,6 +342,14 @@ def run_with_rust_front(
     port. brutexd is SUPERVISED: whenever uvicorn returns or raises, the
     child is terminated in the ``finally`` (never an orphan by design; a
     SIGKILLed parent is the documented residual — see the runbook).
+
+    Between the spawn and entering uvicorn, ``liveness_probe`` confirms brutexd
+    did not die on the spot (bad ``--listen``, operator port already in use,
+    static dir gone). If it already exited, we raise :class:`RustFrontError`
+    LOUDLY instead of sailing into uvicorn on the private port — which would
+    otherwise leave the operator port DEAD with no error (the half-up
+    dashboard). The probe is injectable + bounded so it never introduces a
+    flaky wait.
 
     During uvicorn's own startup window brutexd answers proxied paths with
     its honest plain-body 502 ("upstream unreachable") — a visible degrade,
@@ -298,10 +360,17 @@ def run_with_rust_front(
     _LOG.info(
         "rust_front.starting",
         binary=str(plan.binary),
-        listen=f"{plan.listen_host}:{plan.listen_port}",
+        listen=render_listen(plan.listen_host, plan.listen_port),
         upstream_port=plan.upstream_port,
     )
     proc = popen(command)  # nosec B603 — fixed argv from build_command, no shell
+    returncode = liveness_probe(proc)
+    if returncode is not None:
+        raise RustFrontError(
+            f"brutexd exited immediately (code {returncode}) before uvicorn could bind "
+            f"the operator port {plan.listen_host}:{plan.listen_port} — port busy? bad "
+            "--host? see docs/runbooks/rust-front.md"
+        )
     try:
         uvicorn_run(app, host="127.0.0.1", port=plan.upstream_port, log_config=None)
     finally:
@@ -312,6 +381,7 @@ __all__ = [
     "ENV_BRUTEXD_BIN",
     "ENV_RUST_FRONT",
     "LOOPBACK_HOSTS",
+    "STARTUP_GRACE_S",
     "TERMINATE_TIMEOUT_S",
     "ProcessHandle",
     "RustFrontError",
@@ -321,6 +391,7 @@ __all__ = [
     "build_plan",
     "default_static_dir",
     "locate_brutexd",
+    "render_listen",
     "resolve_rust_front",
     "run_with_rust_front",
 ]
