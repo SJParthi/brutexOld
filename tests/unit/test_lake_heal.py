@@ -35,13 +35,16 @@ from brutex.data import lake_heal
 from brutex.data.catalog import Catalog
 from brutex.data.errors import LakeWriteHalt, WriterError
 from brutex.data.lake_heal import (
+    ATTEMPT_RELPATH,
     AUDIT_HEAL_BATCH,
     AUDIT_HEAL_DEDUP,
     AUDIT_HEAL_DRIFT_MERGE,
     AUDIT_HEAL_QUARANTINE_FILE,
     AUDIT_HEAL_REASSIGN,
+    DEFAULT_LAKE_HEAL_RETRY_S,
     DEFAULT_SWEEP_THROTTLE_S,
     LAKE_HEAL_ENV,
+    LAKE_HEAL_RETRY_ENV,
     LAKE_HEAL_THROTTLE_ENV,
     HealReport,
     StartupSweeper,
@@ -50,8 +53,10 @@ from brutex.data.lake_heal import (
     heal_findings,
     lake_content_token,
     load_heal_stats,
+    load_last_attempt,
     load_last_sweep,
     open_lake_heal_audit,
+    resolve_heal_retry_s,
     resolve_lake_heal_mode,
     resolve_sweep_throttle_s,
     run_startup_sweep,
@@ -3933,6 +3938,67 @@ class TestLakeContentToken:
         june.unlink()
         assert lake_content_token(lake) == skipped_token
 
+    def test_racing_dir_deletion_mid_walk_skipped_deterministically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-LAKE-INVARIANTS-PREINDEX-001: a directory raced away between
+        its parent's listing and its own ``iterdir`` is skipped LOUDLY
+        (``lake_heal.token_walk_skipped`` — the old ``rglob`` suppressed the
+        same race silently), and the token equals the one the dir's genuine
+        absence yields (deterministic)."""
+        import shutil
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        _write_spot(lake, [_bar(_ts(0))], symbol="BANKNIFTY")
+        victim = lake / "bars" / "NSE" / "INDEX" / "BANKNIFTY"
+        real_iterdir = Path.iterdir
+
+        def _racing_iterdir(self: Path) -> Any:
+            if self == victim:
+                raise FileNotFoundError(2, "raced away", str(self))
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", _racing_iterdir)
+        with capture_logs() as logs:
+            skipped_token = lake_content_token(lake)
+        (skip,) = _events(logs, "lake_heal.token_walk_skipped")
+        assert skip["path"] == repr(str(victim))
+        assert skip["log_level"] == "warning"
+        monkeypatch.undo()
+        shutil.rmtree(victim)
+        assert lake_content_token(lake) == skipped_token
+
+    def test_walk_selection_mirrors_rglob(self, tmp_path: Path) -> None:
+        """The streaming walk keeps the old ``rglob("*.parquet")`` SELECTION
+        (empirically pinned on the pinned 3.12 pathlib): a symlinked DIR is
+        never descended (its target's files contribute nothing — exactly what
+        ``**`` did), hidden entries ARE matched, and a dir named
+        ``x.parquet`` contributes its own line AND is descended."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        t0 = lake_content_token(lake)
+        # A symlinked dir (with a parquet inside its target) adds NO line and
+        # is not descended — the token must NOT move.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "a.parquet").write_bytes(b"")
+        (lake / "bars" / "LINKED").symlink_to(outside)
+        assert lake_content_token(lake) == t0
+        # A hidden .parquet IS matched (pathlib wildcards match dot-names).
+        hidden = lake / "bars" / ".hidden.parquet"
+        hidden.write_bytes(b"")
+        t1 = lake_content_token(lake)
+        assert t1 != t0
+        # A DIR named *.parquet contributes a line AND is descended: a file
+        # created inside it moves the token again.
+        dir_pq = lake / "bars" / "dir.parquet"
+        dir_pq.mkdir()
+        t2 = lake_content_token(lake)
+        assert t2 != t1
+        (dir_pq / "inner.parquet").write_bytes(b"")
+        assert lake_content_token(lake) != t2
+
 
 class TestRunStartupSweep:
     def test_startup_sweep_runs_once_then_skips(
@@ -4071,7 +4137,12 @@ class TestRunStartupSweep:
         assert result.report is not None
         assert result.report.refused_mass_heal is True  # mutant: heals instead
         assert result.report.healed == 0
-        assert _tree_state(lake) == before  # not one byte moved
+        after = _tree_state(lake)
+        # DEC-LAKE-INVARIANTS-PREINDEX-001: the refused sweep stamps the ONE
+        # `.lake_heal/` ATTEMPT sidecar (metadata, a lake-data sibling); the
+        # DATA tree itself stays byte-identical — not one lake byte moved.
+        assert after.pop(ATTEMPT_RELPATH, None) is not None
+        assert after == before
         assert load_last_sweep(lake) is None  # a refused sweep never stamps
         (refusal,) = _events(logs, "lake_heal.mass_heal_refused")
         assert refusal["files_scanned"] == 21  # bars 0 + options 21
@@ -4101,18 +4172,26 @@ class TestSentinelStampGate:
     """The sentinel stamps ONLY a genuinely-completed auto sweep (fix-pass).
 
     A refused / observe / errored / partially-healed sweep must SKIP the stamp
-    (``lake_heal.sweep_sentinel_skipped``) so the next boot re-attempts —
+    (``lake_heal.sweep_sentinel_skipped``) so a later boot re-attempts —
     stamping would token-match past live poison and silently stop L3
-    self-healing + its one-shot alert. The stamp cases (zero-finding clean
-    sweep, healed-all sweep) are pinned by ``TestRunStartupSweep``.
+    self-healing + its one-shot alert. Since
+    DEC-LAKE-INVARIANTS-PREINDEX-001 the non-stamp additionally records the
+    ATTEMPT (:data:`ATTEMPT_RELPATH`), so an UNCHANGED-token next boot skips
+    a DETERMINISTIC non-stamp loudly (observe / mass-refusal, mode unchanged)
+    and backs off a TRANSIENT one (errors / unhealed) instead of full-
+    rescanning on every boot. The stamp cases (zero-finding clean sweep,
+    healed-all sweep) are pinned by ``TestRunStartupSweep``.
     """
 
     def _skip_events(self, logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
         return _events(logs, "lake_heal.sweep_sentinel_skipped")
 
-    def test_observe_sweep_skips_sentinel_and_reattempts(
+    def test_observe_sweep_skips_sentinel_then_deterministic_skip(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Observe mode: no stamp (unchanged law) → the NEXT boot is a LOUD
+        deterministic skip — pre-fix it full-rescanned on EVERY boot — and a
+        ``BRUTEX_LAKE_HEAL`` mode flip re-runs immediately."""
         monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
         lake = tmp_path / "lake"
         _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
@@ -4123,12 +4202,37 @@ class TestSentinelStampGate:
         (skip,) = self._skip_events(logs)
         assert skip["reason"] == "observe_mode"
         assert skip["log_level"] == "warning"
-        # The next boot re-attempts (no sentinel → no token match).
-        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        attempt = load_last_attempt(lake)
+        assert attempt is not None
+        assert attempt["reason"] == "observe_mode"
+        assert attempt["mode"] == "observe"
+        assert attempt["lake_token"] == result.token
+        # Next boot, UNCHANGED token + mode: the scan verdict is a pure
+        # function of (token, mode) — skipped LOUDLY, never silently.
+        with capture_logs() as logs2:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        assert second.token == result.token
+        (skip2,) = _events(logs2, "lake_heal.sweep_skip_attempt")
+        assert skip2["verdict"] == "deterministic"
+        assert skip2["reason"] == "observe_mode"
+        assert skip2["log_level"] == "warning"
+        assert "mode flip re-runs" in str(skip2["remediation"])
+        # A mode flip (observe → auto) MUST re-run — and now heals + stamps.
+        monkeypatch.setenv(LAKE_HEAL_ENV, "auto")
+        third = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert third.ran is True
+        assert third.report is not None
+        assert third.report.healed == 1
+        assert load_last_sweep(lake) is not None
 
-    def test_refused_mass_heal_skips_sentinel_and_reattempts(
+    def test_refused_mass_heal_skips_sentinel_then_deterministic_skip(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Mass-heal refusal: no stamp (unchanged law) → deterministic skip on
+        an unchanged token; ANY token move re-arms the sweep immediately."""
+        import os
+
         monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
         monkeypatch.setattr(lake_heal, "MASS_HEAL_MIN_FILES", 1)
         lake = tmp_path / "lake"
@@ -4141,6 +4245,14 @@ class TestSentinelStampGate:
         assert load_last_sweep(lake) is None
         (skip,) = self._skip_events(logs)
         assert skip["reason"] == "mass_heal_refused"
+        with capture_logs() as logs2:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        (skip2,) = _events(logs2, "lake_heal.sweep_skip_attempt")
+        assert skip2["verdict"] == "deterministic"
+        assert skip2["reason"] == "mass_heal_refused"
+        # A token move (a pull / heal / manual copy) re-arms immediately.
+        os.utime(_dest(lake), ns=(1, 1))
         assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
 
     def test_errored_sweep_skips_sentinel(
@@ -4218,9 +4330,160 @@ class TestSentinelStampGate:
         assert load_last_sweep(lake) is None  # NOT stamped
         (skip,) = self._skip_events(logs)
         assert skip["reason"] == "heal_errors"
-        # The next boot re-attempts (no sentinel → no token match).
-        second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
-        assert second.ran is True
+        # Within the transient backoff (attempt + boot share the injected
+        # clock, elapsed 0 s < 24 h) the next boot skips LOUDLY…
+        with capture_logs() as logs2:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        (skip2,) = _events(logs2, "lake_heal.sweep_skip_attempt")
+        assert skip2["verdict"] == "backoff"
+        assert skip2["reason"] == "heal_errors"
+        assert skip2["retry_s"] == DEFAULT_LAKE_HEAL_RETRY_S
+        # …and re-attempts once the backoff elapses (env-tuned to 0 here).
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "0")
+        third = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert third.ran is True
+        assert third.report is not None
+        assert third.report.errors == 1  # still poisoned — genuinely re-tried
+
+
+class TestAttemptRecordBackoff:
+    """The L3 attempt record + skip verdict (DEC-LAKE-INVARIANTS-PREINDEX-001).
+
+    Every ambiguity — absent/corrupt record, foreign token, unknown reason,
+    unparsable/naive/future timestamp — fails OPEN to re-scanning (the
+    sentinel loaders' contract: fail-open to CHECKING, never to skipping);
+    ``force=True`` bypasses the record entirely; an elapsed backoff re-arms.
+    """
+
+    def _write_attempt(self, lake: Path, payload: object) -> None:
+        path = lake / ATTEMPT_RELPATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        path.write_text(text, encoding="utf-8")
+
+    def _attempt(self, lake: Path, **overrides: Any) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "version": 1,
+            "lake_token": lake_content_token(lake),
+            "reason": "heal_errors",
+            "mode": "auto",
+            "attempt_utc": _NOW.isoformat(),
+        }
+        record.update(overrides)
+        return record
+
+    def test_transient_backoff_elapsed_reattempts(self, tmp_path: Path) -> None:
+        """A recorded transient failure re-attempts once the 24 h default
+        backoff elapses (injected clock) — and a now-clean sweep stamps."""
+        from datetime import timedelta
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake))
+        later = _NOW + timedelta(seconds=DEFAULT_LAKE_HEAL_RETRY_S + 1)
+        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=lambda: later)
+        assert result.ran is True
+        assert load_last_sweep(lake) is not None  # clean sweep stamps
+
+    def test_transient_within_backoff_skips(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake))
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is False
+        (skip,) = _events(logs, "lake_heal.sweep_skip_attempt")
+        assert skip["verdict"] == "backoff"
+
+    def test_foreign_token_record_reruns(self, tmp_path: Path) -> None:
+        """A token move (any pull/heal) makes the record inert — re-run."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake, lake_token="0" * 64))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_unknown_reason_reruns(self, tmp_path: Path) -> None:
+        """Forward-compat: an unrecognised reason fails open to checking."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake, reason="mystery_reason"))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_corrupt_and_non_object_records_fail_open(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, "{corrupt")
+        assert load_last_attempt(lake) is None
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        (lake / ".lake_heal" / "last_sweep.json").unlink()  # re-arm the sentinel
+        self._write_attempt(lake, '["not", "an", "object"]')
+        assert load_last_attempt(lake) is None
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_absent_record_loads_none(self, tmp_path: Path) -> None:
+        assert load_last_attempt(tmp_path) is None
+
+    def test_unparsable_timestamp_reruns(self, tmp_path: Path) -> None:
+        """Junk / absent / NAIVE ``attempt_utc`` on a transient reason —
+        the elapsed computation faults (``ValueError`` / ``TypeError``) and
+        the verdict fails open to re-scanning."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake, attempt_utc="not-a-time"))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        (lake / ".lake_heal" / "last_sweep.json").unlink()
+        self._write_attempt(lake, self._attempt(lake, attempt_utc=None))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        (lake / ".lake_heal" / "last_sweep.json").unlink()
+        naive = _NOW.replace(tzinfo=None).isoformat()  # aware-minus-naive raises
+        self._write_attempt(lake, self._attempt(lake, attempt_utc=naive))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_future_skewed_timestamp_reruns(self, tmp_path: Path) -> None:
+        """A future-skewed stamp (elapsed < 0) biases to re-checking."""
+        from datetime import timedelta
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        future = (_NOW + timedelta(hours=1)).isoformat()
+        self._write_attempt(lake, self._attempt(lake, attempt_utc=future))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_force_bypasses_standing_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``force=True`` never consults (nor is blocked by) the record."""
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.ran is True  # observe over a clean lake — still no stamp
+        assert load_last_attempt(lake) is not None
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        forced = run_startup_sweep(lake, force=True, per_file_pause=lambda: None, now=_now)
+        assert forced.ran is True
+
+
+class TestResolveHealRetry:
+    """``BRUTEX_LAKE_HEAL_RETRY_S`` — the ``resolve_sweep_throttle_s`` parse
+    contract (tolerant: junk → default, negative → 0.0)."""
+
+    def test_default_when_unset_or_blank(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(LAKE_HEAL_RETRY_ENV, raising=False)
+        assert resolve_heal_retry_s() == DEFAULT_LAKE_HEAL_RETRY_S
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "   ")
+        assert resolve_heal_retry_s() == DEFAULT_LAKE_HEAL_RETRY_S
+
+    def test_default_when_unparsable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "one-day")
+        assert resolve_heal_retry_s() == DEFAULT_LAKE_HEAL_RETRY_S
+
+    def test_valid_and_negative_clamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "3600")
+        assert resolve_heal_retry_s() == 3600.0
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "-5")
+        assert resolve_heal_retry_s() == 0.0
 
 
 class TestStartupSweeper:
