@@ -20,6 +20,7 @@ coverage on `brutex.costs.*` (the per-module strict gate in
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 import pytest
 from brutex.costs import (
@@ -1299,3 +1300,53 @@ def test_trade_input_rejects_negative_strike() -> None:
             exit_bar_open_paisa=10_000,
             side="long_call",
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# DEC-EXEC-RUST-CORE-001 — the BRUTEX_EXEC_RUST dispatch (slice 7 / P8)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestExecRustDispatch:
+    """ON-arm dispatch parity at the ``compute_trade_cost`` seam.
+
+    The flag-less default is the Python oracle arm (every test above runs
+    it); these tests flip ``BRUTEX_EXEC_RUST=1`` and prove the kernel-served
+    breakdown is WHOLE-OBJECT equal to the OFF arm — with an engagement spy
+    so the ON arm can never go vacuous (a silently-fallen-back kernel would
+    fail the ``spy.calls`` assertion, not just coverage).
+    """
+
+    def test_on_arm_equals_off_arm_and_engages_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno_math
+        from brutex import exec_rust
+
+        trade = _make_trade()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = compute_trade_cost(trade)
+
+        calls: dict[str, int] = {}
+        real = fno_math.exec_option_charge_stack
+
+        def _spy(*a: Any) -> object:
+            calls["exec_option_charge_stack"] = calls.get("exec_option_charge_stack", 0) + 1
+            return real(*a)
+
+        monkeypatch.setattr(
+            exec_rust, "_rust", type("K", (), {"exec_option_charge_stack": staticmethod(_spy)})()
+        )
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = compute_trade_cost(trade)
+        assert calls == {"exec_option_charge_stack": 1}
+        assert on == off
+
+    def test_on_arm_short_side_equals_off_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex import exec_rust
+
+        trade = _make_trade(side="short_call", entry_open_paisa=10_005, exit_open_paisa=9_995)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = compute_trade_cost(trade)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        assert compute_trade_cost(trade) == off

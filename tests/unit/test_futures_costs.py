@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 from datetime import date, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -540,3 +541,65 @@ class TestChargePathViaSyntheticCitedFixture:
         assert out.cost_free is False
         assert out.ipft_paisa == 0  # BSE: the assumed-0 options-precedent stance
         assert out.exch_paisa > 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# DEC-EXEC-RUST-CORE-001 — the BRUTEX_EXEC_RUST dispatch (slice 7 / P8)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestExecRustDispatch:
+    """ON-arm dispatch parity at the ``compute_futures_trade_cost`` seam.
+
+    The flag-less default is the Python oracle arm (every test above runs
+    it); these flip ``BRUTEX_EXEC_RUST=1`` and prove the kernel-served
+    breakdown is WHOLE-OBJECT equal to the OFF arm, with an engagement spy
+    so a silent fallback can never make the ON arm vacuous.
+    """
+
+    def test_on_arm_cost_free_equals_off_arm_and_engages(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno_math
+        from brutex import exec_rust
+
+        trade = _trade()  # NIFTY — the cost-free index arm
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = compute_futures_trade_cost(trade)
+
+        calls: dict[str, int] = {}
+        real = fno_math.exec_futures_charge_stack
+
+        def _spy(*a: Any) -> object:
+            calls["exec_futures_charge_stack"] = calls.get("exec_futures_charge_stack", 0) + 1
+            return real(*a)
+
+        monkeypatch.setattr(
+            exec_rust, "_rust", type("K", (), {"exec_futures_charge_stack": staticmethod(_spy)})()
+        )
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = compute_futures_trade_cost(trade)
+        assert calls == {"exec_futures_charge_stack": 1}
+        assert on == off
+        assert on.cost_free is True
+        assert on.net_pnl_paisa == on.gross_pnl_paisa
+
+    def test_on_arm_cost_bearing_synthetic_cited_equals_off_arm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cost-bearing stack (Groww min-law + full charge stack) via the
+        kernel — under the sanctioned synthetic-cited regime fixture."""
+        from brutex import exec_rust
+
+        monkeypatch.setitem(fc._ETC_FUTURES_REGIMES_BY_EXCHANGE, "NSE", _SYNTH_ETC)
+        monkeypatch.setattr(fc, "_NSE_IPFT_FUTURES_REGIMES", _SYNTH_IPFT)
+        monkeypatch.setattr(fc, "_STAMP_FUTURES_REGIMES", _SYNTH_STAMP)
+        for broker in ("groww", "zerodha"):
+            trade = _trade(instrument="RELIANCE", lot_size=500, broker=broker)
+            monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+            off = compute_futures_trade_cost(trade)
+            monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+            on = compute_futures_trade_cost(trade)
+            assert on == off
+            assert on.cost_free is False
+            assert on.total_charges_paisa > 0
