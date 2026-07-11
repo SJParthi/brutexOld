@@ -71,14 +71,17 @@ from __future__ import annotations
 import os
 import struct
 from collections.abc import Callable, Iterable, Sequence
-from typing import Final, Literal
+from typing import Final, Literal, TypeVar, cast
 
 import structlog
 
 from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.observability import get_registry
 
-_LOG = structlog.get_logger("brutex.engine.rust_parity_core")
+# ``__name__``, never a string literal — the zero-survivor loop siblings'
+# idiom (lake_stats_manifest / sweep_apriori): a literal logger name only
+# carries a behaviour-invisible XX-wrap mutant for the mutmut gate.
+_LOG = structlog.get_logger(__name__)
 
 #: Burn-in policy — class (a)/(b) rows: first-N-per-process double-compute.
 POLICY_BURN_IN: Final = "burn_in"
@@ -119,13 +122,20 @@ class ParityFamily:
 
     __slots__ = ("_disabled_reason", "_memo", "_remaining", "name", "policy")
 
+    # Class-level (not ``self._disabled_reason: str | None = None`` inline):
+    # an inline instance-attribute annotation is runtime-unevaluated under
+    # PEP 563, so its ``| → &`` mutant provably survives (the lake_stats
+    # endgame-round-2 class); the class-level form is evaluated by
+    # ``typing.get_type_hints`` and killed by the annotation pin test.
+    _disabled_reason: str | None
+
     def __init__(
         self, name: str, *, policy: ParityPolicy, burn_in_samples: int = BURN_IN_SAMPLES
     ) -> None:
         self.name = name
         self.policy: ParityPolicy = policy
         self._remaining = burn_in_samples
-        self._disabled_reason: str | None = None
+        self._disabled_reason = None
         self._memo: set[str] = set()
 
     def disabled(self) -> bool:
@@ -257,11 +267,15 @@ def resolve_kernel_symbol(warn_family: ParityFamily, symbol: str) -> Callable[..
     except ImportError:
         warn_family.warn_fallback_once("wheel_missing", symbol=symbol)
         return None
-    kernel: Callable[..., object] | None = getattr(fno_math, symbol, None)
+    # ``object`` + a narrowing ``cast`` (not ``kernel: Callable[...] | None``):
+    # a local-variable annotation is runtime-unevaluated under PEP 526, so
+    # its ``| → &`` mutant provably survives the mutmut gate; the cast's
+    # non-string form carries no mutable literal/operator at all.
+    kernel: object = getattr(fno_math, symbol, None)
     if kernel is None:
         warn_family.warn_fallback_once("wheel_stale", symbol=symbol)
         return None
-    return kernel
+    return cast(Callable[..., object], kernel)
 
 
 def pack_float(value: float) -> bytes:
@@ -284,14 +298,23 @@ def pack_float_rows(rows: Iterable[Sequence[float]]) -> tuple[tuple[bytes, ...],
     return tuple(tuple(struct.pack("<d", v) for v in row) for row in rows)
 
 
-def run_with_parity[T](
+#: Value type served by :func:`run_with_parity`. The classic ``TypeVar``
+#: form (NOT PEP-695 ``def run_with_parity[T]``) is deliberate: the module
+#: sits in ``mutation.yml``'s per-module mutmut loop, and mutmut 2.5.1's
+#: parso 0.8.x cannot parse PEP-695 generic syntax (14 hard parse errors,
+#: measured) — the same constraint ``test_engine_sweep_apriori.py``'s
+#: mutation pack documents ("parso only parses the --paths-to-mutate file").
+_T = TypeVar("_T")
+
+
+def run_with_parity(  # noqa: UP047 — PEP 695 unparsable by the mutmut gate's parso (see _T above)
     family: ParityFamily,
     *,
-    kernel: Callable[[], T],
-    oracle: Callable[[], T],
-    key: Callable[[T], object],
-    validate: Callable[[T], bool] | None = None,
-) -> T:
+    kernel: Callable[[], _T],
+    oracle: Callable[[], _T],
+    key: Callable[[_T], object],
+    validate: Callable[[_T], bool] | None = None,
+) -> _T:
     """Serve one call under *family*'s parity policy (module docstring).
 
     Parameters

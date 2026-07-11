@@ -431,3 +431,179 @@ def test_ranking_kernel_source_has_no_rayon_mul_add_or_total_cmp() -> None:
     # The clamp must be the literal py_min/py_max idiom, never f64::clamp
     # (NaN-propagating) — match the call shape, not the helper definitions.
     assert ".clamp(" not in src
+
+
+# ── mutation-workflow wiring pin (the TestMutationWorkflowWiring precedent) ──
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    Slice-4 PR-1 review round 7 (R7.2/R7.3): the refuter caught BOTH new
+    parity wrapper modules shipping with NO ``--paths-to-mutate`` naming
+    them — the exact unwired-gate class MIGRATION #1614's round 8 recorded
+    (Golden Rule #10) — while the same PR added ``ranking.rs`` to
+    cargo-mutants while the slice-4 design's CI-wiring clause
+    (DEC-RANKING-RUST-TWIN-001) requires "the weekly mutmut loop" for the
+    wrapper Python modules. The
+    module:testfile:timeout pair now sits in the workflow's per-module
+    ``mutmut`` loop (empty third field = the historical wrap-less runner —
+    no spin-capable loop constructs here, bounded ``for`` only); this
+    deterministic pin (the ``test_lake_stats_manifest.py`` precedent) fails
+    if the pair is ever dropped. HONEST: it pins the WIRING only — the
+    weekly run executes on its own schedule/push triggers.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert (
+            '"brutex/ranking/rust_ranking.py:tests/unit/test_ranking_rust_ranking.py:"' in text
+        ), "rust_ranking.py is not wired into mutation.yml's per-module mutmut loop"
+
+
+# ── mutation hardening (slice-4 PR-1 review round 7 — the R7.2/R7.3 fix) ──
+
+
+class TestMutationHardening:
+    """Deterministic pins killing the round-7 in-session mutmut survivors.
+
+    The wired mutation gate (``TestMutationWorkflowWiring`` above) demands
+    ZERO surviving mutants, so the module's behavioural literals (the env
+    flag name, the family-name/policy table) and its defensive laws (the
+    refuse-poison validators' shape refusals, the ``strict=True`` zip
+    guards, the ``key``/``validate`` closures on every parity site) are
+    pinned EXACTLY here (the ``test_lake_stats_manifest.py`` precedent).
+    Structural residue was RESTRUCTURED killable instead of pragma'd: the
+    quoted (runtime-inert) ``cast`` type strings became evaluated forms
+    with no mutable literal, the tandem-redundant second strict zip merged
+    into ONE loop, and the runtime-unevaluated ``list[float] | None`` local
+    annotation became a two-branch assignment.
+    """
+
+    def test_flag_and_family_literals_pinned(self) -> None:
+        from brutex.ranking.rust_ranking import _ALL_FAMILIES  # pyright: ignore[reportPrivateUsage]
+
+        assert RANKING_RUST_ENV == "BRUTEX_RANKING_RUST"
+        assert RANKING_RUST_DEFAULT is False
+        assert tuple(f.name for f in _ALL_FAMILIES) == (
+            "ranking.seam",
+            "ranking.gates",
+            "ranking.term_inputs",
+            "ranking.composite",
+            "ranking.dsr_z",
+            "ranking.order",
+            "ranking.overfit_verdict",
+        )
+        # The float-parity policy table (module docstring): (b*) rows —
+        # composite + dsr_z — always-on; every other family burn-in.
+        assert tuple(f.policy for f in _ALL_FAMILIES) == (
+            "burn_in",
+            "burn_in",
+            "burn_in",
+            "always",
+            "always",
+            "burn_in",
+            "burn_in",
+        )
+
+    def test_validators_refuse_adversarial_shapes(self) -> None:
+        from brutex.ranking.rust_ranking import (
+            _is_bool_tuple,  # pyright: ignore[reportPrivateUsage]
+            _is_float_list,  # pyright: ignore[reportPrivateUsage]
+            _is_permutation,  # pyright: ignore[reportPrivateUsage]
+            _is_term_rows,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        # _is_bool_tuple: tuple-of-REAL-bools of exactly n.
+        assert _is_bool_tuple((True, False), 2)
+        assert not _is_bool_tuple([True, False], 2)  # list, not tuple
+        assert not _is_bool_tuple((True, False), 3)  # wrong length
+        assert not _is_bool_tuple((1, 0), 2)  # ints are not bools
+        # _is_float_list: list-of-REAL-floats of exactly n.
+        assert _is_float_list([1.0, 2.0], 2)
+        assert not _is_float_list((1.0, 2.0), 2)  # tuple, not list
+        assert not _is_float_list([1.0], 2)  # wrong length
+        assert not _is_float_list([1, 2], 2)  # ints are not floats
+        # _is_term_rows: n LIST rows of exactly width floats — a TUPLE of
+        # valid rows must refuse (kills the round-7 `or → and` survivor,
+        # which fell through the early return for non-list values).
+        assert _is_term_rows([[1.0, 2.0]], 1, 2)
+        assert not _is_term_rows(([1.0, 2.0],), 1, 2)  # tuple of rows
+        assert not _is_term_rows([[1.0, 2.0]], 2, 2)  # wrong row count
+        assert not _is_term_rows([[1.0]], 1, 2)  # wrong width
+        assert not _is_term_rows([(1.0, 2.0)], 1, 2)  # tuple row
+        # _is_permutation: an int tuple permuting range(n), bools refused.
+        assert _is_permutation((1, 0), 2)
+        assert not _is_permutation([1, 0], 2)  # list, not tuple
+        assert not _is_permutation((0, 0), 2)  # not a permutation
+        assert not _is_permutation((True, False), 2)  # bools are not ints
+        assert not _is_permutation((1, 2), 2)  # not range(n)
+
+    def test_gate_zip_refuses_a_short_verdict_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # strict=True is the defensive law on the survivors projection — a
+        # parity layer returning FEWER verdicts than candidates must raise,
+        # never silently truncate the pool (kills the strict=False mutant).
+        from brutex.ranking import rust_ranking
+
+        monkeypatch.setattr(rust_ranking, "run_with_parity", lambda *a, **k: (True,))
+        with pytest.raises(ValueError, match="zip"):
+            rank_combos_via_rust(_exact_pool())
+
+    def test_overfit_zip_refuses_a_short_verdict_tuple(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.ranking import rust_ranking
+
+        kernels = rust_ranking._resolve_kernels()  # pyright: ignore[reportPrivateUsage]
+        assert kernels is not None
+        candidates = _exact_pool()  # distinct Sharpes → deflatable pool
+        monkeypatch.setattr(rust_ranking, "run_with_parity", lambda *a, **k: (True,))
+        with pytest.raises(ValueError, match="zip"):
+            rust_ranking._overfit_gate_via_rust(  # pyright: ignore[reportPrivateUsage]
+                candidates, list(candidates), OverfitGateConfig(dsr_min=0.0), kernels
+            )
+
+    def test_clean_on_arm_run_emits_no_refusal_fallback_or_autorevert(self) -> None:
+        # A clean full-pipeline ON-arm run (gates → overfit DSR → terms →
+        # dsr_z → composite → order) must not refuse a single kernel result
+        # (kills the validate→None mutants: a refusal ships the oracle, so
+        # only THIS log assertion can see it) nor fall back nor autorevert.
+        pool = [
+            (0b0001, _m(sharpe_ratio=2.0, sortino_ratio=1.8, calmar_ratio=1.2)),
+            (0b0010, _m(sharpe_ratio=2.5, sortino_ratio=2.0, calmar_ratio=1.5)),
+            (0b0100, _m(sharpe_ratio=3.0, sortino_ratio=2.4, calmar_ratio=1.8)),
+            (0b1000, _m(sharpe_ratio=1.0, sortino_ratio=0.9, calmar_ratio=0.5)),
+        ]
+        cfg = OverfitGateConfig(dsr_min=0.95)
+        with capture_logs() as logs:
+            on = rank_combos_via_rust(pool, overfit=cfg)
+        assert on is not None
+        assert len(on) > 0  # the dsr_z arm genuinely ran (kept non-empty)
+        bad_events = {
+            "rust_parity.kernel_result_refused",
+            "rust_parity.fallback",
+            "rust_parity.autoreverted",
+        }
+        assert [e["event"] for e in logs if e["event"] in bad_events] == []
+
+    def test_rank_order_divergence_autoreverts_and_ships_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A WRONG-but-valid permutation from the kernel must be caught by
+        # the _ORDER burn-in bit-compare (kills the key→None mutant, under
+        # which the wrong order would ship) — the oracle order serves and
+        # the family latches.
+        pool = _exact_pool()  # distinct composites → a unique true order
+        monkeypatch.setattr(
+            fno_math,
+            "ranking_rank_order",
+            lambda comps, masks: sorted(range(len(comps)), key=lambda i: (comps[i], masks[i])),
+        )
+        with capture_logs() as logs:
+            on = rank_combos_via_rust(pool)
+        assert on is not None
+        assert _keys(on) == _keys(_rank_off(pool))
+        reverted = [e for e in logs if e["event"] == "rust_parity.autoreverted"]
+        assert [e["family"] for e in reverted] == ["ranking.order"]

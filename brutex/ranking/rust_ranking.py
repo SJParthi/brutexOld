@@ -209,7 +209,7 @@ def _is_permutation(value: object, n: int) -> bool:
         isinstance(value, tuple)
         and len(value) == n
         and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
-        and sorted(cast("tuple[int, ...]", value)) == list(range(n))
+        and sorted(cast(tuple[int, ...], value)) == list(range(n))
     )
 
 
@@ -222,7 +222,7 @@ def _gate_verdicts(kernels: _Kernels, metrics_list: Sequence[ResultMetrics]) -> 
         _GATES,
         kernel=lambda: tuple(
             cast(
-                "list[bool]",
+                list[bool],
                 kernels.passes_gates(
                     [m.total_trades for m in metrics_list],
                     [m.profit_factor for m in metrics_list],
@@ -274,15 +274,23 @@ def _overfit_gate_via_rust(
     n = len(dsrs)
     verdicts = run_with_parity(
         _OVERFIT,
-        kernel=lambda: tuple(cast("list[bool]", kernels.overfit_verdicts(dsrs, overfit.dsr_min))),
+        kernel=lambda: tuple(cast(list[bool], kernels.overfit_verdicts(dsrs, overfit.dsr_min))),
         oracle=lambda: tuple(passes_overfit_gate(dsr, overfit) for dsr in dsrs),
         key=lambda v: v,
         validate=lambda v: _is_bool_tuple(v, n),
     )
-    kept = [pair for pair, ok in zip(survivors, verdicts, strict=True) if ok]
-    # A kept survivor's DSR is guaranteed a float (a None DSR never passes
-    # the gate) — the same cast discipline as the Python original.
-    kept_dsrs = [cast("float", dsr) for dsr, ok in zip(dsrs, verdicts, strict=True) if ok]
+    # ONE strict zip for both projections (not two parallel comprehensions:
+    # ``len(dsrs) == len(survivors)`` holds unconditionally, so a second
+    # ``strict=True`` over the same pairing would be a tandem-redundant
+    # guard whose ``strict=False`` mutant provably survives). A kept
+    # survivor's DSR is guaranteed a float (a None DSR never passes the
+    # gate) — the same cast discipline as the Python original.
+    kept: list[tuple[int, ResultMetrics]] = []
+    kept_dsrs: list[float] = []
+    for pair, dsr, ok in zip(survivors, dsrs, verdicts, strict=True):
+        if ok:
+            kept.append(pair)
+            kept_dsrs.append(cast(float, dsr))
     return kept, kept_dsrs
 
 
@@ -323,11 +331,15 @@ def rank_combos_via_rust(
     verdicts = _gate_verdicts(kernels, metrics_list)
     survivors = [pair for pair, ok in zip(candidates, verdicts, strict=True) if ok]
 
-    dsr_by_survivor: list[float] | None = None
+    # No inline ``list[float] | None`` annotation — a local annotation is
+    # runtime-unevaluated (PEP 526/563), so its ``| → &`` mutant provably
+    # survives the mutmut gate; both branches let mypy infer the union.
     if overfit is not None and survivors:
         survivors, dsr_by_survivor = _overfit_gate_via_rust(
             candidates, list(survivors), overfit, kernels
         )
+    else:
+        dsr_by_survivor = None
 
     if not survivors:
         return []
@@ -336,7 +348,7 @@ def rank_combos_via_rust(
     term_rows = run_with_parity(
         _TERMS,
         kernel=lambda: cast(
-            "list[list[float]]",
+            list[list[float]],
             kernels.composite_term_inputs(
                 [m.sharpe_ratio for _, m in survivors],
                 [m.sortino_ratio for _, m in survivors],
@@ -362,11 +374,11 @@ def rank_combos_via_rust(
         dsr_values = dsr_by_survivor
         # ``overfit`` is non-None exactly when ``dsr_by_survivor`` is a list
         # (the gate ran and was deflatable) — the rank_combos invariant.
-        overfit_cfg = cast("OverfitGateConfig", overfit)
+        overfit_cfg = cast(OverfitGateConfig, overfit)
         dsr_contrib = run_with_parity(
             _DSR_Z,
             kernel=lambda: cast(
-                "list[float]",
+                list[float],
                 kernels.dsr_z_contributions(dsr_values, overfit_cfg.weight),
             ),
             oracle=lambda: dsr_z_contributions(dsr_values, n, overfit_cfg),
@@ -377,7 +389,7 @@ def rank_combos_via_rust(
     composites = run_with_parity(
         _COMPOSITE,
         kernel=lambda: cast(
-            "list[float]",
+            list[float],
             kernels.composite_scores([list(column) for column in term_columns], dsr_contrib),
         ),
         oracle=lambda: composite_scores(term_columns, dsr_contrib),
@@ -400,7 +412,7 @@ def rank_combos_via_rust(
     ensure_unique_survivor_masks(masks)
     order = run_with_parity(
         _ORDER,
-        kernel=lambda: tuple(cast("list[int]", kernels.rank_order(composites, masks))),
+        kernel=lambda: tuple(cast(list[int], kernels.rank_order(composites, masks))),
         oracle=lambda: tuple(sorted(range(n), key=lambda i: (-composites[i], masks[i]))),
         key=lambda perm: perm,
         validate=lambda perm: _is_permutation(perm, n),

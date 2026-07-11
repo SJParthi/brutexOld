@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import math
 import sys
-from typing import TYPE_CHECKING
+import typing
+from pathlib import Path
+from typing import TYPE_CHECKING, TypeVar
 
 import pytest
 from brutex.engine.rust_parity_core import (
@@ -22,6 +24,7 @@ from brutex.engine.rust_parity_core import (
     POLICY_ALWAYS,
     POLICY_BURN_IN,
     ParityFamily,
+    ParityPolicy,
     env_flag_enabled,
     pack_float,
     pack_float_rows,
@@ -29,7 +32,7 @@ from brutex.engine.rust_parity_core import (
     resolve_kernel_symbol,
     run_with_parity,
 )
-from brutex.observability import MetricsError, get_registry
+from brutex.observability import MetricsError, get_registry, render_prometheus
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
@@ -363,3 +366,124 @@ class TestRunWithParity:
             run_with_parity(fam, kernel=lambda: "v", oracle=oracle, key=lambda v: v)
         # The oracle ran exactly BURN_IN_SAMPLES times, then stopped.
         assert oracle.calls == BURN_IN_SAMPLES
+
+
+# ── mutation hardening (slice-4 PR-1 review round 7 — the R7.2/R7.3 fix) ──
+
+
+class TestMutationHardening:
+    """Deterministic pins killing the round-7 in-session mutmut survivors.
+
+    The wired mutation gate (``TestMutationWorkflowWiring`` below) demands
+    ZERO surviving mutants, so every behavioural literal the module exposes
+    — the policy tokens (the ``ParityPolicy`` wire vocabulary a binding may
+    also spell as raw strings), the burn-in budget, the Prometheus counter
+    name / help / label, the engaged-memo namespace key — is pinned EXACTLY
+    here (the ``test_lake_stats_manifest.py`` ``TestMutationHardening``
+    precedent). Structural residue was RESTRUCTURED killable instead of
+    pragma'd: the logger name rides ``__name__``, the ``str | None``
+    instance annotation moved to class level (``get_type_hints``-evaluated,
+    pinned below), and ``resolve_kernel_symbol``'s local union annotation
+    became an ``object`` + narrowing non-string ``cast`` (no mutable
+    literal/operator on the line) — the lake_stats endgame-round-2 law that
+    a runtime-unevaluated-annotation pragma hides KILLABLE siblings.
+    """
+
+    def test_policy_and_knob_literals_pinned(self) -> None:
+        assert POLICY_BURN_IN == "burn_in"
+        assert POLICY_ALWAYS == "always"
+        assert typing.get_args(ParityPolicy) == ("burn_in", "always")
+        assert BURN_IN_SAMPLES == 16
+        assert DIVERGENCE_COUNTER == "brutex_rust_parity_divergence_total"
+
+    def test_engaged_memo_key_namespaced_apart_from_warn_reasons(self) -> None:
+        from brutex.engine.rust_parity_core import (
+            _ENGAGED_KEY,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        # The exact namespace token — AND the structural law it exists for:
+        # colliding with any warn-once reason would suppress the engaged
+        # INFO after a prior fallback of that reason (or vice versa).
+        assert _ENGAGED_KEY == "__engaged__"
+        warn_reasons = {
+            "wheel_missing",
+            "wheel_stale",
+            "kernel_error",
+            "kernel_disabled",
+            "flag_unrecognised",
+            "kernel_result_refused",
+        }
+        assert _ENGAGED_KEY not in warn_reasons
+
+    def test_logger_is_named_after_the_module(self) -> None:
+        from brutex.engine import rust_parity_core
+
+        # ``get_logger(__name__)`` (the zero-survivor siblings' idiom) —
+        # structlog's lazy proxy records the name in ``_logger_factory_args``.
+        assert rust_parity_core._LOG._logger_factory_args == (  # pyright: ignore[reportPrivateUsage]
+            "brutex.engine.rust_parity_core",
+        )
+
+    def test_disabled_reason_annotation_evaluates_to_optional_str(self) -> None:
+        # Class-level so ``get_type_hints`` EVALUATES it — a ``| → &``
+        # annotation mutant raises TypeError here instead of surviving
+        # runtime-unevaluated (PEP 563/526).
+        hints = typing.get_type_hints(ParityFamily)
+        assert hints["_disabled_reason"] == (str | None)
+
+    def test_run_with_parity_typevar_pinned(self) -> None:
+        from brutex.engine.rust_parity_core import _T  # pyright: ignore[reportPrivateUsage]
+
+        assert isinstance(_T, TypeVar)
+        assert _T.__name__ == "_T"
+
+    def test_divergence_counter_help_and_label_on_the_metrics_wire(self) -> None:
+        fam = ParityFamily("test.render_pin", policy=POLICY_BURN_IN)
+        fam.disable("divergence")
+        rendered = render_prometheus(get_registry())
+        assert (
+            "# HELP brutex_rust_parity_divergence_total "
+            "Rust-vs-Python parity divergences (oracle shipped, family latched)" in rendered
+        )
+        assert 'brutex_rust_parity_divergence_total{family="test.render_pin"} 1' in rendered
+
+    def test_consume_sample_clamps_at_zero(self) -> None:
+        fam = ParityFamily("test.clamp", policy=POLICY_BURN_IN)
+        fam.reset_for_tests(remaining=0)
+        fam.consume_sample()  # docstring law: "Clamped at zero" — never -1
+        assert fam._remaining == 0  # pyright: ignore[reportPrivateUsage]
+
+    def test_consume_sample_always_family_budget_untouched(self) -> None:
+        fam = ParityFamily("test.always_budget", policy=POLICY_ALWAYS)
+        fam.consume_sample()  # docstring law: ALWAYS budget untouched
+        assert fam._remaining == BURN_IN_SAMPLES  # pyright: ignore[reportPrivateUsage]
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    Slice-4 PR-1 review round 7 (R7.2/R7.3): the refuter caught BOTH new
+    parity wrapper modules shipping with NO ``--paths-to-mutate`` naming
+    them — the exact unwired-gate class MIGRATION #1614's round 8 recorded
+    (Golden Rule #10) — while the same PR added ``ranking.rs`` to
+    cargo-mutants while the slice-4 design's CI-wiring clause
+    (DEC-RANKING-RUST-TWIN-001) requires "the weekly mutmut loop" for the
+    wrapper Python modules. The
+    module:testfile:timeout pair now sits in the workflow's per-module
+    ``mutmut`` loop (empty third field = the historical wrap-less runner —
+    no spin-capable loop constructs here, bounded ``for`` only; and
+    ``run_with_parity`` was restructured off PEP-695 generics, which
+    mutmut 2.5.1's parso hard-fails to parse). This deterministic pin (the
+    ``test_lake_stats_manifest.py`` precedent) fails if the pair is ever
+    dropped. HONEST: it pins the WIRING only — the weekly run executes on
+    its own schedule/push triggers.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert (
+            '"brutex/engine/rust_parity_core.py:tests/unit/test_engine_rust_parity_core.py:"'
+            in text
+        ), "rust_parity_core.py is not wired into mutation.yml's per-module mutmut loop"

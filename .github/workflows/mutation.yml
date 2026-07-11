@@ -3,8 +3,10 @@
 # Three mutation gates + one fan-in verdict (DEC-MUTATION-RUNTIME-003):
 #
 # 1. python-mutation — `mutmut` over the critical brutex/ modules (pass 1
-#    ranking/DSR math + a 10-pair per-module loop, now incl.
-#    adapters/rate_common.py). Walks the AST, perturbs one literal /
+#    ranking/DSR math + a 14-pair per-module loop, incl.
+#    adapters/rate_common.py and — per slice-4 PR-1 review round 7 — the
+#    two Rust-parity wrapper modules engine/rust_parity_core.py +
+#    ranking/rust_ranking.py). Walks the AST, perturbs one literal /
 #    comparison / conditional at a time, and runs the module's focused
 #    unit suite against each mutant. Any mutant that **survives** means
 #    the tests don't actually cover that logic branch. Runs on EVERY
@@ -402,8 +404,37 @@ jobs:
           #     sits < 1.5x a legit pass) into explicit loud refusals at the
           #     start of the pass; a mid-pass swing INSIDE the (1.2, 20) s
           #     regime remains the accepted, disclosed residual.
-          # The 10 proven pairs (incl. data/lake_stats_manifest.py, merged in
-          # from DEC-LAKE-STATS-MANIFEST-001 — see its rationale block above)
+          # engine/rust_parity_core.py + ranking/rust_ranking.py joined per
+          # DEC-RANKING-RUST-TWIN-001 slice-4 PR-1 review round 7 (R7.2/R7.3): the
+          # refuter caught the two NEW correctness-critical parity wrapper
+          # modules shipping with NO --paths-to-mutate naming them — the
+          # EXACT unwired-gate class the lake_stats_manifest round-8 block
+          # above records (Golden Rule #10), while the same PR had added
+          # ranking.rs to cargo-mutants and the slice-4 design's CI-wiring
+          # clause requires "the weekly mutmut loop" for wrapper Python
+          # modules (DEC-RANKING-RUST-TWIN-001).
+          # Both focused suites run in ~2 s (the loop's subset argument
+          # holds); neither module carries a spin-capable loop (bounded
+          # `for` over collections only), so both ride the historical
+          # wrap-less runner. run_with_parity was restructured off PEP-695
+          # generics (parso 0.8.x hard-fails that syntax — 14 parse errors
+          # measured pre-fix; the sweep_apriori pack documents the same
+          # constraint). Wired + EXECUTED in-session (mutmut 2.5.1,
+          # py3.12): the post-hardening enumerations measured
+          # rust_parity_core 77/77 KILLED and rust_ranking 106/106 KILLED —
+          # each ZERO survived / ZERO suspicious / ZERO timeout (the round-7
+          # pre-hardening runs measured 80 with 21 survivors and 117 with 19;
+          # survivor-kill pins live in the two suites' TestMutationHardening
+          # packs, and the structural residue — quoted casts, PEP-526/563
+          # annotations, a literal logger name, a tandem-redundant strict
+          # zip — was RESTRUCTURED killable, never pragma'd). The 183 added
+          # mutants at the siblings' ~2.3-3 s pace add ~7-9 min, inside the
+          # budget comment's stated margin. TestMutationWorkflowWiring pins
+          # in both suites fail the unit gate if either pair is ever dropped.
+          # The 13 proven wrap-less pairs (incl. data/lake_stats_manifest.py,
+          # merged in from DEC-LAKE-STATS-MANIFEST-001 — see its rationale
+          # block above; the "10 pairs" wording predated the
+          # sweep_apriori/spec + slice-4 additions)
           # keep their exact historical runner + no
           # --test-time-base (minimal diff — their verified interplay is
           # unchanged). HONEST mechanism note (fixer round 2 — the earlier "no
@@ -420,10 +451,11 @@ jobs:
           # — post-round-3 on the F1-restructured audit.py, byte-identical to
           # this tree; MIGRATION.md #1597) but silently defeatable by future test insertion or
           # a new spin loop without a fail-fast twin. Pre-decided dial: if a
-          # rehearsal/scheduled run ever wedges on one of the 9 pairs again, give
+          # rehearsal/scheduled run ever wedges on one of the wrap-less pairs
+          # again, give
           # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
           # measured CI baseline. rate_common runs LAST so a survivor there never
-          # masks the 10 proven modules.
+          # masks the proven wrap-less modules.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
@@ -436,6 +468,8 @@ jobs:
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
+            "brutex/engine/rust_parity_core.py:tests/unit/test_engine_rust_parity_core.py:" \
+            "brutex/ranking/rust_ranking.py:tests/unit/test_ranking_rust_ranking.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             mod="${pair%%:*}"
             tmo="${pair##*:}"
