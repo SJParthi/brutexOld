@@ -169,7 +169,11 @@ class PriceColumns:
     and stay per-instance). Derived once per kernel lifetime by
     :func:`derive_price_columns` and shareable across every
     :class:`ResidentTradeSim` built over the same window
-    (DEC-STAGE1A-RUST-BATCH-001, the W2 rider).
+    (DEC-STAGE1A-RUST-BATCH-001, the W2 rider). The columns are immutable
+    ``tuple``\\s — the SAME object is shared by the kernel and every sim built
+    from it, so a mutable list here would let one consumer corrupt every
+    sibling in place (review LOW-2 hardening; PyO3 ``Vec`` extraction accepts
+    any sequence, so the FFI edge is unchanged).
 
     Raises
     ------
@@ -179,11 +183,11 @@ class PriceColumns:
         columns).
     """
 
-    open_paisa: list[int]
-    high_paisa: list[int]
-    low_paisa: list[int]
-    close_paisa: list[int]
-    session_days: list[int]
+    open_paisa: tuple[int, ...]
+    high_paisa: tuple[int, ...]
+    low_paisa: tuple[int, ...]
+    close_paisa: tuple[int, ...]
+    session_days: tuple[int, ...]
 
     def __post_init__(self) -> None:
         n = len(self.open_paisa)
@@ -225,11 +229,11 @@ def derive_price_columns(bars: Sequence[CandleBar]) -> PriceColumns:
         The five per-bar columns, positionally aligned with *bars*.
     """
     return PriceColumns(
-        open_paisa=[_price_to_paisa(bar.open) for bar in bars],
-        high_paisa=[_price_to_paisa(bar.high) for bar in bars],
-        low_paisa=[_price_to_paisa(bar.low) for bar in bars],
-        close_paisa=[_price_to_paisa(bar.close) for bar in bars],
-        session_days=[bar.timestamp.astimezone(IST).date().toordinal() for bar in bars],
+        open_paisa=tuple(_price_to_paisa(bar.open) for bar in bars),
+        high_paisa=tuple(_price_to_paisa(bar.high) for bar in bars),
+        low_paisa=tuple(_price_to_paisa(bar.low) for bar in bars),
+        close_paisa=tuple(_price_to_paisa(bar.close) for bar in bars),
+        session_days=tuple(bar.timestamp.astimezone(IST).date().toordinal() for bar in bars),
     )
 
 
@@ -442,7 +446,15 @@ class ResidentTradeSim:
         # duplicate O(N_bars) Decimal pass the lazy u128 promotion used to pay
         # is gone even flag-OFF (no observable output change; spy-pinned).
         self._kernel_inputs: (
-            tuple[list[int], list[int], list[int], list[int], list[bool], list[int]] | None
+            tuple[
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[bool, ...],
+                tuple[int, ...],
+            ]
+            | None
         ) = None
         self._precomputed_columns = precomputed_columns
         # Exit-index certification (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): the
@@ -488,14 +500,31 @@ class ResidentTradeSim:
             try:
                 import fno_math
 
+                # Fresh list copies at the FFI edge only: the memoised columns
+                # are SHARED immutable tuples (review LOW-2), while the
+                # fno_math stub's typed contract declares list columns (PyO3
+                # itself accepts any sequence). One O(N) copy per construction
+                # — the constructor's own Vec marshal is already O(N).
                 if wide:
                     self._rust = fno_math.ResidentSweepSimU128(
-                        open_p, high_p, low_p, close_p, forced, session_days, self._bar_bits
+                        list(open_p),
+                        list(high_p),
+                        list(low_p),
+                        list(close_p),
+                        list(forced),
+                        list(session_days),
+                        self._bar_bits,
                     )
                     self._rust_is_wide = True
                 else:
                     self._rust = fno_math.ResidentSweepSim(
-                        open_p, high_p, low_p, close_p, forced, session_days, self._bar_bits
+                        list(open_p),
+                        list(high_p),
+                        list(low_p),
+                        list(close_p),
+                        list(forced),
+                        list(session_days),
+                        self._bar_bits,
                     )
             except (ImportError, AttributeError):
                 reason = "wheel_missing"
@@ -517,7 +546,14 @@ class ResidentTradeSim:
 
     def _derive_kernel_inputs(
         self,
-    ) -> tuple[list[int], list[int], list[int], list[int], list[bool], list[int]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[bool, ...],
+        tuple[int, ...],
+    ]:
         """Derive the resident kernel's per-bar input columns from the bars.
 
         Returns ``(open_p, high_p, low_p, close_p, forced, session_days)`` —
@@ -559,7 +595,10 @@ class ResidentTradeSim:
         :func:`derive_price_columns` produced them, golden-pinned) else from
         one local :func:`derive_price_columns` call, and the assembled
         6-tuple is MEMOISED on the instance (pure — the G-4 law), so the u128
-        promotion's second derivation is a dict-free O(1) handoff.
+        promotion's second derivation is a dict-free O(1) handoff. Every
+        column in the memo is an immutable ``tuple`` — the price columns are
+        SHARED across every sim built from one kernel, so no consumer can
+        corrupt a sibling in place (review LOW-2 hardening).
         """
         if self._kernel_inputs is not None:
             return self._kernel_inputs
@@ -584,7 +623,7 @@ class ResidentTradeSim:
             columns.high_paisa,
             columns.low_paisa,
             columns.close_paisa,
-            forced,
+            tuple(forced),
             columns.session_days,
         )
         return self._kernel_inputs
@@ -620,8 +659,16 @@ class ResidentTradeSim:
             self._wide_unavailable = True
             return None
         open_p, high_p, low_p, close_p, forced, session_days = self._derive_kernel_inputs()
+        # Fresh list copies at the FFI edge — the memo stays immutable tuples
+        # (review LOW-2; the construction-site comment has the full rationale).
         self._rust_wide = kernel_cls(
-            open_p, high_p, low_p, close_p, forced, session_days, self._bar_bits
+            list(open_p),
+            list(high_p),
+            list(low_p),
+            list(close_p),
+            list(forced),
+            list(session_days),
+            self._bar_bits,
         )
         _LOG.info(
             "rust_trade_sim.wide_kernel_promoted",

@@ -1544,6 +1544,11 @@ fn check_stage1a_batch_values(
     for i in 0..n {
         let du = inp.day_index[i] as usize;
         let pdc = inp.day_pivot_levels[du * crate::stage1a_batch::PIVOT_ROW_LEN + 9];
+        // The day_high/day_low/open_of_day slots get the CURRENT bar's
+        // high/low/open — decision-equivalent to the OFF arm's per-bar
+        // running-extremes guard (a running extreme IS some earlier bar's
+        // already-guarded high/low/open, so a magnitude violation is
+        // rejected at the SAME bar either way; review-proven, INFO-4).
         check_evaluate_inputs(
             inp.open_paisa[i],
             inp.high_paisa[i],

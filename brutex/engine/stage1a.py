@@ -545,7 +545,12 @@ class Stage1AMatrixBuilder:
         consumes the roll cursor / day state). A bar beyond the roll schedule
         raises the SAME ``ValueError`` f-string as :meth:`push` (G-7,
         test-pinned), so marshal-time raises are arm-identical by construction
-        and PROPAGATE.
+        and PROPAGATE. Honest limit (review correctness MINOR-1): an input
+        carrying MULTIPLE pathologies at once may surface a DIFFERENT
+        pathology's exception MESSAGE ON vs OFF (the arms check in a
+        different order); exception TYPE parity holds, the bit-identity of
+        every ACCEPTED input is unaffected, and no such input is reachable
+        through a validated :class:`~brutex.data.models.CandleBar`.
 
         Parameters
         ----------

@@ -1595,25 +1595,26 @@ class TestPriceColumns:
 
         bars = _feed()
         columns = derive_price_columns(bars)
-        assert columns.open_paisa == [_price_to_paisa(b.open) for b in bars]
-        assert columns.high_paisa == [_price_to_paisa(b.high) for b in bars]
-        assert columns.low_paisa == [_price_to_paisa(b.low) for b in bars]
-        assert columns.close_paisa == [_price_to_paisa(b.close) for b in bars]
-        assert columns.session_days == [
+        # Immutable tuples (review LOW-2 — the columns are SHARED across sims).
+        assert columns.open_paisa == tuple(_price_to_paisa(b.open) for b in bars)
+        assert columns.high_paisa == tuple(_price_to_paisa(b.high) for b in bars)
+        assert columns.low_paisa == tuple(_price_to_paisa(b.low) for b in bars)
+        assert columns.close_paisa == tuple(_price_to_paisa(b.close) for b in bars)
+        assert columns.session_days == tuple(
             b.timestamp.astimezone(IST).date().toordinal() for b in bars
-        ]
+        )
         assert columns.n_bars == len(bars)
 
     @pytest.mark.parametrize("field", ["high_paisa", "low_paisa", "close_paisa", "session_days"])
     def test_inconsistent_columns_are_refused_naming_the_field(self, field: str) -> None:
-        kwargs: dict[str, list[int]] = {
-            "open_paisa": [1, 2],
-            "high_paisa": [1, 2],
-            "low_paisa": [1, 2],
-            "close_paisa": [1, 2],
-            "session_days": [1, 2],
+        kwargs: dict[str, tuple[int, ...]] = {
+            "open_paisa": (1, 2),
+            "high_paisa": (1, 2),
+            "low_paisa": (1, 2),
+            "close_paisa": (1, 2),
+            "session_days": (1, 2),
         }
-        kwargs[field] = [1]
+        kwargs[field] = (1,)
         with pytest.raises(ValueError, match=field):
             PriceColumns(**kwargs)
 

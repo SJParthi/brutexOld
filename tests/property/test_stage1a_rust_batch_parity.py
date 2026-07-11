@@ -43,6 +43,7 @@ from brutex.strategies.fib_definitions import FibAnchorKind
 from brutex.vocabulary.evaluator import ProximityParams
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
 
 # pyright: reportCallIssue=false
 # Rationale (DEC-PYRIGHT-UNMASK-001): pyright does not model the Hypothesis
@@ -165,7 +166,8 @@ def _dual_arm(bars: list[CandleBar], **kwargs: Any) -> tuple[list[int], list[int
         off = build_bar_bits(bars, **kwargs)
         trading_core.stage1a_bar_bits_batch = _spy  # type: ignore[attr-defined]
         os.environ[STAGE1A_RUST_ENV] = "1"
-        on = build_bar_bits(bars, **kwargs)
+        with capture_logs() as on_logs:
+            on = build_bar_bits(bars, **kwargs)
     finally:
         trading_core.stage1a_bar_bits_batch = real  # type: ignore[attr-defined]
         if prior_env is None:
@@ -175,6 +177,11 @@ def _dual_arm(bars: list[CandleBar], **kwargs: Any) -> tuple[list[int], list[int
         reset_self_check_for_tests()
         reset_observability_memo_for_tests()
     assert calls[0] == 1, "the ON arm silently fell back — a vacuous parity"
+    # Review LOW-1 hardening: the call spy proves the FFI was INVOKED; this
+    # proves its result was SERVED — a called-then-fell-back arm (a
+    # kernel_refused after the call) would compare Python-to-Python.
+    fell_back = [e for e in on_logs if e.get("event") == "rust_stage1a.fallback"]
+    assert not fell_back, f"the ON arm was called yet FELL BACK — vacuous parity: {fell_back}"
     return off, on
 
 
