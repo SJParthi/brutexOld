@@ -2326,7 +2326,7 @@ jobs:
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
           fi
-          # DEC-RANKING-RUST-TWIN-001 slice-4 PR-1 (review round 7, R7.3): the ONE
+          # DEC-RANKING-RUST-001 slice-4 PR-1 (review round 7, R7.3): the ONE
           # COMMON parity wrapper core ships with its OWN dedicated standalone
           # gate (the slice-4 design's "100% line+branch, standalone ci.yml
           # gate" clause — the oneclick_artifacts.py precedent), not only the broad

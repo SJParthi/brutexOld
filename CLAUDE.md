@@ -18,7 +18,47 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
+_Last updated: 2026-07-11 (DEC-RANKING-RUST-001, MIGRATION.md #1731 —
+the slice-4 PR-1 Rust ranking conversion under the Rust-first mandate
+(DEC-RUST-FIRST-MANDATE-001, queued ledger #1713 riding the in-flight
+kernel-track Slice-1 PR — cited as QUEUED, not asserted merged):
+`brutex.ranking`'s rank-time math gains flag-gated Rust twins in
+`rust/fno-math/src/ranking.rs` (rlib-PURE cores + thin `#[pyfunction]`
+wrappers — `rust/trading-core` stays FROZEN per DEC-SHARED-CORE-001; the
+future trading-core migration is a NAMED follow-up, joint with
+kernel-track), dispatched from exactly ONE production seam (`rank_combos`)
+behind `BRUTEX_RANKING_RUST` (default OFF; a junk value fails SAFE to OFF
+with one warn-once — never silently ON; the flip is a separate later ADR
+with measured M4-Pro soak evidence). ZERO tolerance-bounded surfaces ship —
+every converted function is class (a) bit-exact / (b)
+bit-exact-by-construction / (b\*) host-adjudicated-unconditionally-guarded,
+with per-family policies riding the NEW ONE-COMMON
+`brutex/engine/rust_parity_core.py` (the K2/#1531 burn-in/autorevert
+pattern EXTENDED: first-16 burn-in TRIPWIRE for (a)/(b) rows, an ALWAYS-ON
+per-call ship-the-oracle differential + per-family autorevert latch for
+(b\*) rows — a divergent bit can never reach a leaderboard, a persisted
+row, or a redo comparison, on ANY host, on ANY call). TWO live-caught
+corrections: CPython ≥ 3.12's NEUMAIER-compensated builtin `sum()`
+(gh-100425) transliterated token-for-token as `py_float_sum` (the
+naive-fold transcription was one ulp off on all-equal columns — every z
+flipped ±1.0), and the glibc pow-identity failure ABSORBED (61 + 65
+mismatches per 80,015 samples MEASURED on the build container's libm; the
+host-probe GREEN on the production M4-Pro is the explicit MERGE
+precondition for the ON-arm golden leg, coordinator-tracked). The K2 seam
+HONORED — ZERO `brutex/metrics/` edits, nothing on the
+`_fold_trades → TradeFolds → combine_metrics_from_folds →
+_compute_metrics_impl` chain; `metrics.rs` + `rust_metrics.py`
+byte-untouched. Provenance: the 5-lens implementation panel all-SHIP + 14
+refuter rounds converged (both MAJORs fixed — Rust-wrapper-zone mutation
+killability + the mutmut dispatch-seam gap; both parity wrapper modules at
+ZERO surviving mutants, 77/77 + 106/106 KILLED). HONEST payoff: UNKNOWN —
+a per-finalist one-language-consistency win, never a speedup claim (the
+(b\*) rows double-compute the oracle by design, bench-pinned ≤3× OFF,
+measured 1.29×). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; every frozen golden byte-identical, none
+regenerated; touched modules 100% line+branch; the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1731.)
+Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
 the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
 pollers consolidate onto ONE BXPoll-disciplined consumer per endpoint (subscriber
 fan-outs added to bx-oneclick.js / bx-rate-monitor.js / bx-liveproof.js; the
@@ -2168,7 +2208,62 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
+- **Active branch:** `claude/rust-ranking-metrics-slice4` (**DEC-RANKING-RUST-001, MIGRATION.md #1731** —
+  slice-4 PR-1, the Rust ranking conversion (the slice UMBRELLA entry; PR-2…PR-5 carry -002…-005 under it or claim
+  fresh numbers on open) under the Rust-first mandate DEC-RUST-FIRST-MANDATE-001 (queued ledger #1713 riding the
+  in-flight kernel-track Slice-1 PR — cited as QUEUED, not asserted merged): `brutex.ranking`'s rank-time math gains
+  Rust twins in `rust/fno-math/src/ranking.rs` — rlib-PURE cores + thin `#[pyfunction]` wrappers (the gates twin
+  `passes_gates`/`gate_reasons`, `_zscores`, `composite_term_inputs`/`composite_scores`, the DSR z-term, the
+  `(-score, mask)` index-permutation rank order, batched overfit verdicts, the correctly-rounded i64/i64→f64 FAST
+  path `cr_div_i64` bounded at 2^53) — dispatched from exactly ONE production seam (`rank_combos`) behind
+  `BRUTEX_RANKING_RUST` (default OFF; junk fails SAFE to OFF with one warn-once `flag_unrecognised`;
+  `RANKING_RUST_DEFAULT: Final[bool]` is the ONE flip lever — the flip a separate later ADR with measured M4-Pro
+  soak evidence, the #1531→ADR-0017 two-step). THE FLOAT-PARITY LAW: ZERO tolerance-bounded surfaces ship — every
+  converted function is class (a) bit-exact / (b) bit-exact-by-construction / (b\*)
+  host-adjudicated-unconditionally-guarded, per-family policies riding the NEW ONE-COMMON
+  `brutex/engine/rust_parity_core.py` (the K2/#1531 burn-in/autorevert pattern EXTRACTED before a second wrapper
+  exists, EXTENDED per family: (a)/(b) rows run the first-16-per-process burn-in bit-compare TRIPWIRE; (b\*) rows
+  run an ALWAYS-ON per-call differential with NO off/sampled mode — any bit mismatch SHIPS the Python oracle's
+  value + latches the family OFF process-wide with a `rust_parity.autoreverted` ERROR + a per-family divergence
+  counter, so a divergent bit can never reach a leaderboard, a persisted row, or a redo comparison, on ANY host, on
+  ANY call; compare keys `struct.pack('<d')` bits, signed zeros included; MemoryError re-raises bare). TWO
+  LIVE-CAUGHT corrections: (1) CPython ≥ 3.12's builtin `sum()` over floats is the NEUMAIER-compensated fold of
+  gh-100425, NOT the naive left fold the design transcribed — `ranking.rs::py_float_sum` transliterates CPython's
+  fold token-for-token incl. the exit guard (the naive mean was one ulp off on all-equal columns — every z flipped
+  ±1.0, a 0.1-scale composite shift); (2) the glibc pow-identity failure ABSORBED — the build container's libm
+  MEASURED 61 `pow(x,2)==x*x` + 65 `pow(x,0.5)==sqrt(x)` violations per 80,015 samples
+  (`tests/unit/test_pow_host_probe.py`; the shared verdict helper `tests/fakes/pow_identity.py` gates every strong
+  (b\*) leg), so the always-on differential serves oracle bits on such hosts by design — **the probe GREEN on the
+  production M4-Pro (macOS libm) is the explicit MERGE precondition for the ON-arm golden leg,
+  coordinator-tracked**. The K2 seam HONORED: ZERO `brutex/metrics/` edits — nothing on or near the
+  `_fold_trades → TradeFolds → combine_metrics_from_folds → _compute_metrics_impl` chain; `metrics.rs` +
+  `rust_metrics.py` byte-untouched (numeric semantics FROZEN until K2 merges). GATES (real numbers): flag-ON golden
+  legs reproduce the byte-frozen overfit leaderboard + the ranked-JSON `0.7927106202284727` + DSR
+  `0.9999999999834508` literals + `_GOLDEN_CONTENT_HASH` (parquet-bytes equality across arms) with per-family
+  `engaged` assertions; the sha-pinned rank-order-identity corpus (ten hostile pools — near-ties, signed zeros,
+  >2^53 paisa, None-heavy, NaN/inf gates, at-threshold doors, the overfit pool, u128-mask mixes) asserts identical
+  ranked mask sequences + wire bits + gate verdict/reason tuples across arms with the (b\*) census REPORTED;
+  hypothesis bit-differentials HARD-zero for (a)/(b) + THE unconditional wire law (flag-ON `rank_combos`
+  bit-identical to flag-OFF on every host); OFF-arm zero-cost bench pins (~0.6 µs probe vs ~0.6 ms 200-survivor
+  rank) + the (b\*) differential-cost bound (ON ≤ 3× OFF, measured 1.29×); wheel bookkeeping (nine `ranking_*`
+  symbols in `_EXPECTED_COMPILED_SYMBOLS`/`EXPECTED_BUILD.json`/`__init__.pyi`); cargo-mutants scope 920 measured
+  mutants (+321 ranking.rs; the #1597 shard dial 6→8); the weekly mutmut loop grows to 14 pass-2 pairs incl. BOTH
+  new wrapper modules, budget nominal honestly re-derived. PROVENANCE: 5-lens panel all-SHIP + 14 refuter rounds
+  converged — every confirmed finding fixed incl. the two MAJORs (Rust-wrapper-zone mutation killability, scope
+  915→920; the mutmut dispatch-seam gap); both wrapper modules ZERO surviving mutants (rust_parity_core 77/77,
+  rust_ranking 106/106 KILLED — the 21+19 pre-hardening survivors RESTRUCTURED killable, never pragma'd).
+  COORDINATOR RULINGS: PR-2 exact-rational dispersion (num-rational/num-bigint preferred, exact-pinned +
+  deny.toml); PR-3 presets SHIPS late, default-OFF, corpus-gated; PR-4 post-K2 (kurt CONFIRMED pow-free class (b) —
+  the PR-5 wording is "skew + CAGR"); PR-5 DEFERRED behind an explicit kernel-track JOINT sign-off post-K2 (never a
+  solo doctrine supersession). HONEST: payoff UNKNOWN — per-finalist/per-leaderboard rank-time code, NOT the
+  33-billion-trial hot loop; the claimed win is one-language consistency, NO speedup; the TickVault payoff does NOT
+  materialize as placed (trading-core frozen — the rlib purity keeps the later move cheap); default (flag-absent)
+  behavior byte-identical (bench-pinned); NO golden regenerated; run identity unchanged. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; F&O lake REFERENCE_ONLY; `rust_parity_core.py` 53 tests on
+  its NEW dedicated standalone ci.yml gate (112/26 at 100.00%), the `brutex.ranking` PACKAGE gate 243 tests (380/100
+  at 100.00% incl. `rust_ranking.py` 95/24); fno-math cargo 624+4+1 green dev AND release, fmt/clippy `-D warnings`
+  clean; P-06 + suffix-independence UNMODIFIED; ruff/ruff-format clean; `mypy --strict` clean; pyright 0 new.)
+  Earlier: `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
   the dashboard FRONTEND latency-hardening pack, CLIENT-side only (templates + static JS + tests + docs; ZERO
   route/payload/backend change — byte-stable wire): (Fix 1) the v29 operator page's DUPLICATE pollers consolidate onto
   ONE BXPoll-disciplined consumer per endpoint — bx-oneclick.js's progressPoller fans out to
@@ -5511,7 +5606,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/frontend-latency-hardening-r2`
+- **Active feature branch:** `claude/rust-ranking-metrics-slice4`
+  (DEC-RANKING-RUST-001, MIGRATION.md #1731 — slice-4 PR-1, the Rust ranking
+  conversion under the Rust-first mandate (queued #1713): flag-gated Rust
+  twins for `brutex.ranking`'s rank-time math in `rust/fno-math/src/ranking.rs`
+  (rlib-pure cores; trading-core stays FROZEN), ONE `rank_combos` dispatch
+  seam behind `BRUTEX_RANKING_RUST` default OFF; ZERO tolerance-bounded
+  surfaces — classes (a)/(b)/(b\*) with the ALWAYS-ON ship-the-oracle
+  differential + per-family autorevert on the NEW COMMON
+  `brutex/engine/rust_parity_core.py`; two live-caught corrections
+  (CPython≥3.12 Neumaier `py_float_sum`; the glibc pow-identity failure
+  absorbed — the M4-Pro host-probe green is the merge precondition); K2 seam
+  honored (zero `brutex/metrics/` edits); payoff honestly UNKNOWN
+  (consistency, not speed); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1731 for the
+  full blurb)
+  Earlier: `claude/frontend-latency-hardening-r2`
   (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the dashboard
   FRONTEND latency-hardening pack: v29 duplicate pollers consolidated onto ONE
   BXPoll-disciplined consumer per endpoint (measured BEFORE: 336 req/120 s idle

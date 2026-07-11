@@ -467,7 +467,7 @@ class TestMutationWorkflowWiring:
     them — the exact unwired-gate class MIGRATION #1614's round 8 recorded
     (Golden Rule #10) — while the same PR added ``ranking.rs`` to
     cargo-mutants while the slice-4 design's CI-wiring clause
-    (DEC-RANKING-RUST-TWIN-001) requires "the weekly mutmut loop" for the
+    (DEC-RANKING-RUST-001) requires "the weekly mutmut loop" for the
     wrapper Python modules. The
     module:testfile:timeout pair now sits in the workflow's per-module
     ``mutmut`` loop (empty third field = the historical wrap-less runner —

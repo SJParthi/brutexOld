@@ -418,14 +418,14 @@ jobs:
           #     start of the pass; a mid-pass swing INSIDE the (1.2, 20) s
           #     regime remains the accepted, disclosed residual.
           # engine/rust_parity_core.py + ranking/rust_ranking.py joined per
-          # DEC-RANKING-RUST-TWIN-001 slice-4 PR-1 review round 7 (R7.2/R7.3): the
+          # DEC-RANKING-RUST-001 slice-4 PR-1 review round 7 (R7.2/R7.3): the
           # refuter caught the two NEW correctness-critical parity wrapper
           # modules shipping with NO --paths-to-mutate naming them — the
           # EXACT unwired-gate class the lake_stats_manifest round-8 block
           # above records (Golden Rule #10), while the same PR had added
           # ranking.rs to cargo-mutants and the slice-4 design's CI-wiring
           # clause requires "the weekly mutmut loop" for wrapper Python
-          # modules (DEC-RANKING-RUST-TWIN-001).
+          # modules (DEC-RANKING-RUST-001).
           # Both focused suites run in ~2 s (the loop's subset argument
           # holds); neither module carries a spin-capable loop (bounded
           # `for` over collections only), so both ride the historical
