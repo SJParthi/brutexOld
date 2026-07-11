@@ -1265,6 +1265,43 @@ class TestOpenPositionSessionGapClose:
         assert closed.pnl_paisa == 0
         assert walker.finish() is None
 
+    def test_entry_day_is_the_ist_session_date_not_the_utc_date(self) -> None:
+        """The (A) fill stamps ``entry_day_ist`` from the IST session date, never
+        the UTC calendar date (refuter round 4, directed mutant pin).
+
+        The ``bar.timestamp.date()`` (UTC-date) mutant at the ``_open_position``
+        call survived the suite because the mismatch is domain-bounded — no NSE
+        session bar exists before 05:30 IST post-ingest-filter, so IST and UTC
+        dates always agree on real lake bars. The guard's DOCUMENTED semantics
+        are the IST session date, so this pins that law beyond the NSE trading
+        window (defense-in-depth; the domain never produces such bars): an
+        entry fill at IST 2024-01-02 01:00 is UTC 2024-01-01 19:30 — under the
+        mutant ``entry_day_ist`` reads 2024-01-01 and the (A2) guard
+        phantom-session_gap-closes the just-opened position on its OWN entry
+        bar; the correct IST stamp HOLDS through the later same-IST-session bar
+        (IST 05:00 = UTC 2024-01-01 23:30) to the honest end_of_data finish.
+        """
+        bars = [
+            _flat(0, 55),  # signal — IST date 2024-01-02, UTC date 2024-01-01
+            _flat(1, 0),  # entry fill @ open — UTC date still 2024-01-01
+            _flat(5, 0),  # same IST session date — the position must HOLD
+        ]
+        signals = [True, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=0,
+                mfe_paisa=0,
+                mae_paisa=0,
+                holding_bars=2,
+                entry_ts=_ts(1, 0),
+                exit_ts=_ts(5, 0),
+                direction=Side.BUY,
+            )
+        ]
+        assert [d.exit_reason for d in sink] == ["end_of_data"]
+
 
 class TestSessionGapFinishEquivalence:
     """The finish()-equivalence pin (suffix independence by construction).
