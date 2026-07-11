@@ -375,10 +375,11 @@ def write_report_files(
     evidence_dir.mkdir(parents=True, exist_ok=True)
     for check in report["checks"]:
         spill = json.dumps(check, indent=1, sort_keys=True, allow_nan=False)
-        atomic_write_simple(
-            evidence_dir / f"{check['check_id']}.json",
-            lambda tmp, spill=spill: tmp.write_text(spill, encoding="utf-8"),
-        )
+
+        def _write_spill(tmp: Path, payload: str = spill) -> None:
+            tmp.write_text(payload, encoding="utf-8")
+
+        atomic_write_simple(evidence_dir / f"{check['check_id']}.json", _write_spill)
     base = acceptance_dir(lake_root)
     base.mkdir(parents=True, exist_ok=True)
     atomic_write_simple(

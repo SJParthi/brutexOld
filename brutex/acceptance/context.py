@@ -10,11 +10,12 @@ retry-once TOCTOU law (§4 of the design): moved inputs retry ONCE, moved again
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -89,7 +90,7 @@ class AcceptanceContext:
         """The injected clock shifted to naive IST wall time."""
         return (self.now_utc().astimezone(UTC) + IST_OFFSET).replace(tzinfo=None)
 
-    def run_date(self) -> date:
+    def run_date(self) -> _dt.date:
         """The IST report date (the default sampling seed's basis)."""
         return self.now_ist().date()
 

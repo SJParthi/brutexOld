@@ -125,7 +125,9 @@ def contiguity_stamp_mismatch(
         return None
     if anchored == expected:
         return None
-    if anchored in ind.MUHURAT_SESSIONS and page_row.get("prev_close_muhurat"):
+    from brutex.calendars.nse import MUHURAT_SESSIONS
+
+    if anchored in MUHURAT_SESSIONS and page_row.get("prev_close_muhurat"):
         return None
     if page_row.get("prev_close_contiguous") is False:
         return None

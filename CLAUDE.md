@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
+_Last updated: 2026-07-11 (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756 —
+`brutex verify-acceptance`: the ONE operator-runnable acceptance verifier — 7 composed
+checks (uniqueness census · derived-TF correctness incl. the NEW 1day compare · zero-vendor-call
+incremental-pull re-plan idempotence · disk-provable rate evidence · movers page-vs-DB truth via
+the ONE AST-FENCED independent recompute · stored-data sanity · on-box latency probes) over the
+REAL lake, PASS/FAIL/ABSTAIN(named-reason) with mandatory evidence blocks + required coverage{}
+disclosure, a GATING <10 s teeth smoke (3 planted poisons on a real-writer twin — a verifier that
+cannot demonstrate detection withholds ALL real-lake verdicts, exit 2) + the CI-mandatory 15-poison
+full battery, the frozen `brutex-acceptance-report-v1` machine+human report under
+`<lake>/acceptance/<run_id>/` (atomic LATEST pointer + SweepAuditWriter hash chain + run-over-run
+deltas/abstain streaks carried in the report chain), verify-family exits 0/1/2/3/4 (precedence
+2>3>4>0; structural abstains {no_per_call_persistence, no_per_call_log, no_oi_compare_seam} are
+budget/streak-EXEMPT so the standing by-design gaps never turn the nightly permanently amber).
+ADDITIVE ONLY — NEW `brutex/acceptance/` package + thin CLI shim + ci.yml/mutation.yml gates;
+ZERO edits to serving paths/engine/pull/movers/db_view/ledger/doctor; compose-never-reimplement
+(the fenced movers leg is the single sanctioned exception, DEC-SURFACE-TRIAL-001 precedent).
+HONEST: rate.per_call_history is a PERMANENT named ABSTAIN (no per-call record persists — F3
+needs an operator ruling); tf.oi stands ABSTAIN until F2; sampled PASSes say so on the verdict
+line. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1756.)
+Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
 the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
 pollers consolidate onto ONE BXPoll-disciplined consumer per endpoint (subscriber
 fan-outs added to bx-oneclick.js / bx-rate-monitor.js / bx-liveproof.js; the
@@ -2168,7 +2188,32 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
+- **Active branch:** `claude/verify-acceptance` (**DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756** —
+  the operator acceptance verifier `brutex verify-acceptance`: NEW ADDITIVE `brutex/acceptance/` package
+  (model/report/context/sampling/independent/selftest/run + checks/{unique,tf,pull,rate,movers,sanity,latency})
+  + a thin `# pragma: no cover` cli shim + ci.yml per-module 100% gates + 4 modules in the weekly mutmut loop.
+  Three structural laws: one-verdict-one-evidence-block (empty evidence REFUSED at the model), no-verdict-without-work
+  (`units_checked == 0` ⇒ forced ABSTAIN(nothing_to_check) in the constructor — the #935/#1014 dormant-feature trap
+  closed), and teeth-before-trust (the always-on smoke plants 3 poisons in a real-writer twin lake and requires the
+  COMPOSED checks to catch each; TEETH_FAILED ⇒ exit 2 with real-lake verdicts WITHHELD; the 15-poison full battery is
+  CI-mandatory per merge with a comparator-INVERSION tooth). Compose-never-reimplement: the census fold, the
+  sweep-preflight TF seam + the NEW 1day compare composition, the REAL `plan_windows`/`plan_contract_windows` re-plan
+  on a pinned-clock copy (anti-vacuous planner tail tooth included; explicitly NOT `brutex fetch --dry-run`),
+  disk-only rate evidence (constants pin · #1692 market-hours conformance · bridge point sample · rotating-log window
+  · audit pair-bound trend under an ALWAYS-ABSTAIN verdict · the PERMANENT structural
+  ABSTAIN(no_per_call_persistence)), the AST-FENCED `independent.py` movers leg (raw parquet + hand IST/#1601
+  bucket-anchor/Fraction %CHNG/half-up-2dp/HLC3-paisa/hand calendar back-walk; fence = a red BUILD), the
+  price/bad-tick/tick-grid/session/interior-gap/VIX-silent-empty/completeness sanity battery, and best-of-N-MIN
+  latency probes vs on-box absolute budgets (never the CI 1.1x tier). Daily-rotating seeded sampling (engine set
+  ALWAYS full-history; coverage{} REQUIRED per check; coverage ledger makes accumulation visible). Report:
+  `<lake>/acceptance/<run_id>/report.json` schema-self-validated before writing + report.txt (ABSTAINs FIRST) +
+  evidence spill + LATEST + the SweepAuditWriter hash chain verified by the EXISTING `brutex audit verify`; deltas +
+  abstain streaks carried in the report chain. Exits 0/1/2/3/4 (2>3>4>0). 339 tests; every new module 100.00%
+  line+branch on the ci.yml-exact gates; full battery 15/15 detected, 0 false FAILs on the clean twin;
+  ruff/ruff-format clean; `mypy --strict` clean (the one pre-existing env-specific cma stub note aside, 0 new);
+  pyright 0 errors on the new package. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+  change; the per-item record lives in MIGRATION.md #1756.)
+  Earlier: `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
   the dashboard FRONTEND latency-hardening pack, CLIENT-side only (templates + static JS + tests + docs; ZERO
   route/payload/backend change — byte-stable wire): (Fix 1) the v29 operator page's DUPLICATE pollers consolidate onto
   ONE BXPoll-disciplined consumer per endpoint — bx-oneclick.js's progressPoller fans out to
@@ -5511,7 +5556,14 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/frontend-latency-hardening-r2`
+- **Active feature branch:** `claude/verify-acceptance`
+  (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756 — the operator acceptance verifier
+  `brutex verify-acceptance`: 7 composed checks over the real lake with PASS/FAIL/ABSTAIN(named)
+  verdicts + evidence blocks, the gating teeth smoke + CI 15-poison battery, the frozen
+  `brutex-acceptance-report-v1` report + hash-chained audit trail, verify-family exits 0/1/2/3/4;
+  additive `brutex/acceptance/` package only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line)
+  Earlier: `claude/frontend-latency-hardening-r2`
   (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the dashboard
   FRONTEND latency-hardening pack: v29 duplicate pollers consolidated onto ONE
   BXPoll-disciplined consumer per endpoint (measured BEFORE: 336 req/120 s idle
@@ -5961,7 +6013,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4853-4854` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4955-4956` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |

@@ -1,0 +1,441 @@
+{
+ "box": {
+  "keys": [
+   "brutex_version",
+   "code_commit",
+   "hardware_key",
+   "hostname",
+   "pull_active"
+  ]
+ },
+ "checks": [
+  {
+   "check_id": "unique",
+   "coverage": {
+    "examined": 9,
+    "mode": "bounded",
+    "population": 9,
+    "seed": "2026-07-10",
+    "selection": [
+     "months=6"
+    ],
+    "selection_truncated": false
+   },
+   "duration_s": "<volatile>",
+   "input_fingerprint": {
+    "moved": false,
+    "retried": false
+   },
+   "limits": [
+    "non-engine scope bounded to the last 6 months (--full lifts)"
+   ],
+   "repro": "brutex verify-acceptance --checks unique --seed 2026-07-10",
+   "sub_checks": [
+    {
+     "abstain_reason": null,
+     "abstain_streak": 0,
+     "evidence": {
+      "census": {
+       "engine_clean": true,
+       "engine_detail": "NIFTY/BANKNIFTY/SENSEX: 0 findings over 6 files",
+       "engine_files_skipped": 0,
+       "files_scanned": 9,
+       "files_skipped": 0,
+       "findings_total": 0,
+       "first_skipped_path": null,
+       "healed_total": 0,
+       "last_heal_utc": null,
+       "last_sweep_utc": null,
+       "mode": "acceptance",
+       "present": true,
+       "quarantined_files_total": 0,
+       "segments": [
+        {
+         "alien_files": 0,
+         "clean": 9,
+         "drift_dirs": 0,
+         "dup_files": 0,
+         "files": 9,
+         "foreign_files": 0,
+         "overlap_files": 0,
+         "price_files": 0,
+         "segment": "INDEX"
+        },
+        {
+         "alien_files": 0,
+         "clean": 0,
+         "drift_dirs": 0,
+         "dup_files": 0,
+         "files": 0,
+         "foreign_files": 0,
+         "overlap_files": 0,
+         "price_files": 0,
+         "segment": "CASH"
+        },
+        {
+         "alien_files": 0,
+         "clean": 0,
+         "drift_dirs": 0,
+         "dup_files": 0,
+         "files": 0,
+         "foreign_files": 0,
+         "overlap_files": 0,
+         "price_files": 0,
+         "segment": "FNO"
+        },
+        {
+         "alien_files": 0,
+         "clean": 0,
+         "drift_dirs": 0,
+         "dup_files": 0,
+         "files": 0,
+         "foreign_files": 0,
+         "overlap_files": 0,
+         "price_files": 0,
+         "segment": "OPTIONS"
+        }
+       ]
+      },
+      "files_scanned": 9,
+      "files_skipped": 0,
+      "findings_total": 0,
+      "first_skipped_path": null,
+      "offenders": [],
+      "offenders_total": 0,
+      "offenders_truncated": false,
+      "units_checked": 9
+     },
+     "id": "unique.census",
+     "limits": [
+      "a skip is a FAIL \u2014 incompleteness never certifies clean"
+     ],
+     "repro": "brutex verify-acceptance --checks unique --seed 2026-07-10",
+     "structural": false,
+     "verdict": "PASS"
+    },
+    {
+     "abstain_reason": null,
+     "abstain_streak": 0,
+     "evidence": {
+      "engine_detail": {
+       "BANKNIFTY": "CLEAN",
+       "NIFTY": "CLEAN",
+       "SENSEX": "CLEAN"
+      },
+      "units_checked": 6
+     },
+     "id": "unique.engine",
+     "limits": [
+      "full stored history \u2014 never month-bounded"
+     ],
+     "repro": "brutex verify-acceptance --checks unique --seed 2026-07-10",
+     "structural": false,
+     "verdict": "PASS"
+    }
+   ],
+   "verdict": "PASS"
+  },
+  {
+   "check_id": "tf",
+   "coverage": {
+    "examined": 3,
+    "mode": "full",
+    "population": 3,
+    "seed": "2026-07-10",
+    "selection": [
+     "NSE/INDEX/NIFTY",
+     "NSE/INDEX/BANKNIFTY",
+     "NSE/INDEX/INDIAVIX"
+    ],
+    "selection_truncated": false
+   },
+   "duration_s": "<volatile>",
+   "input_fingerprint": {
+    "moved": false,
+    "retried": false
+   },
+   "limits": [],
+   "repro": "brutex verify-acceptance --checks tf --seed 2026-07-10",
+   "sub_checks": [
+    {
+     "abstain_reason": null,
+     "abstain_streak": 0,
+     "evidence": {
+      "pairs_keyed": 3,
+      "stale_pairs": [],
+      "stale_pairs_total": 0,
+      "stale_pairs_truncated": false,
+      "units_checked": 3
+     },
+     "id": "tf.intraday",
+     "limits": [
+      "exact OHLCV value equality after keep-first dedup \u2014 no tolerance"
+     ],
+     "repro": "brutex verify-acceptance --checks tf --seed 2026-07-10",
+     "structural": false,
+     "verdict": "PASS"
+    },
+    {
+     "abstain_reason": null,
+     "abstain_streak": 0,
+     "evidence": {
+      "ambiguous_abstained": 0,
+      "cells": [
+       {
+        "key": "NSE/INDEX/NIFTY",
+        "state": "equal"
+       },
+       {
+        "key": "NSE/INDEX/BANKNIFTY",
+        "state": "equal"
+       },
+       {
+        "key": "NSE/INDEX/INDIAVIX",
+        "state": "equal"
+       }
+      ],
+      "cells_total": 3,
+      "cells_truncated": false,
+      "equal": 3,
+      "failures": 0,
+      "skipped": 0,
+      "units_checked": 3
+     },
+     "id": "tf.daily",
+     "limits": [
+      "forming sessions excluded from BOTH sides (cutoff law)"
+     ],
+     "repro": "brutex verify-acceptance --checks tf --seed 2026-07-10",
+     "structural": false,
+     "verdict": "PASS"
+    },
+    {
+     "abstain_reason": "no_oi_compare_seam",
+     "abstain_streak": 1,
+     "evidence": {
+      "follow_up": "F2 (OI-aware derived-TF compare)",
+      "law": "compare is OHLCV-6 (tf_autoderive.REQUIRED_COLUMNS) \u2014 derived-F&O open_interest is NOT value-compared in v1",
+      "units_checked": 0
+     },
+     "id": "tf.oi",
+     "limits": [],
+     "repro": "brutex verify-acceptance --checks tf --seed 2026-07-10",
+     "structural": true,
+     "verdict": "ABSTAIN"
+    }
+   ],
+   "verdict": "PASS"
+  },
+  {
+   "check_id": "pull",
+   "coverage": {
+    "examined": 0,
+    "mode": "none",
+    "population": 0,
+    "seed": "2026-07-10",
+    "selection": [],
+    "selection_truncated": false
+   },
+   "duration_s": "<volatile>",
+   "input_fingerprint": {
+    "moved": false,
+    "retried": false
+   },
+   "limits": [],
+   "repro": "brutex verify-acceptance --checks pull --seed 2026-07-10",
+   "sub_checks": [
+    {
+     "abstain_reason": "no_ledger",
+     "abstain_streak": 1,
+     "evidence": {
+      "reason": "no_ledger",
+      "units_checked": 0
+     },
+     "id": "pull.replan_zero",
+     "limits": [],
+     "repro": "brutex verify-acceptance --checks pull --seed 2026-07-10",
+     "structural": false,
+     "verdict": "ABSTAIN"
+    }
+   ],
+   "verdict": "ABSTAIN"
+  },
+  {
+   "check_id": "rate",
+   "coverage": {
+    "examined": 6,
+    "mode": "full",
+    "population": 6,
+    "seed": "2026-07-10",
+    "selection": [
+     "persisted evidence: ledger + journal + bridge + logs + audits"
+    ],
+    "selection_truncated": false
+   },
+   "duration_s": "<volatile>",
+   "input_fingerprint": {
+    "moved": false,
+    "retried": false
+   },
+   "limits": [
+    "vendor tolerance of sustained 8 r/s stays UNVERIFIED by design (\u00a72 Rule 6)",
+    "no blanket rate PASS exists \u2014 sub-verdicts only"
+   ],
+   "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
+   "sub_checks": [
+    {
+     "abstain_reason": null,
+     "abstain_streak": 0,
+     "evidence": {
+      "ceiling_per_min": 500,
+      "ceiling_rps": 8.0,
+      "rps_times_60": 480.0,
+      "units_checked": 3
+     },
+     "id": "rate.constants",
+     "limits": [
+      "injection-site wiring cited to existing unit pins, not re-proven"
+     ],
+     "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
+     "structural": false,
+     "verdict": "PASS"
+    },
+    {
+     "abstain_reason": "nothing_to_check",
+     "abstain_streak": 1,
+     "evidence": {
+      "attempts_examined": 0,
+      "block_window_ist": "08:45-15:35",
+      "excluded_pre_guard": 0,
+      "in_window_attempts": 0,
+      "offending_stamps": [],
+      "units_checked": 0
+     },
+     "id": "rate.market_hours",
+     "limits": [],
+     "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
+     "structural": false,
+     "verdict": "ABSTAIN"
+    },
+    {
+     "abstain_reason": "no_bridge_file",
+     "abstain_streak": 1,
+     "evidence": {
+      "reason": "no bridge file at <lake>/.rate/pull_rate.json",
+      "units_checked": 0
+     },
+     "id": "rate.bridge_snapshot",
+     "limits": [],
+     "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
+     "structural": false,
+     "verdict": "ABSTAIN"
+    },
+    {
+     "abstain_reason": "no_rate_log_lines",
+     "abstain_streak": 1,
+     "evidence": {
+      "reason": "no rate.* lines in the rotating log window",
+      "units_checked": 0
+     },
+     "id": "rate.log_window",
+     "limits": [
+      "CLI fetch never writes this sink \u2014 dashboard pulls only"
+     ],
+     "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
+     "structural": false,
+     "verdict": "ABSTAIN"
+    },
+    {
+     "abstain_reason": "no_per_call_log",
+     "abstain_streak": 1,
+     "evidence": {
+      "chains": {
+       "fno-ingest.jsonl": "absent",
+       "spot-ingest.jsonl": "absent"
+      },
+      "max_pairs_per_rolling_minute": 0,
+      "pairs_total": 0,
+      "units_checked": 0
+     },
+     "id": "rate.pair_bound",
+     "limits": [
+      "pair-completion times are not call-issue times \u2014 evidence only"
+     ],
+     "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
+     "structural": true,
+     "verdict": "ABSTAIN"
+    },
+    {
+     "abstain_reason": "no_per_call_persistence",
+     "abstain_streak": 1,
+     "evidence": {
+      "law": "no per-call timestamped record persists \u2014 retrospective max r/s is UNPROVABLE from disk",
+      "live_probe": "brutex doctor --live --stage 13 (opt-in, vendor-calling)",
+      "remediation": "a persisted per-issue log is follow-up F3 \u2014 OPERATOR RULING required (adjacent to the Python-locked fetch path)",
+      "units_checked": 0
+     },
+     "id": "rate.per_call_history",
+     "limits": [],
+     "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
+     "structural": true,
+     "verdict": "ABSTAIN"
+    }
+   ],
+   "verdict": "PASS"
+  }
+ ],
+ "coverage_ledger": {
+  "datasets_sampled_window_pct": 100.0,
+  "oldest_unsampled": null
+ },
+ "deltas": null,
+ "duration_s": "<volatile>",
+ "generated_utc": "<volatile>",
+ "inputs": {
+  "argv": [
+   "verify-acceptance",
+   "--seed",
+   "2026-07-10"
+  ],
+  "checks_requested": [
+   "unique",
+   "tf",
+   "pull",
+   "rate"
+  ],
+  "full": false,
+  "lake_root": "<volatile>",
+  "latency_budget_overrides": {},
+  "months_bound": 6,
+  "sample_n": 50,
+  "seed": "2026-07-10",
+  "seed_mode": "fixed"
+ },
+ "overall": {
+  "abstain_subchecks_nonstructural": 4,
+  "abstain_subchecks_structural": 3,
+  "error_checks": [],
+  "exit_code": 0,
+  "fail_checks": [],
+  "passes_full": 2,
+  "passes_sample": 1,
+  "verdict": "PASS_WITH_ABSTAINS"
+ },
+ "previous": null,
+ "run_id": "<volatile>",
+ "schema": "brutex-acceptance-report-v1",
+ "self_test": {
+  "duration_s": "<volatile>",
+  "false_fails_on_clean": 0,
+  "mode": "skipped",
+  "poisons_detected": 0,
+  "poisons_planted": 0,
+  "verdict": "TEETH_SKIPPED"
+ },
+ "totals": {
+  "abstain": 7,
+  "error": 0,
+  "fail": 0,
+  "pass": 5
+ }
+}
