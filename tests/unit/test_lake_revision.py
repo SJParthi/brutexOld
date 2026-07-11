@@ -41,6 +41,7 @@ from brutex.dashboard.lake_revision import (
     ABSENT_TOKEN,
     lake_revision,
     rate_bridge_revision,
+    registry_revision,
     sweep_results_revision,
     sweeps_revision,
 )
@@ -316,6 +317,29 @@ class TestSweepResultsRevisionNoSignal:
     this module's stem-matched suite must prove them on its own).
     """
 
+    def test_happy_composite_joins_dirs_and_chain(self, tmp_path: Path) -> None:
+        """The happy path: ``<dirs digest>|<chain stat>`` — and an audit append moves it.
+
+        The standalone twin of the token behaviour proven in
+        ``test_dashboard_results_revision_key.py`` (this module's stem-matched
+        suite must reach the composite return on its own — the discovery-gate
+        contract; the line was previously covered only by the sibling file).
+        """
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
+        chain = tmp_path / "sweeps" / "audit" / "sweep-all.jsonl"
+        chain.parent.mkdir(parents=True, exist_ok=True)
+        chain.write_bytes(b'{"action":"SWEEP_START"}\n')
+        first = sweep_results_revision(tmp_path)
+        assert first is not None and "|" in first
+        dirs = sweeps_revision(tmp_path)
+        st = os.stat(chain)
+        assert first == f"{dirs}|{st.st_mtime_ns}:{st.st_size}"
+        # An audit APPEND (no directory mtime moves) still moves the composite.
+        with chain.open("ab") as handle:
+            handle.write(b'{"action":"SWEEP_START"}\n')
+        second = sweep_results_revision(tmp_path)
+        assert second is not None and second != first
+
     def test_dirs_probe_failure_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -409,6 +433,81 @@ class TestRateBridgeRevision:
         assert token is not None
         ledger_component = token.split("+", 1)[0]
         assert ledger_component == f"{st.st_mtime_ns}:{st.st_size}"
+
+
+class TestRegistryRevision:
+    """The ``registry.duckdb`` content token (DEC-MEMORY-FOOTPRINT-HARDENING-001).
+
+    The cross-process freshness signal for the options expiry-calendar +
+    strike-chain caches: a metadata pull in ANOTHER process writes
+    ``registry.duckdb`` without moving the ledger/sweeps/greeks composite, so
+    the generation-only cache keys served the PRE-pull calendar until an
+    unrelated ledger write.
+    """
+
+    def test_present_registry_matches_stat(self, tmp_path: Path) -> None:
+        """A present registry file tokens as the exact ``mtime_ns:size`` pair."""
+        target = tmp_path / "registry.duckdb"
+        target.write_bytes(b"duckdb-stand-in")
+        st = os.stat(target)
+        assert registry_revision(tmp_path) == f"{st.st_mtime_ns}:{st.st_size}"
+
+    def test_absent_registry_returns_stable_sentinel(self, tmp_path: Path) -> None:
+        """No registry (a CLI-only-pulled lake) → the stable ``absent`` sentinel."""
+        assert registry_revision(tmp_path) == ABSENT_TOKEN
+        # Stable across repeat probes — the sentinel never oscillates a key.
+        assert registry_revision(tmp_path) == ABSENT_TOKEN
+
+    def test_registry_write_moves_the_token(self, tmp_path: Path) -> None:
+        """A committed registry write (metadata pull) MUST move the token.
+
+        Also pins the absent→present transition moving it exactly once.
+        """
+        first = registry_revision(tmp_path)
+        assert first == ABSENT_TOKEN
+        target = tmp_path / "registry.duckdb"
+        target.write_bytes(b"v1")
+        created = registry_revision(tmp_path)
+        assert created is not None and created != ABSENT_TOKEN
+        # A second write with different content — size (and mtime) move.
+        target.write_bytes(b"v2-longer")
+        rewritten = registry_revision(tmp_path)
+        assert rewritten is not None
+        assert rewritten != created
+
+    def test_unreadable_registry_returns_none_and_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing-file OSError → structlog WARN + ``None`` ("no signal")."""
+        target = tmp_path / "registry.duckdb"
+        target.write_bytes(b"v1")
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(target):
+                raise PermissionError(13, "denied", str(target))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        with capture_logs() as logs:
+            assert registry_revision(tmp_path) is None
+        assert any(entry["event"] == "lake_revision.registry_stat_failed" for entry in logs)
+
+    def test_registry_filename_pinned_to_the_db_view_resolver(self, tmp_path: Path) -> None:
+        """The not-imported filename copy cannot drift from the ONE resolver.
+
+        ``lake_revision`` deliberately does NOT import ``db_view`` (that module
+        pulls the polars/duckdb import graph; the probe stays stdlib-lean) —
+        this pin is the drift guard, the ``_SWEEPS_DIRNAME`` precedent.
+        """
+        pytest.importorskip("polars", reason="db_view pulls the data-lake import graph")
+        from brutex.dashboard import lake_revision as probe_mod
+        from brutex.dashboard.db_view import registry_path_for
+
+        assert (
+            registry_path_for(tmp_path / "instruments.duckdb")
+            == tmp_path / probe_mod._REGISTRY_FILENAME
+        )
 
 
 def _write_greeks_marker(lake_root: Path, payload: bytes) -> Path:

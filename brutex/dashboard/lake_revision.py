@@ -133,6 +133,14 @@ _GREEKS_REVISION_FILENAME: Final[str] = "revision.json"
 #: a lean stdlib-only probe surface).
 _SWEEP_AUDIT_RELPATH: Final[tuple[str, str]] = ("audit", "sweep-all.jsonl")
 
+#: The metadata-pull registry cache's filename, a SIBLING of
+#: ``instruments.duckdb`` directly under the lake root. MUST equal the literal
+#: inside ``brutex.dashboard.db_view.registry_path_for`` (the ONE resolver) —
+#: pinned by test, not imported: ``db_view`` pulls the polars/duckdb import
+#: graph and this probe surface stays lean stdlib-only (the
+#: :data:`_SWEEPS_DIRNAME` precedent).
+_REGISTRY_FILENAME: Final[str] = "registry.duckdb"
+
 
 def _stat_token(target: Path, *, event: str, include_ino: bool = False) -> str | None:
     """One path's ``"<mtime_ns>:<size>"`` stat token — the shared O(1) probe core.
@@ -345,6 +353,55 @@ def rate_bridge_revision(lake_root: Path) -> str | None:
     )
 
 
+def registry_revision(lake_root: Path) -> str | None:
+    """Return the ``registry.duckdb`` content token for *lake_root*, or ``None``.
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 — the missing cross-process freshness
+    signal for the two options registry-derived caches
+    (``_options_calendar_cache`` + ``_options_strikes_cache``, keyed on the
+    write generation ONLY): a METADATA pull in ANOTHER process — the nightly
+    headless ``run_full_pipeline``, a second dashboard, a CLI registry writer
+    — upserts expiries + contracts into ``<lake_root>/registry.duckdb``
+    without moving the ledger / sweeps / greeks composite, so an open
+    dashboard kept serving the PRE-pull expiry tiers and ATM strike steps
+    until an unrelated candle write bumped the generation.
+    DEC-STALENESS-CACHE-TRUTH-001 (#1660) closed the same write class for the
+    nav-latency caches with ``coverage_revision``; this token is the
+    registry-file twin, folded into those caches' KEYS at their ``app.py``
+    key-build sites so a committed registry write moves the key on the next
+    poll.
+
+    One ``os.stat`` of ``<lake_root>/registry.duckdb`` folded to
+    ``"<mtime_ns>:<size>"`` — inherited :func:`_stat_token` semantics
+    verbatim: a missing registry (a CLI-only-pulled lake — the graceful
+    lake-fallback path) → the stable :data:`ABSENT_TOKEN` (its first-ever
+    creation moves the token exactly once); any other :class:`OSError` → a
+    structlog WARN (``lake_revision.registry_stat_failed``) + ``None`` =
+    "unknown, no signal — make NO freshness decision".
+
+    HONEST envelope (Golden Rule #10): DuckDB commits touch the database
+    file, so a committed ``upsert_expiry``/``upsert_contract`` moves the
+    stat; the repo-wide same-``(mtime_ns, size)`` in-place-rewrite residual
+    applies here as everywhere (a rewrite landing byte-count-equal within
+    one mtime granule is invisible — stated, not hidden).
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (``registry.duckdb`` lives directly under it —
+        ``db_view.registry_path_for``'s sibling-of-the-master law).
+
+    Returns
+    -------
+    str | None
+        The stat token, :data:`ABSENT_TOKEN`, or ``None`` on a probe error.
+    """
+    return _stat_token(
+        lake_root / _REGISTRY_FILENAME,
+        event="lake_revision.registry_stat_failed",
+    )
+
+
 def _greeks_backfill_revision(lake_root: Path) -> str | None:
     """The Greeks-backfill marker component: one ``os.stat`` of the marker file.
 
@@ -411,6 +468,7 @@ __all__ = [
     "ABSENT_TOKEN",
     "lake_revision",
     "rate_bridge_revision",
+    "registry_revision",
     "sweep_results_revision",
     "sweeps_revision",
 ]

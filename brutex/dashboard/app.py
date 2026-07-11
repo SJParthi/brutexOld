@@ -45,7 +45,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, TypeVar
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -140,7 +140,11 @@ from brutex.dashboard.lake_census_holder import (
     FIRST_SCAN_PER_FILE_BUDGET_S,
     LakeCensusHolder,
 )
-from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
+from brutex.dashboard.lake_revision import (
+    lake_revision,
+    registry_revision,
+    sweep_results_revision,
+)
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -1026,6 +1030,61 @@ def _registry_unreadable_payload(columns: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
+_T = TypeVar("_T")
+
+
+def _registry_key_component(lake_root: Path) -> str:
+    """The ``registry.duckdb`` content token folded into every registry-derived cache key.
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 — the options expiry-calendar +
+    strike-chain caches (and the options CANDIDATE key that bakes both
+    verdicts into its rows) were keyed on the write generation ONLY, which a
+    CROSS-PROCESS metadata pull (nightly headless / second dashboard / CLI)
+    never bumps: the registry moved, the caches did not. Folding this token
+    into the KEY (the ``_nav_latency_key`` ``coverage_revision`` precedent,
+    DEC-STALENESS-CACHE-TRUTH-001) makes a committed registry write yield a
+    fresh key on the next poll — never a stale expiry tier / ATM step.
+
+    A probe OUTAGE (:func:`registry_revision` → ``None`` — a non-missing-file
+    :class:`OSError`, already WARNed by the probe) folds the stable
+    ``"unknown"`` sentinel instead: the key DEGRADES to the pre-fix
+    generation-only staleness envelope for the outage's duration — never
+    WORSE than the behaviour this fix replaces, and self-healing the moment
+    the probe recovers (the recovered token differs from ``"unknown"``, so
+    the next poll re-keys). Distinct by construction from every real token
+    (``"<mtime_ns>:<size>"``) and from the absent-file ``"absent"`` sentinel.
+    """
+    token = registry_revision(lake_root)
+    return "unknown" if token is None else token
+
+
+class _RegistryKeyedCache:
+    """Fold a registry content token into every key of a wrapped cache.
+
+    The :class:`~brutex.dashboard.registry_strikes.StrikeChainCache`-shaped
+    adapter (structural — only ``get_or_compute``) the options strike-chain
+    loader rides (DEC-MEMORY-FOOTPRINT-HARDENING-001): the per-chain keys are
+    built INSIDE :func:`~brutex.dashboard.registry_strikes.make_registry_chain_loader`
+    (``registry_chain_key``), so the registry content token is folded here at
+    the app.py key-build seam — keeping that loader's public signature
+    byte-stable — as ``"<key>|r=<token>"`` (``|`` cannot appear in a stat
+    token or the sentinels, so the join is unambiguous). Every other key
+    component + the generation stamp pass through untouched.
+    """
+
+    __slots__ = ("_inner", "_token")
+
+    def __init__(self, inner: MoversSnapshotCache, token: str) -> None:
+        self._inner = inner
+        self._token = token
+
+    def get_or_compute(self, key: str, *, generation: int, compute: Callable[[], _T]) -> _T:
+        """Delegate with the registry token folded into *key* (stamp untouched)."""
+        return self._inner.get_or_compute(
+            f"{key}|r={self._token}", generation=generation, compute=compute
+        )
+
+
 # ── Host / cross-origin hardening (R2-DS-F1) ────────────────────────────────
 # The dashboard carries no auth/CSRF tokens, so a browser on the operator's
 # machine can be induced to fire state-changing POSTs at this localhost
@@ -1757,7 +1816,11 @@ def build_app(
     # read — re-run on EVERY options poll. The calendar is invariant between metadata
     # pulls, so it is memoised behind the SAME write generation as the caches above
     # (a metadata pull bumps it → re-read; otherwise an options poll is an O(1) handoff),
-    # keyed per exchange. REUSES the COMMON `MoversSnapshotCache` (one calendar key).
+    # keyed per exchange PLUS the registry.duckdb content token
+    # (`_registry_key_component` — DEC-MEMORY-FOOTPRINT-HARDENING-001: a
+    # CROSS-PROCESS metadata pull writes the registry with NO generation bump,
+    # so the generation-only key served the pre-pull calendar until an
+    # unrelated ledger write). REUSES the COMMON `MoversSnapshotCache`.
     _options_calendar_cache = MoversSnapshotCache()
     # The Options-tab AUTHORITATIVE strike-chain cache (DEC-MONEYNESS-REGISTRY-STEP-001):
     # the ATM±N strike-grid step derives from the FULL vendor strike chain of each
@@ -1769,7 +1832,10 @@ def build_app(
     # invariant between metadata pulls, so it is memoised behind the SAME write
     # generation as the calendar cache above (a metadata pull bumps it → re-read;
     # otherwise an options poll is an O(1) handoff), keyed per (exchange, underlying,
-    # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
+    # expiry) — `registry_chain_key` — PLUS the registry.duckdb content token folded
+    # by the `_RegistryKeyedCache` adapter at both key-build seams (the calendar
+    # cache's cross-process staleness class, DEC-MEMORY-FOOTPRINT-HARDENING-001).
+    # REUSES the COMMON `MoversSnapshotCache` (LRU: a
     # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
     _options_strikes_cache = MoversSnapshotCache()
     # The Futures/Options underlying-CLASS kind map cache (DEC-MOVERS-UNDERLYING-CLASS-001):
@@ -4116,13 +4182,19 @@ def build_app(
                 # The stored-master kind map + its content token (review round 1 —
                 # see the futures warm above): correct stamps + route key parity.
                 underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
+                # The registry.duckdb content token — folded into the SAME three
+                # keys the route folds it into (calendar / chains / candidate), so
+                # the warmed entries are actually HIT by the route's composite key
+                # (key parity, CLAUDE.md §11 COMMON) and a cross-process registry
+                # write re-keys them (DEC-MEMORY-FOOTPRINT-HARDENING-001).
+                warm_registry_token = _registry_key_component(lake_root)
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
                 ) -> Callable[[], int]:
                     tier, trk = normalize_options_selectors(raw_tier, raw_track)
                     calendar_expiries = _options_calendar_cache.get_or_compute(
-                        f"options_calendar|{exch or ''}",
+                        f"options_calendar|{exch or ''}|r={warm_registry_token}",
                         generation=gen,
                         compute=lambda: load_registry_expiries(registry_path, exchange=exch),
                     )
@@ -4134,7 +4206,7 @@ def build_app(
                     registry_chain_for = make_registry_chain_loader(
                         registry_path,
                         exchange=exch,
-                        cache=_options_strikes_cache,
+                        cache=_RegistryKeyedCache(_options_strikes_cache, warm_registry_token),
                         generation=gen,
                     )
 
@@ -4149,7 +4221,7 @@ def build_app(
                                 expiry_tier=tier,
                                 expiry_track=trk,
                             )
-                            + f"|m={kinds_token}",
+                            + f"|m={kinds_token}|r={warm_registry_token}",
                             generation=gen,
                             compute=lambda: compute_options_candidates(
                                 lake_root=lake_root,
@@ -6151,14 +6223,25 @@ def build_app(
                     # near) + the All/Monthly/Weekly cadence track (blank ⇒ all),
                     # normalised so the key and the computed set agree.
                     tier, trk = normalize_options_selectors(expiry, track)
+                    # The registry.duckdb CONTENT token (DEC-MEMORY-FOOTPRINT-HARDENING-001):
+                    # folded into the calendar / strike-chain / candidate keys below so a
+                    # CROSS-PROCESS metadata pull (nightly headless, second dashboard, CLI)
+                    # — which writes the registry WITHOUT bumping the write generation —
+                    # re-keys them on the next poll instead of serving the PRE-pull expiry
+                    # tiers + ATM steps until an unrelated ledger write. One os.stat on the
+                    # threadpool worker; a probe outage degrades to the pre-fix
+                    # generation-only envelope (see `_registry_key_component`).
+                    registry_token = _registry_key_component(lake_root)
                     # The AUTHORITATIVE vendor expiry calendar (DEC-MOVERS-CALENDAR-TIERS-001):
                     # the Near/Next/Far + Weekly/Monthly tier classification reads the FULL
                     # calendar from registry.duckdb (not the sparse lake-partition set), so a
                     # sparsely-pulled lake no longer mislabels a tier. Memoised once per write
-                    # generation (a metadata pull bumps it → re-read); `None` when the registry
+                    # generation AND per registry content token (a metadata pull in THIS
+                    # process bumps the generation; one in ANOTHER process moves the token —
+                    # either way a re-read); `None` when the registry
                     # is absent/empty → the lake-partition fallback (a CLI-only lake stays correct).
                     calendar_expiries = _options_calendar_cache.get_or_compute(
-                        f"options_calendar|{exch or ''}",
+                        f"options_calendar|{exch or ''}|r={registry_token}",
                         generation=generation,
                         compute=lambda: load_registry_expiries(
                             registry_path_for(store_path), exchange=exch
@@ -6177,7 +6260,10 @@ def build_app(
                     registry_chain_for = make_registry_chain_loader(
                         registry_path_for(store_path),
                         exchange=exch,
-                        cache=_options_strikes_cache,
+                        # The registry content token folded into every chain key at
+                        # THIS key-build seam (the loader's signature stays stable)
+                        # — DEC-MEMORY-FOOTPRINT-HARDENING-001.
+                        cache=_RegistryKeyedCache(_options_strikes_cache, registry_token),
                         generation=generation,
                     )
                     # The stored-master index-vs-stock kind map for the RANK-time
@@ -6190,6 +6276,12 @@ def build_app(
                     # below — the candidates carry the map's verdict STAMPED per row,
                     # so stale stamps would defeat a fresh map.
                     underlying_kinds, kinds_token = _underlying_kinds_cached(store)
+                    # The registry token is ALSO folded into the candidate key (the
+                    # kinds_token stamped-verdict precedent right above): the computed
+                    # candidates BAKE IN the calendar's tier resolution + the strike
+                    # chains' ATM steps, so a fresh calendar beside a stale cached
+                    # candidate set would still serve the pre-pull tiers
+                    # (DEC-MEMORY-FOOTPRINT-HARDENING-001, closed end-to-end).
                     key = (
                         candidate_key(
                             asset="options",
@@ -6200,7 +6292,7 @@ def build_app(
                             expiry_tier=tier,
                             expiry_track=trk,
                         )
-                        + f"|m={kinds_token}"
+                        + f"|m={kinds_token}|r={registry_token}"
                     )
                     opt_cands = _movers_cache.get_or_compute(
                         key,
