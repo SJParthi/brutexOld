@@ -100,6 +100,7 @@ from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.errors import MarketHoursHalt
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.parquet_writer import fold_max_close_delta
+from brutex.data.window_ledger_store import shared_pull_ledger_scope
 from brutex.money import format_inr, round_money
 from brutex.notifications.sweep_alerts import emit_vendor_conflict_alert
 
@@ -1002,6 +1003,15 @@ def run_full_pipeline(
     it triggers is the real multi-hour vendor fill + the O(symbols × bars)
     prebuild (no throughput claim, Golden Rule #10).
 
+    **One ledger load per run (DEC-LEDGER-LOAD-SPACE-V1-001):** the fetch
+    phases run inside ONE
+    :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`, so the
+    spot phase's full window-ledger materialisation is REUSED by the
+    historical phase (previously each phase loaded the whole O(rows) ledger —
+    two full loads + two co-resident copies per pipeline run). Per-phase saves
+    are unchanged; the scope closes before the prebuild/movers post-steps so
+    the ledger is released, not held through the derive.
+
     Parameters
     ----------
     run_spot
@@ -1059,6 +1069,8 @@ def run_full_pipeline(
     # non-vendor prebuild / movers stages are inapplicable here (there is no pull to
     # derive from) and also do not run. The mid-run per-window ``MarketHoursHalt`` is
     # the belt for a pull already in flight; this is the belt for one about to start.
+    # Checked BEFORE the shared-ledger scope opens — a deferred pull never pays the
+    # whole-ledger materialisation (DEC-LEDGER-LOAD-SPACE-V1-001).
     if market_closed is not None and market_closed():
         _LOG.warning("pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS)
         return PipelinePullReport(
@@ -1068,132 +1080,148 @@ def run_full_pipeline(
             stopped_after=PHASE_MARKET_HOURS,
             note=_market_hours_stop_note(),
         )
-    spot = run_spot()
-    if _cancel_requested(should_stop) or spot.cancelled:
-        # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the spot
-        # phase either observed the cancel at a window boundary (report
-        # ``cancelled=True``) or the request landed between phases. Stop the
-        # chain honestly — durable work stands, the next pull resumes.
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=None,
-            historical=None,
-            stopped_after=f"{PHASE_SPOT} (cancelled)",
-            note=_CANCEL_NOTE,
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
-        )
-    if not spot_phase_ok(spot):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=None,
-            historical=None,
-            stopped_after=PHASE_SPOT,
-            note=_spot_stop_note(spot),
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
-        )
+    # ONE whole-ledger materialisation for the fetch phases
+    # (DEC-LEDGER-LOAD-SPACE-V1-001): the spot phase and the historical phase
+    # each `begin_pull_ledger` the SAME lake — inside this scope the second
+    # (and any later) live begin reuses the first load's instance instead of
+    # re-materialising every recorded window row (measured 1,305 B/row RSS +
+    # ~13.6 µs/row per full load; two distinct materialisations co-resided
+    # across the phase boundary pre-scope). Per-phase SAVES are unchanged
+    # (durability byte-identical); the scope closes BEFORE the post-steps
+    # (prebuild/movers), releasing the ledger instead of holding it through
+    # the O(symbols × bars) derive — and every market-hours defer below exits
+    # (releases) it too. Safe by construction: the phases run sequentially on
+    # this one thread under the pull single-flight lock (the scope is a
+    # ContextVar — confined to this thread/context).
+    with shared_pull_ledger_scope():
+        spot = run_spot()
+        if _cancel_requested(should_stop) or spot.cancelled:
+            # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the spot
+            # phase either observed the cancel at a window boundary (report
+            # ``cancelled=True``) or the request landed between phases. Stop the
+            # chain honestly — durable work stands, the next pull resumes.
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=f"{PHASE_SPOT} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
+        if not spot_phase_ok(spot):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_SPOT,
+                note=_spot_stop_note(spot),
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
 
-    # Market-hours belt BEFORE the metadata vendor phase (DEC-GROWW-MARKET-HOURS-GUARD-001):
-    # spot finishing ~08:43 must NOT leak a `get_expiries`/`get_contracts` storm into the
-    # trading window. Re-check the guard here (the top check covers a pull dispatched into
-    # the window; this covers a spot phase that finished just before it opened). The
-    # metadata phase itself ALSO consults the guard per-cell so a metadata pull that
-    # CROSSES 08:45 halts mid-phase; this is the between-phases stop.
-    if market_closed is not None and market_closed():
-        _LOG.warning("pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="metadata")
-        return PipelinePullReport(
-            spot=spot,
-            metadata=None,
-            historical=None,
-            stopped_after=PHASE_MARKET_HOURS,
-            note=_market_hours_stop_note(),
-        )
-    try:
-        metadata = run_metadata()
-    except MarketHoursHalt:
-        # DEC-GROWW-MARKET-HOURS-GUARD-001: the metadata phase CROSSED 08:45 mid-flight
-        # — its per-cell guard raised MarketHoursHalt and run_two_phase re-raised it as a
-        # global stop. Committed expiries/contracts are already persisted (record-in-the-
-        # fetcher); the un-persisted cells re-pull next out-of-hours run. Stop cleanly.
-        _LOG.warning(
-            "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, crossed="metadata"
-        )
-        return PipelinePullReport(
-            spot=spot,
-            metadata=None,
-            historical=None,
-            stopped_after=PHASE_MARKET_HOURS,
-            note=_market_hours_stop_note(),
-        )
-    if _cancel_requested(should_stop):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=metadata,
-            historical=None,
-            stopped_after=f"{PHASE_METADATA} (cancelled)",
-            note=_CANCEL_NOTE,
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
-        )
-    if not metadata_phase_ok(metadata):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=metadata,
-            historical=None,
-            stopped_after=PHASE_METADATA,
-            note=_metadata_stop_note(metadata),
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
-        )
+        # Market-hours belt BEFORE the metadata vendor phase (DEC-GROWW-MARKET-HOURS-GUARD-001):
+        # spot finishing ~08:43 must NOT leak a `get_expiries`/`get_contracts` storm into the
+        # trading window. Re-check the guard here (the top check covers a pull dispatched into
+        # the window; this covers a spot phase that finished just before it opened). The
+        # metadata phase itself ALSO consults the guard per-cell so a metadata pull that
+        # CROSSES 08:45 halts mid-phase; this is the between-phases stop.
+        if market_closed is not None and market_closed():
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="metadata"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        try:
+            metadata = run_metadata()
+        except MarketHoursHalt:
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: the metadata phase CROSSED 08:45 mid-flight
+            # — its per-cell guard raised MarketHoursHalt and run_two_phase re-raised it as a
+            # global stop. Committed expiries/contracts are already persisted (record-in-the-
+            # fetcher); the un-persisted cells re-pull next out-of-hours run. Stop cleanly.
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, crossed="metadata"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        if _cancel_requested(should_stop):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=f"{PHASE_METADATA} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
+        if not metadata_phase_ok(metadata):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=PHASE_METADATA,
+                note=_metadata_stop_note(metadata),
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
 
-    # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
-    # cleanliness threaded INTO the historical phase (the Greeks seam at the
-    # historical tail cannot otherwise see a spot-side quarantine under the
-    # strict barrier). Computed AFTER both gates passed — the gate arms are
-    # True by construction here; the quarantine check is the strict extra.
-    prior = PriorStepsVerdict(
-        spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
-        metadata_clean=metadata_phase_ok(metadata),
-        strict=strict_gate,
-    )
-    # Market-hours belt BEFORE the historical (F&O) vendor phase
-    # (DEC-GROWW-MARKET-HOURS-GUARD-001): a metadata phase that finished just before the
-    # window opens must not leak the F&O candle storm into it. The F&O spine ALSO
-    # consults the guard per-contract (a contract already started at 08:45 finishes its
-    # few small windows — an acceptable, bounded residue), so this is the between-phases
-    # stop; a phase that crosses mid-flight halts on its next contract.
-    if market_closed is not None and market_closed():
-        _LOG.warning(
-            "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="historical"
+        # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
+        # cleanliness threaded INTO the historical phase (the Greeks seam at the
+        # historical tail cannot otherwise see a spot-side quarantine under the
+        # strict barrier). Computed AFTER both gates passed — the gate arms are
+        # True by construction here; the quarantine check is the strict extra.
+        prior = PriorStepsVerdict(
+            spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
+            metadata_clean=metadata_phase_ok(metadata),
+            strict=strict_gate,
         )
-        return PipelinePullReport(
-            spot=spot,
-            metadata=metadata,
-            historical=None,
-            stopped_after=PHASE_MARKET_HOURS,
-            note=_market_hours_stop_note(),
-        )
-    historical = run_historical(prior)
-    if _cancel_requested(should_stop):
-        # A cancel observed during/after the historical phase: skip the
-        # post-steps (prebuild + movers warm) — nothing is lost, the next
-        # clean pull derives (DEC-JOB-COOPERATIVE-CANCEL-001).
-        quarantined_names = derive_quarantined_name_set(spot, historical)
-        quarantined, quarantined_count = _cap_quarantined(quarantined_names)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=metadata,
-            historical=historical,
-            stopped_after=f"{PHASE_HISTORICAL} (cancelled)",
-            note=_CANCEL_NOTE,
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
-        )
+        # Market-hours belt BEFORE the historical (F&O) vendor phase
+        # (DEC-GROWW-MARKET-HOURS-GUARD-001): a metadata phase that finished just before the
+        # window opens must not leak the F&O candle storm into it. The F&O spine ALSO
+        # consults the guard per-contract (a contract already started at 08:45 finishes its
+        # few small windows — an acceptable, bounded residue), so this is the between-phases
+        # stop; a phase that crosses mid-flight halts on its next contract.
+        if market_closed is not None and market_closed():
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="historical"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        historical = run_historical(prior)
+        if _cancel_requested(should_stop):
+            # A cancel observed during/after the historical phase: skip the
+            # post-steps (prebuild + movers warm) — nothing is lost, the next
+            # clean pull derives (DEC-JOB-COOPERATIVE-CANCEL-001).
+            quarantined_names = derive_quarantined_name_set(spot, historical)
+            quarantined, quarantined_count = _cap_quarantined(quarantined_names)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=historical,
+                stopped_after=f"{PHASE_HISTORICAL} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of

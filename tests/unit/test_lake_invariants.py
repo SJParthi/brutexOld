@@ -495,15 +495,21 @@ class TestScanFindings:
         assert report.findings == ()
         assert report.files_scanned == 1
 
-    def test_missing_price_columns_file_is_skipped(self, tmp_path: Path) -> None:
-        """A bar file WITHOUT the OHLC columns is honestly SKIPPED (not dup-scanned).
+    def test_missing_price_columns_file_emits_alien_finding(self, tmp_path: Path) -> None:
+        """A bar file WITHOUT the OHLC columns is SKIPPED and now carries a FINDING.
 
-        DEC-STORED-DATA-VALIDATION-001 behavior change, documented in the
-        module docstring: the scan now reads BAR_SCAN_COLUMNS (timestamp +
-        OHLC) in ONE pass; a file violating the canonical 7-column schema
-        cannot satisfy the read and is counted ``files_skipped`` with the
-        ``lake.invariant.scan_skip`` WARNING — never silently ignored.
+        DEC-ALIEN-SCHEMA-READ-HEAL-001 behavior change (supersedes the
+        DEC-STORED-DATA-VALIDATION-001 bare-WARN pin this test previously
+        carried): a file violating the canonical 7-column schema cannot
+        satisfy the BAR_SCAN_COLUMNS read — it is still counted
+        ``files_skipped``, but the skip now emits a real
+        :class:`SchemaAlienFile` finding (the healer quarantines it) with the
+        ``lake.invariant.schema_alien_file`` WARNING instead of the
+        finding-less ``scan_skip`` that left the schema-poisoned file in
+        place forever while the dashboard read side skipped it per poll.
         """
+        from brutex.data.lake_invariants import SchemaAlienFile
+
         dest = _dest(tmp_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame({"timestamp": _series([_ts(1)])}).write_parquet(dest)
@@ -511,7 +517,13 @@ class TestScanFindings:
             report = scan_lake_invariants(tmp_path)
         assert report.files_scanned == 0
         assert report.files_skipped == 1
-        assert len(_events(logs, "lake.invariant.scan_skip")) == 1
+        aliens = [f for f in report.findings if isinstance(f, SchemaAlienFile)]
+        assert len(aliens) == 1
+        assert aliens[0].path == dest
+        assert aliens[0].coords is not None
+        assert "missing column(s)" in aliens[0].reason
+        assert len(_events(logs, "lake.invariant.schema_alien_file")) == 1
+        assert not _events(logs, "lake.invariant.scan_skip")
 
     def test_utc_month_rule_no_false_flag_1day(self, tmp_path: Path) -> None:
         # A derived 1day bar is stamped midnight IST = 18:30 UTC of the PREVIOUS
@@ -1360,36 +1372,69 @@ class TestOptionForeignScan:
         (both empirically verified) — so a newline/ESC series name forged
         log lines through ``error=`` while the paired ``path=`` field was
         already escaped (the round-16 ``partition_error`` channel). The
-        ``error=`` field now rides ``repr()`` at the glob-loop site."""
+        ``error=`` field now rides ``repr()`` at the glob-loop site.
+
+        MERGE RECONCILE (DEC-ALIEN-SCHEMA-READ-HEAL-001 ∪
+        DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): a keyless VALID parquet — the
+        original fixture — is now the deterministic alien-schema class and
+        emits a :class:`SchemaAlienFile` finding whose ``partition`` payload
+        rides the SAME repr() escape; the glob-loop ``scan_skip`` else-arm
+        keeps the repr()'d ``error=`` for a genuinely unreadable file."""
         import pyarrow as pa
         import pyarrow.parquet as pq
+        from brutex.data.lake_invariants import SchemaAlienFile
 
         bad = tmp_path / "options" / "SER\x1b\nIES" / "2024-06.parquet"
         bad.parent.mkdir(parents=True, exist_ok=True)
-        # A VALID parquet with neither key column: the 2-key-column read
-        # raises ColumnNotFoundError whose message embeds the raw path.
+        # A VALID parquet with neither key column: the alien-schema class
+        # (the 2-key-column read raises ColumnNotFoundError whose message
+        # embeds the raw path; the footer probe proves the columns missing).
         pq.write_table(pa.table({"x": pa.array([1], type=pa.int64())}), bad)
+        # A footer-corrupt sibling: NOT the alien class — the plain
+        # transient-tolerant scan_skip with the repr()'d error payload.
+        corrupt = bad.parent / "2024-07.parquet"
+        corrupt.write_bytes(b"not a parquet file at all")
         with capture_logs() as logs:
             report = scan_lake_invariants(tmp_path)
-        assert report.findings == ()
-        assert report.option_files_skipped == 1
+        (alien,) = report.findings
+        assert isinstance(alien, SchemaAlienFile)
+        assert alien.path == bad
+        assert alien.series == "SER\x1b\nIES"  # RAW dataclass value (machine surface)
+        assert report.option_files_skipped == 2
+        (alien_event,) = _events(logs, "lake.invariant.schema_alien_file")
+        partition = alien_event["partition"]
+        assert isinstance(partition, str)
+        # Pre-fix class: the raw ESC + newline from the series name would
+        # ride into the rendered payload — repr()-escaped, never dropped.
+        assert "\x1b" not in partition
+        assert "\n" not in partition
+        assert "\\x1b" in partition
         (skip,) = _events(logs, "lake.invariant.scan_skip")
+        assert skip["path"] == repr(str(corrupt))
         error = skip["error"]
         assert isinstance(error, str)
-        # Pre-fix: the raw ESC + newline from the path rode into the payload.
         assert "\x1b" not in error
         assert "\n" not in error
-        # The path IS in the message — escaped by repr(), never dropped.
-        assert "\\x1b" in error
+        # repr()-wrapped: a str repr always renders quoted.
+        assert error.startswith(("'", '"'))
 
     def test_canonical_sibling_scan_skip_error_payload_repr_guarded(self, tmp_path: Path) -> None:
         """The round-17 twin for the TARGETED canonical-sibling read
         (``_canonical_option_keys``): an unreadable July sibling inside a
         newline/ESC-named series dir renders its read-error message
-        ``repr()``-escaped on BOTH ``scan_skip`` emissions (the glob loop's
-        and the targeted read's), and the finding still abstains honestly."""
+        ``repr()``-escaped on the targeted read's ``scan_skip``, and the
+        finding still abstains honestly.
+
+        MERGE RECONCILE (DEC-ALIEN-SCHEMA-READ-HEAL-001 ∪
+        DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): the GLOB-loop encounter with the
+        keyless July file now emits a :class:`SchemaAlienFile` finding (no
+        glob-loop ``scan_skip``); the targeted sibling read keeps the plain
+        repr()-escaped ``scan_skip`` — the alien classification is a
+        glob-loop-only concern (the targeted read abstains, never
+        quarantines)."""
         import pyarrow as pa
         import pyarrow.parquet as pq
+        from brutex.data.lake_invariants import SchemaAlienFile
 
         series = tmp_path / "options" / "SER\x1b\nIES2"
         _plant_option_raw(
@@ -1404,9 +1449,12 @@ class TestOptionForeignScan:
         foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
         assert len(foreigns) == 1
         assert foreigns[0].overlap_rows is None  # honest abstain preserved
+        aliens = [f for f in report.findings if isinstance(f, SchemaAlienFile)]
+        assert [a.path for a in aliens] == [july]  # the glob-loop arm
         skips = _events(logs, "lake.invariant.scan_skip")
-        # One from the main glob loop, one from the targeted sibling read.
-        assert [s["path"] for s in skips] == [repr(str(july))] * 2
+        # ONLY the targeted sibling read skips now (the glob loop emitted the
+        # alien finding for the keyless file instead).
+        assert [s["path"] for s in skips] == [repr(str(july))]
         for skip in skips:
             error = skip["error"]
             assert isinstance(error, str)
@@ -2143,6 +2191,7 @@ class TestCensusToDict:
             "overlap_files",
             "drift_dirs",
             "price_files",
+            "alien_files",
         }
 
     def test_stats_and_sweep_folded(self, tmp_path: Path) -> None:

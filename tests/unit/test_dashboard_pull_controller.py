@@ -3924,3 +3924,94 @@ class TestCooperativeCancel:
         assert calls == ["heal"]
         events = {log["event"] for log in logs}
         assert "pull.cancel_heal_skipped" not in events
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-LEDGER-LOAD-SPACE-V1-001 — the shared pipeline ledger seam
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSharedLedgerSeam:
+    """`ledger=` injection + the production `shared_pull_ledger_scope` engagement.
+
+    Mutant-killing wiring pins (the register-site precedent): the injected /
+    scope-shared instance must be the EXACT object the spot phase records into
+    and persists — a severed kwarg or a dropped scope consult fails by identity.
+    """
+
+    def _capture_end(self, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        """Capture the ledger handed to `end_pull_ledger` (then save for real)."""
+        real_end = pull_controller.end_pull_ledger
+        captured: list[object] = []
+
+        def _spy(ledger: object, lake_root: Path, *, dry_run: bool) -> None:
+            captured.append(ledger)
+            real_end(ledger, lake_root, dry_run=dry_run)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pull_controller, "end_pull_ledger", _spy)
+        return captured
+
+    def test_injected_ledger_is_used_and_begin_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        mine = WindowLedger()
+        captured = self._capture_end(monkeypatch)
+
+        def _never(*args: object, **kwargs: object) -> None:
+            raise AssertionError("begin_pull_ledger must be SKIPPED for an injected ledger")
+
+        monkeypatch.setattr(pull_controller, "begin_pull_ledger", _never)
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+            now=_BULK_NOW,
+            ledger=mine,
+        )
+        assert report.total_symbols == 1
+        # The spot phase recorded into + persisted EXACTLY the injected instance.
+        assert captured and captured[-1] is mine
+        assert mine.count > 0  # the phase genuinely planned/recorded on it
+
+    def test_injected_ledger_is_ignored_under_dry_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        mine = WindowLedger()
+        captured = self._capture_end(monkeypatch)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            ledger=mine,
+        )
+        # A dry-run NEVER records/persists — the injected instance is ignored.
+        assert captured and captured[-1] is None
+        assert mine.count == 0
+
+    def test_scope_shared_instance_reaches_spot_phase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production engagement: under an active scope, the spot phase's own
+        `begin_pull_ledger` (no kwarg passed) returns the scope's ONE instance."""
+        from brutex.data.window_ledger_store import (
+            begin_pull_ledger,
+            shared_pull_ledger_scope,
+        )
+
+        captured = self._capture_end(monkeypatch)
+        with shared_pull_ledger_scope():
+            first = begin_pull_ledger(tmp_path, dry_run=False)
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+                now=_BULK_NOW,
+            )
+        assert captured and captured[-1] is first
