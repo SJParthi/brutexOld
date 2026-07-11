@@ -1687,6 +1687,15 @@ jobs:
           else
             echo "(brutex.data.price_sanity test file not present yet — gate inactive)"
           fi
+          # DEC-DASHBOARD-READ-SCREEN-001: the ONE COMMON dashboard screened bar
+          # reader (SessionBarScreen + screen_frame/screen_rows) composing the
+          # public bad_tick + price_sanity predicates. Standalone-gateable at
+          # 100% line+branch with its own unit+property suite.
+          if compgen -G "tests/unit/test_bar_screen.py" > /dev/null; then
+            pytest --cov=brutex.data.bar_screen --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_bar_screen.py
+          else
+            echo "(brutex.data.bar_screen test file not present yet — gate inactive)"
+          fi
           # DEC-BENCH-ABS-BASELINE-001: the absolute bench-baseline schema/
           # comparator/capture/governance core — pure stdlib, standalone-gateable
           # at 100% line+branch with its OWN unit+property+golden suites.
@@ -2091,6 +2100,18 @@ jobs:
           # log) is covered by
           # tests/unit/test_dashboard_db_candles_torn_read_retry.py, which
           # MUST also join this gate.
+          # DEC-DASHBOARD-READ-SCREEN-001: the split-brain screen's /db seams
+          # (the _bad_tick_seed_bar empty-page + all-screened-window
+          # `return None` arms and the FNO CE/PE kind-derived
+          # bad_tick_enabled arms) are covered by
+          # tests/unit/test_dashboard_split_brain_screen.py, which MUST also
+          # join this gate.
+          # DEC-DB-TZ-MONEYNESS-FIXES-001: the session-TZ invariance belt
+          # (end-to-end pager + _IST_DATE_EXPR pin + source drift pin) AND
+          # the moneyness stock-drift rung (the stock_drift_loader lazy memo
+          # + rung attribution in _underlying_spot_close_by_ts) are covered
+          # by tests/unit/test_dashboard_db_tz_moneyness.py, which MUST also
+          # join this gate (23 test files total in this gate's list).
           # DEC-ALIEN-SCHEMA-READ-HEAL-001: the schema-aware per-file probe
           # (alien-schema skip + the union-conflict empty-degrade residue) is
           # covered by tests/unit/test_dashboard_db_alien_schema.py, which
@@ -2114,7 +2135,7 @@ jobs:
           # tests/unit/test_dashboard_db_span_bounded_reads.py — BOTH MUST
           # join this gate.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py tests/unit/test_dashboard_db_baseline_manifest.py tests/unit/test_dashboard_db_view_window_ledger_page.py tests/unit/test_dashboard_db_span_bounded_reads.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py tests/unit/test_dashboard_db_baseline_manifest.py tests/unit/test_dashboard_db_view_window_ledger_page.py tests/unit/test_dashboard_db_span_bounded_reads.py tests/unit/test_dashboard_split_brain_screen.py tests/unit/test_dashboard_db_tz_moneyness.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi

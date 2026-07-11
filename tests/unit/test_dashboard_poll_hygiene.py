@@ -18,7 +18,14 @@ polling concern). It also:
 
 (The reports.html sweep-poll hardening this pack originally shipped was dropped
 once DEC-OPERATOR-PAGE-REAL-001 moved the Run-Sweep surface off ``/reports``;
-its dedicated pin was removed with it.)
+its dedicated pin was removed with it. DEC-DASHBOARD-POLL-HYGIENE-002's v29
+in-place sweep-poller hardening + its pins here were likewise RETIRED at the
+2026-07-11 merge-reconcile: DEC-FRONTEND-LATENCY-HARDENING-001 (#1720) deleted
+those pollers for the shared-poller subscription, and the four defect classes
+stay pinned at the BXPoll core — hidden guard / through-body abort / capped
+backoff / visibilitychange catch-up in
+``test_dashboard_oneclick_frontend.py::TestPollDiscipline`` plus the v29
+subscription pins in ``test_dashboard_frontend_latency.py``.)
 
 SUPERSESSION (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): the
 five uniform 4 s pollers no longer own an inline ``if (document.hidden)``
