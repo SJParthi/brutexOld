@@ -669,11 +669,11 @@ jobs:
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
-          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + ranking.rs = 897
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + ranking.rs = 915
           #   mutants measured 2026-07-11 (`cargo mutants --list | wc -l`; the
-          #   slice-4 ranking.rs conversion added 298 over the 2026-07-08
+          #   slice-4 ranking.rs conversion added 316 over the 2026-07-08
           #   post-merge 599 — history: 556 pre-merge 2026-07-07, 599 after the
-          #   race-6 u128 trade_sim fold).
+          #   race-6 u128 trade_sim fold, 897 on an interim ranking.rs shape).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
@@ -681,11 +681,11 @@ jobs:
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
           #   wall-clock parallelism = this 8-way shard matrix (6->8 = the #1597
           #   shard dial taken TWICE for the slice-4 ranking.rs re-measure: the
-          #   897-mutant scope on 6 shards puts the +20%-band worst end at
+          #   915-mutant scope on 6 shards puts the +20%-band worst end at
           #   ~130 min — OVER the 120-min job cap):
-          #   ceil(897/8)=113 mutants x 29-40 s/mutant serial (CI per-lane measured
-          #   4-9 s build + 25-31 s test) ~= 55-75 min + ~5.5 min baseline/setup
-          #   ~= 60-81 min nominal, ~97 at +20% on the worst end -> >= 23 min
+          #   ceil(915/8)=115 mutants x 29-40 s/mutant serial (CI per-lane measured
+          #   4-9 s build + 25-31 s test) ~= 56-77 min + ~5.5 min baseline/setup
+          #   ~= 61-82 min nominal, ~98 at +20% on the worst end -> >= 22 min
           #   margin per shard.
           cargo mutants \
             --in-place \
