@@ -19,21 +19,32 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-11 (DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738 —
-Rust kernel track slice 1: the sweep's enumerate+prune mask-source segment
-(`iter_masks_k_of_bits` + per-mask `has_conflict`) gains the fused Rust
-kernel `fno_math.sweep_enum_conflict_free` behind the default-OFF
-`BRUTEX_SWEEP_RUST_ENUM` — SHIPS INERT; kernel survivors bit- AND
-order-identical to the Python loop (the itertools.combinations lex order
-law; digest-path-only seam — Apriori + the legacy no-digest arm stay
-Python; the untouched loop serves every fallback). MEASURED (Linux CI
-sandbox, NOT the §8 M4 Pro): the C(60,5) segment 15.59 s → 0.50 s —
-SEGMENT-level only, NO whole-sweep claim (the trade sim dominates a full
-k=5 1-minute tuple; enum ≈ 1-3% of wall). ENGINE UNCHANGED —
-NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; flag-OFF
-byte-identical (frozen sweep goldens pass unmodified); `rust_enum.py` 100%
-line+branch on its ci.yml gate; the per-fix record lives in the §1
-Active-branch blurb + MIGRATION.md #1738 — this header carries the
-one-line summary, never the story).
+Rust kernel track slice 1, CONFORMED to the design-of-record
+(DESIGN_FINAL_RUST_SWEEP_CORE.md §1.3): the sweep's mask-source segment
+gains the RANGED fused `enumerate_prefilter` kernel on resident
+transposed-bitplane pyclasses (`ResidentSweepEnum`/`U128`; CNS lex-rank
+unranking + the itertools.combinations odometer — the lex ORDER law; fused
+STRICT->= min-hits with the SHORT-CIRCUIT LAW: min_hits==0 pays ZERO
+per-mask counts; dual work caps; k=6 via ranges — no materialisation
+ceiling) behind the default-OFF `BRUTEX_SWEEP_RUST_ENUM` — SHIPS INERT;
+kept-list bit- AND order-identical to the Python spine INCLUDING the
+min-hits dimension (width-keyed enum-shadow burn-in with the mid-tuple
+continuation contract; the loop-exit total-reconciliation belt;
+digest-path-only seam — Apriori WINS + the legacy no-digest arm stays
+Python; the untouched loop serves every fallback; the seam buckets
+enumerated/pruned/evaluated/minhits-dropped EXACTLY as the Python arm).
+MEASURED (shared x86 sandbox over SYNTHETIC bars, NOT the §8 M4 Pro): the
+C(60,5) segment 2.66 µs → 56.8 ns/mask (46.9×); 8/8 sub-grid twin cells
+(2 TFs × k∈{2,5} × top∈{20,1000}) store-hash BYTE-IDENTICAL at 0.90–1.07×
+end-to-end — SEGMENT-level only, NO whole-sweep claim; the REAL-lake
+twin-run (`scripts/ci/rust_enum_twin_run.sh` / the M4-Pro dispatch job) is
+a MERGE GATE pending operator-box execution (coordinator ruling
+2026-07-11). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; flag-OFF byte-identical (frozen sweep
+goldens pass unmodified; the new digest-path goldens minted OFF-arm);
+`rust_enum.py` 100% line+branch on its ci.yml gate; the per-fix record
+lives in the §1 Active-branch blurb + MIGRATION.md #1738 — this header
+carries the one-line summary, never the story).
 Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
 the DB/query-latency hardening pack, READ-side only: (1) the `/db`
 window-ledger pager rides a DuckDB LIMIT/OFFSET fast path over the #1533
@@ -2163,46 +2174,70 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-sweep-enum-slice1` (**DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738** —
-  Rust kernel track slice 1 (the DEC-RUST-FIRST-MANDATE-001 umbrella's first kernel PR; the umbrella's
-  ledger row is queued/in-flight — cited as QUEUED, never asserted merged): the sweep's enumerate+prune
-  mask-source segment is served by the NEW fused Rust kernel `fno_math.sweep_enum_conflict_free`
-  (NEW `rust/fno-math/src/enum_kernel.rs` — pure `Result` core + thin `#[pyfunction]`; a literal odometer
-  transcription of the CPython `itertools.combinations` advance, deliberately NEVER Gosper: position-lex ≠
-  numeric order from n=4 and enumeration order feeds chunk boundaries / `SweepComboError` attribution /
-  stable-sort ties / sidecar counters, so a set-equal order-drifted list would write DIFFERENT durable
-  bytes; conflict pairs cross the FFI AS DATA — `sorted(CONFLICT_PAIRS)`, never re-minted in Rust; `< 128`-
-  validated shifts, checked u64 binomial, `try_reserve_exact` → `MemoryError`, everything else a clean
-  `ValueError` — never a panic under the crate's `panic="abort"` profile) behind the NEW wrapper
-  `brutex/engine/rust_enum.py` (the `rust_metrics.py` template with the default INVERTED: per-call COMMON
-  `env_flag_tristate` flag `BRUTEX_SWEEP_RUST_ENUM`, `SWEEP_RUST_ENUM_DEFAULT = False` — SHIPS INERT, the
-  default-ON flip is a SEPARATE later ADR per the ADR-0017 lever pattern; lazy `_resolve_kernel` with
-  warn-once `wheel_missing`/`wheel_stale`; SILENT pre-validation so invalid input falls to the untouched
-  generator's canonical `ValueError` — the error contract is flag-invariant BY CONSTRUCTION; the
-  `ENUM_KERNEL_MAX_MASKS = 1<<24` ceiling — `C(60,5) = 5,461,512` fits; narrow FFI except with
-  `MemoryError` re-raised BARE — the global-stop law; the O(1) domain gate refusing counter/shape/spot-check
-  poison `kernel_result_refused`; the 16-call burn-in vs the LIVE oracle — full-list ≤ 65,536 enumerated,
-  4096-survivor prefix above — with the `disable_kernel` autorevert latch; engaged-once INFO
-  `sweep_rust_enum.engaged`, the anti-vacuous golden hook). THE ONE SEAM in `sweep_run.py`'s mask-source
-  block engages DIGEST-path only (`not apriori_enabled() and bypass_dedup` — the loop's only effects there
-  are the survivors appends + the two tallies); Apriori WINS over the kernel; the legacy no-digest dedup
-  arm stays pure Python; every fallback runs the verbatim pre-existing loop. EVIDENCE (MEASURED 2026-07-11,
-  Linux CI sandbox — NOT the §8 M4 Pro): the C(60,5) segment 15.59 s Python → 0.500 s kernel-served (31.2×;
-  first engaged call with the armed burn-in 0.539 s; the kernel wall INCLUDES the PyO3 Vec<u128>→4.7M-PyLong
-  conversion); k=3 94.6 ms → 3.6 ms; full k=5 survivor-list equality verified in-session. HONEST: a
-  SEGMENT-level payoff only — NO whole-sweep claim (the sim dominates a full k=5 1-minute tuple at ~7-37
-  min; enum ≈ 1-3% of that wall; the honest whole-tuple band is the regime-dependent ~1.3-3.1× where
-  Stage-1B prunes hard); no O-class change; no GIL release (serial, GIL-held — the recorded crate stance);
-  the domain gate + prefix burn-in cannot catch a tail-region divergence after burn-in — that layer is the
-  hypothesis differential (production + synthetic ≥64-bit pair tables + the pairs-as-data round-trip), the
-  ON-vs-OFF byte-identical golden (store hash/parquet/sidecar/sentinel + the FM-7 flag-flip crash-redo
-  rewrite + the legacy never-engages run), the in-crate proptest vs an independent recursive reference, and
-  the mutation gates (mutants.toml `examine_globs` += enum_kernel.rs — re-measured 704 mutants, +17.5%, so
-  the fno-math matrix took the #1597 +1-shard dial again, 6 → 7). Same-commit wheel handshake:
-  lib.rs registration + `_EXPECTED_COMPILED_SYMBOLS`/stub/`EXPECTED_BUILD.json` + the math-facade frozen
-  surface extension. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
-  flag-OFF byte-identical by construction (frozen sweep goldens pass UNMODIFIED); `rust_enum.py` 100.00%
-  line+branch (151/66) standalone on its NEW ci.yml gate; ruff/ruff-format clean, `mypy --strict` clean,
-  pyright at the pre-change baseline; cargo fmt/clippy `-D warnings`/test green.)
+  Rust kernel track slice 1, CONFORMED to the design-of-record (`docs/design/sweep_core/
+  DESIGN_FINAL_RUST_SWEEP_CORE.md` @ a3c61e9b; the DEC-RUST-FIRST-MANDATE-001 umbrella's first kernel PR —
+  the umbrella ledger row #1713 is queued/in-flight, cited as QUEUED never asserted merged). PROVENANCE:
+  the branch's first pass (a monolithic free-fn `sweep_enum_conflict_free` with a 2^24 ceiling, no fused
+  min-hits, no work caps, a prefix-only burn-in) deviated from the design in 7 documented ways and was
+  REWORKED in-branch as new commits (16b7708 kernel · 53d3458 wrapper+seam · 25c9e5d goldens+properties ·
+  0cfbcf6 measurements+twin-run); the free fn is DELETED with its whole wheel handshake moved in the same
+  commit (crate_version stays 0.3.0). THE KERNEL (design §1.3, `rust/fno-math/src/enum_kernel.rs`):
+  resident CONDITION-MAJOR transposed-bitplane pyclasses `ResidentSweepEnum(bar_bits)`/`ResidentSweepEnumU128`
+  (one packed-u64 bitmap per condition, built once per tuple; per-mask hits = popcount(AND of k planes) ≡
+  the `(bar & mask) == mask` law) serving `enumerate_prefilter(bits, k, pairs, min_hits, start_rank,
+  max_enumerated, max_work_cells) -> (enumerated, conflict_pruned, next_rank, exhausted, hits_counted,
+  kept)` over RANGES of the C(n,k) space: CNS LEX-rank unranking (round-trip proptest) seeds the range, the
+  literal `itertools.combinations` odometer advances it (the ORDER LAW — position-lex ≠ numeric from n=4:
+  masks 3, 5, 9, 6, 10, 12; order feeds chunk boundaries/attribution/tie-breaks/sidecar bytes); kept =
+  conflict-free AND (min_hits==0 OR hits >= min_hits, STRICT `>=` ±1-pinned); the MIN-HITS SHORT-CIRCUIT
+  LAW (min_hits==0 ⇒ ZERO per-mask counts + hits_counted==0; >0 ⇒ hits_counted == enumerated −
+  conflict_pruned — measured teeth 0.001 s vs 0.238 s); DUAL work caps (min-hits-BLIND cells charging,
+  checked AFTER each mask — guaranteed progress; k=6's C(60,6)=50M rides ranges, the materialisation
+  ceiling is GONE); pairs cross the FFI AS DATA; width-validated shifts, checked u128 binomials,
+  `try_reserve` → `MemoryError`, `Result<_,String>` cores under `overflow-checks` + `panic="abort"`; ~30
+  in-crate tests + 3 proptests incl. an independent recursive reference WITH the min-hits dimension (602
+  crate tests green). THE WRAPPER (`brutex/engine/rust_enum.py`, rewritten): ranged consumption (per-range
+  budget clamp(cells//max(1,n_bars), 4096, 2^20); `BRUTEX_SWEEP_CORE_ENUM_CELLS` default 2^28, junk →
+  warn-once + default, clamps [2^16, 2^30] warned); tristate flag/warn-once/PER-WIDTH autorevert
+  latches/MemoryError-re-raise idioms kept; the per-range O(1) domain gate (`_valid_range_result` — the
+  hits law on BOTH arms; deliberately NO per-range `exhausted` cross-check so the design-§1.4 loop-exit
+  TOTAL-RECONCILIATION belt `enum_total_mismatch` stays reachable, early-exhaust-lie fake proves it) + the
+  `enum_no_progress` belt; the design's ENUM-SHADOW burn-in (width-keyed, 2^16-MASK floor, 256-range cap,
+  `enum_shadow_floor_unmet`) with the MID-TUPLE CONTINUATION contract (mismatch ⇒ the Python window ships
+  VERBATIM + the oracle serves to exhaustion — mixed provenance, never partial-kernel bytes — then the
+  width latches); `legacy_dedup_path` listed FIRST among refusals; engaged-once `sweep_rust_enum.engaged`.
+  THE ONE SEAM (`sweep_run.py`): min_hits + bar substrate + injected count_hits threaded per §1.4; the
+  kernel arm buckets enumerated/conflict_pruned/evaluated/n_minhits_dropped EXACTLY as the Python arm
+  (sidecar sum invariant; spy-pinned ZERO Python batch counts past burn-in); DIGEST-path-only; Apriori
+  WINS (frozen, never probed); every fallback runs the verbatim loop. GOLDENS (anti-vacuous): the
+  digest-path variant with OFF-arm-MINTED frozen literals (ON reproduces byte-for-byte + exactly ONE
+  engaged + ZERO `sweep_rust_core.engaged`); legacy-refusal; disabled-arm poison; the INVERTED TEETH PAIR
+  (dropped finalist + spurious keep each move tallies AND store hash — min_hits=121 measured so the target
+  is a genuine finalist); the COUNT-ONLY poison (sidecar moves, store PINNED — the (ix) residual visible);
+  the EMISSION-ORDER golden (32,733-mask k=3 stream: first+last windows + the blake3 full-stream digest);
+  the F1 index→tuple-digest cross-arm identity; the frozen legacy `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID`
+  byte-UNMODIFIED flag-OFF. PROPERTIES: kept-list equality INCLUDING min_hits; ranged-vs-monolithic +
+  split-at-any-rank; dual-knob ≥5 shapes; strict-`>=` ≡ `count_supermasks` BOTH widths. MEASURED
+  (2026-07-11, SHARED x86 SANDBOX over SYNTHETIC bars — NOT the §8 M4 Pro): the C(60,5) segment 2.66 µs →
+  56.8 ns/mask (46.9×) steady-state; fused-count coefficient 0.077 ns/(mask·bar) @k=3 / 0.125 @k=5; the
+  8-cell sub-grid twin (2 TFs incl. a 93,750-bar 1-minute-shaped tuple × k∈{2,5} × top∈{20, 1000}) ALL
+  store-hash BYTE-IDENTICAL at 0.90–1.07× end-to-end (the honest claim is byte-identity + no regression —
+  the 46.9× is the segment's); `docs/design/sweep_core/combo_counts.md` on-branch with §1/§2 verbatim +
+  the withdrawn §3 REPLACED by the round-5 SPLIT-law bottom-up rebuild. REAL-DATA TWIN-RUN packaging
+  (coordinator ruling 2026-07-11 — a MERGE GATE pending real-lake execution on the operator box):
+  `scripts/ci/rust_enum_twin_run.sh` (lake-READ-ONLY, scratch roots, PASS/FAIL + hash manifests for the PR
+  body, refuses a pre-set flag, macOS bash-3.2-safe) + the `rust-enum-twin-run.yml` M4-Pro dispatch job;
+  operator fallback: `bash scripts/ci/rust_enum_twin_run.sh <lake-root>`. MUTATION: enum_kernel 782 raw →
+  204 after the exclude_re dropping ONLY the 578 provably-UNVIABLE whole-fn `-> PyResult` constructor
+  guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the #1597
+  dial taken AGAIN (7 → 8 shards, ceil(803/8)=101). HONEST: SEGMENT-level lever, NO whole-sweep claim; no
+  O-class change; no GIL release; recorded deltas — module naming stays `rust_enum.py`/`enum_kernel.rs`
+  (Slice 2 owns the `sweep_core` unification), bar_bits-only pyclasses (the 7-column core is Slice-2
+  fold-arm machinery), the stall-budget guard lands with Slice 2, the F1 golden asserts the OFF≡ON
+  invariant directly rather than frozen hexes. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; `rust_enum.py` 100.00% line+branch standalone on its ci.yml gate;
+  ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline; cargo
+  fmt/clippy `-D warnings`/test green.)
   Earlier: `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
   the DB/query-latency hardening pack, READ-side only, three evidence-driven fixes off the 2026-07-11
   profiling run (a 1,178-file real-writer lake, 400k-row ledger + 5 deltas, real routes via
@@ -5495,13 +5530,18 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-sweep-enum-slice1`
-  (DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738 — Rust kernel track slice 1:
-  the sweep's enumerate+prune mask-source segment served by the fused
-  `fno_math.sweep_enum_conflict_free` kernel behind the default-OFF
-  `BRUTEX_SWEEP_RUST_ENUM` (SHIPS INERT; digest-path-only seam; survivors
-  bit- AND order-identical to the Python loop; segment-level payoff only —
-  NO whole-sweep claim); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
-  §1's Active branch line — see §1 + MIGRATION.md #1738 for the full blurb)
+  (DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738 — Rust kernel track slice 1,
+  CONFORMED to the design-of-record §1.3: the sweep's mask-source segment
+  served by the RANGED fused `enumerate_prefilter` kernel on the resident
+  `ResidentSweepEnum`/`U128` bitplane pyclasses behind the default-OFF
+  `BRUTEX_SWEEP_RUST_ENUM` (SHIPS INERT; digest-path-only seam; the
+  kept-list bit- AND order-identical to the Python spine INCLUDING the
+  fused STRICT->= min-hits dimension + its SHORT-CIRCUIT LAW; CNS lex-rank
+  ranges — k=6 served, no materialisation ceiling; segment-level payoff
+  only — NO whole-sweep claim; the real-lake twin-run script/dispatch job
+  is a MERGE GATE pending operator-box execution); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1738 for the full blurb)
   Earlier: `claude/db-latency-hardening`
   (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 — the DB/query-latency
   hardening pack, READ-side only: the /db window-ledger DuckDB page fast path
