@@ -49,7 +49,8 @@
 //!   `RuntimeError` (the Python facade's degrade-to-oracle catch is
 //!   `(ValueError, RuntimeError, ...)`; a `pyo3_runtime.PanicException` is a
 //!   `BaseException` subclass that would ESCAPE it — hence the explicit
-//!   boundary; the facade additionally carries a `BaseException` belt that
+//!   boundary; the facade additionally carries a narrow panic belt
+//!   (`Exception` plus the by-name-resolved `PanicException` class) that
 //!   latches OFF + serves the oracle should one nonetheless escape).
 //!   HONEST RESIDUAL: `Engine::Streaming` may run render work on ITS OWN
 //!   worker threads; polars-stream propagates a worker panic back to the

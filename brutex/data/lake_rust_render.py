@@ -86,11 +86,25 @@ a crate-side panic, which the crate catches at the FFI boundary and maps to
 ``AttributeError`` from a broken crate internal) degrades to the Python
 render with one ``lake_rust_render.render_error`` WARN per process: NEVER a
 new crash class — the Python oracle is always available. Belt on top of the
-crate's own boundary: a ``BaseException`` that nonetheless escapes the crate
-(the ``pyo3_runtime.PanicException`` shape — a ``BaseException`` subclass no
-``except Exception`` sees) is caught HERE, latches ``crate_panic``, and
-serves the oracle — ``KeyboardInterrupt``/``SystemExit`` re-raise
-immediately (the ``errors.py`` escape-set doctrine).
+crate's own boundary: the render carries a NARROW panic belt —
+``(Exception, <the resolved pyo3 PanicException class(es)>)`` via
+:func:`_panic_belt_errors`, never a literal ``except BaseException`` (the
+repo convention behind CodeQL ``py/catch-base-exception``: only an
+UNCONDITIONALLY re-raising handler may catch ``BaseException``) — so a
+``pyo3_runtime.PanicException`` that nonetheless escapes a pyo3 boundary
+(a ``BaseException`` subclass no ``except Exception`` sees) latches
+``crate_panic`` and serves the oracle, as does any out-of-degrade-set
+``Exception``; ``KeyboardInterrupt``/``SystemExit``/``MemoryError``
+re-raise immediately (the ``errors.py`` escape-set doctrine). HONEST
+narrowing (deliberate, disclosed): the panic class is resolved by NAME from
+``pyo3_runtime``/``polars.exceptions`` — a panic surfacing through a
+DIFFERENT statically-linked pyo3 runtime whose ``PanicException`` is a
+distinct type object (per-extension pyo3 statics) would now PROPAGATE
+instead of latching; bounded by the import/API-surface/metadata/version
+guards that precede every render and by the crate's own ``catch_unwind``
+FFI boundary (its panics map to ``RuntimeError``, the degrade set) — the
+belt is defence-in-depth for a doubly-broken contract, not the primary
+rail.
 
 **OOM honesty (scoped precisely):** a PYTHON-SURFACED ``MemoryError``
 (the BytesIO/object-list allocations, the IPC handoff) is NEVER caught
@@ -374,7 +388,8 @@ def _degrade_errors() -> tuple[type[Exception], ...]:
     surface (a crate-side panic is caught at the FFI boundary and mapped to
     ``RuntimeError`` — never a ``pyo3_runtime.PanicException``, which is a
     ``BaseException`` that would escape any ``Exception`` catch; the render
-    call carries its own ``BaseException`` belt for exactly that shape);
+    call carries its own narrow panic belt — :func:`_panic_belt_errors` —
+    for exactly that shape);
     ``TypeError``/``OverflowError`` are PyO3 argument-conversion failures;
     ``AttributeError`` is the broken-crate-internals defensive belt (the
     import guard already refuses a module MISSING the API);
@@ -398,6 +413,51 @@ def _degrade_errors() -> tuple[type[Exception], ...]:
     except ImportError:
         return base
     return (*base, _pl_exc.PolarsError)
+
+
+def _panic_belt_errors() -> tuple[type[BaseException], ...]:
+    """The narrow FFI panic-belt catch set — ``(Exception, *panic classes)``.
+
+    ``pyo3_runtime.PanicException`` is the one ``BaseException`` subclass a
+    pyo3 boundary can leak (a Rust panic escaping ``catch_unwind``); it must
+    latch ``crate_panic`` and degrade to the oracle, but the repo convention
+    (CodeQL ``py/catch-base-exception``) forbids a non-re-raising literal
+    ``except BaseException``, so the class is resolved GUARDEDLY by name
+    from its two plausible homes and folded beside ``Exception``:
+
+    * ``pyo3_runtime`` — the class's ``__module__``; pyo3 does NOT register
+      a real importable module today (probed 2026-07-11: ``ImportError``
+      even with polars loaded), so this arm is a forward belt for a pyo3
+      that starts to;
+    * ``polars.exceptions`` — polars re-exports the class
+      (``PanicException``), the in-repo precedent
+      (``brutex/data/errors.py``'s escape sets); the arm that resolves
+      today.
+
+    HONEST narrowing (module docstring): a DISTINCT per-extension
+    ``PanicException`` type object (each statically-linked pyo3 runtime
+    carries its own statics) is not catchable by name and now PROPAGATES —
+    a deliberate, disclosed trade bounded by the crate's own
+    ``catch_unwind`` boundary (panics map to ``RuntimeError``, the degrade
+    set) plus the import/API/metadata/version guards preceding every
+    render. Resolved lazily per raise — an ``except`` clause expression
+    only evaluates while an exception is in flight (the
+    ``_degrade_errors`` convention). ``Exception`` membership keeps every
+    previously-latched out-of-degrade-set ``Exception`` latching exactly
+    as before; ``KeyboardInterrupt``/``SystemExit``/``MemoryError``
+    re-raise in the clause ABOVE the belt, so ``Exception`` here never
+    swallows an OOM.
+    """
+    belt: list[type[BaseException]] = [Exception]
+    for home in ("pyo3_runtime", "polars.exceptions"):
+        try:
+            module = importlib.import_module(home)
+        except ImportError:
+            continue
+        panic = getattr(module, "PanicException", None)
+        if isinstance(panic, type) and issubclass(panic, BaseException) and panic not in belt:
+            belt.append(panic)
+    return tuple(belt)
 
 
 def render_parquet_bytes(
@@ -464,14 +524,22 @@ def render_parquet_bytes(
     except (KeyboardInterrupt, SystemExit, MemoryError):
         # The escape set (the errors.py doctrine): operator interrupt /
         # interpreter shutdown / OOM stay global — OOM in particular must
-        # reach lake_write_guard → LakeWriteHalt, never a fallback.
+        # reach lake_write_guard → LakeWriteHalt, never a fallback. This
+        # clause sits ABOVE the panic belt so the belt's `Exception` member
+        # can never swallow a MemoryError.
         raise
-    except BaseException as exc:  # deliberate — the PanicException belt (below)
-        # Belt over the crate's own catch_unwind: a `pyo3_runtime.
+    except _panic_belt_errors() as exc:
+        # The panic belt over the crate's own catch_unwind: a `pyo3_runtime.
         # PanicException` is a BaseException subclass that no `except
-        # Exception` sees — if one nonetheless escapes the crate boundary,
-        # the crate's contract is broken; latch OFF and serve the oracle
-        # (fail-closed, never a new crash class into the pull spine).
+        # Exception` sees — if one nonetheless escapes a pyo3 boundary, the
+        # contract is broken; latch OFF and serve the oracle (fail-closed,
+        # never a new crash class into the pull spine). The belt is the
+        # NARROW `(Exception, <resolved PanicException class(es)>)` — never
+        # a literal `except BaseException` (CodeQL py/catch-base-exception;
+        # the repo's re-raise-only convention for BaseException handlers).
+        # A foreign BaseException the resolver cannot name PROPAGATES — the
+        # disclosed narrowing (_panic_belt_errors docstring); `Exception`
+        # keeps every out-of-degrade-set Exception latching as before.
         _disable("crate_panic", error_detail=repr(exc))
         return python_render()
     if not isinstance(rust_bytes, bytes):

@@ -40,8 +40,9 @@ brutex_lake.linked_zstd_version()               # -> "1.5.7"
 Errors cross the FFI as `ValueError`/`RuntimeError` (the render AND the
 result construction are each caught at the boundary — never a
 `pyo3_runtime.PanicException`, which as a `BaseException` would escape the
-facade's degrade catch; the facade additionally carries a `BaseException`
-belt as defense-in-depth). The render runs GIL-free (`Python::detach`),
+facade's degrade catch; the facade additionally carries a narrow panic belt
+— `Exception` plus the by-name-resolved `PanicException` class — as
+defense-in-depth). The render runs GIL-free (`Python::detach`),
 matching the wheel's own `write_parquet` posture.
 
 ## Build / test

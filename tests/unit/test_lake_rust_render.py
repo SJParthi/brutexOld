@@ -580,7 +580,7 @@ class TestMetadataGuard:
 
 
 # ---------------------------------------------------------------------------
-# the BaseException / PanicException belt (review-round fold)
+# the narrow PanicException belt (review-round fold; CodeQL-narrowed shape)
 # ---------------------------------------------------------------------------
 
 
@@ -588,13 +588,23 @@ class _FakePanicException(BaseException):
     """The ``pyo3_runtime.PanicException`` shape: BaseException, not Exception."""
 
 
+def _install_panic_runtime(
+    monkeypatch: pytest.MonkeyPatch, panic: object = _FakePanicException
+) -> None:
+    """Install a fake ``pyo3_runtime`` module exposing *panic* as the class."""
+    module = types.ModuleType("pyo3_runtime")
+    module.PanicException = panic  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pyo3_runtime", module)
+
+
 class TestPanicBelt:
-    def test_base_exception_from_the_render_latches_and_serves_the_oracle(
+    def test_resolved_panic_class_from_the_render_latches_and_serves_the_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def _panic(ipc: bytes) -> bytes:
             raise _FakePanicException("polars worker panicked past catch_unwind")
 
+        _install_panic_runtime(monkeypatch)  # the belt resolves the class by name
         _install_crate(monkeypatch, _fake_crate(render=_panic))
         with capture_logs() as logs:
             out = lrr.render_parquet_bytes(
@@ -614,6 +624,73 @@ class TestPanicBelt:
         assert len(disabled) == 1
         assert disabled[0]["reason"] == "crate_panic"
 
+    def test_the_real_polars_panic_exception_latches_via_the_polars_home(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The arm that resolves TODAY: ``polars.exceptions.PanicException``
+        (``pyo3_runtime`` is not a real importable module — probed) is
+        caught, latched ``crate_panic``, and the oracle serves."""
+        import polars.exceptions as pl_exc
+
+        def _panic(ipc: bytes) -> bytes:
+            raise pl_exc.PanicException("simulated escaped panic")
+
+        _install_crate(monkeypatch, _fake_crate(render=_panic))
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert out == PY_BYTES
+        assert lrr.rust_render_disabled()
+        disabled = [e for e in logs if e["event"] == "lake_rust_render.rust_path_disabled"]
+        assert disabled and disabled[0]["reason"] == "crate_panic"
+
+    def test_out_of_degrade_set_exception_latches_crate_panic(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The belt's ``Exception`` member preserves the pre-narrowing law:
+        an Exception OUTSIDE the degrade set (never a warn-and-retry shape)
+        latches ``crate_panic`` and serves the oracle."""
+
+        def _os_error(ipc: bytes) -> bytes:
+            raise OSError("crate touched the filesystem it should not have")
+
+        _install_crate(monkeypatch, _fake_crate(render=_os_error))
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert out == PY_BYTES
+        assert lrr.rust_render_disabled()
+        disabled = [e for e in logs if e["event"] == "lake_rust_render.rust_path_disabled"]
+        assert disabled and disabled[0]["reason"] == "crate_panic"
+
+    def test_unresolvable_foreign_base_exception_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DISCLOSED narrowing (module docstring): a BaseException the
+        resolver cannot name — e.g. a distinct per-extension PanicException
+        type object — PROPAGATES bare instead of latching (the CodeQL
+        py/catch-base-exception re-raise-only convention; pre-narrowing it
+        latched)."""
+        monkeypatch.setitem(sys.modules, "pyo3_runtime", None)  # unimportable
+
+        def _panic(ipc: bytes) -> bytes:
+            raise _FakePanicException("a foreign extension's own panic class")
+
+        _install_crate(monkeypatch, _fake_crate(render=_panic))
+        with pytest.raises(_FakePanicException):
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+        assert not lrr.rust_render_disabled()  # propagated, never half-latched
+
     @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
     def test_interrupt_and_exit_re_raise_bare(
         self, monkeypatch: pytest.MonkeyPatch, exc_type: type[BaseException]
@@ -621,6 +698,7 @@ class TestPanicBelt:
         def _interrupt(ipc: bytes) -> bytes:
             raise exc_type
 
+        _install_panic_runtime(monkeypatch)  # even with the belt fully armed
         _install_crate(monkeypatch, _fake_crate(render=_interrupt))
         with pytest.raises(exc_type):
             lrr.render_parquet_bytes(
@@ -629,6 +707,53 @@ class TestPanicBelt:
                 polars_version="1.42.1",
             )
         assert not lrr.rust_render_disabled()  # never swallowed into a latch
+
+
+class TestPanicBeltResolver:
+    """``_panic_belt_errors`` — the guarded name-resolution law."""
+
+    def test_no_home_importable_narrows_to_exception_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "pyo3_runtime", None)
+        monkeypatch.setitem(sys.modules, "polars.exceptions", None)
+        assert lrr._panic_belt_errors() == (Exception,)
+
+    def test_fake_pyo3_runtime_class_joins_the_belt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_panic_runtime(monkeypatch)
+        monkeypatch.setitem(sys.modules, "polars.exceptions", None)
+        assert lrr._panic_belt_errors() == (Exception, _FakePanicException)
+
+    def test_the_real_polars_home_resolves_today(self) -> None:
+        import polars.exceptions as pl_exc
+
+        belt = lrr._panic_belt_errors()
+        assert Exception in belt
+        assert pl_exc.PanicException in belt
+
+    @pytest.mark.parametrize(
+        "junk",
+        ["not-a-class", type("NotAnException", (), {})],
+        ids=["non-class", "non-BaseException-class"],
+    )
+    def test_junk_panic_attr_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, junk: object
+    ) -> None:
+        _install_panic_runtime(monkeypatch, panic=junk)
+        monkeypatch.setitem(sys.modules, "polars.exceptions", None)
+        assert lrr._panic_belt_errors() == (Exception,)
+
+    def test_module_without_the_attr_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "pyo3_runtime", types.ModuleType("pyo3_runtime"))
+        monkeypatch.setitem(sys.modules, "polars.exceptions", None)
+        assert lrr._panic_belt_errors() == (Exception,)
+
+    def test_the_same_class_in_both_homes_dedupes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_panic_runtime(monkeypatch)
+        fake_pl = types.ModuleType("polars.exceptions")
+        fake_pl.PanicException = _FakePanicException  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "polars.exceptions", fake_pl)
+        assert lrr._panic_belt_errors() == (Exception, _FakePanicException)
 
 
 # ---------------------------------------------------------------------------
@@ -774,21 +899,30 @@ class TestThreadFuzz:
 
             return _oracle
 
+        def _capture(args: threading.ExceptHookArgs) -> None:
+            # Worker escapes of ANY tier — ``Exception`` AND ``BaseException``
+            # — land here and fail the ``assert errors == []`` below: a
+            # ``threading.excepthook`` override instead of a literal
+            # ``except BaseException:`` handler in the worker (CodeQL
+            # py/catch-base-exception; the test_dashboard_rate_bridge_cache.py
+            # precedent), so the teeth are unchanged.
+            exc = args.exc_value if args.exc_value is not None else args.exc_type()
+            errors.append(exc)
+
+        monkeypatch.setattr(threading, "excepthook", _capture)
+
         def _worker(idx: int) -> None:
             out: list[bytes] = []
-            try:
-                for j in range(per_thread):
-                    payload = f"frame-{idx}-{j}".encode()
-                    out.append(
-                        lrr.render_parquet_bytes(
-                            ipc_bytes_factory=_const(payload),
-                            python_render=_oracle_for(payload),
-                            polars_version="1.42.1",
-                            schema_token="fuzz-shape",
-                        )
+            for j in range(per_thread):
+                payload = f"frame-{idx}-{j}".encode()
+                out.append(
+                    lrr.render_parquet_bytes(
+                        ipc_bytes_factory=_const(payload),
+                        python_render=_oracle_for(payload),
+                        polars_version="1.42.1",
+                        schema_token="fuzz-shape",
                     )
-            except BaseException as exc:  # deliberate — surfaced to the assert below
-                errors.append(exc)
+                )
             results[idx] = out
 
         threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n_threads)]

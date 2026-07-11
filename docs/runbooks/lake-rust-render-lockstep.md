@@ -166,8 +166,13 @@ see §4). A healthy engagement logs exactly one
   becomes a catchable PyErr" boundary relies on polars-stream propagating
   a worker panic back to the collector (its observed behaviour — not
   provable in a crate unit test). Bounded regardless: the facade catches
-  an escaped `pyo3_runtime.PanicException` (`BaseException` belt), latches
-  `crate_panic`, and serves the oracle.
+  an escaped `pyo3_runtime.PanicException` (the NARROW panic belt —
+  `(Exception, <resolved PanicException class(es)>)`, never a literal
+  `except BaseException` per the repo's CodeQL py/catch-base-exception
+  convention; a distinct per-extension panic type object the resolver
+  cannot name propagates — the disclosed narrowing in
+  `lake_rust_render._panic_belt_errors`), latches `crate_panic`, and
+  serves the oracle.
 * The crate is in NO Cargo workspace and NO other workflow — ci.yml's rust
   jobs (fno-math / trading-core, RUST_VERSION 1.93.1) never build it;
   brutex-lake's floor is rustc 1.95 (`LAKE_RUST_VERSION` 1.97.0 in its own
