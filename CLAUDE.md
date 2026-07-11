@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-FEED-RUST-CORE-001, MIGRATION.md #1725 —
+_Last updated: 2026-07-11 (DEC-FEED-RUST-CORE-001, MIGRATION.md #1741 —
 the engine read-boundary DECISION kernel in Rust: NEW standalone crate
 `rust/brutex-feed` + the leaf `brutex/feed_rust.py` behind the default-OFF
 `BRUTEX_FEED_RUST` flag (Pattern A opt-in) — the positivity refusal order +
@@ -39,7 +39,7 @@ design, no speedup SLA claimed. ENGINE results UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
 `feed_rust.py` + `replay.py` + `bad_tick.py` 100% line+branch on their
 ci.yml gates; the per-fix record lives in the §1 Active-branch blurb +
-MIGRATION.md #1725 — this header carries the one-line summary, never the
+MIGRATION.md #1741 — this header carries the one-line summary, never the
 story).
 Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
 the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
@@ -2190,7 +2190,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-feed-core-slice` (**DEC-FEED-RUST-CORE-001, MIGRATION.md #1725** —
+- **Active branch:** `claude/rust-feed-core-slice` (**DEC-FEED-RUST-CORE-001, MIGRATION.md #1741** —
   the engine read-boundary DECISION kernel in Rust, ships INERT behind the default-OFF `BRUTEX_FEED_RUST`
   (Pattern A: only explicit truthy enables; junk = OFF + one `feed_rust.flag_unrecognised` warn). NEW standalone
   crate `rust/brutex-feed` (the trading-core shape — pure-Rust core + optional `python` feature, pyo3 0.29
@@ -5586,14 +5586,14 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-feed-core-slice`
-  (DEC-FEED-RUST-CORE-001, MIGRATION.md #1725 — the engine read-boundary
+  (DEC-FEED-RUST-CORE-001, MIGRATION.md #1741 — the engine read-boundary
   DECISION kernel in Rust: NEW crate `rust/brutex-feed` + the leaf
   `brutex/feed_rust.py` behind the default-OFF `BRUTEX_FEED_RUST`;
   integers-only FFI, Python keeps all materialization — `bxsnap2` run
   identity byte-preserved by construction; blanket degrade to the retained
   Python oracle; ships INERT (flag OFF = byte-identical today); ENGINE
   results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
-  line — see §1 + MIGRATION.md #1725 for the full blurb)
+  line — see §1 + MIGRATION.md #1741 for the full blurb)
   Earlier: `claude/frontend-latency-hardening-r2`
   (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the dashboard
   FRONTEND latency-hardening pack: v29 duplicate pollers consolidated onto ONE
