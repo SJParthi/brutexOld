@@ -104,7 +104,7 @@ from brutex.engine.combo_mask import (
 )
 from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore
-from brutex.engine.rust_enum import RustEnumResult, enum_survivors_via_kernel
+from brutex.engine.rust_enum import RustEnumResult, enum_prefilter_via_kernel
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.sweep_apriori import apriori_enabled
@@ -1643,15 +1643,24 @@ def run_persisted_sweep(
     # SweepAprioriBudgetError at its breaker via a lazy import too, so neither
     # module tops the other — no import cycle).
     mask_source: Iterable[int]
-    # Rust enum+prune kernel probe (DEC-SWEEP-ENUM-RUST-001, default-OFF
-    # behind BRUTEX_SWEEP_RUST_ENUM): DIGEST-path only — on that path the
-    # loop's ONLY effects are the ``survivors`` appends (lex order) and the
-    # ``enumerated``/``conflict_pruned`` tallies, exactly the kernel's three
-    # outputs (``skipped_dedup`` stays 0, ``survivor_run_ids`` stays empty).
-    # The legacy no-digest dedup arm and the Apriori arm (which WINS over the
-    # kernel — its probe lives only in the else arm) stay pure Python; every
-    # fallback (``None``) runs the pre-existing loop over the pre-existing
-    # lazy source, byte-identical by construction.
+    # Ranged Rust enum+prune+Stage-1B kernel probe (DEC-SWEEP-ENUM-RUST-001,
+    # default-OFF behind BRUTEX_SWEEP_RUST_ENUM; design-of-record §1.4 seam
+    # shape): the wrapper is probed on the brute-force arm ONLY (the Apriori
+    # arm WINS over the kernel — its probe lives only in the else arm, per
+    # the frozen DEC-SWEEP-APRIORI-TUPLE-001 contract) and engages on the
+    # DIGEST path only (a legacy no-digest tuple with the flag ON warns
+    # ``legacy_dedup_path`` once — the design's engagement-condition order).
+    # The kernel FUSES the Stage-1B min-hits count (the design §2 row: fusing
+    # avoids materialising the 5.5M–40M pre-min-hits survivor Python ints),
+    # so a kernel-served tuple gets ``kept`` directly plus the exact integer
+    # tallies the loop + batch filter below would have produced —
+    # ``evaluated`` derives as ``enumerated − conflict_pruned`` (the
+    # pre-min-hits survivor count) and ``minhits_dropped`` stays
+    # ``evaluated − len(kept)``, so the sidecar/audit buckets are IDENTICAL
+    # to the Python arm's (the design residual-(ix) bucketing law).
+    # ``skipped_dedup`` stays 0 and ``survivor_run_ids`` stays empty on this
+    # path by construction. Every fallback (``None``) runs the pre-existing
+    # loop over the pre-existing lazy source, byte-identical by construction.
     kernel_enum: RustEnumResult | None = None
     if apriori_enabled():
         from brutex.engine.sweep_apriori import generate_apriori_candidates
@@ -1666,17 +1675,28 @@ def run_persisted_sweep(
             cell_label=subject,
         )
     else:
-        if bypass_dedup:
-            kernel_enum = enum_survivors_via_kernel(cfg.condition_bits, cfg.k)
+        kernel_enum = enum_prefilter_via_kernel(
+            cfg.condition_bits,
+            cfg.k,
+            min_hits=cfg.min_hits,
+            bar_bits=bar_bits,
+            count_hits=_count_hits,
+            digest_path=bypass_dedup,
+        )
         mask_source = iter_masks_k_of_bits(cfg.condition_bits, cfg.k)
+    kept: list[int]
     if kernel_enum is not None:
-        # Kernel-served: the identical lex-ordered conflict-free list + the
-        # identical integer tallies the loop below would have produced on the
-        # digest path (bit-identity pinned by the parity golden/property
-        # suites; the unconsumed generator above is lazy — free when unused).
-        survivors = kernel_enum.survivors
+        # Kernel-served: the identical lex-ordered post-min-hits kept list +
+        # the identical integer tallies the loop AND Stage-1B filter below
+        # would have produced on the digest path (bit-identity pinned by the
+        # parity golden/property suites; the unconsumed generator above is
+        # lazy — free when unused). The Python ``_count_hits`` batch call
+        # deliberately does NOT run here — the kernel counted in-fuse (its
+        # in-band ``hits_counted`` law is seam-validated in the wrapper).
+        kept = kernel_enum.kept
         enumerated += kernel_enum.enumerated
         conflict_pruned += kernel_enum.conflict_pruned
+        evaluated = kernel_enum.evaluated
     else:
         for mask in mask_source:
             enumerated += 1
@@ -1702,16 +1722,18 @@ def run_persisted_sweep(
             survivors.append(mask)
             survivor_run_ids.append(run_id)
 
-    # Stage-1B coarse pre-filter — drop survivors that can never reach the
-    # trade-count gate (still "evaluated": we decided their fate + mark them seen).
-    kept = survivors
-    if cfg.min_hits > 0 and survivors:
-        # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
-        # are bit-identical (same SUPERSET kernel) so the kept set never differs.
-        # Routed through the ONE shared ``_count_hits`` the Apriori generator uses.
-        hits = _count_hits(survivors)
-        kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
-    evaluated = len(survivors)
+        # Stage-1B coarse pre-filter — drop survivors that can never reach the
+        # trade-count gate (still "evaluated": we decided their fate + mark them
+        # seen).
+        kept = survivors
+        if cfg.min_hits > 0 and survivors:
+            # Resident buffer (kernel) avoids re-marshalling the bar window;
+            # both arms are bit-identical (same SUPERSET kernel) so the kept
+            # set never differs. Routed through the ONE shared ``_count_hits``
+            # the Apriori generator uses.
+            hits = _count_hits(survivors)
+            kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
+        evaluated = len(survivors)
 
     # ONE run-identity resolver for every downstream consumer (finalist rows +
     # the SweepComboError fingerprints): the digest path recomputes lazily

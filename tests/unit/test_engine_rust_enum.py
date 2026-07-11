@@ -1,668 +1,878 @@
-"""Unit tests for the flag-gated Rust sweep-enumeration seam (rust_enum.py).
+"""Unit suite for :mod:`brutex.engine.rust_enum` — the ranged enum-kernel seam.
 
-DEC-SWEEP-ENUM-RUST-001 (MIGRATION.md #1738). Covers the env-flag resolution,
-the kernel binding (wheel-missing / wheel-stale / kernel-error /
-refused-result fallbacks + the engaged-once signal), the silent pre-validation
-(the flag-invariant error contract), the count ceiling, the domain validation,
-the burn-in self-check + autorevert latch, and the observability memo — every
-branch, for the strict 100% line+branch gate. The kernel-vs-Python-oracle
-bit-equality is pinned here at the seam level (plus hypothesis in
-``tests/property`` and the sweep golden end-to-end).
+DEC-SWEEP-ENUM-RUST-001 (MIGRATION.md #1738), reworked to the design-of-record
+``enumerate_prefilter`` surface. This file alone must hold the module at 100%
+line + branch (the ci.yml per-module gate), so every fallback-reason branch,
+every domain-validation refusal arm, the width-keyed shadow-window state
+machine, the MID-TUPLE CONTINUATION contract and both driver belts are driven
+here — each against the REAL compiled kernel where one exists, and against
+surgical fakes where the branch is a defence the real kernel cannot trip.
 """
 
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import fno_math
 import pytest
-from brutex.engine.combo_mask import count_combos, iter_masks_k_of_bits
-from brutex.engine.rust_enum import (
-    _CONFLICT_PAIRS_SORTED,  # pyright: ignore[reportPrivateUsage]
-    ENUM_KERNEL_MAX_MASKS,
-    FULL_CHECK_ENUMERATED,
-    PREFIX_CHECK_SURVIVORS,
-    SELF_CHECK_CALLS,
-    SWEEP_RUST_ENUM_DEFAULT,
-    SWEEP_RUST_ENUM_ENV,
-    RustEnumResult,
-    _burn_in_passes,  # pyright: ignore[reportPrivateUsage] — the seam's own suite
-    _resolve_kernel,  # pyright: ignore[reportPrivateUsage]
-    _valid_enum_result,  # pyright: ignore[reportPrivateUsage]
-    _validated_unique_bits,  # pyright: ignore[reportPrivateUsage]
-    consume_self_check_sample,
-    disable_kernel,
-    enum_survivors_via_kernel,
-    kernel_disabled,
-    reset_observability_memo_for_tests,
-    reset_self_check_for_tests,
-    self_check_pending,
-    sweep_rust_enum_enabled,
-    warn_fallback_once,
-)
+from brutex.engine import rust_enum
+from brutex.engine.combo_mask import count_combos, count_supermasks, iter_masks_k_of_bits
+from brutex.engine.rust_enum import RustEnumResult
 from brutex.vocabulary import CONFLICT_PAIRS, has_conflict
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
-import brutex.engine.rust_enum as rust_enum_module
+#: The REAL compiled classes, captured BEFORE any monkeypatching so poison
+#: wrappers can delegate to the genuine kernel.
+_REAL_U64 = fno_math.ResidentSweepEnum
+_REAL_U128 = fno_math.ResidentSweepEnumU128
 
-#: A conflict-free bit palette (no CONFLICT_PAIRS member has both bits here).
-_CLEAN_BITS = [0, 2, 5, 7]
+#: A small mixed bar window: bits 0-3 fire with decreasing frequency.
+_BARS: list[int] = [0b1111, 0b0111, 0b0011, 0b0001, 0b0000] * 4
 
-#: The full production vocabulary.
-_VOCAB_BITS = list(range(60))
+#: One REAL production conflict pair (both bits < 60) — used to build tuples
+#: whose every mask conflicts.
+_A_PAIR: tuple[int, int] = min(CONFLICT_PAIRS)
 
 
-def _oracle(bits: Sequence[int], k: int) -> list[int]:
-    """The live Python oracle: conflict-free masks in enumeration order."""
-    return [m for m in iter_masks_k_of_bits(bits, k) if not has_conflict(m)]
+def _count_hits(masks: Sequence[int]) -> list[int]:
+    """The seam's injected Stage-1B counter over the fixture window."""
+    return count_supermasks(_BARS, masks)
+
+
+def _oracle_kept(bits: Sequence[int], k: int, min_hits: int) -> list[int]:
+    """Today's spine, verbatim: enumerate → conflict prune → min-hits filter."""
+    survivors = [m for m in iter_masks_k_of_bits(bits, k) if not has_conflict(m)]
+    if min_hits > 0 and survivors:
+        hits = _count_hits(survivors)
+        return [m for m, h in zip(survivors, hits, strict=True) if h >= min_hits]
+    return survivors
+
+
+def _call(
+    bits: Sequence[int],
+    k: int,
+    *,
+    min_hits: int = 0,
+    bar_bits: Sequence[int] = _BARS,
+    digest_path: bool = True,
+) -> RustEnumResult | None:
+    return rust_enum.enum_prefilter_via_kernel(
+        bits,
+        k,
+        min_hits=min_hits,
+        bar_bits=bar_bits,
+        count_hits=_count_hits,
+        digest_path=digest_path,
+    )
 
 
 @pytest.fixture(autouse=True)
-def _fresh_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each test observes first-occurrence log events, a fresh burn-in budget,
-    an unlatched kernel and an UNSET flag (explicitly armed per test)."""
-    reset_observability_memo_for_tests()
-    reset_self_check_for_tests()
-    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
+def _fresh_state(monkeypatch: pytest.MonkeyPatch) -> Iterable[None]:
+    """Fresh flag/env/shadow/latch/memo state per test (process-global cells)."""
+    monkeypatch.delenv(rust_enum.SWEEP_RUST_ENUM_ENV, raising=False)
+    monkeypatch.delenv(rust_enum.ENUM_WORK_CELLS_ENV, raising=False)
+    rust_enum.reset_enum_self_check_for_tests()
+    rust_enum.reset_observability_memo_for_tests()
+    yield
+    rust_enum.reset_enum_self_check_for_tests()
+    rust_enum.reset_observability_memo_for_tests()
 
 
-def _arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
+@pytest.fixture
+def _on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
 
 
-# ── flag resolution ─────────────────────────────────────────────────────
+# ────── the flag ──────
 
 
-@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", "  On  "])
+@pytest.mark.parametrize("value", ["1", "true", "YES", " on "])
 def test_flag_truthy_values_enable(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, value)
-    assert sweep_rust_enum_enabled() is True
+    monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, value)
+    assert rust_enum.sweep_rust_enum_enabled() is True
 
 
-@pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", "off", "  Off  "])
+@pytest.mark.parametrize("value", ["0", "false", "No", " OFF "])
 def test_flag_falsy_values_disable(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, value)
-    assert sweep_rust_enum_enabled() is False
+    monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, value)
+    assert rust_enum.sweep_rust_enum_enabled() is False
 
 
-def test_flag_unset_is_off_ships_inert(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default is OFF — the standing default-OFF contract for new Rust
-    kernels (the default-ON flip is a SEPARATE later ADR, the ADR-0017
-    precedent). Flip = the ONE ``SWEEP_RUST_ENUM_DEFAULT`` constant."""
-    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
-    assert sweep_rust_enum_enabled() is False
-    assert SWEEP_RUST_ENUM_DEFAULT is False
+def test_flag_unset_is_off_ships_inert() -> None:
+    """Default-OFF is the ONE flip constant — the kernel ships inert."""
+    assert rust_enum.SWEEP_RUST_ENUM_DEFAULT is False
+    assert rust_enum.sweep_rust_enum_enabled() is False
 
 
 @pytest.mark.parametrize("value", ["", "   "])
 def test_flag_empty_follows_the_default(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, value)
-    assert sweep_rust_enum_enabled() is SWEEP_RUST_ENUM_DEFAULT
+    monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, value)
+    assert rust_enum.sweep_rust_enum_enabled() is rust_enum.SWEEP_RUST_ENUM_DEFAULT
 
 
-@pytest.mark.parametrize("value", ["0n", "enable", "garbage", "2"])
-def test_flag_unrecognised_is_off_with_one_warning(
-    monkeypatch: pytest.MonkeyPatch, value: str
+def test_flag_unrecognised_is_off_with_one_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo'd ENABLE attempt is VISIBLE (warn-once), never silently inert."""
+    monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "0n")
+    with capture_logs() as logs:
+        assert rust_enum.sweep_rust_enum_enabled() is False
+        assert rust_enum.sweep_rust_enum_enabled() is False
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert len(warns) == 1
+    assert warns[0]["reason"] == "flag_unrecognised"
+
+
+# ────── the work-cells knob ──────
+
+
+def test_enum_cells_unset_and_blank_serve_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert rust_enum._resolve_enum_work_cells() == rust_enum.DEFAULT_ENUM_WORK_CELLS
+    monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, "   ")
+    assert rust_enum._resolve_enum_work_cells() == rust_enum.DEFAULT_ENUM_WORK_CELLS
+
+
+def test_enum_cells_invalid_warns_once_and_serves_the_default(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A typo'd ENABLE attempt must be VISIBLE, never silently inert.
-
-    Under a default-OFF kernel the unrecognised arm coincides with the
-    default, but the warn-once ``flag_unrecognised`` stays: an operator who
-    typed ``0n`` believing they armed the kernel must see the typo named.
-    """
-    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, value)
+    """The #1608 invalid-numeric-knob precedent: loud + default, never a crash."""
+    monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, "lots")
     with capture_logs() as logs:
-        assert sweep_rust_enum_enabled() is False
-        assert sweep_rust_enum_enabled() is False  # warn-once, still OFF
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "flag_unrecognised"
-    assert events[0]["value"] == value
+        assert rust_enum._resolve_enum_work_cells() == rust_enum.DEFAULT_ENUM_WORK_CELLS
+        assert rust_enum._resolve_enum_work_cells() == rust_enum.DEFAULT_ENUM_WORK_CELLS
+    assert len([e for e in logs if e["event"] == "sweep_rust_enum.enum_cells_invalid"]) == 1
 
 
-# ── burn-in / latch primitives ───────────────────────────────────────────
-
-
-def test_self_check_budget_counts_down_and_clamps() -> None:
-    reset_self_check_for_tests(remaining=2)
-    assert self_check_pending() is True
-    consume_self_check_sample()
-    assert self_check_pending() is True
-    consume_self_check_sample()
-    assert self_check_pending() is False
-    consume_self_check_sample()  # clamped — never goes negative
-    assert self_check_pending() is False
-
-
-def test_reset_restores_the_full_burn_in_budget() -> None:
-    reset_self_check_for_tests(remaining=0)
-    assert self_check_pending() is False
-    reset_self_check_for_tests()
-    assert self_check_pending() is True
-
-
-def test_disable_kernel_latches_once_and_logs_once() -> None:
-    assert kernel_disabled() is False
+def test_enum_cells_clamps_both_directions_with_one_warn_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The design §3 override clamps: a typo'd 2**44 can never hold the GIL
+    for minutes; a degenerate 1 can never make a one-mask-per-call stream."""
+    monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, str(2**44))
     with capture_logs() as logs:
-        disable_kernel("self_check_mismatch", k=2)
-        disable_kernel("some_other_reason")  # no-op — latch already set
-    assert kernel_disabled() is True
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.kernel_autoreverted"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "self_check_mismatch"
-    reset_self_check_for_tests()
-    assert kernel_disabled() is False
-
-
-def test_warn_fallback_once_is_per_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+        assert rust_enum._resolve_enum_work_cells() == rust_enum.ENUM_WORK_CELLS_UPPER_CLAMP
+    clamps = [e for e in logs if e["event"] == "sweep_rust_enum.work_cap_clamped"]
+    assert clamps[0]["direction"] == "high"
+    monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, "1")
     with capture_logs() as logs:
-        warn_fallback_once("reason_a", detail=1)
-        warn_fallback_once("reason_a", detail=2)
-        warn_fallback_once("reason_b")
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
-    assert [e["reason"] for e in events] == ["reason_a", "reason_b"]
+        assert rust_enum._resolve_enum_work_cells() == rust_enum.ENUM_WORK_CELLS_LOWER_CLAMP
+    clamps = [e for e in logs if e["event"] == "sweep_rust_enum.work_cap_clamped"]
+    assert clamps[0]["direction"] == "low"
 
 
-# ── _resolve_kernel ──────────────────────────────────────────────────────
+def test_enum_cells_valid_value_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, str(1 << 20))
+    with capture_logs() as logs:
+        assert rust_enum._resolve_enum_work_cells() == 1 << 20
+    assert not logs
 
 
-def test_resolve_kernel_returns_the_real_symbol() -> None:
-    kernel = _resolve_kernel()
-    assert kernel is fno_math.sweep_enum_conflict_free
+# ────── shadow window + latch state ──────
+
+
+def test_shadow_window_defaults_open_per_width() -> None:
+    assert rust_enum.enum_shadow_pending("u64")
+    assert rust_enum.enum_shadow_pending("u128")
+
+
+def test_reset_enum_self_check_sets_the_named_states() -> None:
+    """The design's full state-setter: closed / cap-near / per-width."""
+    rust_enum.reset_enum_self_check_for_tests(width="u64", masks_remaining=0)
+    assert not rust_enum.enum_shadow_pending("u64")
+    assert rust_enum.enum_shadow_pending("u128")  # untouched width stays open
+    rust_enum.reset_enum_self_check_for_tests()
+    assert rust_enum.enum_shadow_pending("u64")
+
+
+def test_disable_kernel_latches_once_per_width_and_logs_once() -> None:
+    with capture_logs() as logs:
+        rust_enum.disable_kernel("u64", "self_check_mismatch")
+        rust_enum.disable_kernel("u64", "another_reason")  # no-op repeat
+    errors = [e for e in logs if e["event"] == "sweep_rust_enum.kernel_autoreverted"]
+    assert len(errors) == 1
+    assert errors[0]["reason"] == "self_check_mismatch"
+    assert rust_enum.kernel_disabled("u64")
+    assert not rust_enum.kernel_disabled("u128")  # per-width latch (design §5)
+
+
+def test_warn_fallback_once_is_per_reason() -> None:
+    with capture_logs() as logs:
+        rust_enum.warn_fallback_once("reason_a")
+        rust_enum.warn_fallback_once("reason_a")
+        rust_enum.warn_fallback_once("reason_b")
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert [w["reason"] for w in warns] == ["reason_a", "reason_b"]
+
+
+# ────── kernel-class resolution ──────
+
+
+def test_resolve_kernel_class_returns_the_real_classes() -> None:
+    assert rust_enum._resolve_kernel_class("u64") is _REAL_U64
+    assert rust_enum._resolve_kernel_class("u128") is _REAL_U128
 
 
 def test_resolve_kernel_wheel_missing_warns_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "fno_math", None)  # import raises ImportError
+    monkeypatch.setitem(sys.modules, "fno_math", None)
     with capture_logs() as logs:
-        assert _resolve_kernel() is None
-        assert _resolve_kernel() is None
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "wheel_missing"
+        assert rust_enum._resolve_kernel_class("u64") is None
+        assert rust_enum._resolve_kernel_class("u64") is None
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert len(warns) == 1
+    assert warns[0]["reason"] == "wheel_missing"
 
 
 def test_resolve_kernel_wheel_stale_warns_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    stale = types.ModuleType("fno_math")  # imports fine, lacks the slice-1 symbol
-    monkeypatch.setitem(sys.modules, "fno_math", stale)
+    monkeypatch.delattr(fno_math, "ResidentSweepEnum")
     with capture_logs() as logs:
-        assert _resolve_kernel() is None
-        assert _resolve_kernel() is None
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "wheel_stale"
+        assert rust_enum._resolve_kernel_class("u64") is None
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert warns[0]["reason"] == "wheel_stale"
+    assert warns[0]["missing"] == "ResidentSweepEnum"
 
 
-# ── _validated_unique_bits (the FM-13 silent pre-validation) ─────────────
+# ────── input pre-validation ──────
 
 
 def test_validated_unique_bits_normalises_sorted_unique() -> None:
-    assert _validated_unique_bits([5, 0, 3, 5, 0], 2) == (0, 3, 5)
-    assert _validated_unique_bits([], 0) == ()
-    assert _validated_unique_bits([127], 1) == (127,)
+    assert rust_enum._validated_unique_bits([5, 0, 3, 5, 0], 2) == (0, 3, 5)
+    assert rust_enum._validated_unique_bits([], 0) == ()
 
 
 @pytest.mark.parametrize(
     ("bits", "k"),
     [
+        ([0, 1.5], 1),  # non-int entry
+        (["1"], 1),  # str entry
         ([-1, 3], 1),  # negative position
-        ([0, 128], 1),  # position at the u128 ceiling
-        ([0, 1], 3),  # k beyond n_unique
-        ([5, 5], 2),  # duplicates collapse BEFORE the k check
-        ([0, 1], -1),  # negative k
-        ([1.5, 3], 1),  # non-int entry → the generator owns the failure
+        ([128], 1),  # >= MAX_VOCAB_BITS
+        ([0, 1], 3),  # k > n_unique
+        ([0, 1], -1),  # k < 0
     ],
 )
 def test_validated_unique_bits_refuses_silently(bits: list[int], k: int) -> None:
-    """Every violation returns ``None`` with NO raise and NO warn — the
-    untouched Python generator then raises its canonical error (FM-13)."""
+    """Silent ``None`` — the untouched generator owns the canonical raise."""
     with capture_logs() as logs:
-        assert _validated_unique_bits(bits, k) is None
-    assert logs == []
+        assert rust_enum._validated_unique_bits(bits, k) is None
+    assert not logs
 
 
 def test_bool_bits_are_accepted_as_ints() -> None:
-    """``bool`` is an int subclass and shifts like one — the generator
-    accepts it, so the pre-validation must too (parity, not strictness)."""
-    assert _validated_unique_bits([True, 3], 1) == (True, 3)
+    """bool is an int subclass and shifts like one — generator parity."""
+    assert rust_enum._validated_unique_bits([True, False, 3], 2) == (0, 1, 3)
 
 
-# ── _valid_enum_result (the refuse-poison domain gate) ───────────────────
-
-_ALLOWED_057 = (1 << 0) | (1 << 5) | (1 << 7)
+# ────── per-range domain validation ──────
 
 
-def test_valid_enum_result_accepts_a_consistent_triple() -> None:
-    assert _valid_enum_result(([33, 129, 160], 3, 0), 3, 2, _ALLOWED_057) is True
-    # Empty survivors with a fully-pruned count is also consistent.
-    assert _valid_enum_result(([], 3, 3), 3, 2, _ALLOWED_057) is True
+def _real_range(
+    bits: Sequence[int], k: int, min_hits: int = 0
+) -> tuple[tuple[int, int, int, bool, int, list[int]], int, int]:
+    """One REAL whole-range kernel call + its (count, allowed_mask) context."""
+    core = _REAL_U64(list(_BARS))
+    unique = sorted(set(bits))
+    raw = core.enumerate_prefilter(unique, k, sorted(CONFLICT_PAIRS), min_hits, 0, 2**63, 2**63)
+    allowed = 0
+    for pos in unique:
+        allowed |= 1 << pos
+    return raw, count_combos(k, len(unique)), allowed
 
 
-@pytest.mark.parametrize(
-    "forged",
-    [
-        [1, 2, 3],  # not a tuple
-        (1, 2),  # wrong arity
-        ((1, 2, 3), 3, 0),  # survivors not a list
-        ([33], True, 0),  # bool masquerading as enumerated
-        ([33], 3, True),  # bool masquerading as conflict_pruned
-        ([33], 3.0, 2),  # non-int enumerated
-        ([33], 3, "2"),  # non-int conflict_pruned
-        ([33], 4, 3),  # enumerated != count
-        ([33, 129, 160, 36], 3, -1),  # negative conflict_pruned
-        ([33], 3, 1),  # tally inconsistency (3 - 1 != 1)
-        (["33", 129], 3, 1),  # non-int FIRST survivor
-        ([33, "160"], 3, 1),  # non-int LAST survivor
-        ([True, 129], 3, 1),  # bool masquerading as a mask
-        ([33, 1 << 9], 3, 1),  # LAST survivor outside the allowed mask
-        ([1 << 9, 33], 3, 1),  # FIRST survivor outside the allowed mask
-        ([33, 161], 3, 1),  # wrong popcount (161 = bits 0+5+7, 3 bits for k=2)
-        ([3, 129], 3, 1),  # conflicting survivor (bits 0+1 = CONFLICT pair)
-    ],
-)
-def test_valid_enum_result_refuses_forged_shapes(forged: object) -> None:
-    allowed = _ALLOWED_057 | 0b11  # admit bits 0/1 so the conflict case is reachable
-    assert _valid_enum_result(forged, 3, 2, allowed) is False
+def test_valid_range_result_accepts_a_real_range() -> None:
+    for min_hits in (0, 2):
+        raw, count, allowed = _real_range([0, 1, 2, 3, 4], 2, min_hits)
+        assert rust_enum._valid_range_result(
+            raw, start_rank=0, count=count, min_hits=min_hits, k=2, allowed_mask=allowed
+        )
 
 
-# ── _burn_in_passes ──────────────────────────────────────────────────────
+def test_valid_range_result_refuses_every_forged_arm() -> None:
+    """Each refusal arm of the domain gate, forged from a REAL valid range."""
+    raw, count, allowed = _real_range([0, 1, 2, 3, 4], 2, 0)
+    enumerated, pruned, next_rank, exhausted, hits, kept = raw
+    assert kept, "fixture must keep at least two masks"
+
+    def bad(candidate: object) -> None:
+        assert not rust_enum._valid_range_result(
+            candidate, start_rank=0, count=count, min_hits=0, k=2, allowed_mask=allowed
+        )
+
+    bad("junk")  # not a tuple
+    bad(raw[:5])  # wrong arity
+    bad((float(enumerated), pruned, next_rank, exhausted, hits, kept))  # non-int
+    bad((True, pruned, next_rank, exhausted, hits, kept))  # bool masquerade
+    bad((enumerated, pruned, next_rank, 1, hits, kept))  # exhausted not bool
+    bad((enumerated, pruned, next_rank, exhausted, hits, tuple(kept)))  # kept not list
+    bad((enumerated + 1, pruned, count + 1, exhausted, hits, kept))  # next_rank > count
+    bad((enumerated + 1, pruned, next_rank, exhausted, hits, kept))  # position law
+    bad((enumerated, -1, next_rank, exhausted, hits, kept))  # pruned < 0
+    bad((enumerated, enumerated + 1, next_rank, exhausted, hits, kept))  # pruned > enum
+    # MIN-HITS SHORT-CIRCUIT law, arm 1 (min_hits == 0): hits must be 0 and
+    # kept must be EXACTLY the conflict-free count.
+    bad((enumerated, pruned, next_rank, exhausted, 1, kept))
+    bad((enumerated, pruned + 1, next_rank, exhausted, hits, kept))  # kept != cf
+    # First/last kept-mask sanity (spot checks only — O(1)).
+    bad((enumerated, pruned, next_rank, exhausted, hits, ["0b11", *kept[1:]]))  # non-int
+    bad((enumerated, pruned, next_rank, exhausted, hits, [True, *kept[1:]]))  # bool
+    bad((enumerated, pruned, next_rank, exhausted, hits, [0b111, *kept[1:]]))  # popcount
+    bad((enumerated, pruned, next_rank, exhausted, hits, [*kept[:-1], 1 << 40]))  # outside
+    conflicted = (1 << _A_PAIR[0]) | (1 << _A_PAIR[1])
+    assert not rust_enum._valid_range_result(
+        (1, 0, 1, True, 0, [conflicted]),
+        start_rank=0,
+        count=1,
+        min_hits=0,
+        k=2,
+        allowed_mask=conflicted,
+    )  # spot mask carries a production conflict pair
 
 
-def test_burn_in_full_compare_passes_and_consumes() -> None:
-    survivors = _oracle(_CLEAN_BITS, 2)
-    before = self_check_pending()
-    assert _burn_in_passes(_CLEAN_BITS, 2, survivors, count_combos(2, 4)) is True
-    assert before is True
-    assert kernel_disabled() is False
+def test_valid_range_result_min_hits_positive_law() -> None:
+    """Arm 2: hits_counted must equal the conflict-free count exactly — the
+    design's mandated seam pin on the short-circuit law (a guard-deleting
+    kernel mutant flips this value and dies here)."""
+    raw, count, allowed = _real_range([0, 1, 2, 3, 4], 2, 3)
+    enumerated, pruned, next_rank, exhausted, hits, kept = raw
+    assert hits == enumerated - pruned
+
+    def check(candidate: object) -> bool:
+        return rust_enum._valid_range_result(
+            candidate, start_rank=0, count=count, min_hits=3, k=2, allowed_mask=allowed
+        )
+
+    assert check(raw)
+    assert not check((enumerated, pruned, next_rank, exhausted, 0, kept))  # count skipped
+    assert not check((enumerated, pruned, next_rank, exhausted, hits - 1, kept))
+    too_many = [*kept, *([3] * (enumerated - pruned - len(kept) + 1))]
+    assert not check((enumerated, pruned, next_rank, exhausted, hits, too_many))
 
 
-def test_burn_in_full_compare_catches_tail_divergence() -> None:
-    """The FULL arm compares whole lists — a dropped tail or an extra element
-    mismatches even when the head agrees."""
-    survivors = _oracle(_CLEAN_BITS, 2)[:-1]  # dropped tail
+# ────── the python window / continuation helpers ──────
+
+
+def test_python_window_and_continuation_compose_to_the_whole_stream() -> None:
+    bits, k, min_hits = [0, 1, 2, 3, 4], 2, 2
+    gen = iter(iter_masks_k_of_bits(bits, k))
+    w_enum, w_pruned, w_kept = rust_enum._python_window(gen, 4, min_hits, _count_hits)
+    c_enum, c_pruned, c_kept = rust_enum._python_continuation(gen, min_hits, _count_hits)
+    assert w_enum == 4
+    assert w_enum + c_enum == 10  # C(5, 2)
+    assert w_kept + c_kept == _oracle_kept(bits, k, min_hits)
+    assert w_pruned + c_pruned == 10 - len(_oracle_kept(bits, k, 0))
+
+
+def test_python_window_all_conflicting_skips_the_count() -> None:
+    """An all-conflicted window has NO conflict-free masks — the min-hits
+    filter's ``and conflict_free`` guard short-circuits (no count call)."""
+    a, b = _A_PAIR
+    gen = iter(iter_masks_k_of_bits([a, b], 2))
+
+    def _must_not_count(masks: Sequence[int]) -> NoReturn:
+        raise AssertionError("count_hits must not run on an empty window")
+
+    assert rust_enum._python_window(gen, 1, 5, _must_not_count) == (1, 1, [])
+
+
+def test_python_continuation_min_hits_zero_keeps_conflict_free() -> None:
+    gen = iter(iter_masks_k_of_bits([0, 1, 2], 2))
+    enum, pruned, kept = rust_enum._python_continuation(gen, 0, _count_hits)
+    assert enum == 3
+    assert kept == _oracle_kept([0, 1, 2], 2, 0)
+    assert pruned == 3 - len(kept)
+
+
+def test_consume_shadow_floor_unmet_warns_once() -> None:
+    """The 256-range cap tripping with the mask floor unmet is the genuine
+    degenerate-stream signal (design §5 audit C51)."""
+    rust_enum.reset_enum_self_check_for_tests(
+        width="u64", masks_remaining=10**9, ranges_cap_remaining=1
+    )
     with capture_logs() as logs:
-        assert _burn_in_passes(_CLEAN_BITS, 2, survivors, count_combos(2, 4)) is False
-    assert kernel_disabled() is True
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.kernel_autoreverted"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "self_check_mismatch"
+        rust_enum._consume_shadow("u64", 100)
+        rust_enum._consume_shadow("u64", 100)
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.enum_shadow_floor_unmet"]
+    assert len(warns) == 1
+    assert warns[0]["width"] == "u64"
+    assert not rust_enum.enum_shadow_pending("u64")
 
 
-def test_burn_in_prefix_compare_checks_only_the_head_region() -> None:
-    """Above FULL_CHECK_ENUMERATED only the first PREFIX_CHECK_SURVIVORS
-    elements are compared (the honest envelope: tail divergence past the
-    prefix is the property/golden suites' layer)."""
-    oracle = _oracle(_VOCAB_BITS, 3)
-    beyond_full = FULL_CHECK_ENUMERATED + 1
-    # A CORRUPT TAIL past the prefix window passes the prefix arm …
-    corrupt_tail = [*oracle[:PREFIX_CHECK_SURVIVORS], 0xDEAD]
-    assert _burn_in_passes(_VOCAB_BITS, 3, corrupt_tail, beyond_full) is True
-    assert kernel_disabled() is False
-    # … while a corrupt HEAD (order flip inside the window) is caught.
-    flipped = list(oracle)
-    flipped[0], flipped[1] = flipped[1], flipped[0]
-    assert _burn_in_passes(_VOCAB_BITS, 3, flipped, beyond_full) is False
-    assert kernel_disabled() is True
+# ────── enum_prefilter_via_kernel — the driver ──────
 
 
-def test_burn_in_prefix_compare_catches_a_short_kernel_list() -> None:
-    """A kernel list SHORTER than the prefix window mismatches by length."""
-    oracle = _oracle(_VOCAB_BITS, 3)
-    assert _burn_in_passes(_VOCAB_BITS, 3, oracle[:100], FULL_CHECK_ENUMERATED + 1) is False
-    assert kernel_disabled() is True
+def test_off_arm_is_silent_and_structurally_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flag OFF is the deliberate default state — no warn, no kernel resolve."""
 
+    def _must_not_resolve(width: str) -> NoReturn:
+        raise AssertionError("the OFF arm must never resolve the kernel")
 
-# ── enum_survivors_via_kernel — the decision ladder ──────────────────────
-
-
-def test_off_arm_is_structurally_free(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Flag OFF returns ``None`` before ANY kernel resolution or logging."""
-
-    def _must_not_resolve() -> None:
-        raise AssertionError("flag-OFF arm must never resolve the kernel")
-
-    monkeypatch.setattr(rust_enum_module, "_resolve_kernel", _must_not_resolve)
+    monkeypatch.setattr(rust_enum, "_resolve_kernel_class", _must_not_resolve)
     with capture_logs() as logs:
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-    assert logs == []
+        assert _call([0, 1, 2], 2) is None
+    assert not logs
 
 
-def test_latched_kernel_short_circuits_with_warn_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
-    disable_kernel("self_check_mismatch")
-    reset_observability_memo_for_tests()  # observe the fallback fresh
+@pytest.mark.usefixtures("_on")
+def test_legacy_dedup_path_warns_and_falls_back() -> None:
+    """The design's engagement-condition listing order: the digest-path
+    condition is named FIRST — a legacy tuple with the flag ON warns
+    ``legacy_dedup_path`` (once), never a later condition."""
     with capture_logs() as logs:
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "kernel_disabled"
+        assert _call([0, 1, 2], 2, digest_path=False) is None
+        assert _call([0, 1, 2], 2, digest_path=False) is None
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert len(warns) == 1
+    assert warns[0]["reason"] == "legacy_dedup_path"
+    assert not [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
 
 
+@pytest.mark.usefixtures("_on")
+def test_invalid_input_returns_none_silently() -> None:
+    with capture_logs() as logs:
+        assert _call([0, 1.5], 1) is None  # type: ignore[list-item]
+    assert not logs
+
+
+@pytest.mark.usefixtures("_on")
+def test_latched_width_short_circuits_with_warn_once() -> None:
+    rust_enum.disable_kernel("u64", "self_check_mismatch")
+    with capture_logs() as logs:
+        assert _call([0, 1, 2], 2) is None
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert warns[0]["reason"] == "kernel_disabled"
+
+
+@pytest.mark.usefixtures("_on")
 def test_wheel_missing_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
     monkeypatch.setitem(sys.modules, "fno_math", None)
     with capture_logs() as logs:
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-    assert [e["reason"] for e in logs if e["event"] == "sweep_rust_enum.fallback"] == [
-        "wheel_missing"
-    ]
+        assert _call([0, 1, 2], 2) is None
+    fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert fallbacks[0]["reason"] == "wheel_missing"
 
 
-@pytest.mark.parametrize(
-    ("bits", "k"),
-    [([-1], 1), ([0, 128], 1), ([0, 1], 5), ([0, 1], -1)],
-)
-def test_invalid_input_returns_none_silently_flag_on(
-    monkeypatch: pytest.MonkeyPatch, bits: list[int], k: int
-) -> None:
-    """FM-13: invalid input never raises or warns HERE even with the flag ON;
-    the untouched generator raises the canonical ``ValueError``."""
-    _arm(monkeypatch)
+@pytest.mark.usefixtures("_on")
+def test_count_overflow_falls_back() -> None:
+    """C(128, 64) exceeds the u64 rank domain — refused wrapper-side."""
     with capture_logs() as logs:
-        assert enum_survivors_via_kernel(bits, k) is None
-    assert logs == []
-    with pytest.raises(ValueError, match="iter_masks_k_of_bits"):
-        next(iter_masks_k_of_bits(bits, k))
+        assert _call(list(range(128)), 64) is None
+    fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert fallbacks[0]["reason"] == "count_overflow"
 
 
-def test_count_ceiling_falls_back_to_the_lazy_generator(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _arm(monkeypatch)
-    monkeypatch.setattr(rust_enum_module, "ENUM_KERNEL_MAX_MASKS", 5)
-    with capture_logs() as logs:
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None  # C(4,2)=6 > 5
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "count_ceiling"
-    assert events[0]["count"] == 6
-    assert events[0]["ceiling"] == 5
-
-
-@pytest.mark.parametrize("exc", [ValueError("boom"), TypeError("boom"), OverflowError("boom")])
-def test_kernel_error_narrow_except_falls_back(
-    monkeypatch: pytest.MonkeyPatch, exc: Exception
-) -> None:
-    _arm(monkeypatch)
-
-    def _raising_kernel(*args: object) -> object:
-        raise exc
-
-    monkeypatch.setattr(rust_enum_module, "_resolve_kernel", lambda: _raising_kernel)
-    with capture_logs() as logs:
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "kernel_error"
-    assert repr(exc) in str(events[0]["error"])
-
-
-def test_memory_error_re_raises_bare(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001) — never swallowed."""
-    _arm(monkeypatch)
-
-    def _oom_kernel(*args: object) -> object:
-        raise MemoryError("survivor buffer")
-
-    monkeypatch.setattr(rust_enum_module, "_resolve_kernel", lambda: _oom_kernel)
-    with pytest.raises(MemoryError, match="survivor buffer"):
-        enum_survivors_via_kernel(_CLEAN_BITS, 2)
-
-
-def test_unexpected_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A genuine code bug still raises (CLAUDE.md §4 — no broad excepts)."""
-    _arm(monkeypatch)
-
-    def _buggy_kernel(*args: object) -> object:
-        raise RuntimeError("kernel bug")
-
-    monkeypatch.setattr(rust_enum_module, "_resolve_kernel", lambda: _buggy_kernel)
-    with pytest.raises(RuntimeError, match="kernel bug"):
-        enum_survivors_via_kernel(_CLEAN_BITS, 2)
-
-
-def test_refused_result_logs_error_once_and_falls_back(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _arm(monkeypatch)
-
-    def _lying_kernel(*args: object) -> object:
-        return ([33], 999, 0)  # enumerated != count_combos — FM-6
-
-    monkeypatch.setattr(rust_enum_module, "_resolve_kernel", lambda: _lying_kernel)
-    with capture_logs() as logs:
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.kernel_result_refused"]
-    assert len(events) == 1  # ERROR-once (memoised like the warn family)
-
-
-def test_burn_in_mismatch_autoreverts_then_short_circuits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A domain-consistent but ORDER-wrong result is caught by the burn-in,
-    latches the kernel OFF, and every later call short-circuits."""
-    _arm(monkeypatch)
-    oracle = _oracle(_CLEAN_BITS, 2)
-    wrong_order = [oracle[1], oracle[0], *oracle[2:]]  # set-equal, order-flipped
-
-    def _reordered_kernel(*args: object) -> object:
-        return (wrong_order, count_combos(2, 4), count_combos(2, 4) - len(oracle))
-
-    monkeypatch.setattr(rust_enum_module, "_resolve_kernel", lambda: _reordered_kernel)
-    with capture_logs() as logs:
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-    assert kernel_disabled() is True
-    reverts = [e for e in logs if e["event"] == "sweep_rust_enum.kernel_autoreverted"]
-    assert len(reverts) == 1
-    assert reverts[0]["reason"] == "self_check_mismatch"
-    # The NEXT call never reaches the kernel again this process.
-    with capture_logs() as logs:
-        assert enum_survivors_via_kernel(_CLEAN_BITS, 2) is None
-    assert [e["reason"] for e in logs if e["event"] == "sweep_rust_enum.fallback"] == [
-        "kernel_disabled"
-    ]
-
-
-def test_post_burn_in_steady_state_skips_the_oracle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With the budget exhausted a (hypothetically wrong) consistent result is
-    served WITHOUT the oracle compare — the documented honest envelope."""
-    _arm(monkeypatch)
-    reset_self_check_for_tests(remaining=0)
-    oracle = _oracle(_CLEAN_BITS, 2)
-    wrong_order = [oracle[1], oracle[0], *oracle[2:]]
-
-    def _reordered_kernel(*args: object) -> object:
-        return (wrong_order, count_combos(2, 4), count_combos(2, 4) - len(oracle))
-
-    monkeypatch.setattr(rust_enum_module, "_resolve_kernel", lambda: _reordered_kernel)
-    result = enum_survivors_via_kernel(_CLEAN_BITS, 2)
+@pytest.mark.usefixtures("_on")
+def test_min_hits_negative_is_served_as_zero() -> None:
+    """``min_hits <= 0`` is the exact ``if cfg.min_hits > 0`` spine law."""
+    result = _call([0, 1, 2, 3, 4], 2, min_hits=-5)
     assert result is not None
-    assert result.survivors == wrong_order  # steady state trusts the domain gate
-    assert kernel_disabled() is False
+    assert result.kept == _oracle_kept([0, 1, 2, 3, 4], 2, 0)
+    assert result.hits_counted == 0  # the short-circuit law held
 
 
-def test_engaged_logs_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
-    with capture_logs() as logs:
-        first = enum_survivors_via_kernel(_CLEAN_BITS, 2)
-        second = enum_survivors_via_kernel(_CLEAN_BITS, 2)
-    assert first is not None
-    assert second is not None
-    events = [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
-    assert len(events) == 1
+@pytest.mark.usefixtures("_on")
+def test_kernel_served_tuple_matches_the_oracle_across_min_hits() -> None:
+    bits = [0, 1, 2, 3, 4, 5]
+    for min_hits in (0, 1, 3, 20, 10**6):
+        rust_enum.reset_enum_self_check_for_tests()
+        result = _call(bits, 3, min_hits=min_hits)
+        assert result is not None
+        assert result.kept == _oracle_kept(bits, 3, min_hits)
+        assert result.enumerated == count_combos(3, 6)
+        assert result.evaluated == len(_oracle_kept(bits, 3, 0))
+        expected_hits = result.evaluated if min_hits > 0 else 0
+        assert result.hits_counted == expected_hits
 
 
-# ── real-kernel parity pins (the literal-pin layer) ──────────────────────
-
-
-def test_doctest_pin_bits_0_3_5_k2(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
-    result = enum_survivors_via_kernel([0, 3, 5], 2)
+@pytest.mark.usefixtures("_on")
+def test_u128_width_serves_bits_beyond_64() -> None:
+    result = _call([0, 64, 65], 1, min_hits=0)
     assert result is not None
-    assert result.survivors == [9, 33, 40]
-    assert (result.enumerated, result.conflict_pruned) == (3, 0)
+    assert result.kept == [1, 1 << 64, 1 << 65]
+    assert result.enumerated == 3
 
 
-def test_input_order_invariance(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
-    result = enum_survivors_via_kernel([5, 0, 3], 2)
+@pytest.mark.usefixtures("_on")
+def test_k_zero_yields_the_single_empty_mask() -> None:
+    result = _call([], 0)
     assert result is not None
-    assert result.survivors == [9, 33, 40]
-
-
-def test_duplicates_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
-    result = enum_survivors_via_kernel([5, 5, 5], 1)
-    assert result is not None
-    assert result.survivors == [32]
+    assert result.kept == [0]
     assert (result.enumerated, result.conflict_pruned) == (1, 0)
 
 
-def test_k_zero_yields_the_single_empty_mask(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
-    for bits in ([7, 2], []):
-        reset_self_check_for_tests()
-        result = enum_survivors_via_kernel(bits, 0)
-        assert result is not None
-        assert result.survivors == [0]
-        assert (result.enumerated, result.conflict_pruned) == (1, 0)
+@pytest.mark.usefixtures("_on")
+def test_bar_value_past_the_width_is_a_kernel_error_fallback() -> None:
+    """A u64-width tuple over a bar value >= 2**64: PyO3's conversion
+    OverflowError degrades to the Python loop (never a crash)."""
+    with capture_logs() as logs:
+        assert _call([0, 1, 2], 2, bar_bits=[1 << 64]) is None
+    fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert fallbacks[0]["reason"] == "kernel_error"
 
 
-def test_lex_order_witness_is_not_numeric_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Position-lex on bits {0,2,5,7} at k=2: mask 129 (0+7) precedes 36
-    (2+5) — a numeric-ascending (Gosper) kernel fails this pin (FM-1)."""
-    _arm(monkeypatch)
-    result = enum_survivors_via_kernel(_CLEAN_BITS, 2)
+@pytest.mark.usefixtures("_on")
+def test_construction_memory_error_re_raises_bare(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _OomCtor:
+        """Ctor that OOMs — the global-stop class must re-raise bare."""
+
+        def __init__(self, bar_bits: list[int]) -> None:
+            raise MemoryError("enumerate_prefilter: allocation of planes failed")
+
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _OomCtor)
+    with pytest.raises(MemoryError):
+        _call([0, 1, 2], 2)
+
+
+@pytest.mark.usefixtures("_on")
+def test_unexpected_ctor_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _WeirdCtor:
+        """Ctor raising outside the narrow boundary set — must propagate."""
+
+        def __init__(self, bar_bits: list[int]) -> None:
+            raise RuntimeError("not a boundary error")
+
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _WeirdCtor)
+    with pytest.raises(RuntimeError):
+        _call([0, 1, 2], 2)
+
+
+class _FakeCore:
+    """Configurable fake resident core for the driver's defence branches."""
+
+    def __init__(self, bar_bits: list[int]) -> None:
+        self._n = len(bar_bits)
+
+    def n_bars(self) -> int:
+        return self._n
+
+    def enumerate_prefilter(self, *args: object) -> object:
+        raise AssertionError("override per test")
+
+
+@pytest.mark.usefixtures("_on")
+def test_bars_length_mismatch_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The §1.3 F27 seam invariant: an n_bars()-lying core is refused."""
+
+    class _Lying(_FakeCore):
+        def n_bars(self) -> int:
+            return self._n + 1
+
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _Lying)
+    with capture_logs() as logs:
+        assert _call([0, 1, 2], 2) is None
+    fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert fallbacks[0]["reason"] == "bars_length_mismatch"
+
+
+@pytest.mark.usefixtures("_on")
+def test_range_call_value_error_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Raising(_FakeCore):
+        def enumerate_prefilter(self, *args: object) -> NoReturn:
+            raise ValueError("enumerate_prefilter: boundary")
+
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _Raising)
+    with capture_logs() as logs:
+        assert _call([0, 1, 2], 2) is None
+    fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert fallbacks[0]["reason"] == "kernel_error"
+
+
+@pytest.mark.usefixtures("_on")
+def test_range_call_memory_error_re_raises_bare(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Oom(_FakeCore):
+        def enumerate_prefilter(self, *args: object) -> NoReturn:
+            raise MemoryError("enumerate_prefilter: allocation of kept masks failed")
+
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _Oom)
+    with pytest.raises(MemoryError):
+        _call([0, 1, 2], 2)
+
+
+@pytest.mark.usefixtures("_on")
+def test_refused_range_logs_error_once_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Junk(_FakeCore):
+        def enumerate_prefilter(self, *args: object) -> str:
+            return "junk"
+
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _Junk)
+    with capture_logs() as logs:
+        assert _call([0, 1, 2], 2) is None
+        assert _call([0, 1, 2], 2) is None
+    errors = [e for e in logs if e["event"] == "sweep_rust_enum.kernel_result_refused"]
+    assert len(errors) == 1
+
+
+@pytest.mark.usefixtures("_on")
+def test_enum_no_progress_belt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-exhausted zero-progress return (structurally unreachable under
+    the kernel's guaranteed-progress law) trips the driver belt."""
+
+    class _Stuck(_FakeCore):
+        def enumerate_prefilter(self, *args: object) -> tuple[int, int, int, bool, int, list[int]]:
+            return (0, 0, 0, False, 0, [])
+
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _Stuck)
+    with capture_logs() as logs:
+        assert _call([0, 1, 2], 2) is None
+    fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert fallbacks[0]["reason"] == "enum_no_progress"
+
+
+class _EarlyExhaust:
+    """Wraps the REAL kernel but lies ``exhausted`` after the first range —
+    the total-reconciliation belt's teeth (the §1.4 driver assert)."""
+
+    def __init__(self, bar_bits: list[int]) -> None:
+        self._real = _REAL_U64(bar_bits)
+
+    def n_bars(self) -> int:
+        return self._real.n_bars()
+
+    def enumerate_prefilter(self, *args: object) -> tuple[int, int, int, bool, int, list[int]]:
+        enumerated, pruned, next_rank, _, hits, kept = self._real.enumerate_prefilter(*args)
+        return (enumerated, pruned, next_rank, True, hits, kept)
+
+
+@pytest.mark.usefixtures("_on")
+def test_enum_total_mismatch_belt_catches_an_early_exhaust_lie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kernel lying "exhausted" mid-space passes the per-range gate (the
+    exhausted flag is deliberately not cross-checked there) and dies at the
+    loop-exit TOTAL-RECONCILIATION belt vs the driver's own count_combos."""
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _EarlyExhaust)
+    # Force multiple ranges so the first range's next_rank < count: cells at
+    # the lower clamp over C(60, 3) = 34,220 > the 4096-mask range floor.
+    monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, "1")
+    rust_enum.reset_enum_self_check_for_tests(masks_remaining=0)  # past burn-in
+    with capture_logs() as logs:
+        assert _call(list(range(60)), 3) is None
+    fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert fallbacks[0]["reason"] == "enum_total_mismatch"
+
+
+@pytest.mark.usefixtures("_on")
+def test_multi_range_tuple_is_shadowed_and_correct(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C(60, 3) at the clamped cells floor runs ~9 ranges; the shadow window
+    stays open ACROSS ranges (mask-count-floored, design §5) and the result
+    equals the oracle exactly."""
+    monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, "1")  # clamps up: 4096-mask ranges
+    bits = list(range(60))
+    result = _call(bits, 3, min_hits=2)
     assert result is not None
-    assert result.survivors == [5, 33, 129, 36, 132, 160]
+    assert result.kept == _oracle_kept(bits, 3, 2)
+    assert result.enumerated == count_combos(3, 60)
+    # The whole 34,220-mask tuple fits inside the 2^16 shadow floor: every
+    # range was shadowed, so the floor counter dropped by exactly the tuple.
+    assert (
+        rust_enum._SHADOW_MASKS_REMAINING["u64"]
+        == rust_enum.SWEEP_ENUM_SELF_CHECK_MASKS - result.enumerated
+    )
 
 
-def test_k_equals_n_unique_fully_conflicting(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bits {0, 1} at k=2: the single mask 3 carries the (0, 1) CONFLICT pair
-    — empty survivors, pruned 1."""
-    _arm(monkeypatch)
-    result = enum_survivors_via_kernel([0, 1], 2)
+@pytest.mark.usefixtures("_on")
+def test_shadow_window_closes_mid_tuple_and_later_ranges_run_unshadowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, "1")
+    rust_enum.reset_enum_self_check_for_tests(width="u64", masks_remaining=5000)
+    bits = list(range(60))
+    result = _call(bits, 3)
     assert result is not None
-    assert result.survivors == []
-    assert (result.enumerated, result.conflict_pruned) == (1, 1)
+    assert result.kept == _oracle_kept(bits, 3, 0)
+    assert not rust_enum.enum_shadow_pending("u64")  # closed mid-tuple
 
 
+@pytest.mark.usefixtures("_on")
+def test_post_burn_in_steady_state_never_builds_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rust_enum.reset_enum_self_check_for_tests(masks_remaining=0)
+
+    def _must_not_enumerate(bits: Sequence[int], k: int) -> NoReturn:
+        raise AssertionError("the closed shadow window must not build the oracle")
+
+    monkeypatch.setattr(rust_enum, "iter_masks_k_of_bits", _must_not_enumerate)
+    result = _call([0, 1, 2, 3, 4], 2)
+    assert result is not None
+    assert result.kept == _oracle_kept([0, 1, 2, 3, 4], 2, 0)
+
+
+class _DropOneKept:
+    """Domain-VALID poison: silently drops one kept mask from the first range
+    with SELF-CONSISTENT tallies (the drop re-bucketed as conflict-pruned) —
+    the design's in-range kept-set divergence class."""
+
+    def __init__(self, bar_bits: list[int]) -> None:
+        self._real = _REAL_U64(bar_bits)
+        self._poisoned = False
+
+    def n_bars(self) -> int:
+        return self._real.n_bars()
+
+    def enumerate_prefilter(self, *args: object) -> tuple[int, int, int, bool, int, list[int]]:
+        enumerated, pruned, next_rank, exhausted, hits, kept = self._real.enumerate_prefilter(*args)
+        if not self._poisoned and kept:
+            self._poisoned = True
+            return (enumerated, pruned + 1, next_rank, exhausted, hits, kept[1:])
+        return (enumerated, pruned, next_rank, exhausted, hits, kept)
+
+
+@pytest.mark.usefixtures("_on")
+def test_shadow_mismatch_autoreverts_and_ships_the_python_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MID-TUPLE CONTINUATION contract: on a shadow mismatch the width
+    latches (one autorevert ERROR), the Python window ships, the remainder
+    rides today's enumeration, and the RESULT is bit-identical to the pure
+    Python spine — the poison never reaches the caller."""
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _DropOneKept)
+    bits = [0, 1, 2, 3, 4, 5]
+    with capture_logs() as logs:
+        result = _call(bits, 3)
+    reverted = [e for e in logs if e["event"] == "sweep_rust_enum.kernel_autoreverted"]
+    assert len(reverted) == 1
+    assert reverted[0]["reason"] == "self_check_mismatch"
+    assert result is not None
+    assert result.kept == _oracle_kept(bits, 3, 0)
+    assert result.enumerated == count_combos(3, 6)
+    assert result.evaluated == len(_oracle_kept(bits, 3, 0))
+    assert rust_enum.kernel_disabled("u64")
+    # The NEXT tuple short-circuits on the latch (warn-once).
+    with capture_logs() as logs:
+        assert _call(bits, 3) is None
+    fallbacks = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert fallbacks[0]["reason"] == "kernel_disabled"
+
+
+@pytest.mark.usefixtures("_on")
+def test_mixed_provenance_total_mismatch_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defensive belt on the mixed path: if the continuation cannot reconcile
+    the driver's count_combos total (only reachable when the oracle stream
+    itself is broken — simulated by truncating it), the tuple is refused to
+    the spine, never returned short."""
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _DropOneKept)
+
+    def _truncated(bits: Sequence[int], k: int) -> Iterator[int]:
+        return iter(list(iter_masks_k_of_bits(bits, k))[:-3])
+
+    monkeypatch.setattr(rust_enum, "iter_masks_k_of_bits", _truncated)
+    with capture_logs() as logs:
+        assert _call([0, 1, 2, 3, 4, 5], 3) is None
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert warns[0]["reason"] == "enum_total_mismatch"
+    assert warns[0]["provenance"] == "mixed"
+
+
+@pytest.mark.usefixtures("_on")
+def test_engaged_logs_once_per_process() -> None:
+    with capture_logs() as logs:
+        assert _call([0, 1, 2, 3, 4], 2) is not None
+        assert _call([0, 1, 2, 3, 4], 2) is not None
+    engaged = [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+    assert len(engaged) == 1
+    assert engaged[0]["width"] == "u64"
+
+
+@pytest.mark.usefixtures("_on")
+def test_all_conflicting_tuple_keeps_nothing_with_min_hits() -> None:
+    """k == n over one REAL conflict pair: the single mask prunes; the fused
+    count never runs (no conflict-free masks) — hits_counted == 0 even at
+    min_hits > 0 (the law's degenerate arm)."""
+    a, b = _A_PAIR
+    result = _call([a, b], 2, min_hits=5)
+    assert result is not None
+    assert result.kept == []
+    assert (result.enumerated, result.conflict_pruned, result.hits_counted) == (1, 1, 0)
+
+
+# ────── literal pins (the production vocabulary) ──────
+
+
+@pytest.mark.usefixtures("_on")
+def test_doctest_pin_bits_0_3_5_k2() -> None:
+    result = _call([0, 3, 5], 2)
+    assert result is not None
+    assert result.kept == [9, 33, 40]
+
+
+@pytest.mark.usefixtures("_on")
+def test_lex_order_witness_is_not_numeric_order() -> None:
+    """The item-1 counterexample: 9 BEFORE 6 (position-lex, never colex).
+
+    Masks 3 (bits {0,1}) and 12 (bits {2,3}) are pruned by the REAL
+    production conflict pairs — the surviving stream still witnesses the
+    position-lex order (9 strictly before 6; ascending-numeric would flip
+    them). The pair-free full witness [3, 5, 9, 6, 10, 12] is pinned
+    in-crate and in the property suite over synthetic pair tables."""
+    result = _call([0, 1, 2, 3], 2)
+    assert result is not None
+    assert result.kept == [5, 9, 6, 10]
+
+
+@pytest.mark.usefixtures("_on")
 @pytest.mark.parametrize("k", [1, 2, 3])
-def test_production_vocabulary_full_list_equality(monkeypatch: pytest.MonkeyPatch, k: int) -> None:
-    """The 60-bit production vocabulary with the REAL conflict pairs: exact
-    list equality (SET ∧ ORDER) + the counter laws, k = 1..3."""
-    _arm(monkeypatch)
-    result = enum_survivors_via_kernel(_VOCAB_BITS, k)
-    oracle = _oracle(_VOCAB_BITS, k)
-    assert result is not None
-    assert result.survivors == oracle
-    assert result.enumerated == count_combos(k, 60)
-    assert result.conflict_pruned == result.enumerated - len(oracle)
-    if k >= 2:
-        assert result.conflict_pruned > 0  # anti-vacuous: the prune genuinely fires
+def test_production_vocabulary_full_list_equality(k: int) -> None:
+    """The REAL 60-bit vocabulary + REAL conflict pairs: full list equality
+    (SET ∧ ORDER) at production shape, both min-hits arms."""
+    bits = list(range(60))
+    for min_hits in (0, 2):
+        rust_enum.reset_enum_self_check_for_tests()
+        result = _call(bits, k, min_hits=min_hits)
+        assert result is not None
+        assert result.kept == _oracle_kept(bits, k, min_hits)
 
 
-def test_u128_bits_beyond_64(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
-    result = enum_survivors_via_kernel([63, 64, 127], 2)
-    assert result is not None
-    assert result.survivors == _oracle([63, 64, 127], 2)
-    assert result.survivors[-1] == (1 << 64) | (1 << 127)
-
-
-def test_bool_bits_parity_with_the_generator(monkeypatch: pytest.MonkeyPatch) -> None:
-    _arm(monkeypatch)
-    result = enum_survivors_via_kernel([True, 3], 1)
-    assert result is not None
-    assert result.survivors == _oracle([True, 3], 1) == [2, 8]
-
-
-def test_exhaustive_small_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every n <= 7, 0 <= k <= n over the REAL conflict pairs (mirrors the
-    ``test_engine_combo_mask.py`` exhaustive-matrix idiom)."""
-    _arm(monkeypatch)
-    for n in range(8):
-        bits = list(range(n))
-        for k in range(n + 1):
-            reset_self_check_for_tests()
-            result = enum_survivors_via_kernel(bits, k)
-            assert result is not None, f"n={n} k={k}"
-            assert result.survivors == _oracle(bits, k), f"n={n} k={k}"
-            assert result.enumerated == count_combos(k, n), f"n={n} k={k}"
-
-
-# ── constants + pairs-as-data pins (mutation hardening) ──────────────────
+# ────── constants + wiring pins ──────
 
 
 class TestMutationHardening:
-    """Pin every behavioural literal so the mutmut loop has zero survivors."""
+    """Literal pins killing constant/operator mutants in the wrapper."""
 
-    def test_env_name(self) -> None:
-        assert SWEEP_RUST_ENUM_ENV == "BRUTEX_SWEEP_RUST_ENUM"
+    def test_env_names(self) -> None:
+        assert rust_enum.SWEEP_RUST_ENUM_ENV == "BRUTEX_SWEEP_RUST_ENUM"
+        assert rust_enum.ENUM_WORK_CELLS_ENV == "BRUTEX_SWEEP_CORE_ENUM_CELLS"
 
     def test_default_is_false(self) -> None:
-        assert SWEEP_RUST_ENUM_DEFAULT is False
+        assert rust_enum.SWEEP_RUST_ENUM_DEFAULT is False
 
-    def test_ceiling_is_2_pow_24(self) -> None:
-        assert ENUM_KERNEL_MAX_MASKS == 1 << 24
-        # The production worst case C(60, 5) fits under the ceiling.
-        assert count_combos(5, 60) == 5_461_512 <= ENUM_KERNEL_MAX_MASKS
+    def test_work_cell_constants(self) -> None:
+        assert rust_enum.DEFAULT_ENUM_WORK_CELLS == 2**28
+        assert rust_enum.ENUM_WORK_CELLS_LOWER_CLAMP == 2**16
+        assert rust_enum.ENUM_WORK_CELLS_UPPER_CLAMP == 2**30
+        assert rust_enum.RANGE_MASKS_FLOOR == 4096
+        assert rust_enum.RANGE_MASKS_CAP == 2**20
 
-    def test_self_check_calls(self) -> None:
-        assert SELF_CHECK_CALLS == 16
-
-    def test_prefix_and_full_check_bounds(self) -> None:
-        assert PREFIX_CHECK_SURVIVORS == 4096
-        assert FULL_CHECK_ENUMERATED == 65_536
+    def test_shadow_constants(self) -> None:
+        assert rust_enum.SWEEP_ENUM_SELF_CHECK_MASKS == 2**16
+        assert rust_enum.SWEEP_ENUM_SELF_CHECK_RANGES_CAP == 256
 
     def test_conflict_pairs_cross_as_sorted_data(self) -> None:
-        """The FFI pair table is EXACTLY ``sorted(CONFLICT_PAIRS)`` — never
-        re-minted, never filtered Python-side (FM-5)."""
-        assert tuple(sorted(CONFLICT_PAIRS)) == _CONFLICT_PAIRS_SORTED
-        assert len(_CONFLICT_PAIRS_SORTED) == len(CONFLICT_PAIRS)
+        assert tuple(sorted(CONFLICT_PAIRS)) == rust_enum._CONFLICT_PAIRS_SORTED
+        assert len(rust_enum._CONFLICT_PAIRS_SORTED) == len(CONFLICT_PAIRS)
 
-    def test_result_dataclass_is_frozen(self) -> None:
-        result = RustEnumResult(survivors=[1], enumerated=1, conflict_pruned=0)
+    def test_result_dataclass_is_frozen_and_derives_evaluated(self) -> None:
+        result = RustEnumResult(kept=[3], enumerated=10, conflict_pruned=4, hits_counted=6)
+        assert result.evaluated == 6
         with pytest.raises(AttributeError):
-            result.enumerated = 2  # type: ignore[misc]
-
-
-# ── workflow wiring pins ─────────────────────────────────────────────────
+            result.enumerated = 0  # type: ignore[misc]
 
 
 class TestWorkflowWiring:
-    """Pin this module into its dedicated per-module coverage + mutation gates.
+    """The CI/mutation wiring must name this module (drift pins)."""
 
-    Deterministic pins (the ``TestMutationWorkflowWiring`` precedent) that
-    fail the unit suite if the module:suite pairing is ever silently dropped
-    from the workflows — an unwired gate must never masquerade as an active
-    one (Golden Rule #10). These pin the WIRING only; the gates' teeth are
-    the workflows' own runs.
-    """
-
-    _CI = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
-    _MUTATION = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+    _ROOT = Path(__file__).resolve().parents[2]
 
     def test_dedicated_100pct_coverage_gate_wired(self) -> None:
-        text = self._CI.read_text(encoding="utf-8")
-        assert "--cov=brutex.engine.rust_enum" in text
-        assert "tests/unit/test_engine_rust_enum.py" in text
+        ci = (self._ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        assert "--cov=brutex.engine.rust_enum" in ci
+        assert "tests/unit/test_engine_rust_enum.py" in ci
 
     def test_paired_in_the_mutmut_loop(self) -> None:
-        text = self._MUTATION.read_text(encoding="utf-8")
-        assert '"brutex/engine/rust_enum.py:tests/unit/test_engine_rust_enum.py:"' in text, (
-            "rust_enum.py is not wired into mutation.yml's per-module mutmut loop"
-        )
+        wf = (self._ROOT / ".github/workflows/mutation.yml").read_text(encoding="utf-8")
+        assert "brutex/engine/rust_enum.py:tests/unit/test_engine_rust_enum.py:" in wf
 
     def test_rust_kernel_in_the_cargo_mutants_scope(self) -> None:
-        toml = Path(__file__).resolve().parents[2] / "rust" / "fno-math" / ".cargo" / "mutants.toml"
-        assert '"src/enum_kernel.rs"' in toml.read_text(encoding="utf-8"), (
-            "enum_kernel.rs is not in the cargo-mutants examine_globs scope"
-        )
+        toml = (self._ROOT / "rust/fno-math/.cargo/mutants.toml").read_text(encoding="utf-8")
+        assert "src/enum_kernel.rs" in toml
