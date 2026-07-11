@@ -21,6 +21,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1727,15 +1728,133 @@ class TestFixtureTradesReader:
         assert [row["entry_ts"] for row in page.rows] == ["t0"]
         assert "trade row 1" in page.detail
 
-    def test_different_rank_is_a_memo_miss(self, tmp_path: Path) -> None:
-        """The memo is SINGLE-ENTRY by design (one artifact hot at a time)."""
+    def test_two_rank_alternation_no_longer_thrashes(self, tmp_path: Path) -> None:
+        """Fix 4b (DEC-MEMORY-FOOTPRINT-HARDENING-001): the bounded 2-entry
+        ``_RevisionMemo`` holds BOTH sides of a two-artifact alternation, so
+        flipping back to rank 1 is a HIT — the superseded single-entry memo
+        re-parsed on EVERY flip (this test previously pinned that thrash as
+        ``parse_count == 3``; the thrash IS the defect fix 4b removes).
+        """
         _trades_file(tmp_path, rank=1, rows=2)
         _trades_file(tmp_path, rank=2, rows=2)
         reader = oc.FixtureTradesReader(tmp_path)
         reader.page("r-x", 1, offset=0, limit=2)
         reader.page("r-x", 2, offset=0, limit=2)
-        reader.page("r-x", 1, offset=0, limit=2)  # single-entry memo: re-parse
+        reader.page("r-x", 1, offset=0, limit=2)  # 2-entry memo: a HIT now
+        assert reader.parse_count == 2
+
+    def test_third_artifact_evicts_lru_first(self, tmp_path: Path) -> None:
+        """Past the 2-entry bound the LEAST-recently-used artifact re-parses."""
+        for rank in (1, 2, 3):
+            _trades_file(tmp_path, rank=rank, rows=2)
+        reader = oc.FixtureTradesReader(tmp_path)
+        reader.page("r-x", 1, offset=0, limit=2)
+        reader.page("r-x", 2, offset=0, limit=2)
+        reader.page("r-x", 3, offset=0, limit=2)  # evicts rank 1 (the LRU)
         assert reader.parse_count == 3
+        reader.page("r-x", 2, offset=0, limit=2)  # still memoised — a hit
+        assert reader.parse_count == 3
+        reader.page("r-x", 1, offset=0, limit=2)  # evicted — re-parses
+        assert reader.parse_count == 4
+
+
+# ── _RevisionMemo (fix 4b, DEC-MEMORY-FOOTPRINT-HARDENING-001) ──────────
+
+
+class TestRevisionMemo:
+    """The ONE consolidated reader memo: bounded LRU + per-key single-flight."""
+
+    def test_capacity_below_one_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="capacity must be >= 1"):
+            oc._RevisionMemo(capacity=0)
+
+    def test_hit_refreshes_lru_recency(self) -> None:
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo(capacity=2)
+        calls: list[str] = []
+
+        def _compute(tag: str) -> Callable[[], str]:
+            def _run() -> str:
+                calls.append(tag)
+                return tag
+
+            return _run
+
+        assert memo.get_or_compute(("a",), _compute("a")) == "a"
+        assert memo.get_or_compute(("b",), _compute("b")) == "b"
+        # Touch "a" so "b" becomes the LRU, then insert "c" → "b" evicts.
+        assert memo.get_or_compute(("a",), _compute("a-again")) == "a"
+        assert memo.get_or_compute(("c",), _compute("c")) == "c"
+        assert memo.get_or_compute(("a",), _compute("a-again")) == "a"  # still a hit
+        assert memo.get_or_compute(("b",), _compute("b2")) == "b2"  # evicted → recompute
+        assert calls == ["a", "b", "c", "b2"]
+
+    def test_concurrent_misses_pay_one_compute(self) -> None:
+        """Per-key single-flight: 8 cold threads on ONE key pay exactly 1 parse."""
+        memo: oc._RevisionMemo[int] = oc._RevisionMemo()
+        gate = threading.Event()
+        calls: list[int] = []
+        results: list[int] = []
+
+        def _compute() -> int:
+            gate.wait(timeout=5.0)
+            time.sleep(0.02)  # widen the window so followers genuinely wait
+            calls.append(1)
+            return 42
+
+        def _worker() -> None:
+            results.append(memo.get_or_compute(("k",), _compute))
+
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        gate.set()
+        for thread in threads:
+            thread.join(timeout=10.0)
+        assert results == [42] * 8
+        assert len(calls) == 1
+
+    def test_raising_compute_caches_nothing_and_releases_the_flight(self) -> None:
+        """A raising compute propagates raw; the NEXT caller recomputes (no wedge)."""
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo()
+        with pytest.raises(RuntimeError, match="boom"):
+            memo.get_or_compute(("k",), _raise_boom)
+        assert memo.get_or_compute(("k",), lambda: "ok") == "ok"
+
+    def test_waiter_takes_ownership_when_the_owner_raises(self) -> None:
+        """A follower parked on a raising owner's flight LOOPS and recomputes."""
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo()
+        owner_entered = threading.Event()
+        release_owner = threading.Event()
+        outcomes: list[str] = []
+
+        def _owner_compute() -> str:
+            owner_entered.set()
+            release_owner.wait(timeout=5.0)
+            raise RuntimeError("owner failed")
+
+        def _owner() -> None:
+            try:
+                memo.get_or_compute(("k",), _owner_compute)
+            except RuntimeError:
+                outcomes.append("owner-raised")
+
+        def _follower() -> None:
+            outcomes.append(memo.get_or_compute(("k",), lambda: "recovered"))
+
+        owner = threading.Thread(target=_owner)
+        owner.start()
+        assert owner_entered.wait(timeout=5.0)
+        follower = threading.Thread(target=_follower)
+        follower.start()
+        time.sleep(0.05)  # let the follower park on the in-flight event
+        release_owner.set()
+        owner.join(timeout=10.0)
+        follower.join(timeout=10.0)
+        assert sorted(outcomes) == ["owner-raised", "recovered"]
+
+
+def _raise_boom() -> str:
+    raise RuntimeError("boom")
 
 
 # ── production trades reader (DEC-ONECLICK-SWEEP-RUNS-REBIND-001) ───────

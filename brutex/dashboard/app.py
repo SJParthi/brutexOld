@@ -1236,10 +1236,22 @@ def _cross_origin_reason(
 _SWEEP_LEADERBOARD_CACHE_FRACTION: Final[float] = 1.0 / 16.0
 _SWEEP_LEADERBOARD_CACHE_FLOOR_BYTES: Final[int] = 1 << 30  # 1 GiB
 #: One-click artifact cache: 1/32 of total RAM (1.5 GiB on the §8 box); floor
-#: 512 MiB — its payloads (manifest/top100/events pages) are smaller but the
-#: instance is shared across six client-typed key families.
+#: 512 MiB — its payloads (manifest/top100/verify + the chain verdict) are
+#: smaller but the instance is shared across five expensive key families.
 _ONECLICK_CACHE_FRACTION: Final[float] = 1.0 / 32.0
 _ONECLICK_CACHE_FLOOR_BYTES: Final[int] = 512 * 1024 * 1024  # 512 MiB
+#: One-click EVENTS-page cache capacity (fix 4a,
+#: DEC-MEMORY-FOOTPRINT-HARDENING-001): the events route mints one key per
+#: json([rid, offset, limit, kind, q, token, fx]) — ALL client-typed — so on
+#: the pre-partition SHARED instance 256 distinct hostile/varied event-page
+#: polls LRU-evicted the EXPENSIVE families (runs/manifest/top100/verify +
+#: the `oc_chain|` verdict, which only re-runs on an operator click; the
+#: OutageGate got its own 512 cap for exactly this hazard — the payload
+#: cache was never partitioned). The events family now rides its OWN
+#: capacity-capped instance: churn stays bounded to the cheap O(page) tail
+#: reads and can never evict an expensive payload. 128 entries × the ≤1 MiB
+#: read window bounds the family's resident bytes without a watermark.
+_ONECLICK_EVENTS_CACHE_CAPACITY: Final[int] = 128
 
 
 def build_app(
@@ -1982,6 +1994,13 @@ def build_app(
             floor_bytes=_ONECLICK_CACHE_FLOOR_BYTES,
         )
     )
+    # The events-page family's OWN partition (fix 4a,
+    # DEC-MEMORY-FOOTPRINT-HARDENING-001): its keys fold CLIENT-TYPED page
+    # params, so keeping it on the shared instance let a varied/hostile
+    # events poller LRU-evict the expensive runs/manifest/top100/verify/chain
+    # payloads. Same key strings, same chokepoint, same OutageGate — only the
+    # PayloadCache instance differs (see _ONECLICK_EVENTS_CACHE_CAPACITY).
+    _oneclick_events_cache = MoversSnapshotCache(capacity=_ONECLICK_EVENTS_CACHE_CAPACITY)
     _oneclick_outages = oneclick_artifacts.OutageGate()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
@@ -7481,7 +7500,7 @@ def build_app(
                     ensure_ascii=False,
                 )
             return oneclick_artifacts.serve_revision_cached(
-                _oneclick_cache,
+                _oneclick_events_cache,
                 _oneclick_outages,
                 coordinate=coordinate,
                 probe=probe,
