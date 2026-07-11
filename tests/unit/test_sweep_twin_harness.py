@@ -75,8 +75,12 @@ class TestArmEnv:
 
     def test_restores_even_when_the_body_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BRUTEX_TWIN_TEST_VAR", "prior")
-        with pytest.raises(RuntimeError, match="boom"), arm_env({"BRUTEX_TWIN_TEST_VAR": "x"}):
+
+        def _boom() -> None:
             raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"), arm_env({"BRUTEX_TWIN_TEST_VAR": "x"}):
+            _boom()
         assert os.environ["BRUTEX_TWIN_TEST_VAR"] == "prior"
 
 
