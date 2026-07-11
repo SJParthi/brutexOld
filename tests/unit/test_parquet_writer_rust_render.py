@@ -208,7 +208,7 @@ class TestSchemaTokenWiring:
         monkeypatch.setattr(lrr, "render_parquet_bytes", _capture)
         monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
         spot = _bars()
-        greeks = [
+        greeks: list[CandleBar] = [
             FnoGreeksBar(
                 timestamp=b.timestamp,
                 open=b.open,
