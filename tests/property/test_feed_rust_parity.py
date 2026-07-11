@@ -34,7 +34,6 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import pyarrow as pa
 import pytest
 from brutex.data.bad_tick import BAD_TICK_ENABLED_ENV
 from brutex.feed.replay import arrow_table_to_bars
@@ -48,6 +47,13 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
+# Module-level guards (the property job installs `.[dev]` ONLY — no [data]
+# extra, so pyarrow must importorskip exactly like the sibling polars guards;
+# the dual-arm gate's REAL CI execution home is the unit-test job, whose
+# [dev,data,ui] env + wheel install runs tests/property in the coverage pass).
+pa = pytest.importorskip(
+    "pyarrow", reason="pyarrow not installed — the parity tables need the [data] extra"
+)
 pytest.importorskip(
     "brutex_feed",
     reason="brutex_feed wheel not installed — the dual-arm parity gate needs the kernel",
@@ -129,7 +135,7 @@ _hostile_row = st.tuples(
 _hostile_rows = st.lists(_hostile_row, min_size=1, max_size=6)
 
 
-def _table(rows: list[tuple[Any, ...]]) -> pa.Table:
+def _table(rows: list[tuple[Any, ...]]) -> Any:
     return pa.table(
         {
             "timestamp": pa.array([r[0] for r in rows], type=pa.timestamp("us", tz="UTC")),
@@ -162,7 +168,7 @@ def _env(name: str, value: str | None) -> Generator[None]:
 
 
 def _observe(
-    table: pa.Table, flag: str | None, screen: str | None
+    table: Any, flag: str | None, screen: str | None
 ) -> tuple[list[Any] | None, Exception | None, list[Any]]:
     """One arm: bars-or-exception + the non-fallback log record sequence."""
     reset_for_tests()
@@ -179,7 +185,7 @@ def _observe(
     return bars, exc, filtered
 
 
-def _assert_arms_identical(table: pa.Table, *, screen: str | None) -> None:
+def _assert_arms_identical(table: Any, *, screen: str | None) -> None:
     off_bars, off_exc, off_logs = _observe(table, None, screen)
     on_bars, on_exc, on_logs = _observe(table, "1", screen)
     if off_exc is None:

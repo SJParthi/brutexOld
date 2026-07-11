@@ -39,9 +39,13 @@ fuzz_target!(|data: &[u8]| {
     // Raw-f64 ratio: NaN/inf/negative ratios must all be total too.
     let max_ratio = f64::from_bits(read_u64(data, 1));
 
-    // Each bar consumes 40 bytes (ts + 4 prices); cap the stream so a run
-    // stays fast.
-    let n_bars = ((data.len() - 9) / 40).min(64);
+    // Each bar consumes 40 bytes (ts + 4 prices) after the 9-byte header;
+    // cap the stream so a run stays fast. saturating_sub: a 2..9-byte input
+    // must yield ZERO bars, not a usize underflow — the exact 2-byte
+    // `\n\n` crash CI's first smoke run caught (an overflow-checks panic in
+    // the HARNESS arithmetic, not the kernel; regression seed committed at
+    // fuzz/seeds/fuzz_scan/crash-2-byte-header-underflow).
+    let n_bars = (data.len().saturating_sub(9) / 40).min(64);
     let mut ts: Vec<i64> = Vec::with_capacity(n_bars);
     let mut opens: Vec<f64> = Vec::with_capacity(n_bars);
     let mut highs: Vec<f64> = Vec::with_capacity(n_bars);
