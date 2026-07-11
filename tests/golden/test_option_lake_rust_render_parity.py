@@ -4,7 +4,7 @@ DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Regenerates the PR-2
 probe's corpus (7 cases, FEASIBLE-BY-LOCKSTEP 7/7) EXTENDED to 12 cases with
 the five statistics-surface shapes the probe never drove (all-null nullable
 columns · constant single-side Utf8 · the exact 122,880/122,881 RG
-boundaries · the ≥256-char untruncated-binary-stats sentinel · NaN/+inf
+boundaries · the ≥256-char binary-stats truncation-default sentinel · NaN/+inf
 Float64 stats), every write-path frame produced through the REAL
 ``OptionParquetWriter.write()`` / ``heal_partition()`` entries on temp lakes
 (provenance law — the ONLY sanctioned hand-builds are the heal suites'
@@ -407,7 +407,7 @@ def _build_corpus() -> dict[str, _Case]:
             "realistic ~16.5k-row month file via overlap merge (the production shape)",
         )
 
-        # ── o11: the ≥256-char untruncated-binary-stats sentinel ──
+        # ── o11: the ≥256-char binary-stats truncation-default sentinel ──
         lake11 = _mkdtemp("pr2-o11-")
         captured.clear()
         OptionParquetWriter(lake_root=lake11).write(

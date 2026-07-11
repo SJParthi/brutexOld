@@ -1211,6 +1211,145 @@ class TestThreadFuzz:
         total = n_threads * per_thread
         assert lrr.BURN_IN_SAMPLES <= len(oracle_calls) <= total  # lost decrements only ADD
 
+    def test_two_profiles_concurrently_never_ship_a_wrong_byte(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR-2 concurrency surface (a): threads split across BOTH profiles
+        share the ONE disable latch while interleaving the per-profile
+        ``_BURN_IN_REMAINING`` decrements — every returned byte equals its
+        frame's oracle, no autorevert, and EACH profile spends at least its
+        own full burn-in budget of compares (the documented RMW race can
+        only LOSE decrements — extra compares, never fewer)."""
+        import threading
+
+        def _render(ipc: bytes) -> bytes:
+            return b"rendered:" + ipc
+
+        _install_crate(monkeypatch, _fake_crate(render=_render))
+        oracle_calls: dict[str, list[int]] = {
+            lrr.PROFILE_BARS: [],
+            lrr.PROFILE_OPTIONS_DEFAULTS: [],
+        }
+        results: dict[int, list[bytes]] = {}
+        errors: list[BaseException] = []
+        n_threads, per_thread = 8, 10
+
+        def _const(payload: bytes) -> Callable[[], bytes]:
+            return lambda: payload
+
+        def _oracle_for(payload: bytes, profile: str) -> Callable[[], bytes]:
+            def _oracle() -> bytes:
+                oracle_calls[profile].append(1)
+                return b"rendered:" + payload
+
+            return _oracle
+
+        def _capture(args: threading.ExceptHookArgs) -> None:
+            exc = args.exc_value if args.exc_value is not None else args.exc_type()
+            errors.append(exc)
+
+        monkeypatch.setattr(threading, "excepthook", _capture)
+
+        def _worker(idx: int) -> None:
+            profile = lrr.PROFILE_BARS if idx % 2 == 0 else lrr.PROFILE_OPTIONS_DEFAULTS
+            out: list[bytes] = []
+            for j in range(per_thread):
+                payload = f"frame-{idx}-{j}".encode()
+                out.append(
+                    lrr.render_parquet_bytes(
+                        ipc_bytes_factory=_const(payload),
+                        python_render=_oracle_for(payload, profile),
+                        polars_version="1.42.1",
+                        schema_token="fuzz-shape",
+                        profile=profile,
+                    )
+                )
+            results[idx] = out
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert not lrr.rust_render_disabled()  # neither profile tripped the SHARED latch
+        for idx in range(n_threads):
+            expected = [f"rendered:frame-{idx}-{j}".encode() for j in range(per_thread)]
+            assert results[idx] == expected  # every stored byte == that frame's oracle
+        per_profile_total = (n_threads // 2) * per_thread
+        for profile, calls in oracle_calls.items():
+            # Each profile's OWN budget of compares ran despite the shared
+            # latch/interleaved decrements; lost decrements only ADD.
+            assert lrr.BURN_IN_SAMPLES <= len(calls) <= per_profile_total, profile
+
+    def test_concurrent_novel_shapes_past_the_cap_never_ship_a_wrong_byte(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR-2 concurrency surface (b): concurrent NOVEL shapes driven far
+        past ``_BURN_IN_SHAPES_CAP`` — the check-then-add race may overshoot
+        the seen-set by at most the racing-thread count (memory-only,
+        bounded), every returned byte equals its oracle, every render
+        COMPARES (novel shape ⇒ the fail-safe direction: more oracle
+        compares, never fewer), and no autorevert."""
+        import threading
+
+        def _render(ipc: bytes) -> bytes:
+            return b"rendered:" + ipc
+
+        _install_crate(monkeypatch, _fake_crate(render=_render))
+        oracle_calls: list[int] = []
+        results: dict[int, list[bytes]] = {}
+        errors: list[BaseException] = []
+        n_threads, per_thread = 12, 30  # 360 novel shapes >> the 64-entry cap
+
+        def _const(payload: bytes) -> Callable[[], bytes]:
+            return lambda: payload
+
+        def _oracle_for(payload: bytes) -> Callable[[], bytes]:
+            def _oracle() -> bytes:
+                oracle_calls.append(1)
+                return b"rendered:" + payload
+
+            return _oracle
+
+        def _capture(args: threading.ExceptHookArgs) -> None:
+            exc = args.exc_value if args.exc_value is not None else args.exc_type()
+            errors.append(exc)
+
+        monkeypatch.setattr(threading, "excepthook", _capture)
+
+        def _worker(idx: int) -> None:
+            out: list[bytes] = []
+            for j in range(per_thread):
+                payload = f"frame-{idx}-{j}".encode()
+                out.append(
+                    lrr.render_parquet_bytes(
+                        ipc_bytes_factory=_const(payload),
+                        python_render=_oracle_for(payload),
+                        polars_version="1.42.1",
+                        schema_token=f"novel-shape-{idx}-{j}",
+                        profile=lrr.PROFILE_OPTIONS_DEFAULTS,
+                    )
+                )
+            results[idx] = out
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert not lrr.rust_render_disabled()  # 360 clean compares — no autorevert
+        for idx in range(n_threads):
+            expected = [f"rendered:frame-{idx}-{j}".encode() for j in range(per_thread)]
+            assert results[idx] == expected  # every stored byte == that frame's oracle
+        # Every render carried a NOVEL shape, so every render compared —
+        # past the cap too (compare-ALWAYS, the fail-safe direction).
+        assert len(oracle_calls) == n_threads * per_thread
+        # The unlocked check-then-add can overshoot the cap by at most one
+        # entry per racing thread (memory-only, bounded — module docstring).
+        assert len(lrr._BURN_IN_SHAPES_SEEN) <= lrr._BURN_IN_SHAPES_CAP + n_threads
+
 
 # ---------------------------------------------------------------------------
 # the COMMON IPC handoff (hoisted here in PR-2 — §11 COMMON)

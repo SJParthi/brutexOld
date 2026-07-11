@@ -215,9 +215,14 @@ pub const DEFAULTS_ROW_GROUP_SPLIT: usize = 122_880;
 /// `compression="zstd", compression_level=None` → `Zstd(None)` — libzstd's
 /// own default level, 3 at the pinned libzstd 1.5.7, framed DIFFERENTLY
 /// from an explicit level 3, hence a distinct byte surface).
-/// `binary_statistics_truncate_length` stays at its `empty()` default
-/// (None — untruncated); `row_group_size = None` routes the split to the
-/// streaming sink's [`DEFAULTS_ROW_GROUP_SPLIT`] default.
+/// `binary_statistics_truncate_length` stays at its `empty()` default —
+/// None at the OPTION layer only: the pinned rev resolves it to the
+/// INTERNAL 64-byte truncate-with-max-last-byte-increment policy, NOT
+/// literally untruncated (the empirically-corrected reading — golden
+/// pin (d) in tests/golden/test_option_lake_rust_render_parity.py + the
+/// lockstep runbook's statistics row; both engines share the internal
+/// policy, so parity is unaffected). `row_group_size = None` routes the
+/// split to the streaming sink's [`DEFAULTS_ROW_GROUP_SPLIT`] default.
 ///
 /// HONEST SNAPSHOT DISCLOSURE: this constructor hardcodes what the WHEEL
 /// resolves at the pinned rev — the crate cannot read the wheel's Python.
@@ -397,7 +402,9 @@ fn render_parquet_from_ipc(py: Python<'_>, ipc_bytes: &[u8]) -> PyResult<Py<PyBy
 
 /// Render uncompressed Arrow IPC bytes to parquet bytes with the wheel's
 /// ALL-DEFAULTS `df.write_parquet(path)` options (Zstd(None); statistics
-/// min/max/null_count ON, distinct OFF, untruncated; `row_group_size=None`
+/// min/max/null_count ON, distinct OFF, binary stats at the internal
+/// 64-byte truncation default — see [`defaults_writer_options`], never
+/// literally untruncated; `row_group_size=None`
 /// → the streaming sink's 122,880-row default split), byte-identical to the
 /// pinned Python wheel's zero-kwarg render — the expired-options writer's
 /// profile (PR-2).

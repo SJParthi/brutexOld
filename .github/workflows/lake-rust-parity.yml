@@ -73,6 +73,11 @@ on:
       - "tests/golden/test_lake_rust_render_parity.py"
       - "tests/golden/test_option_lake_rust_render_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
+      # DELIBERATELY EXCLUDED (review-round): brutex/data/lake_heal.py /
+      # lake_invariants.py + their suites. The flag-ON heal twin step is
+      # render-SEAM-scoped — any render-seam edit above re-runs it; pure
+      # heal edits ride main ci.yml's crate-free heal gates, and the future
+      # default-ON flip DEC must cite a fresh lane run.
   pull_request:
     paths:
       - "rust/brutex-lake/**"
@@ -86,6 +91,8 @@ on:
       - "tests/golden/test_lake_rust_render_parity.py"
       - "tests/golden/test_option_lake_rust_render_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
+      # DELIBERATELY EXCLUDED: lake_heal.py / lake_invariants.py + suites —
+      # same rationale as the push block above (render-seam-scoped twin).
   workflow_dispatch: {}
 
 permissions:
@@ -219,10 +226,12 @@ jobs:
         # edit exporting one would let the options corpus "pass" on a
         # NON-production split. Assert-unset, never silently-unset — the
         # in-suite RG-split pins are the belt inside the tests themselves.
+        # SET-ness test (review-round: `${!v+x}` — an exported-but-EMPTY
+        # var fails loudly too, not only a non-empty value).
         run: |
           fail=0
           for v in POLARS_IDEAL_SINK_MORSEL_SIZE_ROWS POLARS_IDEAL_SINK_MORSEL_SIZE_BYTES; do
-            if [ -n "$(printenv "$v" || true)" ]; then
+            if [ -n "${!v+x}" ]; then
               echo "::error title=morsel env leak::$v is set in the runner env — the defaults corpus would prove parity on a non-production row-group split" >&2
               fail=1
             fi

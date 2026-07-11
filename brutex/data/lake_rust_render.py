@@ -193,9 +193,13 @@ the guarded render block.
   compare) and the crate's SEPARATE rayon thread pool beside the wheel's.
 * The latches + warn-once memo are the same *documented exception* to the
   no-global-mutable-state rule as ``rust_metrics``'s: plain unlocked writes
-  — a racing writer thread can at worst run a few extra burn-in compares or
-  emit a duplicate warn, never a wrong byte (the compare ships oracle bytes
-  on ANY mismatch; thread-fuzz-pinned in the unit suite).
+  — a racing writer thread can at worst run a few extra burn-in compares,
+  transiently overshoot the shape-cap by ≤ the racing-thread count
+  (memory-only), or emit a duplicate warn, never a wrong byte (the compare
+  ships oracle bytes on ANY mismatch; thread-fuzz-pinned in the unit suite
+  across all three concurrency surfaces — the single-profile latch, two
+  profiles sharing the latch under interleaved per-profile budget
+  decrements, and concurrent NOVEL shapes past the seen-set cap).
 * The burn-in doubles the render cost for its first 16 engaged renders per
   process (bounded, amortised-nil) — and since the caller holds the
   partition's cross-process flock around the render, those first renders
