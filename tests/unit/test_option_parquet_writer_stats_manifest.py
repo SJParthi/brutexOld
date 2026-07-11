@@ -153,6 +153,52 @@ class TestHookFires:
         assert (row.mtime_ns, row.size) == (stat.st_mtime_ns, stat.st_size)
         assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_OPTIONS, key=_SERIES_KEY)
 
+    def test_rust_render_flag_on_token_matches_durable_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R11 (DEC-RUST-DATALAKE-IO-ROADMAP-001 PR-2): with the Rust render
+        seam ARMED, the recorded stat token still equals the POST-replace
+        durable file's ``mtime_ns:size`` — the render → ``os.replace`` →
+        ``os.stat`` ordering is unchanged by the seam (the hook fires under
+        the SAME held locks, stating the file the routed bytes landed as).
+        Crate-free: a faithful fake ``brutex_lake`` (the wheel's own
+        defaults render) engages the seam for real."""
+        import io
+        import sys
+        import types
+
+        import polars as pl
+        from brutex.data import lake_rust_render as lrr
+
+        def _faithful(ipc_bytes: bytes) -> bytes:
+            df = pl.read_ipc(io.BytesIO(ipc_bytes))
+            bio = io.BytesIO()
+            df.write_parquet(bio)
+            return bio.getvalue()
+
+        fake = types.ModuleType("brutex_lake")
+        fake.render_parquet_from_ipc = _faithful  # type: ignore[attr-defined]
+        fake.render_parquet_defaults_from_ipc = _faithful  # type: ignore[attr-defined]
+        fake.pinned_polars_version = lambda: pl.__version__  # type: ignore[attr-defined]
+        fake.linked_zstd_version = lambda: "fake"  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "brutex_lake", fake)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
+        lrr.reset_lake_rust_render_for_tests()
+        try:
+            assert _write(tmp_path, [_option_bar(side="CE"), _option_bar(side="PE")]) == 2
+            _seed_shard(tmp_path, rows=2)
+            assert _write(tmp_path, [_option_bar(side="CE", minute=5)]) == 1
+            row = _shard_row(tmp_path)
+            assert row.rows == 3
+            stat = os.stat(_dest(tmp_path))
+            assert (row.mtime_ns, row.size) == (stat.st_mtime_ns, stat.st_size)
+            assert not lrr.rust_render_disabled()  # the seam genuinely engaged
+            assert lsm.load_valid_dataset_stats(
+                tmp_path, kind=lsm.KIND_OPTIONS, key=_SERIES_KEY
+            )
+        finally:
+            lrr.reset_lake_rust_render_for_tests()
+
 
 class TestHookDoesNotFire:
     def test_pure_repull_added_zero_touches_nothing(self, tmp_path: Path) -> None:

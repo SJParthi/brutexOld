@@ -1,14 +1,28 @@
-//! # brutex-lake — the data-lake Rust render seam (ADR-0019, PR-1)
+//! # brutex-lake — the data-lake Rust render seam (roadmap PR-1 + PR-2)
 //!
-//! DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Re-hosts the ONE
-//! bars-writer parquet render (`brutex/data/parquet_writer.py::_render_bytes`
-//! — frame → parquet bytes; zstd level 3, `row_group_size = 100_000`,
-//! statistics OFF) on a Rust build of polars REV-pinned at the commit the
-//! installed Python wheel's release tag (`py-1.42.1`) pointed at — git tags
-//! are movable, so the manifest pins the commit — so the rendered bytes are
-//! BIT-IDENTICAL to the wheel's output — the FEASIBLE-BY-LOCKSTEP design the
-//! 2026-07-11 spike proved on the full 5-case corpus (sha256 AND raw `cmp`
-//! equal, debug and release, thread-count invariant).
+//! DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726; the datalake Rust
+//! conversion roadmap ADR, `docs/adr/0019-datalake-rust-conversion-roadmap.md`).
+//! Re-hosts BruteX's data-lake parquet renders on a Rust build of polars
+//! REV-pinned at the commit the installed Python wheel's release tag
+//! (`py-1.42.1`) pointed at — git tags are movable, so the manifest pins the
+//! commit — so the rendered bytes are BIT-IDENTICAL to the wheel's output —
+//! the FEASIBLE-BY-LOCKSTEP design the 2026-07-11 spike proved on the full
+//! 5-case bars corpus (sha256 AND raw `cmp` equal, debug and release,
+//! thread-count invariant) and the PR-2 defaults probe re-proved on the
+//! 7-case options corpus (statistics pages + Zstd(None) framing + the
+//! 122,880-row streaming split included).
+//!
+//! TWO render profiles, one shared core ([`render_parquet_with_options_impl`]):
+//!
+//! * **bars** ([`render_parquet_from_ipc`], PR-1) — the spot/Greeks bars
+//!   writer's pinned options: zstd level 3, `row_group_size = 100_000`,
+//!   statistics OFF (`brutex/data/parquet_writer.py::_render_bytes`).
+//! * **options defaults** ([`render_parquet_defaults_from_ipc`], PR-2) — the
+//!   expired-options writer's ALL-DEFAULTS `df.write_parquet(path)` shape
+//!   (`brutex/data/option_parquet_writer.py::_atomic_write_parquet`):
+//!   `Zstd(None)`, statistics min/max/null_count ON + distinct OFF,
+//!   `row_group_size = None` → the streaming sink's 122,880-row
+//!   `TakeableRowsProvider` default split ([`defaults_writer_options`]).
 //!
 //! ## The mirrored call chain (load-bearing — do not "simplify")
 //!
@@ -180,6 +194,53 @@ fn writer_options() -> PolarsResult<ParquetWriteOptions> {
     })
 }
 
+/// The row-group size the streaming sink's `TakeableRowsProvider` defaults
+/// to under `row_group_size = None` (the options-defaults profile) — a CODE
+/// default of the pinned polars rev
+/// (`polars-stream/src/nodes/io_sinks/writers/parquet/mod.rs:53-70` falling
+/// back to `ideal_sink_morsel_size_env()`, `interface.rs:68-95` @ the rev).
+/// DETERMINISM INPUT (PR-2 probe §2): `POLARS_IDEAL_SINK_MORSEL_SIZE_ROWS` /
+/// `..._BYTES` override it at runtime on BOTH engines identically (same env,
+/// same code — parity holds per-identical-env); production never sets them,
+/// and the parity lane assert-unsets them. Pinned here as data for the
+/// `defaults_rg_split_at_122880` cargo test.
+pub const DEFAULTS_ROW_GROUP_SPLIT: usize = 122_880;
+
+/// Defaults-profile writer options — the wheel's zero-kwarg
+/// `DataFrame.write_parquet(path)` binding at the pinned rev, VERBATIM
+/// (`polars-python/src/lazyframe/general.rs:677-724` maps the Python-layer
+/// defaults; `conversion/mod.rs:545-570` builds the statistics flags from
+/// `sink_parquet`'s `statistics=True` dict `{min: True, max: True,
+/// distinct_count: False, null_count: True}`; `conversion/mod.rs:1616` maps
+/// `compression="zstd", compression_level=None` → `Zstd(None)` — libzstd's
+/// own default level, 3 at the pinned libzstd 1.5.7, framed DIFFERENTLY
+/// from an explicit level 3, hence a distinct byte surface).
+/// `binary_statistics_truncate_length` stays at its `empty()` default
+/// (None — untruncated); `row_group_size = None` routes the split to the
+/// streaming sink's [`DEFAULTS_ROW_GROUP_SPLIT`] default.
+///
+/// HONEST SNAPSHOT DISCLOSURE: this constructor hardcodes what the WHEEL
+/// resolves at the pinned rev — the crate cannot read the wheel's Python.
+/// At every version bump the lockstep ritual re-derives it by hand
+/// (docs/runbooks/lake-rust-render-lockstep.md §2) and the options parity
+/// corpus is the mechanical drift detector.
+fn defaults_writer_options() -> ParquetWriteOptions {
+    let mut statistics = StatisticsOptions::empty();
+    statistics.min_value = true;
+    statistics.max_value = true;
+    statistics.distinct_count = false;
+    statistics.null_count = true;
+    ParquetWriteOptions {
+        compression: ParquetCompression::Zstd(None),
+        statistics,
+        row_group_size: None,
+        data_page_size: None,
+        key_value_metadata: None,
+        arrow_schema: None,
+        compat_level: None,
+    }
+}
+
 /// In-memory sink writer — the Rust-side stand-in for the wheel's Python
 /// `BytesIO` Dyn writer. Appends every write to a shared `Vec<u8>`;
 /// `close`/`sync_*` are no-ops (the default `UnifiedSinkArgs` uses
@@ -214,17 +275,28 @@ impl WriteableTrait for SharedVecWriter {
     }
 }
 
-/// Pure-Rust render core: uncompressed Arrow IPC bytes → parquet bytes,
-/// mirroring the wheel's `write_parquet(use_pyarrow=False)` call chain
-/// verbatim (module docs). Exercised directly by `cargo test`; the
-/// `#[pyfunction]` wrapper only adds the panic boundary + PyErr mapping.
-pub fn render_parquet_from_ipc_impl(ipc_bytes: &[u8]) -> PolarsResult<Vec<u8>> {
+/// ONE shared parameterized render core: uncompressed Arrow IPC bytes →
+/// parquet bytes via the streaming-engine sink chain the wheel routes BOTH
+/// profiles through (module docs) — IPC read → `rechunk_mut()` →
+/// `lazy().sink(Dyn, FileWriteFormat::Parquet(opts),
+/// UnifiedSinkArgs::default())` → eager flags → `Engine::Streaming`. The two
+/// profile entry points ([`render_parquet_from_ipc_impl`] /
+/// [`render_parquet_defaults_from_ipc_impl`]) differ ONLY in the
+/// `ParquetWriteOptions` they pass — the load-bearing sink/optflags/engine
+/// chain exists once (the PR-2 refactor; the UNMODIFIED pre-refactor bars
+/// tests are its frozen-behavior gate).
+pub fn render_parquet_with_options_impl(
+    ipc_bytes: &[u8],
+    opts: ParquetWriteOptions,
+) -> PolarsResult<Vec<u8>> {
     if ipc_bytes.is_empty() {
         return Err(polars_err!(ComputeError: "empty IPC payload — nothing to render"));
     }
     let mut df = IpcReader::new(std::io::Cursor::new(ipc_bytes)).finish()?;
     // The Python writer builds the DataFrame from per-column lists → a
-    // single chunk per column. Match that memory layout after the IPC read.
+    // single chunk per column (the option writer's concat/unique/sort output
+    // is likewise single-chunk, probe-measured). Match that memory layout
+    // after the IPC read.
     df.rechunk_mut();
 
     let sink_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -237,7 +309,7 @@ pub fn render_parquet_from_ipc_impl(ipc_bytes: &[u8]) -> PolarsResult<Vec<u8>> {
         .lazy()
         .sink(
             SinkDestination::File { target },
-            FileWriteFormat::Parquet(Arc::new(writer_options()?)),
+            FileWriteFormat::Parquet(Arc::new(opts)),
             UnifiedSinkArgs::default(),
         )?
         .with_optimizations(eager_opt_flags());
@@ -249,31 +321,43 @@ pub fn render_parquet_from_ipc_impl(ipc_bytes: &[u8]) -> PolarsResult<Vec<u8>> {
     Ok(std::mem::take(&mut *locked))
 }
 
+/// Bars-profile render (PR-1, byte-frozen): zstd level 3, row groups of
+/// 100 000, statistics OFF — a 1-line wrapper over the shared core passing
+/// [`writer_options`]. Exercised directly by `cargo test`; the
+/// `#[pyfunction]` wrapper only adds the panic boundary + PyErr mapping.
+pub fn render_parquet_from_ipc_impl(ipc_bytes: &[u8]) -> PolarsResult<Vec<u8>> {
+    render_parquet_with_options_impl(ipc_bytes, writer_options()?)
+}
+
+/// Options-defaults-profile render (PR-2): the wheel's zero-kwarg
+/// `df.write_parquet(path)` byte shape — a 1-line wrapper over the shared
+/// core passing [`defaults_writer_options`].
+pub fn render_parquet_defaults_from_ipc_impl(ipc_bytes: &[u8]) -> PolarsResult<Vec<u8>> {
+    render_parquet_with_options_impl(ipc_bytes, defaults_writer_options())
+}
+
 /// Decode the runtime libzstd version number (e.g. `10507`) to `"1.5.7"`.
 fn libzstd_version_string() -> String {
     let v = zstd::zstd_safe::version_number();
     format!("{}.{}.{}", v / 10_000, (v / 100) % 100, v % 100)
 }
 
-/// Render uncompressed Arrow IPC bytes to parquet bytes with the BruteX
-/// bars-writer options (zstd level 3, row groups of 100 000, statistics
-/// off), byte-identical to the pinned Python wheel's
-/// `DataFrame.write_parquet(use_pyarrow=False)`.
-///
-/// Raises `ValueError` on an empty/undecodable payload or a polars render
-/// error, `RuntimeError` if the render — or the result construction —
-/// panics (both caught at this boundary; a panic never crosses the FFI).
-/// The render itself runs WITHOUT the GIL (`Python::detach` — the wheel's
-/// own `write_parquet` releases it too, so an engaged render never
-/// serializes sibling writer threads; sound: the input is an immutable
-/// `bytes` buffer kept alive by the call arguments). `PyBytes::new` runs
-/// back UNDER the GIL inside its own panic guard (review-round fold: a
-/// result-buffer allocation panic previously escaped as
-/// `pyo3_runtime.PanicException`).
-#[pyfunction]
-fn render_parquet_from_ipc(py: Python<'_>, ipc_bytes: &[u8]) -> PyResult<Py<PyBytes>> {
-    let rendered =
-        py.detach(|| std::panic::catch_unwind(|| render_parquet_from_ipc_impl(ipc_bytes)));
+/// The ONE FFI boundary shell shared by both render pyfunctions (crate-side
+/// COMMON — the discipline exists once): runs *render* WITHOUT the GIL
+/// (`Python::detach` — the wheel's own `write_parquet` releases it too, so
+/// an engaged render never serializes sibling writer threads; sound: the
+/// input is an immutable `bytes` buffer kept alive by the call arguments)
+/// under `std::panic::catch_unwind`, maps a polars error to `ValueError`
+/// and a panic to `RuntimeError` (a panic never crosses the FFI), then
+/// constructs the `PyBytes` result back UNDER the GIL inside its OWN panic
+/// guard (review-round fold: a result-buffer allocation panic previously
+/// escaped as `pyo3_runtime.PanicException`).
+fn render_at_ffi_boundary(
+    py: Python<'_>,
+    ipc_bytes: &[u8],
+    render: fn(&[u8]) -> PolarsResult<Vec<u8>>,
+) -> PyResult<Py<PyBytes>> {
+    let rendered = py.detach(|| std::panic::catch_unwind(|| render(ipc_bytes)));
     let bytes = match rendered {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(err)) => {
@@ -295,6 +379,34 @@ fn render_parquet_from_ipc(py: Python<'_>, ipc_bytes: &[u8]) -> PyResult<Py<PyBy
             "brutex-lake parquet result construction panicked (caught at the FFI boundary)",
         )
     })
+}
+
+/// Render uncompressed Arrow IPC bytes to parquet bytes with the BruteX
+/// bars-writer options (zstd level 3, row groups of 100 000, statistics
+/// off), byte-identical to the pinned Python wheel's
+/// `DataFrame.write_parquet(use_pyarrow=False)`.
+///
+/// Raises `ValueError` on an empty/undecodable payload or a polars render
+/// error, `RuntimeError` if the render — or the result construction —
+/// panics (both caught at the shared FFI boundary shell,
+/// [`render_at_ffi_boundary`]).
+#[pyfunction]
+fn render_parquet_from_ipc(py: Python<'_>, ipc_bytes: &[u8]) -> PyResult<Py<PyBytes>> {
+    render_at_ffi_boundary(py, ipc_bytes, render_parquet_from_ipc_impl)
+}
+
+/// Render uncompressed Arrow IPC bytes to parquet bytes with the wheel's
+/// ALL-DEFAULTS `df.write_parquet(path)` options (Zstd(None); statistics
+/// min/max/null_count ON, distinct OFF, untruncated; `row_group_size=None`
+/// → the streaming sink's 122,880-row default split), byte-identical to the
+/// pinned Python wheel's zero-kwarg render — the expired-options writer's
+/// profile (PR-2).
+///
+/// Same error/panic contract as [`render_parquet_from_ipc`] (the shared
+/// [`render_at_ffi_boundary`] shell).
+#[pyfunction]
+fn render_parquet_defaults_from_ipc(py: Python<'_>, ipc_bytes: &[u8]) -> PyResult<Py<PyBytes>> {
+    render_at_ffi_boundary(py, ipc_bytes, render_parquet_defaults_from_ipc_impl)
 }
 
 /// The Python polars wheel version this crate byte-matches (`"1.42.1"`).
@@ -323,6 +435,7 @@ fn linked_zstd_version() -> String {
 fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", VERSION)?;
     m.add_function(wrap_pyfunction!(render_parquet_from_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(render_parquet_defaults_from_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(pinned_polars_version, m)?)?;
     m.add_function(wrap_pyfunction!(linked_zstd_version, m)?)?;
     Ok(())
@@ -519,5 +632,223 @@ mod tests {
     #[test]
     fn pinned_version_functions_agree_with_constants() {
         assert_eq!(pinned_polars_version(), PINNED_POLARS_PY_VERSION);
+    }
+
+    // ── PR-2: the options-defaults profile ─────────────────────────────
+
+    /// Build an 18-column options-shaped frame (the option writer's
+    /// `_render_df` schema, insertion order preserved) including a NULL
+    /// `side` row (the hand-planted heal shape — side is key payload) and
+    /// nulls in every nullable column, plus its uncompressed IPC bytes.
+    fn options_sample_ipc(rows: usize) -> (DataFrame, Vec<u8>) {
+        let n = rows;
+        let ts: Vec<i64> = (0..n as i64)
+            .map(|i| 1_709_523_900_000_000 + i * 60_000_000)
+            .collect();
+        let timestamp = Series::new("timestamp".into(), ts)
+            .cast(&DataType::Datetime(
+                TimeUnit::Microseconds,
+                Some(polars::prelude::TimeZone::UTC),
+            ))
+            .unwrap();
+        let side: Vec<Option<&str>> = (0..n)
+            .map(|i| {
+                if i % 11 == 5 {
+                    None // the null-side heal shape (Utf8 null_count surface)
+                } else if i % 2 == 0 {
+                    Some("CE")
+                } else {
+                    Some("PE")
+                }
+            })
+            .collect();
+        let opens: Vec<f64> = (0..n).map(|i| 100.25 + (i % 500) as f64).collect();
+        let nullable_i64: Vec<Option<i64>> = (0..n)
+            .map(|i| {
+                if i % 7 == 3 {
+                    None
+                } else {
+                    Some(1_000 + i as i64)
+                }
+            })
+            .collect();
+        let nullable_f64: Vec<Option<f64>> = (0..n)
+            .map(|i| {
+                if i % 7 == 3 {
+                    None
+                } else {
+                    Some(22_000.0 + (i % 40) as f64 * 50.0)
+                }
+            })
+            .collect();
+        let df = DataFrame::new(
+            n,
+            vec![
+                Series::new("exch_id".into(), vec!["NSE"; n]).into(),
+                Series::new("exchange_segment".into(), vec!["NSE_FNO"; n]).into(),
+                Series::new("security_id".into(), vec![13i64; n]).into(),
+                Series::new("underlying_symbol".into(), vec!["NIFTY"; n]).into(),
+                Series::new("expiry_flag".into(), vec!["WEEK"; n]).into(),
+                Series::new("expiry_code".into(), vec![1i64; n]).into(),
+                Series::new("side".into(), side).into(),
+                Series::new("strike_offset".into(), vec!["ATM+3"; n]).into(),
+                timestamp.into(),
+                Series::new("open".into(), opens.clone()).into(),
+                Series::new(
+                    "high".into(),
+                    opens.iter().map(|v| v + 1.5).collect::<Vec<_>>(),
+                )
+                .into(),
+                Series::new(
+                    "low".into(),
+                    opens.iter().map(|v| v - 1.5).collect::<Vec<_>>(),
+                )
+                .into(),
+                Series::new("close".into(), opens).into(),
+                Series::new("volume".into(), (0..n as i64).collect::<Vec<_>>()).into(),
+                Series::new("open_interest".into(), nullable_i64).into(),
+                Series::new("strike".into(), nullable_f64.clone()).into(),
+                Series::new("spot".into(), nullable_f64.clone()).into(),
+                Series::new("iv".into(), nullable_f64).into(),
+            ],
+        )
+        .unwrap();
+        let mut ipc = Vec::new();
+        IpcWriter::new(&mut ipc)
+            .with_compression(None)
+            .finish(&mut df.clone())
+            .unwrap();
+        (df, ipc)
+    }
+
+    /// Render the SAME defaults options through a real temp-FILE sink
+    /// (`SinkTarget::Path` — the wheel's `write_parquet(path)` target shape)
+    /// for the Dyn≡File standing pin below.
+    fn render_defaults_to_file(ipc_bytes: &[u8]) -> Vec<u8> {
+        let mut df = IpcReader::new(std::io::Cursor::new(ipc_bytes))
+            .finish()
+            .unwrap();
+        df.rechunk_mut();
+        let out = std::env::temp_dir().join(format!(
+            "brutex-lake-dyn-file-pin-{}-{}.parquet",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = SinkTarget::Path(PlRefPath::new(out.to_str().unwrap()));
+        let ldf = df
+            .lazy()
+            .sink(
+                SinkDestination::File { target },
+                FileWriteFormat::Parquet(Arc::new(defaults_writer_options())),
+                UnifiedSinkArgs::default(),
+            )
+            .unwrap()
+            .with_optimizations(eager_opt_flags());
+        ldf.collect_with_engine(Engine::Streaming).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        std::fs::remove_file(&out).ok();
+        bytes
+    }
+
+    #[test]
+    fn defaults_options_mapping_matches_wheel() {
+        // The frozen SNAPSHOT of the wheel's zero-kwarg write_parquet(path)
+        // binding at the pinned rev (PR-2 probe §2) — the bump ritual
+        // re-derives it by hand; this pin holds the constructor to it.
+        let opts = defaults_writer_options();
+        assert!(
+            matches!(opts.compression, ParquetCompression::Zstd(None)),
+            "expected Zstd(None) — libzstd's own default level — got {:?}",
+            opts.compression
+        );
+        let mut expected_stats = StatisticsOptions::empty();
+        expected_stats.min_value = true;
+        expected_stats.max_value = true;
+        expected_stats.distinct_count = false;
+        expected_stats.null_count = true;
+        assert_eq!(opts.statistics, expected_stats);
+        assert_eq!(opts.row_group_size, None);
+        assert_eq!(opts.data_page_size, None);
+        assert!(opts.key_value_metadata.is_none());
+        assert!(opts.arrow_schema.is_none());
+        assert!(opts.compat_level.is_none());
+    }
+
+    #[test]
+    fn defaults_ipc_roundtrip_renders_readable_parquet() {
+        let (df, ipc) = options_sample_ipc(40);
+        let parquet = render_parquet_defaults_from_ipc_impl(&ipc).unwrap();
+        assert_eq!(&parquet[..4], b"PAR1");
+        assert_eq!(&parquet[parquet.len() - 4..], b"PAR1");
+        let back = ParquetReader::new(std::io::Cursor::new(parquet.clone()))
+            .finish()
+            .unwrap();
+        assert!(back.equals_missing(&df));
+        // Determinism: an identical second render is byte-identical.
+        let again = render_parquet_defaults_from_ipc_impl(&ipc).unwrap();
+        assert_eq!(parquet, again);
+    }
+
+    #[test]
+    fn defaults_rg_split_at_122880() {
+        // row_group_size=None routes the split to the streaming sink's
+        // TakeableRowsProvider default (DEFAULTS_ROW_GROUP_SPLIT). 122,881
+        // rows must split [122880, 1]. Runs with the morsel env vars unset
+        // (the lane assert-unsets them; a dev box exporting
+        // POLARS_IDEAL_SINK_MORSEL_SIZE_ROWS/_BYTES fails this pin LOUDLY —
+        // assert-unset semantics, deliberate).
+        let (_, ipc) = sample_ipc(DEFAULTS_ROW_GROUP_SPLIT + 1);
+        let parquet = render_parquet_defaults_from_ipc_impl(&ipc).unwrap();
+        let mut reader = ParquetReader::new(std::io::Cursor::new(parquet));
+        let metadata = reader.get_metadata().unwrap();
+        assert_eq!(metadata.row_groups.len(), 2);
+        assert_eq!(metadata.row_groups[0].num_rows(), DEFAULTS_ROW_GROUP_SPLIT);
+        assert_eq!(metadata.row_groups[1].num_rows(), 1);
+    }
+
+    #[test]
+    fn dyn_sink_equals_file_sink_defaults() {
+        // The P2 standing pin (judge-probed PASS 7/7 on the spike crate,
+        // 2026-07-11): the shipped pyfunction serves the Dyn in-memory sink
+        // while the wheel's production write targets a real file PATH — the
+        // two must stay byte-identical under the defaults options (incl.
+        // per-row-group statistics pages on the multi-RG shape).
+        let (_, options_ipc) = options_sample_ipc(600);
+        assert_eq!(
+            render_parquet_defaults_from_ipc_impl(&options_ipc).unwrap(),
+            render_defaults_to_file(&options_ipc),
+            "Dyn sink diverged from File sink on the options-shaped sample"
+        );
+        let (_, multi_rg_ipc) = sample_ipc(DEFAULTS_ROW_GROUP_SPLIT + 7_120);
+        assert_eq!(
+            render_parquet_defaults_from_ipc_impl(&multi_rg_ipc).unwrap(),
+            render_defaults_to_file(&multi_rg_ipc),
+            "Dyn sink diverged from File sink on the multi-row-group sample"
+        );
+    }
+
+    #[test]
+    fn defaults_empty_payload_is_refused() {
+        let err = render_parquet_defaults_from_ipc_impl(&[]).unwrap_err();
+        assert!(err.to_string().contains("empty IPC payload"));
+    }
+
+    #[test]
+    fn defaults_garbage_payload_is_a_clean_error() {
+        let err = render_parquet_defaults_from_ipc_impl(b"not an arrow ipc stream").unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn defaults_zero_row_frame_renders_without_panic() {
+        // Structurally unreachable from the option writer (write() returns 0
+        // on empty bars; the healer's kept==0 arm unlinks, never renders) —
+        // pinned as defence in depth, mirroring the bars twin.
+        let (_, ipc) = options_sample_ipc(0);
+        let parquet = render_parquet_defaults_from_ipc_impl(&ipc).unwrap();
+        assert_eq!(&parquet[..4], b"PAR1");
     }
 }

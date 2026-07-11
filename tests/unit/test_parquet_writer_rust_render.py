@@ -76,7 +76,18 @@ def _polars_backed_fake_crate() -> types.ModuleType:
         )
         return bio.getvalue()
 
+    def render_parquet_defaults_from_ipc(ipc_bytes: bytes) -> bytes:
+        # Present only to satisfy the all-or-nothing _CRATE_API surface
+        # check (PR-2) — this suite drives the BARS profile exclusively.
+        df = pl.read_ipc(io.BytesIO(ipc_bytes))
+        bio = io.BytesIO()
+        df.write_parquet(bio)
+        return bio.getvalue()
+
     module.render_parquet_from_ipc = render_parquet_from_ipc  # type: ignore[attr-defined]
+    module.render_parquet_defaults_from_ipc = (  # type: ignore[attr-defined]
+        render_parquet_defaults_from_ipc
+    )
     module.pinned_polars_version = lambda: pl.__version__  # type: ignore[attr-defined]
     module.linked_zstd_version = lambda: "fake"  # type: ignore[attr-defined]
     return module
@@ -165,6 +176,7 @@ class TestFlagOnGuards:
             raise MemoryError
 
         fake.render_parquet_from_ipc = _oom  # type: ignore[attr-defined]
+        fake.render_parquet_defaults_from_ipc = _oom  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "brutex_lake", fake)
         monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
         lrr.reset_lake_rust_render_for_tests()

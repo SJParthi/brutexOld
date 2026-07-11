@@ -932,6 +932,29 @@ def _remove_option_stats(lake_root: Path, *, dest: Path) -> None:
     )
 
 
+def _defaults_python_render(df: pl.DataFrame) -> bytes:
+    """The defaults-profile LIVE PARITY ORACLE: ``df.write_parquet`` all-defaults → bytes.
+
+    DEC-RUST-DATALAKE-IO-ROADMAP-001 PR-2 — this writer's analogue of
+    :meth:`~brutex.data.parquet_writer.ParquetWriter._render_bytes`'s
+    ``_python_render`` closure: the verbatim zero-kwarg ``write_parquet``
+    render (statistics ON, Zstd(None), ``row_group_size=None`` → the
+    streaming sink's 122,880-row default split) into an in-memory buffer.
+    Byte-representative of what the flag-OFF path streams to a tmp PATH —
+    the wheel routes a ``BytesIO`` target and a path target into the SAME
+    streaming sink (the P1 standing pin in
+    ``tests/unit/test_option_parquet_writer_rust_render.py`` holds that
+    equivalence so it can never silently drift). Called only from the
+    flag-ON arm of :func:`_atomic_write_parquet`, inside the callers'
+    ``lake_write_guard`` — an OOM here maps to ``LakeWriteHalt``.
+    """
+    import io
+
+    bio = io.BytesIO()
+    df.write_parquet(bio)
+    return bio.getvalue()
+
+
 def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
     """Write *df* to *dest* atomically via the shared atomic_io helper.
 
@@ -943,8 +966,45 @@ def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
     at a truncated parquet). The helper additionally maps a full disk (``ENOSPC``) or
     an OOM (``MemoryError`` from ``df.write_parquet``) to a
     :class:`~brutex.data.errors.LakeWriteHalt` pull-wide stop (DEC-LAKE-WRITE-HALT-001).
+
+    THE PR-2 RENDER SEAM (DEC-RUST-DATALAKE-IO-ROADMAP-001; the datalake
+    conversion roadmap ADR, ``docs/adr/0019-datalake-rust-conversion-roadmap.md``):
+    when — and ONLY when — ``BRUTEX_LAKE_RUST_RENDER`` is truthy, the render
+    routes through the COMMON :mod:`brutex.data.lake_rust_render` facade
+    under the :data:`~brutex.data.lake_rust_render.PROFILE_OPTIONS_DEFAULTS`
+    profile (import/version guards, per-profile 16-render burn-in with
+    ship-the-oracle autorevert, shared latch). Flag OFF — the production
+    default — executes the LITERAL legacy call below (mechanism-verbatim,
+    not merely byte-verbatim: ``df.write_parquet`` streams straight to the
+    tmp path with zero new byte surface; never-routes spy-pinned). Honest
+    ON-arm mechanism difference, disclosed: an engaged/degraded/latched
+    render returns facade BYTES written via ``write_bytes``, while OFF
+    path-streams — byte-equal per the P1 standing pin (``BytesIO`` ≡ path
+    target at the pinned wheel). Both callers hold the full lock stack +
+    ``lake_write_guard`` around this call, so a ``MemoryError`` anywhere in
+    the ON arm (IPC handoff, crate call, oracle render) maps to
+    ``LakeWriteHalt`` with no new wrapping, and the burn-in's doubled
+    render runs INSIDE the held flock (deliberate — releasing to compare
+    would open a TOCTOU; bounded to ≤16+novel-shape renders per process,
+    ~ms at the ~16.5k-row production month shape). The facade call passes
+    NO path context (the series dir name is vendor-influenceable — the
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 log-injection discipline).
     """
-    atomic_write_via(dest, df.write_parquet)
+    from brutex.data import lake_rust_render
+
+    if not lake_rust_render.lake_rust_render_enabled():
+        atomic_write_via(dest, df.write_parquet)  # flag-OFF: the verbatim legacy call
+        return
+    import polars as pl
+
+    content = lake_rust_render.render_parquet_bytes(
+        ipc_bytes_factory=lambda: lake_rust_render.ipc_handoff_bytes(df),
+        python_render=lambda: _defaults_python_render(df),
+        polars_version=pl.__version__,
+        schema_token=str(df.schema),
+        profile=lake_rust_render.PROFILE_OPTIONS_DEFAULTS,
+    )
+    atomic_write_via(dest, lambda tmp: tmp.write_bytes(content))
 
 
 __all__ = [
