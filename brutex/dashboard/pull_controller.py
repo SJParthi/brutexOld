@@ -814,8 +814,11 @@ class BulkSpotReport:
 
         Turns the raw tallies into one operator instruction so a token-stuck or
         retry-residual pull never sits silent — ``auth_expired`` (regenerate the
-        token), ``transient_residual`` (re-pull / auto-retry finishes),
-        ``known_gap_only`` (reference symbols with no intraday), or ``clean``.
+        token), ``cancelled`` (the operator's Stop — re-run to resume the honest
+        partial; DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3, never a
+        fabricated green ``clean``), ``transient_residual`` (re-pull / auto-retry
+        finishes), ``known_gap_only`` (reference symbols with no intraday), or
+        ``clean``.
 
         An EXPLICIT synthetic dry-run's verdict is re-labeled through
         :func:`~brutex.adapters.ingest_common.mark_synthetic`
@@ -832,6 +835,12 @@ class BulkSpotReport:
             auth_cause=self.auth_cause,
             quota_exhausted=self.quota_exhausted,
             mass_empty_cause=self.mass_empty_cause,
+            # DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3 (MAJOR): a cancelled
+            # pull previously fell through to the GREEN ``clean`` kind — the
+            # "✅ Pull complete. / No action needed." banner + the durable G5
+            # journal ``verdict="clean"`` after an operator Stop. The dedicated
+            # ``cancelled`` kind is the honest amber "re-run to resume" partial.
+            cancelled=self.cancelled,
             settled_skipped=self.settled_skipped,
         )
         if self.dry_run:
@@ -839,8 +848,29 @@ class BulkSpotReport:
         return verdict
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-friendly dict for the ``/api/v1/universe/pull-all`` route."""
+        """Return a JSON-friendly dict for the ``/api/v1/universe/pull-all`` route.
+
+        EMIT-ON-CANCEL ``note`` (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3):
+        a cancelled pull's payload carries a one-line honest note so the
+        background job's completion headline (``pull_jobs._finish_detail`` reads
+        a Mapping's non-empty ``"note"``) says CANCELLED instead of the bare
+        back-compat ``"done"``. An uncancelled payload is byte-identical (no
+        ``note`` key at all — the emit-on-false projection convention).
+        """
+        verdict = self.verdict
+        note: dict[str, Any] = (
+            {
+                "note": (
+                    "pull CANCELLED at operator request — an honest partial: settled "
+                    "windows are durable, un-pulled windows stay pending; re-run the "
+                    "pull to resume the remainder"
+                )
+            }
+            if self.cancelled
+            else {}
+        )
         return {
+            **note,
             "dry_run": self.dry_run,
             "start_date": self.start_date,
             "end_date": self.end_date,
@@ -856,7 +886,7 @@ class BulkSpotReport:
             # JSON-safe: the exact Decimal renders as its string (never a float
             # round-trip — CLAUDE.md §4 money rule); None stays null.
             "max_close_delta": None if self.max_close_delta is None else str(self.max_close_delta),
-            "verdict": self.verdict.to_dict(),
+            "verdict": verdict.to_dict(),
             "symbols": [
                 {
                     "symbol": s.symbol,

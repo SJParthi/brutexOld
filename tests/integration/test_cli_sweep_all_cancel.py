@@ -231,7 +231,18 @@ def test_post_grid_cancel_skips_the_remaining_tail_passes(
     the whole span. The sidecar is planted DURING stage3 (the real pass runs
     first), so the boundary probe BEFORE options-sim fires: exit 7, the
     consumed sidecar cleared, and the cascade pass (poisoned) never runs.
+
+    Continuation-v3 MINOR (fails-before): the grid publishes ``state="done"``
+    to the progress bridge at GRID completion — BEFORE the tail probes — and
+    ``_tail_cancelled`` previously wrote nothing, so v29.html's terminal
+    branch rendered "✅ Sweep done" (plus the artifact-refresh promise) for a
+    run whose post-grid artifacts were deliberately skipped after the cancel
+    route acked ``{"cancelling": true}``. The probe now overwrites the bridge
+    with the honest ``cancelled`` terminal snapshot (mirroring the grid arms'
+    own cancel publish).
     """
+    import json
+
     lake_root, catalog_path = _persist(tmp_path)
     results_root = tmp_path / "sweeps"
     monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
@@ -264,6 +275,15 @@ def test_post_grid_cancel_skips_the_remaining_tail_passes(
     assert not cancel_sidecar_path(results_root).exists()
     # The grid itself completed normally (the cancel hit only the tail).
     assert "sweep-all done" in out
+    # The progress bridge carries the HONEST `cancelled` terminal — pre-fix it
+    # was left at the grid's `done`, so the dashboard rendered "✅ Sweep done"
+    # for an acked cancel whose post-grid passes were skipped.
+    bridge = results_root / "progress" / "sweep-progress.json"
+    assert bridge.exists()
+    parsed = json.loads(bridge.read_text(encoding="utf-8"))
+    assert parsed["state"] == "cancelled"
+    assert parsed["running"] is False
+    assert "post-grid pass" in parsed["detail"] and "skipped" in parsed["detail"]
 
 
 def test_cancel_after_last_tail_probe_clears_orphan_sidecar_at_run_end(

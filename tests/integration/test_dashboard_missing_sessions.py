@@ -146,20 +146,33 @@ class TestMissingSessionsRoute:
         session into ``missing_count``/``total_missing`` — presented by the
         route, the drill caption and the ledger as re-pullable vendor holes.
         The route now injects ``now_ist().date()`` and the audit end clamps to
-        it, NAMED per row via ``range_end_clamped_to_today``.
+        the day BEFORE it (continuation-v3 residue fix: today's own session is
+        never auditable — pre-close it has not occurred, post-close
+        ``resolve_candle_range`` still caps at the previous day), NAMED per row
+        via ``range_end_clamped_to_today``.
         """
+        from datetime import timedelta
+
         from brutex.calendars.nse import now_ist
 
         _write_nifty(tmp_path, [date(2024, 1, 2), date(2024, 1, 3)])
         client = TestClient(build_app(DashboardState(), instrument_store=store))
-        before = now_ist().date().isoformat()
+        before = now_ist().date()
         body = client.get("/api/v1/coverage/missing-sessions?range_end=2999-12-31").json()
-        after = now_ist().date().isoformat()
+        after = now_ist().date()
         row = body["rows"][0]
         assert row["range_end_clamped_to_today"] is True
-        assert row["range_end"] in {before, after}  # today-IST (midnight-tolerant)
+        # today-IST − 1 day (midnight-tolerant): the clamp lands on the last
+        # AUDITABLE session date, never on today itself.
+        yesterdays = {
+            (before - timedelta(days=1)).isoformat(),
+            (after - timedelta(days=1)).isoformat(),
+        }
+        assert row["range_end"] in yesterdays
         assert row["abstained"] is False
-        assert all(d <= after for d in row["missing_dates"])
+        # Today's session never counts as a re-pullable hole (strictly BEFORE
+        # the request's today — `after` is the midnight-tolerant upper bound).
+        assert all(d < after.isoformat() for d in row["missing_dates"])
 
     def test_empty_lake_never_500(self, store: InstrumentStore) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=store))

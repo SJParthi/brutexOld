@@ -3001,7 +3001,12 @@ def build_app(
                 market_closed=resolve_market_closed(),
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
-            return report
+            # Return the Mapping shape so _finish_detail can surface the report's
+            # emit-on-cancel "note" as the job's completion headline — a cancelled
+            # pull reads CANCELLED, never the bare back-compat "done"
+            # (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3; an uncancelled
+            # payload carries no note, so its headline stays "done" verbatim).
+            return report.to_dict()
 
         # Initial total = symbols × the chosen fetch intervals (1d / 1m / both) — a
         # placeholder the first per-WINDOW ledger sync re-scales to the planned window
@@ -4786,7 +4791,10 @@ def build_app(
                 market_closed=resolve_market_closed(),
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
-            return report
+            # Mapping shape → _finish_detail surfaces the emit-on-cancel "note"
+            # (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3): a cancelled
+            # retry-failed run headlines CANCELLED, never a bare "done".
+            return report.to_dict()
 
         unit_total = len(instruments) * len(fetch_intervals)
         started = _pull_job.start(
@@ -5457,10 +5465,13 @@ def build_app(
         for a late-listed symbol those are un-pullable pre-listing dates, NOT vendor
         holes; each row's ``missing_before_first_stored`` (+ the payload's
         ``total_missing_before_first_stored``) splits them out of the "sessions to
-        re-pull" counts so the two classes are never conflated. FUTURE-end clamp
-        (continuation-v2 fix): a ``range_end`` LATER than today-IST would count
-        every not-yet-occurred trading session as a re-pullable vendor hole — the
-        audit end is clamped to ``now_ist().date()`` with the clamp NAMED per row
+        re-pull" counts so the two classes are never conflated. TODAY/future-end
+        clamp (continuation-v2 fix + the continuation-v3 residue fix): a
+        ``range_end`` AT OR LATER than today-IST would count not-yet-occurred
+        sessions — and TODAY's own un-pullable session (pre-close it has not
+        occurred; post-close ``resolve_candle_range`` still caps at the previous
+        day) — as re-pullable vendor holes, so the audit end is clamped to
+        ``now_ist().date() − 1 day`` with the clamp NAMED per row
         (``range_end_clamped_to_today`` + the clamped ``range_end`` echo), never
         silently applied. READ-ONLY — no pull logic.
 
@@ -5516,9 +5527,11 @@ def build_app(
                 interval=interval,
                 range_start=range_start,
                 range_end=range_end,
-                # The IST audit clock (continuation-v2 fix): a future range_end
-                # is clamped to today so not-yet-occurred sessions never read
-                # as re-pullable holes; the pure module takes it injected.
+                # The IST audit clock (continuation-v2 fix + the v3 residue
+                # fix): an at/after-today range_end is clamped to today − 1 so
+                # neither a not-yet-occurred session nor today's still
+                # un-pullable one reads as a re-pullable hole; the pure module
+                # takes it injected.
                 today=now_ist().date(),
             )
 

@@ -6423,6 +6423,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         if not _should_stop():
             return False
         clear_cancel(out_root)
+        # Overwrite the grid's already-published ``done`` terminal on the file
+        # bridge with the honest ``cancelled`` one (continuation-v3 MINOR): the
+        # grid publishes ``state="done"`` at GRID completion, BEFORE this tail —
+        # without this publish the dashboard rendered "✅ Sweep done" (plus the
+        # artifact-refresh promise) for a run whose post-grid artifacts were
+        # deliberately skipped after the cancel route acked {"cancelling": true}.
+        # Mirrors the grid arms' own cancel publish (sweep_supervisor /
+        # sweep_parallel: guards.progress.cancelled → publish).
+        guards.progress.cancelled(
+            detail=(
+                f"cancelled after the grid — the {next_pass} pass and every later "
+                "post-grid pass were skipped (grid results durable; re-run to rebuild)"
+            )
+        )
+        publish_progress(progress_path, guards.progress.snapshot())
         print(
             "[brutex] sweep-all: CANCELLED at operator request — the grid results "
             f"are already durable; the {next_pass} pass and every later post-grid "

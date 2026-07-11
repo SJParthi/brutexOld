@@ -307,13 +307,18 @@ class TestComputeMissingSessions:
 
 
 class TestFutureEndClamp:
-    """Continuation-v2 fix: a FUTURE audit end never fabricates "sessions to re-pull".
+    """Continuation-v2 fix (+ v3 residue): an at/after-today audit end never fabricates gaps.
 
-    Fails-before: the only end-side guard was ``end.year > HOLIDAY_COVERAGE_LAST_YEAR``,
-    so an explicit ``range_end`` later in the coverage year passed and every
-    not-yet-occurred trading session counted into ``missing_count``/``total_missing`` —
-    which the route, the drill caption and the ledger all present as re-pullable vendor
-    holes. The audit end is now clamped at the injected *today* (the route binds
+    Fails-before (v2): the only end-side guard was ``end.year >
+    HOLIDAY_COVERAGE_LAST_YEAR``, so an explicit ``range_end`` later in the coverage
+    year passed and every not-yet-occurred trading session counted into
+    ``missing_count``/``total_missing`` — which the route, the drill caption and the
+    ledger all present as re-pullable vendor holes. Fails-before (v3 residue): the v2
+    clamp was strict ``end > today``, so an explicit ``range_end`` equal to (or clamped
+    to) *today* kept TODAY's own session in the expected set — pre-close it has not
+    occurred, post-close it is still un-pullable (``resolve_candle_range`` caps at the
+    previous day), so ``missing_count`` over-counted by exactly one per dataset. The
+    audit end now clamps at ``today − 1 day`` whenever ``end >= today`` (the route binds
     ``now_ist().date()``; the module stays pure) with the clamp NAMED on the verdict.
     """
 
@@ -331,12 +336,15 @@ class TestFutureEndClamp:
             today=date(2024, 1, 10),
         )
         assert not result.abstained
-        assert result.range_end == "2024-01-10"  # the AUDITED (clamped) end is echoed
+        # The AUDITED (clamped) end is echoed: today − 1 day (v3 residue fix —
+        # today's own session is never auditable, so the clamp lands on the
+        # last auditable date, not on today itself).
+        assert result.range_end == "2024-01-09"
         assert result.range_end_clamped_to_today is True
-        expected = trading_days_between(date(2024, 1, 2), date(2024, 1, 10))
+        expected = trading_days_between(date(2024, 1, 2), date(2024, 1, 9))
         assert result.expected_count == len(expected)
-        # No fabricated future session — every missing date is on/before today.
-        assert all(d <= "2024-01-10" for d in result.missing_dates)
+        # No fabricated future-or-today session — every missing date is before today.
+        assert all(d < "2024-01-10" for d in result.missing_dates)
 
     def test_no_today_applies_no_clamp(self) -> None:
         # Pure/offline callers (today=None) keep the prior behaviour byte-identical:
@@ -372,9 +380,12 @@ class TestFutureEndClamp:
         assert result.range_end_clamped_to_today is False
         assert result.missing_count == 0
 
-    def test_end_exactly_today_is_not_clamped(self) -> None:
-        # The boundary law: end == today is a legitimate (completed-or-forming)
-        # session — only a STRICTLY future end clamps.
+    def test_end_exactly_today_clamps_to_yesterday(self) -> None:
+        # The boundary law (v3 residue fix — fails-before): end == today CLAMPS
+        # to today − 1 day. Today's session is never auditable — pre-close it
+        # has not occurred, post-close it is still un-pullable
+        # (resolve_candle_range caps every pull at the previous day) — so it
+        # must never be an expected session, let alone a re-pullable hole.
         stored = frozenset(trading_days_between(date(2024, 1, 2), date(2024, 1, 5)))
         result = compute_missing_sessions(
             "NSE",
@@ -386,8 +397,32 @@ class TestFutureEndClamp:
             stored,
             today=date(2024, 1, 5),
         )
-        assert result.range_end == "2024-01-05"
-        assert result.range_end_clamped_to_today is False
+        assert result.range_end == "2024-01-04"
+        assert result.range_end_clamped_to_today is True
+        assert result.missing_count == 0
+
+    def test_explicit_range_end_today_never_counts_today_as_missing(self) -> None:
+        # THE v3 residue repro (fails-before): an explicit ?range_end= equal to
+        # *today* (2024-01-05, a real NSE Friday session) with today NOT stored
+        # counted today into missing_count — "sessions to re-pull" over-counted
+        # by exactly one per dataset even though the session is un-pullable.
+        stored = frozenset(trading_days_between(date(2024, 1, 2), date(2024, 1, 4)))
+        result = compute_missing_sessions(
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            DRILL_INTERVAL,
+            "2024-01-02",
+            "2024-01-04",
+            stored,
+            range_end="2024-01-05",
+            today=date(2024, 1, 5),
+        )
+        assert not result.abstained
+        assert result.range_end == "2024-01-04"
+        assert result.range_end_clamped_to_today is True
+        assert result.missing_count == 0  # pre-fix: 1 (today fabricated as a hole)
+        assert "2024-01-05" not in result.missing_dates
 
     def test_fully_future_range_abstains_with_clamp_named(self) -> None:
         # Both bounds after today: the clamp collapses the span (end < start) →
@@ -407,7 +442,7 @@ class TestFutureEndClamp:
         )
         assert result.abstained
         assert result.abstain_reason == ABSTAIN_NO_RANGE
-        assert result.range_end == "2024-01-10"
+        assert result.range_end == "2024-01-09"
         assert result.range_end_clamped_to_today is True
 
     def test_out_of_coverage_future_year_clamps_then_serves(self) -> None:
@@ -428,7 +463,7 @@ class TestFutureEndClamp:
             today=date(2024, 1, 10),
         )
         assert not result.abstained
-        assert result.range_end == "2024-01-10"
+        assert result.range_end == "2024-01-09"
         assert result.range_end_clamped_to_today is True
 
     def test_payload_threads_today_to_every_row(self) -> None:
@@ -441,8 +476,8 @@ class TestFutureEndClamp:
         assert payload["datasets"] == 1
         row = payload["rows"][0]
         assert row["range_end_clamped_to_today"] is True
-        assert row["range_end"] == "2024-01-10"
-        assert all(d <= "2024-01-10" for d in row["missing_dates"])
+        assert row["range_end"] == "2024-01-09"
+        assert all(d < "2024-01-10" for d in row["missing_dates"])
 
 
 def _row(

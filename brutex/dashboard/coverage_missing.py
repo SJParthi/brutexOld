@@ -46,20 +46,22 @@ with no override, a reversed span, a degenerate
 zero-session range, OR a bound outside the published holiday coverage
 (:data:`~brutex.calendars.HOLIDAY_COVERAGE_FIRST_YEAR` /
 :data:`~brutex.calendars.HOLIDAY_COVERAGE_LAST_YEAR` — an out-of-coverage weekday's
-trading-day verdict would turn on a missing holiday list). A FUTURE audit end
-(continuation-v2 fix — an explicit ``range_end`` later than the caller-injected IST
-*today*) is CLAMPED to *today* with the clamp NAMED on the verdict
+trading-day verdict would turn on a missing holiday list). An audit end AT OR AFTER the
+caller-injected IST *today* (continuation-v2 fix + the continuation-v3 residue fix) is
+CLAMPED to ``today − 1 day`` with the clamp NAMED on the verdict
 (``range_end_clamped_to_today``) — a not-yet-occurred trading session is never a
-re-pullable vendor hole, so it must never count into ``missing_count``; the module stays
-PURE (*today* is injected — the route binds ``now_ist().date()``; ``today=None`` applies
-no clamp).
+re-pullable vendor hole, and TODAY's own session is never auditable either (pre-close it
+has not occurred; post-close ``resolve_candle_range`` still caps every pull at the
+previous day), so neither may count into ``missing_count``; the module stays PURE
+(*today* is injected — the route binds ``now_ist().date()``; ``today=None`` applies no
+clamp).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Final
 
 from brutex.calendars import (
@@ -117,11 +119,15 @@ class MissingSessions:
     missing_truncated: bool
     abstained: bool
     abstain_reason: str | None
-    #: Continuation-v2 fix — True iff a FUTURE audit end (an explicit
-    #: ``range_end`` past the injected *today*, or a corrupt future stored
-    #: bound) was clamped to *today*: a not-yet-occurred trading session is
-    #: never a re-pullable vendor hole, and the clamp is NAMED here (the
-    #: PAGE_LIMIT_MAX naming precedent) instead of silently applied.
+    #: Continuation-v2 fix (+ the continuation-v3 residue fix) — True iff an
+    #: audit end AT OR AFTER the injected *today* (an explicit ``range_end``
+    #: of today or later, or a corrupt future stored bound) was clamped to
+    #: ``today − 1 day``, the last auditable session date: a not-yet-occurred
+    #: trading session is never a re-pullable vendor hole, and TODAY's own
+    #: session is never auditable either (pre-close it has not occurred;
+    #: post-close ``resolve_candle_range`` still caps every pull at the
+    #: previous day). The clamp is NAMED here (the PAGE_LIMIT_MAX naming
+    #: precedent) instead of silently applied.
     range_end_clamped_to_today: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -206,16 +212,19 @@ def compute_missing_sessions(
         vendor holes; the verdict's ``missing_before_first_stored`` splits them
         out of ``missing_count`` so the two classes are never conflated.
     today
-        The audit clock (continuation-v2 fix): the caller-injected IST *today*
-        (the module stays PURE — the route binds ``now_ist().date()``). A
-        resolved audit end STRICTLY AFTER *today* (an explicit future
-        ``range_end``, or a corrupt future stored bound) is CLAMPED to *today*
-        with the clamp NAMED on the verdict (``range_end_clamped_to_today`` +
-        the clamped ``range_end`` echo) — a not-yet-occurred trading session
-        must never count into ``missing_count``/``total_missing``, which every
-        consumer presents as re-pullable vendor holes. ``None`` (the default —
-        pure/offline callers) applies NO clamp, byte-identical to the prior
-        behaviour.
+        The audit clock (continuation-v2 fix + the continuation-v3 residue
+        fix): the caller-injected IST *today* (the module stays PURE — the
+        route binds ``now_ist().date()``). A resolved audit end AT OR AFTER
+        *today* (an explicit ``range_end`` of today or later, or a corrupt
+        future stored bound) is CLAMPED to ``today − 1 day`` with the clamp
+        NAMED on the verdict (``range_end_clamped_to_today`` + the clamped
+        ``range_end`` echo) — a not-yet-occurred trading session must never
+        count into ``missing_count``/``total_missing`` (which every consumer
+        presents as re-pullable vendor holes), and TODAY's own session is
+        equally un-auditable: pre-close it has not occurred, post-close it is
+        still un-pullable (``resolve_candle_range`` caps every pull at the
+        previous day). ``None`` (the default — pure/offline callers) applies
+        NO clamp, byte-identical to the prior behaviour.
     expected_cache
         Optional mutable memo keyed ``(start, end, calendar_exchange)`` →
         the expected-session tuple. The payload builder passes ONE dict per payload
@@ -251,15 +260,20 @@ def compute_missing_sessions(
 
     start = _parse_iso_date(start_override) or _parse_iso_date(first_date)
     end = _parse_iso_date(end_override) or _parse_iso_date(last_date)
-    # Future-end clamp (continuation-v2 fix): an audit end past the injected
-    # *today* would count every not-yet-occurred trading session into
-    # ``missing_count`` — fabricated "sessions to re-pull". Clamp BEFORE the
-    # range/coverage checks (so a far-future ``range_end`` audits honestly up
-    # to today instead of abstaining out-of-coverage) and NAME the clamp on
-    # the verdict; ``today is None`` (pure callers) applies no clamp.
+    # Future/today-end clamp (continuation-v2 fix + the continuation-v3 residue
+    # fix): an audit end past the injected *today* would count every
+    # not-yet-occurred trading session into ``missing_count`` — fabricated
+    # "sessions to re-pull" — and an end AT *today* counted TODAY's own session
+    # the same way (pre-close it has not occurred; post-close it is still
+    # un-pullable — ``resolve_candle_range`` caps every pull at the previous
+    # day), so the clamp is ``end >= today`` → ``today − 1 day`` (the last
+    # auditable, re-pullable session date). Clamp BEFORE the range/coverage
+    # checks (so a far-future ``range_end`` audits honestly up to yesterday
+    # instead of abstaining out-of-coverage) and NAME the clamp on the verdict;
+    # ``today is None`` (pure callers) applies no clamp.
     end_clamped = False
-    if today is not None and end is not None and end > today:
-        end = today
+    if today is not None and end is not None and end >= today:
+        end = today - timedelta(days=1)
         end_clamped = True
     start_iso = start.isoformat() if start is not None else None
     end_iso = end.isoformat() if end is not None else None
@@ -446,11 +460,12 @@ def build_missing_sessions_payload(
     sessions to re-pull" headline) and ``total_missing_before_first_stored`` sums the
     pre-stored-span split (combined-PR fix round 2 — under an explicit range override a
     late-listed symbol's un-pullable pre-listing dates land in the split, not silently
-    in the re-pull headline's interior-hole reading). *today* (continuation-v2 fix) is the
-    caller-injected IST audit clock threaded to every per-dataset audit — a FUTURE audit
-    end is clamped to it with the clamp NAMED per row (``range_end_clamped_to_today``), so
-    not-yet-occurred sessions never inflate ``total_missing``; ``None`` (pure/offline
-    callers) applies no clamp. ONE per-payload ``expected_cache`` dict memoises the
+    in the re-pull headline's interior-hole reading). *today* (continuation-v2 fix + the
+    continuation-v3 residue fix) is the caller-injected IST audit clock threaded to every
+    per-dataset audit — an at/after-*today* audit end is clamped to ``today − 1 day`` with
+    the clamp NAMED per row (``range_end_clamped_to_today``), so neither a
+    not-yet-occurred session nor today's still-un-pullable one ever inflates
+    ``total_missing``; ``None`` (pure/offline callers) applies no clamp. ONE per-payload ``expected_cache`` dict memoises the
     expected-session calendar walk per distinct ``(start, end, exchange)`` range, so the
     common unfiltered many-datasets-one-range case pays the O(span-days) walk once — not
     once per dataset.
