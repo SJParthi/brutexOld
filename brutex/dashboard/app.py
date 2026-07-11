@@ -1868,10 +1868,10 @@ def build_app(
     # (revision, reason) through ONE LRU-bounded gate (the #1711 OutageGate
     # precedent — a poll loop against one bad state logs ONCE, never per
     # poll), and the Hook-C serve-side rebuild fires at most once per
-    # revision through its own gate. Function-local import doctrine does not
-    # apply here — app.py already imports the engine at module scope, and
-    # `results_rollup` imports the VIEW module lazily, so no cycle.
-    from brutex.engine.results_rollup import LogGate as _RollupLogGate
+    # revision through its own gate. LogGate lives in the COMMON stdlib-only
+    # leaf (the PR #1436 CodeQL bidirectional-cycle fix) — imported from
+    # there, never from the engine rollup module.
+    from brutex.observability.log_gate import LogGate as _RollupLogGate
 
     _rollup_log_gate = _RollupLogGate()
     _rollup_rebuild_gate = _RollupLogGate()

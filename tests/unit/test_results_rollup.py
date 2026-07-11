@@ -33,29 +33,6 @@ pytest.importorskip("polars", reason="the rollup persists ResultsStore Parquet f
 import brutex.engine.results_rollup as rr
 import structlog.testing
 from brutex.dashboard import sweep_results_view as view
-from brutex.engine.results_rollup import (
-    AUDIT_RELPATH,
-    CURSOR_START,
-    ROLLUP_K,
-    AuditCursor,
-    AuditCursorMismatch,
-    LogGate,
-    RollupMergeHook,
-    RollupRefusalError,
-    RollupStamp,
-    RollupVerdict,
-    classify_rollup,
-    code_token,
-    rebuild_rollup,
-    rebuild_rollup_from_scan_best_effort,
-    rollup_parquet_path,
-    rollup_root,
-    rollup_stamp_path,
-    snapshot_eras,
-    snapshot_eras_with_cursor,
-    trim_to_union,
-    union_axes,
-)
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.orchestrator.audit import AuditError, AuditWriter
 
@@ -136,7 +113,7 @@ def _start_payload(*, snapshot: str, tf: str = "5m", k: int = 1) -> dict[str, ob
 
 
 def _write_audit(sweeps_root: Path, payloads: list[dict[str, object]]) -> Path:
-    audit_path = sweeps_root.joinpath(*AUDIT_RELPATH)
+    audit_path = sweeps_root.joinpath(*rr.AUDIT_RELPATH)
     with AuditWriter.open(audit_path, resume=audit_path.exists()) as writer:
         for payload in payloads:
             writer.append(action="SWEEP_START", subject="sweep:test", payload=payload)
@@ -167,21 +144,20 @@ def _seed_tree(sweeps_root: Path) -> None:
     )
     _write_audit(sweeps_root, [_start_payload(snapshot="snap-a")])
 
-
-# ────── paths + drift pins ──────
+    # ────── paths + drift pins ──────
 
 
 class TestPaths:
     def test_rollup_root_is_a_sibling_of_the_sweeps_tree(self, tmp_path: Path) -> None:
         sweeps = tmp_path / "sweeps"
-        assert rollup_root(sweeps) == tmp_path / "sweeps_rollup"
-        assert rollup_parquet_path(sweeps) == tmp_path / "sweeps_rollup" / "topk.parquet"
-        assert rollup_stamp_path(sweeps) == tmp_path / "sweeps_rollup" / "topk.stamp.json"
+        assert rr.rollup_root(sweeps) == tmp_path / "sweeps_rollup"
+        assert rr.rollup_parquet_path(sweeps) == tmp_path / "sweeps_rollup" / "topk.parquet"
+        assert rr.rollup_stamp_path(sweeps) == tmp_path / "sweeps_rollup" / "topk.stamp.json"
 
     def test_audit_relpath_matches_the_view_convention(self) -> None:
         """Drift pin: the rollup and the view agree on the ONE audit-chain path."""
-        assert AUDIT_RELPATH == ("audit", "sweep-all.jsonl")
-        assert view._AUDIT_RELPATH == AUDIT_RELPATH
+        assert rr.AUDIT_RELPATH == ("audit", "sweep-all.jsonl")
+        assert view._AUDIT_RELPATH == rr.AUDIT_RELPATH
 
     def test_store_glob_matches_the_view_discovery(self, sweeps_root: Path) -> None:
         """Drift pin: ``current_store_relpaths`` finds exactly the view's stores."""
@@ -198,26 +174,25 @@ class TestPaths:
     def test_rollup_artifact_never_appears_as_a_store(self, sweeps_root: Path) -> None:
         """Sibling-root law: the rollup Parquet is invisible to store discovery."""
         _seed_tree(sweeps_root)
-        assert rebuild_rollup(sweeps_root) is True
+        assert rr.rebuild_rollup(sweeps_root) is True
         rels = rr.current_store_relpaths(sweeps_root)
         assert all("sweeps_rollup" not in rel and "topk" not in rel for rel in rels)
 
 
 class TestImportGuard:
     def test_k_covers_max_top_n(self) -> None:
-        assert ROLLUP_K >= view.MAX_TOP_N
+        assert rr.ROLLUP_K >= view.MAX_TOP_N
 
     def test_guard_refuses_a_too_shallow_union(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(view, "MAX_TOP_N", ROLLUP_K + 1)
-        with pytest.raises(RollupRefusalError, match="MAX_TOP_N"):
+        monkeypatch.setattr(view, "MAX_TOP_N", rr.ROLLUP_K + 1)
+        with pytest.raises(rr.RollupRefusalError, match="MAX_TOP_N"):
             rr._require_k_covers_max_top_n()
 
     def test_guard_passes_at_the_boundary(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(view, "MAX_TOP_N", ROLLUP_K)
+        monkeypatch.setattr(view, "MAX_TOP_N", rr.ROLLUP_K)
         rr._require_k_covers_max_top_n()  # exactly-at-boundary is legal
 
-
-# ────── the derived union axes + code token ──────
+        # ────── the derived union axes + code token ──────
 
 
 @pytest.fixture
@@ -230,7 +205,7 @@ def reset_derivation() -> Any:
 
 class TestUnionAxes:
     def test_axes_are_the_14_rankables_desc_plus_min_dd_asc(self) -> None:
-        axes = union_axes()
+        axes = rr.union_axes()
         assert len(axes) == len(view.RANKABLE_COLUMNS) + 1
         by_field = {(a.field, a.descending) for a in axes}
         for col in view.RANKABLE_COLUMNS:
@@ -238,7 +213,7 @@ class TestUnionAxes:
         assert ("max_drawdown_pct", False) in by_field  # the min_dd_first primary
 
     def test_axes_are_memoised(self) -> None:
-        assert union_axes() is union_axes()
+        assert rr.union_axes() is rr.union_axes()
 
     def test_probe_directions(self) -> None:
         # min_dd_first: a LOWER max_drawdown_pct ranks first → ascending axis.
@@ -254,8 +229,8 @@ class TestUnionAxes:
     ) -> None:
         """De-inerting ``composite_score`` (not a ResultRow field) must refuse LOUDLY."""
         monkeypatch.setattr(view, "PRESET_INERT_AXES", ("max_consecutive_losses",))
-        with pytest.raises(RollupRefusalError, match="composite_score"):
-            union_axes()
+        with pytest.raises(rr.RollupRefusalError, match="composite_score"):
+            rr.union_axes()
 
     def test_lost_derivation_race_returns_the_winner(
         self, reset_derivation: None, monkeypatch: pytest.MonkeyPatch
@@ -270,36 +245,36 @@ class TestUnionAxes:
             return real(preset_name, field_name)
 
         monkeypatch.setattr(rr, "_probe_preset_axis_direction", _racing)
-        assert union_axes() is winner
+        assert rr.union_axes() is winner
 
 
 class TestCodeToken:
     def test_token_is_hex_and_memoised(self) -> None:
-        token = code_token()
+        token = rr.code_token()
         assert len(token) == 64
         int(token, 16)
-        assert code_token() == token
+        assert rr.code_token() == token
 
     def test_max_top_n_bump_moves_the_token(
         self, reset_derivation: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        baseline = code_token()
+        baseline = rr.code_token()
         rr._reset_derivation_caches()
         monkeypatch.setattr(view, "MAX_TOP_N", 400)
-        assert code_token() != baseline
+        assert rr.code_token() != baseline
 
     def test_rank_record_projection_edit_moves_the_token(
         self, reset_derivation: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        baseline = code_token()
+        baseline = rr.code_token()
         rr._reset_derivation_caches()
         monkeypatch.setattr(view, "preset_rank_record_source", lambda: "def edited(): ...")
-        assert code_token() != baseline
+        assert rr.code_token() != baseline
 
     def test_token_is_stable_across_resets(self, reset_derivation: None) -> None:
-        first = code_token()
+        first = rr.code_token()
         rr._reset_derivation_caches()
-        assert code_token() == first
+        assert rr.code_token() == first
 
     def test_lost_token_race_returns_the_winner(
         self, reset_derivation: None, monkeypatch: pytest.MonkeyPatch
@@ -313,16 +288,15 @@ class TestCodeToken:
             return real()
 
         monkeypatch.setattr(view, "preset_rank_record_source", _racing)
-        assert code_token() == "f" * 64
+        assert rr.code_token() == "f" * 64
 
-
-# ────── the trim ──────
+        # ────── the trim ──────
 
 
 class TestTrimToUnion:
     def test_small_set_returns_all_run_id_sorted(self) -> None:
         rows = [_row(seed=3), _row(seed=1), _row(seed=2)]
-        kept = trim_to_union(rows, 10)
+        kept = rr.trim_to_union(rows, 10)
         assert [r.run_id for r in kept] == sorted(r.run_id for r in rows)
 
     def test_union_contains_every_axis_top_k_prefix(self) -> None:
@@ -331,12 +305,12 @@ class TestTrimToUnion:
             for i in range(1, 9)
         ]
         k = 2
-        kept = trim_to_union(rows, k)
+        kept = rr.trim_to_union(rows, k)
         kept_ids = {r.run_id for r in kept}
         base = sorted(rows, key=lambda r: r.run_id)
         # The run_id-ASC prefix rides unconditionally.
         assert {r.run_id for r in base[:k]} <= kept_ids
-        for axis in union_axes():
+        for axis in rr.union_axes():
             ordered = sorted(base, key=lambda r: getattr(r, axis.field), reverse=axis.descending)
             assert {r.run_id for r in ordered[:k]} <= kept_ids
 
@@ -346,41 +320,40 @@ class TestTrimToUnion:
             _row(seed=i, sharpe=float(i % 5), net_pnl_paisa=10_000 - 7 * i) for i in range(1, 30)
         ]
         k = 5
-        kept_list = list(trim_to_union(rows, k))
-        for axis in union_axes():
+        kept_list = list(rr.trim_to_union(rows, k))
+        for axis in rr.union_axes():
             for pool in (rows, kept_list):
                 pool.sort(key=lambda r: r.run_id)
                 pool.sort(key=lambda r: getattr(r, axis.field), reverse=axis.descending)
             assert [r.run_id for r in rows[:k]] == [r.run_id for r in kept_list[:k]]
 
-
-# ────── era scan + AuditCursor ──────
+            # ────── era scan + AuditCursor ──────
 
 
 class TestSnapshotEras:
     def test_absent_chain_is_empty(self, sweeps_root: Path) -> None:
-        assert snapshot_eras(sweeps_root) == {}
-        assert snapshot_eras_with_cursor(sweeps_root) == ({}, CURSOR_START)
+        assert rr.snapshot_eras(sweeps_root) == {}
+        assert rr.snapshot_eras_with_cursor(sweeps_root) == ({}, rr.CURSOR_START)
 
     def test_full_scan_matches_the_cursor_variant(self, sweeps_root: Path) -> None:
         path = _write_audit(
             sweeps_root,
             [_start_payload(snapshot="s1"), _start_payload(snapshot="s2", tf="15m")],
         )
-        eras = snapshot_eras(sweeps_root)
-        eras_c, cursor = snapshot_eras_with_cursor(sweeps_root)
+        eras = rr.snapshot_eras(sweeps_root)
+        eras_c, cursor = rr.snapshot_eras_with_cursor(sweeps_root)
         assert eras == eras_c
         assert eras[("NIFTY", "5m", "bull", "A", 1)] == frozenset({"s1"})
         assert cursor.offset == path.stat().st_size
-        assert cursor.last_hash != CURSOR_START.last_hash
+        assert cursor.last_hash != rr.CURSOR_START.last_hash
 
     def test_non_sweep_start_and_malformed_payloads_are_skipped(self, sweeps_root: Path) -> None:
-        audit_path = sweeps_root.joinpath(*AUDIT_RELPATH)
+        audit_path = sweeps_root.joinpath(*rr.AUDIT_RELPATH)
         with AuditWriter.open(audit_path) as writer:
             writer.append(action="OTHER", subject="s", payload={"x": 1})
             writer.append(action="SWEEP_START", subject="s", payload={"instrument": "N"})
             writer.append(action="SWEEP_START", subject="s", payload=_start_payload(snapshot="ok"))
-        eras = snapshot_eras(sweeps_root)
+        eras = rr.snapshot_eras(sweeps_root)
         assert eras == {("NIFTY", "5m", "bull", "A", 1): frozenset({"ok"})}
 
     def test_committed_corruption_degrades_to_empty(self, sweeps_root: Path) -> None:
@@ -388,16 +361,16 @@ class TestSnapshotEras:
         with open(path, "ab") as f:
             f.write(b"not json\n")
         with structlog.testing.capture_logs() as logs:
-            assert snapshot_eras(sweeps_root) == {}
-            eras, cursor = snapshot_eras_with_cursor(sweeps_root)
+            assert rr.snapshot_eras(sweeps_root) == {}
+            eras, cursor = rr.snapshot_eras_with_cursor(sweeps_root)
         assert eras == {}
-        assert cursor == CURSOR_START
+        assert cursor == rr.CURSOR_START
         assert sum(1 for e in logs if e["event"] == "sweep_results.era_scan_failed") == 2
 
     def test_view_snapshot_eras_delegates_here(self, sweeps_root: Path) -> None:
         """§11 COMMON pin: the view's era scan is THIS module's function."""
         _write_audit(sweeps_root, [_start_payload(snapshot="s1")])
-        assert view._snapshot_eras(sweeps_root) == snapshot_eras(sweeps_root)
+        assert view._snapshot_eras(sweeps_root) == rr.snapshot_eras(sweeps_root)
         source = Path(view.__file__).read_text(encoding="utf-8")
         assert "from brutex.engine.results_rollup import snapshot_eras" in source
 
@@ -405,7 +378,7 @@ class TestSnapshotEras:
 class TestAuditCursor:
     def test_resume_reads_only_the_tail(self, sweeps_root: Path) -> None:
         _write_audit(sweeps_root, [_start_payload(snapshot="s1")])
-        _, cursor1 = snapshot_eras_with_cursor(sweeps_root)
+        _, cursor1 = rr.snapshot_eras_with_cursor(sweeps_root)
         path = _write_audit(sweeps_root, [_start_payload(snapshot="s2")])
         tail = list(rr._iter_entries_with_cursor(path, cursor1))
         assert len(tail) == 1
@@ -417,11 +390,11 @@ class TestAuditCursor:
         path = _write_audit(
             sweeps_root, [_start_payload(snapshot="s1"), _start_payload(snapshot="s2")]
         )
-        _, end = snapshot_eras_with_cursor(sweeps_root)
-        first = next(rr._iter_entries_with_cursor(path, CURSOR_START))
-        bad = AuditCursor(offset=first[1].offset, last_hash="0" * 64)
+        _, end = rr.snapshot_eras_with_cursor(sweeps_root)
+        first = next(rr._iter_entries_with_cursor(path, rr.CURSOR_START))
+        bad = rr.AuditCursor(offset=first[1].offset, last_hash="0" * 64)
         assert bad.last_hash != first[1].last_hash  # genesis ≠ entry-1 hash
-        with pytest.raises(AuditCursorMismatch, match="does not link"):
+        with pytest.raises(rr.AuditCursorMismatch, match="does not link"):
             list(rr._iter_entries_with_cursor(path, bad))
         assert end.offset == path.stat().st_size
 
@@ -430,7 +403,7 @@ class TestAuditCursor:
         committed = path.stat().st_size
         with open(path, "ab") as f:
             f.write(b'{"torn')  # no newline — the uncommitted tail
-        entries = list(rr._iter_entries_with_cursor(path, CURSOR_START))
+        entries = list(rr._iter_entries_with_cursor(path, rr.CURSOR_START))
         assert len(entries) == 1
         assert entries[0][1].offset == committed
 
@@ -440,7 +413,7 @@ class TestAuditCursor:
         )
         line1, line2 = path.read_bytes().splitlines(keepends=True)
         path.write_bytes(line1 + b"\n" + line2)
-        entries = list(rr._iter_entries_with_cursor(path, CURSOR_START))
+        entries = list(rr._iter_entries_with_cursor(path, rr.CURSOR_START))
         assert [e.payload["data_snapshot_hash"] for e, _ in entries] == ["s1", "s2"]
 
     def test_undecodable_committed_line_raises_audit_error(self, sweeps_root: Path) -> None:
@@ -448,25 +421,24 @@ class TestAuditCursor:
         with open(path, "ab") as f:
             f.write(b"\xff\xfe\n")
         with pytest.raises(AuditError, match="undecodable"):
-            list(rr._iter_entries_with_cursor(path, CURSOR_START))
+            list(rr._iter_entries_with_cursor(path, rr.CURSOR_START))
 
-
-# ────── the stamp ──────
+            # ────── the stamp ──────
 
 
 def _stamp_payload(sweeps_root: Path) -> dict[str, Any]:
-    return json.loads(rollup_stamp_path(sweeps_root).read_bytes())
+    return json.loads(rr.rollup_stamp_path(sweeps_root).read_bytes())
 
 
 def _rewrite_stamp(sweeps_root: Path, payload: dict[str, Any]) -> None:
-    rollup_stamp_path(sweeps_root).write_text(rr._dumps(payload) + "\n", encoding="utf-8")
+    rr.rollup_stamp_path(sweeps_root).write_text(rr._dumps(payload) + "\n", encoding="utf-8")
 
 
 class TestStampParse:
     def test_round_trip(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
-        assert rebuild_rollup(sweeps_root) is True
-        raw = rollup_stamp_path(sweeps_root).read_bytes()
+        assert rr.rebuild_rollup(sweeps_root) is True
+        raw = rr.rollup_stamp_path(sweeps_root).read_bytes()
         stamp = rr._parse_stamp(raw)
         assert stamp is not None
         # Re-render → identical bytes (the ONE deterministic JSON law).
@@ -503,23 +475,22 @@ class TestStampParse:
         note: str,
     ) -> None:
         _seed_tree(sweeps_root)
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         payload = _stamp_payload(sweeps_root)
         assert rr._parse_stamp(mutate(payload)) is None, note
 
-
-# ────── the V1-V5 classification ladder ──────
+        # ────── the V1-V5 classification ladder ──────
 
 
 class TestClassifyRollup:
     def _fresh_tree(self, sweeps_root: Path) -> str:
         _seed_tree(sweeps_root)
-        assert rebuild_rollup(sweeps_root) is True
+        assert rr.rebuild_rollup(sweeps_root) is True
         return _rev(sweeps_root.parent)
 
     def test_fresh(self, sweeps_root: Path) -> None:
         rev = self._fresh_tree(sweeps_root)
-        verdict = classify_rollup(sweeps_root, current_rev=rev)
+        verdict = rr.classify_rollup(sweeps_root, current_rev=rev)
         assert verdict.outcome == "fresh"
         assert verdict.reason == "fresh"
         assert verdict.behind_stores == 0
@@ -539,74 +510,74 @@ class TestClassifyRollup:
             return real(path)
 
         monkeypatch.setattr(rr, "_stat_token", _spy)
-        assert classify_rollup(sweeps_root, current_rev=rev).outcome == "fresh"
+        assert rr.classify_rollup(sweeps_root, current_rev=rev).outcome == "fresh"
         assert not any(p.suffix == ".parquet" and "sweeps_rollup" not in str(p) for p in calls)
 
     def test_absent(self, sweeps_root: Path) -> None:
-        verdict = classify_rollup(sweeps_root, current_rev="r")
+        verdict = rr.classify_rollup(sweeps_root, current_rev="r")
         assert (verdict.outcome, verdict.reason) == ("rebuild", "absent")
         assert verdict.rows is None and verdict.stamp is None
 
     def test_stamp_unreadable(self, sweeps_root: Path) -> None:
         self._fresh_tree(sweeps_root)
-        stamp = rollup_stamp_path(sweeps_root)
+        stamp = rr.rollup_stamp_path(sweeps_root)
         stamp.unlink()
         stamp.mkdir()  # read_bytes → IsADirectoryError (OSError, not FileNotFound)
-        verdict = classify_rollup(sweeps_root, current_rev="r")
+        verdict = rr.classify_rollup(sweeps_root, current_rev="r")
         assert verdict.reason == "stamp_unreadable"
 
     def test_stamp_invalid(self, sweeps_root: Path) -> None:
         self._fresh_tree(sweeps_root)
-        rollup_stamp_path(sweeps_root).write_bytes(b"junk")
-        assert classify_rollup(sweeps_root, current_rev="r").reason == "stamp_invalid"
+        rr.rollup_stamp_path(sweeps_root).write_bytes(b"junk")
+        assert rr.classify_rollup(sweeps_root, current_rev="r").reason == "stamp_invalid"
 
     def test_schema_version_mismatch(self, sweeps_root: Path) -> None:
         self._fresh_tree(sweeps_root)
         payload = _stamp_payload(sweeps_root)
         payload["schema_version"] = rr.ROLLUP_SCHEMA_VERSION + 1
         _rewrite_stamp(sweeps_root, payload)
-        assert classify_rollup(sweeps_root, current_rev="r").reason == "schema_version"
+        assert rr.classify_rollup(sweeps_root, current_rev="r").reason == "schema_version"
 
     def test_code_token_mismatch(self, sweeps_root: Path) -> None:
         self._fresh_tree(sweeps_root)
         payload = _stamp_payload(sweeps_root)
         payload["code_token"] = "0" * 64
         _rewrite_stamp(sweeps_root, payload)
-        assert classify_rollup(sweeps_root, current_rev="r").reason == "code_token"
+        assert rr.classify_rollup(sweeps_root, current_rev="r").reason == "code_token"
 
     def test_artifact_unreadable(self, sweeps_root: Path) -> None:
         self._fresh_tree(sweeps_root)
-        rollup_parquet_path(sweeps_root).unlink()
-        assert classify_rollup(sweeps_root, current_rev="r").reason == "artifact_unreadable"
+        rr.rollup_parquet_path(sweeps_root).unlink()
+        assert rr.classify_rollup(sweeps_root, current_rev="r").reason == "artifact_unreadable"
 
     def test_content_hash_mismatch_reads_as_absent(self, sweeps_root: Path) -> None:
         """The stamp-LAST crash law: bytes newer than the stamp ⇒ rebuild."""
         self._fresh_tree(sweeps_root)
-        with open(rollup_parquet_path(sweeps_root), "ab") as f:
+        with open(rr.rollup_parquet_path(sweeps_root), "ab") as f:
             f.write(b"x")
-        assert classify_rollup(sweeps_root, current_rev="r").reason == "content_hash"
+        assert rr.classify_rollup(sweeps_root, current_rev="r").reason == "content_hash"
 
     def test_artifact_undecodable(self, sweeps_root: Path) -> None:
         self._fresh_tree(sweeps_root)
         garbage = b"not a parquet file"
-        rollup_parquet_path(sweeps_root).write_bytes(garbage)
+        rr.rollup_parquet_path(sweeps_root).write_bytes(garbage)
         payload = _stamp_payload(sweeps_root)
         payload["content_hash"] = hashlib.sha256(garbage).hexdigest()
         _rewrite_stamp(sweeps_root, payload)
-        assert classify_rollup(sweeps_root, current_rev="r").reason == "artifact_undecodable"
+        assert rr.classify_rollup(sweeps_root, current_rev="r").reason == "artifact_undecodable"
 
     def test_store_removed_rebuilds(self, sweeps_root: Path) -> None:
         """A removal is the ONE event that can promote a trimmed row — rebuild."""
         rev = self._fresh_tree(sweeps_root)
         removed = next(iter(rr.current_store_relpaths(sweeps_root)))
         (sweeps_root / removed).unlink()
-        verdict = classify_rollup(sweeps_root, current_rev=rev)
+        verdict = rr.classify_rollup(sweeps_root, current_rev=rev)
         assert (verdict.outcome, verdict.reason) == ("rebuild", "store_removed")
 
     def test_additions_only_stale_serves_with_behind_count(self, sweeps_root: Path) -> None:
         self._fresh_tree(sweeps_root)
         _write_store(sweeps_root, [_row(seed=9, tf="15m")], tf="15m", digest="c" * 16)
-        verdict = classify_rollup(sweeps_root, current_rev=_rev(sweeps_root.parent))
+        verdict = rr.classify_rollup(sweeps_root, current_rev=_rev(sweeps_root.parent))
         assert (verdict.outcome, verdict.reason) == ("stale", "behind")
         assert verdict.behind_stores == 1
         assert verdict.rows is not None  # the LAST-VALID rollup still serves
@@ -615,7 +586,7 @@ class TestClassifyRollup:
         """Set-equal + rev moved + tokens intact — the audit-append shape."""
         self._fresh_tree(sweeps_root)
         _write_audit(sweeps_root, [_start_payload(snapshot="snap-b")])
-        verdict = classify_rollup(sweeps_root, current_rev=_rev(sweeps_root.parent))
+        verdict = rr.classify_rollup(sweeps_root, current_rev=_rev(sweeps_root.parent))
         assert (verdict.outcome, verdict.reason) == ("stale", "revision_drift")
         assert verdict.behind_stores == 0
 
@@ -626,7 +597,7 @@ class TestClassifyRollup:
         store = ResultsStore.load(sweeps_root / rel)
         store.append(_row(seed=77, sharpe=9.0))
         store.flush()
-        verdict = classify_rollup(sweeps_root, current_rev=_rev(sweeps_root.parent))
+        verdict = rr.classify_rollup(sweeps_root, current_rev=_rev(sweeps_root.parent))
         assert (verdict.outcome, verdict.reason) == ("rebuild", "store_rewritten")
 
     def test_store_stat_failure_rebuilds(
@@ -638,7 +609,7 @@ class TestClassifyRollup:
             raise PermissionError(f"denied: {path}")
 
         monkeypatch.setattr(rr, "_stat_token", _boom)
-        verdict = classify_rollup(sweeps_root, current_rev="moved-rev")
+        verdict = rr.classify_rollup(sweeps_root, current_rev="moved-rev")
         assert (verdict.outcome, verdict.reason) == ("rebuild", "store_stat_failed")
 
     def test_conflict_suspect_stale_serves(self, sweeps_root: Path) -> None:
@@ -646,57 +617,56 @@ class TestClassifyRollup:
         payload = _stamp_payload(sweeps_root)
         payload["flags"]["conflict_suspect"] = True
         _rewrite_stamp(sweeps_root, payload)
-        verdict = classify_rollup(sweeps_root, current_rev=rev)
+        verdict = rr.classify_rollup(sweeps_root, current_rev=rev)
         assert (verdict.outcome, verdict.reason) == ("stale", "conflict_suspect")
         assert verdict.rows is not None
 
-
-# ────── the write path + Hooks B/C ──────
+        # ────── the write path + Hooks B/C ──────
 
 
 class TestWriteAndRebuild:
     def test_rebuild_writes_parquet_then_stamp(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
-        assert rebuild_rollup(sweeps_root) is True
-        parquet = rollup_parquet_path(sweeps_root)
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        assert rr.rebuild_rollup(sweeps_root) is True
+        parquet = rr.rollup_parquet_path(sweeps_root)
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.content_hash == hashlib.sha256(parquet.read_bytes()).hexdigest()
-        assert stamp.code_token == code_token()
+        assert stamp.code_token == rr.code_token()
         assert stamp.rev == _rev(sweeps_root.parent)
         assert stamp.total_rows == 3
         assert stamp.total_rows_exact is True
         assert stamp.store_count == 2
         assert stamp.conflict_suspect is False
         assert set(stamp.stores) == set(rr.current_store_relpaths(sweeps_root))
-        chain = sweeps_root.joinpath(*AUDIT_RELPATH)
+        chain = sweeps_root.joinpath(*rr.AUDIT_RELPATH)
         assert stamp.audit_offset == chain.stat().st_size
         assert stamp.audit_chain_token == rr._stat_token(chain)
         assert stamp.instruments == ("BANKNIFTY", "NIFTY")
         assert stamp.snapshot_hashes == ("snap-a",)
 
     def test_zero_store_scan_writes_nothing(self, sweeps_root: Path) -> None:
-        assert rebuild_rollup(sweeps_root) is False
-        assert not rollup_root(sweeps_root).exists()
+        assert rr.rebuild_rollup(sweeps_root) is False
+        assert not rr.rollup_root(sweeps_root).exists()
 
     def test_rollup_write_never_moves_the_sweeps_revision(self, sweeps_root: Path) -> None:
         """THE sibling-root pin: a rollup write cannot self-invalidate."""
         _seed_tree(sweeps_root)
         before = _rev(sweeps_root.parent)
-        assert rebuild_rollup(sweeps_root) is True
+        assert rr.rebuild_rollup(sweeps_root) is True
         assert _rev(sweeps_root.parent) == before
         # And a REBUILD over the existing rollup is equally invisible.
-        assert rebuild_rollup(sweeps_root) is True
+        assert rr.rebuild_rollup(sweeps_root) is True
         assert _rev(sweeps_root.parent) == before
 
     def test_rebuild_is_deterministic(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
-        rebuild_rollup(sweeps_root)
-        first = rollup_parquet_path(sweeps_root).read_bytes()
-        first_stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
-        rebuild_rollup(sweeps_root)
-        assert rollup_parquet_path(sweeps_root).read_bytes() == first
-        second_stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        rr.rebuild_rollup(sweeps_root)
+        first = rr.rollup_parquet_path(sweeps_root).read_bytes()
+        first_stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
+        rr.rebuild_rollup(sweeps_root)
+        assert rr.rollup_parquet_path(sweeps_root).read_bytes() == first
+        second_stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert first_stamp is not None and second_stamp is not None
         assert replace(first_stamp, produced_at_utc="") == replace(second_stamp, produced_at_utc="")
 
@@ -730,8 +700,8 @@ class TestWriteAndRebuild:
     def test_best_effort_rebuild_success(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
         scan = view.load_sweep_scan_tree(sweeps_root)
-        rebuild_rollup_from_scan_best_effort(sweeps_root, scan)
-        assert rollup_parquet_path(sweeps_root).exists()
+        rr.rebuild_rollup_from_scan_best_effort(sweeps_root, scan)
+        assert rr.rollup_parquet_path(sweeps_root).exists()
 
     def test_best_effort_rebuild_failure_is_fenced(
         self, sweeps_root: Path, monkeypatch: pytest.MonkeyPatch
@@ -744,7 +714,7 @@ class TestWriteAndRebuild:
 
         monkeypatch.setattr(rr, "rebuild_rollup_from_scan", _boom)
         with structlog.testing.capture_logs() as logs:
-            rebuild_rollup_from_scan_best_effort(sweeps_root, scan)  # never raises
+            rr.rebuild_rollup_from_scan_best_effort(sweeps_root, scan)  # never raises
         assert any(e["event"] == "results_rollup.rebuild_failed" for e in logs)
 
     def test_best_effort_rebuild_carve_out_propagates(
@@ -758,10 +728,9 @@ class TestWriteAndRebuild:
 
         monkeypatch.setattr(rr, "rebuild_rollup_from_scan", _interrupt)
         with pytest.raises(KeyboardInterrupt):
-            rebuild_rollup_from_scan_best_effort(sweeps_root, scan)
+            rr.rebuild_rollup_from_scan_best_effort(sweeps_root, scan)
 
-
-# ────── Hook A: the fenced merge hook ──────
+            # ────── Hook A: the fenced merge hook ──────
 
 
 def _grid() -> Any:
@@ -789,44 +758,44 @@ class TestRollupMergeHook:
         """Incremental Hook-A bytes == the Hook-B full-rebuild bytes."""
         _seed_tree(sweeps_root)
         new = _write_store(sweeps_root, [_row(seed=5, tf="15m")], tf="15m", digest="d" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         with structlog.testing.capture_logs() as logs:
             hook.merge_paths([new])
         assert hook.enabled is True
         assert any(e["event"] == "results_rollup.seed_full_fold" for e in logs)
-        incremental = rollup_parquet_path(sweeps_root).read_bytes()
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        incremental = rr.rollup_parquet_path(sweeps_root).read_bytes()
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.total_rows == 4 and stamp.total_rows_exact is True
-        assert rebuild_rollup(sweeps_root) is True
-        assert rollup_parquet_path(sweeps_root).read_bytes() == incremental
+        assert rr.rebuild_rollup(sweeps_root) is True
+        assert rr.rollup_parquet_path(sweeps_root).read_bytes() == incremental
 
     def test_seed_from_disk_skips_the_full_fold(
         self, sweeps_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed_tree(sweeps_root)
-        assert rebuild_rollup(sweeps_root) is True
+        assert rr.rebuild_rollup(sweeps_root) is True
 
         def _forbidden(root: Path) -> Any:
             raise AssertionError("full fold must not run on a valid intact rollup")
 
         monkeypatch.setattr(view, "load_sweep_scan_tree", _forbidden)
         new = _write_store(sweeps_root, [_row(seed=6, tf="15m")], tf="15m", digest="e" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([new])
         assert hook.enabled is True
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None and stamp.total_rows == 4
 
     def test_seed_from_disk_catches_up_unstamped_stores(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         # An out-of-band store lands AFTER the stamp (not merged directly).
         _write_store(sweeps_root, [_row(seed=7, tf="30m")], tf="30m", digest="f" * 16)
         new = _write_store(sweeps_root, [_row(seed=8, tf="15m")], tf="15m", digest="e" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([new])
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.total_rows == 5 and stamp.store_count == 4
 
@@ -834,26 +803,26 @@ class TestRollupMergeHook:
         self, sweeps_root: Path
     ) -> None:
         _seed_tree(sweeps_root)
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         rel = next(iter(rr.current_store_relpaths(sweeps_root)))
         store = ResultsStore.load(sweeps_root / rel)
         store.append(_row(seed=42, sharpe=8.0))
         store.flush()
         new = _write_store(sweeps_root, [_row(seed=9, tf="15m")], tf="15m", digest="e" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         with structlog.testing.capture_logs() as logs:
             hook.merge_paths([new])
         assert any(e["event"] == "results_rollup.seed_full_fold" for e in logs)
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None and stamp.total_rows == 5
 
     def test_seed_from_disk_unsound_after_removal(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         removed = next(iter(rr.current_store_relpaths(sweeps_root)))
         (sweeps_root / removed).unlink()
         new = _write_store(sweeps_root, [_row(seed=9, tf="15m")], tf="15m", digest="e" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         with structlog.testing.capture_logs() as logs:
             hook.merge_paths([new])
         assert any(e["event"] == "results_rollup.seed_full_fold" for e in logs)
@@ -861,11 +830,11 @@ class TestRollupMergeHook:
     def test_idempotent_re_merge_is_a_no_op(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
         new = _write_store(sweeps_root, [_row(seed=5, tf="15m")], tf="15m", digest="d" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([new])
-        first = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        first = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         hook.merge_paths([new])  # byte-unchanged store → the idempotent short-circuit
-        second = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        second = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert first is not None and second is not None
         assert second.total_rows == first.total_rows == 4
         assert second.total_rows_exact is True
@@ -876,7 +845,7 @@ class TestRollupMergeHook:
         """A KNOWN store re-flushed with a new row re-merges; exact stays True."""
         _seed_tree(sweeps_root)
         new = _write_store(sweeps_root, [_row(seed=5, tf="15m")], tf="15m", digest="d" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([new])
         _write_store(
             sweeps_root,
@@ -885,7 +854,7 @@ class TestRollupMergeHook:
             digest="d" * 16,
         )
         hook.merge_paths([new])
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.total_rows == 5 and stamp.total_rows_exact is True
 
@@ -893,12 +862,12 @@ class TestRollupMergeHook:
         """The documented §h conservative signal — never a fabricated exactness."""
         shared = _row(seed=1, sharpe=2.0)
         first = _write_store(sweeps_root, [shared])
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([first])  # the seed fold sees ONLY the first store
         dup = _write_store(sweeps_root, [shared], tf="15m", digest="d" * 16)
         hook.merge_paths([dup])  # an UNKNOWN store colliding on a KEPT run_id
         assert hook.enabled is True  # identical rows are the append no-op branch
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.total_rows == 1
         assert stamp.total_rows_exact is False
@@ -906,20 +875,20 @@ class TestRollupMergeHook:
     def test_vix_backfill_branch_merges_without_conflict(self, sweeps_root: Path) -> None:
         base = _row(seed=1, vix_mean=None)
         _write_store(sweeps_root, [base])
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         enriched = _write_store(
             sweeps_root, [replace(base, vix_mean=14.5)], tf="15m", digest="d" * 16
         )
         hook.merge_paths([enriched])
         assert hook.enabled is True
-        rows = ResultsStore.load(rollup_parquet_path(sweeps_root)).rows()
+        rows = ResultsStore.load(rr.rollup_parquet_path(sweeps_root)).rows()
         assert len(rows) == 1
         assert rows[0].vix_mean == 14.5  # the None→value backfill union
 
     def test_conflict_latches_the_fence_and_stamps_suspect(self, sweeps_root: Path) -> None:
         """BLOCKER-1: a cross-store conflict NEVER raises into the grid."""
         _write_store(sweeps_root, [_row(seed=1, net_pnl_paisa=100)])
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         first = _write_store(sweeps_root, [_row(seed=2)], tf="30m", digest="e" * 16)
         hook.merge_paths([first])  # a valid rollup lands first
         conflicting = _write_store(
@@ -931,19 +900,19 @@ class TestRollupMergeHook:
         assert len(failures) == 1
         assert failures[0]["kind"] == "conflict"
         assert hook.enabled is False
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None and stamp.conflict_suspect is True
         # The latched hook is a pure no-op thereafter (no second failure log).
         with structlog.testing.capture_logs() as logs2:
             hook.merge_paths([conflicting])
         assert not any(e["event"] == "results_rollup.merge_failed" for e in logs2)
         # /results then stale-serves with the conflict note — never a blackout.
-        verdict = classify_rollup(sweeps_root, current_rev=_rev(sweeps_root.parent))
+        verdict = rr.classify_rollup(sweeps_root, current_rev=_rev(sweeps_root.parent))
         assert (verdict.outcome, verdict.reason) == ("stale", "conflict_suspect")
 
     def test_missing_store_is_a_conflict_kind_failure(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         with structlog.testing.capture_logs() as logs:
             hook.merge_paths([sweeps_root / "NIFTY" / "5m" / "missing.parquet"])
         failures = [e for e in logs if e["event"] == "results_rollup.merge_failed"]
@@ -960,7 +929,7 @@ class TestRollupMergeHook:
             raise OSError("flock timeout")
 
         monkeypatch.setattr(rr, "_write_state", _boom)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         with structlog.testing.capture_logs() as logs:
             hook.merge_paths([new])
         failures = [e for e in logs if e["event"] == "results_rollup.merge_failed"]
@@ -977,7 +946,7 @@ class TestRollupMergeHook:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(rr, "_write_state", _interrupt)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         with pytest.raises(KeyboardInterrupt):
             hook.merge_paths([new])
         assert hook.enabled is True  # the carve-out re-raises BEFORE the latch
@@ -1002,28 +971,28 @@ class TestRollupMergeHook:
         store = ResultsStore(path=dest)
         store.extend([_row(seed=11, tf="1minute")])
         store.flush()
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=grid)
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=grid)
         hook.merge_tuple(tuple_)
         assert hook.enabled is True
-        rows = ResultsStore.load(rollup_parquet_path(sweeps_root)).rows()
+        rows = ResultsStore.load(rr.rollup_parquet_path(sweeps_root)).rows()
         assert [r.run_id for r in rows] == [_run_id(11)]
 
     def test_mark_conflict_suspect_without_a_rollup_is_a_no_op(self, sweeps_root: Path) -> None:
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook._mark_conflict_suspect()  # loaded.stamp is None → return
-        assert not rollup_root(sweeps_root).exists()
+        assert not rr.rollup_root(sweeps_root).exists()
 
     def test_mark_conflict_suspect_write_failure_is_fenced(
         self, sweeps_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed_tree(sweeps_root)
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
 
         def _boom(dest: Path, write: Any) -> None:
             raise OSError("enospc")
 
         monkeypatch.setattr(rr, "atomic_write_simple", _boom)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         with structlog.testing.capture_logs() as logs:
             hook._mark_conflict_suspect()
         assert any(e["event"] == "results_rollup.conflict_stamp_failed" for e in logs)
@@ -1035,7 +1004,7 @@ class TestRollupMergeHook:
             raise MemoryError
 
         monkeypatch.setattr(rr, "_load_rollup", _oom)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         with pytest.raises(MemoryError):
             hook._mark_conflict_suspect()
 
@@ -1047,15 +1016,15 @@ class TestMergeHookEraFold:
         """MINOR-1 teeth: the incremental fold never re-runs the full era scan."""
         _seed_tree(sweeps_root)
         first = _write_store(sweeps_root, [_row(seed=5, tf="15m")], tf="15m", digest="d" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([first])  # seeds via the full fold (chain consumed once)
         _write_audit(sweeps_root, [_start_payload(snapshot="snap-tail")])
         # If the fold fell back to a FULL rescan it would see this stub's junk.
-        monkeypatch.setattr(rr, "snapshot_eras_with_cursor", lambda _root: ({}, CURSOR_START))
+        monkeypatch.setattr(rr, "snapshot_eras_with_cursor", lambda _root: ({}, rr.CURSOR_START))
         second = _write_store(sweeps_root, [_row(seed=6, tf="30m")], tf="30m", digest="e" * 16)
         hook.merge_paths([second])
         assert hook.enabled is True
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.eras[("NIFTY", "5m", "bull", "A", 1)] == frozenset({"snap-a", "snap-tail"})
         assert "snap-tail" in stamp.snapshot_hashes
@@ -1065,10 +1034,10 @@ class TestMergeHookEraFold:
     ) -> None:
         _seed_tree(sweeps_root)
         first = _write_store(sweeps_root, [_row(seed=5, tf="15m")], tf="15m", digest="d" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([first])
 
-        def _forbidden(path: Path, cursor: AuditCursor) -> Any:
+        def _forbidden(path: Path, cursor: rr.AuditCursor) -> Any:
             raise AssertionError("an unchanged chain must not be re-read")
 
         monkeypatch.setattr(rr, "_iter_entries_with_cursor", _forbidden)
@@ -1080,9 +1049,9 @@ class TestMergeHookEraFold:
         _seed_tree(sweeps_root)
         _write_audit(sweeps_root, [_start_payload(snapshot="snap-extra")])
         first = _write_store(sweeps_root, [_row(seed=5, tf="15m")], tf="15m", digest="d" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([first])
-        chain = sweeps_root.joinpath(*AUDIT_RELPATH)
+        chain = sweeps_root.joinpath(*rr.AUDIT_RELPATH)
         first_line = chain.read_bytes().splitlines(keepends=True)[0]
         chain.write_bytes(first_line)  # shrink below the stamped offset
         second = _write_store(sweeps_root, [_row(seed=6, tf="30m")], tf="30m", digest="e" * 16)
@@ -1090,7 +1059,7 @@ class TestMergeHookEraFold:
             hook.merge_paths([second])
         assert any(e["event"] == "results_rollup.era_tail_rescan" for e in logs)
         assert hook.enabled is True
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.eras[("NIFTY", "5m", "bull", "A", 1)] == frozenset({"snap-a"})
 
@@ -1098,9 +1067,9 @@ class TestMergeHookEraFold:
         """A same-or-longer FOREIGN chain fails linkage → warn + full rescan."""
         _seed_tree(sweeps_root)
         first = _write_store(sweeps_root, [_row(seed=5, tf="15m")], tf="15m", digest="d" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([first])
-        chain = sweeps_root.joinpath(*AUDIT_RELPATH)
+        chain = sweeps_root.joinpath(*rr.AUDIT_RELPATH)
         chain.unlink()
         _write_audit(
             sweeps_root,
@@ -1114,7 +1083,7 @@ class TestMergeHookEraFold:
         with structlog.testing.capture_logs() as logs:
             hook.merge_paths([second])
         assert any(e["event"] == "results_rollup.era_tail_rescan" for e in logs)
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.eras[("NIFTY", "5m", "bull", "A", 1)] == frozenset(
             {"fresh-1", "fresh-2", "fresh-3"}
@@ -1123,18 +1092,17 @@ class TestMergeHookEraFold:
     def test_deleted_chain_resets_the_eras(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
         first = _write_store(sweeps_root, [_row(seed=5, tf="15m")], tf="15m", digest="d" * 16)
-        hook = RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
+        hook = rr.RollupMergeHook(sweeps_root=sweeps_root, grid=_grid())
         hook.merge_paths([first])
-        sweeps_root.joinpath(*AUDIT_RELPATH).unlink()
+        sweeps_root.joinpath(*rr.AUDIT_RELPATH).unlink()
         second = _write_store(sweeps_root, [_row(seed=6, tf="30m")], tf="30m", digest="e" * 16)
         hook.merge_paths([second])
-        stamp = rr._parse_stamp(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = rr._parse_stamp(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp is not None
         assert stamp.eras == {}
         assert stamp.audit_offset == 0
 
-
-# ────── the fence through a REAL grid driver ──────
+        # ────── the fence through a REAL grid driver ──────
 
 
 class TestFenceThroughRealGrid:
@@ -1176,7 +1144,7 @@ class TestFenceThroughRealGrid:
 
         grid = _grid()
 
-        def _run(root: Path, hook: RollupMergeHook | None) -> Any:
+        def _run(root: Path, hook: rr.RollupMergeHook | None) -> Any:
             with AuditWriter.open(root / "audit" / "sweep-all.jsonl") as audit:
                 return run_sweep_grid(
                     grid,
@@ -1199,7 +1167,7 @@ class TestFenceThroughRealGrid:
             raise OSError("injected mid-grid merge failure")
 
         monkeypatch.setattr(rr, "_write_state", _boom)
-        hook = RollupMergeHook(sweeps_root=poisoned_root, grid=grid)
+        hook = rr.RollupMergeHook(sweeps_root=poisoned_root, grid=grid)
         with structlog.testing.capture_logs() as logs:
             poisoned = _run(poisoned_root, hook)
         failures = [e for e in logs if e["event"] == "results_rollup.merge_failed"]
@@ -1245,7 +1213,7 @@ class TestFenceThroughRealGrid:
         grid = _grid()
         root = tmp_path / "sweeps"
         root.mkdir()
-        hook = RollupMergeHook(sweeps_root=root, grid=grid)
+        hook = rr.RollupMergeHook(sweeps_root=root, grid=grid)
         with AuditWriter.open(root / "audit" / "sweep-all.jsonl") as audit:
             summary = run_sweep_grid(
                 grid,
@@ -1257,11 +1225,10 @@ class TestFenceThroughRealGrid:
             )
         assert summary.persisted > 0
         assert hook.enabled is True
-        rows = ResultsStore.load(rollup_parquet_path(root)).rows()
+        rows = ResultsStore.load(rr.rollup_parquet_path(root)).rows()
         assert len(rows) == summary.persisted
 
-
-# ────── the CLI Hook-B reconcile fence ──────
+        # ────── the CLI Hook-B reconcile fence ──────
 
 
 class TestCliReconcile:
@@ -1273,7 +1240,7 @@ class TestCliReconcile:
         _seed_tree(sweeps_root)
         assert _run_results_rollup_reconcile(out_root=sweeps_root) is True
         assert "reconciled" in capsys.readouterr().out
-        assert rollup_parquet_path(sweeps_root).exists()
+        assert rr.rollup_parquet_path(sweeps_root).exists()
 
     def test_zero_store_prints_skipped(
         self, sweeps_root: Path, capsys: pytest.CaptureFixture[str]
@@ -1305,19 +1272,18 @@ class TestCliReconcile:
         with pytest.raises(KeyboardInterrupt):
             _run_results_rollup_reconcile(out_root=sweeps_root, rebuild=_interrupt)
 
-
-# ────── LogGate ──────
+            # ────── LogGate ──────
 
 
 class TestLogGate:
     def test_once_per_key(self) -> None:
-        gate = LogGate()
+        gate = rr.LogGate()
         assert gate.should_emit(("a", "b")) is True
         assert gate.should_emit(("a", "b")) is False
         assert gate.should_emit(("a", "c")) is True
 
     def test_lru_eviction_re_emits(self) -> None:
-        gate = LogGate(capacity=2)
+        gate = rr.LogGate(capacity=2)
         assert gate.should_emit(("k1",)) is True
         assert gate.should_emit(("k2",)) is True
         assert gate.should_emit(("k1",)) is False  # refreshed (move_to_end)
@@ -1327,7 +1293,7 @@ class TestLogGate:
         assert gate.should_emit(("k1",)) is True  # evicted by k2's re-entry
 
     def test_clear_degraded_reports_once(self) -> None:
-        gate = LogGate()
+        gate = rr.LogGate()
         assert gate.clear_degraded() is False
         gate.should_emit(("x",))
         assert gate.clear_degraded() is True
@@ -1335,10 +1301,9 @@ class TestLogGate:
 
     def test_capacity_validation(self) -> None:
         with pytest.raises(ValueError, match="capacity"):
-            LogGate(capacity=0)
+            rr.LogGate(capacity=0)
 
-
-# ────── verify-insulation + workflow-wiring pins ──────
+            # ────── verify-insulation + workflow-wiring pins ──────
 
 
 def _repo_root() -> Path:
@@ -1358,7 +1323,7 @@ class TestVerifyInsulation:
 
     def test_rollup_files_live_outside_any_sweeps_recursive_glob(self, sweeps_root: Path) -> None:
         _seed_tree(sweeps_root)
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         walked = {p.name for p in sweeps_root.glob("**/*.parquet")}
         assert "topk.parquet" not in walked
 
@@ -1376,22 +1341,23 @@ class TestMutationWorkflowWiring:
         ci = (_repo_root() / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         assert "--cov=brutex.engine.results_rollup" in ci
 
-
-# ────── misc verdict shape ──────
+        # ────── misc verdict shape ──────
 
 
 def test_rollup_verdict_is_frozen() -> None:
-    verdict = RollupVerdict(outcome="fresh", reason="fresh", rows=(), stamp=None, behind_stores=0)
+    verdict = rr.RollupVerdict(
+        outcome="fresh", reason="fresh", rows=(), stamp=None, behind_stores=0
+    )
     with pytest.raises(AttributeError):
         verdict.reason = "x"  # type: ignore[misc]
 
 
 def test_stamp_dataclass_holds_the_section_b_shape(sweeps_root: Path) -> None:
     _seed_tree(sweeps_root)
-    rebuild_rollup(sweeps_root)
+    rr.rebuild_rollup(sweeps_root)
     payload = _stamp_payload(sweeps_root)
     assert payload["stage"] == rr.ROLLUP_STAGE
-    assert payload["k"] == ROLLUP_K
+    assert payload["k"] == rr.ROLLUP_K
     assert set(payload) == {
         "stage",
         "schema_version",
@@ -1408,4 +1374,108 @@ def test_stamp_dataclass_holds_the_section_b_shape(sweeps_root: Path) -> None:
         "eras",
         "flags",
     }
-    assert isinstance(RollupStamp, type)
+    assert isinstance(rr.RollupStamp, type)
+
+
+class TestRankValueSourceToken:
+    """LOW-1 (PR #1436 hostile review): the rank_by projection joins the token."""
+
+    def test_rank_value_source_is_the_projection_source(self) -> None:
+        source = view.rank_value_source()
+        assert source.lstrip().startswith("def _rank_value(")
+        assert "getattr(row, rank_by)" in source
+
+    def test_rank_value_projection_edit_moves_the_token(
+        self, reset_derivation: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A semantic edit to ``_rank_value`` must force a rollup rebuild."""
+        baseline = rr.code_token()
+        rr._reset_derivation_caches()
+        monkeypatch.setattr(view, "rank_value_source", lambda: "def edited(): ...")
+        assert rr.code_token() != baseline
+
+
+class TestInertAxesAgreement:
+    """LOW-2 (PR #1436 hostile review): PRESET_INERT_AXES must AGREE with the
+    ``_preset_rank_record`` projection's constant-filled fields — a dev
+    populating an inert-listed field from the row (de-inerting the projection
+    while leaving the list stale) must fail HERE loudly, or the union superset
+    would silently stop covering a live ordering axis."""
+
+    def test_every_inert_axis_is_constant_filled_by_the_projection(self) -> None:
+        from brutex.ranking.presets import RankRecord
+
+        row_a = _row(seed=1, sharpe=0.1, max_drawdown_pct=0.01, net_pnl_paisa=1)
+        row_b = _row(seed=2, sharpe=9.9, max_drawdown_pct=0.99, net_pnl_paisa=9_999_999)
+        rec_a = view._preset_rank_record(row_a)
+        rec_b = view._preset_rank_record(row_b)
+        rank_fields = {f.name for f in __import__("dataclasses").fields(RankRecord)}
+        for name in view.PRESET_INERT_AXES:
+            assert name in rank_fields, f"inert axis {name!r} is not a RankRecord field"
+            assert getattr(rec_a, name) == getattr(rec_b, name), (
+                f"PRESET_INERT_AXES lists {name!r} but the projection populates it "
+                f"from the row — de-inerted without a union axis "
+                f"(DEC-RESULTS-TOPK-ROLLUP-001 LOW-2)"
+            )
+
+    def test_non_inert_axes_really_vary_with_the_row(self) -> None:
+        """The guard's teeth are not vacuous: live axes DO differ across rows."""
+        rec_a = view._preset_rank_record(_row(seed=1, max_drawdown_pct=0.01))
+        rec_b = view._preset_rank_record(_row(seed=2, max_drawdown_pct=0.99))
+        assert rec_a.max_drawdown_pct != rec_b.max_drawdown_pct
+
+
+class TestImportOrderInsulation:
+    """The CodeQL bidirectional-cycle fix (PR #1436 alerts 954/955): fresh
+    subprocesses import the two modules in BOTH orders and prove the shared
+    LogGate resolves to the ONE common leaf either way — plus source pins
+    that keep the module-level cross-imports dead."""
+
+    @staticmethod
+    def _run(code: str) -> None:
+        import subprocess
+        import sys
+
+        subprocess.run([sys.executable, "-c", code], check=True, timeout=120)
+
+    def test_rollup_first_then_view(self) -> None:
+        self._run(
+            "import brutex.engine.results_rollup as rollup\n"
+            "import brutex.dashboard.sweep_results_view as view\n"
+            "from brutex.observability.log_gate import LogGate\n"
+            "assert rollup.LogGate is LogGate and view.LogGate is LogGate\n"
+            "assert callable(view.load_sweep_scan_via_rollup)\n"
+            "assert len(rollup.union_axes()) >= 15\n"
+        )
+
+    def test_view_first_then_rollup(self) -> None:
+        self._run(
+            "import brutex.dashboard.sweep_results_view as view\n"
+            "import brutex.engine.results_rollup as rollup\n"
+            "from brutex.observability.log_gate import LogGate\n"
+            "assert rollup.LogGate is LogGate and view.LogGate is LogGate\n"
+            "assert rollup.code_token()\n"
+        )
+
+    def test_view_never_imports_the_rollup_at_module_level(self) -> None:
+        """Source pin: every view→rollup import stays function-local."""
+        source = Path(view.__file__).read_text(encoding="utf-8")
+        for line in source.splitlines():
+            if "from brutex.engine.results_rollup import" in line or (
+                "import brutex.engine.results_rollup" in line
+            ):
+                assert line.startswith((" ", "\t")), (
+                    f"module-level results_rollup import in sweep_results_view: {line!r} "
+                    "(the CodeQL alert-955 cycle would return)"
+                )
+
+    def test_engine_never_imports_the_dashboard_at_module_level(self) -> None:
+        """Source pin: results_rollup has NO module-level brutex.dashboard
+        import — not even TYPE_CHECKING (alert 954; ScanLike is the seam)."""
+        source = Path(rr.__file__).read_text(encoding="utf-8")
+        for line in source.splitlines():
+            if "brutex.dashboard" in line and ("import" in line):
+                assert line.startswith((" ", "\t")), (
+                    f"module-level dashboard import in results_rollup: {line!r}"
+                )
+        assert "class ScanLike(Protocol)" in source

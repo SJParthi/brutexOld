@@ -168,11 +168,14 @@ class TestRollupServeFlatness:
         _build_lake(large, stores=100, rows_per_store=10)
         assert rebuild_rollup(small / SWEEPS_DIRNAME) is True
         assert rebuild_rollup(large / SWEEPS_DIRNAME) is True
-        # Warm both paths once (filesystem cache + import warmup).
-        _served_poll(small)
-        _served_poll(large)
-        t_small = _best_of(3, lambda: _served_poll(small))
-        t_large = _best_of(3, lambda: _served_poll(large))
+        # Warm both paths (filesystem cache + import warmup); best-of-5 keeps
+        # the ratio robust when a combined-suite run trashes the page cache
+        # (observed flake class: the SMALL side catching a slow first stat).
+        for _ in range(2):
+            _served_poll(small)
+            _served_poll(large)
+        t_small = _best_of(5, lambda: _served_poll(small))
+        t_large = _best_of(5, lambda: _served_poll(large))
         ratio = t_large / t_small if t_small > 0 else 1.0
         assert ratio <= metadata_sweep_ceiling(8.0), (
             f"rollup-served poll scaled with store count: {t_small * 1e3:.2f} ms @10 stores → "

@@ -87,12 +87,11 @@ import hashlib
 import json
 import os
 import threading
-from collections import OrderedDict
 from dataclasses import dataclass, replace
 from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 import structlog
 
@@ -105,6 +104,12 @@ from brutex.engine.results_store import (
 )
 from brutex.models import BruteXError
 
+# LogGate lives in a COMMON stdlib-only LEAF (re-exported here for the rollup
+# API): the dashboard serve path consumes the SAME class from the leaf, so
+# neither side imports the other for it — the CodeQL bidirectional-cycle fix
+# (PR #1436; the #1533 leaf-homing pattern).
+from brutex.observability.log_gate import LogGate
+
 # The audit module is consumed via the MODULE attribute (late binding), never
 # a from-import of `iter_entries`: the scan-split suite's zero-audit-reads spy
 # patches `audit.iter_entries`, and an import-time binding here would make the
@@ -112,12 +117,19 @@ from brutex.models import BruteXError
 # after any suite that had already imported this module).
 from brutex.orchestrator import audit as _audit
 from brutex.orchestrator.audit import GENESIS_PREV_HASH, AuditEntry, AuditError
-from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord
+
+# ONE import style for the presets module (CodeQL py/import-and-import-from):
+# the submodule is bound as a NAME so `code_token` can hash its full source
+# via the same binding every constant read uses.
+from brutex.ranking import presets as ranking_presets
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Iterable, Iterator, Sequence
 
-    from brutex.dashboard.sweep_results_view import SweepScan
+    # Engine→engine only. This module deliberately has NO module-level import
+    # of brutex.dashboard.* (not even TYPE_CHECKING — the CodeQL cycle fix):
+    # the legacy-scan input is typed by the structural `ScanLike` Protocol
+    # below, which the dashboard's `SweepScan` satisfies by construction.
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
 
 _LOG = structlog.get_logger("brutex.engine.results_rollup")
@@ -139,6 +151,7 @@ __all__ = [
     "RollupRefusalError",
     "RollupStamp",
     "RollupVerdict",
+    "ScanLike",
     "classify_rollup",
     "code_token",
     "rebuild_rollup",
@@ -301,8 +314,8 @@ def _probe_preset_axis_direction(preset_name: str, field_name: str) -> bool | No
     preset keys are strict monotone total orders (property-pinned in
     ``brutex.ranking``), so a two-point probe is exact.
     """
-    preset = PRESETS[preset_name]
-    base = RankRecord(
+    preset = ranking_presets.PRESETS[preset_name]
+    base = ranking_presets.RankRecord(
         run_id="a" * 64,
         max_drawdown_pct=1.0,
         composite_score=None,
@@ -341,7 +354,9 @@ def union_axes() -> tuple[UnionAxis, ...]:
     axes: list[UnionAxis] = [UnionAxis(field=col, descending=True) for col in RANKABLE_COLUMNS]
     seen: set[tuple[str, bool]] = {(a.field, a.descending) for a in axes}
     row_fields = {f.name for f in dataclass_fields(ResultRow)}
-    rank_fields = tuple(f.name for f in dataclass_fields(RankRecord) if f.name != "run_id")
+    rank_fields = tuple(
+        f.name for f in dataclass_fields(ranking_presets.RankRecord) if f.name != "run_id"
+    )
     for field_name in rank_fields:
         if field_name in PRESET_INERT_AXES:
             # Constant-filled by the /results projection — ordering-inert by
@@ -354,7 +369,7 @@ def union_axes() -> tuple[UnionAxis, ...]:
                 f"persisted ResultRow field — the rollup union cannot cover it; add a union "
                 f"axis (persist the field) or re-inert it (DEC-RESULTS-TOPK-ROLLUP-001 MAJOR-3)"
             )
-        for preset_name in PRESET_NAMES:
+        for preset_name in ranking_presets.PRESET_NAMES:
             direction = _probe_preset_axis_direction(preset_name, field_name)
             if direction is None:
                 continue
@@ -374,9 +389,10 @@ def code_token() -> str:
 
     Folds (MAJOR-3): the rollup schema version + K, the /results ``MAX_TOP_N``,
     the preset registry (names + reverse flags + the FULL ``presets.py``
-    source), ``PRESET_INERT_AXES``, the ``_preset_rank_record`` projection
-    SOURCE (it lives OUTSIDE the hashed ``presets.py`` — the projection makes
-    the inert-axes assumption true, so its edit must move the token), the
+    source), ``PRESET_INERT_AXES``, the ``_preset_rank_record`` AND ``_rank_value``
+    projection SOURCES (both live OUTSIDE the hashed ``presets.py`` — the
+    projections make the inert-axes / raw-rank-value assumptions true, so an
+    edit to either must move the token; LOW-1, PR #1436), the
     DERIVED union-axis enumeration, the ``ResultRow`` field schema, and
     ``RANKABLE_COLUMNS``. Source-hashing over-invalidates on comment edits —
     the safe direction.
@@ -386,7 +402,6 @@ def code_token() -> str:
             return _CODE_TOKEN_MEMO[0]
     import inspect
 
-    import brutex.ranking.presets as presets_module
     from brutex.dashboard import sweep_results_view as view
 
     axis_text = ",".join(
@@ -396,11 +411,12 @@ def code_token() -> str:
         str(ROLLUP_SCHEMA_VERSION),
         str(ROLLUP_K),
         str(view.MAX_TOP_N),
-        ",".join(PRESET_NAMES),
-        ";".join(f"{p.name}:{int(p.reverse)}" for p in PRESETS.values()),
-        hashlib.sha256(inspect.getsource(presets_module).encode("utf-8")).hexdigest(),
+        ",".join(ranking_presets.PRESET_NAMES),
+        ";".join(f"{p.name}:{int(p.reverse)}" for p in ranking_presets.PRESETS.values()),
+        hashlib.sha256(inspect.getsource(ranking_presets).encode("utf-8")).hexdigest(),
         ",".join(view.PRESET_INERT_AXES),
         hashlib.sha256(view.preset_rank_record_source().encode("utf-8")).hexdigest(),
+        hashlib.sha256(view.rank_value_source().encode("utf-8")).hexdigest(),
         axis_text + ",run_id:asc",
         ",".join(f.name for f in dataclass_fields(ResultRow)),
         ",".join(view.RANKABLE_COLUMNS),
@@ -896,6 +912,35 @@ def classify_rollup(sweeps_root: Path, *, current_rev: str) -> RollupVerdict:
 # ── The write path (flock + stamp-last) ──────────────────────────────────────
 
 
+class ScanLike(Protocol):
+    """The legacy-scan shape the rollup writers consume (structural typing).
+
+    The engine deliberately does NOT import the dashboard's ``SweepScan`` —
+    not even under ``TYPE_CHECKING`` (the CodeQL bidirectional-cycle fix,
+    PR #1436): this Protocol names exactly the fields the Hook-B/C full folds
+    read, and ``sweep_results_view.SweepScan`` satisfies it by construction
+    (its additive ``total_rows_override``/``superset_only`` fields are
+    serve-side only and deliberately absent here).
+    """
+
+    @property
+    def rows(self) -> tuple[ResultRow, ...]: ...  # pragma: no cover - protocol
+    @property
+    def store_count(self) -> int: ...  # pragma: no cover - protocol
+    @property
+    def skipped(self) -> int: ...  # pragma: no cover - protocol
+    @property
+    def run_id_conflicts(self) -> int: ...  # pragma: no cover - protocol
+    @property
+    def instruments(self) -> tuple[str, ...]: ...  # pragma: no cover - protocol
+    @property
+    def timeframes(self) -> tuple[str, ...]: ...  # pragma: no cover - protocol
+    @property
+    def directions(self) -> tuple[str, ...]: ...  # pragma: no cover - protocol
+    @property
+    def snapshot_hashes(self) -> tuple[str, ...]: ...  # pragma: no cover - protocol
+
+
 @dataclass
 class _RollupState:
     """The mutable accumulator state behind the hooks + the full folds."""
@@ -981,7 +1026,7 @@ def _write_state(sweeps_root: Path, state: _RollupState) -> None:
     )
 
 
-def _state_from_scan(sweeps_root: Path, scan: SweepScan) -> _RollupState:
+def _state_from_scan(sweeps_root: Path, scan: ScanLike) -> _RollupState:
     """Build the EXACT full-fold state from a legacy :class:`SweepScan`.
 
     The Hook B/C exactness anchor: aggregates come from the legacy loader's
@@ -1015,7 +1060,7 @@ def _state_from_scan(sweeps_root: Path, scan: SweepScan) -> _RollupState:
     )
 
 
-def rebuild_rollup_from_scan(sweeps_root: Path, scan: SweepScan) -> bool:
+def rebuild_rollup_from_scan(sweeps_root: Path, scan: ScanLike) -> bool:
     """Write the rollup EXACTLY from an already-built legacy *scan* (Hooks B/C).
 
     Returns ``True`` iff a rollup was written. A ZERO-store scan writes
@@ -1041,7 +1086,7 @@ def rebuild_rollup(sweeps_root: Path) -> bool:
     return rebuild_rollup_from_scan(sweeps_root, load_sweep_scan_tree(sweeps_root))
 
 
-def rebuild_rollup_from_scan_best_effort(sweeps_root: Path, scan: SweepScan) -> None:
+def rebuild_rollup_from_scan_best_effort(sweeps_root: Path, scan: ScanLike) -> None:
     """Hook C — the fenced serve-side rebuild byproduct (never raises).
 
     Called on the route's fallback arm with the legacy scan it just built;
@@ -1315,42 +1360,3 @@ class RollupMergeHook:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-
-
-# ── The (revision, reason)-deduped log gate (MINOR-2) ────────────────────────
-
-
-class LogGate:
-    """LRU-bounded once-per-key emission gate (the #1711 ``OutageGate`` precedent).
-
-    ``should_emit(key)`` returns ``True`` exactly once per resident *key*
-    (thread-safe; the LRU bound caps a hostile key churn). ``clear_degraded``
-    reports-and-resets the degraded latch so a recovery logs ONE INFO.
-    """
-
-    def __init__(self, *, capacity: int = 512) -> None:
-        if capacity < 1:
-            raise ValueError(f"capacity must be >= 1, got {capacity}")
-        self._capacity = capacity
-        self._lock = threading.Lock()
-        self._seen: OrderedDict[tuple[str, ...], None] = OrderedDict()
-        self._degraded = False
-
-    def should_emit(self, key: tuple[str, ...]) -> bool:
-        """``True`` exactly once per resident *key*; marks the gate degraded."""
-        with self._lock:
-            self._degraded = True
-            if key in self._seen:
-                self._seen.move_to_end(key)
-                return False
-            self._seen[key] = None
-            while len(self._seen) > self._capacity:
-                self._seen.popitem(last=False)
-            return True
-
-    def clear_degraded(self) -> bool:
-        """Reset the degraded latch; ``True`` iff it was set (log recovery once)."""
-        with self._lock:
-            was = self._degraded
-            self._degraded = False
-            return was

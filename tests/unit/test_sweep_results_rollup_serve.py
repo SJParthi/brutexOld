@@ -37,12 +37,6 @@ from brutex.dashboard.sweep_results_view import (
     load_sweep_scan_via_rollup,
     preset_rank_record_source,
 )
-from brutex.engine.results_rollup import (
-    LogGate,
-    rebuild_rollup,
-    rollup_parquet_path,
-    rollup_stamp_path,
-)
 from brutex.engine.results_store import ResultRow, ResultsStore
 
 
@@ -102,16 +96,15 @@ def _rev(lake_root: Path) -> str:
 
     return sweep_results_revision(lake_root) or ""
 
-
-# ────── load_sweep_scan_via_rollup (pure, no FastAPI) ──────
+    # ────── load_sweep_scan_via_rollup (pure, no FastAPI) ──────
 
 
 class TestLoadSweepScanViaRollup:
     def test_fresh_serve_builds_the_superset_scan(self, tmp_path: Path) -> None:
         _write_store(tmp_path, [_row(1, sharpe=2.0), _row(2, sharpe=1.0)])
         sweeps_root = tmp_path / SWEEPS_DIRNAME
-        assert rebuild_rollup(sweeps_root) is True
-        serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=LogGate())
+        assert rr.rebuild_rollup(sweeps_root) is True
+        serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=rr.LogGate())
         assert serve.fallback_reason is None
         assert serve.behind_stores == 0
         assert serve.conflict_suspect is False
@@ -125,7 +118,7 @@ class TestLoadSweepScanViaRollup:
 
     def test_fallback_names_the_reason_and_dedupes_the_warn(self, tmp_path: Path) -> None:
         _write_store(tmp_path, [_row(1)])
-        gate = LogGate()
+        gate = rr.LogGate()
         with structlog.testing.capture_logs() as logs:
             first = load_sweep_scan_via_rollup(tmp_path, rev="r1", log_gate=gate)
             second = load_sweep_scan_via_rollup(tmp_path, rev="r1", log_gate=gate)
@@ -144,9 +137,9 @@ class TestLoadSweepScanViaRollup:
         for an out-of-band writer."""
         _write_store(tmp_path, [_row(1)])
         sweeps_root = tmp_path / SWEEPS_DIRNAME
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         _write_store(tmp_path, [_row(2, tf="15m")], tf="15m", digest="d" * 16)
-        gate = LogGate()
+        gate = rr.LogGate()
         stale_rev = _rev(tmp_path)
         with structlog.testing.capture_logs() as logs:
             first = load_sweep_scan_via_rollup(tmp_path, rev=stale_rev, log_gate=gate)
@@ -156,7 +149,7 @@ class TestLoadSweepScanViaRollup:
         warns = [e for e in logs if e["event"] == "sweep_results.rollup_fallback"]
         assert len(warns) == 1 and warns[0]["reason"] == "behind"  # deduped per rev
         # Reconcile (Hook B) → the next serve is FRESH and logs ONE recovery INFO.
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         with structlog.testing.capture_logs() as logs2:
             fresh = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=gate)
             again = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=gate)
@@ -170,13 +163,13 @@ class TestLoadSweepScanViaRollup:
         the fallback, so era honesty fields refresh on the next poll."""
         _write_store(tmp_path, [_row(1)])
         sweeps_root = tmp_path / SWEEPS_DIRNAME
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         from brutex.orchestrator.audit import AuditWriter
 
         audit_path = sweeps_root / "audit" / "sweep-all.jsonl"
         with AuditWriter.open(audit_path, resume=audit_path.exists()) as writer:
             writer.append(action="SWEEP_START", subject="s", payload={"x": 1})
-        serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=LogGate())
+        serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=rr.LogGate())
         assert serve.scan is None
         assert serve.fallback_reason == "revision_drift"
 
@@ -186,11 +179,11 @@ class TestLoadSweepScanViaRollup:
 
         _write_store(tmp_path, [_row(1)])
         sweeps_root = tmp_path / SWEEPS_DIRNAME
-        rebuild_rollup(sweeps_root)
-        payload = json.loads(rollup_stamp_path(sweeps_root).read_bytes())
+        rr.rebuild_rollup(sweeps_root)
+        payload = json.loads(rr.rollup_stamp_path(sweeps_root).read_bytes())
         payload["flags"]["conflict_suspect"] = True
-        rollup_stamp_path(sweeps_root).write_text(rr._dumps(payload) + "\n", encoding="utf-8")
-        gate = LogGate()
+        rr.rollup_stamp_path(sweeps_root).write_text(rr._dumps(payload) + "\n", encoding="utf-8")
+        gate = rr.LogGate()
         rev = _rev(tmp_path)
         with structlog.testing.capture_logs() as logs:
             serve = load_sweep_scan_via_rollup(tmp_path, rev=rev, log_gate=gate)
@@ -206,12 +199,12 @@ class TestLoadSweepScanViaRollup:
 
         _write_store(tmp_path, [_row(1)])
         sweeps_root = tmp_path / SWEEPS_DIRNAME
-        rebuild_rollup(sweeps_root)
-        payload = json.loads(rollup_stamp_path(sweeps_root).read_bytes())
+        rr.rebuild_rollup(sweeps_root)
+        payload = json.loads(rr.rollup_stamp_path(sweeps_root).read_bytes())
         payload["flags"]["conflict_suspect"] = True
-        rollup_stamp_path(sweeps_root).write_text(rr._dumps(payload) + "\n", encoding="utf-8")
+        rr.rollup_stamp_path(sweeps_root).write_text(rr._dumps(payload) + "\n", encoding="utf-8")
         _write_store(tmp_path, [_row(2, tf="15m")], tf="15m", digest="d" * 16)
-        serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=LogGate())
+        serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=rr.LogGate())
         assert serve.scan is not None
         assert serve.conflict_suspect is True
         assert serve.behind_stores == 1
@@ -221,15 +214,14 @@ class TestLoadSweepScanViaRollup:
         with pytest.raises(AttributeError):
             serve.behind_stores = 1  # type: ignore[misc]
 
-
-# ────── SweepScan superset law + build_sweep_leaderboard ──────
+            # ────── SweepScan superset law + build_sweep_leaderboard ──────
 
 
 class TestSupersetScanLaw:
     def _rollup_scan(self, tmp_path: Path) -> SweepScan:
         _write_store(tmp_path, [_row(1, sharpe=2.0), _row(2, sharpe=1.0)])
-        rebuild_rollup(tmp_path / SWEEPS_DIRNAME)
-        serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=LogGate())
+        rr.rebuild_rollup(tmp_path / SWEEPS_DIRNAME)
+        serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=rr.LogGate())
         assert serve.scan is not None
         return serve.scan
 
@@ -260,8 +252,7 @@ class TestSupersetScanLaw:
         assert source.startswith("def _preset_rank_record(")
         assert "composite_score=None" in source
 
-
-# ────── the route (build_app + TestClient) ──────
+        # ────── the route (build_app + TestClient) ──────
 
 
 fastapi = pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
@@ -319,7 +310,7 @@ class TestLeaderboardRouteRollup:
         lake_root = store.path.parent
         _write_store(lake_root, [_row(1, sharpe=0.5), _row(2, sharpe=2.5)])
         legacy = build_sweep_leaderboard(lake_root, top_n=50).to_dict()
-        assert rebuild_rollup(lake_root / SWEEPS_DIRNAME) is True
+        assert rr.rebuild_rollup(lake_root / SWEEPS_DIRNAME) is True
         payload = client.get("/api/v1/sweep/leaderboard").json()
         assert payload == legacy
         assert "rollup_behind_stores" not in payload  # fresh ⇒ no note keys
@@ -333,7 +324,7 @@ class TestLeaderboardRouteRollup:
         lake_root = store.path.parent
         _write_store(lake_root, [_row(1)])
         _write_store(lake_root, [_row(2, tf="15m")], tf="15m", digest="d" * 16)
-        rebuild_rollup(lake_root / SWEEPS_DIRNAME)
+        rr.rebuild_rollup(lake_root / SWEEPS_DIRNAME)
         loads: list[Path] = []
         real_load = ResultsStore.load.__func__  # type: ignore[attr-defined]
 
@@ -344,14 +335,14 @@ class TestLeaderboardRouteRollup:
         monkeypatch.setattr(ResultsStore, "load", classmethod(_spy))
         payload = client.get("/api/v1/sweep/leaderboard").json()
         assert payload["available"] is True
-        assert loads == [rollup_parquet_path(lake_root / SWEEPS_DIRNAME)]
+        assert loads == [rr.rollup_parquet_path(lake_root / SWEEPS_DIRNAME)]
 
     def test_filtered_requests_never_touch_the_classifier(
         self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         lake_root = store.path.parent
         _write_store(lake_root, [_row(1)])
-        rebuild_rollup(lake_root / SWEEPS_DIRNAME)
+        rr.rebuild_rollup(lake_root / SWEEPS_DIRNAME)
 
         def _forbidden(root: Path, *, current_rev: str) -> object:
             raise AssertionError("a FILTERED request must never consult the rollup")
@@ -371,7 +362,7 @@ class TestLeaderboardRouteRollup:
     ) -> None:
         lake_root = store.path.parent
         _write_store(lake_root, [_row(1, sharpe=0.5), _row(2, sharpe=2.5), _row(3, sharpe=1.5)])
-        rebuild_rollup(lake_root / SWEEPS_DIRNAME)
+        rr.rebuild_rollup(lake_root / SWEEPS_DIRNAME)
         payload = client.get(
             "/api/v1/sweep/leaderboard", params={"rank_by": "net_pnl_paisa", "top": 2}
         ).json()
@@ -384,7 +375,7 @@ class TestLeaderboardRouteRollup:
     ) -> None:
         lake_root = store.path.parent
         _write_store(lake_root, [_row(1), _row(2)])
-        rebuild_rollup(lake_root / SWEEPS_DIRNAME)
+        rr.rebuild_rollup(lake_root / SWEEPS_DIRNAME)
         payload = client.get("/api/v1/sweep/leaderboard", params={"preset": "min_dd_first"}).json()
         legacy = build_sweep_leaderboard(lake_root, preset="min_dd_first", top_n=50).to_dict()
         assert payload == legacy
@@ -402,13 +393,13 @@ class TestLeaderboardRouteRollup:
         lake_root = store.path.parent
         _write_store(lake_root, [_row(1)])
         sweeps_root = lake_root / SWEEPS_DIRNAME
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         _write_store(lake_root, [_row(2, tf="15m")], tf="15m", digest="d" * 16)
         payload = client.get("/api/v1/sweep/leaderboard").json()
         assert payload["total_rows"] == 2  # FRESH — never a stale total
         assert "rollup_behind_stores" not in payload
         # Hook C reconverged the rollup to the full 2-store tree.
-        stamp = json.loads(rollup_stamp_path(sweeps_root).read_bytes())
+        stamp = json.loads(rr.rollup_stamp_path(sweeps_root).read_bytes())
         assert stamp["aggregates"]["store_count"] == 2
 
     def test_conflict_suspect_stale_serves_with_the_note_keys(
@@ -421,10 +412,10 @@ class TestLeaderboardRouteRollup:
         lake_root = store.path.parent
         _write_store(lake_root, [_row(1)])
         sweeps_root = lake_root / SWEEPS_DIRNAME
-        rebuild_rollup(sweeps_root)
-        payload = json.loads(rollup_stamp_path(sweeps_root).read_bytes())
+        rr.rebuild_rollup(sweeps_root)
+        payload = json.loads(rr.rollup_stamp_path(sweeps_root).read_bytes())
         payload["flags"]["conflict_suspect"] = True
-        rollup_stamp_path(sweeps_root).write_text(rr._dumps(payload) + "\n", encoding="utf-8")
+        rr.rollup_stamp_path(sweeps_root).write_text(rr._dumps(payload) + "\n", encoding="utf-8")
         _write_store(lake_root, [_row(2, tf="15m")], tf="15m", digest="d" * 16)
         wire = client.get("/api/v1/sweep/leaderboard").json()
         assert wire["rollup_conflict_suspect"] is True
@@ -440,18 +431,18 @@ class TestLeaderboardRouteRollup:
         lake_root = store.path.parent
         _write_store(lake_root, [_row(1, sharpe=2.0), _row(2, sharpe=1.0)])
         sweeps_root = lake_root / SWEEPS_DIRNAME
-        assert not rollup_parquet_path(sweeps_root).exists()
+        assert not rr.rollup_parquet_path(sweeps_root).exists()
         legacy = build_sweep_leaderboard(lake_root, top_n=50).to_dict()
         payload = client.get("/api/v1/sweep/leaderboard").json()
         assert payload == legacy  # the byte-identical legacy fallback
         # Hook C: the fallback poll wrote the rollup from the scan it built.
-        assert rollup_parquet_path(sweeps_root).exists()
-        stamp_bytes = rollup_stamp_path(sweeps_root).read_bytes()
+        assert rr.rollup_parquet_path(sweeps_root).exists()
+        stamp_bytes = rr.rollup_stamp_path(sweeps_root).read_bytes()
         # A repeat poll within the SAME revision serves cached legacy and the
         # once-per-revision gate never rewrites the artifact.
         again = client.get("/api/v1/sweep/leaderboard").json()
         assert again == legacy
-        assert rollup_stamp_path(sweeps_root).read_bytes() == stamp_bytes
+        assert rr.rollup_stamp_path(sweeps_root).read_bytes() == stamp_bytes
 
     def test_settled_tree_repeat_revision_serves_the_rollup(
         self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
@@ -462,10 +453,10 @@ class TestLeaderboardRouteRollup:
         _write_store(lake_root, [_row(1)])
         assert client.get("/api/v1/sweep/leaderboard").json()["available"] is True
         sweeps_root = lake_root / SWEEPS_DIRNAME
-        assert rollup_parquet_path(sweeps_root).exists()  # Hook C landed
+        assert rr.rollup_parquet_path(sweeps_root).exists()  # Hook C landed
         # Reconcile to the current tree (Hook B): the rollup now matches the
         # settled tree, so a fresh poll of the SAME revision is rollup-served.
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         loads: list[Path] = []
         real_load = ResultsStore.load.__func__  # type: ignore[attr-defined]
 
@@ -480,4 +471,4 @@ class TestLeaderboardRouteRollup:
             payload = client2.get("/api/v1/sweep/leaderboard").json()
         assert payload["available"] is True
         assert "rollup_behind_stores" not in payload
-        assert loads == [rollup_parquet_path(sweeps_root)]  # rollup-served
+        assert loads == [rr.rollup_parquet_path(sweeps_root)]  # rollup-served

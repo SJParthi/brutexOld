@@ -36,7 +36,6 @@ from brutex.dashboard.sweep_results_view import (
     build_sweep_leaderboard,
     load_sweep_scan_via_rollup,
 )
-from brutex.engine.results_rollup import LogGate, rebuild_rollup, trim_to_union, union_axes
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.ranking.presets import PRESET_NAMES
 
@@ -124,7 +123,7 @@ def _seed_lake(lake_root: Path) -> None:
 
 
 def _rollup_scan(lake_root: Path) -> SweepScan:
-    serve = load_sweep_scan_via_rollup(lake_root, rev=_rev(lake_root), log_gate=LogGate())
+    serve = load_sweep_scan_via_rollup(lake_root, rev=_rev(lake_root), log_gate=rr.LogGate())
     assert serve.scan is not None and serve.behind_stores == 0
     return serve.scan
 
@@ -143,7 +142,7 @@ class TestServedParity:
         self, tmp_path: Path, preset: str | None, rank_by: str | None, top: int
     ) -> None:
         _seed_lake(tmp_path)
-        assert rebuild_rollup(tmp_path / SWEEPS_DIRNAME) is True
+        assert rr.rebuild_rollup(tmp_path / SWEEPS_DIRNAME) is True
         scan = _rollup_scan(tmp_path)
         served = build_sweep_leaderboard(
             tmp_path, rank_by=rank_by, top_n=top, scan=scan, preset=preset
@@ -159,7 +158,7 @@ class TestServedParity:
         hi = _row(1, net_pnl_paisa=2**60 + 1)
         lo = _row(2, net_pnl_paisa=2**60)
         _write_store(tmp_path, [lo, hi])
-        rebuild_rollup(tmp_path / SWEEPS_DIRNAME)
+        rr.rebuild_rollup(tmp_path / SWEEPS_DIRNAME)
         scan = _rollup_scan(tmp_path)
         served = build_sweep_leaderboard(tmp_path, rank_by="net_pnl_paisa", scan=scan).to_dict()
         legacy = build_sweep_leaderboard(tmp_path, rank_by="net_pnl_paisa").to_dict()
@@ -175,7 +174,7 @@ class TestServedParity:
         ties = [_replace(base, run_id=f"{seed:064x}") for seed in (5, 3, 9, 1)]
         _write_store(tmp_path, [ties[0], ties[1]])
         _write_store(tmp_path, [ties[2], ties[3]], tf="15m", digest="d" * 16)
-        rebuild_rollup(tmp_path / SWEEPS_DIRNAME)
+        rr.rebuild_rollup(tmp_path / SWEEPS_DIRNAME)
         scan = _rollup_scan(tmp_path)
         for preset in (None, *PRESET_NAMES):
             served = build_sweep_leaderboard(tmp_path, scan=scan, preset=preset).to_dict()
@@ -192,17 +191,17 @@ class TestTrimmedParity:
         rows = [_row(i) for i in range(1, 61)]
         _write_store(tmp_path, rows)
         k = 10
-        kept = trim_to_union(rows, k)
+        kept = rr.trim_to_union(rows, k)
         assert len(kept) < len(rows)  # a REAL trim happened
         full_sorted = sorted(rows, key=lambda r: r.run_id)
         kept_ids = {r.run_id for r in kept}
-        for axis in union_axes():
+        for axis in rr.union_axes():
             ordered = sorted(
                 full_sorted, key=lambda r: getattr(r, axis.field), reverse=axis.descending
             )
             assert {r.run_id for r in ordered[:k]} <= kept_ids
-        # And ranking the union under any axis reproduces the full top-k head.
-        for axis in union_axes():
+            # And ranking the union under any axis reproduces the full top-k head.
+        for axis in rr.union_axes():
             full_head = sorted(
                 full_sorted, key=lambda r: getattr(r, axis.field), reverse=axis.descending
             )[:k]
@@ -218,9 +217,9 @@ class TestWriteDeterminism:
     def test_rebuild_twice_is_byte_identical(self, tmp_path: Path) -> None:
         _seed_lake(tmp_path)
         sweeps_root = tmp_path / SWEEPS_DIRNAME
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         first = rr.rollup_parquet_path(sweeps_root).read_bytes()
-        rebuild_rollup(sweeps_root)
+        rr.rebuild_rollup(sweeps_root)
         assert rr.rollup_parquet_path(sweeps_root).read_bytes() == first
 
     def test_merge_order_independence(self, tmp_path: Path) -> None:
@@ -269,6 +268,6 @@ def _grid() -> SweepGridConfig:
 
 def test_rankable_columns_are_all_union_axes() -> None:
     """Every serveable ``rank_by`` axis is guaranteed present in the union."""
-    fields = {(a.field, a.descending) for a in union_axes()}
+    fields = {(a.field, a.descending) for a in rr.union_axes()}
     for col in RANKABLE_COLUMNS:
         assert (col, True) in fields

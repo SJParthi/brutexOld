@@ -2225,6 +2225,9 @@ jobs:
           # 100% line+branch on results_rollup.py from its dedicated suite.
           if compgen -G "tests/unit/test_results_rollup.py" > /dev/null; then
             pytest --cov=brutex.engine.results_rollup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_results_rollup.py
+            # The COMMON LogGate leaf (the PR #1436 CodeQL cycle fix) rides the
+            # same suite — 100% line+branch on the leaf too.
+            pytest --cov=brutex.observability.log_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_results_rollup.py
           else
             echo "(brutex.engine.results_rollup test file not present yet — gate inactive)"
           fi

@@ -78,16 +78,9 @@ import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import Any, Final
 
 import structlog
-
-if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    # Runtime imports of brutex.engine.results_rollup stay FUNCTION-LOCAL in
-    # this module: the rollup module's import-time K ⊇ MAX_TOP_N assertion
-    # imports THIS module, so a module-level runtime import here would be a
-    # genuine cycle (DEC-RESULTS-TOPK-ROLLUP-001).
-    from brutex.engine.results_rollup import LogGate
 
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.engine.results_store import (
@@ -97,6 +90,14 @@ from brutex.engine.results_store import (
     ResultsStoreError,
 )
 from brutex.money import format_inr, paisa_to_rupees
+
+# LogGate comes from the COMMON stdlib-only LEAF — NEVER from
+# brutex.engine.results_rollup: the rollup module's import-time
+# K ⊇ MAX_TOP_N assertion imports THIS module, so any module-level import of
+# it here (even TYPE_CHECKING) is the CodeQL bidirectional cycle fixed on
+# PR #1436; every runtime results_rollup import in this module stays
+# FUNCTION-LOCAL (DEC-RESULTS-TOPK-ROLLUP-001).
+from brutex.observability.log_gate import LogGate
 from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_preset
 
 _LOG = structlog.get_logger("brutex.dashboard.sweep_results_view")
@@ -119,6 +120,7 @@ __all__ = [
     "load_sweep_scan_tree",
     "load_sweep_scan_via_rollup",
     "preset_rank_record_source",
+    "rank_value_source",
     "resolve_preset_param",
     "store_error_payload",
 ]
@@ -505,6 +507,20 @@ def preset_rank_record_source() -> str:
     force a rollup rebuild (invalidation-teeth-pinned).
     """
     return inspect.getsource(_preset_rank_record)
+
+
+def rank_value_source() -> str:
+    """The exact source text of :func:`_rank_value` — a code-token input.
+
+    DEC-RESULTS-TOPK-ROLLUP-001 (hostile-review LOW-1, PR #1436): the
+    ``rank_by`` projection plays the IDENTICAL inert-assumption role for the
+    14 ``RANKABLE_COLUMNS`` union axes that ``_preset_rank_record`` plays for
+    the preset axes — a future semantic edit here (a coercion, a derived
+    value) would change the served ordering without moving the rollup's
+    ``code_token``, so its SOURCE is folded into the token exactly like the
+    preset projection's (invalidation-teeth-pinned).
+    """
+    return inspect.getsource(_rank_value)
 
 
 #: The externally-served ``error`` marker of :func:`store_error_payload` — a
