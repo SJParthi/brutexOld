@@ -2385,6 +2385,7 @@ class TestWorkerHitCountMemo:
         assert memo is not None
         memo[0b1] = 42
         again = mod._worker_hit_count_memo(tuple_, ctx)
+        assert again is not None
         assert again is memo
         assert again[0b1] == 42
 

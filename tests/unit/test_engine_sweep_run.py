@@ -17,7 +17,7 @@ OHLC (Golden Rule #1 — real-shaped data, no fabrication).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -3373,7 +3373,7 @@ _LEGACY_TALLY_KEYS = frozenset(
 )
 
 
-def _census_log_rows(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _census_log_rows(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
     """The frozen module's own ``sweep.apriori.census`` rows, in emission order."""
     return [e for e in logs if e["event"] == "sweep.apriori.census"]
 
