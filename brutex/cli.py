@@ -6955,6 +6955,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             end=_parse_dt(end),
             catalog_path=catalog,
         )
+        # Golden Rule #3: the R45 diffcheck's production re-simulations stamp
+        # with this SAME launch stamper — late-bound because the run-core CM
+        # entered (and composed the diffcheck closure) BEFORE the stamper
+        # existed; the closure reads the bind at call time.
+        core.bind_reference_stamper(reference_stamper)
         with (
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
