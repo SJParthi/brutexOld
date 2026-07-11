@@ -2228,7 +2228,12 @@ hostile-review pass._
   → scored rows gain `composite_score` AND ?preset=composite ORDERS honestly
   with the DYNAMIC inert-axes disclosure (`composite_score` leaves the set
   iff the index joined non-empty) — the /results read-time half of HIGH #40;
-  the index caches once per revision generation (sufficiency pinned).
+  the index caches once per DEDICATED `composite_index_revision` token (fix
+  round 1, refuter-confirmed MAJOR: the aggs land under `sweep_runs/` AFTER
+  the sweep's last sweeps-tree/audit write, so the sweeps generation alone
+  provably froze an empty/partial index until the NEXT sweep — the probe's
+  newest-run + results-depth dir-mtime digest folds into the payload cache
+  key and the index slot's generation; killing route regression + spy pins).
   (6) display: `oneclick_artifacts._bridge_cascade` (invalid object → key
   dropped + NAMED partial, row kept) + the ONE server-side
   `oneclick_view.cascade_status_text` builder (no verdict prose in JS —
