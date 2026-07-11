@@ -58,7 +58,7 @@ absolute-throughput, the honest 33B-SLA `xfail`) — none are breakage.
 | Mask AND evaluation (u64, vectorized) | ✅ |
 | 52-condition `evaluate_atoms` (one Rust call/bar) | ✅ |
 | Combo dedup — Bloom `seen` + LMDB `contains` | ✅ (strongest path) |
-| Result append + `WorkItemStore` get/exists | ✅ |
+| Result append (results-store get/append; the historical `WorkItemStore` gate was retired when the module was deleted — MIGRATION.md #1727b; LMDB membership keeps its own gate) | ✅ |
 | Rate-limiter `acquire` | ✅ |
 | Dashboard **cached**-summary read | ✅ |
 
@@ -69,7 +69,7 @@ absolute-throughput, the honest 33B-SLA `xfail`) — none are breakage.
 | The decreed **1.1× ceiling** | 🟡 **Dormant.** Per-PR gates run at robust **5–10×**; the strict 1.1× tier runs ONLY on a self-hosted M4-Pro runner that **is not registered** → it proves nothing today. The O(1) *shape* is proven; the exact 1.1× *constant* is aspirational. |
 | **Bar lookup** (random access) | 🔴 **Biggest gap.** No O(1) accessor exists; `ReplayFeed` does an O(n) eager materialization; the only "bar lookup" bench is a synthetic dict that never touches the feed; the named instrumented accessor (Property P-06) is a `pytest.skip` stub. |
 | **symbol→security_id mapping** | 🟡 Claimed O(1) (a CPython dict — plausible) but **zero bench**. |
-| **Quota tracker / instrument-row uniqueness** | 🟡 Credible O(1), **unbenched** on shared CI. |
+| **Instrument-row uniqueness** | 🟡 Credible O(1), **unbenched** on shared CI. (The quota-tracker half of this row is MOOT — the dormant tracker class was deleted behind the `QuotaGate` Protocol, MIGRATION.md #1727b.) |
 | Uncached `/db` scan | 🔴 Inherently O(rows); the read/write split is a **concurrency** guarantee (proven by an integration test), not an O(1)-latency gate. |
 
 ---

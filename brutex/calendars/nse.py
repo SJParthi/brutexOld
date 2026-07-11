@@ -513,6 +513,16 @@ _RAISES: Final[object] = object()
 #: whose timeframes are the 1..375 vocabulary — defensive parity only).
 _RUST_TF_MAX: Final[int] = 2**63 - 1
 
+#: The PyO3 ``u32`` argument bound for :func:`is_forced_exit_bar`'s resolved
+#: ``boundary`` (seconds-since-midnight IST). A boundary outside ``[0, 2³²−1]``
+#: cannot cross the FFI (the kernel takes ``boundary_s: u32`` — PyO3 raises
+#: ``OverflowError`` at conversion where the Python oracle computes a bool
+#: fine), so the wrapper routes it to the oracle — the exact mirror of the
+#: ``_RUST_TF_MAX`` guard (slice-9 refuter round-1 R2-NIT; unreachable from
+#: the engine, whose boundaries are seconds-of-day < 86_400 — defensive
+#: parity only).
+_RUST_BOUNDARY_MAX: Final[int] = 2**32 - 1
+
 
 @dataclass(frozen=True)
 class _RustCalendarKernel:
@@ -1686,7 +1696,10 @@ def is_forced_exit_bar(t: time, tf_minutes: int, forced_exit_seconds: int | None
     # strictly > every boundary, matching Python's bigint result); tf > i64
     # routes to the oracle before PyO3 can raise OverflowError (edge
     # MINOR-1/NIT-2; engine-unreachable — tf is the 1..375 vocabulary).
-    if kernel is not None and tf_minutes <= _RUST_TF_MAX:
+    # The boundary guard is the u32 mirror of the same law (refuter-round-1
+    # R2-NIT): a boundary outside [0, u32::MAX] would OverflowError at the
+    # PyO3 seam where the oracle returns a bool — route it to the oracle too.
+    if kernel is not None and tf_minutes <= _RUST_TF_MAX and 0 <= boundary <= _RUST_BOUNDARY_MAX:
         rust_value = int(kernel.forced_exit_bar(_seconds_of_day(t), tf_minutes, boundary)) == 1
         return _serve_value(
             "is_forced_exit_bar",

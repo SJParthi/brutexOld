@@ -1960,6 +1960,37 @@ class TestRustCalendarSeam:
         assert is_forced_exit_bar(time(9, 15), beyond_i64) is True
         assert nse_module._CAL_DISABLED_REASON[0] is None
 
+    def test_boundary_beyond_u32_routes_to_the_oracle_never_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slice-9 refuter-round-1 R2-NIT: a resolved ``boundary``
+        (forced_exit_seconds) outside the kernel's ``u32`` domain cannot
+        cross the FFI (PyO3 would raise ``OverflowError`` flag-ON where the
+        flag-OFF Python arm returns a bool) — the wrapper now mirrors the
+        ``_RUST_TF_MAX`` guard for it. The fake kernel's raising scalar fns
+        prove the bypass on BOTH out-of-range directions."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel())
+        beyond_u32 = 2**32  # _RUST_BOUNDARY_MAX + 1
+        # 09:15 + 1m closes at 33_360s — far below the huge boundary → False.
+        assert is_forced_exit_bar(time(9, 15), 1, beyond_u32) is False
+        # A negative boundary equally cannot convert to u32 → oracle (True:
+        # every close is strictly after a negative instant).
+        assert is_forced_exit_bar(time(9, 15), 1, -1) is True
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_boundary_beyond_u32_real_kernel_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refuter's flag-ON repro, killed: with the REAL wheel armed a
+        ``forced_exit_seconds > u32::MAX`` returns the oracle's bool instead
+        of an ``OverflowError`` at the PyO3 seam."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=4)
+        assert is_forced_exit_bar(time(15, 15), 15, 2**32) is False
+        assert is_forced_exit_bar(time(15, 15), 15, -1) is True
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
     def test_cross_date_last_bar_stays_on_the_python_arm(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
