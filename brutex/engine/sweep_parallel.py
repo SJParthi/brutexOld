@@ -1118,8 +1118,9 @@ class _WorkerContext:
     #: and carried as defaulted-LAST additive fields (the ``reference_stamper``
     #: precedent) so a pre-wiring construction stays valid. The DEFAULT
     #: ``False`` is the byte-identical legacy path (OFF adds only a few
-    #: None-returning helper calls per tuple) — :func:`_worker_init`
-    #: constructs NO cache when it is off.
+    #: cheap no-op helper calls per tuple — :func:`_intern_bars` returns
+    #: the bars object unchanged, the telemetry helpers return ``None``
+    #: values) — :func:`_worker_init` constructs NO cache when it is off.
     worker_kernel_cache: bool = False
     worker_kernel_capacity: int = 1
 
@@ -1134,7 +1135,9 @@ _WORKER_CTX: _WorkerContext | None = None
 #: — a sibling module global to :data:`_WORKER_CTX`, constructed by
 #: :func:`_worker_init` IFF the context enables it (the default-OFF path
 #: constructs NOTHING — results byte-identical to the legacy path; OFF adds
-#: only a few None-returning helper calls per tuple).
+#: only a few cheap no-op helper calls per tuple — :func:`_intern_bars`
+#: returns the bars object unchanged, the telemetry helpers return ``None``
+#: values).
 #: Workers persist for the pool lifetime (no ``max_tasks_per_child``), so the
 #: cache lives across every tuple the worker processes — the whole win.
 _WORKER_KERNEL_CACHE: ResidentKernelCache | None = None
@@ -1217,7 +1220,9 @@ def _worker_init(ctx: _WorkerContext) -> None:
     # above is LOAD-BEARING for the published perf law and is untouched). The
     # flag + capacity were resolved ONCE in the parent and travel in the ctx;
     # the OFF path constructs NOTHING (byte-identical legacy results; OFF
-    # adds only a few None-returning helper calls per tuple).
+    # adds only a few cheap no-op helper calls per tuple — _intern_bars
+    # returns the bars object unchanged, the telemetry helpers return None
+    # values).
     global _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO  # noqa: PLW0603
     global _WORKER_BARS_KEYS_SEEN, _WORKER_BARS_MEMO_WARNED  # noqa: PLW0603
     _WORKER_BARS_MEMO_WARNED = False

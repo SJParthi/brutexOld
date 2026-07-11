@@ -436,6 +436,35 @@ class TestWorkerInitKernelCache:
         assert mod._WORKER_KERNEL_CACHE is None
         assert mod._WORKER_BARS_MEMO is None
 
+    def test_reinit_resets_the_seen_key_ledger_and_warn_latch(self, tmp_path: Path) -> None:
+        """Fix-round-7 (final-refuter B1 MINOR-1): the two ``_worker_init``
+        reset lines ``_WORKER_BARS_KEYS_SEEN = set()`` and
+        ``_WORKER_BARS_MEMO_WARNED = False`` have TEETH — severing either
+        (a self-assign no-op) fails HERE. Production-inert under the
+        spawn-only contract (a spawn worker's globals start fresh); the
+        resets defend exactly the in-process ``_worker_init`` reuse this
+        suite performs, so the pin pollutes the module globals in-process
+        and asserts the re-init clears them alongside the existing
+        cache/memo constructions."""
+        stale_cache = ResidentKernelCache(capacity=1)
+        mod._WORKER_KERNEL_CACHE = stale_cache
+        mod._WORKER_BARS_MEMO = OrderedDict({("JUNK", "1minute"): _BARS})
+        mod._WORKER_BARS_KEYS_SEEN = {("JUNK", "1minute")}
+        mod._WORKER_BARS_MEMO_WARNED = True
+        mod._worker_init(
+            mod._WorkerContext(
+                grid=_grid(), root=tmp_path, worker_kernel_cache=True, worker_kernel_capacity=2
+            )
+        )
+        assert not mod._WORKER_BARS_KEYS_SEEN
+        assert mod._WORKER_BARS_MEMO_WARNED is False
+        fresh = mod._WORKER_KERNEL_CACHE
+        assert isinstance(fresh, ResidentKernelCache)
+        assert fresh is not stale_cache
+        memo = mod._WORKER_BARS_MEMO
+        assert isinstance(memo, OrderedDict)
+        assert not memo
+
     def test_rayon_determinism_pin_survives_cache_on(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -452,6 +481,72 @@ class TestWorkerInitKernelCache:
         assert os.environ["RAYON_NUM_THREADS"] == "1"
         assert os.environ["OMP_NUM_THREADS"] == "1"
         assert os.environ["POLARS_MAX_THREADS"] == "1"
+
+
+# ─────────────────── driver ctor OFF-path capacity gate ───────────────────
+
+
+class TestDriverOffPathCapacitySilence:
+    @pytest.mark.parametrize("raw", ["zero", "100000000"])
+    def test_off_run_never_resolves_capacity_or_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """Fix-round-7 (final-refuter B1 MINOR-2): the ctor's flag-gated
+        capacity resolution has TEETH — "an OFF run never emits the
+        capacity-hygiene warning for an env var that would not be
+        consumed". Flag OFF + a junk/over-ceiling
+        ``BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY`` must yield ZERO
+        ``worker_kernel_capacity.*`` events across a driver construction
+        AND zero resolver calls (a delegating spy — the
+        ``test_off_constructs_no_cache`` discipline); the carried capacity
+        pins at the inert ``1``. An unconditional resolution (the FM7
+        mutant) fails BOTH asserts."""
+        monkeypatch.delenv(mod.WORKER_KERNEL_CACHE_ENV, raising=False)
+        monkeypatch.setenv(mod.WORKER_KERNEL_CAPACITY_ENV, raw)
+        calls: list[object] = []
+        real = mod.resolve_worker_kernel_capacity
+
+        def _spy(grid: SweepGridConfig, env: dict[str, str] | None = None) -> int:
+            calls.append(grid)
+            return real(grid, env)
+
+        monkeypatch.setattr(mod, "resolve_worker_kernel_capacity", _spy)
+        grid = _grid()
+        with (
+            AuditWriter.open(tmp_path / "i.jsonl") as ingest,
+            SweepAuditWriter.open(tmp_path / "s.jsonl") as sup,
+            SweepCache.open(tmp_path / "cache", bloom_capacity=10_000) as cache,
+        ):
+            guards = SweepGuards(
+                audit=sup,
+                progress=SweepProgress(),
+                checkpoint=SweepCheckpointStore(
+                    path=tmp_path / "ckpt.json",
+                    sweep_id=grid_identity(grid),
+                    total_combos=count_sweep_tuples(grid),
+                ),
+                cache=cache,
+                watchdog=SweepWatchdog(),
+            )
+            with capture_logs() as logs:
+                driver = mod.ParallelGridDriver(
+                    grid,
+                    bars_for=_bars_for,
+                    root=tmp_path / "out",
+                    ingest_audit=ingest,
+                    guards=guards,
+                    workers=2,
+                    stall_seconds=300.0,
+                )
+        assert calls == []
+        hygiene = [
+            e
+            for e in logs
+            if str(e.get("event", "")).startswith("sweep_parallel.worker_kernel_capacity")
+        ]
+        assert hygiene == []
+        assert driver._worker_kernel_cache is False
+        assert driver._worker_kernel_capacity == 1
 
 
 # ────────────────────────── bars-intern memo (T4) ──────────────────────────
