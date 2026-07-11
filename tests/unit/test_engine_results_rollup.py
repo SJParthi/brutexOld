@@ -1335,7 +1335,9 @@ class TestMutationWorkflowWiring:
         workflow = (_repo_root() / ".github" / "workflows" / "mutation.yml").read_text(
             encoding="utf-8"
         )
-        assert "brutex/engine/results_rollup.py:tests/unit/test_results_rollup.py:" in workflow
+        assert (
+            "brutex/engine/results_rollup.py:tests/unit/test_engine_results_rollup.py:" in workflow
+        )
 
     def test_ci_static_gate_is_wired(self) -> None:
         ci = (_repo_root() / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
