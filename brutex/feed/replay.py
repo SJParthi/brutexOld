@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from brutex.calendars.nse import IST
-from brutex.data.bad_tick import BadTickScreen, bad_tick_screen_enabled
+from brutex.data.bad_tick import BadTickScreen, bad_tick_screen_enabled, non_finite_keep_mask
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.feed.errors import FeedError, LookAheadError
@@ -284,11 +284,19 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     of the constructor's ordering / ``volume >= 0`` invariants. A corrupt
     stored bar (e.g. a legacy pre-#912 partition holding an internally-ordered
     NEGATIVE bar the round-2 audit reproduced as a day_low of −1000) can never
-    silently enter the engine: a non-positive price OR an ordering violation
-    raises a LOUD :class:`ValueError` naming *source* (the partition
+    silently enter the engine: a FINITE non-positive price OR an ordering
+    violation raises a LOUD :class:`ValueError` naming *source* (the partition
     coordinates, when the caller knows them) plus the offending bar's
     timestamp — the graceful per-symbol error surface the ingest/prebuild
-    quarantines already handle. Positivity is checked HERE rather than in the
+    quarantines already handle. SCOPE of the ordering raise with the screens
+    ON (``DEC-BADTICK-HILO-SCREEN-001``, a documented SANCTIONED narrowing):
+    a mis-ordered bar whose corrupt field is ALSO ratio-out-of-band versus
+    the session's bad-tick reference is SKIPPED by the hi/lo arm BEFORE the
+    constructor runs (one ``feed.bad_tick_skipped`` WARN — never a raise),
+    and a non-finite field is skipped by the non-finite screen; the ordering
+    raise fires for mis-ordered bars whose fields stay IN-band, and for
+    EVERY mis-ordered bar when ``BRUTEX_BAD_TICK_SCREEN`` is off (both
+    test-pinned). Positivity is checked HERE rather than in the
     constructor because the bar container is legitimately used to hold a
     non-positive price for downstream corrupt-input classification (the Greeks
     ``BAD_INPUT`` path, the executor ``require_tradeable_price`` guard, the
@@ -319,21 +327,78 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     open_interests: list[int | None] = table.column("open_interest").to_pylist()
 
     # Bounded bad-tick (spike / fat-finger / vendor-scaling) screen
-    # (DEC-SWEEP-DATA-EDGE-GUARDS-001): a self-consistent SCALED bar — every
-    # OHLC field ×~10 but internally ordered and positive — passes the
-    # positivity + ordering checks above yet would silently flip every
-    # price-relative bit and (via ``TodayOHLC.absorb``) poison the NEXT day's
-    # PDH/PDL/pivots. The screen SKIPS-and-COUNTS such a bar (never value-edits,
-    # never fabricates) comparing each close to the previous IN-SESSION kept
-    # close; the first bar of each session is exempt (no reopen-gap false trip).
-    # Default ON, ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar.
-    screen = BadTickScreen(source=source) if bad_tick_screen_enabled() else None
+    # (DEC-SWEEP-DATA-EDGE-GUARDS-001 + DEC-BADTICK-HEAD-SEED-001): a
+    # self-consistent SCALED bar — every OHLC field ×~10 but internally ordered
+    # and positive — passes the positivity + ordering checks below yet would
+    # silently flip every price-relative bit and (via ``TodayOHLC.absorb``)
+    # poison the NEXT day's PDH/PDL/pivots. The screen SKIPS-and-COUNTS such a
+    # bar (never value-edits, never fabricates): each session's first up-to-3
+    # bars vote via their median close (so a poison FIRST bar is itself dropped
+    # instead of becoming an unhealable cascade baseline — the head-seed fix),
+    # then every later bar is judged against the last IN-SESSION kept close.
+    # The whole-table mask is computed in ONE O(n) pre-pass (the head vote
+    # needs the ≤ 2 following head bars, so the verdict is per-table, not
+    # per-row-streaming — a head bar's verdict is bounded-FORWARD-looking, and
+    # a load truncated inside a session's first 3 bars can keep a poison head
+    # the full load would drop: the bad_tick module docstring's honest-limits
+    # disclosure); genuine reopen gaps never false-trip and
+    # cross-session comparison stays forbidden. Default ON,
+    # ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar. IST session dates
+    # drive the per-session grouping (``ts`` is timezone-aware — the
+    # constructor rejects a naive datetime, so ``.astimezone`` is safe).
+    # The high/low arm (DEC-BADTICK-HILO-SCREEN-001) rides the same pre-pass:
+    # a bar whose HIGH or LOW is out-of-band vs the session's close-derived
+    # reference is skipped even with a sane close (a x10-scaled high with a
+    # normal close poisons ``TodayOHLC.absorb``'s running max → the next
+    # day's PDH anchor). The non-finite screen (DEC-READ-BOUNDARY-FINITE-001)
+    # runs FIRST: a NaN/±inf OHLC field is corrupt DATA — skipped-and-counted
+    # (one ``feed.non_finite_bar_skipped`` WARN per session) BEFORE the
+    # positivity raise below (SANCTIONED CHANGE: -inf moves from raise-class
+    # to skip-class — a non-finite bar is the same certain-corruption class
+    # as NaN/+inf, and NaN compares false so it never reached the raise
+    # anyway), and non-finite rows are FILTERED OUT of the ratio screen's
+    # input (a NaN reference compares false against everything and would
+    # silently poison the head median / running baseline). Both screens share
+    # the ONE ``BRUTEX_BAD_TICK_SCREEN`` kill switch — OFF restores the exact
+    # pre-#1616 raw read path (forensic replay; -inf then raises at
+    # positivity again, the pre-existing envelope).
+    finite_mask: list[bool] | None = None
+    keep_mask: list[bool] | None = None
+    if bad_tick_screen_enabled():
+        ist_dates = [ts.astimezone(IST).date() for ts in timestamps]
+        finite_mask = non_finite_keep_mask(ist_dates, opens, highs, lows, closes, source=source)
+        screen = BadTickScreen(source=source)
+        if all(finite_mask):
+            keep_mask = screen.screen_mask(ist_dates, closes, highs=highs, lows=lows)
+        else:
+            # Feed the ratio screen ONLY the finite rows (same chronological
+            # order — filtering preserves it), then re-expand its verdicts to
+            # full-table row positions. A non-finite row's slot stays True in
+            # ``keep_mask``: it is dropped by ``finite_mask`` before the
+            # positivity raise and never reaches the ratio-skip branch.
+            finite_idx = [i for i, ok in enumerate(finite_mask) if ok]
+            sub_mask = screen.screen_mask(
+                [ist_dates[i] for i in finite_idx],
+                [closes[i] for i in finite_idx],
+                highs=[highs[i] for i in finite_idx],
+                lows=[lows[i] for i in finite_idx],
+            )
+            keep_mask = [True] * len(closes)
+            for sub_row, full_row in enumerate(finite_idx):
+                keep_mask[full_row] = sub_mask[sub_row]
 
     bars: list[CandleBar] = []
-    for ts, o, h, lo, c, v, oi in zip(
-        timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
+    for row, (ts, o, h, lo, c, v, oi) in enumerate(
+        zip(timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True)
     ):
         origin = f" in {source}" if source is not None else ""
+        # Non-finite skip FIRST (DEC-READ-BOUNDARY-FINITE-001): a NaN/±inf
+        # OHLC field is certain corruption — skipped-and-counted BEFORE the
+        # positivity raise (the raise is reserved for FINITE non-positive
+        # prices; -inf's move from raise-class to skip-class is the
+        # documented sanctioned change).
+        if finite_mask is not None and not finite_mask[row]:
+            continue
         # Engine-boundary POSITIVITY (DEC-STORED-DATA-VALIDATION-001): checked
         # BEFORE construction so an internally-ORDERED all-negative bar (which
         # the ordering-only constructor would accept) is refused with the real
@@ -347,11 +412,18 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
                     f"engine (DEC-STORED-DATA-VALIDATION-001)"
                 )
         # Bad-tick screen (post-positivity, pre-construction): a scaled spike is
-        # DROPPED (not built, not appended) and counted; the last kept good close
-        # carries forward as the comparison baseline. IST session date drives the
-        # per-session grouping (``ts`` is timezone-aware — the constructor rejects
-        # a naive datetime, so ``.astimezone`` is safe).
-        if screen is not None and not screen.keep(ist_date=ts.astimezone(IST).date(), close=c):
+        # DROPPED (not built, not appended) and counted per the pre-computed
+        # keep mask. The positivity raise above deliberately stays FIRST — a
+        # corrupt NON-POSITIVE stored bar is a different, always-loud class
+        # that never rides the skip path. SCOPE of the "byte-identical to the
+        # pre-mask #1616 ordering" claim: it holds for this per-row
+        # raise-before-skip law and for every table that is SERVED; on a table
+        # the positivity guard REFUSES, the whole-table pre-pass above has
+        # already emitted the table's bad-tick WARNs before the raise (the
+        # pre-#1625 streaming screen emitted none past the raising row) —
+        # strictly MORE disclosure on a refused table, never less, and no bars
+        # are served either way (test-pinned).
+        if keep_mask is not None and not keep_mask[row]:
             continue
         try:
             bars.append(
@@ -371,8 +443,6 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
                 f"refusing to serve corrupt data to the engine "
                 f"(DEC-STORED-DATA-VALIDATION-001)"
             ) from exc
-    if screen is not None:
-        screen.finish()
     return bars
 
 

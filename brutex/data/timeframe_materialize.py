@@ -909,14 +909,33 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     prebuild's per-symbol quarantine set, so the symbol is quarantined +
     NAMED and its derived TFs are NOT written — rows are never silently
     dropped or "fixed".
+
+    Bad-tick screen (DEC-BADTICK-RESAMPLE-INPUT-001, INSTRUMENT-CLASS scoped
+    at fix round 2): AFTER the price-sanity raise, the frame is passed through
+    the COMMON :func:`~brutex.data.bad_tick.screen_frame_bad_ticks` iff
+    :func:`~brutex.data.bad_tick.resample_screen_applies` holds for the
+    coordinate — SPOT + FNO ``FUT`` screened; FNO ``CE``/``PE`` deliberately
+    NOT (option premiums legitimately move ``> 4x`` in one minute, so the
+    index-calibrated bound would destroy real option bars — reproduced; the
+    F&O options lake is REFERENCE_ONLY and its movers display path is
+    likewise unscreened, so stored ≡ display consistency holds).
     """
     import polars as pl
 
+    from brutex.data.bad_tick import resample_screen_applies, screen_frame_bad_ticks
     from brutex.data.price_sanity import validate_frame_price_sanity
 
     columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
     if with_open_interest:
         columns = (*columns, "open_interest")
+    # DEC-BADTICK-RESAMPLE-INPUT-001 fix round 2: the bad-tick screen is
+    # INSTRUMENT-CLASS scoped — SPOT + FNO FUT screened, FNO CE/PE (option
+    # premiums legitimately move > 4x/min — the index-calibrated bound is
+    # unjustified) + undecodable-FNO NOT screened. The pure coordinate
+    # predicate is equivalent to the caller's PrebuildKind on every
+    # production input (contract kinds derive from the SAME parse_fno_symbol
+    # decode at cascade discovery / lake_heal), resolved ONCE at build time.
+    screen_bad_ticks = resample_screen_applies(segment, symbol)
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -953,7 +972,19 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         validate_frame_price_sanity(
             frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
         )
-        return frame
+        # DEC-BADTICK-RESAMPLE-INPUT-001: screen scaled bad-tick + non-finite
+        # rows out of the SHARED 1-minute base BEFORE it reaches the intraday
+        # AND daily resamplers (this ONE frame is materialize_lake_timeframes'
+        # shared ``df_1m``), so a self-consistent x10-scaled bar the engine read
+        # boundary drops (close OR high/low ratio-spike) can no longer LAUNDER
+        # into a derived 5m/15m/…/1day bucket. Runs AFTER the positivity/ordering
+        # RAISE above (raise-class before skip-class) — disjoint, no double-drop.
+        # OFF (BRUTEX_BAD_TICK_SCREEN), an UNSCREENED instrument class (fix
+        # round 2 — FNO CE/PE, see ``screen_bad_ticks`` above), or clean data
+        # ⇒ the same frame object.
+        if not screen_bad_ticks:
+            return frame
+        return screen_frame_bad_ticks(frame, source=f"{exchange}/{segment}/{symbol}/1minute")
 
     return _read
 

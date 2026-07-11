@@ -186,6 +186,40 @@ class TestSpotStoredReadEquality:
         )
         assert (cands.stored_reads, cands.resampled_reads) == (0, 1)
 
+    def test_spot_stored_equals_resample_under_poison(self, tmp_path: Path) -> None:
+        """DEC-BADTICK-RESAMPLE-INPUT-001: with a x10-scaled poison 1m bar, the
+        STORED read (screened via make_lake_read_1m) and the on-the-fly RESAMPLE
+        fallback (screened via _read_cut_1m_frame) BOTH drop it, so the
+        stored-vs-resample equality contract holds UNDER poison too — proving
+        seam 4 (the movers fallback screen) is load-bearing. Without it the
+        resample side would keep the poison and diverge from the stored side."""
+        # A clean _DAY session with ONE x10 poison close at 09:20 (post-head).
+        session = _session(_DAY, 20005)
+        session[5] = _bar(day=_DAY, hour=9, minute=20, close="200055", volume=105)
+        _write(tmp_path, segment="INDEX", symbol="NIFTY", interval="1minute", bars=session)
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=_session(_PRIOR, 20000),
+        )
+
+        before = compute_spot_candidates(
+            lake_root=tmp_path, interval="15minute", date=_DAY.isoformat(), time=None
+        )
+        assert before.snapshots, "seed must produce a snapshot"
+        assert (before.stored_reads, before.resampled_reads) == (0, 1)  # resample fallback
+
+        _materialize_spot(tmp_path, "NIFTY")
+        after = compute_spot_candidates(
+            lake_root=tmp_path, interval="15minute", date=_DAY.isoformat(), time=None
+        )
+        assert (after.stored_reads, after.resampled_reads) == (1, 0)  # stored read
+        # Both sides screened the poison ⇒ identical metrics (the poison high
+        # 200057 is absent from the ranking on both).
+        assert after.snapshots == before.snapshots
+
     def test_spot_stored_read_equality_whole_day_no_cutoff(self, tmp_path: Path) -> None:
         # The cutoff-free intraday permutation (time=None ⇒ whole session).
         _seed_spot(tmp_path, "NIFTY", 20000)

@@ -68,20 +68,45 @@ def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -
     wired reader serves, never a poisoned-era physical duplicate), renamed +
     projected to the resampler's canonical ``ts_utc``/OHLCV columns, sorted.
     *source* labels the dedup log event; blank derives ``<symbol>/<interval>``.
+
+    The ``1minute`` re-derive base is bad-tick screened for the SCREENED
+    instrument classes only (DEC-BADTICK-RESAMPLE-INPUT-001 fix round 2 —
+    :func:`~brutex.data.bad_tick.resample_screen_applies` over the
+    ``symbol_dir`` coordinate: SPOT + FNO ``FUT`` screened, FNO ``CE``/``PE``
+    not): the stored derived partitions of those classes are now built from
+    the SAME class-scoped screen, so a one-sided screen here would read a
+    perfectly-honest OPTIONS derived partition FALSE-stale whenever its
+    premium made a legit ``> 4x`` one-minute move — and the doctor's
+    ``check_derived_freshness`` walks FNO contract dirs, so that false-stale
+    would FAIL the whole doctor check (regression-pinned both directions).
     """
     import polars as pl
 
+    from brutex.data.bad_tick import resample_screen_applies, screen_frame_bad_ticks
     from brutex.data.lake_read import dedup_bars_frame
 
     frame, _dropped = dedup_bars_frame(
         pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
         source=source or f"{symbol_dir.name}/{interval}",
     )
-    return (
+    projected = (
         frame.rename({"timestamp": "ts_utc"})
         .select("ts_utc", "open", "high", "low", "close", "volume")
         .sort("ts_utc")
     )
+    # DEC-BADTICK-RESAMPLE-INPUT-001: screen the ``1minute`` re-derive base ONLY
+    # (never the stored DERIVED interval — it must expose its poison), so the
+    # freshness compare re-derives CLEAN and a legacy derived partition built
+    # from unscreened 1m reads ``"stale"`` → the sweep-preflight gate refuses.
+    # Fix round 2: class-scoped via the SAME resample_screen_applies gate the
+    # write seams use (the symbol_dir coordinate is <…>/<segment>/<symbol>) —
+    # SPOT + FNO FUT screened; FNO CE/PE compare raw-vs-raw, mirroring their
+    # unscreened materialisation, so an honest options partition never reads
+    # false-stale on the index-calibrated bound (docstring).
+    # Clean lakes + the BRUTEX_BAD_TICK_SCREEN kill switch OFF ⇒ identity object.
+    if interval == "1minute" and resample_screen_applies(symbol_dir.parent.name, symbol_dir.name):
+        return screen_frame_bad_ticks(projected, source=source or f"{symbol_dir.name}/{interval}")
+    return projected
 
 
 def lake_derived_freshness_verdicts(

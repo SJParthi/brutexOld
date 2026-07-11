@@ -366,6 +366,15 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     frame-for-frame (:func:`brutex.data.tf_autoderive.compare_derived_freshness`).
     Any drift — a stale table left behind by a 1m backfill, or a
     pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid — is a loud ``FAIL``.
+    A LEGACY derived partition materialised from UNSCREENED 1-minute reads
+    ``"stale"`` → ``FAIL`` too, because the re-derive base is now bad-tick
+    screened (DEC-BADTICK-RESAMPLE-INPUT-001) — the intended migration
+    tripwire, not a probe defect. SPOT + FNO ``FUT`` classes only (fix
+    round 2): an FNO ``CE``/``PE`` contract's re-derive base is deliberately
+    NOT screened (`resample_screen_applies` — the index-calibrated 4.0x bound
+    is unjustified for option premiums), mirroring its unscreened
+    materialisation, so an options dir reached by this walk can never
+    false-FAIL the check on a legit ``> 4x`` premium move.
 
     SKIP (a valid state, not a failure) when: the lake root is absent, no
     symbol has derived partitions yet (the auto-derive opt-in is OFF), or

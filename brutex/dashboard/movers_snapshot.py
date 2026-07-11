@@ -790,6 +790,7 @@ def _read_cut_1m_frame(
     """
     import polars as pl
 
+    from brutex.data.bad_tick import screen_frame_bad_ticks
     from brutex.data.lake_day_glob import read_day_intraday_frame
 
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -805,6 +806,21 @@ def _read_cut_1m_frame(
     day_df = df.filter(ist_date == day).sort("ts_utc")
     if cutoff_min is not None:
         day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
+    # DEC-BADTICK-RESAMPLE-INPUT-001: screen the raw 1-minute session frame
+    # (this ONE COMMON reader feeds BOTH the resampled display bars AND the
+    # session-value reducer), so the on-the-fly RESAMPLE fallback consumes the
+    # SAME screened 1-minute base as the STORED derived partition
+    # (make_lake_read_1m) — a poison bar that the stored side drops is dropped
+    # here too, keeping the movers stored-vs-resample byte-equality contract
+    # under poison as well as on clean data (identity object when clean / OFF).
+    # Fix round 2 (instrument-class scope): NO resample_screen_applies gate is
+    # needed here — this reader is STRUCTURALLY spot-only: its ONLY consumers
+    # (_read_session_bars + spot_session_value_paisa) are fed by
+    # compute_spot_candidates, whose discovery whitelists SPOT_PROBE_SEGMENTS
+    # (INDEX/CASH — an FNO coordinate never reaches this read), so the
+    # unconditional call below screens exactly the screened classes. The F&O
+    # movers tabs ride the deliberately UNSCREENED _read_future_session.
+    day_df = screen_frame_bad_ticks(day_df, source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
         return None
     return day_df

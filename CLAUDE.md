@@ -18,7 +18,212 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
+_Last updated: 2026-07-11 (the ENGINE-SLICE CLUB — `claude/engine-slice-club`,
+clubbing PR #1399 (`claude/data-edge-guard-fixes`) + PR #1398
+(`claude/sweep-core-slice0`) into ONE draft PR off main: (a) the data-edge
+pack — DEC-BADTICK-HILO-SCREEN-001 + DEC-READ-BOUNDARY-FINITE-001
+(MIGRATION.md #1687–#1688) + DEC-BADTICK-RESAMPLE-INPUT-001 (MIGRATION.md
+#1683) — the bad-tick hi/lo screen + the non-finite read-boundary guard +
+the resample-input frame screen + the stage1a Muhurat weekly-anchor guards;
+and (b) the Slice-0 pack — DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 (MIGRATION.md
+#1685) — the behavior-identical fold/combine decomposition of
+`brutex/metrics/compute.py`, byte-identity golden-proven. Source files
+disjoint, ledger rows disjoint; the ONE merge conflict was this file's
+governance blurb, resolved by this combined entry. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the full outcome summaries live in the two members'
+blocks directly below + MIGRATION.md #1683/#1685/#1687–#1688.)
+Earlier: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
+#1685 — Slice 0 of the Rust sweep-core conversion: a behavior-identical
+FOLD/COMBINE decomposition of the metric body in `brutex/metrics/compute.py`
+— NEW frozen `TradeFolds` + `_fold_trades` (the verbatim per-trade
+accumulations, token-for-token) + public `combine_metrics_from_folds` (the
+verbatim scalar tail), the exact shape the Rust core will mirror
+term-for-term; BYTE-IDENTITY golden-proven (a 52-test old-vs-new bit-parity
+suite against the frozen pre-Slice-0 oracle + the C23 order-sensitivity
+hypothesis differential gate; anti-vacuous perturbation teeth measured; the
+#1531 frozen `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` reproduce
+byte-for-byte). ZERO Rust lands in this slice; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `compute.py` 100%
+line+branch. Any per-round record lives ONLY in the §1 Active-branch blurb +
+MIGRATION.md #1685 — this header carries the pointer, never the story.)
+Earlier: 2026-07-09 (DEC-BADTICK-HILO-SCREEN-001 +
+DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1687–#1688 — renumbered from
+the interim #1632–#1633, then from #1655–#1656 at PR prep 2026-07-10 (main's PR
+#1354 took #1632, then PR #1343 took #1655; #1687/#1688 coordinator-granted) —
+the data-edge-guard ADDITIONS cycle on the same branch:
+(1) DEC-BADTICK-HILO-SCREEN-001 — the bad-tick screen gains the HIGH/LOW arm:
+`BadTickScreen.screen_mask` grows OPTIONAL keyword-only `highs`/`lows`
+(omitted = the close-only screen, byte-identical — the provisional-API §4.1
+additive-only stability contract); a bar whose high OR low is out-of-band vs
+the session's CLOSE-derived reference (head median for a head bar, last-KEPT
+close after; the SAME `BAD_TICK_MAX_RATIO=4.0` law, boundary bad, the ONE
+symmetric `is_bad_tick` predicate) is skipped-and-counted even with a sane
+close — closing the product-audit-3 DATA-3b class (a x10 HIGH with a normal
+open/low/close passed the close-only screen AND price_sanity, then poisoned
+the NEXT day's PDH/pivot/Fib anchors via `TodayOHLC.absorb`'s running max).
+Whole-bar drop, never a clamped/edited field; the baseline stays CLOSE-derived
+(highs/lows are judged, never become the reference); a bar skipped for ANY
+reason never advances the baseline; reason precedence pinned close→high→low
+(a both-scaled fat-range bar counts once, as `high`); hi/lo skips FOLD into
+the one per-session skip WARN's `skipped` count, which gains the ADDITIVE
+`skip_reasons` per-reason map + `first_reason` fields (existing fields keep
+name + meaning); `replay.py` passes the table's highs/lows. Honest limits:
+the #1625 1-bar/2-bar/escape-band limits carry over — 1-bar/2-bar sessions
+kept INCLUDING their highs/lows (no confirmed reference — a 2-bar session's
+x10 high is a disclosed escape, pinned — and runtime-SILENT, unlike the
+close arm's 2-bar WARN; an intra-bar witness is the named optional
+follow-up, fixer round 3); the head escape band
+`[4·min-neighbor, 4·median)` applies to the hi/lo judgment identically,
+PLUS a hi/lo-ONLY kept-close escape window (fixer round 3, superseding
+round 1's "x10 always caught" hi/lo wording: the arm judges the corrupt
+field vs the SESSION reference, so a x10 HIGH / ÷10 LOW on a bar whose own
+close is kept at (0.25, 0.4)x / (2.5, 4)x the reference is SERVED —
+adversarial-synthetic only, needs a kept >= 60% one-bar move; #1687) —
+but the #1625 "a session can never be emptied by its own head vote"
+invariant is CLOSE-vote-ONLY (fixer round 1): the arm judges the
+median-close bar's OWN high/low, so an EXACTLY-3-bar session (the
+head-resolving shape — 1-/2-bar sessions are KEPT, the head never
+resolves) whose every head bar
+carries an out-of-band high/low is fully EMPTIED (kept=0, skip WARN +
+majority-dropped WARN both fire; the dropped median's CLOSE still seeds the
+baseline; #1625 corrected in place, pinned). SANCTIONED CHANGE (fixer
+round 1): a MIS-ORDERED stored bar whose corrupt field is ratio-out-of-band
+is now SKIPPED by the arm BEFORE the DEC-STORED-DATA-VALIDATION-001
+ordering ValueError — a disclosed loud→quiet narrowing for that class
+(in-band mis-ordered bars still raise; screen OFF restores the raise for
+every mis-ordered bar — both pinned, #1687). The audit-3 permutation suite is pinned: HIGH-only
+x10 / LOW-only ÷10 / both-scaled fat-range, poison at position {0,1,last},
+head permutations, hi/lo-skip-never-advances-baseline, legit reopen gap
+must-not-trip, omitted-kwargs byte-identity.
+(2) DEC-READ-BOUNDARY-FINITE-001 — NEW `bad_tick.non_finite_keep_mask`:
+a bar with ANY non-finite (`inf`/`-inf`/`nan`) OHLC field at
+`arrow_table_to_bars` is skipped-and-counted BEFORE the positivity raise —
+NaN COMPARES FALSE, so it sailed past the raise (`nan <= 0` is False),
+blinded the ratio screen (every comparison against a NaN reference is False)
+and reached `Decimal("NaN")` downstream; non-finite rows are FILTERED OUT of
+the ratio screen's input (a NaN head bar blinds the median vote — the
+filtration is test-pinned: a NaN head row + a later x10 spike still catches
+the spike). One NEW `feed.non_finite_bar_skipped` WARN per affected session
+(a DISTINCT event name — a different, CERTAIN corruption class). SANCTIONED
+CHANGE (documented, never silent): `-inf` moves from raise-class (the
+positivity ValueError) to skip-class; the positivity raise stays reserved for
+FINITE non-positive prices, byte-unchanged. Kill switch DECISION: SHARED
+(`BRUTEX_BAD_TICK_SCREEN`, one gate for the whole read-boundary screen
+family) — OFF = the exact pre-#1616 raw read path for forensic replay
+(`-inf` then raises at positivity again, pinned; the rest of the OFF
+envelope measured per field, fixer round 1: NaN raises an UNWRAPPED
+`decimal.InvalidOperation`, `+inf` in open/low/close the wrapped corrupt-bar
+ValueError, ONLY `+inf`-in-HIGH flows raw — byte-identical to main, #1688);
+no second env knob.
+PLUS the fix-forward completeness items: the first-day-Muhurat abstain WARN
+is now test-pinned as stream-START across ALL SIX real Muhurat dates
+(2020-2025) × both weekly anchors, and the resident-KERNEL bar_bits path
+(`ResidentSweepKernel` / `ResidentKernelCache.get` — which reaches anchors
+through the SAME `build_bar_bits` → `stage1a._compute_anchors` seam, so no
+guard mirror is needed) is EXECUTED over a real Muhurat window for both
+weekly anchors: completes without raising, one abstain WARN, bar_bits
+bit-identical to the non-kernel build — proven, never inferred. ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+scope/vocab/rate-cap/lake-schema/stored-bar change; clean lakes
+byte-identical (kill switch OFF = the pre-#1616 bytes; screen ON over clean
+data = unchanged — all goldens pass unmodified, the frozen 400-case
+vocab_golden_vectors.json byte-untouched); `bad_tick.py` + `replay.py` +
+`stage1a.py` ALL 100% line+branch (re-measured at this HEAD); P-06 +
+suffix-independence suites pass UNMODIFIED (scoped per #1625: they do not
+route through `arrow_table_to_bars`, so they do not certify the new
+screens); ruff/ruff-format clean, `mypy
+--strict` clean, pyright at the merged-main baseline. Any
+per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1687–#1688 — this header carries outcome summaries, never the
+round-by-round story.)
+Earlier: 2026-07-09 (DEC-BADTICK-HEAD-SEED-001 +
+DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001, MIGRATION.md #1625 —
+the two #1616 data-edge-guard follow-on defects fixed as ONE change set:
+(1) DEC-BADTICK-HEAD-SEED-001 — the bad-tick screen's session-head baseline is
+EVIDENCE-CONFIRMED: the first up-to-3 bars of each session vote via their
+MEDIAN close (`HEAD_CONFIRM_BARS=3`, fixed buffer, O(1)/bar), so a ≥4x-scaled
+poison FIRST bar is itself dropped instead of becoming the unhealable baseline
+that cascade-dropped every healthy successor (reproduced: the session collapsed
+to the single poison bar, which Stage-1A absorbed as `_today_ohlc` and rolled
+into the NEXT day's anchors — the #1616 "a lone spike cannot cascade-flag its
+healthy successor" + "corrupt FIRST bar … not screened" claims are corrected IN
+PLACE, strikethrough + CORRECTED notes, the #208 precedent).
+`BadTickScreen.keep()/finish()` becomes the single-pass whole-table
+`screen_mask` (the head verdict needs the ≤2 following head bars; the wired
+`arrow_table_to_bars` computes ONE O(n) pre-pass mask, positivity raise still
+FIRST); genuine reopen gaps never false-trip (consecutive real head minutes
+agree under the NSE circuit bands), cross-session comparison stays FORBIDDEN
+(stock splits never false-trip), mid-session screening + skip-and-COUNT +
+one-WARN-per-session + `BRUTEX_BAD_TICK_SCREEN` kill-switch semantics
+byte-unchanged; the skip WARN's `first_prev_close` field renamed
+`first_ref_close` (a head skip's reference is the MEDIAN, not a prev close).
+HONEST LIMITS: a 1-bar session head is unconfirmable (kept, silent); a 2-bar
+session is unconfirmable (symmetric ratio — no offender identifiable) → BOTH
+kept + one `feed.bad_tick_head_unconfirmed` WARN; a corrupt-MAJORITY head (≥2
+corrupt of the first 3 bars — SAME or DIFFERENT scalings, round-1 review: the
+original "same-scaled" qualifier was WRONG) out-votes the median and COLLAPSES
+the WHOLE session onto the corruption (the corrupt survivors seed the
+baseline, every healthy successor cascade-drops, and Stage-1A absorbs the
+corrupt bar(s) as the day's OHLC → the NEXT day's anchors poisoned — the bug-1
+shape re-armed at a 2-corrupt-head-bars threshold — a threshold made EXACT by
+the round-3 median-seeded baseline, which sealed the one-kept-escape-band-bar
+variant below it; for a corrupt run starting
+at head position 2 a strict REGRESSION vs the #1616 screen — disclosed at full
+blast radius, cascade-pinned, and loudly signalled by the NEW observe-only
+`feed.bad_tick_session_majority_dropped` WARN when skipped > kept — round-2
+reword: a coarse "most of the session was screened away — inspect the
+partition" disclosure, NOT proof the survivors are corrupt (it over-fires on
+a perfectly-screened healthy-median short session, and the minimal 3-bar
+2-of-3 / 4-bar 2v2 corrupt-majority shapes sit at/below its strict gate,
+emitting only the skip WARN — both directions pinned); head verdicts are
+MEDIAN-referenced, so a threshold-adjacent head spike ≥4x its NEIGHBOR yet
+<4x the median rides the disclosed narrow [4·min-neighbor, 4·median) escape
+band and is kept silently (~4.00-4.04x only; the ×10 class always caught —
+round-2 precision, pinned; round-3 FIX: an escaped spike can no longer SEAT
+the post-head baseline — the baseline SEEDS from the head MEDIAN, never the
+LAST kept head bar, so a kept position-3 escape-band spike no longer
+cascade-drops the session's healthy remainder over a flat/declining tail —
+the round-3 review's confirmed shape, position-3 probe + median-seed pins
+added; the residual is the kept spike's own ~4x close in the day's OHLC);
+the head
+verdict is bounded-FORWARD-looking (it reads ≤2 following same-session bars —
+a load truncated inside a session's first 3 bars can keep a poison head the
+full load would drop; pinned; the suffix-independence gates do not route
+through `arrow_table_to_bars`, so they do not certify the screen). Clean lakes
+byte-identical (all goldens pass unmodified). (2) DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — the weekly resolvers'
+deliberate non-trading-`today` `ValueError` (true for EVERY Muhurat date, all
+6, 2020-2025) escaped `stage1a._compute_anchors` OUTSIDE the grid drivers'
+SweepComboError tuple-skip quarantine, so ANY full-scope
+ROLLING_WEEKLY/WEEKLY_STATIC sweep was GUARANTEED to abort whole-grid (killing
+even its PREV_DAY tuples; ingest KEEPS Muhurat bars per #1294) — closing
+#1616's honest-limit (a) BY IMPLEMENTATION: the non-PREV_DAY branch now
+abstains on a `has_muhurat_session(today)` date (fib=None rides the EXISTING
+`_NON_FIB_MASK` clear — the ADR-0012 combo-ineligible convention; warm pivots
+kept) with ONE `stage1a.muhurat_weekly_anchor_ineligible` WARN per Muhurat
+session (incl. a stream whose FIRST day IS the Muhurat date — the round-2 fix
+on the no-prior-day arm, previously ZERO warns there; PREV_DAY first-day
+streams stay silent + byte-identical, both arms pinned); the weekly
+resolvers' raise stays BYTE-UNTOUCHED (test-pinned honest
+refusal for direct callers); PREV_DAY + non-Muhurat behavior byte-identical;
+all 6 real boundaries × both anchors test-pinned + a REAL `run_sweep_grid`
+whole-grid completion regression; RESIDUAL (round-1 disclosure): the abstain
+keys ONLY on `has_muhurat_session` — a leaked NON-Muhurat non-trading-date
+stored bar (a pre-#1294 ingest leak, never retro-cleaned) still hits the
+resolvers' ValueError whole-grid abort (pinned; remediation = re-pull / lake
+census; a typed quarantinable error is a NAMED follow-up); the second DEC id
+carries its own validator stub header, MIGRATION.md #1626. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+F&O lake REFERENCE_ONLY; no scope/vocab/rate-cap/lake-schema change;
+`bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
+suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
+--strict` clean, pyright at the pre-change baseline, 0 new (round-4
+post-merge re-measure on the b73d3b4b-merged tree: `pyright brutex` 0
+errors, `brutex tests` 1 error in `tests/unit/test_window_ledger.py` —
+untouched by this branch, main's own baseline; the round-2 figure of 40 was
+the f028fe65-era measure). The FULL
+per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1625 — this header carries outcome summaries, never the round-by-round
+story.)
+Earlier: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
 DEC-STAGE1A-ROLL-RESET-001 + the round-1–8 review-fix packs DEC-FUTURES-LAUNCH-REVIEW-FIXES-001…-008,
 MIGRATION.md #1700–#1709 + #1710 — the ADR-0012 NIFTY-futures sweep LAUNCH
 capstone (PR-5): the futures track is addressed by ONE frozen series alias **`NSE-NIFTY-FUT`**
@@ -761,7 +966,15 @@ screen at the engine read boundary — NEW `brutex/data/bad_tick.py` (`is_bad_ti
 `feed/replay.py::arrow_table_to_bars` (the ONE sweep-feed choke point) SKIPS-and-
 COUNTS a self-consistent scaled bar (close `>= 4x` OR `<= 1/4x` the previous
 IN-SESSION kept close — the `x10` fat-finger class the positivity+ordering checks
-miss), first-bar-of-session exempt, one `feed.bad_tick_skipped` WARN per session,
+miss), ~~first-bar-of-session exempt~~ [CORRECTED 2026-07-08,
+DEC-BADTICK-HEAD-SEED-001 #1625 — FALSE post-#1625: the first bar is no longer
+exempt, it is MEDIAN-voted with the session's first up-to-3 bars and a poison
+head bar at any of positions 1-3 that is ≥4x (or ≤1/4x) the HEAD MEDIAN is
+itself dropped (the unconditional exemption had made a ≥4x-scaled poison FIRST
+bar the unhealable cascade baseline); see the §1 Active-branch chain copy of
+this blurb for the full correction incl. the remaining #1625-disclosed limits
+(1-2-bar head, corrupt-MAJORITY head, escape-band kept spike, truncated load)], one
+`feed.bad_tick_skipped` WARN per session,
 default-ON `BRUTEX_BAD_TICK_SCREEN` kill switch, O(1)/bar, never value-editing /
 never fabricating. Threshold 4.0 derived from NSE circuit-breaker physics
 (10/15/20% daily bands → single-minute moves << 0.25x; regular-day goldens
@@ -2002,7 +2215,182 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
+- **Active branch:** `claude/engine-slice-club` (**the ENGINE-SLICE CLUB —
+  clubbing PR #1399 (`claude/data-edge-guard-fixes`) + PR #1398
+  (`claude/sweep-core-slice0`) into ONE draft PR off main**: (a) the
+  data-edge pack — DEC-BADTICK-HILO-SCREEN-001 +
+  DEC-READ-BOUNDARY-FINITE-001 (MIGRATION.md #1687–#1688) +
+  DEC-BADTICK-RESAMPLE-INPUT-001 (MIGRATION.md #1683): the bad-tick screen's
+  HIGH/LOW arm + the non-finite OHLC screen at the engine read boundary +
+  the resample-input frame screen (instrument-class-scoped) + the stage1a
+  Muhurat weekly-anchor guards; and (b) the Slice-0 pack —
+  DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 (MIGRATION.md #1685): the
+  behavior-identical fold/combine decomposition of
+  `brutex/metrics/compute.py` (`TradeFolds` + `_fold_trades` +
+  `combine_metrics_from_folds`), byte-identity golden-proven. Steward-verified
+  disjointness: zero shared source files, zero shared ledger rows; the ONE
+  merge conflict was this file's governance blurb, resolved by this combined
+  entry. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the FULL blurbs live
+  VERBATIM in the two members' Earlier entries directly below.)
+  Earlier: `claude/data-edge-guard-fixes` (**DEC-BADTICK-HILO-SCREEN-001 +
+  DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1687–#1688** (renumbered from the
+  interim #1632–#1633, then from #1655–#1656 at PR prep — main's PR #1354
+  took #1632, then PR #1343 took #1655; #1687/#1688 coordinator-granted) — the ADDITIONS cycle
+  on the same branch: (1) the bad-tick screen's HIGH/LOW arm — `screen_mask`
+  gains OPTIONAL keyword-only `highs`/`lows` (omitted = close-only,
+  byte-identical); a bar whose high OR low is out-of-band vs the session's
+  CLOSE-derived reference (head median / last-kept close; same 4.0x law,
+  boundary bad) is skipped-and-counted even with a sane CLOSE — the
+  product-audit-3 DATA-3b class (a x10 HIGH with a normal close poisoned the
+  NEXT day's PDH anchor via `TodayOHLC.absorb`); whole-bar drop never clamp;
+  baseline stays close-derived; a skipped bar never advances it; reason
+  precedence close→high→low pinned; hi/lo skips fold into the one skip WARN's
+  `skipped` + ADDITIVE `skip_reasons`/`first_reason` fields; `replay.py`
+  passes the table's highs/lows; 1-bar/2-bar sessions stay kept incl. their
+  highs/lows (disclosed; the 2-bar hi/lo escape is runtime-SILENT — the
+  intra-bar witness is the named optional follow-up, fixer round 3) and the
+  `[4·min-neighbor, 4·median)` head escape band applies identically, PLUS
+  the hi/lo-ONLY kept-close escape window (fixer round 3 — a x10 high/÷10
+  low on a bar whose own close is kept at (0.25, 0.4)x/(2.5, 4)x the
+  session reference is SERVED; adversarial-synthetic only, #1687) — but
+  the #1625 never-emptied-by-its-own-head-vote
+  invariant is CLOSE-vote-ONLY (fixer round 1): the arm can drop the
+  median-close bar for its own out-of-band high/low, so an EXACTLY-3-bar
+  session (the head-resolving shape; 1-/2-bar sessions are KEPT — the head
+  never resolves) whose every head bar carries one is fully EMPTIED
+  (kept=0, both WARNs
+  fire; #1625 corrected in place, pinned); and SANCTIONED (fixer round 1): a
+  mis-ordered stored bar whose corrupt field is ratio-out-of-band is skipped
+  by the arm BEFORE the DEC-STORED-DATA-VALIDATION-001 ordering ValueError —
+  a disclosed loud→quiet narrowing (in-band mis-ordered bars still raise;
+  screen OFF restores the raise — both pinned). (2) NEW `bad_tick.non_finite_keep_mask` —
+  inf/-inf/nan OHLC at `arrow_table_to_bars` is skipped-and-counted BEFORE
+  the positivity raise (NaN compares false — it sailed past the raise AND
+  blinded the ratio screen; non-finite rows are FILTERED out of the ratio
+  screen's input, test-pinned), one NEW `feed.non_finite_bar_skipped` WARN
+  per session; SANCTIONED CHANGE: `-inf` moves from raise-class to
+  skip-class; kill switch SHARED (`BRUTEX_BAD_TICK_SCREEN` — OFF = the exact
+  pre-#1616 raw read path, `-inf` then raises again, pinned; the OFF envelope
+  measured per field, fixer round 1: NaN raises an unwrapped
+  `decimal.InvalidOperation`, `+inf` in open/low/close the wrapped
+  corrupt-bar ValueError, only `+inf`-in-HIGH flows raw — #1688). Plus the
+  fix-forward completeness items: first-day-Muhurat abstain WARN pinned as
+  stream-START across ALL SIX Muhurat dates × both weekly anchors; the
+  resident-KERNEL bar_bits path (`ResidentSweepKernel`/`ResidentKernelCache.get`
+  → the SAME `build_bar_bits` seam) EXECUTED over a real Muhurat window for
+  both weekly anchors — completes, one WARN, bit-identical to the non-kernel
+  build. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+  no scope/vocab/rate-cap/lake-schema/stored-bar change; `bad_tick.py` +
+  `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
+  suffix-independence + golden suites pass UNMODIFIED (scoped per #1625: the
+  P-06/suffix suites do not route through `arrow_table_to_bars`, so they do
+  not certify the new screens); the frozen 400-case
+  fixture byte-untouched; ruff/ruff-format/`mypy --strict` clean, pyright at
+  the merged-main baseline.)
+  Earlier (same branch): (**DEC-BADTICK-HEAD-SEED-001 +
+  DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001, MIGRATION.md #1625** —
+  the two #1616 data-edge-guard follow-on defects fixed as ONE change set:
+  (1) DEC-BADTICK-HEAD-SEED-001 — the bad-tick screen's session-head baseline is
+  EVIDENCE-CONFIRMED: the first up-to-3 bars of each session vote via their
+  MEDIAN close (`HEAD_CONFIRM_BARS=3`, fixed buffer, O(1)/bar), so a ≥4x-scaled
+  poison FIRST bar is itself dropped instead of becoming the unhealable baseline
+  that cascade-dropped every healthy successor (reproduced: the session collapsed
+  to the single poison bar, which Stage-1A absorbed as `_today_ohlc` and rolled
+  into the NEXT day's anchors — the #1616 "a lone spike cannot cascade-flag its
+  healthy successor" + "corrupt FIRST bar … not screened" claims are corrected IN
+  PLACE, strikethrough + CORRECTED notes, the #208 precedent).
+  `BadTickScreen.keep()/finish()` becomes the single-pass whole-table
+  `screen_mask` (the head verdict needs the ≤2 following head bars; the wired
+  `arrow_table_to_bars` computes ONE O(n) pre-pass mask, positivity raise still
+  FIRST); genuine reopen gaps never false-trip (consecutive real head minutes
+  agree under the NSE circuit bands), cross-session comparison stays FORBIDDEN
+  (stock splits never false-trip), mid-session screening + skip-and-COUNT +
+  one-WARN-per-session + `BRUTEX_BAD_TICK_SCREEN` kill-switch semantics
+  byte-unchanged; the skip WARN's `first_prev_close` field renamed
+  `first_ref_close` (a head skip's reference is the MEDIAN, not a prev close).
+  HONEST LIMITS: a 1-bar session head is unconfirmable (kept, silent); a 2-bar
+  session is unconfirmable (symmetric ratio — no offender identifiable) → BOTH
+  kept + one `feed.bad_tick_head_unconfirmed` WARN; a corrupt-MAJORITY head (≥2
+  corrupt of the first 3 bars — SAME or DIFFERENT scalings, round-1 review: the
+  original "same-scaled" qualifier was WRONG) out-votes the median and COLLAPSES
+  the WHOLE session onto the corruption (the corrupt survivors seed the
+  baseline, every healthy successor cascade-drops, and Stage-1A absorbs the
+  corrupt bar(s) as the day's OHLC → the NEXT day's anchors poisoned — the bug-1
+  shape re-armed at a 2-corrupt-head-bars threshold — a threshold made EXACT by
+  the round-3 median-seeded baseline, which sealed the one-kept-escape-band-bar
+  variant below it; for a corrupt run starting
+  at head position 2 a strict REGRESSION vs the #1616 screen — disclosed at full
+  blast radius, cascade-pinned, and loudly signalled by the NEW observe-only
+  `feed.bad_tick_session_majority_dropped` WARN when skipped > kept — round-2
+  reword: a coarse "most of the session was screened away — inspect the
+  partition" disclosure, NOT proof the survivors are corrupt (it over-fires on
+  a perfectly-screened healthy-median short session, and the minimal 3-bar
+  2-of-3 / 4-bar 2v2 corrupt-majority shapes sit at/below its strict gate,
+  emitting only the skip WARN — both directions pinned); head verdicts are
+  MEDIAN-referenced, so a threshold-adjacent head spike ≥4x its NEIGHBOR yet
+  <4x the median rides the disclosed narrow [4·min-neighbor, 4·median) escape
+  band and is kept silently (~4.00-4.04x only; the ×10 class always caught —
+  round-2 precision, pinned; round-3 FIX: an escaped spike can no longer SEAT
+  the post-head baseline — the baseline SEEDS from the head MEDIAN, never the
+  LAST kept head bar, so a kept position-3 escape-band spike no longer
+  cascade-drops the session's healthy remainder over a flat/declining tail —
+  the round-3 review's confirmed shape, position-3 probe + median-seed pins
+  added; the residual is the kept spike's own ~4x close in the day's OHLC);
+  the head
+  verdict is bounded-FORWARD-looking (it reads ≤2 following same-session bars —
+  a load truncated inside a session's first 3 bars can keep a poison head the
+  full load would drop; pinned; the suffix-independence gates do not route
+  through `arrow_table_to_bars`, so they do not certify the screen). Clean lakes
+  byte-identical (all goldens pass unmodified). (2) DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — the weekly resolvers'
+  deliberate non-trading-`today` `ValueError` (true for EVERY Muhurat date, all
+  6, 2020-2025) escaped `stage1a._compute_anchors` OUTSIDE the grid drivers'
+  SweepComboError tuple-skip quarantine, so ANY full-scope
+  ROLLING_WEEKLY/WEEKLY_STATIC sweep was GUARANTEED to abort whole-grid (killing
+  even its PREV_DAY tuples; ingest KEEPS Muhurat bars per #1294) — closing
+  #1616's honest-limit (a) BY IMPLEMENTATION: the non-PREV_DAY branch now
+  abstains on a `has_muhurat_session(today)` date (fib=None rides the EXISTING
+  `_NON_FIB_MASK` clear — the ADR-0012 combo-ineligible convention; warm pivots
+  kept) with ONE `stage1a.muhurat_weekly_anchor_ineligible` WARN per Muhurat
+  session (incl. a stream whose FIRST day IS the Muhurat date — the round-2 fix
+  on the no-prior-day arm, previously ZERO warns there; PREV_DAY first-day
+  streams stay silent + byte-identical, both arms pinned); the weekly
+  resolvers' raise stays BYTE-UNTOUCHED (test-pinned honest
+  refusal for direct callers); PREV_DAY + non-Muhurat behavior byte-identical;
+  all 6 real boundaries × both anchors test-pinned + a REAL `run_sweep_grid`
+  whole-grid completion regression; RESIDUAL (round-1 disclosure): the abstain
+  keys ONLY on `has_muhurat_session` — a leaked NON-Muhurat non-trading-date
+  stored bar (a pre-#1294 ingest leak, never retro-cleaned) still hits the
+  resolvers' ValueError whole-grid abort (pinned; remediation = re-pull / lake
+  census; a typed quarantinable error is a NAMED follow-up); the second DEC id
+  carries its own validator stub header, MIGRATION.md #1626. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  F&O lake REFERENCE_ONLY; no scope/vocab/rate-cap/lake-schema change;
+  `bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
+  suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
+  --strict` clean, pyright at the pre-change baseline, 0 new (round-2
+  post-merge: 40 errors = the f028fe65 main baseline exactly).)
+  Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
+  of the Rust sweep-core conversion: a BEHAVIOR-IDENTICAL fold/combine decomposition of the metric body in
+  `brutex/metrics/compute.py` — NEW frozen `TradeFolds` (17 fields, the exact per-trade fold intermediates) +
+  `_fold_trades` (the verbatim per-trade accumulations, moved token-for-token, summation order untouched) + NEW
+  public `combine_metrics_from_folds` (the verbatim scalar tail — every libm / None-boundary / floor-div / clamp
+  expression in today's literal tokens; fail-loud typed `ValueError` on `n_trades < 1`, the zero-trade arm staying
+  at the composition root `_compute_metrics_impl` via `_empty_metrics`) — the exact shape the future Rust core
+  mirrors term-for-term. BYTE-IDENTITY golden-proven: a 52-test golden suite bit-compares old-vs-new through BOTH
+  public entries against the VERBATIM pre-Slice-0 oracle (frozen inline; `struct.pack("<d", …)` per float field —
+  signed zeros + every ULP distinguished) over a hostile corpus, PLUS the C23 order-sensitivity hypothesis
+  DIFFERENTIAL gate (4 properties: adversarial orderings / splits 0..n / single-element folds /
+  negative-zero-denormal classes); anti-vacuous teeth MEASURED (one fold operator flipped → golden 33/52 FAIL; the
+  sorted-returns C23 mutant → golden 14/52 + differential 3/4 FAIL); the #1531 frozen
+  `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` sweep-run goldens reproduce byte-for-byte (run identity bit-identical).
+  HONEST LIMITS: "zero observable change" is scoped to the documented contract — the exception SHAPE under
+  contract-VIOLATING inputs (a direct private call with `start_equity_paisa=0`) may differ (same ZeroDivisionError
+  TYPE, different message/raise site), unreachable from BOTH public entries (`compute_metrics_from_scalars` raises
+  a typed ValueError first; details in MIGRATION.md #1685); the `TradeFolds` field-name spellings vs design §1.3
+  are a recorded deviation whose pairing obligation binds Slice 2 (#1685 item (3)). ZERO Rust lands in this slice;
+  no flag, no performance claim. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/lake-schema
+  change; `compute.py` 100% line+branch (288 stmts / 54 branches, 0 missed); ruff/ruff-format clean, `mypy
+  --strict` clean, pyright 0 new.)
+  Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
   DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702** — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone: the ONE pinned series alias `NSE-NIFTY-FUT` (symbol_id 4; retired shapes get a
   did-you-mean refusal), the vendor-truth roll resolver (`brutex/data/futures_series.py` — interior holes refuse
@@ -3097,9 +3485,15 @@ hostile-review pass._
   `brutex/feed/replay.py::arrow_table_to_bars` (the ONE sweep-feed choke point:
   `ReplayFeed._load_bars` → `Catalog.get_bars` → `arrow_table_to_bars`) that SKIPS-and-COUNTS a self-consistent
   SCALED bar (close `>= 4x` OR `<= 1/4x` the previous IN-SESSION kept close — the `x10` decimal-shift /
-  fat-finger class that passes `price_sanity`'s positivity + ordering checks), first bar of each session exempt
-  (no reopen-gap false trip), a skipped spike never advances the baseline (a lone spike cannot cascade-flag its
-  healthy successor), exactly one `feed.bad_tick_skipped` WARN per session (flushed at the session boundary /
+  fat-finger class that passes `price_sanity`'s positivity + ordering checks), ~~first bar of each session
+  exempt (no reopen-gap false trip), a skipped spike never advances the baseline (a lone spike cannot
+  cascade-flag its healthy successor)~~ [CORRECTED 2026-07-08, DEC-BADTICK-HEAD-SEED-001 #1625 — FALSE for
+  the KEPT-spike case: the unconditional first-bar exemption made a ≥4x-scaled poison FIRST bar the
+  unhealable baseline against which every healthy successor WAS cascade-dropped (the session collapsed to the
+  single poison bar, which Stage-1A absorbed as `_today_ohlc` and rolled into the NEXT day's anchors —
+  strictly WORSE than no screen for that class); the session head is now EVIDENCE-CONFIRMED via the median
+  close of the first up-to-3 bars, so a poison head bar is itself dropped, genuine reopen gaps still never
+  false-trip, and a skipped bar still never advances the baseline], exactly one `feed.bad_tick_skipped` WARN per session (flushed at the session boundary /
   stream end with the total skipped count + first offender), default-ON `BRUTEX_BAD_TICK_SCREEN` kill switch,
   O(1)/bar, never value-editing / never fabricating. THRESHOLD 4.0 derived from NSE circuit-breaker physics
   (index-wide 10/15/20% daily halt bands → single-MINUTE moves are a small fraction, well under a couple of
@@ -3108,8 +3502,23 @@ hostile-review pass._
   regular-day bars move `<< 0.25x`/minute so every golden is byte-identical). HONEST LIMITS: the Muhurat guard
   fixes the prev-day ANCHOR roll — a ROLLING_WEEKLY/WEEKLY_STATIC sweep still hits the weekly resolver's
   PRE-EXISTING non-trading-`today` refusal on a Muhurat bar-day (separate; PREV_DAY is the sweep default and is
-  fully fixed); the bad-tick screen is a heuristic bounded-ratio guard (a sub-4× ×2 scaling is deliberately not
-  caught; a corrupt FIRST bar of a session is not screened by this guard). ENGINE UNCHANGED —
+  fully fixed) [CLOSED 2026-07-08 by DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 #1625 — proven a GUARANTEED
+  whole-grid abort (the ValueError is not a SweepComboError, so the grid drivers' tuple-skip never engaged);
+  Stage-1A now honestly ABSTAINS (fib=None → `_NON_FIB_MASK`) on the Muhurat day's own weekly anchor with one
+  `stage1a.muhurat_weekly_anchor_ineligible` WARN; the resolvers' direct-caller refusal stays byte-untouched];
+  the bad-tick screen is a heuristic bounded-ratio guard (a sub-4× ×2 scaling is deliberately not
+  caught; ~~a corrupt FIRST bar of a session is not screened by this guard~~ [CORRECTED 2026-07-08,
+  DEC-BADTICK-HEAD-SEED-001 #1625 — this UNDERSTATED the defect: the corrupt first bar was not merely
+  unscreened, it was KEPT AS THE BASELINE and destroyed the rest of its session; a corrupt head bar at any of
+  positions 1-3 that is ≥4x (or ≤1/4x) the HEAD MEDIAN is NOW caught by the median-of-first-3 head vote
+  (round-4 precision: "caught" is median-referenced, never unconditional) — the remaining honest limits are the
+  unconfirmable 1-2-bar session head + the corrupt-MAJORITY head (≥2 corrupt of the first 3 bars — SAME or
+  DIFFERENT scalings — out-vote the median, seed the baseline, and collapse the WHOLE session onto the
+  corruption) + the disclosed threshold-adjacent `[4·min-neighbor, 4·median)` escape-band kept head spike
+  (since round 3 it can no longer seat the baseline) and the bounded-FORWARD-looking truncated-load corner
+  (round-4 enumeration completion — the two corners round 1/2 disclosed in #1625 were omitted here), all
+  disclosed in full in #1625 with the round-1 collapse WARN + cascade pins]).
+  ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
   change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
   --strict`/pyright clean; the P-06 look-ahead + suffix-independence property suites pass UNMODIFIED.)
@@ -5162,7 +5571,43 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/magical-cray-g6agaw`
+- **Active feature branch:** `claude/engine-slice-club`
+  (the ENGINE-SLICE CLUB — PR #1399's data-edge pack:
+  DEC-BADTICK-HILO-SCREEN-001 + DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md
+  #1687–#1688, + DEC-BADTICK-RESAMPLE-INPUT-001, MIGRATION.md #1683; and
+  PR #1398's Slice-0 pack: DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
+  #1685; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for
+  the full blurb)
+  Earlier: `claude/data-edge-guard-fixes`
+  (DEC-BADTICK-HILO-SCREEN-001 + DEC-READ-BOUNDARY-FINITE-001,
+  MIGRATION.md #1687–#1688 (renumbered from the interim #1632–#1633, then
+  from #1655–#1656; main's PR #1354 took #1632, PR #1343 took #1655) — the additions cycle: (1) the bad-tick screen's
+  HIGH/LOW arm (optional keyword-only `highs`/`lows` on `screen_mask`; an
+  out-of-band high/low skips the whole bar even with a sane close — the
+  DATA-3b PDH-poison class; additive `skip_reasons`/`first_reason` WARN
+  fields) and (2) the non-finite OHLC screen at the engine read boundary
+  (`non_finite_keep_mask` — inf/-inf/nan skipped-and-counted BEFORE the
+  positivity raise, `-inf` sanctioned raise→skip, shared kill switch);
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the
+  full blurb)
+  Earlier (same branch):
+  (DEC-BADTICK-HEAD-SEED-001 + DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001,
+  MIGRATION.md #1625 — the two #1616 data-edge-guard follow-on fixes:
+  (1) the bad-tick screen's session-head baseline is evidence-confirmed
+  (median of the first up-to-3 bars — a poison FIRST bar is itself
+  dropped, never a session-destroying cascade baseline) and (2) Stage-1A
+  honestly abstains (fib=None) on a Muhurat day's own weekly Fib anchor
+  instead of the whole-grid-aborting resolver ValueError; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
+  blurb)
+  Earlier: `claude/sweep-core-slice0`
+  (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685 — Slice 0 of the Rust
+  sweep-core conversion: the behavior-identical fold/combine decomposition of
+  `brutex/metrics/compute.py` (`TradeFolds` + `_fold_trades` +
+  `combine_metrics_from_folds`), byte-identity golden-proven — zero Rust in
+  this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line)
+  Earlier: `claude/magical-cray-g6agaw`
   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
   DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1710 — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone; see §1 Active branch for the full blurb)
