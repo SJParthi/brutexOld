@@ -248,6 +248,192 @@ def parse_condition_ids(raw: str) -> list[int]:
     return bits
 
 
+#: The self-documenting ``--k`` token that selects the Apriori-to-EXTINCTION
+#: exploration mode (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1738) — the
+#: DEFAULT on every grid surface sharing ``_add_sweep_grid_args`` (sweep-all /
+#: sweep-daemon / sweep-verify / nightly). A numeric CSV is the legacy
+#: byte-identical arm; exactly ONE token, no aliases.
+EXTINCTION_K_TOKEN: Final[str] = "extinction"  # noqa: S105 — a --k mode token, not a credential
+
+#: The Apriori frontier's single-``uint64``-limb width — the maximum (exclusive)
+#: condition-bit index the frozen generator accepts (mirrors
+#: ``sweep_apriori._U64_BITS``; a ``>= 64`` bit on the DEFAULT path falls back
+#: to legacy, ruling 10 — the explicit-``--k`` paths keep the generator's own
+#: graceful per-tuple refusal).
+_APRIORI_U64_BITS: Final[int] = 64
+
+#: The pair level — the k=2 rung whose worst-case work is EXACTLY computable at
+#: launch (``C(n, 2) × n_bars``); deeper levels are data-dependent.
+_APRIORI_PAIR_LEVEL: Final[int] = 2
+
+
+@dataclass(frozen=True, slots=True)
+class SweepExplorationPlan:
+    """The resolved sweep exploration mode (DEC-SWEEP-APRIORI-DEFAULT-001).
+
+    Produced by :func:`resolve_sweep_exploration` — a PURE resolution (the
+    resolver never mutates the environment; the CALLERS own the
+    ``BRUTEX_SWEEP_APRIORI`` write so spawn workers inherit it).
+
+    Attributes
+    ----------
+    apriori
+        ``True`` iff the Apriori extinction mode resolved ON (the caller must
+        then ensure ``BRUTEX_SWEEP_APRIORI`` is set for the engine + workers).
+    k_values
+        The resolved k-ladder (extinction: ``[1..n_unique]``, possibly trimmed
+        by an explicit ``--max-combos``) or the legacy explicit list.
+    notes
+        Loud one-line WARN notes the caller prints to stderr (the kill-switch
+        fallback, the u128 fallback, the ladder trim) — empty on the silent
+        arms.
+    """
+
+    apriori: bool
+    k_values: list[int]
+    notes: tuple[str, ...]
+
+
+def resolve_sweep_exploration(
+    k: str,
+    *,
+    condition_bits: Sequence[int],
+    max_combos: int | None,
+    env: Mapping[str, str] = os.environ,
+) -> SweepExplorationPlan:
+    """Resolve the ``--k`` grammar + env law into a :class:`SweepExplorationPlan`.
+
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738) — the ONE pure resolver
+    behind every grid surface's ``--k``:
+
+    * A NUMERIC CSV (anything but the token) is the LEGACY arm — parsed exactly
+      as before (``_parse_int_csv``), ``apriori=False``, the environment
+      never read: byte-identical to the pre-flip behavior.
+    * The ``extinction`` token (the new default) resolves the tri-state
+      ``BRUTEX_SWEEP_APRIORI``: unset/blank or truthy ⇒ EXTINCTION mode
+      (``k_values = [1..n_unique]``); an explicit falsy literal is the KILL
+      SWITCH ⇒ the legacy default ``[1, 2]`` + one loud WARN note (never a
+      refusal of an explicitly-passed token); a SET-but-unrecognised value
+      (junk — e.g. a typo'd ``ture``) raises :class:`CliUserError` EAGERLY —
+      after the flip a junk value would otherwise be a SILENT mode flip of the
+      default (Golden Rule #1). Explicit numeric ``--k`` + any env value keeps
+      today's tri-state opt-in semantics byte-identical (junk stays
+      silent-OFF there — the byte-identity mandate covers that path).
+    * u128 forward guard (ruling 10): a resolved condition bit ``>= 64`` on
+      the token arm falls back to the legacy ``[1, 2]`` with one loud WARN —
+      the frozen generator refuses ``>= 64``-bit vocabularies per tuple, so an
+      extinction default there would TUPLE_FAIL every tuple (a stillborn
+      default). Explicit ``--k`` paths keep today's per-tuple graceful refusal.
+    * Explicit ``--max-combos`` × extinction (ruling 9): the ladder is TRIMMED
+      to the contiguous prefix ``1..k_max`` the cap admits (walking k upward,
+      cut at the FIRST k whose raw ``C(n_unique, k)`` exceeds the cap — the
+      extinction walk's own upward march; the symmetric ``C(n, k)`` tail
+      re-entry at very deep k is deliberately NOT admitted), with one loud
+      note naming the cut; a cap that empties the ladder (even ``k=1``
+      refused) raises :class:`CliUserError`. ``effective_max_combos`` then
+      honors the explicit cap verbatim (operator WINS), and the trimmed ladder
+      satisfies the raw-count guard by construction.
+
+    Parameters
+    ----------
+    k
+        The raw ``--k`` value (token or CSV).
+    condition_bits
+        The resolved swept condition bits (``n_unique = len(set(...))``).
+    max_combos
+        The raw ``--max-combos`` (``None`` = not passed — the built-in
+        default, which ``effective_max_combos`` auto-raises in apriori mode).
+    env
+        The environment mapping to read (injectable for tests; NEVER mutated).
+
+    Returns
+    -------
+    SweepExplorationPlan
+        The resolved mode + ladder + loud notes.
+
+    Raises
+    ------
+    CliUserError
+        A junk ``BRUTEX_SWEEP_APRIORI`` value on the token arm, a non-integer
+        legacy CSV token, or an explicit ``--max-combos`` that refuses even
+        ``k=1`` in extinction mode.
+    """
+    if k.strip().lower() != EXTINCTION_K_TOKEN:
+        # LEGACY arm — byte-identical: same parser, env untouched/unread.
+        return SweepExplorationPlan(apriori=False, k_values=_parse_int_csv(k, flag="--k"), notes=())
+    # Lazy imports keep the CLI module top light (the polars-free `version`
+    # fast path) — the resolver runs only on the sweep surfaces.
+    from brutex.engine.combo_mask import count_combos
+    from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+    from brutex.engine.sweep_lookahead import env_flag_tristate
+
+    raw = env.get(SWEEP_APRIORI_ENV)
+    if raw is not None and raw.strip():
+        flag = env_flag_tristate(raw)
+        if flag is False:
+            # The kill switch: legacy default k=1,2 + ONE loud WARN — an
+            # explicitly-passed token is never refused; the WARN says exactly
+            # what happened (ruling 7).
+            return SweepExplorationPlan(
+                apriori=False,
+                k_values=[1, 2],
+                notes=(
+                    f"{SWEEP_APRIORI_ENV}={raw!r} (the kill switch) disables the "
+                    "Apriori extinction default — falling back to the legacy "
+                    "default k=1,2 (byte-identical to the previous default); "
+                    "unset the env var to restore extinction mode, or pass an "
+                    "explicit --k.",
+                ),
+            )
+        if flag is None:
+            # Junk on the DEFAULT path is fail-loud (ruling 7): a typo'd value
+            # must never silently flip the default exploration mode.
+            raise CliUserError(
+                f"{SWEEP_APRIORI_ENV}={raw!r} is not a recognised value "
+                "(1/true/yes/on | 0/false/no/off); refusing to guess the default "
+                "exploration mode — fix the env var or pass an explicit --k"
+            )
+    n_unique = len(set(condition_bits))
+    over_width = sorted(bit for bit in set(condition_bits) if bit >= _APRIORI_U64_BITS)
+    if over_width:
+        # u128 forward guard (ruling 10) — dormant at today's 60-bit vocabulary.
+        return SweepExplorationPlan(
+            apriori=False,
+            k_values=[1, 2],
+            notes=(
+                f"condition bit {over_width[0]} >= 64: the Apriori frontier is "
+                "u64-only (the frozen generator refuses >=64-bit vocabularies "
+                "per tuple), so the extinction default falls back to the legacy "
+                "k=1,2 for this run — pass an explicit --k to choose the ladder.",
+            ),
+        )
+    k_values = list(range(1, n_unique + 1))
+    notes: tuple[str, ...] = ()
+    if max_combos is not None:
+        trimmed: list[int] = []
+        for candidate_k in k_values:
+            if count_combos(candidate_k, n_unique) > max_combos:
+                break
+            trimmed.append(candidate_k)
+        if not trimmed:
+            raise CliUserError(
+                f"--max-combos {max_combos} refuses even k=1 "
+                f"(C({n_unique},1)={n_unique} > {max_combos}) in extinction mode; "
+                "raise --max-combos, omit it, or pass an explicit --k"
+            )
+        if len(trimmed) < len(k_values):
+            cut_k = trimmed[-1] + 1
+            notes = (
+                f"extinction ladder TRIMMED by the explicit --max-combos "
+                f"{max_combos}: k limited to 1..{trimmed[-1]} (the first refused "
+                f"level is k={cut_k}, C({n_unique},{cut_k})="
+                f"{count_combos(cut_k, n_unique)} > {max_combos}); omit "
+                "--max-combos to walk the full ladder under the mask·bar breaker.",
+            )
+        k_values = trimmed
+    return SweepExplorationPlan(apriori=True, k_values=k_values, notes=notes)
+
+
 def sweep_all_exit_code(tuples_failed: int) -> int:
     """Map a completed ``sweep-all`` run's ``tuples_failed`` to its exit code.
 
@@ -353,7 +539,15 @@ def _add_sweep_grid_args(
         help="Comma-separated directions BUY/SELL (default BUY,SELL)",
     )
     parser.add_argument(
-        "--k", default="1,2", help="Comma-separated conditions-per-combo values (default 1,2)"
+        "--k",
+        default=EXTINCTION_K_TOKEN,
+        help=(
+            "Comma-separated conditions-per-combo values, or 'extinction' (the "
+            "default): walk k=1,2,3,… per cell until no combo fires >= min-hits "
+            "bars — provably nothing deeper survives (Apriori anti-monotone). An "
+            "explicit list (e.g. '1,2') runs exactly those k, legacy-style, "
+            "byte-identical to the previous default."
+        ),
     )
     parser.add_argument(
         "--fib-anchors",
@@ -407,7 +601,14 @@ def _add_sweep_grid_args(
         "--max-combos",
         type=int,
         default=None,
-        help="Refuse any tuple whose mask count exceeds this (honest opt-in guard)",
+        help=(
+            "Refuse any k whose RAW brute-force count C(n,k) exceeds this. Legacy "
+            "mode: the hard cap (default 100000). Extinction/Apriori mode: an "
+            "opt-in belt — when omitted the raw-count cap is auto-raised (logged) "
+            "and the per-level mask·bar budget (BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS) "
+            "is the operative guard; when passed it TRIMS the k-ladder to the k it "
+            "admits (noted loudly)."
+        ),
     )
     parser.add_argument(
         "--allow-missing-slices",
@@ -6346,7 +6547,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
-    from brutex.engine.sweep_apriori import apriori_enabled, effective_max_combos
+    from brutex.engine.sweep_apriori import (
+        SWEEP_APRIORI_ENV,
+        apriori_enabled,
+        effective_max_combos,
+        resolve_max_mask_bars,
+    )
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
     from brutex.engine.sweep_checkpoint import SweepCheckpointStore
@@ -6445,8 +6651,34 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    k_list = _parse_int_csv(k, flag="--k")
+    # Exploration-mode resolution (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md
+    # #1738): the condition bits parse FIRST (the resolver needs n_unique +
+    # the u128 width guard), then the ONE pure resolver maps the --k grammar +
+    # the BRUTEX_SWEEP_APRIORI tri-state onto the ladder — EAGERLY, before any
+    # lake I/O (the resolve_results_depth_enabled precedent), so a junk env
+    # value on the default path is a clean pre-sweep user-config error.
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
+    try:
+        exploration = resolve_sweep_exploration(
+            k, condition_bits=condition_bits, max_combos=max_combos
+        )
+    except CliUserError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    for note in exploration.notes:
+        print(f"[brutex] {note}", file=sys.stderr)
+    k_list = exploration.k_values
+    # Workers + the engine guards read this env var (spawn workers inherit
+    # the parent env at pool creation; sweep_run's apriori branch +
+    # effective_max_combos below read only os.environ). setdefault
+    # semantics — a truthy operator value is left verbatim; a SET-but-BLANK
+    # value (which the resolver classifies exactly like unset, and which
+    # apriori_enabled() reads as OFF) is overwritten too, so the resolved
+    # plan and the engine can never disagree. No restore here: a CLI
+    # process exits after the sweep; the ONE in-process embedder
+    # (dashboard run_sweep_from_request) snapshot-restores at its boundary.
+    if exploration.apriori and not os.environ.get(SWEEP_APRIORI_ENV):
+        os.environ[SWEEP_APRIORI_ENV] = "1"
     # Off-heap dedup-store knobs (R2-SL-F4-F5): validate flag + env EAGERLY —
     # before the lake preload and any store open — so a mistyped knob is a
     # clean user-config error, never a mid-launch traceback (and never a false
@@ -6578,6 +6810,51 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(
             f"[brutex] WARNING: sweeping PARTIAL coverage (--allow-missing-slices): "
             f"{len(preflight.missing)} empty pairs will skip as no-bars: {missing_str}"
+        )
+
+    # Extinction-mode launch preflight (DEC-SWEEP-APRIORI-DEFAULT-001): name the
+    # mode, the ONE operative hard guard, and the EXACTLY-computable worst-case
+    # level-2 work per loaded slice. Deliberately NO C(60,k) projections and NO
+    # wall-clock estimate — deeper levels are data-dependent, so any such figure
+    # would be fake precision (modeled != measured, Golden Rule #10); the run's
+    # audit artifacts carry the measured per-level curve instead.
+    if exploration.apriori:
+        from brutex.engine.combo_mask import count_combos
+        from brutex.ranking import MIN_TRADES
+
+        budget = resolve_max_mask_bars()
+        n_unique = len(set(condition_bits))
+        print(
+            "[brutex] sweep exploration: APRIORI-TO-EXTINCTION (default). Per cell "
+            f"the k-ladder runs k=1,2,3,… until no combo fires >= {MIN_TRADES} bars "
+            "(natural extinction — provably nothing deeper survives).",
+            file=sys.stderr,
+        )
+        print(
+            f"[brutex] hard guard: per-level mask·bar breaker at {budget} mask·bar "
+            "(BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS; MODELED default, not an "
+            "M4-measured figure). A level exceeding it refuses LOUDLY; that tuple "
+            "and the cell's deeper k are marked TUPLE_FAILED (they would trip "
+            "identically); raise the budget and re-run to explore deeper.",
+            file=sys.stderr,
+        )
+        if _APRIORI_PAIR_LEVEL in exploration.k_values:
+            c2 = count_combos(_APRIORI_PAIR_LEVEL, n_unique)
+            for (slice_symbol, slice_interval), slice_bars in loaded.items():
+                product = c2 * slice_bars
+                pct = 100.0 * product / budget
+                print(
+                    f"[brutex] worst-case level-2 work, exact: "
+                    f"{slice_symbol}/{slice_interval} C({n_unique},2)={c2} x "
+                    f"{slice_bars} bars = {product} mask·bar ({pct:.2f}% of budget)",
+                    file=sys.stderr,
+                )
+        print(
+            "[brutex] deeper levels are DATA-DEPENDENT — no candidate count or "
+            "wall-clock is projectable before the frontier is built; this run's "
+            "audit artifacts carry the measured per-level curve (modeled != "
+            "measured, Golden Rule #10).",
+            file=sys.stderr,
         )
 
     # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
@@ -6805,9 +7082,19 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     def _on_progress(snap: SweepProgressSnapshot) -> None:
         publish_progress(progress_path, snap)
 
+    # The k-axis banner token (DEC-SWEEP-APRIORI-DEFAULT-001): extinction mode
+    # names the ladder + the operative breaker budget instead of dumping the
+    # raw 60-element list; the legacy branch is byte-identical.
+    if exploration.apriori:
+        k_banner = (
+            f"k=1..{exploration.k_values[-1]} (Apriori extinction mode; "
+            f"breaker budget {resolve_max_mask_bars()} mask·bar)"
+        )
+    else:
+        k_banner = f"k={list(grid.k_values)}"
     print(
         f"[brutex] sweep-all: {grid.instruments} × {[tf.label for tf in grid.timeframes]} × "
-        f"{[d.value for d in grid.directions]} × k={list(grid.k_values)} → "
+        f"{[d.value for d in grid.directions]} × {k_banner} → "
         f"results: {out_root}"
     )
     # AUTOMATIC operator alerts (DEC-TELEGRAM-WIRE-001): a hung sweep worker fires
@@ -7006,6 +7293,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 "redo on the next run (exit code non-zero).",
                 file=sys.stderr,
             )
+            if result.tuples_failed_apriori_budget > 0:
+                # The mode-aware remediation sentence (DEC-SWEEP-APRIORI-DEFAULT-001):
+                # a budget trip is target-invariant, so the cell's deeper-k
+                # tuples fail identically — name the ONE lever.
+                print(
+                    f"[brutex] {result.tuples_failed_apriori_budget} of these were mask·bar "
+                    "budget trips — that cell's deeper k levels fail identically by "
+                    "construction; raise BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS (or pass an "
+                    "explicit --k) and re-run to explore them (the frozen checkpoint "
+                    "re-runs exactly the refused tuples).",
+                    file=sys.stderr,
+                )
         if stage3_report.enabled:
             print(
                 f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
