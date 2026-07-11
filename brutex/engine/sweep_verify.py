@@ -1472,19 +1472,32 @@ def recorded_apriori_from_audit(results_root: Path) -> bool | None:
     The ``recorded_stage3_from_audit`` precedent: the tree describes itself via
     its audit chains, never the operator's memory. Scans
     ``audit/sweep-all.jsonl`` then ``audit/sweep-all-supervisor.jsonl`` (the
-    two launcher chains — the nightly binding pins the supervisor path law)
-    for the FIRST mode-carrying START record (:data:`_MODE_START_ACTIONS`):
+    per-chain precedence order as shipped) for mode-carrying START records
+    (:data:`_MODE_START_ACTIONS`); within a chain the **LAST** such record wins
+    (review fix round 1 M2 — the ``recorded_audit_facts`` latest-generation
+    posture: a multi-launch daemon root accretes one START per launch, so the
+    LATEST launch's mode governs; the earlier first-record-wins read
+    permanently downgraded every recount after a mode flip):
 
-    * ``"apriori"`` key present-and-enabled ⇒ ``True`` (an extinction/Apriori
-      tree).
-    * a START record WITHOUT the key ⇒ ``False`` — the EMIT-ON-apriori law
-      makes absence == legacy, which also classifies every pre-flip tree
-      correctly for free.
+    * the winning record's ``"apriori"`` key present-and-enabled ⇒ ``True``
+      (an extinction/Apriori tree).
+    * a winning START record WITHOUT the key ⇒ ``False`` — the
+      EMIT-ON-apriori law makes absence == legacy, which also classifies every
+      pre-flip tree correctly for free.
     * no START record in either chain ⇒ ``None`` (abstain — no gate; the
       code-commit context gate already protects such trees).
 
-    Consumed by ``cmd_sweep_verify``'s recorded-mode gate: a resolved-mode ≠
-    recorded-mode recount is a CONTEXT mismatch (``n_enumerated`` is
+    Each present chain is STREAMED exactly once via ``iter_entries`` — O(1)
+    memory, never a materialised list (review fix round 1 m4; the per-tuple
+    ``SWEEP_START``/``TUPLE_*`` records are skipped in-stream, untouched).
+    Neither file can be skipped outright: ``sweep-all-supervisor.jsonl``
+    carries the production launchers' ``SUPERVISOR_START`` and
+    ``sweep-all.jsonl`` can carry a library caller's ``GRID_SWEEP_START``
+    (the orchestrator appends it to whatever ingest audit it is handed), so
+    BOTH structurally admit :data:`_MODE_START_ACTIONS`.
+
+    Consumed by ``cmd_sweep_verify``'s recorded-mode gate: a recount-effective
+    mode ≠ recorded-mode recount is a CONTEXT mismatch (``n_enumerated`` is
     mode-dependent AND sits in the byte-diffed trial-stats sidecar, so a
     wrong-mode recount under an otherwise matched context would read
     verdict-grade ``recount_divergence`` — the false-corrupt hazard) — the
@@ -1506,21 +1519,23 @@ def recorded_apriori_from_audit(results_root: Path) -> bool | None:
         If a present audit log is unreadable (a malformed tree is not a
         verifiable tree — the ``recorded_stage3_from_audit`` contract).
     """
-    from brutex.orchestrator.audit import AuditError, read_entries
+    from brutex.orchestrator.audit import AuditError, iter_entries
 
     for parts in (("audit", "sweep-all.jsonl"), ("audit", "sweep-all-supervisor.jsonl")):
         audit_path = results_root.joinpath(*parts)
         if not audit_path.exists():
             continue
+        last: bool | None = None
         try:
-            entries: list[AuditEntry] = list(read_entries(audit_path))
+            for entry in iter_entries(audit_path):
+                if entry.action not in _MODE_START_ACTIONS:
+                    continue
+                recorded = entry.payload.get("apriori")
+                last = isinstance(recorded, Mapping) and recorded.get("enabled") is True
         except AuditError as exc:
             raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
-        for entry in entries:
-            if entry.action not in _MODE_START_ACTIONS:
-                continue
-            recorded = entry.payload.get("apriori")
-            return isinstance(recorded, Mapping) and recorded.get("enabled") is True
+        if last is not None:
+            return last
     return None
 
 

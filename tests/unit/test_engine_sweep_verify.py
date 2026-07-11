@@ -2653,3 +2653,74 @@ class TestRecordedAprioriFromAudit:
         path.write_text("{not jsonl\n", encoding="utf-8")
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_apriori_from_audit(tmp_path)
+
+    def test_last_mode_start_in_a_chain_wins_after_a_mode_flip(self, tmp_path: Path) -> None:
+        """Review fix round 1 M2 — the multi-launch daemon root: a LEGACY tree
+        whose supervisor chain later accretes an extinction-cycle
+        SUPERVISOR_START (appended via the REAL ``SweepAuditWriter`` resume,
+        exactly like a second daemon launch) must read the LATEST launch's
+        mode — the first-record-wins read permanently downgraded every
+        recount after the flip."""
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        sup_path.parent.mkdir(parents=True)
+        # Launch 1: legacy (mode-less START — the EMIT-ON-apriori law).
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+        assert recorded_apriori_from_audit(tmp_path) is False
+        # Launch 2: the extinction cycle appends onto the SAME chain.
+        with SweepAuditWriter.open(sup_path, resume=True) as sup:
+            sup.append(
+                action="SUPERVISOR_START",
+                subject="sweep-all",
+                payload={"apriori": {"enabled": True, "max_mask_bars": 42}},
+            )
+        assert recorded_apriori_from_audit(tmp_path) is True
+
+    def test_mode_flip_back_to_legacy_reads_legacy(self, tmp_path: Path) -> None:
+        # The symmetric flip: extinction then legacy → the LAST (legacy) wins.
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        sup_path.parent.mkdir(parents=True)
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(
+                action="SUPERVISOR_START",
+                subject="sweep-all",
+                payload={"apriori": {"enabled": True, "max_mask_bars": 42}},
+            )
+        with SweepAuditWriter.open(sup_path, resume=True) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_each_chain_is_streamed_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review fix round 1 m4: ONE streaming ``iter_entries`` pass per present
+        chain — never a materialised ``read_entries`` list, never a second
+        pass (the last-wins fold happens in-stream)."""
+        import brutex.orchestrator.audit as audit_mod
+
+        self._write_start(tmp_path, "sweep-all.jsonl", "SWEEP_START", {"k": 2})
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+
+        iter_calls: list[Path] = []
+        real_iter = audit_mod.iter_entries
+
+        def _spy_iter(path: Path) -> object:
+            iter_calls.append(path)
+            return real_iter(path)
+
+        def _no_read(path: Path) -> object:
+            raise AssertionError("recorded_apriori_from_audit must stream, never materialise")
+
+        monkeypatch.setattr(audit_mod, "iter_entries", _spy_iter)
+        monkeypatch.setattr(audit_mod, "read_entries", _no_read)
+        assert recorded_apriori_from_audit(tmp_path) is False
+        assert iter_calls.count(tmp_path / "audit" / "sweep-all.jsonl") == 1
+        assert iter_calls.count(sup_path) == 1
