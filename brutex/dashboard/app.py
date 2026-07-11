@@ -39,7 +39,7 @@ import math
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -1537,7 +1537,7 @@ def build_app(
         watchdog = loop_watchdog  # narrow for the closure (mypy: not None)
 
         @asynccontextmanager
-        async def _watchdog_lifespan(_app: Any) -> AsyncIterator[None]:
+        async def _watchdog_lifespan(_app: Any) -> AsyncGenerator[None]:
             """Start/stop the loop watchdog around the app's serving lifetime."""
             await watchdog.start_from_running_loop()
             try:
@@ -1545,9 +1545,7 @@ def build_app(
             finally:
                 watchdog.stop()
 
-        app = FastAPI(
-            title="BruteX Dashboard", version="0.1.0a0", lifespan=_watchdog_lifespan
-        )
+        app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_watchdog_lifespan)
     else:
         app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
 

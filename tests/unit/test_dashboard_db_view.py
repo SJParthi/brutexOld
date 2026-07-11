@@ -612,7 +612,9 @@ class TestOptionWindowDecode:
         monkeypatch.setattr(
             db_view_module,
             "_LEDGER_READ_CACHE",
-            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+            db_view_module._make_ledger_read_cache(
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
 
         ledger = WindowLedger()
@@ -738,7 +740,9 @@ class TestSpotWindowRollup:
         monkeypatch.setattr(
             db_view_module,
             "_LEDGER_READ_CACHE",
-            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+            db_view_module._make_ledger_read_cache(
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
         ledger = WindowLedger()
         ledger.record(
@@ -769,10 +773,18 @@ class TestSpotWindowRollup:
         os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
         clock["t"] += 121.0  # step past the adaptive-floor cap
         before = calls["n"]
+        # Past the cap the records key rides stale-while-revalidate
+        # (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001): the read serves the
+        # last-known rollup while the (inline) revalidator re-parses ONCE.
         third = spot_window_rollup(tmp_path)
         assert calls["n"] == before + 1  # mtime bump re-parses exactly once…
-        assert third is not first  # …and re-groups (a genuinely new rollup)
-        assert spot_window_rollup(tmp_path) is third  # then cached again
+        assert third is first  # …served last-known — never a blocking regroup
+        spot_window_rollup(tmp_path)  # the rollup key's own one-serve SWR cycle
+        fresh = spot_window_rollup(tmp_path)
+        assert calls["n"] == before + 1  # STILL exactly one re-parse (the law)
+        assert fresh is not first  # the landed revalidates re-grouped anew
+        assert fresh == first
+        assert spot_window_rollup(tmp_path) is fresh  # then cached again
 
     def test_spot_rows_are_byte_unchanged_by_the_map(self, tmp_path: Path) -> None:
         ledger = WindowLedger()
@@ -1891,7 +1903,9 @@ class TestLedgerDeltaAwareness:
         monkeypatch.setattr(
             db_view_module,
             "_LEDGER_READ_CACHE",
-            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+            db_view_module._make_ledger_read_cache(
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
         base = WindowLedger()
         base.record(
@@ -1901,6 +1915,9 @@ class TestLedgerDeltaAwareness:
         assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {"NIFTY"}
         self._append_delta(tmp_path, "SENSEX")  # base mtime UNTOUCHED
         clock["t"] += 121.0  # step past the adaptive-floor cap
+        # One last-known SWR serve (the prior fold), then the landed (inline)
+        # revalidate serves the delta row — bounded, logged, never blocking.
+        assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {"NIFTY"}
         assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {
             "NIFTY",
             "SENSEX",
@@ -1916,7 +1933,9 @@ class TestLedgerDeltaAwareness:
         monkeypatch.setattr(
             db_view_module,
             "_LEDGER_READ_CACHE",
-            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+            db_view_module._make_ledger_read_cache(
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
         base = WindowLedger()
         base.record(
@@ -1926,6 +1945,10 @@ class TestLedgerDeltaAwareness:
         assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
         self._append_delta(tmp_path, "BANKNIFTY")  # base mtime UNTOUCHED
         clock["t"] += 121.0  # step past the adaptive-floor cap
+        # Layer-by-layer SWR convergence (records, then the derived rollup):
+        # two last-known serves, then the delta row lands — never blocking.
+        assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
+        spot_window_rollup(tmp_path)  # the rollup key's own one-serve cycle
         assert spot_window_rollup(tmp_path) == {
             ("NIFTY", "1minute"): (1, 0, 0),
             ("BANKNIFTY", "1minute"): (1, 0, 0),

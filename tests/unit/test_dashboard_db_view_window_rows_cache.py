@@ -83,7 +83,9 @@ class TestWindowLedgerRowsCached:
         monkeypatch.setattr(
             db_view,
             "_LEDGER_READ_CACHE",
-            db_view._make_ledger_read_cache(clock=lambda: clock["t"]),  # pyright: ignore[reportPrivateUsage]
+            db_view._make_ledger_read_cache(  # pyright: ignore[reportPrivateUsage]
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
         _seed(tmp_path, ["NIFTY"])
         parses = {"n": 0}
@@ -103,11 +105,14 @@ class TestWindowLedgerRowsCached:
         # merge-on-save — that is the writer's cost, not the grid's — so pin
         # the DELTA of the grid reads only.)
         _seed(tmp_path, ["NIFTY", "SENSEX"])
-        clock["t"] += 121.0  # step past the floor cap — never a stale serve here
+        clock["t"] += 121.0  # step past the floor cap → the SWR arm: one
+        # last-known serve while the (inline) revalidator parses ONCE.
         base = parses["n"]
+        stale = window_ledger_rows_cached(tmp_path)
+        assert parses["n"] == base + 1  # exactly one fresh parse (the revalidate)
+        assert len(stale) == 1  # the last-known projection — never a blocked read
         refreshed = window_ledger_rows_cached(tmp_path)
-        assert parses["n"] == base + 1
-        assert len(refreshed) == 2
+        assert len(refreshed) == 2  # the landed store serves the flush
         assert window_ledger_rows_cached(tmp_path) == refreshed  # still cached
         assert parses["n"] == base + 1
 

@@ -54,6 +54,7 @@ from brutex.dashboard.db_view import (
     _WINDOW_KEY_COLUMNS,
     WINDOW_PAGE_CACHE_CAPACITY,
     _build_window_payload_duckdb,
+    _compute_cursor,
     _ledger_scan_source,
     _ledger_stamp_token,
     _window_counts_from_records,
@@ -1071,3 +1072,71 @@ def test_unknown_status_values_collapse_to_one_page_key(tmp_path: Path) -> None:
     assert [r["symbol"] for r in failed["windows"]] == ["BANKNIFTY"]
     assert cache.computes == {"window-counts": 1, "window-page": 2}
     assert _UNKNOWN_WINDOW_STATUS not in repr(failed)  # the sentinel never leaks into a payload
+
+
+class TestComputeCursor:
+    """`_compute_cursor` (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001): the
+    flagged window caches may run a compute on a BACKGROUND revalidator daemon
+    concurrent with the request thread's statements on the SAME shared DuckDB
+    connection — whose execute→fetch pending-result state is per-connection
+    (reproduced in-suite: a background counts fold fetched the request's
+    16-column page rows). Every cached compute therefore rides an isolated
+    cursor; fakes without `cursor()` fall back to the conn itself."""
+
+    def test_real_conn_yields_an_independent_cursor(self) -> None:
+        conn = duckdb.connect()
+        cursor = _compute_cursor(conn)
+        assert cursor is not conn  # statement-isolated — its own pending state
+        assert cursor.execute("SELECT 42").fetchone() == (42,)
+
+    def test_conn_without_cursor_falls_back(self) -> None:
+        spy = _SpyConn()  # the suite's fake — records calls, has no cursor()
+        assert _compute_cursor(spy) is spy
+
+    def test_raising_cursor_falls_back(self) -> None:
+        class _Wedged:
+            def cursor(self) -> Any:
+                raise RuntimeError("connection closed")
+
+        wedged = _Wedged()
+        assert _compute_cursor(wedged) is wedged
+
+    def test_background_revalidate_never_corrupts_the_request_statements(
+        self, tmp_path: Path
+    ) -> None:
+        """THE interleave regression (fails without `_compute_cursor`): a
+        revalidator folding counts on the shared conn CONCURRENT with the
+        request thread's page query corrupted each other's pending results
+        (`too many values to unpack (expected 3)`). With isolation, heavy
+        stamp churn + concurrent polls stay clean."""
+        _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
+        conn = duckdb.connect()
+        counts_cache, page_cache = make_window_payload_caches()  # REAL daemon runner
+        errors: list[BaseException] = []
+
+        def _poll() -> None:
+            try:
+                for _ in range(10):
+                    build_window_payload(
+                        tmp_path,
+                        conn=conn,
+                        count_cache=counts_cache,
+                        page_cache=page_cache,
+                        generation=0,
+                    )
+            except BaseException as exc:
+                errors.append(exc)
+
+        import threading as _threading
+        import time as _time
+
+        pollers = [_threading.Thread(target=_poll, daemon=True) for _ in range(4)]
+        for t in pollers:
+            t.start()
+        # Churn the stamp while the pollers run (the mid-pull delta cadence).
+        for i in range(6):
+            _write_delta(tmp_path, [_row(f"SYM{i}", "SUCCESS", bars=1)])
+            _time.sleep(0.02)
+        for t in pollers:
+            t.join(timeout=30)
+        assert not errors, f"interleaved statements corrupted a result: {errors[0]!r}"
