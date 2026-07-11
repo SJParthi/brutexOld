@@ -1916,6 +1916,34 @@ def build_app(
     _spot_cascade_cache = MoversSnapshotCache(
         pull_active_probe=_pull_live, adaptive_floor=True, stale_while_revalidate=True
     )
+    # The /db TABLES summary cache (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
+    # the coordinator-directed tables-route fold): `GET /api/v1/db/tables` ran the
+    # `table_summary` COUNT(*) sweep UNCACHED on the store's read connection on
+    # EVERY open, so mid-pull it convoyed behind whatever multi-second read held
+    # the store read lock (the operator's live "request timed out after 12000ms"
+    # on the tables list, twice; the in-repo forensic precedent latency_ms≈32796).
+    # The 3-row payload is a pure function of the store tables (instruments /
+    # instrument_runs / schema_meta), so it is memoised on ONE STABLE key whose
+    # GENERATION digests the write generation AND the instrument-master content
+    # revision (`master_revision` — a keyless load-instruments moves the
+    # instruments/instrument_runs counts WITHOUT bumping the generation; the
+    # `_nav_latency_coords` digest-bridge form, so the floor + SWR arms stay
+    # reachable on the one stable key), with the SAME serve-last-known posture
+    # as the discovery memos above: past-floor mid-pull the last-known counts
+    # serve instantly and AT MOST ONE tokenless background daemon revalidates.
+    # SMALL dedicated instance (one live key — the WINDOW_PAGE_CACHE
+    # small-instance precedent); the compute reads a FRESH `store.connection`
+    # view per run, so the background revalidator never shares a
+    # `_LockedReadConn` with a request thread.
+    _db_tables_cache = MoversSnapshotCache(
+        capacity=8,
+        pull_active_probe=_pull_live,
+        adaptive_floor=True,
+        stale_while_revalidate=True,
+    )
+    # The tables cache's ONE stable key (the freshness token lives in the
+    # GENERATION digest, never the key — the floor-rekey law).
+    db_tables_key = "db-tables-summary"
     # The DEFAULT-poll latest-movers-date cache (GAP #4): the `/api/v1/movers` route with
     # NO explicit date resolves the latest available spot 1day via `latest_movers_date`,
     # an O(datasets) DuckDB MAX over the spot 1day globs — re-run on EVERY default poll.
@@ -8107,9 +8135,53 @@ def build_app(
 
         Thin wrapper over :func:`brutex.dashboard.db_view.table_summary`.
         Tolerates a missing table (count 0) so a fresh/empty store works.
+        Memoised in the SWR-flagged ``_db_tables_cache``
+        (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, the tables-route fold):
+        the COUNT(*) sweep previously ran UNCACHED on the store read connection
+        per open and convoyed >12 s behind mid-pull reads holding the store
+        read lock (the operator's live tables-list timeout). Now a repeat open
+        within one freshness token is an O(1) hit, a token move (a pull
+        generation bump OR a keyless ``load-instruments`` master move)
+        recomputes, and a past-floor mid-pull open serves the LAST-KNOWN
+        counts instantly (logged ``movers_cache.stale_served``) while at most
+        ONE tokenless background daemon revalidates — the fresh-compute
+        payload is byte-identical to the pre-cache route (pinned). A
+        freshness-probe fault degrades to today's exact pre-cache path: one
+        direct UNCACHED sweep (``table_summary`` maps a faulted connection to
+        honest 0-counts per table — never a 500, nothing cached).
         """
         store = _require_store()
-        tables = await _run_lake(lambda: table_summary(store.connection))
+
+        def _tables() -> list[dict[str, Any]]:
+            """Resolve the cached table summary off the event loop (worker thread).
+
+            The freshness probe (one O(1) generation read + the cheap
+            ``master_revision`` COUNT+MAX) runs INSIDE the offloaded callable
+            — never on the event loop (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002).
+            The compute reads a FRESH ``store.connection`` view per run, so
+            the background SWR revalidator never shares a ``_LockedReadConn``
+            with a request thread (each view serialises its own
+            ``execute → fetch`` under the store read lock).
+            """
+
+            def _compute() -> list[dict[str, Any]]:
+                return table_summary(store.connection)
+
+            try:
+                gen = _summary_cache.generation
+                count, latest = master_revision(store)
+            except STORE_FAULT_TYPES:
+                # Probe outage → the exact pre-cache posture, byte-for-byte:
+                # one direct uncached sweep (honest 0-counts on a faulted
+                # conn — table_summary never raises there), nothing cached.
+                return _compute()
+            return _db_tables_cache.get_or_compute(
+                db_tables_key,
+                generation=revision_generation(f"gen={gen}|m={count}:{latest}"),
+                compute=_compute,
+            )
+
+        tables = await _run_lake(_tables)
         return JSONResponse({"tables": tables})
 
     @app.get("/api/v1/db/table/{name}")

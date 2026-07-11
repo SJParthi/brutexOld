@@ -14,6 +14,15 @@ windows page stuck at "loading…" + the /universe feed dropping ~154 s), on the
 PRODUCTION cache shape (real daemon revalidator). FAILS-BEFORE: both routes
 blocked for the whole fold.
 
+Tables fold (coordinator-directed) — ``GET /api/v1/db/tables`` joins the
+serve-last-known family: the previously-UNCACHED ``table_summary`` COUNT(*)
+sweep is memoised behind a ``master_revision``-folded generation in an
+SWR-flagged cache (the operator's live "request timed out after 12000ms" on
+the tables list). Pins: instant last-known serve past-floor mid-pull with a
+PARKED sweep stub; fresh-compute BYTE-identity vs the pre-cache route shape;
+cache-key honesty (token move → recompute, no move → hit); the probe-fault
+degrade to today's direct uncached sweep.
+
 Skipped cleanly without the ``[ui]`` extra (the sibling dashboard suites).
 """
 
@@ -23,6 +32,7 @@ import threading
 import time
 from collections.abc import Generator
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +41,16 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
+from brutex.dashboard import app as app_module
 from brutex.dashboard import db_view
 from brutex.dashboard.app import DashboardState, build_app
+from brutex.dashboard.summary_cache import SummaryCache
 from brutex.data import window_ledger_store as wls
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.window_ledger import WindowLedger
+from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 _NOW = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
@@ -299,3 +313,190 @@ class TestCoverageWindowsServesLastKnown:
             ]  # last-known rows — the page family serves too
         finally:
             fold.release.set()
+
+
+def _instrument(symbol: str, security_id: int) -> Instrument:
+    """A minimal IDX instrument for `upsert_many` (the nav-floor-rekey helper shape)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=0,
+        tick_size=Decimal("0"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def _load_master(store: InstrumentStore, run_id: str) -> None:
+    """One instrument load — moves `master_revision` WITHOUT a generation bump."""
+    store.upsert_many(
+        [_instrument("NIFTY", 13)],
+        snapshot_date=date(2026, 1, 2),
+        run_id=run_id,
+        csv_source_sha256="0" * 64,
+    )
+
+
+class _ParkedTableSummary:
+    """A parked `table_summary` stand-in (the tables twin of `_ParkedFold`):
+    first armed call blocks on the release event (the COUNT(*) sweep convoyed
+    behind the store read lock mid-pull); every call is counted. Pass-through
+    to the real sweep on release."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+        self._real = app_module.table_summary
+        self._park = False
+
+    def arm(self) -> None:
+        self._park = True
+
+    def __call__(self, conn: Any) -> Any:
+        self.calls += 1
+        if self._park:
+            self.entered.set()
+            assert self.release.wait(timeout=_FOLD_HOLD_S)
+        return self._real(conn)
+
+
+class TestDbTablesServesLastKnown:
+    """The coordinator-directed tables-route fold — SWR + byte pin + key honesty."""
+
+    def test_tables_serve_last_known_past_floor_with_parked_sweep(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILS-BEFORE: past-floor mid-pull the route ran the COUNT(*) sweep
+        INLINE on the store read connection — with the sweep parked (the live
+        ">12 s convoy" shape) the route blocked for the whole hold (the
+        operator's "request timed out after 12000ms" tables list, twice).
+        Now: the PRIOR token's counts serve within the budget and the sweep
+        runs in ONE background revalidator (the production daemon runner)."""
+        pull_on = {"v": False}
+        app = build_app(
+            DashboardState(), instrument_store=store, pull_active_probe=lambda: pull_on["v"]
+        )
+        with TestClient(app) as client:
+            first = client.get("/api/v1/db/tables")
+            assert first.status_code == 200
+            prior = first.json()["tables"]
+            assert [r["table"] for r in prior] == [
+                "instruments",
+                "instrument_runs",
+                "schema_meta",
+            ]
+            time.sleep(_FLOOR_AGE_S)  # age the entry past the 2 s base floor
+            pull_on["v"] = True
+            _load_master(store, "r-mid-pull")  # the master token moves mid-pull
+            parked = _ParkedTableSummary()
+            parked.arm()
+            monkeypatch.setattr(app_module, "table_summary", parked)
+            try:
+                started = time.monotonic()
+                resp = client.get("/api/v1/db/tables")
+                elapsed = time.monotonic() - started
+                assert resp.status_code == 200
+                assert elapsed < _SERVE_BUDGET_S, (
+                    f"/api/v1/db/tables blocked {elapsed:.2f}s behind the parked "
+                    "COUNT(*) sweep — the tables cache must serve last-known past "
+                    "the floor"
+                )
+                assert resp.json()["tables"] == prior  # the last-known counts
+                assert parked.entered.wait(timeout=5.0)  # the revalidator IS sweeping
+            finally:
+                parked.release.set()
+            # Bounded settle: the background revalidator lands the fresh counts.
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                rows = client.get("/api/v1/db/tables").json()["tables"]
+                counts = {r["table"]: r["row_count"] for r in rows}
+                if counts["instruments"] == 1:
+                    break
+                time.sleep(0.05)
+            else:  # pragma: no cover — a genuine hang fails loudly here
+                pytest.fail("the background revalidate never landed the fresh counts")
+
+    def test_tables_fresh_response_byte_identical_to_direct_summary(
+        self, store: InstrumentStore
+    ) -> None:
+        """The byte-identity pin: a FRESH compute's wire bytes == the pre-cache
+        route shape (`JSONResponse({"tables": table_summary(store.connection)})`),
+        on a non-vacuous store (real instrument + run rows)."""
+        _load_master(store, "r-byte-pin")
+        app = build_app(DashboardState(), instrument_store=store)
+        with TestClient(app) as client:
+            resp = client.get("/api/v1/db/tables")
+        assert resp.status_code == 200
+        expected = JSONResponse({"tables": db_view.table_summary(store.connection)}).body
+        assert resp.content == expected
+        counts = {r["table"]: r["row_count"] for r in resp.json()["tables"]}
+        assert counts["instruments"] == 1  # non-vacuous: real counts on the wire
+        assert counts["schema_meta"] >= 1  # the store's own schema_version row
+
+    def test_tables_cache_key_honesty(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Token move → recompute (BOTH components: the master content revision
+        AND the write generation); no move → O(1) hit, zero sweeps."""
+        summary_cache = SummaryCache()
+        counted = {"n": 0}
+        real = app_module.table_summary
+
+        def _spy(conn: Any) -> Any:
+            counted["n"] += 1
+            return real(conn)
+
+        monkeypatch.setattr(app_module, "table_summary", _spy)
+        app = build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)
+        with TestClient(app) as client:
+            assert client.get("/api/v1/db/tables").status_code == 200
+            assert counted["n"] == 1
+            assert client.get("/api/v1/db/tables").status_code == 200
+            assert counted["n"] == 1  # no token move → hit
+            _load_master(store, "r-key-honesty")  # master moves, NO generation bump
+            rows = client.get("/api/v1/db/tables").json()["tables"]
+            assert counted["n"] == 2  # the folded master token recomputed
+            assert {r["table"]: r["row_count"] for r in rows}["instruments"] == 1
+            summary_cache.mark_dirty()  # the write-generation component moves
+            assert client.get("/api/v1/db/tables").status_code == 200
+            assert counted["n"] == 3
+            assert client.get("/api/v1/db/tables").status_code == 200
+            assert counted["n"] == 3  # settled again → hit
+
+    def test_tables_probe_fault_degrades_to_direct_uncached_sweep(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A freshness-probe fault takes today's exact pre-cache path: one
+        direct UNCACHED sweep per open (never a 500, nothing cached)."""
+        counted = {"n": 0}
+        real = app_module.table_summary
+
+        def _spy(conn: Any) -> Any:
+            counted["n"] += 1
+            return real(conn)
+
+        def _raise(_store: Any) -> Any:
+            raise OSError("probe outage")
+
+        monkeypatch.setattr(app_module, "table_summary", _spy)
+        monkeypatch.setattr(app_module, "master_revision", _raise)
+        app = build_app(DashboardState(), instrument_store=store)
+        with TestClient(app) as client:
+            r1 = client.get("/api/v1/db/tables")
+            assert r1.status_code == 200
+            assert counted["n"] == 1
+            r2 = client.get("/api/v1/db/tables")
+            assert r2.status_code == 200
+            assert counted["n"] == 2  # uncached per open during the outage
+            assert r2.content == r1.content  # the real sweep still serves
