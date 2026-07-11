@@ -14,11 +14,15 @@ distinct later decision, DEC-EXEC-PY-BODY-DELETE-001).
 
 This module is deliberately PACKAGE-NEUTRAL (top-level ``brutex.exec_rust``):
 it is consumed by both the costs package and the two executors, so a home
-inside either would mint an options↔costs import cycle. It imports
-``brutex.costs.calculator`` for the shared :class:`ChargeStack` shape only;
-the dispatch sites import THIS module lazily inside the dispatching function
-(the ``materialize_trade`` lazy-import precedent), so no import cycle exists
-at module-load time.
+inside either would mint an options↔costs import cycle. Its ONLY costs-side
+import is the shared :class:`ChargeStack` shape from the stdlib-only LEAF
+``brutex.costs.types`` — never ``calculator`` (whose dispatch site imports
+this module back), so the calculator ↔ exec_rust import pair is structurally
+acyclic (CodeQL ``py/cyclic-import``; AST-pinned by the seam suite's
+leaf-discipline test). The dispatch sites still import THIS module lazily
+inside the dispatching function (the ``materialize_trade`` lazy-import
+precedent) — deferral of the engine-package + one-time ``fno_math`` import
+cost, no longer cycle-avoidance.
 
 ## The flag — ``BRUTEX_EXEC_RUST`` over ``EXEC_RUST_DEFAULT`` (OFF)
 
@@ -89,7 +93,7 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.costs.calculator import ChargeStack
+from brutex.costs.types import ChargeStack
 from brutex.engine.sweep_lookahead import env_flag_tristate
 
 __all__ = [
@@ -235,10 +239,27 @@ def _fits_i64(*values: int) -> bool:
 
 
 def _envelope_fallback(site: str) -> None:
+    """Warn-once + Python-arm fallback for an out-of-i64-envelope input.
+
+    Fired by a seam whose :func:`_fits_i64` pre-gate refused an input the
+    kernel's ``i64`` wire cannot carry — the seam then serves the exact
+    Python arm instead (never a truncated kernel call). One
+    ``exec_rust.envelope_fallback`` WARNING per *site* per process (the
+    :func:`_warn_once` ``(event, reason)`` dedupe; ``reason`` =
+    ``"envelope:<site>"``).
+    """
     _warn_once("exec_rust.envelope_fallback", reason=f"envelope:{site}", site=site)
 
 
 def _kernel_fallback(site: str, exc: BaseException) -> None:
+    """Warn-once + Python-arm fallback for a kernel-raised *exc* at *site*.
+
+    Fired when the dispatched kernel call raised inside a seam's narrow
+    catch — the seam then serves the exact Python arm (the loudness law:
+    never a silent fallback). One ``exec_rust.kernel_fallback`` WARNING per
+    *site* per process, carrying ``error`` (``str(exc)``) + ``error_type``
+    for triage (``reason`` = ``"kernel:<site>"``).
+    """
     _warn_once(
         "exec_rust.kernel_fallback",
         reason=f"kernel:{site}",

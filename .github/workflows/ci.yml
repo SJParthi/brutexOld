@@ -1158,10 +1158,12 @@ jobs:
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
-          # 19d · brutex.costs.types (95 stmts, 14 branches, 75 tests —
-          #       incl. the DEC-ETC-REGIME-HISTORY-001 UnverifiedCostRegimeError
-          #       direct-construction tests, REQUIRED here because this gate
-          #       collects test_costs_calculator.py ONLY)
+          # 19d · brutex.costs.types (113 stmts, 14 branches after the
+          #       ChargeStack leaf-homing — the CodeQL py/cyclic-import fix,
+          #       DEC-EXEC-RUST-CORE-001; incl. the DEC-ETC-REGIME-HISTORY-001
+          #       UnverifiedCostRegimeError direct-construction tests,
+          #       REQUIRED here because this gate collects
+          #       test_costs_calculator.py ONLY)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
             pytest --cov=brutex.costs.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
           else
@@ -1177,8 +1179,10 @@ jobs:
           else
             echo "(brutex.costs.constants test file not present yet — gate inactive)"
           fi
-          # 19f · brutex.costs.calculator (88 stmts, 12 branches after the
-          #       DEC-EXEC-RUST-CORE-001 _charge_stack_py extraction; same test)
+          # 19f · brutex.costs.calculator (72 stmts, 14 branches after the
+          #       DEC-EXEC-RUST-CORE-001 _charge_stack_py extraction + the
+          #       ChargeStack leaf-homing into brutex.costs.types — the
+          #       CodeQL py/cyclic-import fix; same test)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
             pytest --cov=brutex.costs.calculator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
           else

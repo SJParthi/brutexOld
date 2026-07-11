@@ -87,11 +87,26 @@ def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 class _BombKernel:
-    """A kernel stand-in whose ANY attribute access fails the test —
-    the structural proof that a code path never touches the kernel."""
+    """A kernel stand-in that RECORDS + refuses ANY attribute access —
+    the structural proof that a code path never touches the kernel.
+
+    ``__getattr__`` raises :class:`AttributeError` (the special method's
+    standard contract — a non-AttributeError there breaks ``getattr``/
+    ``hasattr`` semantics and trips CodeQL's non-standard-exception check),
+    but the access is recorded in :attr:`touched` FIRST, and every
+    must-not-touch test asserts ``touched == []`` — so even an
+    AttributeError swallowed by a defaulted ``getattr(rust, name, None)``
+    probe can never let a kernel touch pass silently.
+    """
+
+    def __init__(self) -> None:
+        """Start with an empty access record."""
+        self.touched: list[str] = []
 
     def __getattr__(self, name: str) -> Any:
-        raise AssertionError(f"kernel touched via {name!r} on a must-not-touch path")
+        """Record the access, then refuse it with the standard exception."""
+        self.touched.append(name)
+        raise AttributeError(f"kernel touched via {name!r} on a must-not-touch path")
 
 
 def _raising_kernel(fn_name: str, exc: BaseException) -> SimpleNamespace:
@@ -192,11 +207,13 @@ def test_off_arm_never_touches_the_kernel(
     proof) and emits ZERO warnings."""
     if flag is not None:
         monkeypatch.setenv(exec_rust.ENV_FLAG, flag)
-    monkeypatch.setattr(exec_rust, "_rust", _BombKernel())
+    bomb = _BombKernel()
+    monkeypatch.setattr(exec_rust, "_rust", bomb)
     with capture_logs() as logs:
         results = _call_every_wrapper()
     assert results == [None] * 6
     assert logs == []
+    assert bomb.touched == []
 
 
 # ── wheel-missing fallback ──────────────────────────────────────────────
@@ -292,7 +309,8 @@ def test_envelope_fallback_per_site(monkeypatch: pytest.MonkeyPatch, site: str) 
     ``exec_rust.envelope_fallback`` naming the site — the kernel is never
     called (bomb kernel)."""
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
-    monkeypatch.setattr(exec_rust, "_rust", _BombKernel())
+    bomb = _BombKernel()
+    monkeypatch.setattr(exec_rust, "_rust", bomb)
     call = _envelope_calls()[site]
     with capture_logs() as logs:
         assert call() is None
@@ -301,6 +319,7 @@ def test_envelope_fallback_per_site(monkeypatch: pytest.MonkeyPatch, site: str) 
     assert len(events) == 1
     assert events[0]["site"] == site
     assert events[0]["reason"] == f"envelope:{site}"
+    assert bomb.touched == []
 
 
 def test_exact_i64_boundaries_are_in_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -348,23 +367,27 @@ def test_futures_tail_turnover_none_served_and_present_enveloped(
     assert kind == "trade"
     none_args: dict[str, Any] = {**_FUTURES_ARGS, "brokerage_turnover_bps_x100": None}
     assert stack == _futures_charge_stack_py(2_200_000, 2_210_000, **none_args)
-    monkeypatch.setattr(exec_rust, "_rust", _BombKernel())
+    bomb = _BombKernel()
+    monkeypatch.setattr(exec_rust, "_rust", bomb)
     with capture_logs() as logs:
         assert tail(_TOO_BIG) is None
     assert [e["event"] for e in logs] == ["exec_rust.envelope_fallback"]
+    assert bomb.touched == []
 
 
 def test_warn_once_dedupes_per_event_reason_pair(monkeypatch: pytest.MonkeyPatch) -> None:
     """TWO distinct (event, reason) keys in ONE memo window each warn once —
     the memo never collapses distinct keys onto one entry."""
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
-    monkeypatch.setattr(exec_rust, "_rust", _BombKernel())
+    bomb = _BombKernel()
+    monkeypatch.setattr(exec_rust, "_rust", bomb)
     calls = _envelope_calls()
     with capture_logs() as logs:
         assert calls["fill_slippage"]() is None
         assert calls["fill_futures"]() is None
     events = [e for e in logs if e["event"] == "exec_rust.envelope_fallback"]
     assert [e["reason"] for e in events] == ["envelope:fill_slippage", "envelope:fill_futures"]
+    assert bomb.touched == []
 
 
 # ── narrow kernel-call catch + MemoryError bare re-raise ────────────────
@@ -928,7 +951,8 @@ def test_off_arm_is_todays_python_bytes(monkeypatch: pytest.MonkeyPatch) -> None
     flag-less default run; this pin proves the OFF arm cannot involve the
     kernel at all, so those suites certify the OFF arm bytes.
     """
-    monkeypatch.setattr(exec_rust, "_rust", _BombKernel())
+    bomb = _BombKernel()
+    monkeypatch.setattr(exec_rust, "_rust", bomb)
     results: list[tuple[TradeCostBreakdown, FuturesCostBreakdown]] = []
     for flag in (None, "0"):
         if flag is None:
@@ -957,6 +981,7 @@ def test_off_arm_is_todays_python_bytes(monkeypatch: pytest.MonkeyPatch) -> None
         gst_rate=C.GST_TOTAL_BPS_X100,
     )
     assert breakdown.net_pnl_paisa == stack.net_pnl_paisa
+    assert bomb.touched == []
 
 
 def test_on_arm_engages_the_kernel_at_compute_trade_cost(
@@ -999,7 +1024,6 @@ def test_import_census_only_the_four_dispatch_sites_import_the_seam() -> None:
     itself) imports ``brutex.exec_rust`` — the raw kernel entries stay
     private plumbing behind the seam (the import-census pin)."""
     import subprocess
-    import sys
 
     root = Path(__file__).resolve().parents[2]
     out = subprocess.run(
@@ -1037,7 +1061,36 @@ def test_import_census_only_the_four_dispatch_sites_import_the_seam() -> None:
         check=False,
     )
     assert out2.stdout.strip() == ""
-    del subprocess, sys
+
+
+def test_seam_is_a_costs_free_leaf_ast_pin() -> None:
+    """The seam's ``brutex``-internal imports are EXACTLY the pinned leaf set.
+
+    The CodeQL ``py/cyclic-import`` fix (the #1533 leaf-homing precedent):
+    ``brutex/exec_rust.py`` must import the shared :class:`ChargeStack`
+    shape from the stdlib-only leaf ``brutex.costs.types`` — NEVER from
+    ``brutex.costs.calculator``, whose dispatch site imports the seam back
+    (the mutual pair CodeQL flagged). Walks the WHOLE AST (module-level
+    AND function-local ``import``/``from`` statements), so a lazily
+    re-introduced calculator import fails too; the exact-set law also
+    catches a silently GROWN import surface.
+    """
+    import ast
+
+    source = (Path(__file__).resolve().parents[2] / "brutex" / "exec_rust.py").read_text(
+        encoding="utf-8"
+    )
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            modules.add(node.module)
+        elif isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+    brutex_imports = {m for m in modules if m == "brutex" or m.startswith("brutex.")}
+    assert brutex_imports == {
+        "brutex.costs.types",
+        "brutex.engine.sweep_lookahead",
+    }
 
 
 class TestMutationWorkflowWiring:

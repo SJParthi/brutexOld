@@ -25,17 +25,20 @@ at sweep time.
 
 from __future__ import annotations
 
-from typing import NamedTuple
-
 from brutex.costs import constants as C  # noqa: N812 — C = costs constants namespace
 from brutex.costs.types import (
+    ChargeStack,
     TradeCostBreakdown,
     TradeInput,
     UnsupportedTradeOutcomeError,
 )
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 
-__all__ = ["compute_trade_cost"]
+# ChargeStack is re-exported (via __all__) for the historical consumers
+# that import it from here; its HOME is the stdlib-only leaf
+# brutex.costs.types (the CodeQL py/cyclic-import fix — see the leaf's
+# class docstring).
+__all__ = ["ChargeStack", "compute_trade_cost"]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -193,37 +196,11 @@ def _apply_slippage(
 # ─────────────────────────────────────────────────────────────────
 # The dispatchable integer charge-stack core (DEC-EXEC-RUST-CORE-001)
 # ─────────────────────────────────────────────────────────────────
-
-
-class ChargeStack(NamedTuple):
-    """The 17 integer outputs of one round-trip charge-stack computation.
-
-    Field ORDER is pinned — it mirrors the Rust ``exec::ChargeStack`` struct
-    (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) field-for-field, and both
-    project 1:1 onto the numeric fields of
-    :class:`~brutex.costs.types.TradeCostBreakdown` /
-    :class:`~brutex.costs.futures_costs.FuturesCostBreakdown`. All values are
-    int64 paisa. Shared by BOTH stacks (§11 COMMON — the futures twin returns
-    the same shape).
-    """
-
-    buy_fill_paisa: int
-    sell_fill_paisa: int
-    n_shares: int
-    buy_notional_paisa: int
-    sell_notional_paisa: int
-    brokerage_paisa: int
-    stt_paisa: int
-    exch_paisa: int
-    sebi_paisa: int
-    ipft_paisa: int
-    stamp_paisa: int
-    gst_paisa: int
-    slippage_paisa: int
-    total_charges_paisa: int
-    gross_pnl_paisa: int
-    net_pnl_paisa: int
-    realized_slip_per_share: int
+# ChargeStack itself is homed in the stdlib-only LEAF brutex.costs.types
+# (re-exported here for the historical consumers via __all__) so the
+# brutex.exec_rust seam can import the shared shape WITHOUT importing this
+# module — the calculator ↔ exec_rust CodeQL py/cyclic-import pair is
+# structurally gone (the #1533 leaf-homing precedent).
 
 
 def _charge_stack_py(
@@ -457,12 +434,16 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # implemented (a pre-boundary trade is OVER-charged by 18% of the
     # sub-rupee SEBI fee — conservative; COSTS_VERIFIED.md §20).
     # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
-    # Lazy import: brutex.exec_rust imports THIS module's ChargeStack shape,
-    # so a top-level import here would be a cycle (the materialize_trade
-    # lazy-import precedent). Default-OFF (`BRUTEX_EXEC_RUST`): the seam
-    # returns None unless the kernel actually serves; the Python core below
-    # stays the permanent oracle arm (DEC-EXEC-PY-BODY-DELETE-001 owns any
-    # later deletion decision).
+    # Lazy import (the materialize_trade lazy-import precedent): the seam is
+    # now a costs-free LEAF (it imports the shared ChargeStack shape from
+    # brutex.costs.types, never this module — the CodeQL py/cyclic-import
+    # fix), so this import is DEFERRAL, not cycle-avoidance: it keeps the
+    # seam's engine-package + one-time fno_math import cost off plain
+    # `import brutex.costs`, landing it on the first dispatch instead.
+    # Default-OFF (`BRUTEX_EXEC_RUST`): the seam returns None unless the
+    # kernel actually serves; the Python core below stays the permanent
+    # oracle arm (DEC-EXEC-PY-BODY-DELETE-001 owns any later deletion
+    # decision).
     from brutex import exec_rust
 
     stack = exec_rust.charge_stack_option(
