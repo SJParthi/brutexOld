@@ -221,6 +221,61 @@ def _events(logs: Sequence[_LogEvent], name: str) -> list[_LogEvent]:
     return [e for e in logs if e["event"] == name]
 
 
+class TestMarketHoursHalt:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 — the spot pull halts gracefully mid-run."""
+
+    def test_market_hours_halt_defers_pull_and_skips_later_steps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An injected always-blocked guard halts the pull at the first window, keeps
+        committed work, fires the alert, breaks later step groups + the minute phase."""
+        from brutex.data.errors import MarketHoursHalt
+
+        halts: list[BaseException] = []
+        monkeypatch.setattr(pull_controller, "emit_pull_halt_alert", halts.append)
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("NIFTY"), _stock("ADANIENT")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_NOW,
+                from_date=_FROM,
+                to_date=_TO,
+                # BOTH phases so the daily-phase halt exercises the minute-skip belt too.
+                intervals=("1day", "1minute"),
+                adapter_factory=lambda root, _insts: (SyntheticSpotAdapter(), _real_sink(root)),
+                market_closed=lambda: True,
+            )
+        # The pull RETURNED (graceful) — never a raised job error.
+        assert report is not None
+        # The CRITICAL Telegram pull-halt alert fired for the market-hours halt.
+        assert len(halts) >= 1
+        assert all(isinstance(h, MarketHoursHalt) for h in halts)
+        # The halt was logged loudly, and later steps are announced halted with the
+        # market_hours reason (never a silent disappearance).
+        assert _events(logs, "universe.pull_all.market_hours_halt")
+        step_halted = _events(logs, "pull.step.halted")
+        assert any(e.get("reason") == "market_hours" for e in step_halted)
+        # The minute phase was skipped honestly via the global-stop guard.
+        minute_skipped = _events(logs, "universe.pull_all.minute_skipped_global_stop")
+        assert minute_skipped
+        assert any(e.get("market_hours_blocked") is True for e in minute_skipped)
+
+    def test_market_closed_open_pull_completes_normally(self, tmp_path: Path) -> None:
+        """market_closed returning False never halts — the pull completes as before."""
+        report = pull_all_spot(
+            [_index("NIFTY")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,
+            from_date=_FROM,
+            to_date=_TO,
+            adapter_factory=lambda root, _insts: (SyntheticSpotAdapter(), _real_sink(root)),
+            market_closed=lambda: False,
+        )
+        assert report is not None
+
+
 class TestSpotStepOrdering:
     """(a) The ordering teeth + the ``pull.step.*`` event stream."""
 
