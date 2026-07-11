@@ -78,11 +78,16 @@ from time import time
 from types import TracebackType
 from typing import Any, BinaryIO, ClassVar, Final, Protocol, Self, cast, runtime_checkable
 
-import structlog
-
 from brutex.models import BruteXError
 
-_LOG = structlog.get_logger(__name__)
+# NOTE (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630): this module is
+# deliberately free of the process logging stack — the hash-chained audit
+# records are DIRECT file appends so no logging configuration can ever
+# filter or reformat them (pinned by tests/unit/test_cli_sweep_log_level.py
+# ::TestAuditChainIsNotStructlog). The Rust-seam observability events
+# (seam STATE, never audit records) route through the sibling
+# ``brutex.orchestrator.audit_seam_log`` via a late-bound function-local
+# import inside :func:`_warn_rust_once` / :func:`_disable_rust_kernel`.
 
 # ────────────────────────────────────────────────────────────────────────
 # Constants
@@ -278,12 +283,20 @@ _RUST_WARN_MEMO: Final[set[str]] = set()
 
 
 def _warn_rust_once(event: str, **context: object) -> None:
-    """Log *event* at WARNING once per process (per event + reason key)."""
+    """Log *event* at WARNING once per process (per event + reason key).
+
+    Late-bound sink: the logging import happens only when a seam event
+    actually fires, keeping this module's import graph (and source text)
+    free of the process logging stack per the #1630 pin (see the module
+    NOTE above). The warn-once memo gates the import cost.
+    """
     key = f"{event}:{context.get('reason', '')}"
     if key in _RUST_WARN_MEMO:
         return
     _RUST_WARN_MEMO.add(key)
-    _LOG.warning(event, **context)
+    from brutex.orchestrator import audit_seam_log
+
+    audit_seam_log.warn(event, **context)
 
 
 def _rust_flag_enabled() -> bool:
@@ -358,7 +371,9 @@ def _disable_rust_kernel(reason: str, **context: object) -> None:
     """
     if _RUST_DISABLED_REASON[0] is None:
         _RUST_DISABLED_REASON[0] = reason
-        _LOG.error("audit.kernel_autoreverted", reason=reason, **context)
+        from brutex.orchestrator import audit_seam_log
+
+        audit_seam_log.error("audit.kernel_autoreverted", reason=reason, **context)
 
 
 def _set_rust_kernel_for_tests(kernel: _RustAuditKernel | None) -> None:
