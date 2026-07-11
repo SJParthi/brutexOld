@@ -104,6 +104,7 @@ from brutex.engine.combo_mask import (
 )
 from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore
+from brutex.engine.rust_enum import RustEnumResult, enum_survivors_via_kernel
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.sweep_apriori import apriori_enabled
@@ -1642,6 +1643,16 @@ def run_persisted_sweep(
     # SweepAprioriBudgetError at its breaker via a lazy import too, so neither
     # module tops the other — no import cycle).
     mask_source: Iterable[int]
+    # Rust enum+prune kernel probe (DEC-SWEEP-ENUM-RUST-001, default-OFF
+    # behind BRUTEX_SWEEP_RUST_ENUM): DIGEST-path only — on that path the
+    # loop's ONLY effects are the ``survivors`` appends (lex order) and the
+    # ``enumerated``/``conflict_pruned`` tallies, exactly the kernel's three
+    # outputs (``skipped_dedup`` stays 0, ``survivor_run_ids`` stays empty).
+    # The legacy no-digest dedup arm and the Apriori arm (which WINS over the
+    # kernel — its probe lives only in the else arm) stay pure Python; every
+    # fallback (``None``) runs the pre-existing loop over the pre-existing
+    # lazy source, byte-identical by construction.
+    kernel_enum: RustEnumResult | None = None
     if apriori_enabled():
         from brutex.engine.sweep_apriori import generate_apriori_candidates
 
@@ -1655,30 +1666,41 @@ def run_persisted_sweep(
             cell_label=subject,
         )
     else:
-        mask_source = iter_masks_k_of_bits(cfg.condition_bits, cfg.k)
-    for mask in mask_source:
-        enumerated += 1
-        if has_conflict(mask):
-            conflict_pruned += 1
-            continue
         if bypass_dedup:
-            # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
-            # path the dedup probes are BYPASSED (sentinel-authoritative redo,
-            # above) and ``mark_many`` is SKIPPED (below), so a survivor's
-            # run_id has exactly TWO consumers — the SweepComboError
-            # fingerprint and the finalist rows — both recomputed on demand
-            # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
-            # canonical inputs, Golden Rule #4: same bytes, computed later).
-            # Skipping the eager per-enumerated-mask hash deletes O(survivors)
-            # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
+            kernel_enum = enum_survivors_via_kernel(cfg.condition_bits, cfg.k)
+        mask_source = iter_masks_k_of_bits(cfg.condition_bits, cfg.k)
+    if kernel_enum is not None:
+        # Kernel-served: the identical lex-ordered conflict-free list + the
+        # identical integer tallies the loop below would have produced on the
+        # digest path (bit-identity pinned by the parity golden/property
+        # suites; the unconsumed generator above is lazy — free when unused).
+        survivors = kernel_enum.survivors
+        enumerated += kernel_enum.enumerated
+        conflict_pruned += kernel_enum.conflict_pruned
+    else:
+        for mask in mask_source:
+            enumerated += 1
+            if has_conflict(mask):
+                conflict_pruned += 1
+                continue
+            if bypass_dedup:
+                # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
+                # path the dedup probes are BYPASSED (sentinel-authoritative redo,
+                # above) and ``mark_many`` is SKIPPED (below), so a survivor's
+                # run_id has exactly TWO consumers — the SweepComboError
+                # fingerprint and the finalist rows — both recomputed on demand
+                # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
+                # canonical inputs, Golden Rule #4: same bytes, computed later).
+                # Skipping the eager per-enumerated-mask hash deletes O(survivors)
+                # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
+                survivors.append(mask)
+                continue
+            run_id = _lazy_run_id(mask)
+            if dedup.seen(run_id):
+                skipped_dedup += 1
+                continue
             survivors.append(mask)
-            continue
-        run_id = _lazy_run_id(mask)
-        if dedup.seen(run_id):
-            skipped_dedup += 1
-            continue
-        survivors.append(mask)
-        survivor_run_ids.append(run_id)
+            survivor_run_ids.append(run_id)
 
     # Stage-1B coarse pre-filter — drop survivors that can never reach the
     # trade-count gate (still "evaluated": we decided their fate + mark them seen).
