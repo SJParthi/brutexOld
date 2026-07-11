@@ -31,6 +31,17 @@ Unset the flag (or set `off`) and restart — one env var, no deploy, no code
 change. The Python `/static` mount survives this PR untouched, so the
 single-process topology is always available.
 
+## Flag-flip precondition (coordinator-ruled)
+
+Do not flip `BRUTEX_RUST_FRONT` production-ON until all three disclosed
+residuals are closed — an active serving path cannot carry them: (1) a
+`cargo-llvm-cov` 100% line+branch coverage lane for `rust/brutexd/` in CI,
+(2) a `cargo-mutants` shard for the crate in `mutation.yml`, and (3) test
+coverage for the `src/main.rs` error branches (runtime-build / bind / serve
+failure, arg-parse exit-2). These residuals were coordinator-accepted as
+land-OK only while the flag stays default-OFF; the production-ON flip is
+BLOCKED until all three are closed.
+
 ## The parity guarantee
 
 `tests/integration/test_sidecar_parity_static.py` (plus the crate's own
