@@ -1,0 +1,47 @@
+# Maturin build configuration for the BruteX data-lake Rust render crate
+# (ADR-0019 PR-1, DEC-RUST-DATALAKE-IO-ROADMAP-001 — MIGRATION.md #1726).
+#
+# Pip installs this as a separate distribution alongside `brutex`, exactly
+# like the sibling kernels (`rust/fno-math`, `rust/trading-core`). It is
+# DELIBERATELY not installed by the main CI test job: the Python facade
+# (`brutex/data/lake_rust_render.py`) is default-OFF and degrades loudly to
+# the Python render when the crate is absent; only the dedicated
+# `.github/workflows/lake-rust-parity.yml` lane builds + installs it and
+# runs the byte-parity corpus.
+#
+# References:
+#   - docs/adr/0019-datalake-rust-conversion-roadmap.md (§3 PR-1)
+#   - docs/runbooks/lake-rust-render-lockstep.md (the bump ritual)
+#   - rust/fno-math/pyproject.toml (the layout template, DEC-P0-055)
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-lake"
+version = "0.1.0"
+description = "BruteX data-lake Rust render seam — polars-native parquet render, byte-locked to the installed Python wheel (ADR-0019 PR-1)."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [
+    { name = "SJParthi" },
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+# Mixed Python + Rust layout (the fno-math DEC-P0-055 convention): Python
+# source under `python/`, the cdylib registered as the private
+# `brutex_lake._brutex_lake` submodule, re-exported by `__init__.py` with a
+# matched `__init__.pyi` + `py.typed` marker for pyright/mypy strict mode.
+python-source = "python"
+module-name = "brutex_lake._brutex_lake"
+features = ["pyo3/extension-module"]
+strip = true
