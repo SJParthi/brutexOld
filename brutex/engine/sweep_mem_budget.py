@@ -10,8 +10,12 @@ with a bare ``MemoryError``. This module is the PURE planning half of the fix:
 * :func:`resolve_bounded_rank_mode` / :func:`resolve_mem_budget_bytes` — the two
   operator env knobs (``BRUTEX_SWEEP_BOUNDED_RANK`` ∈ ``{off, auto, on}``,
   default ``auto``; ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``, default RAM-derived
-  per DEC-RAM-BUDGETS-001 — ``total RAM × 1/6`` when detected, the 8 GiB
-  floor when RAM is undetectable).
+  per DEC-RAM-BUDGETS-001 — ``total RAM × 1/6`` when detected, DIVIDED by the
+  live EVAL-worker count on the parallel path
+  (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 — the pool initializer exports the
+  INTERNAL :data:`BUDGET_WORKERS_ENV`, read by :func:`resolve_budget_workers`;
+  the explicit override stays per-worker UNDIVIDED, the #1352 contract; the
+  8 GiB floor when RAM is undetectable, undivided).
 * :func:`plan_rank_memory` — ONE deterministic pre-flight decision per tuple,
   taken from the config alone (``n_masks`` is ``C(n, k)``, known before any
   allocation): below budget the plan keeps today's batch path byte-identical;
@@ -55,6 +59,17 @@ BOUNDED_RANK_MODE_ENV: Final[str] = "BRUTEX_SWEEP_BOUNDED_RANK"
 
 #: Env knob for the rank-region memory budget in bytes (``> 0``).
 MEM_BUDGET_ENV: Final[str] = "BRUTEX_SWEEP_MEM_BUDGET_BYTES"
+
+#: INTERNAL divisor seam (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001): the live
+#: EVAL-worker count the RAM-derived DEFAULT budget divides by, exported into
+#: each pool worker's environment by ``sweep_parallel._worker_init`` from the
+#: pool context — NOT an operator knob. Before this wiring each of the pool's
+#: N eval workers independently admitted the FULL ``total × 1/6`` (aggregate
+#: ~1.167× total RAM at the AUTO cap's 7 eval workers — the C4/W7 root). The
+#: explicit :data:`MEM_BUDGET_ENV` override is a PER-WORKER figure and stays
+#: UNDIVIDED (the #1352 contract); unset → 1 (the sequential/CLI single-process
+#: path, byte-identical to the pre-wire default).
+BUDGET_WORKERS_ENV: Final[str] = "BRUTEX_SWEEP_BUDGET_WORKERS"
 
 #: The rank-region budget FLOOR: 8 GiB per tuple — the original hand-picked
 #: HEURISTIC for the CLAUDE.md §8 envelope (48 GB box, ~10 sweep cores →
@@ -134,19 +149,17 @@ def resolve_bounded_rank_mode(environ: Mapping[str, str] | None = None) -> Bound
         ) from None
 
 
-def resolve_mem_budget_bytes(environ: Mapping[str, str] | None = None) -> int:
-    """Resolve the rank-region byte budget from ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``.
+def resolve_budget_workers(environ: Mapping[str, str] | None = None) -> int:
+    """Resolve the live EVAL-worker divisor from :data:`BUDGET_WORKERS_ENV`.
 
-    Delegates to the COMMON :func:`brutex.config.hardware_envelope.memory_budget_bytes`
-    (DEC-RAM-BUDGETS-001). Resolution order: a set, non-blank env value is the
-    validated explicit override (byte-unchanged #1352 contract — a non-integer
-    or non-positive value raises, a broken budget must never silently disable
-    the guard, Golden Rule #1); unset/blank → the RAM-derived default —
-    ``detected total RAM`` × :data:`MEM_BUDGET_FRACTION` when detection
-    succeeds, else :data:`DEFAULT_MEM_BUDGET_BYTES` (the 8 GiB floor) EXACTLY.
-    RAM detection is cached once per process, so the resolved default is
-    stable for the whole run even though the production runner re-resolves
-    per tuple (no mid-run flapping).
+    The INTERNAL seam of DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001: the parallel
+    pool initializer (``sweep_parallel._worker_init``) exports the pool's
+    eval-worker count into each worker's environment, so the per-worker
+    RAM-derived default budget genuinely divides across the pool. Unset/blank
+    → ``1`` (the sequential / single-process path, byte-identical to the
+    pre-wire default). Garbage or a value ``< 1`` raises — a broken divisor
+    must never silently mis-size admission (Golden Rule #1; the
+    :data:`MEM_BUDGET_ENV` fail-loud posture).
 
     Parameters
     ----------
@@ -156,11 +169,65 @@ def resolve_mem_budget_bytes(environ: Mapping[str, str] | None = None) -> int:
     Raises
     ------
     ValueError
-        If the env value is set and not a positive integer.
+        If the value is set and not an integer ``>= 1``.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get(BUDGET_WORKERS_ENV, "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"{BUDGET_WORKERS_ENV}={raw!r} is not an integer worker count (>= 1 required); "
+            f"this is the INTERNAL pool-initializer seam, not an operator knob"
+        ) from None
+    if value < 1:
+        raise ValueError(f"{BUDGET_WORKERS_ENV}={value} must be >= 1")
+    return value
+
+
+def resolve_mem_budget_bytes(
+    environ: Mapping[str, str] | None = None, *, workers: int | None = None
+) -> int:
+    """Resolve the rank-region byte budget from ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``.
+
+    Delegates to the COMMON :func:`brutex.config.hardware_envelope.memory_budget_bytes`
+    (DEC-RAM-BUDGETS-001). Resolution order: a set, non-blank env value is the
+    validated explicit override (byte-unchanged #1352 contract — a non-integer
+    or non-positive value raises, a broken budget must never silently disable
+    the guard, Golden Rule #1; the override is a PER-WORKER figure and is
+    NEVER divided); unset/blank → the RAM-derived default —
+    ``detected total RAM`` × :data:`MEM_BUDGET_FRACTION` **÷ the live
+    eval-worker count** (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 — *workers*
+    when given, else :func:`resolve_budget_workers` from the environment; the
+    pool initializer exports it, so N parallel eval workers now share ONE
+    budget fraction instead of EACH admitting ``total × 1/6``) when detection
+    succeeds, else :data:`DEFAULT_MEM_BUDGET_BYTES` (the 8 GiB floor) EXACTLY
+    — the undetected sentinel keeps the pre-derivation constant bit-for-bit,
+    UNdivided (the :func:`memory_budget_bytes` floor law, stated honestly).
+    RAM detection is cached once per process, so the resolved default is
+    stable for the whole run even though the production runner re-resolves
+    per tuple (no mid-run flapping).
+
+    Parameters
+    ----------
+    environ
+        Injectable environment mapping (tests); ``None`` reads ``os.environ``.
+    workers
+        Explicit eval-worker divisor (``>= 1``); ``None`` resolves it from
+        :data:`BUDGET_WORKERS_ENV` via :func:`resolve_budget_workers`.
+
+    Raises
+    ------
+    ValueError
+        If the env value is set and not a positive integer, or the divisor
+        (env or explicit) is not an integer ``>= 1``.
     """
     return memory_budget_bytes(
         fraction=MEM_BUDGET_FRACTION,
         floor_bytes=DEFAULT_MEM_BUDGET_BYTES,
+        workers=resolve_budget_workers(environ) if workers is None else workers,
         env=environ,
         env_var=MEM_BUDGET_ENV,
     )
@@ -384,6 +451,7 @@ def plan_rank_memory(
 __all__ = [
     "BATCH_RANK_BYTES_PER_KEPT",
     "BOUNDED_RANK_MODE_ENV",
+    "BUDGET_WORKERS_ENV",
     "DEFAULT_MEM_BUDGET_BYTES",
     "MEM_BUDGET_ENV",
     "MEM_BUDGET_FRACTION",
@@ -391,6 +459,7 @@ __all__ = [
     "RankMemoryPlan",
     "plan_rank_memory",
     "resolve_bounded_rank_mode",
+    "resolve_budget_workers",
     "resolve_mem_budget_bytes",
     "watermark_message",
 ]
