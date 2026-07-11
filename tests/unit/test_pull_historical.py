@@ -4186,8 +4186,3 @@ def test_durable_preference_persists_the_candle_phase_winner(tmp_path: Path) -> 
     assert sdk.candle_symbols == ["NSE-M&M-25Jan24-2400-CE", "NSE-M%26M-25Jan24-2400-CE"]
     assert meta.rows == {form_winner_key("M&M"): "M%26M"}
     store.close()
-
-
-
-
-
