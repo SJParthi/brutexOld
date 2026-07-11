@@ -156,17 +156,19 @@ from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, cast
 
 import structlog
 
 from brutex.engine.combo_mask import count_combos
 from brutex.engine.results_store import VixTrioConflictError
+from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_mem_budget import MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
     count_sweep_tuples,
+    hit_memo_cell_key,
     iter_sweep_tuples,
     make_store_for,
     run_one_tuple,
@@ -833,6 +835,41 @@ class _WorkerContext:
 #: is written exactly once per worker process (single-threaded within a worker).
 _WORKER_CTX: _WorkerContext | None = None
 
+#: The per-worker-PROCESS single-cell hit-count memo (DEC-SWEEP-APRIORI-
+#: DEFAULT-001): ``(cell_key, memo)`` beside :data:`_WORKER_CTX` (the same
+#: module-global-by-necessity precedent; single-threaded within a worker).
+#: Reset whenever the worker sees a NEW cell key (:func:`hit_memo_cell_key`).
+#: HONEST (Golden Rule #10): the index-dispatched pool interleaves cells
+#: across workers, so the worst case is one frontier ladder per WORKER per
+#: cell — not one per k — a stated residual, never hidden. Identity-free by
+#: construction: counts are a pure per-mask function, memo-on == memo-off
+#: bytes (parity-pinned sequential + 2-worker spawn).
+_WORKER_HIT_MEMO: tuple[tuple[Any, ...], dict[int, int]] | None = None
+
+
+def _worker_hit_count_memo(tuple_: SweepTuple, ctx: _WorkerContext) -> dict[int, int] | None:
+    """Return the worker's per-cell hit-count memo, or ``None`` when apriori is OFF.
+
+    The worker re-reads the inherited ``BRUTEX_SWEEP_APRIORI`` env (the SAME
+    channel ``run_persisted_sweep``'s own apriori branch reads — spawn workers
+    inherit the parent env at pool creation, after the CLI resolver's
+    setdefault); OFF returns ``None`` so the legacy path is structurally
+    untouched. ON derives the SAME cell key the sequential drivers use and
+    resets the module-global memo on a cell change.
+    """
+    global _WORKER_HIT_MEMO  # noqa: PLW0603 — per-worker single-cell state (see the module note)
+    if not apriori_enabled():
+        return None
+    roll_schedule = (
+        ctx.roll_schedule_by_instrument.get(tuple_.instrument)
+        if ctx.roll_schedule_by_instrument is not None
+        else None
+    )
+    cell_key = hit_memo_cell_key(tuple_, ctx.grid, roll_schedule)
+    if _WORKER_HIT_MEMO is None or _WORKER_HIT_MEMO[0] != cell_key:
+        _WORKER_HIT_MEMO = (cell_key, {})
+    return _WORKER_HIT_MEMO[1]
+
 
 def _worker_init(ctx: _WorkerContext) -> None:
     """Pool ``initializer``: pin numerics + bound worker logging + stash the context.
@@ -908,6 +945,9 @@ def _run_tuple_in_worker(
             # The pool-wide stamper (DEC-VIX-STAMP-WIRE-001): every worker
             # binds the SAME pickled stamper, so parallel == sequential.
             reference_stamper=ctx.reference_stamper,
+            # Per-cell hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001): None
+            # unless the inherited env enables the Apriori mode.
+            hit_count_memo=_worker_hit_count_memo(tuple_, ctx),
         )
     except (SweepComboError, VixTrioConflictError) as exc:
         return TupleWorkResult(
@@ -1190,24 +1230,36 @@ class ParallelGridDriver:
         self._guards.checkpoint.load()
         resume_from = self._guards.checkpoint.next_index
 
+        # Resolved ONCE per parallel run (DEC-SWEEP-APRIORI-DEFAULT-001): gates
+        # the EMIT-ON-apriori START/COMPLETE payload keys — a legacy run's
+        # payloads stay byte-identical (frozen-key-set pinned).
+        apriori_on = apriori_enabled()
         self._guards.progress.start(enumerated=total, detail=self._subject)
+        start_payload: dict[str, Any] = {
+            "sweep_id": sweep_id,
+            "tuples_total": total,
+            "resume_from": resume_from,
+            "workers": self._workers,
+            "instruments": list(self._grid.instruments),
+            "timeframes": [tf.label for tf in self._grid.timeframes],
+            "directions": [d.value for d in self._grid.directions],
+            "k_values": list(self._grid.k_values),
+            "mode": self._grid.mode,
+            "data_snapshot_hash": self._grid.data_snapshot_hash,
+            "indicator_version": self._grid.indicator_version,
+            "code_commit_sha": self._grid.code_commit_sha,
+        }
+        if apriori_on:
+            # The per-run MODE record (DEC-SWEEP-APRIORI-DEFAULT-001) —
+            # consumed by sweep-verify's recorded-mode gate; absence == legacy.
+            start_payload["apriori"] = {
+                "enabled": True,
+                "max_mask_bars": resolve_max_mask_bars(),
+            }
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_START,
             subject=self._subject,
-            payload={
-                "sweep_id": sweep_id,
-                "tuples_total": total,
-                "resume_from": resume_from,
-                "workers": self._workers,
-                "instruments": list(self._grid.instruments),
-                "timeframes": [tf.label for tf in self._grid.timeframes],
-                "directions": [d.value for d in self._grid.directions],
-                "k_values": list(self._grid.k_values),
-                "mode": self._grid.mode,
-                "data_snapshot_hash": self._grid.data_snapshot_hash,
-                "indicator_version": self._grid.indicator_version,
-                "code_commit_sha": self._grid.code_commit_sha,
-            },
+            payload=start_payload,
         )
 
         # Load the durable quarantine sidecar BEFORE dispatch: a tuple a PRIOR
@@ -1256,7 +1308,7 @@ class ParallelGridDriver:
                 )
             raise
 
-        payload = {
+        payload: dict[str, Any] = {
             "sweep_id": sweep_id,
             "tuples_total": total,
             "tuples_run": acc.tuples_run,
@@ -1272,6 +1324,10 @@ class ParallelGridDriver:
             "ranked": acc.ranked,
             "persisted": acc.persisted,
         }
+        if apriori_on:
+            # EMIT-ON-apriori (DEC-SWEEP-APRIORI-DEFAULT-001): legacy COMPLETE
+            # payloads stay byte-identical (frozen-key-set pinned).
+            payload["tuples_failed_apriori_budget"] = acc.tuples_failed_apriori_budget
         quarantine_note = (
             f" · {acc.tuples_quarantined_prior} QUARANTINED-prior "
             f"(see {quarantine_sidecar_path(self._root)})"
@@ -1305,6 +1361,7 @@ class ParallelGridDriver:
             persisted=acc.persisted,
             tuples_failed=acc.tuples_failed,
             tuples_quarantined_prior=acc.tuples_quarantined_prior,
+            tuples_failed_apriori_budget=acc.tuples_failed_apriori_budget,
         )
 
     def _drive(
@@ -1436,8 +1493,24 @@ class ParallelGridDriver:
         k)`` enumerated masks walks the ``N_bars`` bars). Used ONLY to size the
         heavy-grid stall bound (:meth:`_effective_stall_seconds`); never in results.
         O(1) — ``count_combos`` is a single ``math.comb``.
+
+        APRIORI CAP (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1738): with
+        the Apriori mode enabled the raw ``C(n_unique, k) × N_bars`` estimate
+        explodes at mid-ladder k (``C(60,30) × n_bars ≈ 1e23`` — an effectively
+        INFINITE stall bound that would de-facto DISARM the #1608 watchdog), so
+        the estimate is capped at ``k × max_mask_bars``: a target-k tuple
+        performs at most ``k`` breaker-bounded LEVELS of counting (each level's
+        mask·bar work ≤ the breaker budget, or it trips —
+        ``sweep_apriori._budget_check`` at every level). Legacy runs keep the
+        raw estimate byte-identical (predicate-gated). HONEST consequence
+        (Golden Rule #10): wedge-detection latency on a deep-k tuple is
+        O(k × the budget's implied wall time) — finite, stated (the #1608
+        ~4× philosophy stretched, not broken).
         """
-        return float(count_combos(tuple_.k, self._n_unique)) * float(n_bars)
+        raw = float(count_combos(tuple_.k, self._n_unique)) * float(n_bars)
+        if apriori_enabled():
+            return min(raw, float(tuple_.k) * float(resolve_max_mask_bars()))
+        return raw
 
     def _effective_stall_seconds(self, max_inflight_work: float) -> float:
         """The heavy-grid-aware stall bound for the current in-flight set.
@@ -1628,6 +1701,15 @@ class ParallelGridDriver:
 
         if outcome.kind == "failed":
             acc.tuples_failed += 1
+            # The DISTINCT budget-trip counter (DEC-SWEEP-APRIORI-DEFAULT-001):
+            # TupleWorkResult.failed_error carries `f"{type(exc).__name__}: {exc}"`,
+            # so the class-name prefix identifies the deterministic breaker trip
+            # apart from generic tuple failures (the cell's deeper-k tuples
+            # re-trip identically — the done-line names the ONE remediation).
+            if outcome.failed_error is not None and outcome.failed_error.startswith(
+                "SweepAprioriBudgetError"
+            ):
+                acc.tuples_failed_apriori_budget += 1
             acc.had_failure = True
             self._advance(current=label, survived=False, skipped=False)
             self._guards.audit.append(
@@ -1865,6 +1947,11 @@ class _Accumulator:
     skipped_cache: int = 0
     skipped_resume: int = 0
     tuples_failed: int = 0
+    #: The SUBSET of ``tuples_failed`` that were deterministic Apriori mask·bar
+    #: breaker trips (``SweepAprioriBudgetError``, DEC-SWEEP-APRIORI-DEFAULT-001)
+    #: — surfaced distinctly on the COMPLETE payload + summary so the done-line
+    #: can name the raise-the-budget remediation.
+    tuples_failed_apriori_budget: int = 0
     #: Tuples THIS run quarantined because the worker pool broke / a worker raised
     #: MemoryError while they were in flight — recorded in the DURABLE sidecar
     #: (:func:`quarantine_sidecar_path`), deliberately NOT cache-recorded and NOT

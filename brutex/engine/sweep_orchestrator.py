@@ -73,11 +73,11 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import blake3
 import structlog
@@ -85,6 +85,7 @@ import structlog
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
 from brutex.engine.results_store import ResultsStore, VixTrioConflictError
 from brutex.engine.stage1a import apply_1day_mask_for
+from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_run import (
@@ -564,6 +565,17 @@ class SweepGridSummary:
         but a non-zero count makes the grid verdict NON-ZERO and leaves each
         failed tuple un-sentineled / un-cached for a deterministic redo next run.
         NOT counted as run or skipped-no-bars.
+    tuples_failed_apriori_budget
+        The SUBSET of ``tuples_failed`` whose failure was the deterministic
+        Apriori mask·bar breaker
+        (:class:`~brutex.engine.sweep_run.SweepAprioriBudgetError`,
+        DEC-SWEEP-APRIORI-DEFAULT-001): a budget trip is target-invariant, so
+        the SAME cell's every deeper-k tuple re-trips identically — the
+        distinct counter lets the CLI/Telegram name the remediation (raise
+        ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` and re-run; the frozen
+        checkpoint re-runs exactly the refused tuples). Defaulted ``0`` (the
+        ``tuples_quarantined_prior`` precedent) so every existing constructor
+        and consumer is unchanged; always ``0`` on a legacy (non-apriori) run.
     """
 
     tuples_total: int
@@ -576,6 +588,7 @@ class SweepGridSummary:
     ranked: int
     persisted: int
     tuples_failed: int
+    tuples_failed_apriori_budget: int = 0
 
 
 def _dedup_seq[T](seq: Sequence[T]) -> tuple[T, ...]:
@@ -738,6 +751,57 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     return str(blake3.blake3(canonical.encode("utf-8")).hexdigest())[:_PATH_DIGEST_LEN]
 
 
+def hit_memo_cell_key(
+    tuple_: SweepTuple,
+    grid: SweepGridConfig,
+    roll_schedule: tuple[int, ...] | None,
+) -> tuple[Any, ...]:
+    """Return the CELL key the per-cell hit-count memo lives under (§11 COMMON).
+
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738): the memo caches
+    superset-hit counts, which are a pure function of the tuple's ``bar_bits``
+    matrix — so the key is EXACTLY the resident-kernel cache's determinant set
+    (``instrument``, ``tf.label``, flattened proximity bps, ``prior_n``,
+    ``fib_anchor``, ``roll_schedule``, the D12 ``apply_1day_mask`` flag).
+    ``direction`` / ``sl`` / ``tp`` / ``k`` are EXCLUDED so the memo survives a
+    whole cell's k-ladder (the extinction walk) — the point of the memo. The
+    ONE key builder is shared by the sequential drivers AND the parallel
+    worker (never three copies).
+
+    Parameters
+    ----------
+    tuple_
+        The grid point.
+    grid
+        The owning grid config (``prior_n`` participates).
+    roll_schedule
+        The tuple's resolved ADR-0012 roll schedule (``None`` for spot).
+
+    Returns
+    -------
+    tuple[Any, ...]
+        A hashable, equality-comparable cell key.
+    """
+    proximity_bps = (
+        None
+        if tuple_.proximity is None
+        else (
+            tuple_.proximity.pivot_proximity_bps,
+            tuple_.proximity.pdh_pdl_proximity_bps,
+            tuple_.proximity.fib_proximity_bps,
+        )
+    )
+    return (
+        tuple_.instrument,
+        tuple_.tf.label,
+        proximity_bps,
+        grid.prior_n,
+        tuple_.fib_anchor.value,
+        roll_schedule,
+        apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
+    )
+
+
 def tuple_store_path(root: Path, tuple_: SweepTuple, grid: SweepGridConfig) -> Path:
     """Return the deterministic per-tuple Parquet path under *root*.
 
@@ -824,6 +888,7 @@ def run_one_tuple(
     kernel_cache: ResidentKernelCache | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    hit_count_memo: MutableMapping[int, int] | None = None,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
 
@@ -883,6 +948,14 @@ def run_one_tuple(
         ``vix_mean``/``vix_min``/``vix_max`` columns differ (Stage C persists
         the trio; the pre-Stage-C "persisted bytes identical" wording was
         reconciled by the round-2 panel, MINOR).
+    hit_count_memo
+        Optional per-CELL hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001),
+        forwarded verbatim to
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` — populated by
+        the grid drivers ONLY when the Apriori exploration mode is enabled
+        (keyed by :func:`hit_memo_cell_key`, reset on a cell change). ``None``
+        (default — every legacy call site) is byte-identical to the pre-memo
+        path; memo-on is bit-identical anyway (counts are pure per-mask).
 
     Returns
     -------
@@ -933,6 +1006,7 @@ def run_one_tuple(
         # the digest is the same collision guard the store filename carries.
         trial_stats_digest=_tuple_digest(tuple_, grid),
         reference_stamper=reference_stamper,
+        hit_count_memo=hit_count_memo,
     )
 
 
@@ -1044,26 +1118,35 @@ def run_sweep_grid(
         f"grid:{len(grid.instruments)}i×{len(grid.timeframes)}tf×"
         f"{len(grid.directions)}d:tuples={total}"
     )
-    audit.append(
-        action=_ACTION_GRID_START,
-        subject=subject,
-        payload={
-            "tuples_total": total,
-            "instruments": list(grid.instruments),
-            "timeframes": [tf.label for tf in grid.timeframes],
-            "directions": [d.value for d in grid.directions],
-            "k_values": list(grid.k_values),
-            "fib_anchors": [a.value for a in grid.fib_anchors],
-            "mode": grid.mode,
-            "data_snapshot_hash": grid.data_snapshot_hash,
-            "indicator_version": grid.indicator_version,
-            "code_commit_sha": grid.code_commit_sha,
-        },
-    )
+    # Resolved ONCE per grid run (DEC-SWEEP-APRIORI-DEFAULT-001): gates the
+    # EMIT-ON-apriori START/COMPLETE payload keys + the per-cell hit-count
+    # memo threading. A legacy run reads False → zero new keys, no memo —
+    # every legacy payload byte-identical (frozen-key-set pinned).
+    apriori_on = apriori_enabled()
+    start_payload: dict[str, Any] = {
+        "tuples_total": total,
+        "instruments": list(grid.instruments),
+        "timeframes": [tf.label for tf in grid.timeframes],
+        "directions": [d.value for d in grid.directions],
+        "k_values": list(grid.k_values),
+        "fib_anchors": [a.value for a in grid.fib_anchors],
+        "mode": grid.mode,
+        "data_snapshot_hash": grid.data_snapshot_hash,
+        "indicator_version": grid.indicator_version,
+        "code_commit_sha": grid.code_commit_sha,
+    }
+    if apriori_on:
+        # The per-run MODE record (DEC-SWEEP-APRIORI-DEFAULT-001): consumed by
+        # sweep-verify's recorded-mode gate (recorded_apriori_from_audit) so a
+        # wrong-mode recount downgrades to INCONCLUSIVE, never a false CORRUPT.
+        # Absence == legacy, which also classifies every pre-flip tree correctly.
+        start_payload["apriori"] = {"enabled": True, "max_mask_bars": resolve_max_mask_bars()}
+    audit.append(action=_ACTION_GRID_START, subject=subject, payload=start_payload)
 
     tuples_run = 0
     tuples_skipped_no_bars = 0
     tuples_failed = 0
+    tuples_failed_apriori_budget = 0
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
@@ -1083,6 +1166,13 @@ def run_sweep_grid(
         else None
     )
 
+    # Per-cell hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001): ONE single-cell
+    # memo beside the kernel cache, keyed on the bar_bits determinants
+    # (hit_memo_cell_key — direction/sl/tp/k excluded so it survives the whole
+    # cell's k-ladder); reset on a cell-key change. Threaded ONLY when the
+    # Apriori mode is on — legacy runs pass None (structurally untouched).
+    hit_memo_state: tuple[tuple[Any, ...], dict[int, int]] | None = None
+
     for tuple_ in iter_sweep_tuples(grid):
         # "Resilient: skip + continue" — a combo that raises mid-evaluation
         # surfaces as a SweepComboError naming the exact offending combo. Skip
@@ -1096,6 +1186,18 @@ def run_sweep_grid(
         # runs — tuple-scoped by construction, never grounds to abort the
         # grid. Every other exception still propagates (global abort),
         # including the PLAIN ResultsStoreError run-identity conflict.
+        hit_count_memo: dict[int, int] | None = None
+        if apriori_on:
+            cell_key = hit_memo_cell_key(
+                tuple_,
+                grid,
+                roll_schedule_by_instrument.get(tuple_.instrument)
+                if roll_schedule_by_instrument is not None
+                else None,
+            )
+            if hit_memo_state is None or hit_memo_state[0] != cell_key:
+                hit_memo_state = (cell_key, {})
+            hit_count_memo = hit_memo_state[1]
         try:
             summary = run_one_tuple(
                 grid,
@@ -1108,9 +1210,17 @@ def run_sweep_grid(
                 kernel_cache=kernel_cache,
                 roll_schedule_by_instrument=roll_schedule_by_instrument,
                 reference_stamper=reference_stamper,
+                hit_count_memo=hit_count_memo,
             )
         except (SweepComboError, VixTrioConflictError) as exc:
             tuples_failed += 1
+            if type(exc).__name__ == "SweepAprioriBudgetError":
+                # The DISTINCT budget-trip counter (DEC-SWEEP-APRIORI-DEFAULT-001):
+                # a trip is target-invariant, so the cell's deeper-k tuples
+                # re-trip identically — counted apart from generic failures so
+                # the CLI/Telegram can name the one remediation (raise the
+                # budget and re-run; the redo law re-runs exactly these).
+                tuples_failed_apriori_budget += 1
             label = (
                 f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"
                 f"/k={tuple_.k}/sl={tuple_.sl_paisa}/tp={tuple_.tp_paisa}"
@@ -1148,8 +1258,9 @@ def run_sweep_grid(
         ranked=ranked,
         persisted=persisted,
         tuples_failed=tuples_failed,
+        tuples_failed_apriori_budget=tuples_failed_apriori_budget,
     )
-    payload = {
+    payload: dict[str, Any] = {
         "tuples_total": total,
         "tuples_run": tuples_run,
         "tuples_skipped_no_bars": tuples_skipped_no_bars,
@@ -1161,6 +1272,10 @@ def run_sweep_grid(
         "ranked": ranked,
         "persisted": persisted,
     }
+    if apriori_on:
+        # EMIT-ON-apriori (DEC-SWEEP-APRIORI-DEFAULT-001): legacy COMPLETE
+        # payloads stay byte-identical (frozen-key-set pinned).
+        payload["tuples_failed_apriori_budget"] = tuples_failed_apriori_budget
     audit.append(action=_ACTION_GRID_COMPLETE, subject=subject, payload=payload)
     _LOG.info("sweep_grid.complete", subject=subject, **payload)
     return grid_summary
@@ -1174,6 +1289,7 @@ __all__ = [
     "Timeframe",
     "bloom_capacity_hint",
     "count_sweep_tuples",
+    "hit_memo_cell_key",
     "iter_sweep_tuples",
     "load_or_create_store",
     "make_store_for",
