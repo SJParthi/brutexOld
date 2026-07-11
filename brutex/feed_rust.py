@@ -89,7 +89,9 @@ class _ScanKernel(Protocol):
         screen_enabled: bool,
         max_ratio: float,
         /,
-    ) -> ScanResult | None: ...
+    ) -> ScanResult | None:
+        """Scan the raw columns; ``None`` = abstain (degrade to the oracle)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 def reset_for_tests() -> None:

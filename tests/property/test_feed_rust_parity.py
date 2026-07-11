@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -144,7 +144,7 @@ def _table(rows: list[tuple[Any, ...]]) -> pa.Table:
 
 
 @contextmanager
-def _env(name: str, value: str | None) -> Iterator[None]:
+def _env(name: str, value: str | None) -> Generator[None]:
     """Set/unset one env var, restoring the prior state (hypothesis-safe —
     function-scoped monkeypatch fixtures do not mix with ``@given``)."""
     old = os.environ.get(name)
@@ -163,7 +163,7 @@ def _env(name: str, value: str | None) -> Iterator[None]:
 
 def _observe(
     table: pa.Table, flag: str | None, screen: str | None
-) -> tuple[list[Any] | None, Exception | None, list[dict[str, Any]]]:
+) -> tuple[list[Any] | None, Exception | None, list[Any]]:
     """One arm: bars-or-exception + the non-fallback log record sequence."""
     reset_for_tests()
     with _env(FEED_RUST_ENV, flag), _env(BAD_TICK_ENABLED_ENV, screen), capture_logs() as logs:

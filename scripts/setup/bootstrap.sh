@@ -110,6 +110,24 @@ else
   fi
 fi
 
+# ────────── 6a. brutex_feed wheel (optional) ──────────
+# DEC-FEED-RUST-CORE-001: the default-OFF feed decision kernel. OPTIONAL —
+# nothing imports it at module scope and BRUTEX_FEED_RUST is default-OFF
+# (the feed degrades to the Python oracle without it), so a build failure
+# WARNS but never aborts bootstrap.
+_step "Step 6a/7 — build + install brutex_feed Rust extension (optional)"
+if python -c "import brutex_feed" 2>/dev/null; then
+  _ok "brutex_feed already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-feed && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_feed" 2>/dev/null; then
+    _ok "brutex_feed built + installed via maturin"
+  else
+    _warn "brutex_feed build failed — OPTIONAL kernel (BRUTEX_FEED_RUST default-OFF degrades to the Python oracle)"
+  fi
+fi
+
 # ────────── 6b. git hooks (pre-commit + commit-msg + pre-push) ──────────
 # DEC-PRE-PUSH-HOOK-001: install ALL hook stages so the local gates
 # (.pre-commit-config.yaml) actually fire — including the new pre-push

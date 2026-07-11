@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import sys
 import types
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -54,7 +55,7 @@ def _fresh_warn_registry() -> None:
 
 
 def _table(
-    rows: list[Row],
+    rows: Sequence[Any],
     *,
     timestamp_type: pa.DataType | None = None,
     price_type: pa.DataType | None = None,
@@ -104,7 +105,7 @@ def _run_both_arms(
     monkeypatch: pytest.MonkeyPatch,
     *,
     source: str | None = _SOURCE,
-) -> tuple[list[Any], list[Any], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[Any], list[Any], Sequence[Any], Sequence[Any]]:
     """Drive OFF then ON over *table*; return (off_bars, on_bars, off_logs, on_logs)."""
     monkeypatch.delenv(FEED_RUST_ENV, raising=False)
     with capture_logs() as off_logs:
@@ -129,11 +130,11 @@ def _assert_bars_str_identical(off: list[Any], on: list[Any]) -> None:
         assert repr(a.open_interest) == repr(b.open_interest)
 
 
-def _bad_tick_events(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _bad_tick_events(logs: Sequence[Any]) -> list[Any]:
     return [rec for rec in logs if rec["event"] == "feed.bad_tick_skipped"]
 
 
-def _fallback_reasons(logs: list[dict[str, Any]]) -> list[str]:
+def _fallback_reasons(logs: Sequence[Any]) -> list[str]:
     return [str(rec["reason"]) for rec in logs if rec["event"] == FEED_RUST_FALLBACK_EVENT]
 
 
@@ -405,7 +406,7 @@ class TestOrderingLaws:
         table: pa.Table,
         monkeypatch: pytest.MonkeyPatch,
         exc_type: type[BaseException],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, str]:
+    ) -> tuple[Sequence[Any], Sequence[Any], str, str]:
         monkeypatch.delenv(FEED_RUST_ENV, raising=False)
         with capture_logs() as off_logs, pytest.raises(exc_type) as off_exc:
             arrow_table_to_bars(table, source=_SOURCE)
