@@ -313,10 +313,12 @@ byte-identical lake, 124/124 SHA match). The conversion's expected deltas:
 ## 9. PR-1 shipped surface (2026-07-11 — appended when PR-1 landed on this branch, same DEC)
 
 The §3 PR-1 gate set is IMPLEMENTED (full record: the PR-1 segment of
-MIGRATION.md #1726): the standalone `rust/brutex-lake/` crate (polars
-git-pinned `py-1.42.1`, restated object_store patch, zstd trio via the
-committed `Cargo.lock`, lockstep pins cargo-tested, panics caught at the
-FFI boundary), the `brutex/data/lake_rust_render.py` facade + the ONE
+MIGRATION.md #1726): the standalone `rust/brutex-lake/` crate (polars git
+deps REV-pinned at the commit the movable `py-1.42.1` tag pointed at —
+`PINNED_POLARS_GIT_REV`, no `tag =` line, cargo-tested by
+`manifest_rev_matches_pinned_rev`; restated object_store patch, zstd trio
+via the committed `Cargo.lock`, lockstep pins cargo-tested, panics caught
+at the FFI boundary), the `brutex/data/lake_rust_render.py` facade + the ONE
 `_render_bytes` seam (`BRUTEX_LAKE_RUST_RENDER` default OFF; import guard /
 version guard / 16-render burn-in with ship-the-oracle autorevert exactly
 as §3 specifies; `MemoryError` → `lake_write_guard` → `LakeWriteHalt`
