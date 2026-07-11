@@ -203,8 +203,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
-    from brutex.engine.sweep_progress import SweepProgressSnapshot
     from brutex.engine.reference_series import TradeReferenceStamper
+    from brutex.engine.sweep_progress import SweepProgressSnapshot
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
 
