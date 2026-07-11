@@ -12,6 +12,16 @@ therefore freezes "what the live module answers today" as a machine-readable,
 language-neutral ANSWER KEY (the ``vocab_golden_vectors.json`` /
 DEC-BXSNAP2-PARITY-GOLDEN-001 #1695 layer) that a non-Python port replays
 natively; it duplicates no unit assertion.
+
+Slice-9 review-round ADDITIVE extension (calendar MINOR — the answer key
+omitted 5 dispatch heads): the per-date record gained the ``h``/``hc``/``we``
+columns (``is_holiday`` / ``is_holiday_checked`` triage / ``is_weekend``,
+appended LAST) and the scalars gained the ``trading_days_between`` family
+(both variants incl. the checked OOC-raise range). The regeneration was
+verified ADDITIVE-ONLY (every pre-extension record equals the projection of
+the new record onto the old keys; every pre-extension scalar family
+byte-identical) and is LEDGERED in MIGRATION.md #1727a — the pre-merge
+regen record the regen law demands.
 """
 
 from __future__ import annotations
@@ -34,11 +44,16 @@ from brutex.calendars.nse import (
     get_session_checked,
     has_muhurat_session,
     is_forced_exit_bar,
+    is_holiday,
+    is_holiday_checked,
     is_special_weekend_session,
     is_trading_day,
     is_trading_day_checked,
+    is_weekend,
     previous_trading_session,
     session_last_bar_complete,
+    trading_days_between,
+    trading_days_between_checked,
 )
 
 FIXTURES: Final[Path] = Path(__file__).resolve().parent / "fixtures"
@@ -133,6 +148,24 @@ OBSERVED_OVERLAY_PROBES: Final[tuple[tuple[date, frozenset[date]], ...]] = (
     (date(2026, 2, 2), frozenset({date(2026, 2, 1)})),
 )
 
+#: ``trading_days_between[_checked]`` probes: (start, end) inclusive ranges —
+#: the Republic-Day-2026 cluster (holiday + weekend elision), the
+#: Budget-Saturday-2025 special weekend (a SATURDAY inside the range that IS
+#: a trading day), the Muhurat-2020 boundary (a Muhurat Saturday that is NOT
+#: a trading day in the walk), a range crossing the coverage END (the checked
+#: variant's offending-ordinal RAISE law vs the unguarded variant's silent
+#: OOC-weekday inclusion — the partial-discard law: NOTHING accumulated
+#: before the offending date is returned), and the empty start > end range.
+#: Added by the slice-9 review-round additive extension (see the module
+#: docstring's regen record note).
+TRADING_DAYS_BETWEEN_PROBES: Final[tuple[tuple[date, date], ...]] = (
+    (date(2026, 1, 23), date(2026, 1, 30)),
+    (date(2025, 1, 31), date(2025, 2, 2)),
+    (date(2020, 11, 13), date(2020, 11, 16)),
+    (date(2026, 12, 28), date(2027, 1, 5)),
+    (date(2026, 7, 6), date(2026, 7, 5)),
+)
+
 
 def _session_json(session: TradingSession | None) -> dict[str, str] | None:
     """Project a session (or ``None``) into the compact fixture shape."""
@@ -156,7 +189,14 @@ def verdict_record(d: date, *, exchange: str | None = None) -> dict[str, Any]:
     ``"raises"``) · ``m`` :func:`has_muhurat_session` · ``w``
     :func:`is_special_weekend_session` · ``p``
     :func:`previous_trading_session` (ISO or ``None`` — the coverage-floor
-    abstain freezes as ``None``).
+    abstain freezes as ``None``) · ``h`` :func:`is_holiday` (unguarded —
+    silent set-membership out of coverage) · ``hc`` :func:`is_holiday_checked`
+    outcome (``"true"``/``"false"``/``"raises"`` — raises on ANY
+    out-of-coverage date, weekends included, unlike ``tdc``) · ``we``
+    :func:`is_weekend`. The ``h``/``hc``/``we`` keys are the slice-9
+    review-round ADDITIVE extension (appended LAST — every pre-extension
+    key/value byte-identical; the ledgered regen record lives in
+    MIGRATION.md #1727a).
     """
     tdc: str
     try:
@@ -168,6 +208,11 @@ def verdict_record(d: date, *, exchange: str | None = None) -> dict[str, Any]:
         sc = _session_json(get_session_checked(d, exchange=exchange))
     except HolidayDataUnavailableError:
         sc = "raises"
+    hc: str
+    try:
+        hc = "true" if is_holiday_checked(d, exchange=exchange) else "false"
+    except HolidayDataUnavailableError:
+        hc = "raises"
     prev = previous_trading_session(d, exchange=exchange)
     return {
         "d": d.isoformat(),
@@ -178,6 +223,9 @@ def verdict_record(d: date, *, exchange: str | None = None) -> dict[str, Any]:
         "m": has_muhurat_session(d),
         "w": is_special_weekend_session(d),
         "p": None if prev is None else prev.isoformat(),
+        "h": is_holiday(d, exchange=exchange),
+        "hc": hc,
+        "we": is_weekend(d),
     }
 
 
@@ -232,6 +280,27 @@ def _previous_session_observed(d: date, observed: AbstractSet[date]) -> str | No
     return None if prev is None else prev.isoformat()
 
 
+def _trading_days_between_row(start: date, end: date) -> dict[str, Any]:
+    """One frozen ``trading_days_between[_checked]`` vector (both variants).
+
+    ``days`` = the unguarded walk (silent OOC-weekday inclusion); ``checked``
+    = the strict walk's day list, or ``"raises"`` when any in-range date is
+    an out-of-coverage weekday (the offending-ordinal RAISE discards every
+    day accumulated before it — nothing partial is returned).
+    """
+    checked: list[str] | str
+    try:
+        checked = [d.isoformat() for d in trading_days_between_checked(start, end)]
+    except HolidayDataUnavailableError:
+        checked = "raises"
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "days": [d.isoformat() for d in trading_days_between(start, end)],
+        "checked": checked,
+    }
+
+
 def build_scalars() -> dict[str, Any]:
     """Every scalar-vector family, computed from the live module."""
     muhurat_boundary = _muhurat_2025_boundary_seconds()
@@ -280,6 +349,9 @@ def build_scalars() -> dict[str, Any]:
                 "session_type": _require_session(d).session_type.value,
             }
             for d in sorted(MUHURAT_SESSIONS)
+        ],
+        "trading_days_between": [
+            _trading_days_between_row(start, end) for start, end in TRADING_DAYS_BETWEEN_PROBES
         ],
     }
 

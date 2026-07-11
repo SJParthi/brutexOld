@@ -13,7 +13,11 @@ two out-of-coverage abstain-triage strips, and every scalar-vector family
 EVERY Muhurat + special-weekend session, the ``is_forced_exit_bar`` strict-``>``
 boundary, the ``daily_derive_cutoff`` strict-``>`` at-close law,
 ``session_last_bar_complete``, the ``previous_trading_session`` observed-overlay
-remove-only vectors, and the Muhurat-precedence law).
+remove-only vectors, the Muhurat-precedence law, and — since the slice-9
+review-round additive extension (ledgered, MIGRATION.md #1727a) — the
+``trading_days_between[_checked]`` vectors, with the per-date record carrying
+the ``h``/``hc``/``we`` (``is_holiday`` / ``is_holiday_checked`` /
+``is_weekend``) columns appended last).
 
 REGENERATION LAW (differs from the audit fixture's never-regenerate law, stated
 honestly): this fixture is DATA-CARRYING and MUST be regenerable when a

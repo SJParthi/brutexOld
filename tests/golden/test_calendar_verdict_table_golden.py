@@ -6,16 +6,24 @@ The frozen, machine-readable ANSWER KEY for the Rust port of the
 (``is_trading_day`` / the ``is_trading_day_checked`` raise-vs-False-vs-True
 triage / ``get_session`` incl. its documented out-of-coverage FABRICATION /
 ``get_session_checked`` / ``has_muhurat_session`` /
-``is_special_weekend_session`` / ``previous_trading_session``), the two
+``is_special_weekend_session`` / ``previous_trading_session`` / ``is_holiday``
+/ the ``is_holiday_checked`` triage / ``is_weekend``), the two
 out-of-coverage abstain-triage strips, and every scalar family (expected-bars
 ceiling law, forced-exit time+seconds for one regular day + EVERY Muhurat +
 special-weekend session, the ``is_forced_exit_bar`` strict-``>`` boundary, the
 ``daily_derive_cutoff`` strict-``>`` at-close law, ``session_last_bar_complete``,
-the ``previous_trading_session`` observed-overlay remove-only vectors, and the
-Muhurat-precedence law). The port flips ON only when it reproduces this fixture
-BIT-FOR-BIT (the goldens-first law); calendar DATA itself stays in
-``brutex.calendars`` per ADR-0012 D8 and crosses any FFI as
-config/day-ordinals — this key freezes the VERDICTS.
+the ``previous_trading_session`` observed-overlay remove-only vectors, the
+Muhurat-precedence law, and the ``trading_days_between[_checked]`` vectors
+incl. the checked variant's OOC-raise partial-discard law). The port flips ON
+only when it reproduces this fixture BIT-FOR-BIT (the goldens-first law);
+calendar DATA itself stays in ``brutex.calendars`` per ADR-0012 D8 and
+crosses any FFI as config/day-ordinals — this key freezes the VERDICTS.
+
+Slice-9 review-round ADDITIVE extension (calendar MINOR; the ledgered regen
+record is MIGRATION.md #1727a): the answer key had omitted 5 of the 17
+dispatch heads — the ``h``/``hc``/``we`` per-date columns + the
+``trading_days_between`` scalar family were APPENDED, verified additive-only
+(every pre-extension record/family byte-identical under key projection).
 
 The test asserts fixture-vs-live EQUALITY through the shared thin projection
 (``tests/golden/_calendar_verdict_harness``) — it re-derives no semantics and
@@ -67,7 +75,7 @@ from tests.golden._calendar_verdict_harness import (
 #: SHA-256 manifest over the RAW fixture bytes (fixtures/README.md convention).
 #: Updating this constant is the reviewed-edit chokepoint every regeneration
 #: must pass through — together with its own ledgered calendar-data DEC.
-_EXPECTED_SHA256: Final[str] = "a7ebbd551c2c5bf53db806f659a7f7ac2418615db3e487f99ac9e9d3a9cd88d6"
+_EXPECTED_SHA256: Final[str] = "a0e59ddf50743907de7116af38755be72ee03eabd595b0b0a88ccece7285a8ee"
 
 _EXPECTED_DAY_COUNT: Final[int] = 2557
 _YEARS: Final[tuple[int, ...]] = (2020, 2021, 2022, 2023, 2024, 2025, 2026)
@@ -173,6 +181,7 @@ def test_strip_triage_shapes_are_the_documented_ones() -> None:
         "session_last_bar_complete",
         "previous_session_observed",
         "muhurat_precedence",
+        "trading_days_between",
     ],
 )
 def test_scalar_family_replays_against_live_module(family: str) -> None:
@@ -201,6 +210,55 @@ def test_daily_cutoff_strict_gt_at_close_divergence_is_frozen() -> None:
     assert by_now["2026-07-06T15:29:59"] == "2026-07-06"
     assert by_now["2026-07-06T15:30:00"] == "2026-07-06"  # AT close = still forming
     assert by_now["2026-07-06T15:30:01"] == "2026-07-07"
+
+
+def test_holiday_and_weekend_columns_spot_pins() -> None:
+    """Spot-pin the slice-9 additive columns: ``h``/``hc``/``we`` shapes.
+
+    Republic Day 2026 (Mon) is a holiday both variants agree on; a regular
+    Monday is neither; and — unlike ``tdc`` — ``hc`` raises on ANY
+    out-of-coverage date, weekends included (frozen in the strips).
+    """
+    by_date = {r["d"]: r for r in _days()}
+    republic = by_date["2026-01-26"]
+    assert republic["h"] is True
+    assert republic["hc"] == "true"
+    assert republic["we"] is False
+    monday = by_date["2026-07-06"]
+    assert monday["h"] is False
+    assert monday["hc"] == "false"
+    assert monday["we"] is False
+    saturday = by_date["2026-07-04"]
+    assert saturday["we"] is True
+    strips: list[dict[str, Any]] = _doc()["strips"]
+    strip_by_date = {r["d"]: r for r in strips}
+    ooc_weekend = strip_by_date["2027-01-02"]  # Saturday
+    assert ooc_weekend["tdc"] == "false"  # trading-day triage answers weekends
+    assert ooc_weekend["hc"] == "raises"  # holiday triage refuses ANY OOC date
+    assert ooc_weekend["h"] is False  # unguarded: silent set-membership
+
+
+def test_trading_days_between_vectors_spot_pins() -> None:
+    """Spot-pin the slice-9 additive scalar family — both variants.
+
+    The coverage-crossing range shows the divergence the family exists to
+    freeze: the unguarded walk silently INCLUDES out-of-coverage weekdays,
+    the checked walk raises (and discards everything — partial results are
+    never returned)."""
+    rows: list[dict[str, Any]] = _doc()["scalars"]["trading_days_between"]
+    by_range = {(r["start"], r["end"]): r for r in rows}
+    republic_week = by_range[("2026-01-23", "2026-01-30")]
+    assert "2026-01-26" not in republic_week["days"]  # Republic Day elided
+    assert republic_week["days"] == republic_week["checked"]  # in-coverage: identical
+    budget = by_range[("2025-01-31", "2025-02-02")]
+    assert "2025-02-01" in budget["days"]  # the Budget SATURDAY trades
+    muhurat = by_range[("2020-11-13", "2020-11-16")]
+    assert muhurat["days"] == ["2020-11-13"]  # the Muhurat Saturday does NOT
+    crossing = by_range[("2026-12-28", "2027-01-05")]
+    assert "2027-01-01" in crossing["days"]  # silent OOC-weekday inclusion
+    assert crossing["checked"] == "raises"  # the strict walk refuses instead
+    empty = by_range[("2026-07-06", "2026-07-05")]
+    assert empty["days"] == [] and empty["checked"] == []
 
 
 def test_muhurat_precedence_law_holds_on_every_muhurat_date() -> None:

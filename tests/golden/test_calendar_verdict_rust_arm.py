@@ -11,6 +11,13 @@ duplication (the golden job discovers this module by placement).
 
 Skips VISIBLY when the installed ``fno_math`` wheel predates the slice-9
 ``CalendarVerdictEngine`` symbol (a stale local wheel), never silently.
+
+The slice-9 review-round additive fixture extension (the ``h``/``hc``/``we``
+per-date columns — ``is_holiday`` / ``is_holiday_checked`` / ``is_weekend`` —
+plus the ``trading_days_between[_checked]`` scalar family; ledgered in
+MIGRATION.md #1727a) rides the SAME shared harness, so this module replays
+all 5 previously-unpinned dispatch heads flag-ON automatically — the Rust
+arm now reproduces the COMPLETE 17-head answer key bit-for-bit.
 """
 
 from __future__ import annotations
