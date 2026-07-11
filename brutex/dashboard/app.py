@@ -5075,8 +5075,9 @@ def build_app(
                 # (DEC-JOB-CANCEL-CONTROL-001 — the Greeks-backfill arm of the
                 # DEC-JOB-COOPERATIVE-CANCEL-001 mechanism): the runner probes
                 # the job's per-run token before each batch; a cancelled run
-                # RETURNS its honest CANCELLED report (checkpoint kept, next
-                # run resumes) — never a raise, so the job settles "done" with
+                # RETURNS its honest CANCELLED report (resume correct — the
+                # frozen checkpoint when one was recorded, the stored stamps
+                # otherwise) — never a raise, so the job settles "done" with
                 # the cancelled note as its headline and the alert below still
                 # fires the ⏹ summary. HONEST cancel-blind span: the O(files)
                 # scan above has no interior probe — a Stop acked mid-scan is
@@ -5163,7 +5164,13 @@ def build_app(
         NO ``expected_kind`` gate, deliberately: ``_greeks_backfill_job`` is a
         DEDICATED job instance only this route family ever starts (unlike the
         shared pull/sweep job the pull route must kind-gate), so a kind
-        compare would be vacuous. Refusal reasons: ``"idle"`` (no run in
+        compare would be vacuous. The verdict likewise carries NO
+        run-identity token (the ``/api/v1/pull/cancel`` wire, kept
+        deliberately): if run A finishes AND the operator restarts within the
+        ONE HTTP round-trip a Stop POST is in flight, the cancel lands on the
+        fresh run — an accepted, disclosed window (hostile-review #1748;
+        the cancel is graceful + lossless and the run trivially restarts).
+        Refusal reasons: ``"idle"`` (no run in
         flight — a between-runs or after-finish request can never pre-poison a
         later run, the fresh-Event-per-start identity gate) and
         ``"uncancellable"`` (a DRY-RUN is scan + report only, started
@@ -5175,8 +5182,9 @@ def build_app(
         the O(files) SCAN phase has NO interior probe (a Stop acked mid-scan
         is honored at the FIRST batch boundary — the #1369 metadata-phase
         cancel-blind-span precedent). The stopped run settles as an honest
-        "done" whose headline reads CANCELLED + resumable; the frozen
-        checkpoint makes the next same-plan run fast-resume.
+        "done" whose headline reads CANCELLED + resumable; a frozen
+        checkpoint (when one was recorded) makes the next same-plan run
+        fast-resume, and the stored stamps keep resume correct regardless.
         """
         cancelling, reason = _greeks_backfill_job.request_cancel_verdict()
         payload: dict[str, object] = {"cancelling": bool(cancelling)}

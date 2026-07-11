@@ -1787,6 +1787,7 @@ def run_greeks_backfill(
     batches = 0
     completed = resumed_from
     cancelled = False
+    checkpoint_survives = False
     for batch_start in range(resumed_from, total, batch_size):
         if should_stop is not None and should_stop():
             # Cooperative operator cancel (DEC-JOB-CANCEL-CONTROL-001): probed
@@ -1801,12 +1802,24 @@ def run_greeks_backfill(
             # this flat loop returns gracefully like the pipeline's
             # stopped_after verdict).
             cancelled = True
+            # Honest checkpoint state (hostile-review fix, #1748): "kept" is
+            # claimed only when a frozen file ACTUALLY survives on disk — a
+            # cancel before the first clean record (or after an errored-prefix
+            # freeze / a failed record) has no file, and says so. Probed ONCE
+            # here and reused by the report note below (nothing touches the
+            # file between this break and the note — the clean-completion
+            # unlink is skipped on the cancelled path).
+            checkpoint_survives = store.path.exists()
             _LOG.warning(
                 "greeks_backfill.cancelled",
                 completed=completed,
                 total=total,
                 batches=batches,
-                checkpoint="kept (frozen at the last clean prefix) — the next run resumes",
+                checkpoint=(
+                    "kept (frozen at the last clean prefix) — the next run resumes"
+                    if checkpoint_survives
+                    else "none recorded — the next run re-scans (correct via the stamps)"
+                ),
             )
             break
         batch = plan.targets[batch_start : batch_start + batch_size]
@@ -1901,14 +1914,22 @@ def run_greeks_backfill(
     if cancelled:
         # The honest cancelled headline (surfaced verbatim by the dashboard
         # job's _finish_detail): the stop point + the resume promise FIRST,
-        # then the same tallies clause a completed run reports. "checkpoint
-        # kept" describes the unlink-skip above — on a cancel before the first
-        # clean record there is simply no file, and resume stays correct via
-        # the stamps either way (the checkpoint is only the accelerator).
+        # then the same tallies clause a completed run reports. The resume
+        # clause is BRANCHED on the on-disk truth (hostile-review fix, #1748):
+        # "checkpoint kept" describes the unlink-skip above and is claimed
+        # ONLY when a frozen file actually survives — on a cancel before the
+        # first clean record there is simply no file, and that arm says so
+        # honestly. Resume stays correct via the stamps either way (the
+        # checkpoint is only the accelerator).
+        resume_clause = (
+            "resumable (checkpoint kept; re-run to resume)"
+            if checkpoint_survives
+            else "resumable (no checkpoint recorded — the re-run re-scans; resume "
+            "correct via stored stamps)"
+        )
         note = (
             f"Greeks backfill {plan.backfill_id[:12]} CANCELLED by operator at "
-            f"contract {completed}/{total} — resumable (checkpoint kept; re-run "
-            f"to resume): {tallies_clause}"
+            f"contract {completed}/{total} — {resume_clause}: {tallies_clause}"
         )
     else:
         note = f"Greeks backfill {plan.backfill_id[:12]}: {tallies_clause}"

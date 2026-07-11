@@ -1255,10 +1255,13 @@ class SweepAlerter:
         operator-initiated one-shot deserves an answer. A CANCELLED run
         (DEC-JOB-CANCEL-CONTROL-001 — the operator's cooperative Stop) reads
         the distinct ⏹ head naming the stop + the resume promise, under a
-        DISTINCT ``…:cancelled`` dedupe key so the resumed run's own
-        completion summary (same content-addressed ``backfill_id``) is never
-        dedupe-suppressed. Best-effort; silent no-op when Telegram is
-        disabled.
+        DISTINCT ``…:cancelled`` dedupe key — a LABELING convention only: at
+        the 0.0-window ``RUN_COMPLETE`` kind
+        (:data:`~brutex.notifications.telegram.DEDUPE_WINDOW_SECONDS`) the
+        dedupe_key does NO notifier-side suppression, so the resumed run's
+        own completion summary (same content-addressed ``backfill_id``)
+        fires regardless of the key choice. Best-effort; silent no-op when
+        Telegram is disabled.
         """
         clauses: list[str] = []
         if report.errored > 0:
@@ -1272,10 +1275,14 @@ class SweepAlerter:
             # Operator's cooperative Stop (DEC-JOB-CANCEL-CONTROL-001): an
             # honest ⏹ PARTIAL — never a ✅ for a run the operator halted, and
             # never the ⚠️ "with failures" wording for a deliberate stop (any
-            # errored/unfixable clauses still ride along). The dedupe key is
-            # DISTINCT from the completion key: the resumed run shares the
-            # SAME content-addressed backfill_id, so a shared key would
-            # suppress its genuine completion summary.
+            # errored/unfixable clauses still ride along). The DISTINCT
+            # `…:cancelled` dedupe_key is a LABELING convention only (it names
+            # the outcome on the event record — the soak_drift precedent):
+            # at the 0.0-window RUN_COMPLETE kind the dedupe_key does NO
+            # notifier-side suppression (DEDUPE_WINDOW_SECONDS —
+            # check_dedupe_locked returns False for window <= 0.0), so the
+            # resumed run's completion summary (same content-addressed
+            # backfill_id) fires regardless of the key.
             head = (
                 f"⏹ Greeks backfill CANCELLED by operator — "
                 f"{report.enriched}/{report.planned} contracts re-stamped v2 before "

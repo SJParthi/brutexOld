@@ -2416,30 +2416,50 @@ class TestRunnerCancel:
         assert report.cancelled is True and report.batches == 0
         assert report.enriched == 0 and report.bars_written == 0
         assert "CANCELLED by operator at contract 0/4" in report.note
-        assert "resumable" in report.note and "re-run to resume" in report.note
         # Nothing was recorded, so there is no checkpoint to keep — and the
         # cancel wrote none (no fabricated resume state).
         assert not checkpoint_path(lake).exists()
+        # HOSTILE-REVIEW REGRESSION (#1748 fix round): with NO file on disk
+        # the note takes the honest no-checkpoint arm — it must NOT claim
+        # "checkpoint kept" for a file that does not exist (the pre-fix note
+        # did, unconditionally). Resume stays correct via the stored stamps.
+        assert "resumable" in report.note
+        assert "checkpoint kept" not in report.note
+        assert "no checkpoint recorded" in report.note
+        assert "resume correct via stored stamps" in report.note
         cancelled_logs = [r for r in logs if r["event"] == "greeks_backfill.cancelled"]
         assert len(cancelled_logs) == 1
         assert cancelled_logs[0]["completed"] == 0 and cancelled_logs[0]["total"] == 4
-        assert "kept" in str(cancelled_logs[0]["checkpoint"])
+        # The log field is branched on the SAME on-disk truth as the note.
+        checkpoint_field = str(cancelled_logs[0]["checkpoint"])
+        assert "none recorded" in checkpoint_field and "kept" not in checkpoint_field
 
     def test_cancel_between_batches_completes_inflight_batch(self, lake: Path) -> None:
         """A cancel acked while batch 1 runs lands at the boundary: batch 1's
         driver call + clean-prefix checkpoint record complete DURABLY first,
         batch 2 never starts, and the checkpoint file is KEPT (the
         clean-completion unlink is skipped)."""
+        from structlog.testing import capture_logs
+
         plan = _plan(4)
         stop = _StopAfter(1)  # boundary 1 → False (batch 1 runs), boundary 2 → True
         spy = _SpyEnrich()
-        report = run_greeks_backfill(
-            lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=spy, should_stop=stop
-        )
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=spy, should_stop=stop
+            )
         assert [len(c) for c in spy.calls] == [2]  # the in-flight batch completed
         assert report.cancelled is True and report.batches == 1
         assert report.enriched == 2
         assert "CANCELLED by operator at contract 2/4" in report.note
+        # HOSTILE-REVIEW pin (#1748 fix round): a frozen file genuinely
+        # survives HERE, so this arm — and only this arm — claims it (the
+        # note branch keys on the on-disk truth, never unconditionally).
+        assert "resumable (checkpoint kept; re-run to resume)" in report.note
+        assert "no checkpoint recorded" not in report.note
+        cancelled_logs = [r for r in logs if r["event"] == "greeks_backfill.cancelled"]
+        assert len(cancelled_logs) == 1
+        assert "kept (frozen at the last clean prefix)" in str(cancelled_logs[0]["checkpoint"])
         # The checkpoint survives, frozen at batch 1's fully-clean prefix.
         assert checkpoint_path(lake).exists()
         store = SweepCheckpointStore(
@@ -2514,6 +2534,11 @@ class TestRunnerCancel:
         # The round-3 freeze stands: the errored prefix was never recorded,
         # so there is no checkpoint file — the cancel neither wrote nor kept one.
         assert not checkpoint_path(lake).exists()
+        # HOSTILE-REVIEW pin (#1748 fix round): the errored-prefix cancel is
+        # the SECOND no-file shape — the note must take the honest
+        # no-checkpoint arm here too, never claim a kept file.
+        assert "checkpoint kept" not in report.note
+        assert "no checkpoint recorded" in report.note
         resumed = _SpyEnrich()
         report2 = run_greeks_backfill(
             lake, plan=plan, rate_source=_RATE, batch_size=1, enrich=resumed

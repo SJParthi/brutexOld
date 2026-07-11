@@ -654,12 +654,13 @@
          backfill runs; POSTs /api/v1/universe/greeks-backfill-cancel. The stop
          lands at the next BETWEEN-BATCHES boundary — the in-flight batch's
          durable writes + checkpoint record complete first — and the run settles
-         as an honest CANCELLED partial (checkpoint kept; the next run resumes).
+         as an honest CANCELLED partial (resume stays correct: the frozen
+         checkpoint when one was recorded, the stored stamps otherwise).
          A stop during the O(files) SCAN phase is honored only at the FIRST
          batch boundary; a DRY-RUN (scan + report only) has no stop seam and is
          refused honestly. -->
     <button id="gbStopBtn" class="vbtn" hidden style="margin-left:8px;cursor:pointer;"
-            title="Cooperative stop — the in-flight batch (default 25 contracts) finishes its durable writes + checkpoint record, then the backfill settles as an honest CANCELLED partial. The checkpoint is kept, so the next run resumes. A stop during the O(files) scan is honored at the first batch boundary; a dry-run scan has no stop seam and runs to completion.">
+            title="Cooperative stop — the in-flight batch (default 25 contracts) finishes its durable writes + checkpoint record, then the backfill settles as an honest CANCELLED partial. The next run resumes (the frozen checkpoint when one was recorded; the stored stamps otherwise). A stop during the O(files) scan is honored at the first batch boundary; a dry-run scan has no stop seam and runs to completion.">
       ⏹ Stop backfill
     </button>
     <span id="gbstatus" style="margin-left:10px;color:var(--muted);"></span>
@@ -2409,6 +2410,9 @@ let gbTimer = null;
 let gbFeedRetries = 0;
 let gbWatchActive = false;
 let gbPollGen = 0;               // re-entrancy generation: a superseded/stale response never repaints
+let gbStopGen = 0;               // Stop-button watch-epoch (hostile-review fix, #1748): bumped on every
+                                 // gbBeginWatch/gbFinish transition so a LATE cancel-POST response can
+                                 // never repaint a DIFFERENT run's freshly-reset Stop button
 /* Hung-fetch abort bound for EVERY gb fetch (fix round 10, refuter-confirmed —
    the sibling pollProgress's own refuter-confirmed bound, omitted by the
    round-9 rewrite): browsers have NO body-read timeout, so a
@@ -2452,6 +2456,7 @@ function gbRetryDelayMs() {
 }
 function gbBeginWatch() {
   gbWatchActive = true;
+  gbStopGen += 1;   // new watch epoch: any in-flight Stop-POST straggler is now stale
   gbFeedRetries = 0;
   const btn = document.getElementById('greeksBackfillBtn');
   if (btn) btn.disabled = true;   // re-enabled ONLY once a terminal state is observed
@@ -2467,6 +2472,7 @@ function gbFinish() {
   gbWatchActive = false;
   gbFeedRetries = 0;
   gbPollGen += 1;   // invalidate any in-flight poll straggler (a settled panel never repaints stale)
+  gbStopGen += 1;   // watch epoch over: a late Stop-POST response never repaints the reset button
   if (gbTimer) { clearTimeout(gbTimer); gbTimer = null; }
   const btn = document.getElementById('greeksBackfillBtn');
   if (btn) btn.disabled = false;
@@ -2533,8 +2539,17 @@ async function pollGreeksBackfill() {
         // `cancelling` payload key, DEC-JOB-CANCEL-CONTROL-001): reflect the
         // honest stopping state on both the status line and the Stop button
         // until the job settles through the normal terminal branch below.
+        // PHASE-accurate label (hostile-review fix, #1748): during the
+        // cancel-blind O(files) SCAN phase (total still 0) NO batch is in
+        // flight — the stop lands at the FIRST batch boundary, so the label
+        // must not claim a current batch is finishing.
         const sbtn = document.getElementById('gbStopBtn');
-        if (sbtn) { sbtn.disabled = true; sbtn.textContent = 'Stopping — finishing current batch…'; }
+        if (sbtn) {
+          sbtn.disabled = true;
+          sbtn.textContent = (s.total || 0) > 0
+            ? 'Stopping — finishing current batch…'
+            : 'Stopping — will stop at the first batch boundary…';
+        }
       }
       gbStatus((s.cancelling === true ? 'stopping · ' : 'running · ') + line);
       gbTimer = setTimeout(pollGreeksBackfill, GB_MS);
@@ -2584,19 +2599,29 @@ document.addEventListener('visibilitychange', () => {
    gbFetchJson; the running WET backfill stops at its next BETWEEN-BATCHES
    boundary (the in-flight batch's durable writes + checkpoint record land
    first) and settles through the NORMAL poll path with the honest CANCELLED
-   headline — the checkpoint is kept, so the next run resumes. Distinct
-   refusal labels: "idle" vs the dry-run's honest "uncancellable" (a dry-run
-   is scan + report only — no stop seam, never a fabricated ack).
-   textContent only — never markup. */
+   headline — resume stays correct either way (the frozen checkpoint when one
+   was recorded; the stored stamps otherwise). Distinct refusal labels:
+   "idle" vs the dry-run's honest "uncancellable" (a dry-run is scan + report
+   only — no stop seam, never a fabricated ack). The click-time label is the
+   phase-NEUTRAL 'Stopping…' (the click cannot know scan-vs-batch phase; the
+   very next poll paints the phase-accurate label off the payload), and the
+   late-response writes are gbStopGen watch-epoch guarded (hostile-review
+   fix, #1748): a POST that resolves after gbFinish/gbBeginWatch transitioned
+   the panel must never repaint a DIFFERENT run's freshly-reset button with a
+   stale refusal. textContent only — never markup. */
 async function gbStopBackfill() {
+  const gen = gbStopGen;   // watch-epoch capture at click time (the gbPollGen pattern)
   const sbtn = document.getElementById('gbStopBtn');
-  if (sbtn) { sbtn.disabled = true; sbtn.textContent = 'Stopping — finishing current batch…'; }
+  if (sbtn) { sbtn.disabled = true; sbtn.textContent = 'Stopping…'; }
+  // Stale once the watch epoch moved (run settled / a fresh run began) or the
+  // button was hidden/reset — run A's late refusal must never label run B.
+  const stale = () => gen !== gbStopGen || !sbtn || sbtn.hidden;
   try {
     const res = await gbFetchJson('/api/v1/universe/greeks-backfill-cancel', {method: 'POST'});
     const j = res.body;
     if (!res.ok) throw new Error('HTTP ' + res.status);
     if (!j || j.cancelling !== true) {
-      if (sbtn) {
+      if (!stale()) {
         sbtn.textContent = (j && j.reason === 'uncancellable')
           ? 'Dry-run scan has no stop seam — it runs to completion'
           : 'No running backfill to stop';
@@ -2604,7 +2629,7 @@ async function gbStopBackfill() {
       }
     }
   } catch (e) {
-    if (sbtn) { sbtn.textContent = 'Stop request failed — retry'; sbtn.disabled = false; }
+    if (!stale()) { sbtn.textContent = 'Stop request failed — retry'; sbtn.disabled = false; }
   }
 }
 const greeksBackfillBtn = document.getElementById('greeksBackfillBtn');

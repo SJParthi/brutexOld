@@ -369,11 +369,16 @@ class TestCancelRoute:
         completion summary, and the after-finish Stop race settling as an
         idle no-op (the fresh-Event-per-start identity law).
         """
+        # The fixture note mirrors the REAL runner's 0/1-with-no-file shape
+        # (hostile-review #1748 fix round: the note's resume clause branches
+        # on the on-disk checkpoint truth — a cancel before the first clean
+        # record has no file, so the honest no-checkpoint arm renders here).
         report = _report(
             cancelled=True,
             note=(
                 "Greeks backfill bbbbbbbbbbbb CANCELLED by operator at contract 0/1 — "
-                "resumable (checkpoint kept; re-run to resume): 0 contract(s) re-stamped "
+                "resumable (no checkpoint recorded — the re-run re-scans; resume "
+                "correct via stored stamps): 0 contract(s) re-stamped "
                 "v2, 0 already current, 0 errored (re-runnable); 0 bars written"
             ),
         )
@@ -766,6 +771,59 @@ class TestFrontend:
         assert "Dry-run scan has no stop seam" in block
         assert "No running backfill to stop" in block
         assert "Stop request failed — retry" in block
+
+    def test_backfill_stop_label_is_phase_accurate(self) -> None:
+        """HOSTILE-REVIEW REGRESSION (#1748 fix round): during the
+        cancel-blind O(files) SCAN phase (``total`` still 0) NO batch is in
+        flight — the stop lands at the FIRST batch boundary — so the poll's
+        stopping label must not claim a current batch is finishing (the
+        pre-fix branch wrote 'Stopping — finishing current batch…'
+        unconditionally). Once batches run (``total > 0``) the original
+        wording stands; the phase split keys off the SAME ``total`` the
+        status line keys off. The click-time label is phase-NEUTRAL
+        ('Stopping…') — the click cannot know the phase, and the very next
+        poll paints the accurate one off the payload.
+        """
+        block = self._gb_block()
+        poll = block[
+            block.index("async function pollGreeksBackfill()") : block.index(
+                "async function gbAttachIfRunning"
+            )
+        ]
+        assert "? 'Stopping — finishing current batch…'" in poll
+        assert ": 'Stopping — will stop at the first batch boundary…';" in poll
+        assert poll.count("(s.total || 0) > 0") == 2  # status line + label share the key
+        stop = block[block.index("async function gbStopBackfill()") :]
+        assert "sbtn.textContent = 'Stopping…';" in stop
+        assert "Stopping — finishing current batch…" not in stop
+
+    def test_backfill_stop_button_watch_epoch_guard(self) -> None:
+        """HOSTILE-REVIEW REGRESSION (#1748 fix round): gbStopBackfill's
+        late-response writes are watch-epoch guarded — without the guard a
+        cancel POST resolving AFTER run A settled and run B began repainted
+        run B's freshly-reset Stop button with run A's stale refusal label,
+        which then PERSISTED (the poll re-writes the button only under
+        ``cancelling === true``). The epoch (``gbStopGen``, the gbPollGen
+        pattern run-scoped to the Stop button) bumps on BOTH panel
+        transitions (gbBeginWatch AND gbFinish), and the guard also skips a
+        hidden/reset button. Substring pins (presence, not execution — the
+        panel's honest envelope).
+        """
+        block = self._gb_block()
+        assert "let gbStopGen = 0;" in block
+        assert block.count("gbStopGen += 1;") == 2  # begin + finish, nowhere else
+        begin = block[block.index("function gbBeginWatch()") : block.index("function gbFinish()")]
+        fin = block[
+            block.index("function gbFinish()") : block.index("async function startGreeksBackfill")
+        ]
+        assert "gbStopGen += 1;" in begin
+        assert "gbStopGen += 1;" in fin
+        stop = block[block.index("async function gbStopBackfill()") :]
+        assert "const gen = gbStopGen;" in stop
+        assert "const stale = () => gen !== gbStopGen || !sbtn || sbtn.hidden;" in stop
+        # BOTH late-write sites (the refusal branch AND the failed-POST
+        # catch) ride the guard — a stale response writes nothing.
+        assert stop.count("if (!stale())") == 2
 
     def test_backfill_poll_generation_guard_supersedes_stale_chains(self) -> None:
         """REGRESSION (fix round 10): the gb poll chain is generation-guarded.

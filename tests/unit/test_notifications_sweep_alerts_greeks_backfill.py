@@ -109,9 +109,9 @@ class TestGreeksBackfillComplete:
         """DEC-JOB-CANCEL-CONTROL-001: an operator-cancelled run reads the
         honest ⏹ head (never a ✅ for a run the operator halted, never the
         ⚠️ "with failures" wording for a deliberate stop) under a DISTINCT
-        ``…:cancelled`` dedupe key — the resumed run shares the SAME
-        content-addressed ``backfill_id``, so a shared key would suppress its
-        genuine completion summary.
+        ``…:cancelled`` dedupe key — a LABELING convention naming the outcome
+        on the event record (at the 0.0-window RUN_COMPLETE kind no
+        dedupe_key ever suppresses — see the sibling labeling-only pin).
         """
         fake = FakeNotifier()
         alerter = SweepAlerter(notifier=fake)
@@ -125,6 +125,36 @@ class TestGreeksBackfillComplete:
         assert escape_markdown_v2("2/5 contracts re-stamped v2 before the stop") in event.message
         assert escape_markdown_v2("resumable (re-run resumes)") in event.message
         assert "✅" not in event.message and "⚠️" not in event.message
+
+    def test_cancelled_dedupe_key_is_labeling_only_no_suppression(self) -> None:
+        """HOSTILE-REVIEW pin (#1748 fix round): the distinct ``…:cancelled``
+        dedupe key is a LABELING convention only — RUN_COMPLETE's notifier
+        dedupe window is ``0.0`` (``check_dedupe_locked`` returns ``False``
+        for ``window <= 0.0``), so NO dedupe_key ever suppresses at this
+        kind and the resumed run's completion summary fires regardless of
+        key choice. The premise is pinned so a future nonzero RUN_COMPLETE
+        window forces a conscious re-derive of the key choice, and the
+        stale suppression rationale (the falsified "a shared key would
+        suppress" claim) must never re-drift into the source.
+        """
+        import re
+        from pathlib import Path
+
+        from brutex.notifications import sweep_alerts as sweep_alerts_module
+        from brutex.notifications.telegram import DEDUPE_WINDOW_SECONDS
+
+        # The premise: RUN_COMPLETE is a 0.0-window kind — no suppression.
+        assert DEDUPE_WINDOW_SECONDS[TelegramEventKind.RUN_COMPLETE] == 0.0
+        # The falsified rationale never returns (built by concatenation so
+        # this pin can never match its own docstring source; whitespace/
+        # comment-prefix runs collapse to one space so a line-wrapped
+        # re-drift is still caught — the TestMeterLifecycleInvariantDocPin
+        # idiom).
+        raw = Path(sweep_alerts_module.__file__).read_text(encoding="utf-8")
+        source = re.sub(r"[\s#]+", " ", raw)
+        assert ("would " + "suppress") not in source
+        # The honest house wording anchors the cancelled-key comment site.
+        assert "does NO notifier-side suppression" in source
 
     def test_cancelled_clauses_still_ride_along(self) -> None:
         """A cancelled run with errored/unfixable contracts keeps those honest
