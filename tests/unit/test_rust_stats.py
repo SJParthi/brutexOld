@@ -764,6 +764,114 @@ def test_min_sharpe_bool_engages_the_kernel(exact_bool: bool) -> None:
     assert not any(e["event"] == "rust_stats.fallback" for e in logs)
 
 
+# ── the FFI call site: refusal-context totality (refuter round 3) ───────
+# Refuter-round-3 CONFIRMED defects (fix round 4), BOTH in the round-3
+# refusal paths' own warn-CONTEXT expressions — evaluated as call arguments
+# BEFORE the warn-once memo check, so each raised on EVERY call: (R3-1,
+# refuter 3 — a residual of round-2 D1) the OverflowError refusal arm's
+# ``repr(min_sharpe)`` is itself PARTIAL — CPython ≥3.11 caps int→str at
+# ``sys.get_int_max_str_digits()`` (default 4300), so a type-legal exact
+# int past ~4300 digits CRASHED the ON arm (ValueError) where OFF returns
+# a rate; (R3-2, refuter 1) the foreign refusal's ``ms_type.__name__``
+# lookup dispatches through the foreign TYPE's METACLASS MRO — a hostile
+# metaclass ``__name__`` property raised ON-only where OFF serves the
+# oracle. Both fixed by making the contexts TOTAL: the digit-limit-guarded
+# ``_inexact_threshold_context`` + the C-level ``type.__dict__['__name__']``
+# getset fetch in ``_type_name``.
+
+
+class _MetaRaisingName(type):
+    """Refuter-1 round-3 attack verbatim (repro_metaclass_name.py): a
+    metaclass whose ``__name__`` is a raising property — it shadows
+    ``type``'s C-level getset for ordinary attribute lookup, so the
+    pre-fix ``ms_type.__name__`` raised RuntimeError ON-only."""
+
+    @property
+    def __name__(cls) -> str:  # type: ignore[override]  # the deliberate hostile shape under test
+        raise RuntimeError("hostile metaclass __name__")
+
+
+class _HostileNamed(metaclass=_MetaRaisingName):
+    """Foreign threshold whose reflected ``__lt__`` answers the oracle's
+    ``sharpe > min_sharpe`` compare with True (every defined fold passes)."""
+
+    def __lt__(self, other: object) -> bool:
+        return True
+
+
+def test_min_sharpe_hostile_metaclass_name_refuses_on_off_identical() -> None:
+    """Refuter-round-3 R3-2 repro VERBATIM (r3ref1/repro_metaclass_name.py):
+    pre-fix OFF returned 1.0 (the oracle dispatches the object's reflected
+    ``__lt__``) while ON raised RuntimeError from the foreign refusal's
+    ``ms_type.__name__`` lookup through the hostile METACLASS MRO — on
+    every call, refuting the "never dispatches ANY operation to a foreign
+    object" claim at the type level. Post-fix the name is fetched through
+    ``type``'s C-level getset descriptor (``_type_name``), so ON ALSO
+    refuses to the oracle and returns the identical 1.0, with the foreign
+    warn carrying the type's REAL slot name."""
+    returns = [0.01, 0.02, -0.005, 0.03, 0.015, -0.01, 0.02, 0.01]
+    ms = _HostileNamed()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=ms)  # type: ignore[arg-type]  # the deliberate foreign type under test
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv")
+        reset_observability_memo_for_tests()
+        with capture_logs() as logs:
+            on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=ms)  # type: ignore[arg-type]  # the deliberate foreign type under test
+    # Every defined fold passes on both arms (the reflected __lt__ is True).
+    assert struct.pack("<d", on) == struct.pack("<d", off) == struct.pack("<d", 1.0)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_foreign_type"]
+    # The SAFE lookup reads the real C-level name slot the hostile
+    # metaclass property shadows (kills the _type_name lookup mutants).
+    assert events[0]["min_sharpe_type"] == "_HostileNamed"
+    assert kernel_disabled("cpcv") is False
+    assert not any(e["event"] == "rust_stats.engaged" for e in logs)
+
+
+def test_min_sharpe_int_past_repr_digit_limit_refuses_not_crashes() -> None:
+    """Refuter-round-3 R3-1 repro VERBATIM (r3r3_repro_bigint_repr.py): a
+    type-legal exact int past BOTH float range and CPython's int→str digit
+    cap took the OverflowError refusal arm and then CRASHED in the
+    refusal's own ``repr(min_sharpe)`` (ValueError: Exceeds the limit …) —
+    ON raised on every call where OFF returns a rate, the residual of the
+    round-2 D1 fix (whose regression trio caps at 401 digits). Post-fix
+    the warn context degrades to the bounded ``bit_length`` placeholder
+    and the refusal never raises: ON≡OFF bit-equal via the oracle, no
+    burn-in sample consumed, no latch."""
+    huge = 10**5000  # 5001 digits — past the default 4300-digit repr cap
+    returns = [0.01, -0.02, 0.03, -0.01, 0.02, 0.005, -0.015, 0.025] * 4
+    limit_before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)  # pin the CPython DEFAULT — deterministic
+    try:
+        # The trap itself, pinned: int.__repr__ is partial under the limit.
+        with pytest.raises(ValueError, match="Exceeds the limit"):
+            repr(huge)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(STATS_RUST_ENV, "0")
+            off = cpcv_pass_rate(returns, n_groups=8, n_test_groups=4, min_sharpe=huge)
+            mp.setenv(STATS_RUST_ENV, "1")
+            reset_self_check_for_tests("cpcv")  # fresh burn-in budget
+            budgets_before = dict(rust_stats._SELF_CHECK_REMAINING)  # pyright: ignore[reportPrivateUsage]
+            with capture_logs() as logs:
+                on = cpcv_pass_rate(returns, n_groups=8, n_test_groups=4, min_sharpe=huge)
+    finally:
+        sys.set_int_max_str_digits(limit_before)
+    assert struct.pack("<d", on) == struct.pack("<d", off)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_inexact"]
+    # The exact placeholder — the context is size-bounded, conversion-free
+    # (kills the _inexact_threshold_context f-string/except-arm mutants).
+    assert (
+        events[0]["min_sharpe"]
+        == f"<int past the int->str digit limit; bit_length={huge.bit_length()}>"
+    )
+    assert budgets_before == rust_stats._SELF_CHECK_REMAINING  # pyright: ignore[reportPrivateUsage]
+    assert kernel_disabled("cpcv") is False
+    assert not any(e["event"] == "rust_stats.engaged" for e in logs)
+
+
 # ── the FFI call site: burn-in + engagement ─────────────────────────────
 
 

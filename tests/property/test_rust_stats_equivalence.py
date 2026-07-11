@@ -25,9 +25,12 @@ must flow IEEE-identically), and the tiny ``n == n_groups`` boundary
 including non-float-representable ints past 2^53 (the refuter-round-1
 exactness-leak class) and ints past 2^1024 whose ``float()`` raises
 OverflowError (the refuter-round-2 crash class) — the seam's exact-type
-domain gate refuses both to the oracle. A second hypothesis test widens the
-threshold to the EXOTIC type corpus (bools, numpy scalars, an
-ordering-reversed float subclass, Decimals, NaN/inf) under the round-2
+domain gate refuses both to the oracle — and ±10^5000, past CPython's
+int→str digit limit as well (the refuter-round-3 refusal-context crash
+class: the pre-fix corpus capped at 401 digits). A second hypothesis test
+widens the threshold to the EXOTIC type corpus (bools, numpy scalars, an
+ordering-reversed float subclass, a hostile-metaclass-``__name__`` foreign
+object, >4300-digit ints, Decimals, NaN/inf) under the round-2
 invariant: ON≡OFF ALWAYS — a bit-equal value or an IDENTICAL exception
 type + message (the oracle serves both arms with the ORIGINAL object's own
 semantics). The strict-``>`` boundary at an ACHIEVED fold Sharpe is pinned
@@ -102,10 +105,14 @@ def _cases(draw: st.DrawFn) -> tuple[list[float], int, int, float]:
     # OverflowError — the seam's exact-type domain gate refuses BOTH to the
     # oracle (never a rounded FFI compare, never an ON-arm crash);
     # value-exact ints (0, ±1, 2^53) and bools stay kernel-served.
+    # ±10^5000 (refuter round 3): past sys.get_int_max_str_digits() too —
+    # the refusal's own warn-context repr must be digit-limit-safe (the
+    # pre-fix corpus capped at 401 digits and missed the crash).
     min_sharpe: float = draw(
         st.one_of(
             st.sampled_from([0.0, 0.5, -0.5]),
             st.sampled_from([0, 1, -1, 2**53, 2**53 + 3, -(2**53 + 3), 2**60 + 1, 10**400]),
+            st.sampled_from([10**5000, -(10**5000)]),
             st.integers(min_value=-(2**60), max_value=2**60),
             st.integers(min_value=2**1024, max_value=2**1200),
             st.integers(min_value=-(2**1200), max_value=-(2**1024)),
@@ -234,8 +241,27 @@ class _ReversedFloat(float):
         return float.__ge__(self, other)
 
 
+class _HostileNameMeta(type):
+    """Refuter-round-3 R3-2 attack class: a metaclass whose ``__name__`` is
+    a raising property — the foreign refusal's type-name fetch must bypass
+    the metaclass MRO (``_type_name``'s C-level getset), never dispatch it."""
+
+    @property
+    def __name__(cls) -> str:  # type: ignore[override]  # the deliberate hostile shape under test
+        raise RuntimeError("hostile metaclass __name__")
+
+
+class _HostileNameObject(metaclass=_HostileNameMeta):
+    """Foreign threshold under the hostile metaclass; its reflected
+    ``__lt__`` answers the oracle's compare on both arms identically."""
+
+    def __lt__(self, other: object) -> bool:
+        return True
+
+
 def _exotic_thresholds() -> st.SearchStrategy[object]:
-    """The refuter-round-2 exotic threshold corpus: everything a hostile or
+    """The refuter-round-2 exotic threshold corpus (round-3 widened):
+    everything a hostile or
     exotic caller could feed ``min_sharpe`` without tripping the type
     checker's numeric tower (plus outright junk-adjacent numerics)."""
     return st.one_of(
@@ -243,6 +269,11 @@ def _exotic_thresholds() -> st.SearchStrategy[object]:
         st.integers(),  # UNBOUNDED — rare astronomically-huge draws included
         st.integers(min_value=2**1024, max_value=2**1300),  # float() overflow
         st.integers(min_value=-(2**1300), max_value=-(2**1024)),
+        # Round 3: past the int→str digit limit too — the refusal's own
+        # warn-context repr must be total; and the hostile-metaclass
+        # foreign shape — the type-NAME fetch must be metaclass-safe.
+        st.sampled_from([10**5000, -(10**5000)]),
+        st.builds(_HostileNameObject),
         st.booleans(),
         st.sampled_from(
             [
