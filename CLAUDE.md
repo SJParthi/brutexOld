@@ -836,7 +836,10 @@ completeness hole is always visible; distinct
 actions + ERROR/WARNING logs make the loss LOUD. Fail-loud is chosen over blind
 pool-rebuild on the merits + the memory-budget-division interaction: the
 per-tuple rank budget divides across workers (`memory_budget_bytes` = `total ×
-fraction / workers`), so rebuilding into the next heavy tuple would just
+fraction / workers`) [CORRECTED by DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+(MIGRATION.md #1671): as originally wired the divisor was never passed
+(`workers` defaulted 1) — the claim was false until #1671 wired it; see that
+entry], so rebuilding into the next heavy tuple would just
 re-OOM. HONEST residual (named follow-up, NOT claimed): a deterministically-
 WEDGED non-OOM tuple still aborts via `SweepStallError` with a frozen
 checkpoint, so an identical resume re-dispatches IT — the stall path has no
