@@ -5,16 +5,23 @@
   coordinator-assigned).
 - **Umbrella mandate:** DEC-RUST-FIRST-MANDATE-001 — queued ledger entry
   #1713 (rides the in-flight kernel-track Slice-1 PR; NOT on `main` at this
-  branch head, so it is cited as queued, not asserted as merged).
+  branch head, so it is cited as queued, not asserted as merged — and the
+  same caveat extends to the mandate's CONTENT: every mandate-v2 rule
+  quoted in this doc is quoted from that in-flight PR and is not yet
+  verifiable in this repo at this head).
   This slice is **P12** of that roadmap, flagged there as
-  "low-value tail — expected payoff ≈ 0". The verdict below CONFIRMS the
-  roadmap's own expectation, with evidence.
-- **Assessment read against:** `origin/main` at
+  "low-value tail — expected payoff ≈ 0" (same quoted-from-the-in-flight-PR
+  sourcing). The verdict below CONFIRMS the roadmap's own expectation, with
+  evidence.
+- **Assessment read against:** the **assessment-basis commit**
   `adab6aa2acf0fa0e6b17d6c86dbf26c1ecc198e9` (the ADR-0012 futures-launch
-  merge). This doc lands on a branch based one commit later
-  (`a268bd4` — the Groww market-hours pull guard, which touches none of the
-  assessed surface); every `file:line` citation below was RE-VERIFIED at the
-  branch head.
+  merge — the `origin/main` head when the panel read the tree; main has
+  since advanced to `a268bd4`). This doc lands on a branch based one commit
+  later (`a268bd4` — the Groww market-hours pull-guard glue, which **DOES
+  touch three of the seven assessed areas**: `brutex/cli.py` (+72/−3), six
+  `brutex/dashboard/*.py` files, and `brutex/nightly/pipeline_binding.py`
+  (+20) — guard/glue wiring only, adding no CPU-bound work); every
+  `file:line` citation below was RE-VERIFIED at the branch head.
 - **Scope:** this slice = `brutex/dashboard/` (+ templates + static JS),
   `brutex/cli.py`, and the ops packages `brutex/backup/`, `brutex/nightly/`,
   `brutex/notifications/`, `brutex/observability/`, `brutex/config/`.
@@ -48,11 +55,14 @@ CPU-bound Python here; the only contested item (a `brutex/backup/` watchdog
 binary) was ruled KEEP on the merits (§ "Contested item" below).
 
 **Mandate compliance.** KEEP PYTHON here is mandate-COMPLIANT engineering
-judgment, not a skipped port. The Rust-first mandate v2's in-surface rule
-says additions inside an existing Python surface follow that surface's
-language until the surface is replaced, and its "organic replacement, no
-big-bang" clause is exactly what rules out a whole-surface rewrite with
-expected payoff ≈ 0. The verdict is backed by the measured evidence table
+judgment, not a skipped port — CONDITIONED on the mandate text's source:
+the rules below are **quoted from the in-flight mandate PR (queued ledger
+entry #1713) and are not yet verifiable in this repo at this head**. As
+quoted there, the Rust-first mandate v2's in-surface rule says additions
+inside an existing Python surface follow that surface's language until the
+surface is replaced, and its "organic replacement, no big-bang" clause is
+exactly what rules out a whole-surface rewrite with expected payoff ≈ 0.
+The verdict is backed by the measured evidence table
 below and by the M6-watcher-owns-the-failure-class ruling on the
 backup-binary steelman — the one convert argument that survived to the
 judge.
@@ -60,6 +70,13 @@ judge.
 ---
 
 ## Final per-area verdict table
+
+All LOC figures in this document are raw `wc -l` at the **`adab6aa2`
+assessment basis**; main has since advanced (at `a268bd4`: dashboard
+56,872 → 57,195 py · cli.py 9,571 → 9,640 · nightly 4,463 → 4,483 —
++412 LOC total across the three touched areas; the other four areas are
+unchanged). The basis label — not a silent cell refresh — is what keeps
+the table honest: the cells are the panel's read, dated.
 
 | Area | LOC | Verdict | Benefit of Rust | Effort | Risk | Rationale |
 |---|---|---|---|---|---|---|
@@ -85,9 +102,12 @@ concedes every slice other than backup/ ("weak, and I say so").
    (`test_verify_repeat_poll_flat_vs_manifest_size`,
    tests/bench/test_oneclick_o1.py:623-637). The ledger poll measured
    14.18 ms/poll @ 1k rows vs 17.58 ms/poll @ 10k → ratio 1.24× under the
-   `cache_tier_ceiling` discipline
-   (tests/bench/test_ledger_delta_o_page_o1.py:170-178). The largest
-   measured Python-side unit on the whole surface is that 6.89 ms compute,
+   `cache_tier_ceiling` discipline — the bench docstring's own
+   **"pre-page-cache"** pin
+   (tests/bench/test_ledger_delta_o_page_o1.py:170-178; the label at
+   :176), and that 17.58 ms is a **native DuckDB QUALIFY scan**, not
+   Python compute. The largest measured PYTHON-side unit on the whole
+   surface is the 6.89 ms compute (`load_manifest` + `reconcile_funnel`),
    paid once per artifact revision.
 2. **The dashboard reader's structural conclusion:** "no tight per-row
    Python loop over large data … not either delegated to polars/DuckDB or
@@ -338,10 +358,15 @@ occurs:
 - The effort/risk columns are the panel's judgement, not measured
   port-costs; they were not needed to decide, because the BENEFIT column is
   ~nil everywhere on the evidence.
-- The panel read `origin/main` at `adab6aa2…`; one commit landed on main
-  before this doc branched (`a268bd4`, pull-hours guard — outside the
-  assessed surface). All `file:line` cites were re-verified at the branch
-  head; drift after merge is governed by the repo's citation-accuracy
+- The panel read `origin/main` at the assessment-basis commit `adab6aa2…`
+  (the then-main head; main has since advanced); one commit landed on main
+  before this doc branched (`a268bd4`, market-hours pull-guard glue that
+  DOES touch `brutex/cli.py`, the dashboard pull path, and nightly's
+  `pipeline_binding` — three of the seven assessed areas — while adding no
+  CPU-bound work). All `file:line` cites were re-verified at the branch
+  head, and the LOC table carries its `adab6aa2` basis label with the
+  post-basis main drift noted there; drift after merge is governed by the
+  repo's citation-accuracy
   scanner only for its scanned normative set (this doc is NOT in that set —
   cites here are point-in-time and dated).
 - The audit hash-chain (`brutex/orchestrator/audit.py` +
