@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine import rust_enum
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
@@ -3341,3 +3342,140 @@ class TestLazyRunIdHardening:
         assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
         assert digest_peak < legacy_peak
         assert legacy_peak - digest_peak > digest.evaluated * 48
+
+
+# ────── DEC-SWEEP-ENUM-RUST-001 — the Rust enum+prune kernel seam ──────
+#
+# The flag-gated `enum_survivors_via_kernel` probe inside `run_persisted_sweep`
+# engages on the DIGEST path only (`bypass_dedup`); the legacy no-digest dedup
+# arm and the Apriori arm stay pure Python by contract, and every fallback
+# (`None`) runs the verbatim pre-existing loop. Byte-identity end-to-end is the
+# golden's job (tests/golden/test_engine_rust_enum_parity.py); these pin the
+# seam's dispatch decisions + counter equality at the unit level.
+
+
+class TestRustEnumSeam:
+    """Dispatch + parity pins for the DEC-SWEEP-ENUM-RUST-001 seam."""
+
+    _DIGEST = "abad1deaabad1dea"
+
+    @pytest.fixture(autouse=True)
+    def _fresh_rust_enum_state(self, monkeypatch: pytest.MonkeyPatch) -> Iterable[None]:
+        """Fresh warn-once memo / burn-in budget / flag per test."""
+        rust_enum.reset_observability_memo_for_tests()
+        rust_enum.reset_self_check_for_tests()
+        monkeypatch.delenv(rust_enum.SWEEP_RUST_ENUM_ENV, raising=False)
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        yield
+        rust_enum.reset_observability_memo_for_tests()
+        rust_enum.reset_self_check_for_tests()
+
+    def test_on_digest_tuple_equals_off_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ON+digest == OFF+digest: every summary counter, the store hash, the
+        parquet bytes AND the trial-stats sidecar bytes — with the anti-vacuous
+        proof that the kernel genuinely served the ON run."""
+        bars = _trending_bars()
+        # Bits {0,1,2,3,4} at k=2 carry the REAL (0,1) + (2,3) conflict pairs,
+        # so the prune genuinely fires (anti-vacuous conflict_pruned > 0).
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=self._DIGEST)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+        with capture_logs() as logs:
+            on = _run_sweep(tmp_path, "on", bars, cfg, digest=self._DIGEST)
+        assert [e for e in logs if e["event"] == "sweep_rust_enum.engaged"], (
+            "the ON run never engaged the kernel — a vacuous parity"
+        )
+        assert on.enumerated == off.enumerated == 10  # C(5, 2)
+        assert on.conflict_pruned == off.conflict_pruned == 2
+        assert on.skipped_dedup == off.skipped_dedup == 0
+        assert on.evaluated == off.evaluated == 8
+        assert on.persisted == off.persisted
+        assert on.ranked == off.ranked
+        assert on.backtested == off.backtested
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        on_sidecar = trial_stats_sidecar_path(tmp_path / "on.parquet")
+        off_sidecar = trial_stats_sidecar_path(tmp_path / "off.parquet")
+        assert on_sidecar.read_bytes() == off_sidecar.read_bytes()
+
+    def test_legacy_no_digest_never_probes_the_kernel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FM-14: the legacy dedup arm stays pure Python even flag-ON — the
+        kernel probe is structurally unreachable (`bypass_dedup` guard)."""
+        bars = _trending_bars()
+        cfg = _make_config()
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=None)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+
+        def _must_not_probe(bits: Sequence[int], k: int) -> NoReturn:
+            raise AssertionError("the legacy no-digest arm must never probe the kernel")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.enum_survivors_via_kernel", _must_not_probe)
+        on = _run_sweep(tmp_path, "on", bars, cfg, digest=None)
+        assert on.enumerated == off.enumerated
+        assert on.conflict_pruned == off.conflict_pruned
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+
+    def test_apriori_wins_over_the_enum_kernel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FM-10: with BOTH flags on the Apriori generator is the mask source
+        and the enum-kernel probe is never reached (its probe lives only in
+        the else arm)."""
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2)
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+
+        def _must_not_probe(bits: Sequence[int], k: int) -> NoReturn:
+            raise AssertionError("the Apriori arm must never probe the enum kernel")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.enum_survivors_via_kernel", _must_not_probe)
+        summary = _run_sweep(tmp_path, "ap", bars, cfg, digest=self._DIGEST)
+        # The Apriori arm ran (conflict-free candidates by construction).
+        assert summary.conflict_pruned == 0
+
+    def test_kernel_fallback_none_runs_the_python_loop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A kernel `None` (any ladder fallback) leaves the digest tuple on
+        the verbatim Python loop — probed exactly once, bytes unchanged."""
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=self._DIGEST)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+        calls: list[tuple[tuple[int, ...], int]] = []
+
+        def _always_none(bits: Sequence[int], k: int) -> None:
+            calls.append((tuple(bits), k))
+
+        monkeypatch.setattr("brutex.engine.sweep_run.enum_survivors_via_kernel", _always_none)
+        on = _run_sweep(tmp_path, "fb", bars, cfg, digest=self._DIGEST)
+        assert calls == [((0, 1, 2, 3, 4), 2)]
+        assert on.enumerated == off.enumerated
+        assert on.conflict_pruned == off.conflict_pruned
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "fb.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+
+    def test_u128_bits_through_the_kernel_seam(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bits ≥ 64 flow through the kernel-served seam byte-identically —
+        the u128 twin of TestU128EnvelopeThroughSweep for the enum segment."""
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 64, 65], k=1, min_hits=0)
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=self._DIGEST)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+        with capture_logs() as logs:
+            on = _run_sweep(tmp_path, "on", bars, cfg, digest=self._DIGEST)
+        assert [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+        assert on.enumerated == off.enumerated == 3
+        assert on.evaluated == off.evaluated == 3
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
