@@ -67,6 +67,139 @@ def _job() -> BackgroundPullJob:
     return BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
 
 
+class TestMarketHoursStartGate:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 — the vendor-pull START gate + is_pull_halt."""
+
+    def test_is_pull_halt_recognises_market_hours_halt(self) -> None:
+        from brutex.data.errors import MarketHoursHalt
+
+        assert pull_jobs.is_pull_halt(MarketHoursHalt()) is True
+
+    def test_market_hours_halt_fires_pull_halt_alert_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A MarketHoursHalt escaping to the job layer → error state + the alert."""
+        from brutex.data.errors import MarketHoursHalt
+
+        halts: list[BaseException] = []
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+        # Guard OPEN so the start gate does not pre-empt the worker.
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: False,
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            raise MarketHoursHalt()
+
+        assert job.start(work, total=1) is True
+        snap = job.snapshot()
+        assert snap.state == STATE_ERROR
+        assert "MarketHoursHalt" in snap.detail
+        assert len(halts) == 1
+        assert isinstance(halts[0], MarketHoursHalt)
+
+    def test_start_gate_refuses_pull_inside_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A JOB_KIND_PULL start with the guard active is DEFERRED — no spawn."""
+        spawned: list[object] = []
+        warns: list[str] = []
+        monkeypatch.setattr(pull_jobs._LOG, "warning", lambda event, **_kw: warns.append(event))
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=spawned.append,
+            market_hours_guard=lambda: True,
+        )
+
+        def work(_on_progress: ProgressHook) -> None:  # pragma: no cover — never runs
+            raise AssertionError("worker must not run inside the market-hours window")
+
+        assert job.start(work, total=1) is False
+        assert spawned == []  # nothing spawned
+        assert job.running is False
+        snap = job.snapshot()
+        assert "market-hours" in snap.detail.lower()
+        assert "pull.deferred.market_hours" in warns
+
+    def test_start_gate_exempts_non_pull_kind_inside_window(self) -> None:
+        """Greeks-backfill / sweep kinds make no vendor calls → NOT gated."""
+        from brutex.dashboard.pull_jobs import JOB_KIND_SWEEP
+
+        ran: list[bool] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: True,  # window is OPEN
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            ran.append(True)
+
+        assert job.start(work, total=1, job_kind=JOB_KIND_SWEEP) is True
+        assert ran == [True]  # the non-pull job ran despite the open window
+
+    def test_start_gate_allows_pull_outside_window(self) -> None:
+        """Guard inactive (outside window / disabled) → the pull proceeds normally."""
+        ran: list[bool] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: False,
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            ran.append(True)
+
+        assert job.start(work, total=1) is True
+        assert ran == [True]
+
+    def test_market_hours_exempt_greeks_backfill_allowed_in_window(self) -> None:
+        """A Greeks-backfill start (JOB_KIND_PULL + market_hours_exempt=True) makes ZERO
+        vendor calls, so it is ALLOWED even inside the market-hours window."""
+        ran: list[bool] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: True,  # window is OPEN
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            ran.append(True)
+
+        assert job.start(work, total=1, market_hours_exempt=True) is True
+        assert ran == [True]  # the vendor-free backfill ran despite the open window
+
+    def test_market_hours_exempt_dry_run_pull_allowed_in_window(self) -> None:
+        """A --dry-run pull (JOB_KIND_PULL + market_hours_exempt=True) hits no Groww API,
+        so it is ALLOWED inside the market-hours window."""
+        ran: list[bool] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: True,
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            ran.append(True)
+
+        # dry_run=True → market_hours_exempt=True at the call site.
+        assert job.start(work, total=1, market_hours_exempt=True) is True
+        assert ran == [True]
+
+    def test_non_exempt_pull_still_deferred_in_window(self) -> None:
+        """market_hours_exempt=False (a REAL vendor pull) is still deferred in-window."""
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: True,
+        )
+
+        def work(_on_progress: ProgressHook) -> None:  # pragma: no cover — never runs
+            raise AssertionError("a non-exempt vendor pull must not run in market hours")
+
+        assert job.start(work, total=1, market_hours_exempt=False) is False
+
+
 def test_successful_job_advances_then_finishes() -> None:
     job = _job()
 

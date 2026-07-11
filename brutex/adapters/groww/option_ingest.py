@@ -125,7 +125,12 @@ from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout, WriteDeadlineExceeded
+from brutex.data.errors import (
+    LakeWriteHalt,
+    MarketHoursHalt,
+    PartitionLockTimeout,
+    WriteDeadlineExceeded,
+)
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import fold_max_close_delta
@@ -224,6 +229,11 @@ _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
+    # DEC-GROWW-MARKET-HOURS-GUARD-001: the per-contract market-hours guard raised —
+    # the pull crossed into the NSE trading window and must halt to leave the shared
+    # Groww account free for TickVault's live feed. A PULL-WIDE stop: propagates past
+    # the per-contract quarantine so the whole pull halts gracefully.
+    MarketHoursHalt,
     MassEmptySettleHalt,
     GrowwAuthError,
     VendorDownError,
@@ -423,6 +433,7 @@ def ingest_option_contract(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     form_preference: SymbolFormPreference | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -463,7 +474,15 @@ def ingest_option_contract(
         On a TERMINAL (non-retryable) fetch error — re-raised so the
         :func:`run_groww_option_ingest` quarantine sees it (auth included; Groww
         has no fail-fast latch — the same divergence as the spot spine).
+    MarketHoursHalt
+        DEC-GROWW-MARKET-HOURS-GUARD-001 — consulted FIRST (before the clamp /
+        ledger-skip probe / any vendor call): a pull that crossed into the NSE
+        trading window ``[08:45, 15:35)`` IST halts on THIS contract. A
+        ``_GLOBAL_STOP_ERRORS`` member, so it propagates past the per-contract
+        quarantine and stops the whole pull gracefully.
     """
+    if market_closed is not None and market_closed():
+        raise MarketHoursHalt()
     exchange = contract_exchange(contract)
     now_for_clamp = (now_ist or _now_ist)()
     # The window key is derived in ONE shared place (CLAUDE.md §11 COMMON) so the key the
@@ -1900,6 +1919,7 @@ def run_groww_option_ingest(
     write_breaker: WriteHealthBreaker | None = None,
     form_preference: SymbolFormPreference | None = None,
     audit: AuditWriter | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -2041,6 +2061,14 @@ def run_groww_option_ingest(
     real-vendor production sites construct one via
     :func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`
     (the ``capture_hook_factory`` / ``detect_completeness_gaps`` gating pattern).
+
+    *market_closed* (DEC-GROWW-MARKET-HOURS-GUARD-001): a zero-arg ``() -> bool``
+    predicate threaded verbatim into every contract's fetch — ``True`` means the
+    pull crossed into the NSE market-hours window ``[08:45, 15:35)`` IST and the
+    contract raises :class:`~brutex.data.errors.MarketHoursHalt`, a
+    :data:`_GLOBAL_STOP_ERRORS` member that halts the pull gracefully. ``None`` (the
+    default — dry-run / synthetic / unit-test callers) never gates; only the real
+    production entrypoints bind the live guard.
 
     *audit* (DEC-INGEST-AUDIT-WIRING-001 — Golden Rule #8): the optional
     hash-chained :class:`~brutex.orchestrator.audit.AuditWriter` this driver
@@ -2193,6 +2221,7 @@ def run_groww_option_ingest(
                 storm_breaker=storm_breaker,
                 write_breaker=wbreaker,
                 form_preference=preference,
+                market_closed=market_closed,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
