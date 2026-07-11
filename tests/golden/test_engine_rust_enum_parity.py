@@ -1,27 +1,40 @@
-"""Byte-identical leaderboard parity: Rust enum kernel ON vs the Python loop OFF.
+"""Byte-identical parity + the design-mandated poison/order goldens — enum kernel.
 
-DEC-SWEEP-ENUM-RUST-001 (MIGRATION.md #1738) — THE merge gate. A real synthetic
-multi-day lake is swept through :func:`brutex.engine.sweep_run.run_persisted_sweep`
-twice for the SAME cell config — once with ``BRUTEX_SWEEP_RUST_ENUM`` unset (the
-verbatim Python enumerate+prune loop) and once set (the fused Rust kernel) — and
-the persisted leaderboard is asserted **byte-identical**: same
-``store_content_hash`` AND same ``.parquet`` bytes AND (on the digest path) the
-same trial-stats sidecar + completion-sentinel bytes. The proof rests on the
-kernel's order law (survivors in the exact ``itertools.combinations``
-lexicographic order) + the counter identity (``enumerated`` /
-``conflict_pruned`` embed verbatim in the sidecar + audit payloads).
+DEC-SWEEP-ENUM-RUST-001 (MIGRATION.md #1738) — THE merge gate, reworked to the
+design-of-record inventory (`DESIGN_FINAL_RUST_SWEEP_CORE.md` §5/§6 Slice 1):
 
-ANTI-VACUOUS: the ON+digest runs additionally assert the
-``sweep_rust_enum.engaged`` INFO genuinely fired (the kernel actually served
-the enumeration — never a trivially-passing both-ran-Python parity), the
-conflict prune genuinely bit (``conflict_pruned > 0`` at k >= 2), and the
-finalist set is non-empty at low k.
+* **Twin-run byte identity (the CI-lane arm of the §7.2 venue law):** a real
+  synthetic multi-day lake swept twice — flag OFF (the verbatim Python loop +
+  batch Stage-1B) and flag ON (the ranged fused kernel) — persisted
+  leaderboard, trial-stats sidecar and completion sentinel all byte-identical,
+  with the ``sweep_rust_enum.engaged`` anti-vacuous pin. The REAL-DATA twin is
+  the on-branch operator-box gate (`scripts/ci/rust_enum_twin_run.sh`).
+* **Emission-order golden (design Slice-1 item 1):** first + last 10k kept
+  masks + the blake3 of the FULL emission stream vs the Python oracle over the
+  production 60-bit vocabulary, plus the frozen stream literal — the
+  LEX-RANK-vs-colex trap's teeth.
+* **Inverted-teeth poison PAIR (§5 round-6 symmetrised):** a domain-VALID
+  poisoned kernel past the enum burn-in that silently DROPS one persisted-set
+  mask — or spuriously KEEPS one below-min-hits mask — with self-consistent
+  counts MOVES the tallies AND the store content hash (the finalist belt
+  structurally cannot catch a wrong kept SET; the twin-run gate can, and these
+  prove it has teeth in BOTH directions).
+* **COUNT-ONLY poison (residual (ix) teeth — §7.1):** a tallies-only
+  mis-bucketing poison (a min-hits drop re-bucketed as conflict-pruned, kept
+  set CORRECT) moves the trial-stats SIDECAR bytes while the store hash stays
+  pinned UNCHANGED — proving the ship-time twin-run SIDECAR compare is the
+  net for that class.
+* **F1 INDEX→TUPLE-DIGEST golden (§3):** the positional checkpoint ↔ tuple
+  digest map over a fixture grid is IDENTICAL on the OFF and ON arms (the
+  tuple-ORDER authority stays the untouched Python grid iteration — this pin
+  makes that invariant tested, not assumed).
+* The FM-7 flag-flip CRASH-REDO golden and the per-tuple kept-list equality
+  (failure localization below the sweep level).
 
-Also pinned here: the direct per-tuple survivor list equality (failure
-localization below the sweep level), the FM-7 flag-flip CRASH-REDO golden
-(complete OFF → sentinel deleted → redo ON with the same digest → every
-artifact rewrites byte-identically), and the legacy no-digest ON run (the
-kernel never engages — bytes match OFF with zero ``engaged`` events).
+The DIGEST-PATH GOLDEN VARIANT + engaged-event positive/negative pins + the
+LEGACY-REFUSAL + disabled-arm poison goldens live beside the frozen literals
+in ``tests/golden/test_engine_sweep_run_golden.py`` (the design mandates the
+variant lands in the SAME module that owns ``_GOLDEN_CONTENT_HASH``).
 """
 
 from __future__ import annotations
@@ -31,16 +44,17 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import fno_math
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
-from brutex.engine.combo_mask import count_combos, iter_masks_k_of_bits
+from brutex.engine.combo_mask import count_combos, count_supermasks, iter_masks_k_of_bits
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.rust_enum import (
     SWEEP_RUST_ENUM_ENV,
-    enum_survivors_via_kernel,
+    enum_prefilter_via_kernel,
+    reset_enum_self_check_for_tests,
     reset_observability_memo_for_tests,
-    reset_self_check_for_tests,
 )
 from brutex.engine.sweep_run import (
     ComboDedup,
@@ -64,12 +78,25 @@ _CONDITION_BITS = [0, 1, 2, 3, 4, 5, 6, 7]
 _MIN_HITS = 5
 _DIGEST = "abad1deaabad1dea"
 
+#: The REAL compiled class, captured before any poison monkeypatching.
+_REAL_U64 = fno_math.ResidentSweepEnum
+
+#: Fixture facts measured on the OFF arm (2026-07-11) and load-bearing for
+#: the poison goldens: at k=2 the fixture persists NINE finalists, the
+#: LOWEST-hits finalist is mask 36 (bits {2, 5}, 120 hits) and the
+#: highest-hits finalist is mask 5 (bits {0, 2}, 836 hits); the next
+#: finalist above 36 has 250 hits, so ``min_hits = 121`` drops EXACTLY
+#: mask 36 on a healthy run.
+_DROP_TARGET_MASK = 5
+_SPURIOUS_MASK = 36
+_SPURIOUS_MIN_HITS = 121
+
 
 @pytest.fixture(autouse=True)
 def _fresh_rust_enum_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fresh warn-once memo + burn-in budget + an UNSET flag per test."""
+    """Fresh warn-once memo + shadow windows + an UNSET flag per test."""
     reset_observability_memo_for_tests()
-    reset_self_check_for_tests()
+    reset_enum_self_check_for_tests()
     monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
     monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
 
@@ -101,7 +128,7 @@ def _bars() -> list[CandleBar]:
     return out
 
 
-def _config(k: int) -> SweepRunConfig:
+def _config(k: int, min_hits: int = _MIN_HITS) -> SweepRunConfig:
     return SweepRunConfig(
         instrument="NIFTY",
         tf="1m",
@@ -115,7 +142,7 @@ def _config(k: int) -> SweepRunConfig:
         tf_minutes=1,
         sl_paisa=80,
         tp_paisa=50,
-        min_hits=_MIN_HITS,
+        min_hits=min_hits,
     )
 
 
@@ -126,6 +153,7 @@ def _run(
     k: int,
     digest: str | None,
     *,
+    min_hits: int = _MIN_HITS,
     audit_tag: str | None = None,
 ) -> SweepRunSummary:
     store = ResultsStore(path=tmp_path / f"{tag}.parquet")
@@ -133,7 +161,7 @@ def _run(
     with AuditWriter.open(tmp_path / f"{audit_tag or tag}.jsonl") as audit:
         return run_persisted_sweep(
             bars,
-            _config(k),
+            _config(k, min_hits),
             store=store,
             dedup=dedup,
             audit=audit,
@@ -145,7 +173,8 @@ def _run(
 def test_leaderboard_byte_identical_on_vs_off_digest_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, k: int
 ) -> None:
-    """THE gate: ON+digest == OFF+digest, byte-for-byte, kernel PROVEN engaged."""
+    """THE gate: ON+digest == OFF+digest, byte-for-byte, kernel PROVEN engaged
+    — with the Stage-1B min-hits FUSED in-kernel on the ON arm."""
     pytest.importorskip("polars")  # flush needs the [data] extra
     bars = _bars()
 
@@ -154,7 +183,7 @@ def test_leaderboard_byte_identical_on_vs_off_digest_path(
     off_dir.mkdir()
     off = _run(off_dir, "cell", bars, k, _DIGEST)
 
-    reset_self_check_for_tests()
+    reset_enum_self_check_for_tests()
     reset_observability_memo_for_tests()
     monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
     on_dir = tmp_path / "on"
@@ -167,7 +196,7 @@ def test_leaderboard_byte_identical_on_vs_off_digest_path(
         "the ON run never engaged the kernel — a vacuous parity"
     )
 
-    # Byte-identical persisted leaderboard + sidecar.
+    # Byte-identical persisted leaderboard + sidecar + sentinel.
     assert on.store_content_hash == off.store_content_hash
     assert (on_dir / "cell.parquet").read_bytes() == (off_dir / "cell.parquet").read_bytes()
     on_sidecar = trial_stats_sidecar_path(on_dir / "cell.parquet")
@@ -177,18 +206,22 @@ def test_leaderboard_byte_identical_on_vs_off_digest_path(
     off_sentinel = completion_sentinel_path(off_dir / "cell.parquet")
     assert on_sentinel.read_bytes() == off_sentinel.read_bytes()
 
-    # Counter identity (the sidecar/audit-byte law).
+    # Counter identity (the sidecar/audit-byte law) — incl. the fused
+    # min-hits bucketing (evaluated / minhits_dropped).
     assert on.enumerated == off.enumerated == count_combos(k, len(set(_CONDITION_BITS)))
     assert on.conflict_pruned == off.conflict_pruned
     assert on.evaluated == off.evaluated
+    assert on.minhits_dropped == off.minhits_dropped
     assert on.persisted == off.persisted
     assert on.ranked == off.ranked
     assert on.backtested == off.backtested
 
-    # The prune genuinely fires from k=2 (bits carry three real pairs) and
-    # the low-k finalist pool is non-empty (meaningful parity).
+    # The prune genuinely fires from k=2 (bits carry three real pairs), the
+    # min-hits filter genuinely drops at k=2, and the low-k finalist pool is
+    # non-empty (meaningful parity).
     if k >= 2:
         assert on.conflict_pruned > 0
+        assert on.minhits_dropped > 0
     if k == 1:
         assert on.persisted > 0
 
@@ -196,9 +229,9 @@ def test_leaderboard_byte_identical_on_vs_off_digest_path(
 def test_legacy_no_digest_on_matches_off_and_never_engages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """FM-14: on the legacy no-digest path the flag-ON run is byte-identical
-    to OFF with ZERO ``engaged`` events — the kernel is structurally
-    unreachable there (`bypass_dedup` guard)."""
+    """On the legacy no-digest path the flag-ON run is byte-identical to OFF
+    with ZERO ``engaged`` events and one ``legacy_dedup_path`` warn — the
+    kernel refuses the legacy dedup arm by contract."""
     pytest.importorskip("polars")
     bars = _bars()
     k = 2
@@ -215,6 +248,8 @@ def test_legacy_no_digest_on_matches_off_and_never_engages(
         on = _run(on_dir, "cell", bars, k, None)
 
     assert [e for e in logs if e["event"] == "sweep_rust_enum.engaged"] == []
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert [w["reason"] for w in warns] == ["legacy_dedup_path"]
     assert on.store_content_hash == off.store_content_hash
     assert (on_dir / "cell.parquet").read_bytes() == (off_dir / "cell.parquet").read_bytes()
     assert on.enumerated == off.enumerated
@@ -247,7 +282,7 @@ def test_flag_flip_crash_redo_rewrites_byte_identically(
     # authoritative and re-runs the FULL population.
     sentinel_path.unlink()
 
-    reset_self_check_for_tests()
+    reset_enum_self_check_for_tests()
     reset_observability_memo_for_tests()
     monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
     with capture_logs() as logs:
@@ -267,14 +302,296 @@ def test_flag_flip_crash_redo_rewrites_byte_identically(
     assert sentinel_path.read_bytes() == sentinel_before
 
 
-@pytest.mark.parametrize("k", [1, 2, 3, 4])
-def test_per_tuple_survivor_list_equality(monkeypatch: pytest.MonkeyPatch, k: int) -> None:
-    """Failure localization below the sweep: the kernel's survivor list for
-    this cell's bits equals the filtered Python generator — SET ∧ ORDER."""
+# ────── inverted-teeth poison pair + count-only poison (design §5/§7.1) ──────
+
+
+class _PoisonBase:
+    """Wraps the REAL kernel and post-processes exactly one range."""
+
+    def __init__(self, bar_bits: list[int]) -> None:
+        self._real = _REAL_U64(bar_bits)
+        self.fired = False
+
+    def n_bars(self) -> int:
+        return self._real.n_bars()
+
+    def enumerate_prefilter(self, *args: object) -> tuple[int, int, int, bool, int, list[int]]:
+        raw = self._real.enumerate_prefilter(*args)
+        if not self.fired:
+            poisoned = self._poison(raw)
+            if poisoned is not None:
+                self.fired = True
+                return poisoned
+        return raw
+
+    def _poison(
+        self, raw: tuple[int, int, int, bool, int, list[int]]
+    ) -> tuple[int, int, int, bool, int, list[int]] | None:
+        raise NotImplementedError
+
+
+class _DropFinalist(_PoisonBase):
+    """Silently DROP the highest-hits finalist mask with self-consistent
+    counts (the drop re-bucketed as a conflict prune; the in-band hits count
+    adjusted per the short-circuit law) — the design's dropped-mask poison."""
+
+    def _poison(
+        self, raw: tuple[int, int, int, bool, int, list[int]]
+    ) -> tuple[int, int, int, bool, int, list[int]] | None:
+        enumerated, pruned, next_rank, exhausted, hits, kept = raw
+        if _DROP_TARGET_MASK not in kept:
+            return None
+        kept = [m for m in kept if m != _DROP_TARGET_MASK]
+        return (enumerated, pruned + 1, next_rank, exhausted, hits - 1, kept)
+
+
+class _SpuriousKeep(_PoisonBase):
+    """Wrongly ADMIT the below-min-hits mask 36 (a genuine gate-passing
+    strategy the healthy min_hits=121 arm drops) with self-consistent counts
+    — the round-6 spurious-keep mirror. The mask is conflict-free, so the
+    tallies need NO adjustment: only the seam-derived minhits_dropped moves."""
+
+    def _poison(
+        self, raw: tuple[int, int, int, bool, int, list[int]]
+    ) -> tuple[int, int, int, bool, int, list[int]] | None:
+        enumerated, pruned, next_rank, exhausted, hits, kept = raw
+        if _SPURIOUS_MASK in kept or 40 not in kept:
+            return None
+        kept = list(kept)
+        kept.insert(kept.index(40), _SPURIOUS_MASK)  # lex position: {2,5} before {3,5}
+        return (enumerated, pruned, next_rank, exhausted, hits, kept)
+
+
+class _CountOnlyMisbucket(_PoisonBase):
+    """Re-bucket ONE min-hits drop as a conflict prune — kept set CORRECT,
+    Σ enumerated CORRECT, hits law self-consistent: the residual-(ix)
+    tallies-only divergence."""
+
+    def _poison(
+        self, raw: tuple[int, int, int, bool, int, list[int]]
+    ) -> tuple[int, int, int, bool, int, list[int]] | None:
+        enumerated, pruned, next_rank, exhausted, hits, kept = raw
+        if len(kept) >= enumerated - pruned:  # need a genuine min-hits drop
+            return None
+        return (enumerated, pruned + 1, next_rank, exhausted, hits - 1, kept)
+
+
+def _poisoned_run(
+    tmp_path: Path,
+    tag: str,
+    poison_cls: type[_PoisonBase],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    min_hits: int = _MIN_HITS,
+) -> tuple[SweepRunSummary, _PoisonBase]:
+    """One flag-ON run past the enum burn-in with *poison_cls* installed."""
+    instances: list[_PoisonBase] = []
+
+    def _factory(bar_bits: list[int]) -> _PoisonBase:
+        inst = poison_cls(bar_bits)
+        instances.append(inst)
+        return inst
+
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _factory)
     monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
-    result = enum_survivors_via_kernel(_CONDITION_BITS, k)
-    oracle = [m for m in iter_masks_k_of_bits(_CONDITION_BITS, k) if not has_conflict(m)]
+    reset_observability_memo_for_tests()
+    # PAST the burn-in: the shadow window is closed (masks floor consumed) —
+    # the poison must escape the runtime nets and be caught only by the
+    # golden-level byte compare (that is exactly what these teeth prove).
+    reset_enum_self_check_for_tests(masks_remaining=0)
+    summary = _run(tmp_path, tag, _bars(), 2, _DIGEST, min_hits=min_hits)
+    assert instances, "the poisoned kernel class was never constructed"
+    return summary, instances[0]
+
+
+def test_inverted_teeth_dropped_mask_moves_tallies_and_content_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A domain-VALID silent DROP of a finalist mask past the enum burn-in
+    MOVES the tallies AND the store content hash — necessary because the
+    finalist belt structurally cannot catch a wrong kept SET; the ship-time
+    twin-run byte compare (this golden's shape) is the net with teeth."""
+    pytest.importorskip("polars")
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    off = _run(off_dir, "cell", _bars(), 2, _DIGEST)
+    on_dir = tmp_path / "on"
+    on_dir.mkdir()
+    poisoned, inst = _poisoned_run(on_dir, "cell", _DropFinalist, monkeypatch)
+    assert inst.fired
+    assert poisoned.store_content_hash != off.store_content_hash
+    assert poisoned.conflict_pruned == off.conflict_pruned + 1  # the tallies move
+    assert poisoned.evaluated == off.evaluated - 1
+    assert poisoned.persisted == off.persisted - 1
+
+
+def test_inverted_teeth_spurious_keep_moves_tallies_and_content_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The round-6 SYMMETRIC twin: a spuriously-KEPT below-min-hits mask (a
+    gate-passing strategy today's spine would never emit at this floor)
+    walks, persists, and MOVES the tallies AND the content hash — the
+    twin-run gate has teeth in BOTH directions of the kept-set class."""
+    pytest.importorskip("polars")
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    off = _run(off_dir, "cell", _bars(), 2, _DIGEST, min_hits=_SPURIOUS_MIN_HITS)
+    on_dir = tmp_path / "on"
+    on_dir.mkdir()
+    poisoned, inst = _poisoned_run(
+        on_dir, "cell", _SpuriousKeep, monkeypatch, min_hits=_SPURIOUS_MIN_HITS
+    )
+    assert inst.fired
+    assert poisoned.store_content_hash != off.store_content_hash
+    assert poisoned.minhits_dropped == off.minhits_dropped - 1  # the tallies move
+    assert poisoned.backtested == off.backtested + 1
+    assert poisoned.persisted == off.persisted + 1
+
+
+def test_count_only_poison_moves_the_sidecar_but_not_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Residual-(ix) teeth: a COUNT-ONLY mis-bucketing (one min-hits drop
+    incremented into conflict_pruned; kept set + Σ enumerated CORRECT) leaves
+    the store hash pinned UNCHANGED while the trial-stats SIDECAR bytes MOVE
+    — proving the ship-time twin-run SIDECAR compare catches exactly the
+    class the store-hash compare is blind to."""
+    pytest.importorskip("polars")
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    off = _run(off_dir, "cell", _bars(), 2, _DIGEST)
+    on_dir = tmp_path / "on"
+    on_dir.mkdir()
+    poisoned, inst = _poisoned_run(on_dir, "cell", _CountOnlyMisbucket, monkeypatch)
+    assert inst.fired
+    # Store bytes PINNED unchanged (the kept set is correct) …
+    assert poisoned.store_content_hash == off.store_content_hash
+    assert (on_dir / "cell.parquet").read_bytes() == (off_dir / "cell.parquet").read_bytes()
+    # … while the sidecar bytes MOVE (the mis-bucketed tallies persist there).
+    on_sidecar = trial_stats_sidecar_path(on_dir / "cell.parquet").read_bytes()
+    off_sidecar = trial_stats_sidecar_path(off_dir / "cell.parquet").read_bytes()
+    assert on_sidecar != off_sidecar
+    assert poisoned.conflict_pruned == off.conflict_pruned + 1
+    assert poisoned.minhits_dropped == off.minhits_dropped - 1
+
+
+# ────── emission-order golden (design Slice-1 item 1) ──────
+
+#: Frozen blake3 (hex) of the FULL kept-mask emission stream — production
+#: 60-bit vocabulary, k=3, min_hits=0, REAL conflict pairs, each mask encoded
+#: as 16 little-endian bytes. Minted from the PYTHON oracle 2026-07-11;
+#: re-lock ONLY on a deliberate vocabulary/conflict-table change.
+_EMISSION_STREAM_BLAKE3 = "54c107154ec79cd311c439611d031d717a32f0d96a273e31745a12201797c384"
+_EMISSION_KEPT_COUNT = 32_733
+
+
+def test_emission_order_golden_first_last_10k_and_full_stream_blake3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The design-mandated emission-order golden: first + last 10k kept masks
+    + the blake3 of the FULL emission stream vs the Python oracle, plus the
+    frozen stream literal — a colex/standard-CNS unranking (or ANY order or
+    set drift) breaks this golden instead of silently moving durable bytes."""
+    bits = list(range(60))
+    k = 3
+    oracle = [m for m in iter_masks_k_of_bits(bits, k) if not has_conflict(m)]
+    assert len(oracle) == _EMISSION_KEPT_COUNT
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
+    result = enum_prefilter_via_kernel(
+        bits,
+        k,
+        min_hits=0,
+        bar_bits=[],
+        count_hits=lambda masks: [0] * len(masks),
+        digest_path=True,
+    )
     assert result is not None
-    assert result.survivors == oracle
+    kept = result.kept
+    assert kept[:10_000] == oracle[:10_000]
+    assert kept[-10_000:] == oracle[-10_000:]
+    stream = b"".join(m.to_bytes(16, "little") for m in kept)
+    oracle_stream = b"".join(m.to_bytes(16, "little") for m in oracle)
+    assert fno_math.blake3_hash(stream).hex() == _EMISSION_STREAM_BLAKE3
+    assert fno_math.blake3_hash(oracle_stream).hex() == _EMISSION_STREAM_BLAKE3
+    # The set+order survivor golden vs the flat path (one plain ==).
+    assert kept == oracle
+
+
+# ────── F1 index→tuple-digest golden (design §3) ──────
+
+
+def test_f1_positional_checkpoint_tuple_digest_map_is_arm_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifier B F1: the durable checkpoint is POSITIONAL (a tuple index),
+    so the positional-index → tuple-digest map over a fixture grid must be
+    IDENTICAL on the OFF and ON arms — any enumeration/ordering drift breaks
+    this golden instead of silently prefix-skipping never-run tuples on
+    resume. (The tuple-ORDER authority stays the untouched Python grid
+    iteration; the enum kernel serves MASKS inside one tuple — this pin makes
+    the invariant tested, not assumed.)"""
+    from brutex.engine.sweep_orchestrator import (
+        SweepGridConfig,
+        Timeframe,
+        _tuple_digest,
+        iter_sweep_tuples,
+    )
+
+    def _digests() -> list[str]:
+        grid = SweepGridConfig(
+            instruments=["NIFTY", "BANKNIFTY"],
+            timeframes=[Timeframe("1minute", 1), Timeframe("5minute", 5)],
+            directions=[Side.BUY, Side.SELL],
+            k_values=[1, 2],
+            condition_bits=[0, 1, 2, 3, 4],
+            stop_losses=[80],
+            take_profits=[50],
+            proximities=[None],
+            mode="A",
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="deadbeef",
+        )
+        return [_tuple_digest(t, grid) for t in iter_sweep_tuples(grid)]
+
+    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
+    off_map = _digests()
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
+    on_map = _digests()
+    assert off_map == on_map
+    assert len(off_map) == 16  # 2 instruments × 2 TFs × 2 directions × 2 k
+    assert len(set(off_map)) == 16  # digests are distinct (no collisions)
+
+
+# ────── per-tuple kept-list equality (failure localization) ──────
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 4])
+@pytest.mark.parametrize("min_hits", [0, 5])
+def test_per_tuple_kept_list_equality(
+    monkeypatch: pytest.MonkeyPatch, k: int, min_hits: int
+) -> None:
+    """Failure localization below the sweep: the kernel's kept list for this
+    cell's bits equals today's spine (conflict prune + batch Stage-1B) —
+    SET ∧ ORDER — on both min-hits arms."""
+    bar_bits = [0b10101010, 0b01010101, 0b11111111, 0b00000001] * 8
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
+    result = enum_prefilter_via_kernel(
+        _CONDITION_BITS,
+        k,
+        min_hits=min_hits,
+        bar_bits=bar_bits,
+        count_hits=lambda masks: count_supermasks(bar_bits, masks),
+        digest_path=True,
+    )
+    assert result is not None
+    survivors = [m for m in iter_masks_k_of_bits(_CONDITION_BITS, k) if not has_conflict(m)]
+    if min_hits > 0 and survivors:
+        hits = count_supermasks(bar_bits, survivors)
+        oracle = [m for m, h in zip(survivors, hits, strict=True) if h >= min_hits]
+    else:
+        oracle = survivors
+    assert result.kept == oracle
     assert result.enumerated == count_combos(k, len(set(_CONDITION_BITS)))
-    assert result.conflict_pruned == result.enumerated - len(oracle)
+    assert result.conflict_pruned == result.enumerated - len(survivors)
+    assert result.evaluated == len(survivors)
