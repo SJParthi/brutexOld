@@ -21,9 +21,9 @@
 _Last updated: 2026-07-11 (QUAD MAX-CLUB merge vehicle, branch
 `claude/quad-dashboard-lakeinv-universe-docs` — the file-disjoint fold of FOUR PRs as ONE
 merge event off main tip 3f32b3ef: #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002
-#1699 + DEC-DASHBOARD-READ-SCREEN-001 #1724 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1717 +
-DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1718) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1740 ·
-#1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1725 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001 #1726.
+#1699 + DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
+DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1762 ·
+#1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1763 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001 #1764.
 The three colliding ledger rows were renumbered off main's taken #1712/#1715 (DEC-IDs are the
 stable handles per DEC-LEDGER-RENUMBER-001). READ-side dashboard / lake-heal SPACE / docs only —
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. This header carries pointers, never round narration;
@@ -2278,13 +2278,13 @@ hostile-review pass._
 - **Active branch:** `claude/quad-dashboard-lakeinv-universe-docs` (**QUAD MAX-CLUB merge
   vehicle** — the file-disjoint fold of FOUR PRs as ONE merge event, assembled off main tip
   3f32b3ef: **#1440** dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 +
-  DEC-DASHBOARD-READ-SCREEN-001 #1724 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1717 +
-  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1718) · **#1450** DEC-LAKE-INVARIANTS-PREINDEX-001 #1740
+  DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · **#1450** DEC-LAKE-INVARIANTS-PREINDEX-001 #1762
   (stream the L3 lake-invariants scan + boot content token O(series)/O(dir), and stop
   full-rescanning every boot on an unstamped sweep) · **#1288** DEC-DASHBOARD-READPATH-WEDGE-001
-  #1725 (the `universe.html` guarded-poll CLIENT belt — seven pollers routed through ONE
+  #1763 (the `universe.html` guarded-poll CLIENT belt — seven pollers routed through ONE
   `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard) · **#1441** docs
-  club DEC-EAP-FEEDBACK-INDEX-001 #1726 (+ the Zerodha 10y feasibility record + the market
+  club DEC-EAP-FEEDBACK-INDEX-001 #1764 (+ the Zerodha 10y feasibility record + the market
   one-pager, docs-only). File-disjoint by construction (only `docs/MIGRATION.md` + this
   `CLAUDE.md` are union files); the three colliding ledger rows were renumbered off main's
   taken #1712/#1715 (DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001). READ-side
@@ -5714,10 +5714,10 @@ hostile-review pass._
 - **Active feature branch:** `claude/quad-dashboard-lakeinv-universe-docs`
   (QUAD MAX-CLUB merge vehicle — the file-disjoint fold of FOUR PRs as ONE merge:
   #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 ·
-  DEC-DASHBOARD-READ-SCREEN-001 #1724 · DEC-DB-TZ-MONEYNESS-FIXES-001 #1717 ·
-  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1718) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1740 ·
-  #1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1725 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001
-  #1726; READ-side dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED —
+  DEC-DASHBOARD-READ-SCREEN-001 #1759 · DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 ·
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1762 ·
+  #1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1763 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001
+  #1764; READ-side dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
   Earlier: `integration/t1-sweep-core`
   (T1 SWEEP-CORE integration train — folds #1330 DEC-SWEEP-UNKILLABLE-CORE-001 (#1712) +
