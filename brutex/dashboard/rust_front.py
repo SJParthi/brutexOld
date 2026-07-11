@@ -83,19 +83,16 @@ class ProcessHandle(Protocol):
 
     def poll(self) -> int | None:
         """Return the exit code if the process has exited, else ``None``."""
-        ...  # pragma: no cover — Protocol stub
 
     def terminate(self) -> None:
         """Send SIGTERM."""
-        ...  # pragma: no cover — Protocol stub
 
     def kill(self) -> None:
         """Send SIGKILL."""
-        ...  # pragma: no cover — Protocol stub
 
     def wait(self, timeout: float | None = None) -> int:
         """Wait for exit, raising ``subprocess.TimeoutExpired`` on timeout."""
-        ...  # pragma: no cover — Protocol stub
+        raise NotImplementedError  # pragma: no cover — Protocol stub
 
 
 def resolve_rust_front(env: Mapping[str, str] | None = None) -> bool:
