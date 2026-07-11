@@ -31,8 +31,10 @@ autorevert latch (mismatch or batch fault ships the ORACLE values;
 MemoryError re-raises raw), chunk cap 65,536. OFF (default) arm byte- AND
 log-identical (bomb-spy + zero-event + OFF-cost-bench teeth); ON arm's ONLY
 deltas on a COMPLETING pass are three fault/engagement-scoped events (a
-mid-target crash on an out-of-band-corrupt row additionally reorders the
-log STREAM — disclosed in #1724, zero stored/status/counter delta); the
+mid-target crash on an out-of-band-corrupt row makes ON's log stream a
+content SUPERSET of OFF's — later rows' pass-1 events OFF never reaches,
+then the identical raise; disclosed in #1724, zero stored/status/counter
+delta); the
 EXISTING enrich golden
 reproduces byte-identically with the flag ON (fixture untouched,
 engaged-INFO anti-vacuous pin). HONEST: both arms O(rows) — ON/OFF wall
@@ -2231,7 +2233,8 @@ hostile-review pass._
   env (zero `_GreeksWorkerContext` change). **Sanctioned ON-arm log deltas — exactly three on a
   COMPLETING pass:** `rust_batch_engaged` (INFO once/process) · `rust_batch_autoreverted` (ERROR,
   fault only) · `rust_batch_flag_unrecognised` (WARNING once/process) — plus the ONE disclosed
-  crash-path log-STREAM reorder (#1724, refuter-2B F1); OFF arm ZERO delta (bomb-spy + zero-event
+  crash-path delta: ON's stream is a content SUPERSET of OFF's before the identical raise
+  (#1724, refuter-2B F1); OFF arm ZERO delta (bomb-spy + zero-event
   + OFF-cost-bench teeth). EVIDENCE: extended 12e gate 261 passed — `greeks_enrich.py` (598/148) +
   `spot_join.py` 100.00%; 12d 55 passed — `options/greeks.py` (71/16) 100.00%; cargo test default
   (lib 109 + greeks_batch.rs 2) AND `--features python,serde` (lib 176) green; fmt + clippy
@@ -2247,7 +2250,10 @@ hostile-review pass._
   judge's honest position); ships INERT — a default flip needs its own DEC/ADR with real-lake soak
   + zero autoreverts + mutation-green; the Vec-alloc abort residual is the same disclosed envelope
   as every existing FFI path; GREEKS_FORMULA_VERSION stays 2, enrich goldens frozen.
-  HOSTILE-REVIEW ROUND 1 folded (4/4 SHIP; 2 MINOR + 5 NIT, all fixed same-branch pre-PR): the
+  HOSTILE-REVIEW ROUND 1 folded (4/4 SHIP; 2 MINOR + 9 NIT raised across the four reviews →
+  2 MINOR + 6 NIT fixed same-branch pre-PR; the remaining 3 NITs are named no-action
+  residuals — R2's Rust-side length-cap trust documented in batch.rs, R3's chunk-straddle-
+  via-monkeypatch equivalence + provisional-number process note accepted with reasons): the
   batch.rs unit oracle reads the scalar `GreeksOut` FIELDS directly (the values_of
   field-permutation mutant now dies at the UNIT layer — mutant re-applied + verified killed);
   `greeks/batch.rs` added to `.cargo/mutants.toml`'s documented out-of-scope disclosure block
