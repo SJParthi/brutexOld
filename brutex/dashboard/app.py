@@ -1696,6 +1696,22 @@ def build_app(
     # not share the 256-cap counts instance nor evict its tiny entries); both
     # stay outside the candle int-total cache's key namespace above.
     _window_counts_cache, _window_page_cache = make_window_payload_caches()
+    # The pre-open EXPORT rows cache (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md
+    # #1719): a repeat `.xlsx`/`.zip` export click previously RE-RAN the entire
+    # report build — measured 206 DuckDB per-symbol aggregates binding 616 files
+    # + a 1,442-scandir dataset walk per click (326–574 ms at 103 symbols,
+    # +22 MB RSS cold; identical statement counts on the REPEAT click — zero
+    # caching). The built `PreOpenRow` list is invariant within one write
+    # generation for one (basis, [from, to], symbols filter) coordinate, so it
+    # is memoised here behind `_summary_cache.generation` (a pull — or a
+    # cross-process CLI pull via the revision probe — bumps it → rebuild; the
+    # SAME invalidation signal every discovery cache above rides). SMALL
+    # dedicated instance (a row list holds symbols × days entries, so it must
+    # not share — nor churn-evict — the 256-cap generic caches; the
+    # WINDOW_PAGE_CACHE precedent). The workbook/zip SERIALISATION stays
+    # per-click (CPU-bound over the cached rows, mode/min_pct-dependent).
+    # Single-flight: two concurrent export clicks pay ONE build.
+    _preopen_rows_cache = MoversSnapshotCache(capacity=8)
     # The FOUR discovery-walk memos below additionally opt into the PULL-TIME
     # adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the ported #920
     # pattern): during a pull the write generation bumps on EVERY window tick,
@@ -6535,17 +6551,24 @@ def build_app(
         lake_root = getattr(store, "path", None)
 
         def _build_rows(lake: Path) -> list[Any]:
-            """Build the pre-open report rows off the event loop (threadpool worker)."""
-            # Offloaded: the dataset discovery (filesystem walk) + the per-symbol
-            # DuckDB aggregate run on a threadpool worker, building store.connection
+            """Serve the memoised report rows off the event loop (threadpool worker)."""
+            # DEC-DB-LATENCY-HARDENING-001: rows memoised per (basis, range,
+            # symbols filter) at the write generation — a repeat click within one
+            # generation is an O(1) handoff (ZERO dataset walks, ZERO DuckDB
+            # statements, spy-pinned); the cold build (discovery walk + per-symbol
+            # aggregates) runs on this threadpool worker, building store.connection
             # here so the store RLock stays on this thread (DEC-DASHBOARD-FASTREAD-001).
-            return build_preopen_rows(
-                store.connection,
-                lake,
-                datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
-                start=start_d,
-                end=end_d,
-                basis=report_basis,
+            return _preopen_rows_cache.get_or_compute(
+                _preopen_rows_key(report_basis, start_d, end_d, wanted),
+                generation=_summary_cache.generation,
+                compute=lambda: build_preopen_rows(
+                    store.connection,
+                    lake,
+                    datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
+                    start=start_d,
+                    end=end_d,
+                    basis=report_basis,
+                ),
             )
 
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
@@ -6614,14 +6637,23 @@ def build_app(
         lake_root = getattr(store, "path", None)
 
         def _build_rows(lake: Path) -> list[Any]:
-            """Build the pre-open report rows off the event loop (threadpool worker)."""
-            return build_preopen_rows(
-                store.connection,
-                lake,
-                datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
-                start=start_d,
-                end=end_d,
-                basis=report_basis,
+            """Serve the memoised report rows off the event loop (threadpool worker).
+
+            DEC-DB-LATENCY-HARDENING-001: the SAME memo coordinate as the
+            ``.xlsx`` route — mode/min_pct shape only the RENDER below, so both
+            exports share ONE cached row build per (basis, range, symbols).
+            """
+            return _preopen_rows_cache.get_or_compute(
+                _preopen_rows_key(report_basis, start_d, end_d, wanted),
+                generation=_summary_cache.generation,
+                compute=lambda: build_preopen_rows(
+                    store.connection,
+                    lake,
+                    datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
+                    start=start_d,
+                    end=end_d,
+                    basis=report_basis,
+                ),
             )
 
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
@@ -9020,6 +9052,22 @@ def _load_results_template() -> str:
 def _render_results_html() -> str:
     """Return the brute-force sweep leaderboard page HTML (DEC-DASHBOARD-RESULTS-PAGE-001)."""
     return _load_results_template()
+
+
+def _preopen_rows_key(basis: str, start: date, end: date, wanted: Sequence[str] | None) -> str:
+    """The pre-open export rows-memo key — pure, deterministic, collision-safe.
+
+    DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md #1719): one memo coordinate per
+    ``(basis, inclusive [from, to] range, symbols filter)`` — the exact inputs
+    that shape the built ``PreOpenRow`` list (the ``.zip`` route's mode/min_pct
+    shape only the RENDER, so both export routes share one coordinate). The
+    filter segment rides one tuple ``repr`` (the window-page precedent —
+    unambiguous, a client-supplied comma-joined symbols string can never forge
+    a key collision through a bare separator); ``None`` (no filter) keys as
+    ``None``, distinct from any explicit tuple.
+    """
+    filter_token = None if wanted is None else tuple(wanted)
+    return f"preopen-rows|{basis}|{start.isoformat()}|{end.isoformat()}|{filter_token!r}"
 
 
 def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, date]:

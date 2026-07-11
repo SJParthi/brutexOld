@@ -1298,6 +1298,7 @@ def _execute_parquet_resilient(
     skip_event: str = "db.parquet_skip",
     unreadable_event: str = "db.parquet_unreadable",
     skip_sink: list[bool] | None = None,
+    files: Sequence[str] | None = None,
 ) -> list[tuple[Any, ...]]:
     """Execute *sql* over the ``directory`` Parquet glob, **resilient to an unreadable file**.
 
@@ -1333,6 +1334,18 @@ def _execute_parquet_resilient(
     (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix; Golden Rule #1 — never a fabricated number).
     The fast (no-error) path never touches *skip_sink*.
 
+    *files* (optional, DEC-DB-LATENCY-HARDENING-001): an explicit BOUNDED candidate
+    file list (POSIX paths under *directory*) bound to the source ``?`` instead of
+    the whole ``/**/*.parquet`` glob — the caller has proven (byte-parity pinned per
+    caller) that only these files can hold rows the query can match, so DuckDB opens
+    O(candidates) Parquet footers per statement instead of O(all stored months).
+    ``None`` (the default) keeps the whole-glob read byte-identical; an EMPTY list
+    short-circuits to ``[]`` with ZERO queries (no candidate file ⇒ no matchable
+    row). The degraded corrupt-skip path probes ONLY the bounded candidates (a
+    corrupt file OUTSIDE them provably cannot hold a matchable row, so it neither
+    trips the probe nor the *skip_sink* adjacency guard — a strictly-narrower
+    degrade blast radius, named in MIGRATION.md #1719).
+
     The skip set is the COMMON :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`
     (``duckdb.Error`` covers a corrupt ``read_parquet``; ``OSError`` covers a file-level
     fault). ``duckdb.Error`` is deliberately BROAD (DuckDB exposes no version-stable
@@ -1343,9 +1356,13 @@ def _execute_parquet_resilient(
     ONLY when a read actually fails; the happy path stays a single query (Golden Rule #5
     O(1) steady-state).
     """
-    glob = directory.as_posix() + "/**/*.parquet"
+    if files is not None and not files:
+        # A bounded read with ZERO candidate files: no matchable row can exist —
+        # the whole-glob read would return the same [] after opening every footer.
+        return []
+    source_bind: Any = list(files) if files is not None else directory.as_posix() + "/**/*.parquet"
     try:
-        return list(conn.execute(sql, [glob, *extra_params]).fetchall())
+        return list(conn.execute(sql, [source_bind, *extra_params]).fetchall())
     except movers_read_skip_errors() as whole_glob_error:
         readable, omitted = _readable_parquet_subset(
             conn,
@@ -1354,6 +1371,7 @@ def _execute_parquet_resilient(
             source=source,
             skip_event=skip_event,
             unreadable_event=unreadable_event,
+            candidates=files,
         )
         if omitted and skip_sink is not None:
             skip_sink.append(True)
@@ -1370,6 +1388,7 @@ def _readable_parquet_subset(
     source: str,
     skip_event: str,
     unreadable_event: str,
+    candidates: Sequence[str] | None = None,
 ) -> tuple[list[str], bool]:
     """Probe each ``*.parquet`` under *directory*; return ``(readable_subset, any_omitted)``.
 
@@ -1389,12 +1408,22 @@ def _readable_parquet_subset(
     true predecessor day's bar may have lived in the dropped file), so they must emit a
     BLANK %-change rather than bridge to a non-adjacent earlier day — never a fabricated
     number (Golden Rule #1).
+
+    *candidates* (DEC-DB-LATENCY-HARDENING-001): the BOUNDED file list of a
+    file-bounded read (see :func:`_execute_parquet_resilient`'s *files*) — only
+    those are probed, since a file outside them was never part of the failed
+    read and provably cannot hold a matchable row. ``None`` = the historical
+    whole-``directory`` rglob probe, byte-identical.
     """
     skip_errors = movers_read_skip_errors()
     readable: list[str] = []
     omitted = False
-    for path in sorted(directory.rglob("*.parquet")):
-        candidate = path.as_posix()
+    probe_paths = (
+        list(candidates)
+        if candidates is not None
+        else [path.as_posix() for path in sorted(directory.rglob("*.parquet"))]
+    )
+    for candidate in probe_paths:
         try:
             conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
         except skip_errors as skip_reason:
@@ -3884,8 +3913,45 @@ def _daily_close_by_date(
     return {_bar_ist_date(ts): _to_decimal(close) for ts, close in rows}
 
 
+def _existing_month_files_in_span(base: Path, start: date, end: date) -> list[str]:
+    """The EXISTING ``<base>/<yyyy>/<mm>.parquet`` files that can hold a bar whose
+    IST date falls in the INCLUSIVE ``[start, end]`` span — pure enumeration.
+
+    DEC-DB-LATENCY-HARDENING-001: the file-list bound for the span-scoped readers.
+    The candidate months follow the ±1-calendar-day pad law of
+    ``spot_daily_resample.ist_span_partition_months`` (a bar's UTC partition month
+    can differ from its IST date's month by at most the 05:30 offset — the pad can
+    only ever ADD the immediately-adjacent month, never drop a matchable file),
+    saturating at the ``date`` domain edges so a degenerate 0001/9999 span simply
+    keeps everything (never an ``OverflowError``). Enumerated from the EXISTING
+    tree (ONE rglob — the same listing cost the readers' own ``any(...)`` presence
+    guard already pays), each rel parsed by the SAME ASCII month grammar the stats
+    manifest pins (:func:`~brutex.data.lake_stats_manifest.parse_rel_month`,
+    ``KIND_BARS``); a NON-grammar file (a stray out-of-band parquet whose month is
+    unknowable) is conservatively KEPT so the bounded read can never exclude a file
+    the whole-glob read would have seen (byte-parity, Golden Rule #1). O(existing
+    files) listing per call — this bounds the DuckDB FOOTER OPENS per statement to
+    O(span months), NOT the directory listing (stated, never O(1)).
+    """
+    lo = (start - timedelta(days=1)) if start > date.min else start
+    hi = (end + timedelta(days=1)) if end < date.max else end
+    lo_key, hi_key = (lo.year, lo.month), (hi.year, hi.month)
+    keep: list[str] = []
+    for path in sorted(base.rglob("*.parquet")):
+        parsed = parse_rel_month(KIND_BARS, f"{path.parent.name}/{path.name}")
+        if parsed is None or lo_key <= parsed <= hi_key:
+            keep.append(path.as_posix())
+    return keep
+
+
 def _daily_open_by_date(
-    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    span: tuple[date, date] | None = None,
 ) -> dict[date, Decimal]:
     """Read the symbol's 1-DAY official open per IST date → ``{ist_date: open}``.
 
@@ -3894,6 +3960,15 @@ def _daily_open_by_date(
     the pre-open report (DEC-PREOPEN-REPORT-1DAY-001), on the SAME 1-day basis as
     the report's previous close so the two never mix price scales. Reads the
     1-day partition keyed by :func:`_bar_ist_date`; ``{}`` when absent.
+
+    *span* (DEC-DB-LATENCY-HARDENING-001): the report's own INCLUSIVE
+    ``[start, end]`` IST date range. When given, the read binds ONLY the
+    existing month files that can hold an in-span bar
+    (:func:`_existing_month_files_in_span` — O(span months) DuckDB footer opens
+    per click instead of O(all stored months)); the consumer
+    (``build_preopen_rows``) uses ONLY in-span days of this map, so the bounded
+    map is byte-identical for every consumed key (parity-pinned). ``None`` (the
+    default) keeps the whole-partition read byte-identical.
     """
     _validate_candle_coords(exchange, segment, symbol, _DAILY_INTERVAL)
     base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
@@ -3907,12 +3982,19 @@ def _daily_open_by_date(
         'SELECT "timestamp", open FROM read_parquet(?, union_by_name=true)',
         [],
         source=f"candle-dayopen:{exchange}/{segment}/{symbol}",
+        files=None if span is None else _existing_month_files_in_span(base, span[0], span[1]),
     )
     return {_bar_ist_date(ts): _to_decimal(open_) for ts, open_ in rows}
 
 
 def _intraday_open_by_date(
-    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    span: tuple[date, date] | None = None,
 ) -> dict[date, Decimal]:
     """Read the symbol's 09:15 IST session-open 1-minute OPEN per day → ``{ist_date: open}``.
 
@@ -3930,6 +4012,13 @@ def _intraday_open_by_date(
     session ``TimeZone`` and would roll a session bar back one calendar day on a
     negative-offset host — DEC-SPOT-SESSION-DAYS-IST-TZ-001), matching
     :func:`_bar_ist_date`. ``{}`` when the symbol has no 1-minute partition.
+
+    *span* (DEC-DB-LATENCY-HARDENING-001): the report's own INCLUSIVE
+    ``[start, end]`` IST date range — the exact bound-law + parity contract of
+    :func:`_daily_open_by_date` (the profiling evidence measured the minute
+    basis binding EVERY 1-minute month file of EVERY symbol — 616 files per
+    export click at 103 symbols — where a 3-week report needs ~1–2 per symbol).
+    ``None`` (the default) keeps the whole-partition read byte-identical.
     """
     _validate_candle_coords(exchange, segment, symbol, _INTRADAY_BASE_INTERVAL)
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
@@ -3946,6 +4035,7 @@ def _intraday_open_by_date(
         "FROM read_parquet(?, union_by_name=true) GROUP BY d",
         [],
         source=f"candle-dayopen-min:{exchange}/{segment}/{symbol}",
+        files=None if span is None else _existing_month_files_in_span(base, span[0], span[1]),
     )
     return {day: _to_decimal(first_open) for day, first_open in rows}
 

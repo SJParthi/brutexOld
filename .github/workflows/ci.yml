@@ -2051,10 +2051,13 @@ jobs:
           # the fast-equals-legacy parity, the legacy-shape/NULL-cell/
           # torn-read/conn-None degrade arms, the wledger-* memo families)
           # is covered by
-          # tests/unit/test_dashboard_db_view_window_ledger_page.py, which
-          # MUST also join this gate.
+          # tests/unit/test_dashboard_db_view_window_ledger_page.py, and the
+          # span-bounded IEP reads (_existing_month_files_in_span + the
+          # _execute_parquet_resilient `files` arm + the span kwargs) by
+          # tests/unit/test_dashboard_db_span_bounded_reads.py — BOTH MUST
+          # join this gate.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_view_window_ledger_page.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_view_window_ledger_page.py tests/unit/test_dashboard_db_span_bounded_reads.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
