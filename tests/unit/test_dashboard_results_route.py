@@ -436,3 +436,83 @@ class TestLeaderboardCascadeJoin:
         # The ?preset=composite axis is now honestly ACTIVE.
         preset = client.get("/api/v1/sweep/leaderboard?preset=composite").json()
         assert preset["preset_inert_axes"] == ["max_consecutive_losses"]
+
+    def test_aggs_landing_after_a_poll_surfaces_without_a_sweeps_write(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """Fix round 1 (refuter-confirmed MAJOR killing regression): the depth
+        pass writes the aggs sidecars AFTER the sweep's last store flush /
+        audit append, into the ``sweep_runs/`` sibling tree that
+        ``sweep_results_revision`` never stats — so a poll landing mid-pass
+        cached an EMPTY composite index that the aggs writes could never
+        invalidate (the pre-fix "can never hide behind a stale index" comment
+        was false; the stale index persisted until the NEXT sweep). The
+        dedicated ``composite_index_revision`` token must surface the aggs on
+        the very next poll with NO sweeps-tree write, NO audit append and NO
+        ``mark_dirty`` following them (``cmd_sweep_all``'s real ordering).
+        """
+        import polars as pl
+
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        run_dir = lake_root / "sweep_runs" / ("grid" + "0" * 60)
+        run_dir.mkdir(parents=True)
+        # Prime every cache MID-depth-pass: the run dir exists, no aggs yet.
+        first = client.get("/api/v1/sweep/leaderboard").json()
+        assert first["composite_join"]["state"] == "joined"
+        assert first["composite_join"]["scored_rows"] == 0
+        assert "composite_score" not in first["rows"][0]
+        # The depth pass then lands the aggs — nothing else moves.
+        depth = run_dir / "results-depth" / "NIFTY" / "5m"
+        depth.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "run_id": [f"{1:064x}"],
+                "composite_score": pl.Series([1.75], dtype=pl.Float64),
+            }
+        ).write_parquet(depth / "bull_k1_aaaaaaaaaaaaaaaa.aggs.parquet")
+        second = client.get("/api/v1/sweep/leaderboard").json()
+        assert second["composite_join"]["scored_rows"] == 1
+        assert second["rows"][0]["composite_score"] == 1.75
+        # The activation reaches the preset axis too — still no sweeps write.
+        preset = client.get("/api/v1/sweep/leaderboard?preset=composite").json()
+        assert preset["preset_inert_axes"] == ["max_consecutive_losses"]
+
+    def test_composite_index_reads_once_per_token(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fix round 1 memo law: repeat polls at an UNCHANGED aggs tree pay ONE
+        ``load_composite_index`` (the token-keyed slot), and an aggs write pays
+        exactly one more — never a per-poll O(aggs files) re-read.
+        """
+        import polars as pl
+        from brutex.dashboard import app as app_module
+
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        depth = lake_root / "sweep_runs" / ("grid" + "0" * 60) / "results-depth" / "NIFTY" / "5m"
+        depth.mkdir(parents=True)
+        pl.DataFrame(
+            {"run_id": [f"{1:064x}"], "composite_score": pl.Series([1.75], dtype=pl.Float64)}
+        ).write_parquet(depth / "bull_k1_aaaaaaaaaaaaaaaa.aggs.parquet")
+        calls = {"n": 0}
+        real = app_module.load_composite_index
+
+        def _spy(root: Path) -> object:
+            calls["n"] += 1
+            return real(root)
+
+        monkeypatch.setattr(app_module, "load_composite_index", _spy)
+        for _ in range(3):
+            assert (
+                client.get("/api/v1/sweep/leaderboard").json()["composite_join"]["scored_rows"] == 1
+            )
+        assert calls["n"] == 1
+        # A second sidecar lands in a NEW tf dir → the token moves → ONE more read.
+        sibling = depth.parent / "15m"
+        sibling.mkdir()
+        pl.DataFrame(
+            {"run_id": [f"{2:064x}"], "composite_score": pl.Series([2.0], dtype=pl.Float64)}
+        ).write_parquet(sibling / "bull_k1_bbbbbbbbbbbbbbbb.aggs.parquet")
+        assert client.get("/api/v1/sweep/leaderboard").json()["composite_join"]["scored_rows"] == 2
+        assert calls["n"] == 2

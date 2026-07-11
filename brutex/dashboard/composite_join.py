@@ -33,19 +33,22 @@ Laws:
   failed (logged, "—" everywhere).
 
 Honest cost (Golden Rule #10): O(aggs files) column reads ONCE per
-leaderboard revision generation (the app memoises the index) — disclosed,
-never claimed O(1).
+:func:`composite_index_revision` token (the app memoises the index on the
+DEDICATED freshness probe below) — disclosed, never claimed O(1).
 """
 
 from __future__ import annotations
 
+import hashlib
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.dashboard.lake_revision import ABSENT_TOKEN
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.oneclick_artifacts import discover_runs, runs_root
 
@@ -59,6 +62,7 @@ __all__ = [
     "COMPOSITE_STATE_ERROR",
     "COMPOSITE_STATE_JOINED",
     "CompositeIndex",
+    "composite_index_revision",
     "load_composite_index",
 ]
 
@@ -179,3 +183,93 @@ def load_composite_index(results_root: Path) -> CompositeIndex:
         skipped_files=skipped_files,
         dropped_values=dropped_values,
     )
+
+
+def composite_index_revision(results_root: Path) -> str | None:
+    """Return the composite index's freshness token for *results_root*, or ``None``.
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001 fix round 1 (refuter-confirmed MAJOR):
+    the aggs sidecars this module reads live under the ``sweep_runs/`` SIBLING
+    tree, which ``lake_revision.sweep_results_revision`` (sweeps dir-mtime
+    digest + audit stat) NEVER stats — and ``cmd_sweep_all``'s results-depth
+    pass writes them AFTER the sweep's last store flush / audit append, so a
+    composite index cached on that generation alone could freeze an
+    EMPTY/PARTIAL index (a poll landing mid-depth-pass) for the WHOLE
+    inter-sweep interval. This dedicated probe covers exactly what
+    :func:`load_composite_index` reads:
+
+    * the NEWEST run's identity via the SAME
+      :func:`~brutex.dashboard.oneclick_artifacts.discover_runs` selection law
+      (§11 COMMON — never a second selection law); and
+    * a bounded directory-mtime digest of that run's ``results-depth/``
+      subtree down to the ``<instrument>/<tf>/`` dirs — every aggs sidecar
+      lands via the atomic ``trade_store`` tempfile + ``os.replace`` INTO its
+      ``<tf>/`` dir, which moves that dir's mtime, so any aggs write moves
+      the token (the ``lake_revision.sweeps_revision`` digest shape).
+
+    Returns
+    -------
+    str | None
+        * a digest token when a newest run exists (a still-absent depth tree
+          contributes the stable ``"<run_id>|absent"`` component — its
+          first-ever creation moves the token exactly once);
+        * :data:`~brutex.dashboard.lake_revision.ABSENT_TOKEN` when no run
+          directory exists at all (``discover_runs`` folds an unreadable runs
+          root into the same empty listing the LOADER sees, so probe and
+          loader can never disagree about absence);
+        * ``None`` — "unknown, no signal" — when the depth-tree stat/scan
+          fails with a non-missing-file :class:`OSError` (logged); the caller
+          folds it as a probe OUTAGE (the cached payload holds — bounded
+          staleness, never a fake flip).
+
+    Honest cost (Golden Rule #10): O(run dirs) stats for the newest-run
+    selection plus O(depth dirs) ``scandir``/``stat`` — bounded by
+    instruments × timeframes, NEVER by the sidecar file count — paid per
+    ``/results`` poll (the ``sweeps_revision`` envelope, disclosed).
+    """
+    runs = discover_runs(results_root, limit=1)
+    if not runs:
+        return ABSENT_TOKEN
+    run_id = runs[0].run_id
+    depth_dir = runs_root(results_root) / run_id / _RESULTS_DEPTH_DIRNAME
+    try:
+        st_depth = os.stat(depth_dir)
+    except (FileNotFoundError, NotADirectoryError):
+        # The depth pass has not created the tree yet — a stable PER-RUN
+        # absent component: its first creation moves the token exactly once.
+        return f"{run_id}|{ABSENT_TOKEN}"
+    except OSError as exc:
+        _LOG.warning(
+            "composite_join.revision_stat_failed",
+            path=str(depth_dir),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
+    parts: list[str] = [run_id, f".:{st_depth.st_mtime_ns}"]
+    try:
+        with os.scandir(depth_dir) as level1:
+            for d1 in sorted(
+                (entry for entry in level1 if entry.is_dir(follow_symlinks=False)),
+                key=lambda entry: entry.name,
+            ):
+                parts.append(f"{d1.name}:{d1.stat(follow_symlinks=False).st_mtime_ns}")
+                with os.scandir(d1.path) as level2:
+                    for d2 in sorted(
+                        (entry for entry in level2 if entry.is_dir(follow_symlinks=False)),
+                        key=lambda entry: entry.name,
+                    ):
+                        parts.append(
+                            f"{d1.name}/{d2.name}:{d2.stat(follow_symlinks=False).st_mtime_ns}"
+                        )
+    except OSError as exc:
+        # A dir vanishing mid-scan (a concurrent prune) or a permission fault:
+        # no signal — never a spurious invalidation, never a masked error.
+        _LOG.warning(
+            "composite_join.revision_scan_failed",
+            path=str(depth_dir),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
