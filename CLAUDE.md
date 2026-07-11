@@ -42,6 +42,14 @@ grammar · expiry-capped covered-span replan · instruments.duckdb opened READ-O
 glob=False oracle reads · bounded 16 MiB evidence tails, chain-verify dropped from the
 evidence sub · `--months` made real for tf.daily/sanity + the census scoped to sampled
 coordinates — the per-round record lives in MIGRATION.md #1756, never this header).
+HOSTILE-REVIEW ROUND 2 folded pre-merge (the coverage-gate test-stem BLOCKER renamed ·
+the registry.duckdb schema-drift ABSTAIN guard · the replan oracle's correct-or-abstain
+non-default-window-shape routing (explicit-dates F&O + overlapping-anchor false-FAILs dead,
+the out-of-coverage double-fetch FAIL kept) · the pull TOCTOU retry genuinely re-reads ·
+Muhurat-date 1day bars disclosed UNVERIFIED + counted once · the instrument-master read
+became an in-memory SNAPSHOT so the in-process #1482/#1646 drift ladder stays live ·
+seed-rotated F&O contract sampling + bounded/pruned coverage ledger — per-round record in
+MIGRATION.md #1756, never this header).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
 Active-branch blurb + MIGRATION.md #1756.)
 Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
@@ -2232,7 +2240,27 @@ hostile-review pass._
   evidence-only sub; RecursionError bombs fold, MemoryError re-raises raw; `--months` genuinely bounds
   tf.daily/sanity and the census scans sampled coordinates × months (never the whole-tree glob); enumerations
   memoised per run; latency's first call relabeled `first_call_ms` (never claimed cold); the report golden
-  regenerated as a reviewed act. 400+ tests; every module re-measured 100.00%
+  regenerated as a reviewed act. HOSTILE-REVIEW ROUND 2 folded (same branch, pre-merge — 3-refuter panel,
+  every CONFIRMED finding fixed with a fails-before regression): the coverage_gate_discovery BLOCKER killed
+  (the 7 checks-package test files RENAMED `test_acceptance_check_*` → `test_acceptance_checks_*` per the
+  discovery grammar + the ci.yml pairings repointed — never an exclude entry); the movers options leg probes
+  registry.duckdb READ-ONLY first — a schema-version drift ABSTAINs `registry_schema_drift` BEFORE the
+  route's write-capable `RegistryStore.open` can drop/restamp it (absent = proceed, empirically pinned the
+  route creates nothing; matching = proceed, the no-net-bytes residual disclosed in limits+runbook); the
+  replan oracle goes correct-or-abstain — the hard replan==0 law binds DEFAULT-law series only, while
+  explicit-dates F&O rows / overlapping-anchor ranges / in-coverage re-tiling mismatches route to the named
+  `non_default_window_shape` (both refuter false-FAIL repros dead; a key ESCAPING the covered spans still
+  hard-FAILs — the double-fetch tooth pinned); the pull TOCTOU retry genuinely RE-READS the ledger
+  (`on_retry=drop_ledger_memo` — the void `retried:True` stamp over a memoised snapshot is dead); Muhurat
+  1day bars are counted ONCE per distinct IST date and disclosed UNVERIFIED (`muhurat_days_unverified` +
+  the limits/runbook line — corruption on those ~6 dates is honestly out of scope); the instrument master is
+  read as a short-lived in-memory SNAPSHOT (no held file handle — the in-process DuckDB same-file
+  config-conflict that silently degraded the #1482/#1646 movers drift ladder is dead, leg A is the
+  production wire again); the F&O contract sample seed-ROTATES (`sample_fno_contracts` — the fixed head-6
+  is dead) and contracts join the coverage-ledger population (capped 5000, truncation disclosed); the
+  coverage ledger read is bounded 16 MiB + pruned-on-save to the live population; NITs: symlinked
+  `<lake>/acceptance` write refusal, BaseException-safe env restore in ctx.close, the vacuous-tail
+  O(eligible×records) note, the moneyness grammar tightened to `[1-9]\d*` depths. 415+ tests; every module re-measured 100.00%
   line+branch on the ci.yml-exact gates; full battery 15/15 detected, 0 false FAILs on the clean twin;
   ruff/ruff-format clean; `mypy --strict` clean (the one pre-existing env-specific cma stub note aside, 0 new);
   pyright 0 errors on the new package (net −12 on the touched test files). ENGINE UNCHANGED —
@@ -5589,6 +5617,11 @@ hostile-review pass._
   hostile-review round 1 folded pre-merge (TOCTOU law wired · per-day Muhurat · full moneyness
   grammar · expiry-capped covered-span replan · read-only instruments.duckdb · bounded evidence
   tails · --months made real — per-round record in MIGRATION.md #1756);
+  hostile-review round 2 folded pre-merge (coverage-gate test-stem rename · registry schema-drift
+  ABSTAIN guard · correct-or-abstain non-default-window-shape replan · pull retry re-reads ·
+  Muhurat-date 1day bars disclosed unverified · in-memory master snapshot keeps the drift ladder
+  live · seed-rotated F&O sampling + bounded/pruned coverage ledger — per-round record in
+  MIGRATION.md #1756);
   additive `brutex/acceptance/` package only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line)
   Earlier: `claude/frontend-latency-hardening-r2`
