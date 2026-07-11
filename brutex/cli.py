@@ -7983,6 +7983,54 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     with contextlib.suppress(CascadeWireError):
         stage3 = load_manifest(out_root).stage3
 
+    # Gate-folded store addresses (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001
+    # merge re-derivation over DEC-STAGE3-RECOUNT-001): `_tuple_digest` now
+    # folds the ACTIVE gate config into every tuple/cell store ADDRESS, so a
+    # stage-3-enabled tree's expected paths are derivable ONLY from a grid
+    # carrying the tree's RECORDED Stage-3 knobs. Resolve them exactly as the
+    # recount tier does — the tree's OWN audit first (condition B1), the
+    # operator --stage3-* flags as the audit-less fallback (condition B8) —
+    # and fold them into the verify grid so `plan_expected_stores` + the
+    # shadow re-sweep address the SAME files the launcher wrote. A gate-less
+    # tree emits NO fragment (default-elision), so its verify grid — and every
+    # pre-fold verdict — is byte-identical to before. HONEST residual: an
+    # overfit-gated tree (--dsr-min at launch) has no recorded-knob channel
+    # here yet, so its identity pairing still reads grid_mismatch — re-verify
+    # with a matching config (the #1336 remediation wording).
+    if stage3 is not None and stage3.enabled:
+        import dataclasses as _dc
+
+        from brutex.engine.sweep_verify import recorded_stage3_from_audit
+
+        _addr_audit = recorded_stage3_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        _addr_knobs = _addr_audit.knobs if _addr_audit.consistent else None
+        if _addr_knobs is not None:
+            grid = _dc.replace(
+                grid,
+                stage3_enable=True,
+                stage3_top_k=_addr_knobs.stage3_top_k,
+                stage3_max_fevals=_addr_knobs.max_fevals,
+                stage3_max_restarts=_addr_knobs.max_restarts,
+            )
+        elif stage3_enable:
+            _flag_fold: dict[str, Any] = {"stage3_enable": True}
+            for _key, _value in (
+                ("stage3_top_k", stage3_top_k),
+                ("stage3_max_fevals", stage3_fevals),
+                ("stage3_max_restarts", stage3_restarts),
+            ):
+                if _value is not None:
+                    _flag_fold[_key] = _value
+            grid = _dc.replace(grid, **_flag_fold)
+        else:
+            print(
+                "[brutex] sweep-verify: the tree records an ENABLED stage-3 pass but "
+                "its audit carries no consistent knobs and no --stage3-* flags were "
+                "given — the gate-folded store addresses cannot be re-derived "
+                "(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so identity pairing may "
+                "honestly read grid_mismatch"
+            )
+
     current_sha = _resolve_code_commit_sha()
     current_indicator = _indicator_version()
     vocabulary_trusted = code_sha == current_sha and indicator == current_indicator
