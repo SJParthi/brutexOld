@@ -192,15 +192,15 @@ def run_acceptance(
             except Exception as exc:  # noqa: BLE001 — fencing: ERROR + continue
                 _LOG.error("acceptance.check_errored", check_id=check_id, error=str(exc))
                 result = _error_check(check_id, exc, seed=ctx.seed)
-            if result.duration_s == 0.0:
-                from dataclasses import replace
+            from dataclasses import replace
 
-                result = replace(result, duration_s=round(time.monotonic() - check_started, 3))
+            result = replace(result, duration_s=round(time.monotonic() - check_started, 3))
             checks.append(result)
             try:
                 audit.check(run_id=run_id, check=result)
             except OSError as exc:
                 _LOG.error("acceptance.audit_append_failed", error=str(exc))
+                audit.close()
                 return 2, {"error": f"audit append failed: {exc}", "run_id": run_id}
 
     # ── streak carry from the previous report chain ────────────────────
@@ -299,6 +299,7 @@ def run_acceptance(
         audit.close()
     except (report_mod.ReportWriteError, OSError) as exc:
         _LOG.error("acceptance.report_write_failed", error=str(exc))
+        audit.close()
         return 2, report
     exit_code = overall.exit_code
     _LOG.info(

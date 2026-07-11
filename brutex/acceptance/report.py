@@ -300,6 +300,7 @@ class AcceptanceAudit:
         path = audit_path(lake_root)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._writer = SweepAuditWriter.open(path, actor="acceptance", resume=path.is_file())
+        self._closed = False
 
     def run_start(self, *, run_id: str, argv: Sequence[str], seed: str) -> None:
         """Append the ``ACCEPTANCE_RUN_START`` line."""
@@ -337,8 +338,10 @@ class AcceptanceAudit:
         )
 
     def close(self) -> None:
-        """Close the underlying writer."""
-        self._writer.close()
+        """Close the underlying writer (idempotent — safe on every exit path)."""
+        if not self._closed:
+            self._closed = True
+            self._writer.close()
 
 
 # ────────────────────────────────────────────────────────────────────────

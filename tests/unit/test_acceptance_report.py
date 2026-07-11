@@ -337,3 +337,10 @@ class TestAuditChain:
         ]
         assert lines[0]["payload"]["abstain_count"] == 1
         assert lines[1]["payload"]["fail_count"] == 1
+
+
+class TestAuditCloseIdempotent:
+    def test_double_close_is_safe(self, tmp_path: Path) -> None:
+        audit = AcceptanceAudit(tmp_path)
+        audit.close()
+        audit.close()  # second close is a no-op (every exit path may close)

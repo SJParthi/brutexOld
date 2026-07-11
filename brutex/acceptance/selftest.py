@@ -527,9 +527,15 @@ def run_full_battery(
 
         scenario("over_cap_bridge", "rate must FAIL a persisted over-cap snapshot", _p9)
 
-        # 10: an in-market-hours vendor attempt stamp.
+        # 10: an in-market-hours vendor attempt stamp — on a trading day AT or
+        # AFTER the guard's landing date (earlier stamps are honestly excluded).
         def _p10(root: Path) -> bool:
-            in_window = f"{days[1].isoformat()}T04:30:00+00:00"  # 10:00 IST
+            from brutex.calendars.nse import is_trading_day
+
+            probe = max(days[1], rate_check.MARKET_HOURS_GUARD_LANDED)
+            while not is_trading_day(probe):  # weekends walk to the next session
+                probe += timedelta(days=1)
+            in_window = f"{probe.isoformat()}T04:30:00+00:00"  # 10:00 IST
             _seed_ledger(root, day=days[1], last_attempt_at=in_window)
             return _check_fails(rate_check.run(_twin_context(root, now_utc=now)))
 
