@@ -280,6 +280,55 @@ class TestRecordedContext:
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_context_from_audit(path)
 
+    def test_mid_chain_corruption_after_valid_start_still_maps(self, tmp_path: Path) -> None:
+        """DEC-AUDIT-READERS-STREAM-001: the streaming reader raises its
+        AuditError lazily MID-iteration — a malformed committed line AFTER a
+        successfully-folded ``SWEEP_START`` must still map to
+        ``SweepVerifyError`` (the try spans the loop, not just the call)."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={
+                    "data_snapshot_hash": "x",
+                    "indicator_version": "v",
+                    "code_commit_sha": "c",
+                },
+            )
+        with path.open("a", encoding="utf-8") as f:
+            f.write("{not jsonl mid-chain\n")  # committed (newline-terminated) corruption
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_context_from_audit(path)
+
+    def test_streams_without_materialising_the_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Memory-shape pin (DEC-AUDIT-READERS-STREAM-001): the reader must
+        ride ``iter_entries``, never the whole-chain ``read_entries`` list —
+        the pre-fix code resolved ``read_entries`` at call time (function-
+        local import), so this spy FAILS on the pre-fix implementation."""
+        from brutex.orchestrator import audit as audit_mod
+
+        def _boom(_path: Path) -> list[object]:
+            raise AssertionError("read_entries called — chain materialised")
+
+        monkeypatch.setattr(audit_mod, "read_entries", _boom)
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={
+                    "data_snapshot_hash": "x",
+                    "indicator_version": "v",
+                    "code_commit_sha": "c",
+                },
+            )
+        ctx = recorded_context_from_audit(path)
+        assert ctx is not None
+        assert ctx.data_snapshot_hash == "x"
+
 
 # ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──
 
@@ -2494,6 +2543,36 @@ class TestRecordedStage3FromAudit:
         path.write_text("{not jsonl\n", encoding="utf-8")
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_stage3_from_audit(path)
+
+    def test_mid_chain_corruption_after_valid_pass_still_maps(self, tmp_path: Path) -> None:
+        """DEC-AUDIT-READERS-STREAM-001: a malformed committed line AFTER a
+        successfully-folded ``STAGE_3_PASS_START`` still maps to
+        ``SweepVerifyError`` — the try spans the streaming iteration."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=self._pass_payload())
+        with path.open("a", encoding="utf-8") as f:
+            f.write("{not jsonl mid-chain\n")  # committed (newline-terminated) corruption
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_stage3_from_audit(path)
+
+    def test_streams_without_materialising_the_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Memory-shape pin: the reader rides ``iter_entries``, never the
+        whole-chain ``read_entries`` list (spy fails on the pre-fix code)."""
+        from brutex.orchestrator import audit as audit_mod
+
+        def _boom(_path: Path) -> list[object]:
+            raise AssertionError("read_entries called — chain materialised")
+
+        monkeypatch.setattr(audit_mod, "read_entries", _boom)
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=self._pass_payload())
+        record = recorded_stage3_from_audit(path)
+        assert record.knobs is not None
+        assert record.knobs.stage3_top_k == 3
 
 
 class TestCellRecountCodes:
