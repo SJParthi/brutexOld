@@ -2061,7 +2061,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/memory-footprint-hardening` (**DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721** —
-  the memory/cache hardening pack, items 1-2 of 6 (items 3-6 land on this same branch before the PR opens): (1) NEW
+  the memory/cache hardening pack, items 1-3 of 6 (items 4-6 land on this same branch before the PR opens): (1) NEW
   `lake_revision.registry_revision` — the `registry.duckdb` content stat token folded into the options
   expiry-calendar / strike-chain / CANDIDATE cache keys at both app.py key-build sites (route + post-pull warm, key
   parity; the #1660 `coverage_revision` precedent) so a CROSS-PROCESS metadata pull (nightly headless / CLI / second
@@ -2075,7 +2075,21 @@ hostile-review pass._
   `_LEDGER_READ_CACHE` (1/16, floor 1 GiB), each via the COMMON `memory_budget_bytes`, no new env var — and
   `LakeOptionBarSource._bar_cache` becomes a bounded LRU (`bar_cache_capacity=256`; a recomputable read cache —
   hit-after-evict rebuilds identical bars, pinned). Measured evidence: 84.9 MB at capacity 256 with 750-row dict
-  payloads; ~1.0 KB/row parsed ledger records; ~1.1 KB/ResultRow SweepScans. READ-side only — ENGINE UNCHANGED —
+  payloads; ~1.0 KB/row parsed ledger records; ~1.1 KB/ResultRow SweepScans. (3) the window-ledger cache-residency
+  COLLAPSE: db_view's `_LEDGER_READ_CACHE` held TWO whole-ledger per-row payloads resident per lake (the
+  `ledger-records|` records family AND the `ledger-rows|` projected-rows family — measured 60.0 MB two-family at a
+  50k-row fixture on the fix-2 deep-size accounting) — the rows family is RETIRED: the records family is THE single
+  resident per-row representation (30.0 MB post-fix, ratio 0.500, bench-pinned ≤ 60%), the `/db` grid route rides
+  NEW `window_ledger_rows_page` (slice the cached records FIRST, project ONLY the page — O(1) records hit +
+  O(page ≤ 500) projection per click), `window_ledger_rows_cached` keeps its exact signature/bytes as the
+  whole-projection compat surface at a disclosed O(rows) per call (34 ms @ 50k measured; leaves SHARED with the
+  resident records), grid staleness is now SINGLE-phase (exactly the records serve — the rows half of the
+  composed-floor envelope died with the cache entry; the spot-rollup keeps the composed two-floor law, behaviorally
+  pinned on its own serving key); stamp/invalidation + single-flight laws byte-identical (suites unmodified);
+  QUERY SHAPE UNTOUCHED — no SQL/`dedup_qualify_latest_sql`/DuckDB fast-path change (the DB-latency session's
+  surface, #1719); residency + O(1)-class repeat-poll + byte-parity pins in NEW
+  `tests/bench/test_ledger_cache_residency.py`, the residency/no-second-floor/no-entry pins verified FAILING
+  pre-change. READ-side only — ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; steady-state payloads byte-identical (pinned); `movers_cache.py` + `lake_revision.py` +
   `lake_source.py` ALL 100% line+branch standalone; ruff/ruff-format clean, `mypy --strict` 0 new, pyright 0 errors
   on touched files.)
@@ -5288,11 +5302,13 @@ hostile-review pass._
 
 - **Active feature branch:** `claude/memory-footprint-hardening`
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721 — the memory/cache
-  hardening pack, items 1-2 of 6: the `registry.duckdb` content token re-keys
+  hardening pack, items 1-3 of 6: the `registry.duckdb` content token re-keys
   the options calendar/strike/candidate caches on a cross-process metadata
-  pull, and the COMMON `MoversSnapshotCache` gains the opt-in RAM-derived
-  byte watermark (+ the `LakeOptionBarSource` bar-cache LRU); items 3-6 land
-  on this same branch; READ-side only, ENGINE UNCHANGED —
+  pull, the COMMON `MoversSnapshotCache` gains the opt-in RAM-derived
+  byte watermark (+ the `LakeOptionBarSource` bar-cache LRU), and the
+  window-ledger cache residency collapses to ONE resident per-row family
+  (records; the /db grid rows an O(page) on-demand projection); items 4-6
+  land on this same branch; READ-side only, ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
   Earlier: `claude/groww-market-hours-guard`
   (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE

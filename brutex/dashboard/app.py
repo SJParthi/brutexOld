@@ -8154,17 +8154,22 @@ def build_app(
         full-universe options pull holds ~841k rows (the measured shape behind
         ``db_view.WINDOW_ROWS_CAP``), and this route previously re-PARSED the whole
         Parquet (``load_window_ledger(...).to_rows()``) on EVERY paging click. The
-        read now rides :func:`~brutex.dashboard.db_view.window_ledger_rows_cached`
-        — the SAME mtime-keyed single parse the other ledger readers share — so a
-        paging click within one ledger generation is an O(1) cache handoff + an
-        O(page) slice/format; the FIRST read after a ledger flush still pays one
+        read now rides :func:`~brutex.dashboard.db_view.window_ledger_rows_page`
+        — the SAME stamp-keyed single parse the other ledger readers share, with
+        ONLY the page's records projected to row tuples
+        (DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3: the former cached
+        whole-ledger rows projection was a SECOND resident per-row family beside
+        the records cache — retired; residency is now the ONE records family) —
+        so a paging click within one ledger generation is an O(1) records-cache
+        handoff + an O(page) projection/format; the FIRST read after a ledger
+        flush still pays one
         real O(rows) parse (true O(page) needs a write-time manifest, NOT claimed).
         The page-slice preserves the canonical
         :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort + derived
         columns byte-for-byte (ONE row-shape source:
         ``window_ledger.ledger_record_row``).
         """
-        from brutex.dashboard.db_view import window_ledger_rows_cached
+        from brutex.dashboard.db_view import window_ledger_rows_page
 
         columns = [
             "market",
@@ -8193,14 +8198,14 @@ def build_app(
         lake = lake_root.parent
 
         def _load() -> dict[str, Any]:
-            """Read the cached ledger rows, then slice + IST-format ONLY the page."""
+            """Read ONE page off the cached ledger records, then IST-format it."""
             from brutex.data.session import format_ist_clock
 
-            all_rows = window_ledger_rows_cached(lake)
-            total = len(all_rows)
-            # Slice BEFORE formatting → only the page's rows are IST-coerced (O(page)).
-            # An offset past the end is a clean empty page (Python slice never raises).
-            page = all_rows[offset : offset + limit]
+            # Slice BEFORE projecting/formatting → only the page's records are
+            # tuple-projected + IST-coerced (O(page)); the whole-ledger rows are
+            # never materialized per poll (DEC-MEMORY-FOOTPRINT-HARDENING-001
+            # fix 3). An offset past the end is a clean empty page.
+            total, page = window_ledger_rows_page(lake, offset=offset, limit=limit)
             rows: list[list[Any]] = []
             for row in page:
                 cells: list[Any] = list(row)

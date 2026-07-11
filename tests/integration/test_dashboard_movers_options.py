@@ -736,7 +736,9 @@ def _seed_sparse_july_lake(tmp_path: Path) -> None:
             segment="FNO",
             symbol=f"NSE-NIFTY-07Jul25-24000-{opt}",
             interval="1minute",
-            bars=[_min_bar(hour=9, minute=15, close="150", volume=100, oi=10, day=date(2025, 7, 7))],
+            bars=[
+                _min_bar(hour=9, minute=15, close="150", volume=100, oi=10, day=date(2025, 7, 7))
+            ],
         )
 
 
@@ -888,7 +890,12 @@ class TestRegistryContentTokenKeying:
 
         inner = MoversSnapshotCache()
         adapter = app_mod._RegistryKeyedCache(inner, "111:222")
-        assert adapter.get_or_compute("options_strikes||NIFTY|2025-07-07", generation=7, compute=lambda: "chain") == "chain"
+        assert (
+            adapter.get_or_compute(
+                "options_strikes||NIFTY|2025-07-07", generation=7, compute=lambda: "chain"
+            )
+            == "chain"
+        )
         # The inner cache holds the token-folded key at the SAME generation…
         assert (
             inner.get_or_compute(
@@ -901,7 +908,9 @@ class TestRegistryContentTokenKeying:
         # …and a DIFFERENT token keys apart (the cross-process re-key law).
         other = app_mod._RegistryKeyedCache(inner, "333:444")
         assert (
-            other.get_or_compute("options_strikes||NIFTY|2025-07-07", generation=7, compute=lambda: "fresh")
+            other.get_or_compute(
+                "options_strikes||NIFTY|2025-07-07", generation=7, compute=lambda: "fresh"
+            )
             == "fresh"
         )
 
