@@ -1574,7 +1574,12 @@ class _FakeEngine:
         if name in self._overrides:
             value = self._overrides[name]
             return lambda *args: value
-        raise AssertionError(f"fake engine method {name!r} must not be called")
+        # AttributeError (not AssertionError) — the standard exception for a
+        # special method, per CodeQL py/unexpected-raise-in-special-method.
+        # The tripwire strength is identical: no production call site catches
+        # AttributeError or hasattr()-probes the engine, so an un-overridden
+        # access still fails the test loudly.
+        raise AttributeError(f"fake engine method {name!r} must not be called")
 
 
 def _fake_kernel(**overrides: object) -> nse_module._RustCalendarKernel:
