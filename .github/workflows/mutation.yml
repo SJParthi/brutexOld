@@ -604,7 +604,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   # Rust mutation — cargo-mutants over rust/fno-math/ (8-shard matrix)
   #
-  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
+  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs
+  # + ranking.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
