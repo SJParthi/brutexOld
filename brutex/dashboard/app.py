@@ -1454,12 +1454,15 @@ def build_app(
     loop_watchdog
         Optional :class:`~brutex.observability.loop_watchdog.LoopWatchdog`
         (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 G5): when given, the app
-        registers ``startup``/``shutdown`` event handlers that start the 1 s
-        event-loop heartbeat task + monitor daemon and stop them cleanly.
-        ``None`` (the default) registers NOTHING — zero threads, tasks or
-        handlers (census-pinned), so every existing ``build_app()`` caller is
-        byte-identical. Production binds one in ``cli.cmd_dashboard`` behind
-        the fail-loud ``BRUTEX_LOOP_WATCHDOG`` kill switch (default ON).
+        rides a minimal LIFESPAN (``FastAPI(lifespan=...)`` — Starlette 1.x
+        removed the ``add_event_handler``/``on_event`` seam, so the lifespan
+        kwarg is the ONE lifecycle hook) that starts the 1 s event-loop
+        heartbeat task + monitor daemon on serve and stops them cleanly on
+        shutdown. ``None`` (the default) builds the app with NO lifespan —
+        zero threads, tasks or lifecycle hooks (census-pinned), so every
+        existing ``build_app()`` caller is byte-identical. Production binds
+        one in ``cli.cmd_dashboard`` behind the fail-loud
+        ``BRUTEX_LOOP_WATCHDOG`` kill switch (default ON).
 
     Returns
     -------
@@ -8508,8 +8511,10 @@ def build_app(
             DEC-COMPLETENESS-FNO-SKIP-001 mechanism db_view already implements at
             the segment-dir level), so a cold spot-cascade build never pays the
             ~10⁵-10⁶ per-contract partition dirs of a materialised options lake
-            (measured 42× on the synthetic repro; the production unfiltered walk's
-            own docstring figure is 29.7 min at 2.36M files). ``filter_spot_datasets``
+            (measured 42× on the synthetic repro's WALK, 420.0 ms → 10.0 ms —
+            the full unfiltered ``_build`` measured 490.9 ms; the production
+            unfiltered walk's own docstring figure is 29.7 min at 2.36M
+            files). ``filter_spot_datasets``
             stays as the provable-no-op belt (the ONE spot-vs-F&O split, §11
             COMMON). A FILTERED walk deliberately NEVER rebuilds the dataset
             manifest (db_view's :func:`list_candle_datasets` guard) — rebuild duty

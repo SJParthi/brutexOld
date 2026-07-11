@@ -41,10 +41,14 @@ the external healthchecks lane's job, disclosed not claimed. Healthy overhead
 is ~2 wakeups/s, O(1) each — stated, not "free".
 
 Wiring: :func:`brutex.dashboard.app.build_app` takes ``loop_watchdog=None``
-(default ``None`` ⇒ ZERO threads/tasks/handlers — the test suite's hundreds of
-``build_app()`` constructions are byte-identical) and, when given one,
-registers ``startup``/``shutdown`` event handlers (the app deliberately has NO
-lifespan — the handlers are the seam). Production binds it in
+(default ``None`` ⇒ ZERO threads/tasks/lifespan — the test suite's hundreds of
+``build_app()`` constructions are byte-identical) and, when given one, rides a
+minimal LIFESPAN (``FastAPI(lifespan=...)`` — the app's ONE lifecycle hook on
+the installed dep set: Starlette 1.x REMOVED ``add_event_handler``/``on_event``,
+so there are no startup/shutdown event handlers to register): serve start
+launches the heartbeat task + monitor daemon, shutdown stops them cleanly
+(round-3 review — this paragraph previously claimed the retired event-handler
+seam; the lifespan IS the wiring). Production binds it in
 ``cli.cmd_dashboard`` behind the fail-loud :data:`LOOP_WATCHDOG_ENV` kill
 switch (default ON; junk raises at startup — the DEC-RAM-BUDGETS-001 env
 convention via :func:`resolve_loop_watchdog_enabled`).

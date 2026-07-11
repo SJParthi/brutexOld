@@ -645,3 +645,141 @@ class TestDefaultRunnerSmoke:
                 break
             deadline.wait(0.01)
         assert cache.get_or_compute("k", generation=2, compute=lambda: "x") == "v2"
+
+
+class TestRacedCleanStoreServedAsHit:
+    """Round-3 review: a CLEAN entry landing between the fast-path miss and
+    the stale serve is served AS the value — never a one-store-older snapshot,
+    never a ``stale_served`` log for a stale serve that did not happen (the
+    stale_served law). Both stale-serving arms re-check under the serve lock;
+    the race is injected deterministically through the ``pull_active`` probe
+    (called between the fast-path miss and either serve, outside the lock)."""
+
+    @staticmethod
+    def _racing_pull_active(
+        cache_ref: list[MoversSnapshotCache],
+        *,
+        store_value: str,
+        relatch: bool = False,
+    ) -> Any:
+        """One-shot probe: the FIRST call stores a clean gen-2 entry for "k"."""
+        state = {"raced": False}
+
+        def _probe() -> bool:
+            if not state["raced"]:
+                state["raced"] = True
+                # force_fresh bypasses floor AND SWR — the inline store lands
+                # the clean entry exactly inside the reader's race window.
+                cache_ref[0].get_or_compute(
+                    "k", generation=2, compute=lambda: store_value, force_fresh=True
+                )
+                if relatch:
+                    # Re-arm the outage latch AFTER the inner store cleared it,
+                    # so the raced-clean hit itself performs the recovery flip.
+                    cache_ref[0].serve_last_known("k", compute=lambda: "unused")
+            return True
+
+        return _probe
+
+    def test_floor_arm_raced_clean_served_fresh_no_stale_log(self) -> None:
+        """FLOOR arm (age < floor): the raced-in clean value is served and the
+        stale_served log is suppressed — without the re-read this served the
+        stale snapshot AND logged a stale serve."""
+        clock = {"t": 0.0}
+        cache_ref: list[MoversSnapshotCache] = []
+        spawned: list[Any] = []
+        cache = _flagged(
+            clock=lambda: clock["t"],
+            runner=spawned.append,
+            pull_active=self._racing_pull_active(cache_ref, store_value="fresh-raced"),
+        )
+        cache_ref.append(cache)
+        cache.get_or_compute("k", generation=1, compute=lambda: "v1")
+        clock["t"] = 1.0  # inside the 2 s base floor — the floor arm serves
+        with capture_logs() as logs:
+            got = cache.get_or_compute("k", generation=2, compute=lambda: "must-not-run")
+        assert got == "fresh-raced"  # the clean raced-in value, not "v1"
+        assert _events(logs, "movers_cache.stale_served") == []
+        assert spawned == []  # the floor arm never spawns
+
+    def test_swr_arm_raced_clean_served_fresh_no_spawn_no_stale_log(self) -> None:
+        """SWR arm (past floor): the raced-in clean value is a plain hit — no
+        revalidator spawned, no stale_served / stale_extended logged."""
+        clock = {"t": 0.0}
+        cache_ref: list[MoversSnapshotCache] = []
+        spawned: list[Any] = []
+        cache = _flagged(
+            clock=lambda: clock["t"],
+            runner=spawned.append,
+            pull_active=self._racing_pull_active(cache_ref, store_value="fresh-raced"),
+        )
+        cache_ref.append(cache)
+        cache.get_or_compute("k", generation=1, compute=lambda: "v1")
+        clock["t"] = 5.0  # past the 2 s base floor — the SWR arm is reached
+        with capture_logs() as logs:
+            got = cache.get_or_compute("k", generation=2, compute=lambda: "must-not-run")
+        assert got == "fresh-raced"
+        assert _events(logs, "movers_cache.stale_served") == []
+        assert _events(logs, "movers_cache.stale_extended") == []
+        assert spawned == []  # served as a hit BEFORE the spawn decision
+
+    def test_swr_arm_raced_clean_clears_outage_latch_logs_recovered(self) -> None:
+        """The raced-clean hit is a REAL resolution: it clears an armed outage
+        latch and logs the one ``revision_probe_recovered`` INFO (the #1386
+        latch contract holds through the re-check path)."""
+        clock = {"t": 0.0}
+        cache_ref: list[MoversSnapshotCache] = []
+        cache = _flagged(
+            clock=lambda: clock["t"],
+            runner=lambda job: None,
+            pull_active=self._racing_pull_active(
+                cache_ref, store_value="fresh-raced", relatch=True
+            ),
+        )
+        cache_ref.append(cache)
+        cache.get_or_compute("k", generation=1, compute=lambda: "v1")
+        clock["t"] = 5.0
+        with capture_logs() as logs:
+            got = cache.get_or_compute("k", generation=2, compute=lambda: "must-not-run")
+        assert got == "fresh-raced"
+        assert _events(logs, "movers_cache.revision_probe_recovered")
+        assert _events(logs, "movers_cache.stale_served") == []
+
+
+class TestStaleExtendedOnFailingRevalidator:
+    """Round-3 review (V3): the persistently-FAILING revalidator path is
+    NEVER a silent forever-stale illusion — every past-cap serve escalates
+    ``stale_extended`` on the episode cadence even while the revalidate
+    compute raises on every spawn (the WEDGED/in-flight path was already
+    pinned; this pins the failing-runner path explicitly)."""
+
+    def test_stale_extended_fires_while_revalidator_keeps_failing(self) -> None:
+        clock = {"t": 0.0}
+        cache = _flagged(
+            clock=lambda: clock["t"],
+            runner=lambda job: job(),  # inline: the failure happens each read
+            adaptive_floor_cap_s=120.0,
+        )
+        cache.get_or_compute("k", generation=1, compute=lambda: "v1")
+
+        def _boom() -> str:
+            raise ValueError("dead volume")
+
+        clock["t"] = 121.0  # past the 120 s cap
+        with capture_logs() as logs:
+            assert cache.get_or_compute("k", generation=2, compute=_boom) == "v1"
+        (warned,) = _events(logs, "movers_cache.stale_extended")
+        assert warned["cap_s"] == 120.0
+        (failed,) = _events(logs, "movers_cache.swr_revalidate_failed")
+        assert failed["failures"] == 1
+        (served,) = _events(logs, "movers_cache.stale_served")
+        assert served["revalidate"] == "spawned"  # the serve stays disclosed
+        # STILL failing past the 300 s re-WARN window: the escalation
+        # re-fires (never once-and-silent while the failure persists) and the
+        # failure WARN re-logs with the TRUE running count.
+        clock["t"] = 121.0 + _SWR_STALE_EXTENDED_REWARN_S + 1.0
+        with capture_logs() as logs:
+            assert cache.get_or_compute("k", generation=2, compute=_boom) == "v1"
+        assert len(_events(logs, "movers_cache.stale_extended")) == 1
+        (failed2,) = _events(logs, "movers_cache.swr_revalidate_failed")
+        assert failed2["failures"] == 2

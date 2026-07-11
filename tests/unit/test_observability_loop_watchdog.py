@@ -499,3 +499,37 @@ class TestBuildAppWiring:
         assert not wd.started  # shutdown stopped it
         names = {t.name for t in threading.enumerate()}
         assert "bx-loop-watchdog-monitor" not in names
+
+
+class TestWiringDocstringPins:
+    """Round-3 review: the docstrings must describe the REAL lifespan seam.
+
+    The module + ``build_app`` docstrings previously claimed the app
+    "registers ``startup``/``shutdown`` event handlers (the app deliberately
+    has NO lifespan)" — affirmatively false against the code, which wires the
+    watchdog via ``FastAPI(lifespan=...)`` (Starlette 1.x REMOVED
+    ``add_event_handler``/``on_event``). A maintainer trusting the docstring
+    would hunt for handlers that do not exist; these pins keep the wording
+    reconciled to the wiring (the doc-pin idiom — DEC-RATE-METER-LIFECYCLE-001
+    round 3 precedent).
+    """
+
+    def test_module_docstring_names_the_lifespan_seam(self) -> None:
+        import brutex.observability.loop_watchdog as mod
+
+        doc = mod.__doc__
+        assert doc is not None
+        assert "lifespan" in doc.lower()  # the true seam is named…
+        # …and the retired event-handler claims are gone.
+        assert "has NO\nlifespan" not in doc
+        assert "has NO lifespan" not in doc
+        assert "registers ``startup``/``shutdown`` event handlers" not in doc
+
+    def test_build_app_docstring_names_the_lifespan_seam(self) -> None:
+        pytest.importorskip("fastapi")
+        from brutex.dashboard.app import build_app
+
+        doc = build_app.__doc__
+        assert doc is not None
+        assert "lifespan" in doc.lower()
+        assert "registers ``startup``/``shutdown`` event handlers" not in doc

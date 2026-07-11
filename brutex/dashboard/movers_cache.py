@@ -1061,6 +1061,13 @@ class MoversSnapshotCache:
           field; serving past ``adaptive_floor_cap_s`` escalates via
           ``movers_cache.stale_extended``). Never engaged on a MISS (no entry
           to serve) — the cold first read stays the blocking single-flight.
+          BOTH stale-serving arms re-check the slot under the serve lock: a
+          CLEAN entry that raced in since the fast-path miss (a foreign
+          thread's store / a landed revalidator / the warm reseed) is served
+          as a plain hit — never a one-store-older snapshot, never a
+          ``stale_served`` log for a stale serve that did not happen
+          (round-3 review; the SWR arm's re-check runs BEFORE the spawn, the
+          post-spawn window is a disclosed residual).
         * **Miss / stale** — no entry, or the entry's generation is stale (a
           write landed) past the floor / with no floor: run ``compute``
           (outside the lock), store the result stamped with *generation*, evict
@@ -1128,19 +1135,31 @@ class MoversSnapshotCache:
                 cap_s=self._adaptive_floor_cap_s,
             )
             if age < effective_floor:
-                _LOG.info(
-                    "movers_cache.stale_served",
-                    stale=True,
-                    key=key,
-                    age_s=round(age, 3),
-                    floor_s=round(effective_floor, 3),
-                    entry_generation=entry.generation,
-                    generation=generation,
-                )
+                raced_clean = False
                 with self._lock:
+                    # Round-3 review: re-read under the serve lock — a racing
+                    # store (a foreign thread's compute / an SWR revalidator /
+                    # the warm reseed) may have landed a CLEAN entry for THIS
+                    # generation between the fast-path miss and this serve.
+                    # Serve the fresh value as a plain hit instead of a
+                    # one-store-older snapshot — and never log a stale serve
+                    # that did not happen (the stale_served law).
+                    latest = self._entries.get(key)
+                    if latest is not None and latest.generation == generation:
+                        entry, raced_clean = latest, True
                     if key in self._entries:
                         self._entries.move_to_end(key)  # keep the served key MRU.
                     recovered = self._note_result_locked(key, mru_prefix)
+                if not raced_clean:
+                    _LOG.info(
+                        "movers_cache.stale_served",
+                        stale=True,
+                        key=key,
+                        age_s=round(age, 3),
+                        floor_s=round(effective_floor, 3),
+                        entry_generation=entry.generation,
+                        generation=generation,
+                    )
                 if recovered:
                     self._log_probe_recovered(key, mru_prefix)
                 return entry.value  # type: ignore[return-value]
@@ -1156,6 +1175,27 @@ class MoversSnapshotCache:
         # flight falls through to the untouched inline single-flight (an idle
         # stamp is stable ⇒ the recompute is the cheap manifest-first read).
         if entry is not None and self._swr and not force_fresh:
+            recovered = False
+            raced_clean = False
+            with self._lock:
+                # Round-3 review: the same racing-store re-check BEFORE the
+                # revalidator spawn — a CLEAN entry that landed for THIS
+                # generation since the fast-path miss is served as a plain hit
+                # (no spawn, no stale_served log for a stale serve that did
+                # not happen). The residual window between the spawn below and
+                # the serve tail is disclosed, not closed: re-reading there
+                # would swallow an inline test runner's own store and invert
+                # the deterministic serve-stale seam the suite pins — the
+                # revalidator's store converges the NEXT read either way.
+                latest = self._entries.get(key)
+                if latest is not None and latest.generation == generation:
+                    entry, raced_clean = latest, True
+                    self._entries.move_to_end(key)  # a plain hit — mark MRU.
+                    recovered = self._note_result_locked(key, mru_prefix)
+            if raced_clean:
+                if recovered:
+                    self._log_probe_recovered(key, mru_prefix)
+                return entry.value  # type: ignore[return-value]
             revalidate_state = self._ensure_revalidator(
                 key, generation, compute, spawn_if_absent=self._pull_active()
             )
