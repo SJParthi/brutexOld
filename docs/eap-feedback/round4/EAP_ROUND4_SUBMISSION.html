@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Claude Code Projects (beta) — Round-4 Feedback</title>
+<style>
+:root{--fg:#1a1a1a;--muted:#5b6470;--bg:#ffffff;--accent:#b4530a;--accent2:#0a5fb4;
+--border:#e2e6ea;--code-bg:#f5f7f9;--th-bg:#f0f3f6;--row-alt:#fafbfc;}
+*{box-sizing:border-box;}
+html{-webkit-text-size-adjust:100%;}
+body{margin:0;background:#eef1f4;color:var(--fg);
+font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.wrap{max-width:920px;margin:0 auto;background:var(--bg);padding:46px 56px 80px;
+box-shadow:0 1px 4px rgba(0,0,0,.08);}
+h1{font-size:22px;line-height:1.28;margin:40px 0 12px;letter-spacing:-.01em;
+color:#fff;background:var(--accent2);padding:11px 18px;border-radius:8px;}
+main>h1:first-child{font-size:30px;color:var(--fg);background:none;padding:0;
+margin:0 0 6px;}
+h2{font-size:25px;margin:42px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--accent);
+letter-spacing:-.01em;}
+h3{font-size:19px;margin:30px 0 6px;color:var(--accent2);}
+h4{font-size:16px;margin:18px 0 4px;color:var(--fg);}
+h5,h6{font-size:15px;margin:14px 0 4px;color:var(--muted);}
+p{margin:9px 0;}
+a{color:var(--accent2);}
+strong{font-weight:650;}
+hr{border:0;border-top:1px solid var(--border);margin:30px 0;}
+ul,ol{margin:8px 0 8px 4px;padding-left:22px;}
+li{margin:4px 0;}
+code{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;
+padding:1px 5px;font:13.5px/1.4 "SF Mono",ui-monospace,Menlo,Consolas,monospace;
+word-break:break-word;}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;
+padding:14px 16px;overflow:auto;margin:12px 0;}
+pre code{background:none;border:0;padding:0;font-size:13px;
+white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px;display:block;overflow-x:auto;}
+th,td{border:1px solid var(--border);padding:8px 11px;text-align:left;vertical-align:top;}
+th{background:var(--th-bg);font-weight:650;}
+tbody tr:nth-child(even){background:var(--row-alt);}
+@media (max-width:680px){.wrap{padding:24px 18px 60px;}h1{font-size:24px;}}
+@media print{body{background:#fff;}.wrap{box-shadow:none;max-width:none;padding:0;}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<h1>Claude Code Projects (beta) &mdash; Round-4 Feedback</h1>
+<h2>Issues at a glance</h2>
+<table>
+<thead><tr><th>#</th><th>Observation</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>The <strong>project-level default reasoning effort is ignored</strong> &mdash; every new session comes up at the platform default (High). Proven 2026-07-10 by a controlled double-canary experiment (Max &rarr; High, Extra &rarr; High); the model default (Fable 5) mapped correctly both times.</td></tr>
+<tr><td>2</td><td>Correcting the <strong>effort across multiple sessions in quick succession</strong> triggers a Claude Code <strong>desktop app auto-restart</strong> &mdash; the trigger is consistent for us; cause not captured.</td></tr>
+<tr><td>3</td><td>With more than 10 parallel sessions, transient rate-limit / &ldquo;service busy&rdquo; / API errors cluster around <strong>session-create bursts</strong>.</td></tr>
+<tr><td>4</td><td><strong>Cross-session messages dropped mid-turn</strong> &mdash; twice on 2026-07-10, both silently; recovered only via fallback channels.</td></tr>
+<tr><td>5</td><td>Sessions <strong>cannot be DELETED from the coordinator</strong> &mdash; it can create, list, open, and message every session in the fleet, but has no way to delete (or close/archive) one; verified against the full coordinator tool registry.</td></tr>
+<tr><td>6</td><td><strong>False &ldquo;needs input&rdquo; badges</strong> &mdash; sessions flagged when nothing is pending.</td></tr>
+<tr><td>7</td><td><strong>Actively-working sessions show &ldquo;idle&rdquo;</strong> &mdash; the status appears to track only the main conversation turn.</td></tr>
+</tbody>
+</table>
+<hr/>
+<h2>What we would love (raised gently)</h2>
+<ul>
+<li><strong>Apply the project-level default Effort</strong> to new and coordinator-spawned sessions; expose the effective effort to the session (or via an API); unify the &ldquo;Max&rdquo; (settings) vs &ldquo;Ultracode&rdquo; (session control) naming.</li>
+<li><strong>A look at the desktop restart</strong> on rapid effort changes &mdash; the one crash we can trigger reliably; we will gladly capture diagnostics.</li>
+<li><strong>Guidance on the fleet envelope</strong> &mdash; is more than 10 parallel sessions in one Project intended, and should session creation be paced?</li>
+<li><strong>Delivery guarantees for cross-session messages</strong> &mdash; a receipt, a queued retry, or a dead-letter surface; delayed is fine, silently lost is not.</li>
+<li><strong>Coordinator-level session deletion/archival</strong> &mdash; gated on a verified-complete check.</li>
+<li><strong>A &ldquo;needs input&rdquo; badge that clears</strong> when nothing is pending.</li>
+<li><strong>State indicators that reflect background/agent activity</strong> &mdash; or at minimum a last-activity timestamp.</li>
+</ul>
+<hr/>
+<h2>Open questions</h2>
+<ul>
+<li>Is the desktop auto-restart under rapid effort changes a known crash class, and is there a log or crash report we could capture next time?</li>
+<li>Is more than 10 parallel sessions in one Project within the intended beta envelope, and is there a recommended session-create pacing?</li>
+<li>What are the intended delivery semantics of cross-session messaging &mdash; must a coordinator verify receipt itself?</li>
+<li>If the coordinator can create, list, and message sessions, why can it not delete one? Is deletion deliberately UI-only, or simply not yet exposed?</li>
+<li>Is the session list&rsquo;s state indicator meant to track only the main conversation turn? That would explain items 6 and 7.</li>
+<li>Can a session audit its own effective reasoning effort? Both canaries confirmed no effort field exists anywhere in a session&rsquo;s own context.</li>
+<li>What is the relationship between the settings dropdown&rsquo;s &ldquo;Max&rdquo; and the session-side &ldquo;Ultracode&rdquo; (asked in round 2, still open &mdash; item 1 attaches side-by-side evidence)?</li>
+</ul>
+<hr/>
+<h2>Details</h2>
+<h3>1 &mdash; The project-level default reasoning effort is ignored: every new session comes up at the platform default (High)</h3>
+<p>Proven 2026-07-10 by a controlled double-canary experiment. With Project Settings &rarr; Effort set to <strong>Max</strong>, a freshly-spawned canary read <strong>&ldquo;Fable 5 &middot; High&rdquo;</strong> (effort popover: &ldquo;Default (High)&rdquo;); after changing the default to <strong>Extra</strong> and saving, a second canary again read <strong>High</strong>. The <strong>model</strong> default (Fable 5) mapped correctly in both spawns &mdash; the defect is effort-only. Day-to-day observation matches: every new session, coordinator-spawned or manual, comes up at High. Two sub-findings: <strong>(a)</strong> a session cannot introspect its own effort &mdash; no effort field exists anywhere in its own context, so the UI footer is the only place the truth is visible; <strong>(b)</strong> the settings dropdown says &ldquo;Max&rdquo; while the session-side control says &ldquo;Ultracode&rdquo; &mdash; the round-2 naming question, now with evidence.</p>
+<p><strong>Why it matters:</strong> the human must correct every session by hand &mdash; across more than 10 parallel sessions, exactly the toil the project default exists to remove &mdash; and the correction sweep triggers item 2.</p>
+<p><strong>Suggested fix:</strong> apply the project default Effort at session create; expose the effective effort programmatically; unify the Max/Ultracode naming.</p>
+<h3>2 &mdash; Desktop app auto-restarts when correcting the effort across multiple sessions in quick succession</h3>
+<p>Working around item 1 means changing the effort session by session &mdash; and doing so in quick succession reproducibly restarts the Claude Code desktop app mid-fleet-operation. No crash report captured, so we cannot say what dies; the trigger is consistent for us.</p>
+<p><strong>Why it matters:</strong> the workaround for the ignored default steers straight into the one crash we can reproduce, and we lose our place in the fleet each time.</p>
+<p><strong>Suggested fix:</strong> point us at a crash log or debug flag and we will capture diagnostics; fixing item 1 removes most of the trigger.</p>
+<h3>3 &mdash; Scale instability on session-create bursts (more than 10 parallel sessions)</h3>
+<p>At fleet scale, transient errors &mdash; rate-limit messages, &ldquo;service busy&rdquo;, generic API errors, occasional sudden restarts &mdash; cluster when several sessions are spun up in a short burst, more than during steady-state work. As in round 3, we cannot isolate the cause (create burst vs. open-session count vs. coordinator traffic) &mdash; this is the pattern, not a proven mechanism.</p>
+<p><strong>Why it matters:</strong> batch spin-up is the coordinator&rsquo;s natural rhythm, so it repeatedly steers into the destabilizing maneuver.</p>
+<p><strong>Suggested fix:</strong> a documented safe create rate, or back-off-and-retry on session creation so a burst degrades to a queue rather than to errors.</p>
+<h3>4 &mdash; Cross-session messages drop mid-turn, silently</h3>
+<p>Twice on 2026-07-10, in two different fleet sessions, a <code>send_message</code> delivery was lost mid-turn with no error surfaced to the sender: a verifier session&rsquo;s verdict (recovered via a PR-comment fallback plus a team-memory dead-drop) and a decision message from another session (recovered later via team memory and re-confirmation). Both recoveries worked only because the sessions had independently built fallback channels.</p>
+<p><strong>Why it matters:</strong> a silently-dropped coordination message is worse than a failed one &mdash; the sender believes coordination happened, and the fleet quietly diverges.</p>
+<p><strong>Suggested fix:</strong> a delivery receipt, a queued retry, or a dead-letter surface &mdash; delayed is fine, silently lost is not.</p>
+<h3>5 &mdash; Sessions cannot be DELETED from the coordinator</h3>
+<p>The coordinator can create, list, open, and message sessions &mdash; yet it cannot delete one. No delete (or close/archive) capability exists &mdash; verified against the full tool registry available to the coordinator. Completed sessions accumulate in the project view; today a watchdog session compiles an evidence-backed &ldquo;safe to close&rdquo; list that the human executes by hand. One hedge: the docs reference a server-side session-creation surface, so a delete counterpart may exist internally, unexposed.</p>
+<p><strong>Why it matters:</strong> creation without retirement is half a lifecycle &mdash; the fleet only ever grows, and the decision that most needs to be safe-by-default falls on the human.</p>
+<p><strong>Suggested fix:</strong> coordinator-level session deletion/archival, gated on a verified-complete check.</p>
+<h3>6 &mdash; &ldquo;Needs input&rdquo; badge shows when nothing needs input</h3>
+<p>Sessions repeatedly show a &ldquo;needs input&rdquo; badge, yet opening them reveals no pending question, prompt, or permission request. The badge&rsquo;s mechanism is invisible from our side &mdash; stale or mis-set, we cannot tell.</p>
+<p><strong>Why it matters:</strong> the badge is the operator&rsquo;s primary triage signal at fleet scale &mdash; false positives cost round trips and teach the operator to distrust it.</p>
+<p><strong>Suggested fix:</strong> clear the badge when the input is resolved or was never pending.</p>
+<h3>7 &mdash; Actively-working sessions show as &ldquo;idle&rdquo;</h3>
+<p>The inverse of item 6: sessions demonstrably mid-work &mdash; background workers running, CI being driven &mdash; read &ldquo;idle&rdquo; in the session list, corroborated by the coordinator&rsquo;s activity digests and a watchdog&rsquo;s sweeps. The status appears to track only the main conversation turn, not background/agent activity.</p>
+<p><strong>Why it matters:</strong> with item 6, the state column cannot be trusted in either direction &mdash; the operator either interrupts live work or leaves stuck sessions unattended.</p>
+<p><strong>Suggested fix:</strong> reflect background/agent activity in the state, or add a last-activity timestamp beside it.</p>
+<hr/>
+<p><em>Prepared 2026-07-10. Where we could not prove a cause, we say so plainly.</em></p>
+</main>
+</body>
+</html>
