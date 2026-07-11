@@ -309,10 +309,51 @@ posture says no coupling beyond `rust/trading-core` exists).
   keep-frozen-containers set for the ratified deletions (state/retry/
   pipeline/store/quota_tracker/adaptive_rate_limiter), the
   DEC-EXECUTION-TRIO-DELETE-001 pattern (subsumes the former
-  store-census/adaptive-deletion follow-ups).
+  store-census/adaptive-deletion follow-ups). **EXECUTED — phase 2a
+  (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727b; §8 below).**
 * **F3** — `phase_throughput.py` dormant-telemetry disposition
   (delete-candidate; confirm in the same grep-proof pass).
 * **F4** — deletion request for the dead `fno-math` compat `TradingCalendar`
   routed to the KERNEL TRACK (their crate — zero non-test consumers; not
   touched by this slice).
 * **F5** — the TickVault calendar-export pattern (§5), demand-gated, own DEC.
+
+## 8. Phase 2a execution record — the deletions (2026-07-11)
+
+**DEC-ORCH-DEAD-SCAFFOLD-DELETE-001 (MIGRATION.md #1727b)** executed F2 on
+this branch, after phases 1 (goldens) + 2b-1 (audit + calendar Rust ports)
+landed. Every §3 zero-production-caller claim was RE-PROVEN by grep at head
+`4037789` before deletion (only `audit.py` — a KEEP module — had changed in
+`brutex/orchestrator/` since the claims were cut).
+
+* **Deleted whole:** `retry.py` (360) · `store.py` (619) ·
+  `adaptive_rate_limiter.py` (474) + their test files. The §6 retry.py
+  phantom-docstring finding died with the module — nothing to fix.
+* **Deleted with kept shapes:** `state.py` (527) + `pipeline.py` (737) —
+  the LIVE shapes moved VERBATIM to the new stdlib-only leaf
+  `brutex/orchestrator/events.py`: `IngestPhase`, `PipelineEventKind`,
+  `PipelineEvent`, `EventSubscriber`, **plus `WorkItemState`** (a deliberate
+  one-symbol widening of the planned keep-set: it is the declared type of
+  `PipelineEvent.item_state`, and the dashboard reads
+  `event.item_state.value` — the shape could not move without it).
+* **Trimmed in place:** `quota_tracker.py` 544→137 — the exceptions
+  (`DailyQuotaExceeded`, `QuotaInvariantError`) keep their byte-stable
+  import path (the ingest spines' global-stop sets + the Telegram halt
+  matcher are load-bearing); the dormant `DailyQuotaTracker` machinery is
+  DELETED behind the new structural **`QuotaGate` Protocol** on the ONE
+  re-wire seam (`RateController(quota_tracker=)` /
+  `AdaptiveTokenBucket.quota_tracker`). This explicitly SUPERSEDES
+  DEC-QUOTA-VERDICT-MOOT-001 (#1591)'s KEEP-DORMANT clause for this module
+  only — the full supersession wording lives in MIGRATION.md #1727b.
+* **The §3 hazard-map hazards all discharged:** `__init__.py` rewritten in
+  the same commit (hazard 3); the ci.yml per-PR blocking mutmut gate
+  RETARGETED `state.py` → `brutex/data/parser.py` on measured runs
+  (parser 33 mutants / 100.00% killed / 72 s; the partition.py candidate
+  measured 109 / 100.00% / 240 s — too budget-close on shared runners);
+  bench-m4pro.yml's `test_store_o1.py` token removed (hazard 4); the
+  rate_limiter quota tests rewritten against a fake `QuotaGate` so its
+  100% gate stayed green (hazard 5); the doc file:line cites reconciled
+  (hazard 6).
+* **F3 (`phase_throughput.py`) remains OPEN** — dormant but outside the
+  ratified deletion set.
+

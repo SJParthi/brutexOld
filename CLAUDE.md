@@ -2094,7 +2094,26 @@ hostile-review pass._
   request for the dead fno-math compat TradingCalendar). The retry.py phantom-docstring fix is
   DELIBERATELY SKIPPED (retry.py is in the ratified deletion scope — recorded in ADR-0019 §6). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; both new suites ride the existing
-  golden job — 493 passed; ruff/ruff-format/`mypy --strict` clean, pyright 0 errors.)
+  golden job — 493 passed; ruff/ruff-format/`mypy --strict` clean, pyright 0 errors.
+  **PHASE 2a LANDED (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727b — the entry renumbered
+  1727 → 1727a when the deletion record took 1727b, the 613a/613b both-suffixed convention):** the
+  ratified dead-scaffolding DELETION executed after the 2b-1 Rust ports — every zero-production-caller
+  grep-proof re-run at head 4037789 and held; `state.py`/`pipeline.py`/`retry.py`/`store.py`/
+  `adaptive_rate_limiter.py` DELETED (2,717 source lines + 11 test files ≈6,185 lines) with the LIVE
+  shapes moved verbatim to NEW stdlib-only `brutex/orchestrator/events.py` (IngestPhase ·
+  PipelineEventKind · PipelineEvent · EventSubscriber · WorkItemState — the last a deliberate
+  one-symbol widening: it types `PipelineEvent.item_state`, which the dashboard reads);
+  `quota_tracker.py` TRIMMED in place 544→137 (the load-bearing `DailyQuotaExceeded`/
+  `QuotaInvariantError` keep their byte-stable import path; the dormant tracker machinery deleted
+  behind the NEW structural `QuotaGate` Protocol on the ONE `RateController(quota_tracker=)` re-wire
+  seam — explicitly superseding DEC-QUOTA-VERDICT-MOOT-001 #1591's KEEP-DORMANT clause for this module
+  only, its exception-sets-not-narrowed pins PRESERVED); `__init__.py` rewritten same-commit; the
+  ci.yml per-PR BLOCKING mutmut gate RETARGETED state.py → `brutex/data/parser.py` on MEASURED runs
+  (33 mutants / 100.00% killed / 72 s; the partition.py candidate measured 109 / 240 s — too
+  budget-close); the deleted modules' ci.yml gates replaced by events.py + trimmed-quota_tracker
+  gates (both 100.00% line+branch); mutation.yml loop pairs −3; bench-m4pro.yml's stale
+  test_store_o1.py token removed; docs/ENV_VARS/STANDARDS rows reconciled. ZERO production behavior
+  change; §2 Rule 6 values byte-untouched; rust/ untouched by this phase.)
   Earlier: `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
   renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
   cascade reserved #1633–#1649 — see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history — and the in-flight
@@ -5308,9 +5327,13 @@ hostile-review pass._
   orchestrator/NSE-calendar Rust CONVERSION program, parity-gated by the two
   frozen goldens shipped in this pass (audit-chain byte layout + the 2,557-day
   calendar verdict table); operator-overridden from the judged keep-Python
-  verdict under the ratified "live → Rust, dead → DELETED" principle; the port
-  + deletions land as later phases behind the goldens; ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  verdict under the ratified "live → Rust, dead → DELETED" principle; the
+  audit + calendar Rust ports landed as phase 2b-1 and the dead-scaffolding
+  DELETION landed as phase 2a (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+  MIGRATION.md #1727b — state/pipeline/retry/store/adaptive_rate_limiter
+  deleted, live shapes kept in `orchestrator/events.py` + the `QuotaGate`
+  Protocol, the blocking mutmut gate retargeted to `data/parser.py`);
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
   Earlier: `claude/groww-market-hours-guard`
   (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE
   market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
@@ -5664,7 +5687,10 @@ bruteX/
 │   ├── notifications/
 │   ├── observability/
 │   ├── options/                    ← expiry/strike/lot-size rules (lake)
-│   ├── orchestrator/               ← FSM + audit + rate limiter
+│   ├── orchestrator/               ← audit chain + rate limiter +
+│   │                                 live pipeline event shapes (the dead
+│   │                                 FSM/retry/pipeline/store scaffolding
+│   │                                 was DELETED — MIGRATION.md #1727b)
 │   ├── ranking/                    ← composite ranking + rejection gates
 │   ├── strategies/                 ← 52-vocabulary engine (Phase 3)
 │   └── vocabulary/                 ← 52-condition evaluator (→ trading_core)

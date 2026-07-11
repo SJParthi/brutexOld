@@ -53,7 +53,7 @@
 | # | Requirement | Verdict | Evidence | Risk |
 |---|---|---|---|---|
 | P-01 | **"100% standards / 18 requirements"** | 🟢 LARGELY CLOSED | Was "9 of 21 ✅ / ~22%" at the original audit; the DEC-STANDARDS-AUDIT-001 → DEC-CROSSWALK-001 → DEC-PYLINT-DROP-001 → DEC-DOCTOR-001 → DEC-STRESS-001 arc ratcheted it to **15 of 21 sub-rows 🟢 ENFORCED; 2 🟡 PARTIAL; 1 📋 ROADMAP; 3 👁️ MANUAL → ~71%** (per `STANDARDS_100PCT.md:67-86`, re-verified 2026-06-08; CLAUDE.md §2 rule 12 reconciled by DEC-DOC-STANDARDS-RECONCILE-001). CLAUDE.md §2 rule 12 still presents all 18 as the binding *target*; the honest-envelope block now cites the real 71%. | Decree-vs-reality gap narrowed from ~60% → ~14% (remaining: 2 partial coverage rows + 1 throughput-runner roadmap). |
-| P-02 | **"Mutation score ≥ 85%"** | 🟠 | Covers ONE module (`brutex/orchestrator/state.py` at 98%). 4 prior PRs used `OPERATOR_OVERRIDE` to bypass entirely (DEC-P0-005). | Headline gate covers ~1% of package. |
+| P-02 | **"Mutation score ≥ 85%"** | 🟠 | The per-PR blocking gate covers TWO modules (`brutex/data/parser.py` — retargeted from the deleted `orchestrator/state.py` by MIGRATION.md #1727 — + `brutex/money.py`); the broad weekly pass lives in mutation.yml. 4 prior PRs used `OPERATOR_OVERRIDE` to bypass entirely (DEC-P0-005). | Headline per-PR gate covers ~1% of package. |
 | P-03 | **"2-4 day SLA at 80-150K trials/sec"** | 🟠 | PERFORMANCE_BUDGET §5: "OPTIMISTIC" tier. Realistic is "20-50K" (7-20 days), conservative "5-15K" (25-75 days). MIGRATION #98: probability 55-65%. **No measured M4 Pro throughput.** | Operator plans against 2-4 days; actual likely 7-20+. |
 | P-04 | **`BRUTEX_SAFETY_FACTOR=0.6` configurable** | 🟠 | CI env-var set; **zero code reads it**. `DEFAULT_INITIAL_RPS = 3.0` hardcoded in `rate_limiter.py:88`. "5 × 0.6" math is comment-only. | Misleading configurability. |
 | P-05 | **GrowwToken redaction** | 🟠 | `__repr__`/`__str__` redact. NO `__reduce__`/`__getstate__` override → `pickle.dumps(token)` serializes plain. NO deepcopy guard. No adversarial tests. `_value` is public-ish. | structlog event or pickle of any state holding the token leaks silently. |
@@ -104,7 +104,7 @@
 | L-02 | Native intraday TFs (1/5/15/25/60 only) | CLAUDE.md §6 + MIGRATION #54 (self-corrected) |
 | L-03 | DEC-PROTOCOL-001 retired | CLAUDE.md header + MIGRATION #164 |
 | L-04 | Spot indices not tradable → no slippage on spot | TRACK1_BACKTEST_SPEC.md:518-531 |
-| L-05 | IST midnight quota reset | `brutex/orchestrator/quota_tracker.py:103-110` uses `ZoneInfo("Asia/Kolkata")` |
+| L-05 | IST midnight quota reset | HISTORICAL — the dormant `DailyQuotaTracker` (IST-midnight rollover, DEC-P0-028) was deleted with its module trim (MIGRATION.md #1727); the policy record lives in the ledger, and a future `QuotaGate` implementation re-adopts it |
 | L-06 | 21 timeframes enforced | `brutex/data/timeframes.py:28-69` + compile-time assertion |
 | L-07 | 52 atomic conditions enforced | `brutex/vocabulary/bits.py:23-91` + assertion |
 | L-08 | Muhurat session handled | `brutex/calendars/nse.py:182-188, 210-212` |

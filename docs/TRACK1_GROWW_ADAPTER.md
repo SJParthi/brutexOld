@@ -260,7 +260,7 @@ Groww SDK exposes 11 exception classes (`brutex/adapters/groww/groww_errors.py` 
 | **L3 RECONCILE** | Daily reconciliation: for each (instrument, trading_day), compare expected bar count vs lake. Gap → re-queue + Telegram WARN | `brutex/orchestrator/replay.py` (existing oracle, extended) |
 | **L4 PREVENT** | Bloom + LMDB + audit JSONL hash-chain — already in place, broker-agnostic | `brutex/orchestrator/{bloom, store, audit}.py` |
 | **L5 AUDIT** | Every chunk fetch = 1 audit JSONL line with `vendor: groww` stamp; replay oracle verifies lake↔audit on each MonitorLoop tick | `brutex/orchestrator/audit.py` + `replay.py` |
-| **L6 RECOVER** | Process crash → audit log replay on startup → resume from last completed WorkItem (idempotent re-fetch) | `brutex/orchestrator/pipeline.py` (existing) |
+| **L6 RECOVER** | Process crash → durable window-ledger checkpoint on startup → re-pull only unsettled windows (idempotent keep-first sink) | `brutex/data/window_ledger_store.py` + `brutex/dashboard/pull_intent.py` *(the historical `orchestrator/pipeline.py` scaffolding was deleted — MIGRATION.md #1727)* |
 | **L7 COOLDOWN** | Auto-resume after rate-limit recovery + OPERATOR_OVERRIDE rate-limited per DEC-P0-008 pattern | `brutex/orchestrator/rate_limiter.py` (existing + adaptive ext) |
 
 **Key invariant:** even with 4 r/s throttle, account suspension, network down, or process crash — every (instrument, ts) bar tuple is FETCHED and STORED at least once. Idempotent re-fetch is safe because content_hash + Bloom + LMDB collapse duplicates.
@@ -367,12 +367,12 @@ The single most important design decision: **we do NOT write five separate error
 
 | Spine component | Guarantee it provides | Module | Status |
 |---|---|---|---|
-| **Pacer** (token bucket) | never exceed the rate; auto down/up-shift on 429s | `orchestrator/rate_limiter.py::AdaptiveTokenBucket` + `adaptive_rate_limiter.py` | ✅ built |
-| **Retry + backoff** | transient errors retry on an exponential ladder, then quarantine — never an infinite hammer, never a silent give-up | `orchestrator/retry.py::backoff_delay` + `fetch_loop.run_fetch` | ✅ built |
-| **Error translator** | all 11 `Groww*Exception` → neutral `Vendor*` → `Outcome` (retry / re-auth / quarantine / settle) | `adapters/groww/client.py` + `orchestrator/retry.py::classify_exception` | ✅ built |
+| **Pacer** (token bucket) | never exceed the rate; auto down/up-shift on 429s | `orchestrator/rate_limiter.py::AdaptiveTokenBucket` under `adapters/rate_common.py::RateController` | ✅ built |
+| **Retry + backoff** | transient errors retry on a bounded ladder, then quarantine — never an infinite hammer, never a silent give-up | `adapters/groww/errors.py::is_retryable` + the client `max_attempts` ladder *(the unwired `orchestrator/retry.py` scaffolding was deleted — MIGRATION.md #1727)* | ✅ built |
+| **Error translator** | all 11 `Groww*Exception` → typed `Groww*Error` → retry / re-auth / quarantine / settle | `adapters/groww/client.py` + `adapters/groww/errors.py` | ✅ built |
 | **Watermark** | crash-safe resume; settled work (COMPLETED / NO_DATA) never re-pulled | `data/watermark.py::FetchWatermark` | ✅ built |
 | **Audit** | every action = one hash-chained JSONL line (`vendor: groww`) | `orchestrator/audit.py` | ✅ built |
-| **Quota** | the 100K/day ceiling halts cleanly, resumes next IST day *(HISTORICAL — operator-confirmed 2026-06-13: backtesting has **NO daily quota**, DEC-GROWW-RATE-PERMIN-001; the live build sites wire `quota_tracker=None`)* | `orchestrator/quota_tracker.py` | ✅ built (wiring pending) |
+| **Quota** | a wired gate halts cleanly on the vendor's daily ceiling *(HISTORICAL — operator-confirmed 2026-06-13: backtesting has **NO daily quota**, DEC-GROWW-RATE-PERMIN-001; the live build sites wire `quota_tracker=None`; the dormant tracker was DELETED behind the `QuotaGate` Protocol — MIGRATION.md #1727)* | `orchestrator/quota_tracker.py` (exceptions + `QuotaGate` seam) | ✅ seam kept |
 | **Sink / Store** | parsed records land idempotently (Bloom + content-hash dedup) | `data/sink.py` (bars) · `data/instrument_store.py` (instruments/expiries/contracts) | ✅ built |
 
 **The template is `GrowwCandleFetcher`** (`adapters/groww/client.py`): pace → call SDK → extract → translate errors → return. Each new surface is the same five steps against a different SDK method, feeding a different store. This is CLAUDE.md §11 **COMMON** (one spine, no copy-paste) + **DYNAMIC** (add a surface without re-architecting).
