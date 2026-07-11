@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
+from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from hypothesis import HealthCheck
 from hypothesis import settings as _hyp_settings
@@ -43,6 +44,23 @@ _hyp_settings.register_profile(
     suppress_health_check=(HealthCheck.too_slow,),
 )
 _hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
+
+# DEC-GROWW-MARKET-HOURS-GUARD-001 test hermeticity (the #1380 philosophy —
+# hermetic against the real HOST, here the WALL CLOCK instead of the disk):
+# the market-hours START gate's production default (`guard_active_default`)
+# reads the REAL clock + `os.environ`, so any test that starts a
+# `BackgroundPullJob` / drives a pull route WITHOUT injecting a guard would
+# pass out-of-hours and FAIL between 08:45-15:35 IST on an NSE trading day (a
+# wall-clock flake class over the whole suite — reproduced locally 2026-07-10
+# 12:02 IST: 13 untouched `test_dashboard_pull_stall.py` starts deferred).
+# The suite therefore runs under the DOCUMENTED operator kill switch
+# (`BRUTEX_MARKET_HOURS_GUARD=0`, `setdefault` so an explicit outer choice
+# wins). The guard's OWN tests stay fully armed on both arms — they inject
+# `env=` mappings / guard callables / monkeypatched clocks explicitly
+# (test_market_hours.py, the gate tests in test_pull_jobs.py /
+# test_cli_retry_storm.py / test_nightly_pipeline_binding.py) — so this
+# default disables ONLY the ambient real-clock read, never the tested law.
+os.environ.setdefault(MARKET_HOURS_GUARD_ENV, "0")
 
 
 @pytest.fixture
