@@ -2223,7 +2223,13 @@ hostile-review pass._
   8-cell sub-grid twin (2 TFs incl. a 93,750-bar 1-minute-shaped tuple × k∈{2,5} × top∈{20, 1000}) ALL
   store-hash BYTE-IDENTICAL at 0.90–1.07× end-to-end (the honest claim is byte-identity + no regression —
   the 46.9× is the segment's); `docs/design/sweep_core/combo_counts.md` on-branch with §1/§2 verbatim +
-  the withdrawn §3 REPLACED by the round-5 SPLIT-law bottom-up rebuild. REAL-DATA TWIN-RUN packaging
+  the withdrawn §3 REPLACED by the round-5 SPLIT-law bottom-up rebuild (REVIEW ROUND 1 fold: the §3.4
+  term-2 table's ×1000 unit slip corrected — ≈6.0 min/≈12.3 min per 1-minute tuple, NOT 98 h/206 h — and
+  the "count-term dominated" conclusion honestly INVERTED to TERM-3 dominated at `top=1000` (≈24–39
+  min/tuple at the real ~555k-bar window), recomputation-pinned by NEW
+  `tests/unit/test_combo_counts_doc_pin.py`; the twin-run workflow's dead `twin_start`/`twin_end`
+  dispatch inputs wired into the step env + every-input-consumed pin; the ci.yml gate comment's stale
+  151/66 size figure dropped + negative-pinned — per-fix record in MIGRATION.md #1738). REAL-DATA TWIN-RUN packaging
   (coordinator ruling 2026-07-11 — a MERGE GATE pending real-lake execution on the operator box):
   `scripts/ci/rust_enum_twin_run.sh` (lake-READ-ONLY, scratch roots, PASS/FAIL + hash manifests for the PR
   body, refuses a pre-set flag, macOS bash-3.2-safe) + the `rust-enum-twin-run.yml` M4-Pro dispatch job;
