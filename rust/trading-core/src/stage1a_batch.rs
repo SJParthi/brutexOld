@@ -65,6 +65,20 @@ pub const MIN_PRIOR_N: usize = 1;
 /// See [`MIN_PRIOR_N`].
 pub const MAX_PRIOR_N: usize = 4;
 
+/// Upper bound for `fractal_k` (the BOS/CHoCH swing look-back; production
+/// passes the literal 2). [`MarketStructureState::new`] computes a `2*k + 1`
+/// deque capacity under `overflow-checks = true` + `panic = "abort"`, so an
+/// unbounded hostile `k` (e.g. `2^64 - 1`, or `2^62` via capacity overflow)
+/// would SIGABRT the whole interpreter through the FFI (refuter RF-B F2);
+/// rejected in [`validate_structure`] so the panic is unreachable. 64 is
+/// comfortably above every conceivable production value while keeping the
+/// allocation trivially safe — a swing needs `2k + 1` bars to confirm, so a
+/// larger `k` could never fire on a real intraday stream anyway. NOTE: the
+/// pre-existing frozen `MarketStructureState` PYCLASS has the same abort
+/// behaviour for a direct hostile construction — deliberately NOT touched
+/// (frozen TickVault-shared surface, out of this slice's scope).
+pub const MAX_FRACTAL_K: usize = 64;
+
 /// The flat column/table view of one Stage-1A batch build.
 ///
 /// Per-bar columns are all length `N` (bar order); the per-day tables carry
@@ -153,9 +167,10 @@ pub struct Stage1aBatchInputs<'a> {
 /// * `day_index` starts at 0, steps by 0 or 1, and its final value satisfies
 ///   `last + 1 == D` (every day row consumed — the G-2 terminal check; the
 ///   step law subsumes "non-decreasing and `< D`");
-/// * `prior_n ∈ MIN_PRIOR_N..=MAX_PRIOR_N`; `fractal_k >= 1` (the native
-///   [`MarketStructureState::new`] would `assert!` on 0 — rejected here so the
-///   panic is unreachable).
+/// * `prior_n ∈ MIN_PRIOR_N..=MAX_PRIOR_N`; `fractal_k ∈ 1..=MAX_FRACTAL_K`
+///   (the native [`MarketStructureState::new`] would `assert!` on 0 and
+///   overflow-abort on a huge `k` — both rejected here so the panic is
+///   unreachable; refuter RF-B F2).
 pub fn validate_structure(inp: &Stage1aBatchInputs<'_>) -> Result<usize, String> {
     let n = inp.open_paisa.len();
     for (name, len) in [
@@ -210,8 +225,11 @@ pub fn validate_structure(inp: &Stage1aBatchInputs<'_>) -> Result<usize, String>
             inp.prior_n
         ));
     }
-    if inp.fractal_k < 1 {
-        return Err("stage1a_batch: fractal_k must be >= 1, got 0".to_string());
+    if !(1..=MAX_FRACTAL_K).contains(&inp.fractal_k) {
+        return Err(format!(
+            "stage1a_batch: fractal_k ({}) out of the [1, {MAX_FRACTAL_K}] domain",
+            inp.fractal_k
+        ));
     }
     if n == 0 {
         if n_days != 0 {
@@ -684,6 +702,20 @@ mod tests {
                 .unwrap_err()
                 .contains("fractal_k")
         );
+        // RF-B F2: the UPPER bound — an unbounded hostile k would
+        // overflow-abort inside MarketStructureState::new (2*k + 1 capacity
+        // under panic="abort"); the domain check must fire FIRST.
+        for huge in [MAX_FRACTAL_K + 1, 1 << 62, usize::MAX] {
+            v.fractal_k = huge;
+            assert!(
+                stage1a_bar_bits_batch_impl(&v)
+                    .unwrap_err()
+                    .contains("fractal_k")
+            );
+        }
+        // The bound itself is legal (boundary law).
+        v.fractal_k = MAX_FRACTAL_K;
+        assert!(stage1a_bar_bits_batch_impl(&v).is_ok());
     }
 
     #[test]
@@ -805,6 +837,102 @@ mod tests {
             "3 dojis == 3 bearish flags"
         );
         assert_eq!(masks[3] & (1u128 << crate::bits::BIT_PRIOR_N_BULLISH), 0);
+    }
+
+    /// The three POSITIVE dependency masks exactly as the Python dispatch
+    /// sends them (`stage1a.ANCHOR_DEPENDENT_MASK` / `FIB_DEPENDENT_MASK` /
+    /// `bits.APPLIES_TO_1DAY_MASK` — frozen vocabulary constants), so the
+    /// oracle-derived probe masks below replay under the REAL clears.
+    const REAL_ANCHOR_DEP: u128 = 0xf00003fffffc0;
+    const REAL_FIB_DEP: u128 = 0x3ff80000;
+    const REAL_APPLIES_1DAY: u128 = 0xfcf0fffffffffff;
+
+    /// Refuter RF-B F1(c): the mixed-direction ROLLING-WINDOW value pin.
+    ///
+    /// Directions B,B,B,R,R,R,B,B with `prior_n = 3` — expected masks derived
+    /// ONCE from the Python oracle (`Stage1AMatrixBuilder(prior_n=3).build`)
+    /// over the identical `collect_batch_inputs` columns. Kills BOTH
+    /// demonstrated survivors: `flags.remove(0)` → `pop()` freezes the FIRST
+    /// window ([B,B,B] forever — bar 6 would read all-BULLISH instead of the
+    /// oracle's all-BEARISH) and `push(close > open)` → `push(close < open)`
+    /// inverts every non-doji flag.
+    #[test]
+    fn mixed_direction_rolling_window_matches_the_python_oracle() {
+        let mut c = cols(8);
+        c.open = vec![
+            10_000, 10_500, 11_000, 11_500, 11_000, 10_500, 10_000, 10_500,
+        ];
+        c.high = vec![
+            10_600, 11_100, 11_600, 11_600, 11_100, 10_600, 10_600, 11_100,
+        ];
+        c.low = vec![9_900, 10_400, 10_900, 10_900, 10_400, 9_900, 9_900, 10_400];
+        c.close = vec![
+            10_500, 11_000, 11_500, 11_000, 10_500, 10_000, 10_500, 11_000,
+        ];
+        c.typical = vec![
+            10_333, 10_833, 11_333, 11_167, 10_667, 10_167, 10_333, 10_833,
+        ];
+        c.tod = vec![
+            33_300, 33_360, 33_420, 33_480, 33_540, 33_600, 33_660, 33_720,
+        ];
+        c.session_day = vec![738_887; 8];
+        let mut v = view(&c); // prior_n = 3, fractal_k = 2, bps 10/10/10
+        v.anchor_dependent_mask = REAL_ANCHOR_DEP;
+        v.fib_dependent_mask = REAL_FIB_DEP;
+        v.applies_to_1day_mask = REAL_APPLIES_1DAY;
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_eq!(
+            masks,
+            vec![
+                0x10040240000000,
+                0x10140240000000,
+                0x10140240000000,
+                0x10102280000000,
+                0x20100280000000,
+                0x20180280000000,
+                0x20104240000000,
+                0x10100240000000,
+            ]
+        );
+        // Anti-vacuous: the Group-6 window genuinely ROLLS across the stream
+        // (all-bullish at bar 3, all-bearish at bar 6 — a frozen-first-window
+        // mutant cannot reproduce both).
+        assert_ne!(masks[3] & (1u128 << crate::bits::BIT_PRIOR_N_BULLISH), 0);
+        assert_ne!(masks[6] & (1u128 << crate::bits::BIT_PRIOR_N_BEARISH), 0);
+    }
+
+    /// Refuter RF-B F1(c): the all-BULL prior-flag pin (`prior_n = 2`) —
+    /// oracle-derived masks; a direction-inverted `push(close < open)` mutant
+    /// flips bit 37 → 38 from bar 2 on.
+    #[test]
+    fn bull_stream_prior_flags_match_the_python_oracle() {
+        let mut c = cols(6);
+        c.open = vec![10_000, 10_200, 10_400, 10_600, 10_800, 11_000];
+        c.high = vec![10_300, 10_500, 10_700, 10_900, 11_100, 11_300];
+        c.low = vec![9_900, 10_100, 10_300, 10_500, 10_700, 10_900];
+        c.close = vec![10_200, 10_400, 10_600, 10_800, 11_000, 11_200];
+        c.typical = vec![10_133, 10_333, 10_533, 10_733, 10_933, 11_133];
+        c.tod = vec![33_300, 33_360, 33_420, 33_480, 33_540, 33_600];
+        c.session_day = vec![738_887; 6];
+        let mut v = view(&c);
+        v.prior_n = 2;
+        v.anchor_dependent_mask = REAL_ANCHOR_DEP;
+        v.fib_dependent_mask = REAL_FIB_DEP;
+        v.applies_to_1day_mask = REAL_APPLIES_1DAY;
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_eq!(
+            masks,
+            vec![
+                0x10040040000000,
+                0x10140040000000,
+                0x10142040000000,
+                0x10142040000000,
+                0x10142040000000,
+                0x10142040000000,
+            ]
+        );
+        assert_ne!(masks[2] & (1u128 << crate::bits::BIT_PRIOR_N_BULLISH), 0);
+        assert_eq!(masks[2] & (1u128 << crate::bits::BIT_PRIOR_N_BEARISH), 0);
     }
 
     #[test]

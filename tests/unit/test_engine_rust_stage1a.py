@@ -246,6 +246,49 @@ def test_memory_error_propagates_bare(monkeypatch: pytest.MonkeyPatch) -> None:
         rust_bar_bits_or_none(_inputs_for(bars), oracle=lambda: _oracle_for(bars))
 
 
+@pytest.mark.parametrize("hostile_k", [65, 2**62, 2**64 - 1])
+def test_hostile_fractal_k_raises_value_error_never_aborts(hostile_k: int) -> None:
+    # Refuter RF-B F2: an unbounded fractal_k used to SIGABRT the whole
+    # interpreter through the REAL FFI (MarketStructureState::new computes a
+    # 2*k + 1 capacity under overflow-checks + panic="abort" — exit 134 for
+    # 2**64-1 AND 2**62); validate_structure now caps it at MAX_FRACTAL_K=64
+    # so the panic is unreachable — a clean ValueError instead. The
+    # pre-existing MarketStructureState PYCLASS keeps the identical abort
+    # behaviour for a direct hostile construction (frozen TickVault-shared
+    # surface — deliberately untouched, out of this slice's scope).
+    inputs = _inputs_for(_two_day_feed())
+    with pytest.raises(ValueError, match="fractal_k"):
+        trading_core.stage1a_bar_bits_batch(
+            inputs.open_paisa,
+            inputs.high_paisa,
+            inputs.low_paisa,
+            inputs.close_paisa,
+            inputs.typical_paisa,
+            inputs.volume,
+            inputs.tod_seconds,
+            inputs.pre_open,
+            inputs.session_key,
+            inputs.session_day,
+            inputs.contract_reset,
+            inputs.day_index,
+            inputs.ema20_paisa,
+            inputs.ema200_paisa,
+            inputs.day_pivot_levels,
+            inputs.day_fib_levels,
+            inputs.day_has_pivot,
+            inputs.day_has_fib,
+            inputs.pivot_bps,
+            inputs.pdh_pdl_bps,
+            inputs.fib_bps,
+            inputs.prior_n,
+            inputs.anchor_dependent_mask,
+            inputs.fib_dependent_mask,
+            inputs.applies_to_1day_mask,
+            inputs.apply_1day_mask,
+            hostile_k,
+        )
+
+
 def test_burn_in_pass_consumes_budget_and_engages() -> None:
     bars = _two_day_feed()
     remaining_before = SELF_CHECK_BUILDS
