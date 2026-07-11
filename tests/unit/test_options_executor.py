@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -622,3 +623,53 @@ class TestExecRustDispatch:
         on = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=source)
         assert isinstance(on, MaterializedTrade)
         assert on == off
+
+    @pytest.mark.parametrize(
+        "wire",
+        [
+            list(range(16)),
+            list(range(18)),
+            list(range(20)),
+            list("abcdefghijklmnopq"),  # the pinned length 17, junk element types
+        ],
+        ids=["len-16", "len-18", "len-20", "len-17-wrong-type"],
+    )
+    def test_malformed_kernel_wire_warns_and_serves_the_python_arm(
+        self, monkeypatch: pytest.MonkeyPatch, wire: list[object]
+    ) -> None:
+        """The R3-F3 regression, reproduced at the EXACT reported path: a
+        wrong-arity options wire from the KERNEL previously raised
+        ``TypeError`` at ``ChargeStack(*wire)`` OUTSIDE the seam's try —
+        no seam warn — and this executor's broad prep catch swallowed it
+        with ZERO logs (a silent Python-arm fallback against the seam's
+        documented loudness law). The seam now validates the wire and
+        warn-onces ``exec_rust.kernel_fallback`` (``KernelWireFault``)
+        BEFORE returning the fallback sentinel; the value is the
+        byte-identical OFF arm."""
+        import fno_math
+        from brutex import exec_rust
+        from structlog.testing import capture_logs
+
+        source = _Source()
+        off = self._off(monkeypatch, source)
+        exec_rust.reset_warn_memo_for_tests()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        # Malformed ONLY at the tail symbol; every other kernel entry
+        # delegates to the real wheel (the Python tail's own inner
+        # charge-stack dispatch must not trip the stale-wheel guard).
+        fake = SimpleNamespace(
+            exec_options_materialize=lambda *_a: ("trade", wire),
+            **{
+                n: getattr(fno_math, n) for n in ("exec_option_charge_stack", "exec_apply_slippage")
+            },
+        )
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            on = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=source)
+        assert isinstance(on, MaterializedTrade)
+        assert on == off
+        events = [x for x in logs if x["event"] == "exec_rust.kernel_fallback"]
+        assert len(events) == 1
+        assert events[0]["site"] == "materialize_option_tail"
+        assert events[0]["error_type"] == "KernelWireFault"
+        exec_rust.reset_warn_memo_for_tests()

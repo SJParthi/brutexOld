@@ -2051,7 +2051,25 @@ hostile-review pass._
   n_lots domain raised to the spec 1..10_000; the `__post_init__` prose
   honesty-corrected (TradeCostBreakdown has none — the Rust
   `ChargeStack::validated()` check + the parity gates guard the
-  options-breakdown values). ENGINE
+  options-breakdown values).
+  REVIEW ROUND 2 folded (3-refuter panel, same branch pre-merge): every
+  kernel-returned wire is length+element-type VALIDATED inside the seam
+  BEFORE any indexing (`_wire_fault`/`_verdict_fault` → warn-once
+  `KernelWireFault` fallback — kills the 17/18-slot futures-wire IndexError
+  crash, the ≥20-slot silent truncation, the right-length wrong-type silent
+  adoption; parametrized 16/17/18/20 + wrong-type regressions at the seam
+  AND both real executor dispatches, value == the OFF arm); the R3-F3
+  zero-log escape closed structurally (a contract fault warn-onces INSIDE
+  the seam — the options executor's broad prep catch can no longer swallow
+  an un-warned TypeError); the calculator mutmut SUSPICIOUS trip de-flaked
+  (a FIRST-collected fast total-composition pin + `--test-time-base 45` on
+  the unwrapped mutmut branch; proven 125/125 KILLED 0-suspicious on two
+  consecutive CI-mirrored runs, exec_rust re-proven 145/145 post-hardening);
+  the pre-existing options SHORT gross-sign code-vs-spec contradiction
+  (buy−sell vs §4/§13 sell−buy; production-unreachable — DEC-EXEC-008
+  BUY-only) REGISTERED as CALCULATOR_SPEC §16 item 20, never silently
+  decided; ci.yml 19f1 comment re-measured 198/68; the OFF-arm docstring
+  discloses the one-time first-dispatch fno_math import. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; trading-core FROZEN
   untouched; no scope/vocab/rate/lake-schema change).
   Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +

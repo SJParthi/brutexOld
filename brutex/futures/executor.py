@@ -715,7 +715,9 @@ def _materialize_tail_rust(
         )
         return RejectedFuturesTrade(leg=leg, reason=FuturesRejectReason.STALE_BAR)
     if kind != "trade" or stack is None:
-        # A kernel contract fault — the Python oracle arm serves instead.
+        # Executor-side BELT: the seam's _verdict_fault already warn-onces +
+        # refuses these shapes (review round 2, R3-F3) — reachable only via
+        # an injected seam; the Python oracle arm serves.
         return None
     # Validation parity: the SAME FuturesTradeInput the Python tail builds —
     # its __post_init__ re-validates the inputs and raises byte-identically.

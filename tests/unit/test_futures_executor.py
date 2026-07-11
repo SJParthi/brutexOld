@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -950,3 +951,54 @@ class TestExecRustDispatch:
         )
         assert isinstance(on, MaterializedFuturesTrade)
         assert on == off
+
+    @pytest.mark.parametrize(
+        "wire",
+        [
+            list(range(16)),
+            list(range(17)),
+            list(range(18)),
+            list(range(20)),
+            list("abcdefghijklmnopqrs"),  # the pinned length 19, junk element types
+        ],
+        ids=["len-16", "len-17", "len-18", "len-20", "len-19-wrong-type"],
+    )
+    def test_malformed_kernel_wire_warns_and_serves_the_python_arm(
+        self, monkeypatch: pytest.MonkeyPatch, wire: list[object]
+    ) -> None:
+        """Review round 2 (R2-MINOR/R3-F2): a 17/18-slot futures wire from
+        the KERNEL previously raised an UNCAUGHT ``IndexError`` out of
+        ``materialize_futures_trade`` (a raw crash — outside the seam catch
+        AND this executor's broad catch), and a 20-slot wire was silently
+        truncated-adopted. Every malformed shape now lands on the
+        byte-identical Python arm with ONE loud seam-side
+        ``exec_rust.kernel_fallback`` (``KernelWireFault``)."""
+        import fno_math
+        from brutex import exec_rust
+
+        window = _window()
+        off = self._off(monkeypatch, window)
+        exec_rust.reset_warn_memo_for_tests()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        # Malformed ONLY at the tail symbol; every other kernel entry
+        # delegates to the real wheel (the Python tail's own inner
+        # charge-stack dispatch must not trip the stale-wheel guard).
+        fake = SimpleNamespace(
+            exec_futures_materialize=lambda *_a: ("trade", wire),
+            **{
+                n: getattr(fno_math, n)
+                for n in ("exec_futures_charge_stack", "exec_apply_futures_fill")
+            },
+        )
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            on = materialize_futures_trade(
+                _signal(), resolver=_Resolver(), source=_Source(window=window)
+            )
+        assert isinstance(on, MaterializedFuturesTrade)
+        assert on == off
+        events = [x for x in logs if x["event"] == "exec_rust.kernel_fallback"]
+        assert len(events) == 1
+        assert events[0]["site"] == "materialize_futures_tail"
+        assert events[0]["error_type"] == "KernelWireFault"
+        exec_rust.reset_warn_memo_for_tests()

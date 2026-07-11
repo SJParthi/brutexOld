@@ -434,7 +434,15 @@ jobs:
           # re-proven post-round-1: 125 mutants — 124 KILLED + the same
           # total-sign-flip SUSPICIOUS again apply-proven killed; 0 survived
           # on every run — divisor/sign/message/basis pins + 5 documented
-          # provably-equivalent pragmas).
+          # provably-equivalent pragmas). REVIEW ROUND 2 (R3-F1): the
+          # SUSPICIOUS trip itself is de-flaked — a FIRST-collected fast
+          # total-composition pin kills the sign-flip class at test #1
+          # (0.46 s, far under the 2x-baseline threshold) and the unwrapped
+          # branch below now passes --test-time-base 45; re-proven at the
+          # round-2 tree: calculator 125/125 KILLED (0 timeout / 0
+          # suspicious / 0 survived, TWO consecutive CI-mirrored runs) and
+          # exec_rust 145/145 KILLED 0/0 after the wire-shape-guard
+          # hardening.
           # costs/futures_costs.py is DELIBERATELY NOT paired yet:
           # its first bounded local run surfaced early survivors before the
           # zero-survivor bar could be met inside the slice budget — wiring
@@ -515,9 +523,22 @@ jobs:
                 --simple-output
             else
               runner="sh -c 'pytest $tf -x -q --no-header || exit 1'"
+              # --test-time-base 45 on the UNWRAPPED branch too (slice-7
+              # review round 2, R3-F1 — mirrors the wrapped branch's
+              # classifier slack): mutmut 2.x classifies a KILLED-but-slow
+              # mutant OK_SUSPICIOUS when the failing run exceeds
+              # 2 x baseline + base, and the verdict grep below counts a
+              # SUSPICIOUS id line exactly like a survivor — the
+              # calculator pair's total-sign-flip mutant (killed only via
+              # a late hypothesis property whose shrinking blew the 2x
+              # window) tripped this in 2 of 3 local runs. The base ONLY
+              # widens the killed-vs-suspicious classification; survivors
+              # (tests PASS) and the baseline*10 hard timer (BAD_TIMEOUT)
+              # are untouched.
               mutmut run \
                 --paths-to-mutate "$mod" \
                 --runner "$runner" \
+                --test-time-base 45 \
                 --simple-output
             fi
             mutmut results | tee "mutmut-results-$name.txt"

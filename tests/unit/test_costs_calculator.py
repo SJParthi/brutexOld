@@ -86,6 +86,59 @@ def _make_trade(
 
 
 # ─────────────────────────────────────────────────────────────────
+# FIRST-COLLECTED fast mutation killer (review round 2, R3-F1)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_total_charges_composition_fast_first_pin() -> None:
+    """FAST deterministic killer for the total-composition sign mutants —
+    deliberately the FIRST test pytest collects in this file.
+
+    Review round 2, R3-F1: the weekly mutmut pair runs this file under
+    ``pytest -x``, and the ``+ stamp_paisa`` → ``- stamp_paisa`` mutant on
+    the Step-11 total-charges sum (mutant #92 of the round-1 enumeration)
+    was killed only DEEP into the run (the earlier late-file composition
+    pin sat behind ~70 tests + the hypothesis property, whose shrinking
+    pushed the failing run past mutmut's 2×-baseline threshold →
+    classified SUSPICIOUS → the verdict grep read it as a survivor). This
+    pin makes any total-composition sign flip die at test #1, seconds into
+    the run. Inputs + expected stack are the hand-recomputed values of
+    ``TestChargeStackMutationHardening.test_gst_base_and_total_composition_signs``
+    (big synthetic SEBI/IPFT so every component is distinct + material):
+    4_000 + 11_707_800 + 5_466_511 + 156_052_260 + 312_104_520 + 234_000 +
+    85_252_900 = 570_821_991.
+    """
+    from brutex.costs.calculator import _charge_stack_py
+
+    stack = _charge_stack_py(
+        3_000_000,
+        3_002_010,
+        is_long=True,
+        lot_size=65,
+        n_lots=40,
+        brokerage_round_trip_paisa=4_000,
+        stt_rate=15_000,
+        etc_rate=3_503,
+        sebi_rate=100_000,
+        ipft_rate=200_000,
+        stamp_rate=300,
+        gst_rate=1_800_000,
+    )
+    assert stack.total_charges_paisa == 570_821_991
+    assert stack.total_charges_paisa > 0
+    assert stack.total_charges_paisa == (
+        stack.brokerage_paisa
+        + stack.stt_paisa
+        + stack.exch_paisa
+        + stack.sebi_paisa
+        + stack.ipft_paisa
+        + stack.stamp_paisa
+        + stack.gst_paisa
+    )
+    assert stack.net_pnl_paisa == stack.gross_pnl_paisa - stack.total_charges_paisa
+
+
+# ─────────────────────────────────────────────────────────────────
 # §12.1 — Canonical NIFTY fixture (byte-exact spec table)
 # ─────────────────────────────────────────────────────────────────
 

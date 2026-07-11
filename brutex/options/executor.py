@@ -518,9 +518,11 @@ def _materialize_tail_rust(
     if kind == "tick_floor":
         return RejectedTrade(leg=leg, reason=RejectReason.TICK_FLOOR)
     if kind != "trade" or stack is None:
-        # A kernel contract fault — the Python oracle arm serves instead
-        # (the fallback law; a wrong VALUE cannot escape this way because
-        # the Python arm recomputes everything).
+        # Executor-side BELT: the seam's _verdict_fault already warn-onces
+        # + refuses these shapes (review round 2, R3-F3 — the structural
+        # loudness law lives INSIDE brutex.exec_rust), so this branch is
+        # reachable only via an injected seam; the Python oracle arm serves
+        # (a wrong VALUE cannot escape — the Python arm recomputes).
         return None
     # Validation parity: construct the SAME TradeInput the Python tail
     # builds — its __post_init__ re-validates the inputs and raises

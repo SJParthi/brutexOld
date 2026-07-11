@@ -432,44 +432,283 @@ def test_memory_error_reraises_bare(monkeypatch: pytest.MonkeyPatch, site: str) 
         _in_envelope_calls()[site]()
 
 
-def test_wrong_wire_arity_is_refused_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A 16-slot wire from the kernel is a CONTRACT bug — the ``TypeError``
-    from the NamedTuple constructor propagates (refusal, never silent
-    adoption of a malformed stack)."""
-    monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
-    fake = SimpleNamespace(exec_option_charge_stack=lambda *_a: list(range(16)))
-    monkeypatch.setattr(exec_rust, "_rust", fake)
-    with pytest.raises(TypeError):
-        exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS)
+# ── kernel wire / verdict SHAPE guard (review round 2 —
+#    R2-MINOR/R3-F2/R3-F3: every kernel-returned wire is validated for
+#    length AND element type BEFORE any indexing; ANY violation → the same
+#    warn-once loud fallback → the Python arm — never an IndexError crash,
+#    never a silent adoption, never a zero-log executor swallow) ──────────
 
 
-def test_short_futures_wire_falls_back_to_python_arm(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A malformed SHORT futures trade wire routes to the Python arm like
-    every other malformed kernel shape on this site (review round 1,
-    H3-NIT-3): the wire slicing runs INSIDE the narrow try, so
-    ``ChargeStack(*wire[:17])`` raises ``TypeError`` → one warn-once
-    ``exec_rust.kernel_fallback`` → ``None`` (the Python tail serves)."""
-    monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
-    fake = SimpleNamespace(exec_futures_materialize=lambda *_a: ("trade", [1, 2, 3]))
-    monkeypatch.setattr(exec_rust, "_rust", fake)
-    with capture_logs() as logs:
-        out = exec_rust.materialize_futures_tail(
-            2_200_000,
-            2_210_000,
-            entry_volume=10,
-            exit_volume=10,
-            path_highs_paisa=[2_201_000],
-            path_lows_paisa=[2_199_000],
-            reject_stale=True,
-            **_FUTURES_ARGS,
+def _futures_tail_call() -> object:
+    return exec_rust.materialize_futures_tail(
+        2_200_000,
+        2_210_000,
+        entry_volume=10,
+        exit_volume=10,
+        path_highs_paisa=[2_201_000],
+        path_lows_paisa=[2_199_000],
+        reject_stale=True,
+        **_FUTURES_ARGS,
+    )
+
+
+def _option_tail_call() -> object:
+    return exec_rust.materialize_option_tail(
+        12_000, 15_000, entry_volume=10, exit_volume=10, reject_stale=True, **_OPTION_ARGS
+    )
+
+
+class TestKernelWireShapeGuard:
+    """A malformed kernel wire — wrong length, wrong element TYPE, junk
+    verdict kind, broken kind↔wire pairing — routes through the seam's
+    :func:`_wire_fault`/:func:`_verdict_fault` validation to ONE warn-once
+    ``exec_rust.kernel_fallback`` (``error_type="KernelWireFault"``) and the
+    ``None`` Python-arm sentinel, on EVERY wire the seam consumes.
+
+    Review round 2 regressions: a 17/18-slot futures wire raised an
+    UNCAUGHT ``IndexError`` past the seam catch AND the executor catch
+    (R2-MINOR/R3-F2); a ≥20-slot wire was silently truncated-adopted; a
+    right-length wire of junk elements was silently adopted whole (R2
+    probe C); and the options wrong-arity ``TypeError`` escaped the seam
+    un-warned into the options executor's broad catch — a ZERO-log silent
+    fallback (R3-F3).
+    """
+
+    @staticmethod
+    def _assert_one_wire_fallback(logs: list[Any], site: str) -> None:
+        events = [e for e in logs if e["event"] == "exec_rust.kernel_fallback"]
+        assert len(events) == 1
+        assert events[0]["site"] == site
+        assert events[0]["reason"] == f"kernel:{site}"
+        assert events[0]["error_type"] == "KernelWireFault"
+
+    @pytest.mark.parametrize("n", [16, 18, 20])
+    @pytest.mark.parametrize(
+        ("site", "kernel_fn", "call"),
+        [
+            (
+                "charge_stack_option",
+                "exec_option_charge_stack",
+                lambda: exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS),
+            ),
+            (
+                "charge_stack_futures",
+                "exec_futures_charge_stack",
+                lambda: exec_rust.charge_stack_futures(2_200_000, 2_210_000, **_FUTURES_ARGS),
+            ),
+        ],
+        ids=["option-stack", "futures-stack"],
+    )
+    def test_stack_wire_wrong_length_falls_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        site: str,
+        kernel_fn: str,
+        call: Callable[[], object],
+        n: int,
+    ) -> None:
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(**{kernel_fn: lambda *_a: list(range(n))})
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert call() is None
+        self._assert_one_wire_fallback(logs, site)
+        assert logs[0]["error"] == f"wire length {n} != the pinned 17"
+
+    @pytest.mark.parametrize(
+        ("site", "kernel_fn", "call"),
+        [
+            (
+                "charge_stack_option",
+                "exec_option_charge_stack",
+                lambda: exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS),
+            ),
+            (
+                "charge_stack_futures",
+                "exec_futures_charge_stack",
+                lambda: exec_rust.charge_stack_futures(2_200_000, 2_210_000, **_FUTURES_ARGS),
+            ),
+        ],
+        ids=["option-stack", "futures-stack"],
+    )
+    def test_stack_wire_right_length_wrong_type_falls_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        site: str,
+        kernel_fn: str,
+        call: Callable[[], object],
+    ) -> None:
+        """R2 probe C: a right-LENGTH wire of chars was silently adopted
+        whole (17 junk elements through ``ChargeStack(*wire)``) — now a
+        counted type fault → the Python arm."""
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(**{kernel_fn: lambda *_a: list("abcdefghijklmnopq")})
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert call() is None
+        self._assert_one_wire_fallback(logs, site)
+        assert logs[0]["error"] == "wire[0] is str, expected int"
+
+    @pytest.mark.parametrize("n", [16, 18, 20])
+    def test_option_tail_wire_wrong_length_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, n: int
+    ) -> None:
+        """The R3-F3 seam-side shape: pre-fix, ``_stack_from_wire(wire)``
+        sat OUTSIDE the try, so the ``TypeError`` escaped the seam with no
+        warn and the options executor's broad catch swallowed it silently."""
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(exec_options_materialize=lambda *_a: ("trade", list(range(n))))
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert _option_tail_call() is None
+        self._assert_one_wire_fallback(logs, "materialize_option_tail")
+
+    def test_option_tail_right_length_wrong_type_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(
+            exec_options_materialize=lambda *_a: ("trade", list("abcdefghijklmnopq"))
         )
-    assert out is None
-    events = [e for e in logs if e["event"] == "exec_rust.kernel_fallback"]
-    assert len(events) == 1
-    assert events[0]["error_type"] == "TypeError"
-    assert events[0]["site"] == "materialize_futures_tail"
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert _option_tail_call() is None
+        self._assert_one_wire_fallback(logs, "materialize_option_tail")
+
+    @pytest.mark.parametrize("n", [16, 17, 18, 20])
+    def test_futures_tail_wire_wrong_length_falls_back_never_crashes(
+        self, monkeypatch: pytest.MonkeyPatch, n: int
+    ) -> None:
+        """The R2-MINOR/R3-F2 regression matrix: 17/18 slots previously
+        raised an UNCAUGHT ``IndexError`` (a raw crash out of
+        ``materialize_futures_trade``); 20 slots was silently
+        truncated-adopted; 16 was the one shape round 1 actually fixed."""
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(exec_futures_materialize=lambda *_a: ("trade", list(range(n))))
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert _futures_tail_call() is None
+        self._assert_one_wire_fallback(logs, "materialize_futures_tail")
+        assert logs[0]["error"] == f"wire length {n} != the pinned 19"
+
+    def test_futures_tail_right_length_wrong_type_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(
+            exec_futures_materialize=lambda *_a: ("trade", list("abcdefghijklmnopqrs"))
+        )
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert _futures_tail_call() is None
+        self._assert_one_wire_fallback(logs, "materialize_futures_tail")
+
+    @pytest.mark.parametrize(
+        ("site", "kernel_fn", "call", "bad"),
+        [
+            (
+                "fill_slippage",
+                "exec_apply_slippage",
+                lambda: exec_rust.fill_slippage(9_995, 12_005, is_long=True),
+                (1, 2),
+            ),
+            (
+                "fill_futures",
+                "exec_apply_futures_fill",
+                lambda: exec_rust.fill_futures(9_995, 12_005, is_long=True),
+                (1, 2, "x"),
+            ),
+        ],
+        ids=["fill-slippage-short", "fill-futures-wrong-type"],
+    )
+    def test_fill_wire_shape_faults_fall_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        site: str,
+        kernel_fn: str,
+        call: Callable[[], object],
+        bad: object,
+    ) -> None:
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(**{kernel_fn: lambda *_a: bad})
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert call() is None
+        self._assert_one_wire_fallback(logs, site)
+
+    @pytest.mark.parametrize(
+        ("verdict", "error"),
+        [
+            (("bogus", None), "unknown verdict kind 'bogus'"),
+            (("trade", None), "verdict ('trade', None) is missing its stack wire"),
+            (("stale_bar", list(range(19))), "verdict kind 'stale_bar' carries an unexpected wire"),
+            ((["unhashable"], None), "unknown verdict kind ['unhashable']"),
+            (("trade", "not-a-list"), "wire is str, expected a list"),
+        ],
+        ids=[
+            "unknown-kind",
+            "trade-without-wire",
+            "reject-with-wire",
+            "unhashable-kind",
+            "str-wire",
+        ],
+    )
+    def test_futures_verdict_contract_faults_fall_back(
+        self, monkeypatch: pytest.MonkeyPatch, verdict: object, error: str
+    ) -> None:
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(exec_futures_materialize=lambda *_a: verdict)
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert _futures_tail_call() is None
+        self._assert_one_wire_fallback(logs, "materialize_futures_tail")
+        assert logs[0]["error"] == error
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [("bogus", None), ("trade", None), ("tick_floor", list(range(17)))],
+        ids=["unknown-kind", "trade-without-wire", "reject-with-wire"],
+    )
+    def test_option_verdict_contract_faults_fall_back(
+        self, monkeypatch: pytest.MonkeyPatch, verdict: object
+    ) -> None:
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(exec_options_materialize=lambda *_a: verdict)
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert _option_tail_call() is None
+        self._assert_one_wire_fallback(logs, "materialize_option_tail")
+
+    def test_bool_wire_element_is_a_type_fault(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``bool`` is an ``int`` subclass but NOT a legal ``Vec<i64>``
+        element — refused as a type fault, never adopted."""
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        wire = [*range(3), True, *range(4, 17)]
+        fake = SimpleNamespace(exec_option_charge_stack=lambda *_a: wire)
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS) is None
+        self._assert_one_wire_fallback(logs, "charge_stack_option")
+        assert logs[0]["error"] == "wire[3] is bool, expected int"
+
+    def test_malformed_wire_at_the_real_dispatch_equals_the_python_arm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dispatch-level value law: a malformed-wire kernel under the REAL
+        ``compute_trade_cost`` serves the byte-identical OFF-arm breakdown
+        (pre-fix this path CRASHED raw — the calculator dispatch has no
+        outer catch)."""
+        trade = _option_trade()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = compute_trade_cost(trade)
+        exec_rust.reset_warn_memo_for_tests()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(exec_option_charge_stack=lambda *_a: list(range(20)))
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            on = compute_trade_cost(trade)
+        assert on == off
+        self._assert_one_wire_fallback(logs, "charge_stack_option")
 
 
 # ── ON arm: kernel == Python oracle, wrapper by wrapper ─────────────────

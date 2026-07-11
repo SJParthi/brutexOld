@@ -48,9 +48,16 @@ state).
 * a wheel that imports but LACKS an ``exec_*`` entry (stale-wheel build
   skew) raises the named :class:`StaleExecWheelError` with the rebuild
   remediation — LOUD, never a silent Python-arm fallback;
-* a MALFORMED kernel result (wrong wire arity / an unknown verdict kind) is
-  REFUSED loudly at :class:`ChargeStack` construction or by the caller —
-  never silently adopted. Served-VALUE integrity is guarded by the
+* a MALFORMED kernel result — wrong wire length, a non-int wire element, an
+  unknown verdict kind, or a broken kind↔wire pairing — is VALIDATED inside
+  the seam BEFORE any indexing/adoption (:func:`_wire_fault` /
+  :func:`_verdict_fault`, review round 2: R2-MINOR/R3-F2 killed the 17/18-
+  slot futures-wire ``IndexError`` escape + the over-long/wrong-type silent
+  adoption) and routes to the SAME warn-once ``exec_rust.kernel_fallback``
+  (``error_type="KernelWireFault"``) → ``None`` → the Python arm — the warn
+  fires INSIDE the seam, structurally, because the executors' broad prep
+  catches would otherwise swallow an escaping ``TypeError`` with zero logs
+  (R3-F3). Served-VALUE integrity is guarded by the
   Rust-side ``ChargeStack::validated()`` construction check plus the
   dual-arm / golden / differential parity gates; on re-materialization the
   frozen dataclasses that DEFINE ``__post_init__`` invariants
@@ -63,8 +70,11 @@ state).
 
 COLD path: the executors run per-trade loops over FINALIST trades only.
 The value of the Rust arm is one-language consistency + shared-crate reuse,
-NOT speed — no speedup is claimed or measured here; the OFF arm's only cost
-is one env read + one function call per dispatch. The warn-once memo is
+NOT speed — no speedup is claimed or measured here; the OFF arm's steady
+cost is one env read + one function call per dispatch, plus a ONE-TIME
+``fno_math`` module import on the first dispatch of the process (the PyO3
+module init runs; ``ImportError`` → ``None`` on wheel-free envs) — no
+``exec_*`` kernel code ever RUNS while OFF. The warn-once memo is
 LOG-VOLUME state only (results never depend on it);
 :func:`reset_warn_memo_for_tests` restores a fresh view (the documented
 exception to the no-global-mutable-state rule, the rust_metrics precedent).
@@ -123,6 +133,10 @@ _I64_MAX: Final[int] = 2**63 - 1
 
 #: Wire arity of one charge stack (the pinned :class:`ChargeStack` order).
 _WIRE_LEN: Final[int] = 17
+
+#: Wire arity of a futures TRADE verdict — the 17 stack slots + mae + mfe
+#: (``exec_futures.rs`` pushes the two excursions onto the stack wire).
+_FUTURES_WIRE_LEN: Final[int] = _WIRE_LEN + 2
 
 
 def _import_kernel() -> ModuleType | None:
@@ -233,15 +247,84 @@ def _kernel_fallback(site: str, exc: BaseException) -> None:
     )
 
 
-def _stack_from_wire(wire: list[int]) -> ChargeStack:
-    """Re-wrap the pinned 17-slot kernel wire as the shared NamedTuple.
+def _wire_fallback(site: str, fault: str) -> None:
+    """Warn-once + Python-arm fallback for a malformed kernel RESULT shape.
 
-    A wrong-arity OPTIONS wire is a kernel CONTRACT bug — the ``TypeError``
-    from the NamedTuple constructor propagates loudly (refusal, never
-    silent adoption). Served-value integrity is the Rust-side
-    ``ChargeStack::validated()`` check + the dual-arm/golden/differential
-    gates (``TradeCostBreakdown`` has no ``__post_init__``; see the module
-    docstring's fallback law).
+    The structural loudness law (review round 2, R3-F3): a kernel-contract
+    fault must warn INSIDE the seam BEFORE the ``None`` fallback sentinel
+    returns — the pre-fix design let ``ChargeStack(*wire)`` raise
+    ``TypeError`` OUTSIDE the seam's try, and the executors' broad prep
+    catches (``options/executor.py`` / ``futures/executor.py``) swallowed
+    it with ZERO logs (a silent Python-arm fallback, against this module's
+    own law). Same event/reason family as :func:`_kernel_fallback` so the
+    flood-safety memo is shared per site.
+    """
+    _warn_once(
+        "exec_rust.kernel_fallback",
+        reason=f"kernel:{site}",
+        site=site,
+        error=fault,
+        error_type="KernelWireFault",
+    )
+
+
+def _wire_fault(wire: object, *, expected_len: int) -> str | None:
+    """Describe a malformed kernel wire, or ``None`` when well-formed.
+
+    Well-formed = a ``list``/``tuple`` of EXACTLY *expected_len* genuine
+    ``int`` elements (``bool`` is refused — the kernel wire is ``Vec<i64>``,
+    so anything else is build/contract skew). Review round 2
+    (R2-MINOR/R3-F2): every kernel-returned wire is validated through this
+    predicate BEFORE any indexing — a 17/18-slot futures wire previously
+    raised an UNCAUGHT ``IndexError`` past every catch on the dispatch
+    path, a ≥20-slot wire was silently truncated-adopted, and a
+    right-length wire of junk elements was silently adopted whole.
+    """
+    if not isinstance(wire, list | tuple):
+        return f"wire is {type(wire).__name__}, expected a list"
+    if len(wire) != expected_len:
+        return f"wire length {len(wire)} != the pinned {expected_len}"
+    for i, item in enumerate(wire):
+        if not isinstance(item, int) or isinstance(item, bool):
+            return f"wire[{i}] is {type(item).__name__}, expected int"
+    return None
+
+
+def _verdict_fault(
+    kind: object, wire: object, *, reject_kinds: tuple[str, ...], expected_len: int
+) -> str | None:
+    """Describe a malformed kernel materialize VERDICT, or ``None``.
+
+    Contract per site: ``("trade", <expected_len>-slot int wire)`` or
+    ``(<reject kind>, None)`` with *reject_kinds* pinned by the caller
+    (options ``("stale_bar", "tick_floor")``; futures ``("stale_bar",)``).
+    Membership is tested on a TUPLE (never a set) so an unhashable junk
+    *kind* classifies as a fault instead of raising out of the guard.
+    """
+    if kind == "trade":
+        if wire is None:
+            return "verdict ('trade', None) is missing its stack wire"
+        return _wire_fault(wire, expected_len=expected_len)
+    if kind not in reject_kinds:
+        return f"unknown verdict kind {kind!r}"
+    if wire is not None:
+        return f"verdict kind {kind!r} carries an unexpected wire"
+    return None
+
+
+def _stack_from_wire(wire: Any) -> ChargeStack:
+    """Re-wrap a VALIDATED pinned 17-slot kernel wire as the NamedTuple.
+
+    Every caller runs :func:`_wire_fault` (directly or via
+    :func:`_verdict_fault`) FIRST, so this constructor never sees a
+    malformed wire — a shape/type violation is a kernel CONTRACT fault and
+    routes to the warn-once :func:`_wire_fallback` → the Python arm
+    (review round 2; supersedes the round-1 "the ``TypeError`` propagates
+    loudly" design, whose raise the options executor's broad prep catch
+    swallowed with zero logs — R3-F3). Served-value integrity is the
+    Rust-side ``ChargeStack::validated()`` check + the
+    dual-arm/golden/differential gates (``TradeCostBreakdown`` has no
+    ``__post_init__``; see the module docstring's fallback law).
     """
     return ChargeStack(*wire)
 
@@ -257,15 +340,17 @@ def fill_slippage(
         _envelope_fallback("fill_slippage")
         return None
     try:
-        out: tuple[int, int, int] = _kernel_fn(rust, "exec_apply_slippage")(
-            entry_open_paisa, exit_open_paisa, is_long
-        )
+        out = _kernel_fn(rust, "exec_apply_slippage")(entry_open_paisa, exit_open_paisa, is_long)
     except MemoryError:
         raise
     except (ValueError, TypeError, OverflowError) as exc:
         _kernel_fallback("fill_slippage", exc)
         return None
-    return out
+    fault = _wire_fault(out, expected_len=3)
+    if fault is not None:
+        _wire_fallback("fill_slippage", fault)
+        return None
+    return (out[0], out[1], out[2])
 
 
 def fill_futures(
@@ -279,7 +364,7 @@ def fill_futures(
         _envelope_fallback("fill_futures")
         return None
     try:
-        out: tuple[int, int, int] = _kernel_fn(rust, "exec_apply_futures_fill")(
+        out = _kernel_fn(rust, "exec_apply_futures_fill")(
             entry_open_paisa, exit_open_paisa, is_long
         )
     except MemoryError:
@@ -287,7 +372,11 @@ def fill_futures(
     except (ValueError, TypeError, OverflowError) as exc:
         _kernel_fallback("fill_futures", exc)
         return None
-    return out
+    fault = _wire_fault(out, expected_len=3)
+    if fault is not None:
+        _wire_fallback("fill_futures", fault)
+        return None
+    return (out[0], out[1], out[2])
 
 
 def charge_stack_option(
@@ -329,7 +418,7 @@ def charge_stack_option(
         _envelope_fallback("charge_stack_option")
         return None
     try:
-        wire: list[int] = _kernel_fn(rust, "exec_option_charge_stack")(
+        wire = _kernel_fn(rust, "exec_option_charge_stack")(
             entry_open_paisa,
             exit_open_paisa,
             is_long,
@@ -347,6 +436,10 @@ def charge_stack_option(
         raise
     except (ValueError, TypeError, OverflowError) as exc:
         _kernel_fallback("charge_stack_option", exc)
+        return None
+    fault = _wire_fault(wire, expected_len=_WIRE_LEN)
+    if fault is not None:
+        _wire_fallback("charge_stack_option", fault)
         return None
     return _stack_from_wire(wire)
 
@@ -396,7 +489,7 @@ def charge_stack_futures(
         _envelope_fallback("charge_stack_futures")
         return None
     try:
-        wire: list[int] = _kernel_fn(rust, "exec_futures_charge_stack")(
+        wire = _kernel_fn(rust, "exec_futures_charge_stack")(
             entry_open_paisa,
             exit_open_paisa,
             is_long,
@@ -416,6 +509,10 @@ def charge_stack_futures(
         raise
     except (ValueError, TypeError, OverflowError) as exc:
         _kernel_fallback("charge_stack_futures", exc)
+        return None
+    fault = _wire_fault(wire, expected_len=_WIRE_LEN)
+    if fault is not None:
+        _wire_fallback("charge_stack_futures", fault)
         return None
     return _stack_from_wire(wire)
 
@@ -487,6 +584,16 @@ def materialize_option_tail(
         raise
     except (ValueError, TypeError, OverflowError) as exc:
         _kernel_fallback("materialize_option_tail", exc)
+        return None
+    # Whole-verdict validation BEFORE adoption (review round 2, R3-F3): the
+    # pre-fix `_stack_from_wire(wire)` sat outside the try, so a wrong-arity
+    # wire raised TypeError past the seam (no warn) into the options
+    # executor's broad prep catch — a ZERO-LOG silent fallback.
+    fault = _verdict_fault(
+        kind, wire, reject_kinds=("stale_bar", "tick_floor"), expected_len=_WIRE_LEN
+    )
+    if fault is not None:
+        _wire_fallback("materialize_option_tail", fault)
         return None
     if wire is None:
         return (kind, None)
@@ -566,20 +673,26 @@ def materialize_futures_tail(
             stamp_rate,
             gst_rate,
         )
-        if wire is None:
-            return (kind, None, 0, 0)
-        # Inside the narrow try DELIBERATELY (review round 1, H3-NIT-3): a
-        # malformed SHORT futures wire makes ChargeStack(*wire[:17]) raise
-        # TypeError → caught → warn-once fallback → the Python arm serves,
-        # like every other malformed kernel shape on this site.
-        return (
-            kind,
-            _stack_from_wire(wire[:_WIRE_LEN]),
-            wire[_WIRE_LEN],
-            wire[_WIRE_LEN + 1],
-        )
     except MemoryError:
         raise
     except (ValueError, TypeError, OverflowError) as exc:
         _kernel_fallback("materialize_futures_tail", exc)
         return None
+    # Whole-verdict validation BEFORE any indexing (review round 2,
+    # R2-MINOR/R3-F2 — supersedes the round-1 inside-the-try slicing, whose
+    # "caught like every other malformed shape" claim was FALSE for wire
+    # lengths 17/18: `wire[_WIRE_LEN]` raised IndexError past the narrow
+    # catch AND the executor's broad catch — a raw crash — while a ≥20-slot
+    # wire was silently truncated-adopted).
+    fault = _verdict_fault(kind, wire, reject_kinds=("stale_bar",), expected_len=_FUTURES_WIRE_LEN)
+    if fault is not None:
+        _wire_fallback("materialize_futures_tail", fault)
+        return None
+    if wire is None:
+        return (kind, None, 0, 0)
+    return (
+        kind,
+        _stack_from_wire(wire[:_WIRE_LEN]),
+        wire[_WIRE_LEN],
+        wire[_WIRE_LEN + 1],
+    )
