@@ -1808,9 +1808,10 @@ def build_app(
     # index is an O(datasets) build over a lake dir-walk; memoised here behind the SAME
     # write-generation as the caches above so a pull rebuilds it but every cascade click
     # (underlyings / expiries / contracts) is an O(1) handoff — tiny lazy payloads, never
-    # the flat thousand-row dropdown. Now the COMMON `MoversSnapshotCache` (keyed
+    # the flat thousand-row dropdown. The COMMON `MoversSnapshotCache` (keyed
     # FNO_CASCADE_KEY) so it shares the pull-time floor + the discovery warm; the
-    # bespoke single-slot `FnoCascadeCache` class is superseded at this wiring site.
+    # bespoke single-slot `FnoCascadeCache` class this superseded was production-dead
+    # and DELETED (fix 6a, DEC-MEMORY-FOOTPRINT-HARDENING-001).
     _fno_cascade_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
     # The /db candle-datasets discovery cache (DEC-DB-TAB-SWITCH-O1-001): the
     # `/api/v1/db/candles/datasets` endpoint walks the WHOLE `bars/` tree THREE times
