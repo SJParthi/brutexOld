@@ -3341,3 +3341,304 @@ class TestLazyRunIdHardening:
         assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
         assert digest_peak < legacy_peak
         assert legacy_peak - digest_peak > digest.evaluated * 48
+
+
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738) ──────
+# The apriori census artifact (EMIT-ON-apriori tallies key) + the per-cell
+# hit-count memo seam. The frozen generator itself is gated by its own suite;
+# these tests pin the sweep_run WIRING: census rows bit-equal to the module's
+# own ``sweep.apriori.census`` log (the call-order coupling — call j == level
+# j), the frozen legacy payload key-set, timings-never-in-byte-compared-
+# artifacts determinism, and memo-on == memo-off byte identity.
+
+
+#: The FROZEN legacy FLUSH/COMPLETE payload key-set (pre-#1738 shape): a
+#: legacy tuple must carry EXACTLY these keys — the EMIT-ON-apriori law's
+#: teeth (a new unconditional key would break byte-identity for every
+#: legacy tree).
+_LEGACY_TALLY_KEYS = frozenset(
+    {
+        "enumerated",
+        "conflict_pruned",
+        "skipped_dedup",
+        "evaluated",
+        "ranked",
+        "persisted",
+        "backtested",
+        "minhits_dropped",
+        "trial_n_finite",
+        "trial_sidecar_written",
+        "sentinel_written",
+    }
+)
+
+
+def _census_log_rows(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The frozen module's own ``sweep.apriori.census`` rows, in emission order."""
+    return [e for e in logs if e["event"] == "sweep.apriori.census"]
+
+
+def _flush_payload(audit_path: Path) -> dict[str, Any]:
+    from brutex.orchestrator.audit import read_entries
+
+    payloads = [e.payload for e in read_entries(audit_path) if e.action == "SWEEP_FLUSH"]
+    assert len(payloads) == 1
+    return payloads[0]
+
+
+def _complete_payload(audit_path: Path) -> dict[str, Any]:
+    from brutex.orchestrator.audit import read_entries
+
+    payloads = [e.payload for e in read_entries(audit_path) if e.action == "SWEEP_COMPLETE"]
+    assert len(payloads) == 1
+    return payloads[0]
+
+
+class TestAprioriCensusArtifact:
+    """The EMIT-ON-apriori ``apriori`` tallies key (test plan rows 3 + 18)."""
+
+    def test_legacy_payload_carries_no_apriori_key_frozen_keyset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A LEGACY tuple's FLUSH/COMPLETE payload is the FROZEN pre-#1738 key-set."""
+        pytest.importorskip("polars")
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        bars = _trending_bars()
+        cfg = _make_config(k=2, min_hits=5)
+        _run_sweep(tmp_path, "legacy", bars, cfg, digest="abad1deaabad1dea")
+        flush = _flush_payload(tmp_path / "legacy.jsonl")
+        # FLUSH additionally carries the store hash beside the tallies.
+        assert set(flush) == _LEGACY_TALLY_KEYS | {"store_content_hash"}
+        assert set(_complete_payload(tmp_path / "legacy.jsonl")) == _LEGACY_TALLY_KEYS
+
+    @pytest.mark.parametrize("k", [2, 3])
+    def test_census_rows_match_the_module_census_bit_for_bit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, k: int
+    ) -> None:
+        """The wrapper-recorded rows == the frozen ``sweep.apriori.census`` rows.
+
+        Pins the call-order coupling (call j IS level j — D1 risk 5): levels
+        ``1..k-1`` carry the same raw |C_j| + frequent |F_j| the module logged,
+        the TARGET row carries |C_k| with ``frequent``/``count_ms`` null
+        (Stage-1B is the authority; no counter call of its own).
+        """
+        pytest.importorskip("polars")
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        bars = _trending_bars()
+        cfg = _make_config(k=k, min_hits=5)
+        with capture_logs() as logs:
+            summary = _run_sweep(tmp_path, "cell", bars, cfg, digest="abad1deaabad1dea")
+        module_rows = _census_log_rows(logs)
+        assert len(module_rows) == k  # levels 1..k-1 + the target level
+        payload = _flush_payload(tmp_path / "cell.jsonl")
+        artifact = payload["apriori"]
+        rows = artifact["levels"]
+        assert len(rows) == k
+        for level_index, (artifact_row, module_row) in enumerate(
+            zip(rows, module_rows, strict=True), start=1
+        ):
+            assert artifact_row["level"] == module_row["level"] == level_index
+            assert artifact_row["candidates"] == module_row["candidates"]
+            if level_index < k:
+                # Internal frontier rows: |F_j| bit-equal to the module's.
+                assert artifact_row["frequent"] == module_row["frequent"]
+                assert isinstance(artifact_row["count_ms"], float)
+            else:
+                # The TARGET row: frequent OMITTED by the module, null here;
+                # its truth is the ``backtested`` tally on the SAME payload.
+                assert "frequent" not in module_row
+                assert artifact_row["frequent"] is None
+                assert artifact_row["count_ms"] is None
+        # The target row's candidates == the honest ``enumerated`` tally.
+        assert rows[-1]["candidates"] == summary.enumerated == payload["enumerated"]
+        # The COMPLETE payload carries the identical key (same dict).
+        assert _complete_payload(tmp_path / "cell.jsonl")["apriori"] == artifact
+        # Envelope keys: the resolved budget + the generator wall-clock.
+        from brutex.engine.sweep_apriori import DEFAULT_MAX_MASK_BARS
+
+        assert artifact["max_mask_bars"] == DEFAULT_MAX_MASK_BARS
+        assert isinstance(artifact["generator_ms"], float)
+
+    def test_k1_census_is_one_row_zero_counter_calls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``k == 1``: exactly ONE row (the target), no counter call — probe-verified."""
+        pytest.importorskip("polars")
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        bars = _trending_bars()
+        cfg = _make_config(k=1, min_hits=5)
+        with capture_logs() as logs:
+            summary = _run_sweep(tmp_path, "k1", bars, cfg, digest="abad1deaabad1dea")
+        module_rows = _census_log_rows(logs)
+        assert len(module_rows) == 1
+        rows = _flush_payload(tmp_path / "k1.jsonl")["apriori"]["levels"]
+        assert rows == [
+            {
+                "level": 1,
+                "candidates": module_rows[0]["candidates"],
+                "frequent": None,
+                "count_ms": None,
+            }
+        ]
+        assert rows[0]["candidates"] == summary.enumerated == 5  # every singleton
+
+    def test_extinct_cell_census_shape(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An EXTINCT cell (F_1 == ∅) enumerates 0 at every deeper level."""
+        pytest.importorskip("polars")
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        bars = _trending_bars()
+        cfg = _make_config(k=3, min_hits=10**6)  # nothing fires a million bars
+        with capture_logs() as logs:
+            summary = _run_sweep(tmp_path, "extinct", bars, cfg, digest="abad1deaabad1dea")
+        module_rows = _census_log_rows(logs)
+        rows = _flush_payload(tmp_path / "extinct.jsonl")["apriori"]["levels"]
+        assert [r["candidates"] for r in rows] == [r["candidates"] for r in module_rows]
+        assert rows[0]["frequent"] == 0  # F_1 empty
+        assert rows[1] == {
+            "level": 2,
+            "candidates": 0,
+            "frequent": 0,
+            "count_ms": rows[1]["count_ms"],
+        }
+        assert rows[-1] == {"level": 3, "candidates": 0, "frequent": None, "count_ms": None}
+        assert summary.enumerated == 0
+        # The all-zeros run still writes a VALID v1 sidecar + sentinel.
+        assert summary.sentinel_written is True
+        assert summary.trial_sidecar_written is True
+
+    def test_two_identical_apriori_runs_are_byte_identical_timings_audit_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Determinism pin: timings live ONLY in the audit payload — the store,
+        sidecar and sentinel of two identical apriori runs are byte-identical
+        (no wall-clock leak into a byte-compared artifact, Golden Rule #7)."""
+        pytest.importorskip("polars")
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        bars = _trending_bars()
+        digest = "abad1deaabad1dea"
+        for tag in ("a", "b"):
+            (tmp_path / tag).mkdir()
+            _run_sweep(tmp_path / tag, "cell", bars, _make_config(k=2, min_hits=5), digest=digest)
+        for artifact in (
+            Path("cell.parquet"),
+            trial_stats_sidecar_path(Path("cell.parquet")),
+            completion_sentinel_path(Path("cell.parquet")),
+        ):
+            a = (tmp_path / "a" / artifact).read_bytes()
+            b = (tmp_path / "b" / artifact).read_bytes()
+            assert a == b, artifact
+
+
+class TestHitCountMemo:
+    """The per-cell hit-count memo seam (test plan row 19, sequential half)."""
+
+    def test_memo_on_equals_memo_off_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """memo-on == memo-off: identical store hash + parquet + sidecar bytes."""
+        pytest.importorskip("polars")
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        bars = _trending_bars()
+        digest = "abad1deaabad1dea"
+        cfg = _make_config(k=2, min_hits=5)
+        (tmp_path / "off").mkdir()
+        off = _run_sweep(tmp_path / "off", "cell", bars, cfg, digest=digest)
+        memo: dict[int, int] = {}
+        (tmp_path / "on").mkdir()
+        store = ResultsStore(path=tmp_path / "on" / "cell.parquet")
+        with AuditWriter.open(tmp_path / "on" / "cell.jsonl") as audit:
+            on = run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest=digest,
+                hit_count_memo=memo,
+            )
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on" / "cell.parquet").read_bytes() == (
+            tmp_path / "off" / "cell.parquet"
+        ).read_bytes()
+        sidecar = trial_stats_sidecar_path(Path("cell.parquet"))
+        assert (tmp_path / "on" / sidecar).read_bytes() == (tmp_path / "off" / sidecar).read_bytes()
+        assert memo  # the memo genuinely accreted counts
+
+    def test_memo_survives_the_k_ladder_and_serves_hits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A memo carried k=2 → k=3 (the cell ladder) yields bytes identical to
+        a fresh k=3 run — the all-hit fast path (``missing == []``) included."""
+        pytest.importorskip("polars")
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        bars = _trending_bars()
+        digest = "abad1deaabad1dea"
+        memo: dict[int, int] = {}
+
+        def _run_with_memo(tag: str, k: int) -> SweepRunSummary:
+            (tmp_path / tag).mkdir()
+            store = ResultsStore(path=tmp_path / tag / "cell.parquet")
+            with AuditWriter.open(tmp_path / tag / "cell.jsonl") as audit:
+                return run_persisted_sweep(
+                    bars,
+                    _make_config(k=k, min_hits=5),
+                    store=store,
+                    dedup=_dedup(),
+                    audit=audit,
+                    trial_stats_digest=digest,
+                    hit_count_memo=memo,
+                )
+
+        _run_with_memo("k2", 2)
+        size_after_k2 = len(memo)
+        ladder_k3 = _run_with_memo("k3", 3)
+        (tmp_path / "fresh").mkdir()
+        fresh_k3 = _run_sweep(
+            tmp_path / "fresh", "cell", bars, _make_config(k=3, min_hits=5), digest=digest
+        )
+        assert ladder_k3.store_content_hash == fresh_k3.store_content_hash
+        assert (tmp_path / "k3" / "cell.parquet").read_bytes() == (
+            tmp_path / "fresh" / "cell.parquet"
+        ).read_bytes()
+        # The singleton frontier of the k=3 run was served from the memo
+        # (already present after k=2 — cross-k reuse, the point of the memo).
+        assert size_after_k2 >= 5  # all 5 singletons memoised at k=2
+        assert len(memo) >= size_after_k2
+
+    def test_memo_beyond_cap_is_pure_pass_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Past HIT_MEMO_MAX_ENTRIES the memo stops retaining (insert-drop; the
+        overlay serves the computed values) — counts still byte-identical."""
+        pytest.importorskip("polars")
+        import brutex.engine.sweep_run as sweep_run_mod
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        monkeypatch.setattr(sweep_run_mod, "HIT_MEMO_MAX_ENTRIES", 2)
+        bars = _trending_bars()
+        digest = "abad1deaabad1dea"
+        cfg = _make_config(k=2, min_hits=5)
+        (tmp_path / "off").mkdir()
+        off = _run_sweep(tmp_path / "off", "cell", bars, cfg, digest=digest)
+        memo: dict[int, int] = {}
+        (tmp_path / "capped").mkdir()
+        store = ResultsStore(path=tmp_path / "capped" / "cell.parquet")
+        with AuditWriter.open(tmp_path / "capped" / "cell.jsonl") as audit:
+            capped = run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest=digest,
+                hit_count_memo=memo,
+            )
+        assert capped.store_content_hash == off.store_content_hash
+        assert len(memo) <= 2  # insert-drop beyond the (patched) cap
