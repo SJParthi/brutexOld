@@ -14,13 +14,20 @@ runbook is how you RESTORE it.
 
 ## 0. Honest cost table (MEASURED, tagged)
 
+MEASURED provenance: the timing figures are 2026-07-11 sandbox-spike
+transcripts (median of 15) — no committed bench reproduces them, so treat
+them as directional; each one DISCLOSES a cost, never a speedup.
+
 | Item | Cost | Tag |
 |---|---|---|
 | Cold crate build (polars graph from source, release) | ~6.5 min wall / ~24 min CPU / ~12 GB target dir | MEASURED (spike, 2026-07-11) |
 | Warm CI run (cargo cache hit) | minutes (our crate only recompiles) | MODELED |
 | Per-render engaged overhead, 100k-row shape | IPC handoff ~6.6 ms + crate render ~12.5 ms ≈ 19 ms vs ~13 ms Python `write_parquet` tail → **+~6 ms (+47%) on the encode tail**, ~3% of the FULL `_render_bytes` wall (the Python-side frame build dominates) | MEASURED (2026-07-11 sandbox, median of 15) |
 | Per-render engaged overhead, 10-row shape | ~1.1 ms vs ~0.5 ms Python tail (≈2×) | MEASURED (same run) |
-| Burn-in (first 16 engaged renders/process) | 2× render cost, bounded, amortised-nil | MODELED |
+| Engaged transient PEAK MEMORY (review-round fold) | the render concurrently holds the source frame + a FULL **uncompressed** Arrow-IPC copy (≈ the frame's in-RAM size — MEASURED 2026-07-11: 250k-row 7-col frame ≈ 14 MB → IPC ≈ 14 MB ≈ 2.3× the ~6 MB compressed parquet) + the crate's re-decoded rechunked frame + the crate parquet buffer → **≈ 2.5× the Python path's transient peak (≈ 3× during burn-in, when BOTH engines' parquet buffers are live for the compare)**; a 17-col Greeks month scales the same way | MEASURED sizes / MODELED peak (2026-07-11) |
+| GIL during the engaged render | RELEASED (`Python::detach` — the review-round fold; the wheel's own `write_parquet` releases it too), so an engaged render no longer serializes sibling writer/dashboard threads. Pre-fold builds of the crate held it for the full ~12.5 ms render | MEASURED semantics (code), no timing claim |
+| Thread-pool footprint | the crate is a SEPARATE polars build with its OWN global rayon pool beside the wheel's — an engaged process carries up to 2× polars threads on N cores (both pools read `POLARS_MAX_THREADS` independently; the env var bounds each, it does not de-duplicate them) — a further reason the engaged default stays OFF | MODELED (structural) |
+| Burn-in (first 16 engaged renders/process + once per NEW schema shape) | 2× render cost, bounded, amortised-nil — AND, because the caller holds the partition's cross-process flock around the render, those renders hold that flock ~2-3× longer (a concurrent CLI-fetch process waiting on the SAME partition waits with them; bounded to the burn-in window) | MODELED |
 | Payoff | **≈ 0 — uniformity, not speed** (the engaged path is a small measured SLOWDOWN; the crate links the same encoder the wheel runs) | MEASURED/MODELED per ADR-0019 §0/§4 |
 
 ## 1. The ATOMIC pin — three legs that move together
@@ -28,10 +35,16 @@ runbook is how you RESTORE it.
 1. **Python wheel**: the installed `polars` version (repo pyproject
    range-pins `>=1.0,<2.0` with no lockfile — ADR-0019 F4 — so the installed
    version is environment truth, not a manifest fact).
-2. **Crate tag**: every polars git dependency in
-   `rust/brutex-lake/Cargo.toml` at `tag = "py-<wheel version>"`, single
-   source `PINNED_POLARS_PY_VERSION` in `rust/brutex-lake/src/lib.rs`
-   (cargo-tested: `manifest_tag_matches_pinned_version`).
+2. **Crate rev**: every polars git dependency in
+   `rust/brutex-lake/Cargo.toml` REV-pinned at the exact commit the
+   upstream `py-<wheel version>` tag points at (tags are MOVABLE — a moved
+   tag re-resolving would be silently different bytes; review-round fold).
+   Single sources `PINNED_POLARS_GIT_REV` + `PINNED_POLARS_PY_VERSION` in
+   `rust/brutex-lake/src/lib.rs` (cargo-tested:
+   `manifest_rev_matches_pinned_rev` holds the manifest,
+   `lockfile_resolves_pinned_rev` holds the committed `Cargo.lock`; every
+   CI cargo step runs `--locked` and the maturin wheel build enforces the
+   lock via `locked = true`).
 3. **zstd trio**: the COMMITTED `rust/brutex-lake/Cargo.lock` must resolve
    the same zstd stack the wheel's own lock pins at that tag (at 1.42.1:
    zstd 0.13.3 / zstd-safe 7.2.4 / zstd-sys 2.0.16 → libzstd 1.5.7;
@@ -42,31 +55,37 @@ runbook is how you RESTORE it.
 
 Run ALL steps for ANY polars wheel bump. Nothing re-engages until step 7.
 
-1. **Pin the wheel deliberately.** Decide the target `polars==X.Y.Z`. Verify
-   the git tag `py-X.Y.Z` exists upstream
-   (`git ls-remote --tags https://github.com/pola-rs/polars "py-X.Y.Z"`).
-2. **Bump the crate tag.** In `rust/brutex-lake/src/lib.rs` set
-   `PINNED_POLARS_PY_VERSION = "X.Y.Z"`; in `Cargo.toml` move all FIVE
-   polars git deps to `tag = "py-X.Y.Z"`. Re-check the upstream workspace's
-   `[patch.crates-io]` at the new tag — the restated patches in our
+1. **Pin the wheel deliberately.** Decide the target `polars==X.Y.Z`.
+   Resolve the git tag `py-X.Y.Z` to its COMMIT upstream
+   (`git ls-remote --tags https://github.com/pola-rs/polars "py-X.Y.Z"` —
+   the printed hash is the new rev; for an annotated tag take the `^{}`
+   peeled line).
+2. **Bump the crate rev.** In `rust/brutex-lake/src/lib.rs` set
+   `PINNED_POLARS_PY_VERSION = "X.Y.Z"` AND `PINNED_POLARS_GIT_REV` to the
+   resolved commit; in `Cargo.toml` move all FIVE polars git deps to
+   `rev = "<that commit>"` (rev-pinned, never the movable tag — the
+   review-round law). Re-check the upstream workspace's
+   `[patch.crates-io]` at the new rev — the restated patches in our
    manifest (object_store fork et al.) must be updated to whatever revs the
    NEW tag's lock pins (patches do not propagate through git deps).
    Feature-subset drift is a live hazard: the minimum feature set that
    COMPILES can change between tags (at 1.42.1 `strings` was load-bearing).
 3. **Re-pin the zstd trio.** Read the polars repo's `Cargo.lock` AT THE NEW
-   TAG for its zstd / zstd-safe / zstd-sys versions. Regenerate our lock
+   REV for its zstd / zstd-safe / zstd-sys versions. Regenerate our lock
    (`cargo generate-lockfile`), then force the trio (and any other
-   encode-path crate the new tag's lock pins differently) with
+   encode-path crate the new rev's lock pins differently) with
    `cargo update -p <crate> --precise <ver>`. Update
    `PINNED_LIBZSTD_VERSION` if the bundled libzstd moved. Commit the new
    `Cargo.lock`.
-4. **cargo gates.** `cargo fmt --check && cargo clippy --all-targets -- -D
-   warnings && cargo test --release` in `rust/brutex-lake/` — the lockstep
-   pin tests must be green (they fail LOUD on a manifest/lock drift).
+4. **cargo gates.** `cargo fmt --check && cargo clippy --all-targets
+   --locked -- -D warnings && cargo test --release --locked` in
+   `rust/brutex-lake/` — the lockstep pin tests must be green (they fail
+   LOUD on a manifest/lock drift, and `--locked` refuses a stale lock
+   instead of silently re-resolving it).
 5. **Rebuild + reinstall the wheel** in the target environment:
    `pip install ./rust/brutex-lake` (with `polars==X.Y.Z` installed).
 6. **Re-run the parity corpus.**
-   `pytest -rs tests/golden/test_lake_rust_render_parity.py` — all 5 corpus
+   `pytest -rs tests/golden/test_lake_rust_render_parity.py` — all 6 corpus
    cases + the whole-write-path test must PASS (not skip: a skip means the
    version guard still sees a mismatch — step 2 or 5 is incomplete).
    CI-side, trigger `lake-rust-parity.yml` via workflow_dispatch and check
@@ -123,9 +142,29 @@ see §4). A healthy engagement logs exactly one
   this seam exists (constraint P10; the burn-in and every degrade path
   depend on it).
 * The main CI test job never installs the crate; only
-  `lake-rust-parity.yml` (and local operators) do.
-* `MemoryError` on the engaged path maps to `LakeWriteHalt` through the
-  writer's `lake_write_guard`, identical to the pure-Python render.
+  `lake-rust-parity.yml` (and local operators) do. **Flip precondition
+  (review-round fold):** real-crate byte-identity is therefore enforced
+  ONLY by that NON-REQUIRED lane — the future default-ON flip DEC must
+  either make the lane required or cite a fresh green run of it as a
+  stated precondition (never flip on the lane's mere existence).
+* **OOM honesty, scoped precisely (review-round fold):** a PYTHON-SURFACED
+  `MemoryError` on the engaged path (BytesIO/object-list allocations, the
+  IPC handoff) maps to `LakeWriteHalt` through the writer's
+  `lake_write_guard`, identical to the pure-Python render. A
+  Rust-encoder-INTERNAL allocation failure is NOT gracefully mapped on
+  EITHER side — the wheel's own `write_parquet` is the same Rust polars
+  and shares the class (allocator abort, or a panic: on the crate side
+  mapped to `RuntimeError` at the FFI boundary → the facade degrades to
+  the oracle; an allocator ABORT kills the process on both paths). The
+  seam neither narrows nor widens that envelope.
+* **Standing hazard (unproven residual):** the crate's render runs the
+  polars STREAMING engine, which may execute on its own worker threads;
+  `catch_unwind` unwinds only the calling thread, so the "every panic
+  becomes a catchable PyErr" boundary relies on polars-stream propagating
+  a worker panic back to the collector (its observed behaviour — not
+  provable in a crate unit test). Bounded regardless: the facade catches
+  an escaped `pyo3_runtime.PanicException` (`BaseException` belt), latches
+  `crate_panic`, and serves the oracle.
 * The crate is in NO Cargo workspace and NO other workflow — ci.yml's rust
   jobs (fno-math / trading-core, RUST_VERSION 1.93.1) never build it;
   brutex-lake's floor is rustc 1.95 (`LAKE_RUST_VERSION` 1.97.0 in its own

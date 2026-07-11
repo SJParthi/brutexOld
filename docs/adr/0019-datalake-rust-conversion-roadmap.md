@@ -335,3 +335,31 @@ engaged overhead: ~+6 ms (+47%) on the 100k-row encode tail vs the Python
 ≈0-payoff banner holds as a small measured slowdown. Locks + error mapping
 did not move (the PR-1 boundary). PR-2..PR-4 and the waves remain future
 work under the same apparatus.
+
+**ADVERSARIAL-REVIEW FIX ROUND folded (2026-07-11, same branch, pre-merge —
+5 hostile lenses; full per-item record in the MIGRATION.md #1726 PR-1
+segment):** the facade is fail-closed against a FOREIGN/BROKEN crate (API
+surface verified at import; a raising metadata pyfunction latches
+`crate_metadata_error`; `AttributeError` joins the degrade set; a
+`BaseException`/`PanicException` escaping the crate boundary latches
+`crate_panic` and serves the oracle — KeyboardInterrupt/SystemExit/
+MemoryError re-raise bare); the crate constructs its result INSIDE a panic
+guard (a `PyBytes` allocation panic maps to `RuntimeError`, never a
+`PanicException`) and releases the GIL for the render (`Python::detach` —
+the wheel's own posture); the polars git deps are REV-pinned (tags are
+movable; `PINNED_POLARS_GIT_REV`, manifest + committed `Cargo.lock` both
+cargo-tested, every CI cargo step `--locked`, maturin `locked = true`); the
+parity lane force-aligns the installed wheel to the crate pin so a new
+upstream polars release can never turn the lane green-but-vacuous (the
+drift check is now FATAL in-lane; `brutex/data/models.py` joins the path
+triggers); the burn-in gains a SCHEMA-SHAPE gate (every distinct frame
+shape byte-compared at least once before crate bytes ship for it — the
+count budget alone would have licensed a first-ever Greeks shape after 16
+spot renders) and the corpus gains the all-null-overlay case (all 6 cases
+byte-MATCH on the rebuilt crate; the original 5 digests unchanged). OOM
+honesty is SCOPED PRECISELY: a Python-surfaced `MemoryError` maps to
+`LakeWriteHalt` as on the pure-Python path; a Rust-encoder-INTERNAL
+allocation failure aborts/panics on BOTH the wheel and the crate — the
+seam neither narrows nor widens that envelope. FLIP PRECONDITION: byte
+identity is enforced only by the NON-REQUIRED parity lane — the default-ON
+flip DEC must make it required or cite a fresh green run.

@@ -44,7 +44,8 @@ re-derivation; run-identity bytes downstream). ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; zero code ships in the roadmap
 commit itself — PR-1 has since SHIPPED on the same branch (the `rust/brutex-lake`
 crate + the default-OFF `BRUTEX_LAKE_RUST_RENDER` render seam with import/version
-guards + burn-in autorevert; the 5-case byte-parity corpus green locally — the §1
+guards + burn-in autorevert; the byte-parity corpus green locally, and the 5-lens
+adversarial-review fix round folded pre-merge — the §1
 Active-branch blurb + the MIGRATION.md #1726 PR-1 segment carry the record).)
 Earlier: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
 DEC-STAGE1A-ROLL-RESET-001 + the round-1–8 review-fix packs DEC-FUTURES-LAUNCH-REVIEW-FIXES-001…-008,
@@ -2090,14 +2091,28 @@ hostile-review pass._
   5-case corpus through the REAL `_render_bytes` — all 5 sha256+raw-bytes MATCH (the
   spike's exact digests) + whole-write-path ON/OFF parity through
   `ParquetWriter.write` (partition bytes + `raw_hash` equal); NEW non-required
-  `.github/workflows/lake-rust-parity.yml` lane (path-triggered + dispatch; drift
-  WARN step) + `docs/runbooks/lake-rust-render-lockstep.md` (bump ritual +
+  `.github/workflows/lake-rust-parity.yml` lane (path-triggered + dispatch) +
+  `docs/runbooks/lake-rust-render-lockstep.md` (bump ritual +
   escalation). HONEST: MEASURED small SLOWDOWN engaged (+~6 ms/+47% on the 100k-row
   encode tail, ~3% of the full render wall) — payoff ≈ 0, uniformity not speed;
   locks/error mapping unmoved; PR-2..PR-4 + waves future. `lake_rust_render.py`
   100% line+branch standalone; `parquet_writer.py` 100% on its full matched suite;
-  cargo fmt/clippy/test green. ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+  cargo fmt/clippy/test green. ADVERSARIAL-REVIEW FIX ROUND folded (2026-07-11,
+  same branch, pre-merge — 5 hostile lenses; the per-item record lives in the
+  MIGRATION.md #1726 PR-1 segment + ADR-0019 §9): foreign/broken-crate
+  fail-closed hardening (API-surface import guard, `crate_metadata_error` +
+  `crate_panic`/BaseException-belt latches, `AttributeError` in the degrade set),
+  the crate's result construction moved inside the panic boundary + the render
+  now GIL-FREE (`Python::detach`), the polars git deps REV-pinned (movable-tag
+  hazard; manifest + Cargo.lock cargo-tested, CI `--locked`, maturin
+  `locked = true`), the parity lane force-aligns the wheel to the crate pin
+  (green-but-vacuous-on-next-release closed; drift check now FATAL in-lane;
+  `models.py` joins the path triggers), the burn-in gains a SCHEMA-SHAPE gate +
+  the corpus the all-null-overlay case (all 6 byte-MATCH on the rebuilt crate),
+  and the OOM/memory/GIL/dual-pool honesty rows land in the runbook cost table
+  (Python-surfaced `MemoryError` → `LakeWriteHalt`; Rust-internal alloc failure
+  aborts/panics on BOTH sides — the seam neither narrows nor widens it). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
   Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
   DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702** — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone: the ONE pinned series alias `NSE-NIFTY-FUT` (symbol_id 4; retired shapes get a
@@ -5267,11 +5282,16 @@ hostile-review pass._
   re-hosted on the NEW `rust/brutex-lake` crate (polars git-pinned
   `py-1.42.1`, zstd trio via the committed Cargo.lock), default-OFF
   behind `BRUTEX_LAKE_RUST_RENDER` with import/version guards + the
-  16-render burn-in autorevert, Python as the live parity oracle; the
-  5-case byte-parity corpus + whole-write-path parity EXECUTED locally
-  (all sha256+bytes equal); NEW non-required lake-rust-parity.yml lane +
-  the lockstep runbook (`window_ledger_store` stays the LAST-MILE named
-  escalation point); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  16-render burn-in autorevert (schema-shape-gated since the review
+  round), Python as the live parity oracle; the byte-parity corpus (the
+  spike's 5 cases + the review-round all-null-overlay case) +
+  whole-write-path parity EXECUTED locally
+  (all sha256+bytes equal); NEW non-required lake-rust-parity.yml lane
+  (wheel force-aligned to the crate pin, cargo `--locked`, rev-pinned
+  polars deps) + the lockstep runbook (`window_ledger_store` stays the
+  LAST-MILE named escalation point); the 5-lens ADVERSARIAL-REVIEW FIX
+  ROUND is folded pre-merge — per-item record in the MIGRATION.md #1726
+  PR-1 segment; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
   Earlier: `claude/magical-cray-g6agaw`
   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
