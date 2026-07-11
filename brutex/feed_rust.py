@@ -107,6 +107,10 @@ def warn_degrade_once(reason: str, **fields: object) -> None:
     an already-logged reason are silent — a wheel-less box polling the feed
     must never log-storm.
     """
+    # Deliberately unlocked check-then-add (the rust_metrics warn-once
+    # precedent): two threads racing the same reason can at worst BOTH log
+    # it once (an at-most-double line, never a storm and never a miss) —
+    # a lock here would buy nothing the log dedup downstream doesn't.
     if reason in _WARNED:
         return
     _WARNED.add(reason)
@@ -192,7 +196,10 @@ def validate_scan(result: object, n_rows: int) -> bool:
     * ``positivity_stop`` — ``None`` or ``(row, field)`` with
       ``row in [0, n_rows)`` and ``field in [0, 3]``; when present, every
       kept row AND every warn anchor is strictly before ``row`` (no boundary
-      flush at the stop row, no finish event).
+      flush at the stop row, no finish event) — and every event's
+      ``session_first_row`` / ``first_prev_row`` / ``first_skip_row`` is
+      likewise strictly before ``row`` (the scan truncated there, so no
+      recorded coordinate can reference the stop row or beyond).
 
     Negative or out-of-range indices are refused OUTRIGHT — a negative index
     would silently wrap Python list selection. Any violation emits one
@@ -206,6 +213,7 @@ def validate_scan(result: object, n_rows: int) -> bool:
     if stop is None:
         kept_bound = n_rows
         emit_bound = n_rows + 1  # a finish event anchors AT n_rows
+        row_bound = n_rows
     else:
         if not (isinstance(stop, tuple) and len(stop) == _STOP_ARITY):
             return _invalid(n_rows, "stop_shape")
@@ -214,9 +222,12 @@ def validate_scan(result: object, n_rows: int) -> bool:
             return _invalid(n_rows, "stop_types")
         if not (0 <= stop_row < n_rows and 0 <= stop_field <= _MAX_FIELD_INDEX):
             return _invalid(n_rows, "stop_range")
-        # Stop truncation law: nothing recorded at/after the stop row.
+        # Stop truncation law: nothing recorded at/after the stop row —
+        # kept rows, warn anchors, AND every event row coordinate
+        # (session_first_row / first_prev_row / first_skip_row).
         kept_bound = stop_row
         emit_bound = stop_row
+        row_bound = stop_row
     prev_kept = -1
     for idx in kept:
         if not isinstance(idx, int):
@@ -233,11 +244,11 @@ def validate_scan(result: object, n_rows: int) -> bool:
             return _invalid(n_rows, "event_types")
         if emit <= prev_emit or emit >= emit_bound:
             return _invalid(n_rows, "event_order")
-        if not 0 <= session_first < n_rows:
+        if not 0 <= session_first < row_bound:
             return _invalid(n_rows, "session_first_range")
         if skipped < 1:
             return _invalid(n_rows, "skipped_floor")
-        if not 0 <= first_prev < first_skip < n_rows:
+        if not 0 <= first_prev < first_skip < row_bound:
             return _invalid(n_rows, "offender_range")
         prev_emit = emit
     return True

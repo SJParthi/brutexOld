@@ -19,6 +19,10 @@
 //!
 //! The scan is O(n_bars) per LAUNCH — a per-call latency win on the feed
 //! read boundary, NOT an O(1) claim and NOT on the ~33B-trial mask path.
+//! Memory: the PyO3 edge packs five owned `Vec<f64>`/`Vec<i64>` column
+//! copies (plus the optional `ts_us` list the caller builds when the screen
+//! is on) — a transient O(n_bars) cost, dominated by the pre-existing
+//! `to_pylist()` materialization the read path already pays in BOTH arms.
 
 pub mod scan;
 

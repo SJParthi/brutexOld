@@ -40,10 +40,15 @@ degrades to the byte-identical Python oracle (``wheel_missing`` /
 HONEST residual gap (Golden Rule #10, same envelope as the siblings'): the
 version + symbol-set handshake catches a stale wheel that dropped or added a
 symbol or changed crate version. It does NOT catch same-version,
-symbol-compatible BEHAVIORAL drift — that class is watched by the baked
-``__source_digest__`` (compared by the follow-up doctor stage) and, at
-runtime, by the refuse-poison ``validate_scan`` gate + the degrade-to-oracle
-posture in ``brutex/feed_rust.py``.
+symbol-compatible BEHAVIORAL drift — and neither does anything else at
+runtime in this slice: the ``validate_scan`` gate in ``brutex/feed_rust.py``
+is STRUCTURAL-only (shape / ordering / range laws), so a same-version,
+symbol-complete wheel whose DECISIONS drifted while keeping a valid shape
+serves silently. The catches for that class are the named follow-ups — the
+``brutex doctor`` stage comparing the baked ``__source_digest__`` against
+the source tree (``DEC-FEED-RUST-DOCTOR-STAGE-001``) and the flip-time
+burn-in self-check (``DEC-FEED-RUST-FLIP-001``); this slice ships the stamp
+surfaces only, never claims either.
 """
 
 from __future__ import annotations

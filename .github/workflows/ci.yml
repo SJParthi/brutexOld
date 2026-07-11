@@ -2577,23 +2577,13 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
-      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
-        # The default-OFF feed decision kernel: this job drives the flag-ON
-        # parity/degrade/golden suites, so the wheel must be importable
-        # (absent wheel = those tests skip loudly and the ON arm goes
-        # unproven). Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-feed; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+      # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
+      # this job installs `.[dev]` only (no pyarrow), so the feed parity
+      # module (tests/property/test_feed_rust_parity.py) skips on its
+      # pyarrow guard regardless; installing the wheel was dead weight. The
+      # dual-arm parity gate's execution home is the `test:` job
+      # ([dev,data,ui] + the wheel), which runs tests/property in its
+      # coverage pass.
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then

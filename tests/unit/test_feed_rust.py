@@ -272,6 +272,18 @@ class TestValidateScan:
         self._refused(([], [(4, 0, 1, 0, 4)], None), 4, "offender_range")  # skip >= n
         self._refused(([], [(4, 0, 1, -1, 1)], None), 4, "offender_range")  # negative
 
+    def test_session_first_at_or_after_stop_row(self) -> None:
+        # Round-1 review tightening: under a stop at row 3, an event whose
+        # session_first_row is AT the stop row (in [0, n_rows) but not
+        # strictly before the truncation point) is kernel-impossible and
+        # must refuse — kills the row_bound -> n_rows reversion mutant.
+        self._refused(([0], [(2, 3, 1, 0, 1)], (3, 0)), 5, "session_first_range")
+
+    def test_offender_at_or_after_stop_row(self) -> None:
+        # Same tightening for the offender coordinates: first_skip_row at
+        # the stop row refuses even though it is < n_rows.
+        self._refused(([0], [(2, 0, 1, 0, 3)], (3, 0)), 5, "offender_range")
+
 
 # ── Leaf discipline + vocabulary mirror pins ────────────────────────────────
 
@@ -279,23 +291,24 @@ class TestValidateScan:
 class TestLeafDiscipline:
     """AST pins: import leaf-ness + the inline flag vocabulary mirror."""
 
-    def test_leaf_imports_nothing_from_heavy_packages(self) -> None:
+    def test_leaf_imports_only_from_the_allowlist(self) -> None:
+        # Round-1 review hardening: an import ALLOWLIST (strictly stronger
+        # than the original heavy-package denylist) — a stray third-party or
+        # brutex.* import into the leaf fails this pin by construction.
+        # The leaf's whole legal surface: stdlib (__future__/os/typing),
+        # structlog, and the lazy in-function wheel import.
+        allowed = {"__future__", "os", "typing", "structlog", "brutex_feed"}
         source = Path(feed_rust.__file__).read_text(encoding="utf-8")
         tree = ast.parse(source)
-        forbidden = (
-            "brutex.engine",
-            "brutex.costs",
-            "brutex.dashboard",
-            "brutex.data",
-            "brutex.feed",
-        )
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    assert not alias.name.startswith(forbidden), alias.name
+                    top = alias.name.split(".")[0]
+                    assert top in allowed, alias.name
             elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                assert not module.startswith(forbidden), module
+                assert node.level == 0, "relative imports forbidden in the leaf"
+                top = (node.module or "").split(".")[0]
+                assert top in allowed, node.module
 
     def test_truthy_falsy_mirror_sweep_lookahead(self) -> None:
         # The leaf may not IMPORT env_flag_tristate (verified cycle:
