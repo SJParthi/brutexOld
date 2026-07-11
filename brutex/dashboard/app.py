@@ -62,6 +62,7 @@ from brutex.adapters.ingest_common import (
 from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
+from brutex.config.hardware_envelope import memory_budget_bytes
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard import oneclick_artifacts, oneclick_view
 from brutex.dashboard.completeness import (
@@ -1217,6 +1218,30 @@ def _cross_origin_reason(
     return _CROSS_ORIGIN_DETAIL
 
 
+# ── Byte watermarks for the two heaviest shared-cache instances ─────────────
+# DEC-MEMORY-FOOTPRINT-HARDENING-001: the COMMON `MoversSnapshotCache` bounds
+# ENTRIES, not bytes — measured 84.9 MB at capacity 256 with 750-row dict
+# payloads (339.7 KiB/entry), and `_sweep_leaderboard_cache` retains whole
+# `SweepScan`s (~1.1 KB/ResultRow — a 100k-row store parses to ~105 MB
+# resident, several revisions can co-reside until LRU aging). The two
+# heavy-payload instances therefore opt into the byte watermark, each budget
+# derived from the COMMON RAM envelope (`memory_budget_bytes`,
+# DEC-RAM-BUDGETS-001 — the fraction reproduces a conservative share of the
+# CLAUDE.md §8 48 GiB reference box; an undetected-RAM sandbox gets the floor
+# EXACTLY; no new env var — the derivation is not operator-tunable here).
+# Every OTHER instance keeps `max_bytes=None` → byte-identical behaviour.
+#: /results sweep-leaderboard cache: 1/16 of total RAM (3 GiB on the §8 box);
+#: floor 1 GiB — the latency audit's derived pre-fix worst-case retention, so
+#: the unknown-RAM fallback never bounds TIGHTER than the measured status quo.
+_SWEEP_LEADERBOARD_CACHE_FRACTION: Final[float] = 1.0 / 16.0
+_SWEEP_LEADERBOARD_CACHE_FLOOR_BYTES: Final[int] = 1 << 30  # 1 GiB
+#: One-click artifact cache: 1/32 of total RAM (1.5 GiB on the §8 box); floor
+#: 512 MiB — its payloads (manifest/top100/events pages) are smaller but the
+#: instance is shared across six client-typed key families.
+_ONECLICK_CACHE_FRACTION: Final[float] = 1.0 / 32.0
+_ONECLICK_CACHE_FLOOR_BYTES: Final[int] = 512 * 1024 * 1024  # 512 MiB
+
+
 def build_app(
     state: DashboardState,
     *,
@@ -1923,8 +1948,15 @@ def build_app(
     # a filter/rank click within one revision re-ranks the cached scan with zero
     # store loads (see `api_sweep_leaderboard`). REUSES the COMMON LRU
     # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON); the LRU ages
-    # out old-revision keys.
-    _sweep_leaderboard_cache = MoversSnapshotCache()
+    # out old-revision keys, and the RAM-derived byte watermark bounds the
+    # resident SweepScan payload bytes (DEC-MEMORY-FOOTPRINT-HARDENING-001 —
+    # the constants + rationale live at the module-level block above build_app).
+    _sweep_leaderboard_cache = MoversSnapshotCache(
+        max_bytes=memory_budget_bytes(
+            fraction=_SWEEP_LEADERBOARD_CACHE_FRACTION,
+            floor_bytes=_SWEEP_LEADERBOARD_CACHE_FLOOR_BYTES,
+        )
+    )
     # The one-click artifact read memo (DEC-OPERATOR-PAGE-REAL-001): every
     # `/api/v1/oneclick/*` read (runs listing, manifest, top100, events tail
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
@@ -1941,8 +1973,15 @@ def build_app(
     # via `sibling_key_token` — r1 MINOR-1 fold).
     # HONEST envelope (Golden Rule #10): the FIRST read per revision pays the
     # O(artifact) parse; the cached hit is O(1) vs run count / artifact size.
-    # REUSES the COMMON `MoversSnapshotCache`.
-    _oneclick_cache = MoversSnapshotCache()
+    # REUSES the COMMON `MoversSnapshotCache`, with the RAM-derived byte
+    # watermark bounding the six shared key families' resident payload bytes
+    # (DEC-MEMORY-FOOTPRINT-HARDENING-001 — constants above build_app).
+    _oneclick_cache = MoversSnapshotCache(
+        max_bytes=memory_budget_bytes(
+            fraction=_ONECLICK_CACHE_FRACTION,
+            floor_bytes=_ONECLICK_CACHE_FLOOR_BYTES,
+        )
+    )
     _oneclick_outages = oneclick_artifacts.OutageGate()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each

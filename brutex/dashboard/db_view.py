@@ -61,6 +61,7 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
+from brutex.config.hardware_envelope import memory_budget_bytes
 
 # NO lake_revision import — module-level OR lazy (AST-pinned by
 # ``test_db_view_no_lake_revision_import``): lake_revision lazily imports
@@ -5117,19 +5118,35 @@ _LEDGER_READ_CACHE_CAPACITY: Final[int] = 32
 #: so the tighter cap bounds the worst-case served staleness.
 _LEDGER_READ_FLOOR_CAP_S: Final[float] = 120.0
 
+#: Byte watermark for the ledger read cache (DEC-MEMORY-FOOTPRINT-HARDENING-001):
+#: the cache retains parsed whole-ledger record TUPLES (~1.0 KB/row measured —
+#: a production 841k-row ledger parses to ~0.8 GB resident) across 3 key
+#: families × multi-lake headroom, so the 32-entry count bound alone is no byte
+#: bound at all. Budget = 1/16 of total RAM via the COMMON `memory_budget_bytes`
+#: (3 GiB on the CLAUDE.md §8 48 GiB box); floor 1 GiB when RAM is undetected —
+#: generous enough that today's steady state (one lake, three families) never
+#: evicts, while a pathological multi-lake session is bounded. No new env var.
+_LEDGER_READ_CACHE_FRACTION: Final[float] = 1.0 / 16.0
+_LEDGER_READ_CACHE_FLOOR_BYTES: Final[int] = 1 << 30  # 1 GiB
+
 
 def _make_ledger_read_cache(
     *, clock: Callable[[], float] = _monotonic_clock
 ) -> MoversSnapshotCache:
     """Construct THE shared stamped ledger read cache — parameters exist ONCE.
 
-    Single-flight + the #920 adaptive floor, both REUSED from the verified
+    Single-flight + the #920 adaptive floor + the RAM-derived byte watermark
+    (DEC-MEMORY-FOOTPRINT-HARDENING-001), all REUSED from the verified
     :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` contract (no
     third hand-rolled cache — CLAUDE.md §11 COMMON). *clock* is injectable so
     the floor tests are deterministic (production keeps the monotonic default).
     """
     return MoversSnapshotCache(
         capacity=_LEDGER_READ_CACHE_CAPACITY,
+        max_bytes=memory_budget_bytes(
+            fraction=_LEDGER_READ_CACHE_FRACTION,
+            floor_bytes=_LEDGER_READ_CACHE_FLOOR_BYTES,
+        ),
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,

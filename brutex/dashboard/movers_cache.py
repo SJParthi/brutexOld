@@ -68,17 +68,26 @@ hidden — Golden Rule #10).
   pull) still pays the real ``O(instruments × bars-read)`` lake scan — this is
   NOT claimed away. The cache bounds how OFTEN that cost is paid (once per
   coordinate per generation), it does not make the scan itself O(1).
-* Memory is bounded in **ENTRY COUNT** (``capacity``), NOT in bytes
-  (DEC-LATENCY-HONESTY-BATCH-001 corrects the prior unqualified "memory is
-  bounded" wording): an LRU keeps at most ``capacity`` snapshots resident —
-  ``O(capacity)`` ENTRIES, so a long session that views thousands of
-  coordinates never grows without bound in count (the least-recently-used
-  snapshot is evicted) — but each entry retains its WHOLE payload, so total
-  resident bytes are ``capacity × payload-size``: large payloads (e.g. sweep
-  scans keyed per revision) can retain gigabytes at the default capacity
-  (≈256 × 4 MiB ≈ 1 GiB — the latency audit's probe figure, arithmetically
-  derived, not re-measured on this branch). A byte-watermark / size-aware
-  eviction is a NAMED follow-up, not claimed.
+* Memory is bounded in **ENTRY COUNT** (``capacity``) by default, plus an
+  OPT-IN **byte watermark** (``max_bytes`` — DEC-MEMORY-FOOTPRINT-HARDENING-001,
+  claiming the follow-up DEC-LATENCY-HONESTY-BATCH-001 named): an LRU keeps
+  at most ``capacity`` snapshots resident — ``O(capacity)`` ENTRIES, so a
+  long session that views thousands of coordinates never grows without bound
+  in count — but each entry retains its WHOLE payload, so total resident
+  bytes are ``capacity × payload-size``: large payloads can retain gigabytes
+  at the default capacity (measured 84.9 MB at capacity 256 with 750-row
+  dict payloads — 339.7 KiB/entry; sweep scans are far larger, ~1.1 KB/row ×
+  100k rows per resident scan). An instance constructed with
+  ``max_bytes=<budget>`` additionally evicts LRU-first until the tracked
+  total fits the budget (the just-inserted entry is NEVER evicted — a single
+  over-budget entry is kept alone + ONE WARNING per breach episode). HONEST
+  (Golden Rule #10): the per-entry figure is a best-effort DEEP-SIZE
+  **approximation** (:func:`deep_size_bytes` — a recursive
+  ``sys.getsizeof`` walk over containers/dataclass-likes, cycle-guarded,
+  depth-capped), NOT exact RSS; shared sub-objects double-count across
+  entries and native (polars/duckdb) buffers under-count. The default
+  ``max_bytes=None`` keeps every pre-watermark behaviour byte-identical
+  (regression-pinned: the sizer is never even called).
 * An opted-in instance may serve a **bounded-stale** entry while a pull runs
   (age < the adaptive floor, capped at ``adaptive_floor_cap_s``); the staleness
   window closes the moment the pull ends (probe ``False`` → recompute) and the
@@ -92,6 +101,7 @@ route.
 from __future__ import annotations
 
 import hashlib
+import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -110,6 +120,7 @@ __all__ = [
     "MAX_ADAPTIVE_FLOOR_CAP_S",
     "MoversSnapshotCache",
     "candidate_key",
+    "deep_size_bytes",
     "revision_generation",
 ]
 
@@ -243,6 +254,93 @@ def revision_generation(token: str) -> int:
     return int.from_bytes(hashlib.sha256(token.encode("utf-8")).digest()[:8], "big")
 
 
+#: Recursion-depth cap for :func:`deep_size_bytes`. Payloads here are shallow
+#: (dataclass rows inside dicts/tuples inside a container — ≤ ~5 levels in
+#: practice); the cap bounds a pathological deep nest to O(width^depth) work
+#: and guarantees the walk can never hit ``RecursionError`` on its own.
+_DEEP_SIZE_MAX_DEPTH: Final[int] = 16
+
+#: Conservative per-object fallback when even ``sys.getsizeof`` fails (an
+#: exotic ``__sizeof__`` override raising) — the CPython small-object floor,
+#: so a sizing fault under-counts modestly instead of raising or reading 0.
+_DEEP_SIZE_FALLBACK_BYTES: Final[int] = 64
+
+
+def _shallow_size(obj: object) -> int:
+    """One object's ``sys.getsizeof``, degraded to a constant — NEVER a raise."""
+    try:
+        return sys.getsizeof(obj)
+    except Exception:  # pylint: disable=broad-except — sizing must never break an insert
+        return _DEEP_SIZE_FALLBACK_BYTES
+
+
+def deep_size_bytes(value: object) -> int:
+    """Best-effort DEEP byte size of *value* — an APPROXIMATION, never exact RSS.
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 — the per-entry figure behind the
+    opt-in ``max_bytes`` watermark: a small recursive ``sys.getsizeof`` walk
+    over ``dict`` / ``list`` / ``tuple`` / ``set`` / ``frozenset`` containers
+    and dataclass-like objects (their ``__dict__`` plus every MRO
+    ``__slots__`` attribute), with scalars (``str`` / ``bytes`` /
+    ``bytearray`` / numbers / ``None``) counted shallow (``getsizeof``
+    already includes their payload). Cycle-guarded by object identity (a
+    shared/self-referencing sub-object counts ONCE per call) and depth-capped
+    at :data:`_DEEP_SIZE_MAX_DEPTH` (a deeper nest counts its remaining
+    subtree shallow). ANY sizing fault — a raising ``__sizeof__``, a
+    container mutating mid-walk, an exotic ``__dict__`` — degrades to the
+    shallow ``sys.getsizeof`` of the whole value (never a raise: sizing can
+    never break an insert — Golden Rule #1's never-crash posture for
+    accounting).
+
+    HONEST envelope (Golden Rule #10): the figure is a HEURISTIC — objects
+    shared BETWEEN two cached entries double-count (each entry's walk sees
+    them once), native library buffers (polars/duckdb/pyarrow) under-count
+    (``getsizeof`` sees only the Python shell), and interned scalars
+    over-count. Good enough to bound a cache's resident payload bytes; not a
+    memory profiler.
+    """
+    seen: set[int] = set()
+
+    def _walk(obj: object, depth: int) -> int:
+        oid = id(obj)
+        if oid in seen:
+            return 0  # cycle / shared sub-object: counted once per call.
+        seen.add(oid)
+        total = _shallow_size(obj)
+        if depth >= _DEEP_SIZE_MAX_DEPTH:
+            return total  # deeper subtree counted shallow (bounded work).
+        if obj is None or isinstance(obj, (str, bytes, bytearray, int, float, complex, bool)):
+            return total  # scalars: getsizeof already includes the payload.
+        if isinstance(obj, dict):
+            for key, item in list(obj.items()):
+                total += _walk(key, depth + 1) + _walk(item, depth + 1)
+            return total
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            for item in list(obj):
+                total += _walk(item, depth + 1)
+            return total
+        # Dataclass-like objects: instance __dict__ and/or per-class __slots__.
+        attrs = getattr(obj, "__dict__", None)
+        if isinstance(attrs, dict):
+            total += _walk(attrs, depth + 1)
+        for klass in type(obj).__mro__:
+            slots = getattr(klass, "__slots__", ())
+            if isinstance(slots, str):  # a bare-string __slots__ is ONE name.
+                slots = (slots,)
+            for name in slots:
+                try:
+                    slot_value = getattr(obj, name)
+                except AttributeError:
+                    continue  # an unset slot holds nothing to size.
+                total += _walk(slot_value, depth + 1)
+        return total
+
+    try:
+        return _walk(value, 0)
+    except Exception:  # pylint: disable=broad-except — sizing must never break an insert
+        return _shallow_size(value)
+
+
 @dataclass(frozen=True, slots=True)
 class _Entry:
     """One cached candidate set plus the generation + clock it was computed at.
@@ -264,6 +362,10 @@ class _Entry:
     generation: int
     computed_at: float = 0.0
     compute_duration: float = 0.0
+    #: The entry's best-effort deep payload size (DEC-MEMORY-FOOTPRINT-
+    #: HARDENING-001) — 0 when the instance carries no ``max_bytes`` watermark
+    #: (the sizer is never called there; the default stays byte-identical).
+    size_bytes: int = 0
 
 
 class MoversSnapshotCache:
@@ -281,6 +383,20 @@ class MoversSnapshotCache:
     capacity
         Maximum number of distinct keys kept resident; the least-recently-used
         entry is evicted once the count would exceed it. Must be ``>= 1``.
+    max_bytes
+        Optional byte WATERMARK over the tracked payload total
+        (DEC-MEMORY-FOOTPRINT-HARDENING-001): when set (``>= 1``), every
+        insert sizes its payload via :func:`deep_size_bytes` (a best-effort
+        deep approximation — see its honesty envelope) and LRU entries are
+        evicted until the running total fits the watermark — the
+        just-inserted entry is NEVER evicted, so a single over-budget payload
+        is kept alone with ONE ``movers_cache.byte_watermark_single_entry_over``
+        WARNING per breach episode (the episode ends when an insert lands the
+        total back at/below the watermark). Eviction bursts log ONE
+        ``movers_cache.byte_watermark_evicted`` INFO with counts, never a
+        line per entry. The default ``None`` disables the watermark entirely
+        — no sizing call, no accounting drift, behaviour byte-identical to
+        the pre-watermark cache (regression-pinned).
     pull_active_probe
         Optional zero-arg in-process pull signal for the OPT-IN adaptive floor
         (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001; the production wiring reads this
@@ -329,6 +445,7 @@ class MoversSnapshotCache:
         self,
         *,
         capacity: int = DEFAULT_MOVERS_CACHE_CAPACITY,
+        max_bytes: int | None = None,
         pull_active_probe: Callable[[], bool | None] | None = None,
         adaptive_floor: bool = False,
         adaptive_base_floor_s: float = DEFAULT_ADAPTIVE_BASE_FLOOR_S,
@@ -337,7 +454,16 @@ class MoversSnapshotCache:
     ) -> None:
         if capacity < 1:
             raise ValueError(f"capacity must be >= 1, got {capacity}")
+        if max_bytes is not None and max_bytes < 1:
+            raise ValueError(f"max_bytes must be >= 1 (or None to disable), got {max_bytes}")
         self._capacity = capacity
+        self._max_bytes = max_bytes
+        #: Running best-effort payload total (bytes) — 0 forever without a
+        #: watermark (entries then carry size_bytes=0). Guarded by ``_lock``.
+        self._total_bytes = 0
+        #: One WARNING per single-entry-over-budget breach EPISODE; reset the
+        #: moment an insert lands the total back at/below the watermark.
+        self._single_over_warned = False
         self._pull_active_probe = pull_active_probe
         self._adaptive_floor = adaptive_floor
         self._adaptive_base_floor_s = adaptive_base_floor_s
@@ -375,6 +501,21 @@ class MoversSnapshotCache:
         """The number of entries currently resident — O(1)."""
         with self._lock:
             return len(self._entries)
+
+    @property
+    def max_bytes(self) -> int | None:
+        """The byte watermark, or ``None`` when disabled — O(1)."""
+        return self._max_bytes
+
+    def total_bytes(self) -> int:
+        """The tracked best-effort payload total in bytes — O(1).
+
+        Always ``0`` without a watermark (no sizing runs there); with one, the
+        sum of every resident entry's :func:`deep_size_bytes` figure — an
+        approximation, never exact RSS (see the sizer's honesty envelope).
+        """
+        with self._lock:
+            return self._total_bytes
 
     def get_or_compute(
         self, key: str, *, generation: int, compute: Callable[[], _T], force_fresh: bool = False
@@ -495,7 +636,19 @@ class MoversSnapshotCache:
             event.set()  # wake waiters so exactly one takes over.
             raise
         finished_at = self._clock()
+        # Size the payload OUTSIDE the lock (the value is still thread-local
+        # here) so a large deep walk never blocks a concurrent hit; skipped
+        # entirely without a watermark — the default stays byte-identical
+        # (DEC-MEMORY-FOOTPRINT-HARDENING-001).
+        entry_bytes = 0 if self._max_bytes is None else deep_size_bytes(value)
+        evicted_for_bytes = 0
+        single_over = False
+        total_after = 0
         with self._lock:
+            prior = self._entries.get(key)
+            if prior is not None:
+                # Replacing a stale entry: retire its bytes before re-adding.
+                self._total_bytes -= prior.size_bytes
             self._entries[key] = _Entry(
                 value=value,
                 generation=generation,
@@ -504,12 +657,49 @@ class MoversSnapshotCache:
                 # read; a non-monotonic clock's negative delta is neutralized by
                 # the floor's max(base, …) — no clamp needed (mirrors #920).
                 compute_duration=finished_at - started_at,
+                size_bytes=entry_bytes,
             )
+            self._total_bytes += entry_bytes
             self._entries.move_to_end(key)
             while len(self._entries) > self._capacity:
-                self._entries.popitem(last=False)  # evict the LRU entry.
+                _, removed = self._entries.popitem(last=False)  # evict the LRU entry.
+                self._total_bytes -= removed.size_bytes
+            if self._max_bytes is not None:
+                # Byte-watermark eviction: LRU-first until the tracked total
+                # fits — but NEVER the just-inserted entry (it is MRU, and the
+                # loop stops at one resident entry), so a single over-budget
+                # payload is kept alone (warned once per breach episode below).
+                while self._total_bytes > self._max_bytes and len(self._entries) > 1:
+                    _, removed = self._entries.popitem(last=False)
+                    self._total_bytes -= removed.size_bytes
+                    evicted_for_bytes += 1
+                if self._total_bytes > self._max_bytes:
+                    if not self._single_over_warned:
+                        self._single_over_warned = True
+                        single_over = True
+                else:
+                    self._single_over_warned = False
+            total_after = self._total_bytes
             # Store BEFORE waking waiters (same lock block) so a woken waiter
             # always finds the fresh entry — never a duplicate scan.
             self._inflight.pop(key, None)
         event.set()
+        # Logging OUTSIDE the lock (the stale_served precedent): one line per
+        # eviction BURST with counts — never a line per evicted entry — and
+        # ONE single-entry-over WARNING per breach episode.
+        if evicted_for_bytes:
+            _LOG.info(
+                "movers_cache.byte_watermark_evicted",
+                evicted=evicted_for_bytes,
+                total_bytes=total_after,
+                max_bytes=self._max_bytes,
+                key=key,
+            )
+        if single_over:
+            _LOG.warning(
+                "movers_cache.byte_watermark_single_entry_over",
+                key=key,
+                entry_bytes=entry_bytes,
+                max_bytes=self._max_bytes,
+            )
         return value
