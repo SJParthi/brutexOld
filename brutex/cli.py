@@ -8146,8 +8146,57 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    k_list = _parse_int_csv(k, flag="--k")
+    # Exploration-mode resolution (DEC-SWEEP-APRIORI-DEFAULT-001): the SAME
+    # resolver + env law as cmd_sweep_all — the shared parser flipped verify's
+    # --k default to the extinction token too, so a bare `sweep-verify` on an
+    # extinction tree rebuilds the SAME k-ladder. Condition bits parse FIRST
+    # (the resolver needs n_unique + the u128 width guard).
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
+    try:
+        exploration = resolve_sweep_exploration(
+            k, condition_bits=condition_bits, max_combos=max_combos
+        )
+    except CliUserError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    for note in exploration.notes:
+        print(f"[brutex] {note}", file=sys.stderr)
+    k_list = exploration.k_values
+    if exploration.apriori:
+        # The recount's shadow re-sweep + effective_max_combos read only
+        # os.environ (setdefault semantics; a SET-but-BLANK value is
+        # overwritten too — the cmd_sweep_all law).
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        if not os.environ.get(SWEEP_APRIORI_ENV):
+            os.environ[SWEEP_APRIORI_ENV] = "1"
+    # Recorded-mode gate (DEC-SWEEP-APRIORI-DEFAULT-001): n_enumerated is
+    # mode-dependent AND sits in the byte-diffed trial-stats sidecar, so a
+    # wrong-mode recount under an otherwise MATCHED context would read
+    # verdict-grade recount_divergence on a healthy tree (the false-corrupt
+    # hazard). A definite recorded-mode ≠ resolved-mode is therefore a CONTEXT
+    # mismatch: printed here, folded into the recount `mismatches` ladder
+    # below (refuse → inconclusive; --allow-context-mismatch → compare with
+    # findings degraded to INCONCLUSIVE — never verdict-grade). A pre-flip /
+    # START-less tree reads None → abstain (the code-commit context gate
+    # already protects it).
+    from brutex.engine.sweep_verify import recorded_apriori_from_audit
+
+    try:
+        recorded_mode = recorded_apriori_from_audit(out_root)
+    except SweepVerifyError as exc:
+        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    mode_mismatch: str | None = None
+    if recorded_mode is not None and recorded_mode != exploration.apriori:
+        mode_mismatch = (
+            f"exploration_mode: recorded "
+            f"{'apriori-extinction' if recorded_mode else 'legacy'} vs resolved "
+            f"{'apriori-extinction' if exploration.apriori else 'legacy'} — "
+            "n_enumerated in the trial-stats sidecar is mode-dependent, so a "
+            "wrong-mode recount byte-diverges without corruption"
+        )
+        print(f"[brutex] sweep-verify: {mode_mismatch}")
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
     # condition B9): the `// 60` form maps 1day to 1440 wall-clock minutes while
     # the launcher uses the 375-minute session — tf_minutes is in every tuple
@@ -8183,7 +8232,25 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     }
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
-    if max_combos is not None:
+    if exploration.apriori:
+        # The verify twin of cmd_sweep_all's Apriori-aware pre-flight
+        # (DEC-SWEEP-APRIORI-DEFAULT-001): without it an extinction tree's
+        # k-ladder would be REFUSED at the raw-C(n,k) guard before Tier 1
+        # ever ran. An explicit --max-combos still WINS verbatim (the
+        # resolver already trimmed the ladder to what it admits), and the
+        # LEGACY verify arm below keeps today's raw pass-through
+        # byte-identical.
+        from brutex.engine.sweep_apriori import effective_max_combos
+        from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+
+        grid_kwargs["max_combos"] = effective_max_combos(
+            apriori_enabled=True,
+            k_values=k_list,
+            n_unique=len(set(condition_bits)),
+            requested_max_combos=max_combos if max_combos is not None else DEFAULT_MAX_COMBOS,
+            requested_is_explicit=max_combos is not None,
+        )
+    elif max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
     try:
         grid = SweepGridConfig(**grid_kwargs)
@@ -8306,6 +8373,12 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             )
             if rec != cur
         ]
+        # Exploration-mode parity (DEC-SWEEP-APRIORI-DEFAULT-001): a
+        # wrong-mode recount is a CONTEXT mismatch — it rides the SAME
+        # refuse/inconclusive ladder below, so its byte-divergence can never
+        # read verdict-grade recount_divergence (the false-corrupt hazard).
+        if mode_mismatch is not None:
+            mismatches.append(mode_mismatch)
         # F16 schedule evidence (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): a lake
         # that gained/lost a contract since the recorded run is surfaced with
         # BOTH schedules named — not just a bare snapshot-hash diff.

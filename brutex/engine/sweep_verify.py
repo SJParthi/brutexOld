@@ -1457,6 +1457,73 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
     )
 
 
+#: The two mode-carrying START actions (DEC-SWEEP-APRIORI-DEFAULT-001): the
+#: sequential/parallel supervisor chain's ``SUPERVISOR_START`` (the production
+#: launcher — ``sweep-all-supervisor.jsonl``) and the grid orchestrator's
+#: ``GRID_SWEEP_START`` (library callers / the recount's own shadow chain).
+#: The per-tuple ``SWEEP_START`` lines deliberately do NOT carry the mode key,
+#: so they are NOT in this family.
+_MODE_START_ACTIONS: Final[frozenset[str]] = frozenset({"GRID_SWEEP_START", "SUPERVISOR_START"})
+
+
+def recorded_apriori_from_audit(results_root: Path) -> bool | None:
+    """Read the exploration MODE a sweep tree RECORDED (DEC-SWEEP-APRIORI-DEFAULT-001).
+
+    The ``recorded_stage3_from_audit`` precedent: the tree describes itself via
+    its audit chains, never the operator's memory. Scans
+    ``audit/sweep-all.jsonl`` then ``audit/sweep-all-supervisor.jsonl`` (the
+    two launcher chains — the nightly binding pins the supervisor path law)
+    for the FIRST mode-carrying START record (:data:`_MODE_START_ACTIONS`):
+
+    * ``"apriori"`` key present-and-enabled ⇒ ``True`` (an extinction/Apriori
+      tree).
+    * a START record WITHOUT the key ⇒ ``False`` — the EMIT-ON-apriori law
+      makes absence == legacy, which also classifies every pre-flip tree
+      correctly for free.
+    * no START record in either chain ⇒ ``None`` (abstain — no gate; the
+      code-commit context gate already protects such trees).
+
+    Consumed by ``cmd_sweep_verify``'s recorded-mode gate: a resolved-mode ≠
+    recorded-mode recount is a CONTEXT mismatch (``n_enumerated`` is
+    mode-dependent AND sits in the byte-diffed trial-stats sidecar, so a
+    wrong-mode recount under an otherwise matched context would read
+    verdict-grade ``recount_divergence`` — the false-corrupt hazard) — the
+    downgrade is the existing context-mismatch mechanism, never verdict-grade.
+
+    Parameters
+    ----------
+    results_root
+        The sweep results tree root (the audit chains live under ``audit/``).
+
+    Returns
+    -------
+    bool | None
+        The recorded mode, or ``None`` when no START record exists.
+
+    Raises
+    ------
+    SweepVerifyError
+        If a present audit log is unreadable (a malformed tree is not a
+        verifiable tree — the ``recorded_stage3_from_audit`` contract).
+    """
+    from brutex.orchestrator.audit import AuditError, read_entries
+
+    for parts in (("audit", "sweep-all.jsonl"), ("audit", "sweep-all-supervisor.jsonl")):
+        audit_path = results_root.joinpath(*parts)
+        if not audit_path.exists():
+            continue
+        try:
+            entries: list[AuditEntry] = list(read_entries(audit_path))
+        except AuditError as exc:
+            raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+        for entry in entries:
+            if entry.action not in _MODE_START_ACTIONS:
+                continue
+            recorded = entry.payload.get("apriori")
+            return isinstance(recorded, Mapping) and recorded.get("enabled") is True
+    return None
+
+
 def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
     """Attribute a store-pair diff to the VIX trio — and name the SHAPE, or abstain.
 
@@ -2036,6 +2103,7 @@ __all__ = [
     "VerifyFinding",
     "compare_recount",
     "plan_expected_stores",
+    "recorded_apriori_from_audit",
     "recorded_context_from_audit",
     "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
