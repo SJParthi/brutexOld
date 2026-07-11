@@ -40,19 +40,26 @@ members — clean merge). #1285
 (MIGRATION.md #1717, renumbered #1615 → #1635 → #1717 across the folds — the
 sweep scale-guards pack, THREE fixes as ONE change set, required before the institutional
 k=5 run: (1) CRITICAL worker-aware rank-memory budget (the OOM fix) —
-`sweep_mem_budget.resolve_mem_budget_bytes()` is a WHOLE-MACHINE figure (RAM×1/6 = 8 GiB on
+`sweep_mem_budget.resolve_mem_budget_bytes()` was a WHOLE-MACHINE figure (RAM×1/6 = 8 GiB on
 the §8 48 GB box) consumed once per tuple, but BLIND to the 8-worker `ProcessPoolExecutor`:
 8 concurrent k=5 tuples each retain ~5.21 GB (C(60,5)=5,461,512 masks × 1024 B/kept) ≈
 41.7 GB at once → OOM, and 5.21 GB sat JUST UNDER the undivided 8 GiB per-tuple gate so the
-bounded columnar rank NEVER engaged. NEW pure `per_worker_mem_budget_bytes(total,
-sweep_concurrency)` divides the TOTAL by the resolved worker count at the plan seam,
-threaded from the driver with NO global (`run_persisted_sweep(sweep_concurrency=)` ←
-`run_one_tuple(sweep_concurrency=)` ← `_WorkerContext.sweep_concurrency =
-ParallelGridDriver._workers`; sequential defaults 1 = byte-for-byte the old budget). Under
-8 workers a k=5 tuple plans against 8 GiB//8 = 1 GiB, so 5.21 GB > 1 GiB → the bounded rank
-ENGAGES (result-safe — bounded ≡ batch bit-identical) and 8×1 GiB = 8 GiB concurrent
-retention stays under RAM/2 = 24 GiB; the `BRUTEX_SWEEP_MEM_BUDGET_BYTES` override stays a
-TOTAL, divided the same way. (2) k-aware SLA projection — `check_sweep_sla` gains OPTIONAL
+bounded columnar rank NEVER engaged. DELIVERY MECHANISM DEDUPED TO MAIN at the 2026-07-11
+fold: main landed the SAME fix independently as DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+(#1671 — `resolve_mem_budget_bytes(workers=)` divides the RAM-derived default INSIDE the
+resolver, the pool initializer exporting `BRUTEX_SWEEP_BUDGET_WORKERS` from
+`_WorkerContext.budget_workers`), so T2's call-site division
+(`per_worker_mem_budget_bytes` + the `sweep_concurrency=` threading) is DROPPED — main
+wins, a second division at the plan seam would DOUBLE-divide the budget — and the
+`BRUTEX_SWEEP_MEM_BUDGET_BYTES` override contract resolves to main's: a PER-WORKER
+figure, NEVER divided (the #1352 contract; T2's divided-TOTAL reading is superseded).
+T2's UNIQUE OOM pins survive re-pinned onto the landed resolver: 8×1 GiB concurrent
+retention ≤ RAM/2, the k=5 bounded-rank engagement flip
+(`test_engine_sweep_mem_budget.py::TestWorkerAwareBudgetScaleGuards`), the e2e
+fits→refused/bounded flip through the env seam
+(`test_engine_sweep_run_bounded.py::TestWorkerAwareBudget`), and the NEW
+no-double-division pin (`test_no_double_division_after_scale_guards_dedupe`).
+(2) k-aware SLA projection — `check_sweep_sla` gains OPTIONAL
 per-(instrument, tf, k) `TupleCostCell`s driving `project_weighted_grid_cost`: per-tuple
 weight = C(n_bits, k) × N_bars, projected = `per_tuple_seconds × Σ(weight×mult) /
 reference_weight` (reference = the mean weight of the SMALLEST-k cells), so the 30 s
@@ -66,8 +73,8 @@ byte-for-byte the flat model. HONEST: grid-RELATIVE and STILL UNBENCHMARKED (Gol
 keep-awake hook (same entry_label, same span — a train-fold re-derivation, disclosed), so
 a 2-4-day overnight sweep never sleeps mid-flight on EITHER entry point; best-effort,
 non-darwin is a logged no-op. In-train re-derivations: `run_one_tuple` carries BOTH T1's
-`diffcheck`/`store_quarantine` seams AND the new `sweep_concurrency=`, threaded inside
-T1's G1 `_attempt()` retry body. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+`diffcheck`/`store_quarantine` seams, threaded inside T1's G1 `_attempt()` retry body
+(the interim `sweep_concurrency=` threading was dropped at the #1671 dedupe). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
 REFERENCE_ONLY, no scope/vocab/rate change; touched engine modules 100% line+branch
 (seq-vs-parallel byte-identity goldens + suffix-independence gates pass unchanged);
 ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline.
@@ -177,6 +184,33 @@ delegation); Row 21 HONEST (the `sweep_run_core(log_file=)` plumbing stays UNWIR
 events are already a run_id-scoped log on the INTERNAL DISK via the mirrored `flight-recorder.jsonl`
 — follow-up DEC-SWEEP-RUN-LOG-FILE-001). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
+the DB/query-latency hardening pack, READ-side only: (1) the `/db`
+window-ledger pager rides a DuckDB LIMIT/OFFSET fast path over the #1533
+delta-folded ledger scan source (`db_view.query_window_ledger_page` —
+measured 7,321–8,778 ms cold at 400k rows → 564.8 ms; the O(rows) Python
+record fold per stamp is GONE; the byte-identical legacy parse stays the
+degrade for legacy-shape / NULL-derivable-cell / persistent-duckdb-error /
+no-conn); (2) the pre-open export rows are memoised per (basis, range,
+symbols) at the write generation (repeat click 326–574 ms / 206 DuckDB
+statements → 4.2–18.6 ms / 0 statements, bytes identical) + the IEP (open)
+reads are span-bounded (the CLOSE maps deliberately stay whole-partition —
+the #1649a hole diagnostics need the unbounded view); (3) the `/db` candles
+%CHNG baseline binds the page's own month files instead of the whole glob
+(72 files bound twice per click → 2; the #863 timestamp bounds pruned ROW
+GROUPS, this bounds the Parquet FOOTER opens too — merged-tree mechanism =
+main's #1670 `_bars_file_windows`, this pack's interim arm superseded at the
+merge-reconcile, behavior pins re-run green). HONEST: the
+window-ledger fresh-stamp click stays ONE O(total rows + delta footers)
+columnar scan (never literal O(page) — the repeat click is the O(1)
+handoff); the ONE behavior-visible class is corrupt-lake-only — a corrupt
+file provably OUTSIDE a bounded read's candidates no longer blanks it (a
+strictly-narrower degrade, named in #1719). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+healthy-lake payloads byte-identical (fast-equals-legacy pinned);
+`db_view.py` + `preopen_report.py` 100% line+branch on their ci.yml gates;
+the per-fix record lives in the §1 Active-branch blurb + MIGRATION.md
+#1719 — this header carries the one-line summary, never the story).
 Earlier: 2026-07-08 (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 —
 an explicit `/movers` bucket-anchor TIME pick now resolves to the COMPLETED bucket
 (broker-matching close) instead of a PARTIAL forming bucket. The TIME dropdown on a
@@ -973,7 +1007,10 @@ completeness hole is always visible; distinct
 actions + ERROR/WARNING logs make the loss LOUD. Fail-loud is chosen over blind
 pool-rebuild on the merits + the memory-budget-division interaction: the
 per-tuple rank budget divides across workers (`memory_budget_bytes` = `total ×
-fraction / workers`), so rebuilding into the next heavy tuple would just
+fraction / workers`) [CORRECTED by DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+(MIGRATION.md #1671): as originally wired the divisor was never passed
+(`workers` defaulted 1) — the claim was false until #1671 wired it; see that
+entry], so rebuilding into the next heavy tuple would just
 re-OOM. HONEST residual (named follow-up, NOT claimed): a deterministically-
 WEDGED non-OOM tuple still aborts via `SweepStallError` with a frozen
 checkpoint, so an identical resume re-dispatches IT — the stall path has no
@@ -2279,9 +2316,14 @@ hostile-review pass._
   train** — based on T1's `integration/t1-sweep-core` (NOT main — the PR diff shows T1+T2
   until T1 lands, expected + disclosed). Folded so far: #1285 DEC-SWEEP-SCALE-GUARDS-001
   (MIGRATION.md #1717, renumbered #1615 → #1635 → #1717 across the folds) — the sweep scale-guards pack:
-  worker-aware rank-memory budget (`per_worker_mem_budget_bytes`, threaded driver →
-  `run_one_tuple(sweep_concurrency=)` → `run_persisted_sweep` inside T1's G1 `_attempt()`
-  retry body), k-aware SLA projection (`TupleCostCell` + `project_weighted_grid_cost`),
+  worker-aware rank-memory budget (the OOM fix — DELIVERY MECHANISM DEDUPED to main's landed
+  DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 #1671 at the 2026-07-11 fold: main's
+  `resolve_mem_budget_bytes(workers=)` + the pool-initializer `BRUTEX_SWEEP_BUDGET_WORKERS`
+  seam WIN; T2's `per_worker_mem_budget_bytes` call-site division + `sweep_concurrency=`
+  threading DROPPED — a second division would double-divide; the override contract resolves
+  to main's PER-WORKER-never-divided #1352 reading; T2's unique OOM/engagement pins survive
+  re-pinned + the NEW `test_no_double_division_after_scale_guards_dedupe` pin),
+  k-aware SLA projection (`TupleCostCell` + `project_weighted_grid_cost`),
   keep_awake on the dashboard sweep job body; plus #1305 DEC-SWEEP-KEEPAWAKE-001
   (MIGRATION.md #1718, renumbered #1631 → #1636 → #1718) — keep_awake on every sweep entrypoint
   (`cmd_sweep_all` ONE wide source-level wrap covering the lake preload, with T1's
@@ -2370,6 +2412,49 @@ hostile-review pass._
   the `log_file=` plumbing stays unwired at cmd_sweep_all (process-start file-routing needed; the
   material events are already a run_id log on the internal disk via the mirrored flight recorder;
   follow-up DEC-SWEEP-RUN-LOG-FILE-001).
+  Earlier: `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
+  the DB/query-latency hardening pack, READ-side only, three evidence-driven fixes off the 2026-07-11
+  profiling run (a 1,178-file real-writer lake, 400k-row ledger + 5 deltas, real routes via
+  `build_app` + `TestClient`): **(1)** the `/db` window-ledger pager — NEW
+  `db_view.query_window_ledger_page`, a DuckDB LIMIT/OFFSET projection over the SAME #1533
+  delta-folded `_ledger_scan_source` the `/coverage/windows` fast paths scan, total from ONE
+  stamp-memoised COUNT(*) (the NEW `wledger-*` key families on the injected window-payload caches);
+  measured 7,321–8,778 ms cold at 400k rows → 564.8 ms (the 7,177 ms O(rows) Python record fold per
+  stamp is GONE); a legacy-shape base / a NULL in a legacy-DERIVABLE cell / a persistent
+  `duckdb.Error` (torn-read retry-once first) / `conn=None` each degrade to the byte-identical
+  legacy cached parse (`window_ledger_rows_cached`, byte-untouched — the fenced #1533 cache
+  families were NOT restructured); **(2)** the pre-open exports — both routes memoise
+  `build_preopen_rows` on the NEW dedicated `_preopen_rows_cache` keyed
+  `(basis, [from, to], symbols-filter)` at `_summary_cache.generation` (repeat click 326–574 ms /
+  206 DuckDB statements binding 616 files → 4.2–18.6 ms / 0 statements, bytes identical; the `.zip`
+  shares the `.xlsx`'s coordinate) + the IEP (open) readers gain an additive `span=` binding only
+  the report span's month files via NEW `_existing_month_files_in_span` (±1-day pad law, domain
+  saturation, non-grammar strays conservatively kept) through `_execute_parquet_resilient`'s NEW
+  bounded `files=` arm — the CLOSE maps deliberately stay whole-partition (the #1649a contiguity
+  guards' `found=nearest_lake_session` diagnostics + the calendar back-walk depth need the
+  unbounded view); the #1649a pre-fix goldens pass UNMODIFIED; **(3)** the `/db` candles %CHNG
+  baseline — `_intraday_last_close_with_predecessor`'s two reads bind explicit file lists, so a
+  page click binds 2 baseline files instead of 72 (warm p50 30.7 → 21.1 ms; the residual is the
+  #1614 manifest revalidation sweep, out of scope). FIX-3 MECHANISM SUPERSEDED at the 2026-07-11
+  merge-reconcile (main 652301b5, PR #1386): main's DEC-DB-BASELINE-MANIFEST-ROUTE-001 (#1670)
+  landed the SAME footer-open fix in-flight with a richer mechanism (`_bars_file_windows` —
+  manifest-exact per-file bounds + month-grammar fallback + predecessor step-back, ALSO covering
+  the moneyness spot join) — the merged tree serves #1670's mechanism, this pack's interim
+  `_predecessor_candidate_files` helper was DELETED at the reconcile, and this pack's
+  behavior-level pins + bench re-ran GREEN over it unchanged; the bounded-`files=` resilient-read
+  arm CONVERGED with #1670/#1668's (main's kwarg + two-stage probe + readable-subset latch
+  adopted); fixes 1 + 2 untouched, `_existing_month_files_in_span` stays (the fix-2 consumer). SANCTIONED (corrupt lakes
+  only): a corrupt file provably OUTSIDE a bounded read's candidates no longer blanks that read —
+  correct-or-absent preserved, blast radius strictly narrower; a corrupt CANDIDATE still blanks
+  (both directions pinned). The D3 route spy tightened 1 → 0 Python parses (byte-parity half
+  unmodified). HONEST: the window-ledger fresh-stamp click is ONE O(total rows + delta footers)
+  columnar scan, never literal O(page); the export render stays O(report rows) per click; candidate
+  enumeration is an O(existing files) listing. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; no new required wire fields; `db_view.py` +
+  `preopen_report.py` 100% line+branch on their ci.yml gates (two new unit files joined the db_view
+  gate); ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline;
+  fast-equals-legacy + bounded-equals-unbounded parity pinned exhaustively; benches
+  `test_db_window_ledger_page_o1.py` + `test_db_candles_baseline_bound_o1.py`.)
   Earlier: `claude/movers-bucket-asof-fix` (**DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001,
   MIGRATION.md #1601** — an explicit `/movers` bucket-anchor TIME pick now resolves to the
   COMPLETED bucket (broker-matching close) instead of a PARTIAL forming bucket. The TIME
@@ -5644,6 +5729,15 @@ hostile-review pass._
   Earlier: `claude/sweep-unkillable-core`
   (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1712 — the UNKILLABLE sweep
   run core, Phase 2 of the one-click sweep program; see §1 Active branch for
+  the full blurb)
+  Earlier: `claude/db-latency-hardening`
+  (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 — the DB/query-latency
+  hardening pack, READ-side only: the /db window-ledger DuckDB page fast path
+  (7.3–8.8 s cold at 400k rows → 0.56 s, zero Python parses), the pre-open
+  export rows memo (repeat click 206 DuckDB statements → 0, bytes identical)
+  + span-bounded IEP reads, and the /db candles %CHNG baseline file bound
+  (72 files bound twice per click → 2); healthy-lake payloads byte-identical;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 + MIGRATION.md #1719 for
   the full blurb)
   Earlier: `claude/movers-bucket-asof-fix`
   (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 — an explicit `/movers`

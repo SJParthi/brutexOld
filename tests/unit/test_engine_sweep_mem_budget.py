@@ -22,7 +22,6 @@ from brutex.engine.sweep_mem_budget import (
     MEM_BUDGET_FRACTION,
     BoundedRankMode,
     RankMemoryPlan,
-    per_worker_mem_budget_bytes,
     plan_rank_memory,
     resolve_bounded_rank_mode,
     resolve_mem_budget_bytes,
@@ -261,38 +260,44 @@ class TestWatermarkMessage:
         assert BOUNDED_RANK_MODE_ENV not in message
 
 
-# ────── per_worker_mem_budget_bytes (DEC-SWEEP-SCALE-GUARDS-001, the OOM fix) ──────
+# ────── worker-aware budget — the DEC-SWEEP-SCALE-GUARDS-001 OOM pins, re-pinned
+# onto main's LANDED divisor (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 #1671) ──────
 
 
-class TestPerWorkerMemBudget:
-    """The worker-aware budget divide — the OOM fix's arithmetic core."""
+class TestWorkerAwareBudgetScaleGuards:
+    """T2's OOM-guarantee pins over the landed ``resolve_mem_budget_bytes(workers=)``.
 
-    def test_single_worker_is_byte_unchanged(self) -> None:
-        # Pin (b): the sequential path (one resident tuple) divides by 1, so the
-        # per-tuple budget is byte-for-byte the pre-change whole-machine figure.
-        assert per_worker_mem_budget_bytes(8 * _GIB, 1) == 8 * _GIB
+    T2's delivery mechanism (a ``per_worker_mem_budget_bytes`` call-site
+    division at the plan seam) was DEDUPED to main's #1671 pool-initializer
+    divisor at the 2026-07-11 fold — main wins, incl. the override contract
+    (``BRUTEX_SWEEP_MEM_BUDGET_BYTES`` is PER-WORKER, never divided). These
+    keep ONLY the assertions unique to the scale-guards register — the §8-box
+    OOM arithmetic + the k=5 bounded-rank engagement flip; the divisor seam
+    itself is pinned in test_engine_sweep_mem_budget_workers.py.
+    """
 
-    def test_eight_workers_divide_the_total(self) -> None:
-        # The 48 GiB §8 box: default total 8 GiB / 8 workers == 1 GiB per tuple.
-        assert per_worker_mem_budget_bytes(8 * _GIB, 8) == 1 * _GIB
+    def test_eight_workers_divide_the_default_total(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The 48 GiB §8 box: default total 8 GiB ÷ 8 eval workers == 1 GiB/tuple.
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        assert resolve_mem_budget_bytes({}, workers=8) == 1 * _GIB
 
-    def test_override_is_divided_the_same_way(self) -> None:
-        # The BRUTEX_SWEEP_MEM_BUDGET_BYTES override stays a TOTAL, divided the
-        # same way — an operator's 4 GiB total under 4 workers is 1 GiB/tuple.
-        assert per_worker_mem_budget_bytes(4 * _GIB, 4) == 1 * _GIB
-
-    def test_floor_is_one_byte_never_zero(self) -> None:
-        # A pathological total//workers == 0 must never yield a zero budget (that
-        # would refuse every non-empty tuple); the floor is 1 byte.
-        assert per_worker_mem_budget_bytes(3, 8) == 1
-
-    def test_integer_division_floors(self) -> None:
-        assert per_worker_mem_budget_bytes(10, 3) == 3
+    def test_floor_is_one_byte_never_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A pathological derived // workers == 0 must never yield a zero budget
+        # (that would refuse every non-empty tuple); the COMMON
+        # memory_budget_bytes floors the divided figure at 1 byte.
+        _simulate_ram(monkeypatch, 12)  # 12 × 1/6 ÷ 8 = 0.25 → floored to 1
+        assert resolve_mem_budget_bytes({}, workers=8) == 1
 
     @pytest.mark.parametrize("bad", [0, -1, -8])
-    def test_rejects_non_positive_worker_count(self, bad: int) -> None:
-        with pytest.raises(ValueError, match="sweep_concurrency must be >= 1"):
-            per_worker_mem_budget_bytes(8 * _GIB, bad)
+    def test_rejects_non_positive_worker_count(
+        self, bad: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A silently-wrong divisor must fail loud (Golden Rule #1).
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        with pytest.raises(ValueError, match="workers must be >= 1"):
+            resolve_mem_budget_bytes({}, workers=bad)
 
     def test_eight_concurrent_k5_retention_stays_under_half_ram(
         self, monkeypatch: pytest.MonkeyPatch
@@ -305,7 +310,7 @@ class TestPerWorkerMemBudget:
         _simulate_ram(monkeypatch, 48 * _GIB)
         total_ram = 48 * _GIB
         workers = 8
-        per_tuple = per_worker_mem_budget_bytes(resolve_mem_budget_bytes({}), workers)
+        per_tuple = resolve_mem_budget_bytes({}, workers=workers)
         assert workers * per_tuple <= total_ram // 2
 
     def test_k5_bounded_rank_engages_under_default_workers_but_not_single(
@@ -317,8 +322,7 @@ class TestPerWorkerMemBudget:
         _simulate_ram(monkeypatch, 48 * _GIB)
         n_masks_k5 = math.comb(60, 5)  # 5,461,512 masks
         projected = n_masks_k5 * BATCH_RANK_BYTES_PER_KEPT  # ~5.21 GB
-        total = resolve_mem_budget_bytes({})
-        assert total == 8 * _GIB
+        assert resolve_mem_budget_bytes({}, workers=1) == 8 * _GIB
         # The register's exact numbers: 5.21 GB projection under the 8 GiB gate.
         assert 5 * _GIB < projected < 6 * _GIB
 
@@ -328,7 +332,7 @@ class TestPerWorkerMemBudget:
             top_k=1000,
             digest_path=True,
             mode=BoundedRankMode.AUTO,
-            budget_bytes=per_worker_mem_budget_bytes(total, 1),
+            budget_bytes=resolve_mem_budget_bytes({}, workers=1),
         )
         assert single_plan.bounded is False
 
@@ -338,7 +342,7 @@ class TestPerWorkerMemBudget:
             top_k=1000,
             digest_path=True,
             mode=BoundedRankMode.AUTO,
-            budget_bytes=per_worker_mem_budget_bytes(total, 8),
+            budget_bytes=resolve_mem_budget_bytes({}, workers=8),
         )
         assert parallel_plan.bounded is True
         assert parallel_plan.bounded_top_k == 1000

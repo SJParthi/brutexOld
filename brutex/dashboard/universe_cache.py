@@ -80,10 +80,46 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+import duckdb
+import structlog
+
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.models import Exchange, Instrument
 
-__all__ = ["UniverseSnapshotCache", "coverage_revision", "master_revision"]
+__all__ = [
+    "STORE_FAULT_TYPES",
+    "UniverseSnapshotCache",
+    "UniverseStoreOutageError",
+    "coverage_revision",
+    "master_revision",
+]
+
+_LOG = structlog.get_logger(__name__)
+
+#: The STORE-fault class (DEC-CACHE-SERVE-LAST-KNOWN-001, the 8th keystone site):
+#: the exceptions a wedged/unreachable instrument store raises from the revision
+#: probe or the three base reads — ``duckdb.Error`` (every DuckDB exception; NONE
+#: of them subclasses ``ValueError``, scout-verified, so the routes' bad-``kind``
+#: 400 arm is unaffected) plus ``OSError`` (a stalled volume). Deliberately NARROW:
+#: a genuine code bug (``ValueError``/``KeyError``/…) still propagates raw — never
+#: silently swallowed (the ``movers_read_skip_errors`` posture). ONE source of
+#: truth (CLAUDE.md §11 COMMON) — ``app.py``'s nav-latency probe guard imports it.
+STORE_FAULT_TYPES: Final[tuple[type[BaseException], ...]] = (duckdb.Error, OSError)
+
+
+class UniverseStoreOutageError(RuntimeError):
+    """The instrument store is unreachable AND no last-known snapshot is resident.
+
+    DEC-CACHE-SERVE-LAST-KNOWN-001: raised by
+    :meth:`UniverseSnapshotCache._current` when a store fault
+    (:data:`STORE_FAULT_TYPES`) hits the revision probe or the base reads on a
+    COLD cache — there is nothing last-known to serve, so the caller must map
+    this to an HONEST degrade payload (the ``store_error_payload`` precedent:
+    explicit error markers + 503, never a raw 500, never a fabricated empty
+    universe). Always ``raise … from exc`` — the original store fault stays
+    chained for server-side diagnosis; the wire never carries ``str(exc)``.
+    """
+
 
 #: The content-revision probe: the row-count + newest write time over the
 #: ``instruments`` table — the exact table the cached reads project from. A COUNT +
@@ -230,10 +266,16 @@ class UniverseSnapshotCache:
     pay ONE scan instead of N (the ``summary``/``instruments`` reads run on a
     threadpool worker, so a stalled lake volume can pin a worker but never the
     event loop). The reads are a deterministic function of the revision
-    (idempotent, Golden Rule #7). A ``compute`` that raises (e.g. a broken store)
-    releases the single-flight event and propagates cleanly — nothing is stored
-    and no waiter is left hanging; a bad ``kind`` (a pure post-``_current``
-    classifier error) likewise propagates and nothing is cached.
+    (idempotent, Golden Rule #7). A non-store-fault ``compute`` raise (a genuine
+    code bug) releases the single-flight event and propagates RAW — nothing is
+    stored and no waiter is left hanging; a bad ``kind`` (a pure post-``_current``
+    classifier error) likewise propagates and nothing is cached. A STORE fault
+    (:data:`STORE_FAULT_TYPES` — a wedged volume / unreachable DuckDB) from the
+    revision probe OR the base reads instead serves the RESIDENT snapshot
+    last-known (flagged to the caller, WARNed once per outage, recovered with one
+    INFO) or raises the typed :class:`UniverseStoreOutageError` on a cold cache
+    (DEC-CACHE-SERVE-LAST-KNOWN-001 — the pre-fix probe-BEFORE-snapshot ordering
+    made serve-last-known impossible by construction).
 
     Returns are READ-ONLY: :meth:`summary` / :meth:`instruments` hand back the LIVE
     memoised dict / list (no defensive copy — mirrors ``MoversSnapshotCache`` /
@@ -252,6 +294,41 @@ class UniverseSnapshotCache:
         #: serve the published snapshot, so N cold pollers pay ONE scan. The
         #: entry is popped by the leader on both the success and the failure path.
         self._refreshing: dict[tuple[int, str], threading.Event] = {}
+        #: The once-per-outage WARN latch (DEC-CACHE-SERVE-LAST-KNOWN-001 — the
+        #: ``movers_cache``/``rate_bridge_cache`` ``_degraded`` posture): the FIRST
+        #: store-fault serve/raise of an outage WARNs; repeats stay silent until
+        #: the next fully-successful serve logs the recovery INFO and re-arms it.
+        #: One instance-wide flag (this cache fronts exactly ONE store).
+        self._outage_latched: bool = False
+
+    def _latch_outage(self, *, served: str, error: BaseException) -> None:
+        """WARN once per outage flip (repeats silent until :meth:`_note_recovered`).
+
+        *served* names the degrade arm (``"last_known"`` — a resident snapshot
+        was served labelled — or ``"cold_fault"`` — nothing resident, the typed
+        :class:`UniverseStoreOutageError` is about to raise). The full store
+        fault detail is logged HERE, server-side only (the wire carries stable
+        markers, never ``str(exc)`` — the ``store_error_payload`` sanitization
+        law).
+        """
+        with self._lock:
+            first_flip = not self._outage_latched
+            self._outage_latched = True
+        if first_flip:
+            _LOG.warning(
+                "universe_cache.store_probe_outage",
+                served=served,
+                error=str(error),
+                error_type=type(error).__name__,
+            )
+
+    def _note_recovered(self) -> None:
+        """One INFO per outage→recovery flip (called on every fully-good serve)."""
+        with self._lock:
+            recovered = self._outage_latched
+            self._outage_latched = False
+        if recovered:
+            _LOG.info("universe_cache.store_probe_recovered")
 
     def size(self) -> int:
         """``1`` if a revision is currently resident, else ``0`` — O(1)."""
@@ -268,26 +345,62 @@ class UniverseSnapshotCache:
         """
         return master_revision(store)
 
-    def _current(self, store: Any) -> _Snapshot:
-        """Return the snapshot for the store's current revision, rebuilding on a miss.
+    def _serve_last_known_or_raise(self, exc: BaseException, *, where: str) -> _Snapshot:
+        """The store-fault degrade arm: resident snapshot → serve it, else typed raise.
 
-        The cheap revision token is probed once (outside the lock); on a miss the
-        three base reads run OUTSIDE the lock behind a per-revision single-flight
-        (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002): exactly ONE cold reader computes a
-        given revision while concurrent cold readers WAIT on its event and then
-        serve the published snapshot, so N simultaneous cold pollers pay ONE scan
-        instead of N (mirrors :meth:`SummaryCache._plan`'s cold single-flight). A
-        ``compute`` that raises (e.g. a broken store) releases the event and
-        propagates cleanly — nothing is stored and no waiter is left hanging.
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (the 8th keystone site): a store fault
+        (:data:`STORE_FAULT_TYPES`) from the revision probe or the base reads
+        serves the RESIDENT snapshot last-known (the caller labels the payload —
+        never a silent stale serve, Golden Rule #1) with one latched WARN; a COLD
+        cache raises the typed :class:`UniverseStoreOutageError` (chained) the
+        routes map to an honest 503 degrade — never a raw 500, never a fabricated
+        empty universe.
         """
-        revision = self._revision(store)
+        with self._lock:
+            snap = self._snapshot
+        if snap is not None:
+            self._latch_outage(served="last_known", error=exc)
+            return snap
+        self._latch_outage(served="cold_fault", error=exc)
+        raise UniverseStoreOutageError(
+            f"instrument store unreachable at the {where} with no resident snapshot"
+        ) from exc
+
+    def _current(self, store: Any) -> tuple[_Snapshot, bool]:
+        """Return ``(snapshot, served_last_known)`` for the store's current revision.
+
+        The cheap revision token is probed FIRST — but a store fault there no
+        longer makes serve-last-known impossible by construction (the pre-fix
+        probe-before-snapshot ordering, DEC-CACHE-SERVE-LAST-KNOWN-001): a
+        :data:`STORE_FAULT_TYPES` fault from the probe OR the base-read rebuild
+        serves the RESIDENT snapshot as ``(snap, True)`` (the caller labels it)
+        with one latched WARN, and raises the typed
+        :class:`UniverseStoreOutageError` when the cache is COLD. The healthy
+        path is byte-identical to the pre-fix behaviour and returns
+        ``(snap, False)`` (logging the one recovery INFO when a prior outage was
+        latched).
+
+        On a healthy miss the three base reads run OUTSIDE the lock behind a
+        per-revision single-flight (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002): exactly
+        ONE cold reader computes a given revision while concurrent cold readers
+        WAIT on its event and then serve the published snapshot, so N
+        simultaneous cold pollers pay ONE scan instead of N (mirrors
+        :meth:`SummaryCache._plan`'s cold single-flight). A non-store-fault
+        ``compute`` raise (a genuine code bug) releases the event and propagates
+        RAW — nothing is stored and no waiter is left hanging.
+        """
+        try:
+            revision = self._revision(store)
+        except STORE_FAULT_TYPES as exc:
+            return self._serve_last_known_or_raise(exc, where="revision probe"), True
         while True:
             with self._lock:
                 snap = self._snapshot
                 if snap is not None and snap.revision == revision:
                     # Hit — also the wake path for a follower once the leader
-                    # published THIS revision. An O(1) dict handoff.
-                    return snap
+                    # published THIS revision. An O(1) dict handoff (the recovery
+                    # INFO logs OUTSIDE the lock, below the loop).
+                    break
                 event = self._refreshing.get(revision)
                 if event is None:
                     # We are the cold leader for this revision: register the event
@@ -309,12 +422,19 @@ class UniverseSnapshotCache:
             # fresh snapshot) or on failure (they retry).
             published = False
             try:
-                rebuilt = _Snapshot(
-                    revision=revision,
-                    eligible=store.fno_eligible_underlyings(),
-                    candidates=store.list_index_equity_instruments(),
-                    reference=store.reference_only_security_ids(),
-                )
+                try:
+                    rebuilt = _Snapshot(
+                        revision=revision,
+                        eligible=store.fno_eligible_underlyings(),
+                        candidates=store.list_index_equity_instruments(),
+                        reference=store.reference_only_security_ids(),
+                    )
+                except STORE_FAULT_TYPES as exc:
+                    # Partial outage (probe answered, base read wedged): the SAME
+                    # degrade arm. `published` stays False, so the finally below
+                    # pops the registration + wakes waiters — each retries and
+                    # lands here too (bounded by the concurrent poller count).
+                    return self._serve_last_known_or_raise(exc, where="base read"), True
                 with self._lock:
                     # Re-check under the lock: only adopt `rebuilt` if no concurrent
                     # miss already installed THIS revision (keep its memoised payloads
@@ -323,11 +443,14 @@ class UniverseSnapshotCache:
                     if snap is not None and snap.revision == revision:
                         self._refreshing.pop(revision, None)
                         published = True
-                        return snap
-                    self._snapshot = rebuilt
-                    self._refreshing.pop(revision, None)
-                published = True
-                return rebuilt
+                        adopted = snap
+                    else:
+                        self._snapshot = rebuilt
+                        self._refreshing.pop(revision, None)
+                        published = True
+                        adopted = rebuilt
+                self._note_recovered()
+                return adopted, False
             finally:
                 if not published:
                     # The compute raised — drop the registration so a waiter (or the
@@ -335,9 +458,13 @@ class UniverseSnapshotCache:
                     with self._lock:
                         self._refreshing.pop(revision, None)
                 event.set()
+        # The ONLY loop exit is the hit `break` above — `snap` is the resident
+        # snapshot for THIS revision (leader/follower paths return inside).
+        self._note_recovered()
+        return snap, False
 
-    def summary(self, store: Any) -> dict[str, int]:
-        """Return ``/api/v1/universe/summary``'s payload, cached per revision.
+    def summary_view(self, store: Any) -> tuple[dict[str, int], bool]:
+        """Return ``(summary payload, served_last_known)``, cached per revision.
 
         On a hit the memoised dict is returned directly; on a miss the KPI counts
         are computed via :func:`~brutex.dashboard.universe_query.universe_summary`
@@ -346,34 +473,48 @@ class UniverseSnapshotCache:
         ADDITIVE ``reference_stock_count`` / ``stock_count_total`` keys the Stocks
         badge splits on (DEC-LABEL-TRUTH-001) — no extra store query, and every
         legacy key stays byte-identical.
+        ``served_last_known`` is ``True`` iff a store OUTAGE served the resident
+        snapshot (DEC-CACHE-SERVE-LAST-KNOWN-001) — the route MUST label the
+        payload (the derivation itself is pure over the resident snapshot, so an
+        outage serve still memoises correctly); a COLD outage raises
+        :class:`UniverseStoreOutageError` out of :meth:`_current`.
         """
-        snap = self._current(store)
+        snap, served_last_known = self._current(store)
         with self._lock:
             if snap.summary is not None:
-                return snap.summary
+                return snap.summary, served_last_known
         value = universe_summary(
             snap.candidates, fno_eligible=snap.eligible, reference_only_ids=snap.reference
         )
         with self._lock:
             if snap.summary is None:
                 snap.summary = value
-            return snap.summary
+            return snap.summary, served_last_known
 
-    def instruments(self, store: Any, *, kind: str | None) -> list[dict[str, Any]]:
-        """Return ``/api/v1/universe/instruments``'s rows for *kind*, cached per revision.
+    def summary(self, store: Any) -> dict[str, int]:
+        """Back-compat :meth:`summary_view` delegator (payload only, flag dropped)."""
+        return self.summary_view(store)[0]
+
+    def instruments_view(
+        self, store: Any, *, kind: str | None
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Return ``(rows for kind, served_last_known)``, cached per revision.
 
         On a hit the memoised row list for *kind* is returned; on a miss the rows
         are built via :func:`~brutex.dashboard.universe_query.list_underlyings`
         (which raises :class:`ValueError` for a bad *kind* — propagated, never
         cached) and memoised. ``None`` / ``"index"`` / ``"stock"`` are each cached
         independently, so the explorer's "F&O only" toggle and tab switches share
-        one base read.
+        one base read. ``served_last_known`` is ``True`` iff a store OUTAGE served
+        the resident snapshot (DEC-CACHE-SERVE-LAST-KNOWN-001) — the route MUST
+        label its envelope; a COLD outage raises
+        :class:`UniverseStoreOutageError` out of :meth:`_current`.
         """
-        snap = self._current(store)
+        snap, served_last_known = self._current(store)
         with self._lock:
             cached = snap.instruments.get(kind)
             if cached is not None:  # values are always lists, so this means "hit".
-                return cached
+                return cached, served_last_known
         rows = list_underlyings(
             snap.candidates,
             kind=kind,
@@ -381,4 +522,8 @@ class UniverseSnapshotCache:
             reference_only_ids=snap.reference,
         )
         with self._lock:
-            return snap.instruments.setdefault(kind, rows)
+            return snap.instruments.setdefault(kind, rows), served_last_known
+
+    def instruments(self, store: Any, *, kind: str | None) -> list[dict[str, Any]]:
+        """Back-compat :meth:`instruments_view` delegator (rows only, flag dropped)."""
+        return self.instruments_view(store, kind=kind)[0]
