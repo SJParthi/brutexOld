@@ -386,3 +386,135 @@ def test_legacy_launch_keeps_the_flat_default_watchdog_timeout(
 
     assert _sweep_all(lake_root, catalog_path, tmp_path / "sweeps", k="1,2") == EXIT_OK
     assert captured == [DEFAULT_TIMEOUT_SECONDS]
+
+
+# ──── round 2: the mixed-mode census residue (recount_mode_divergence) ────
+
+
+def _mixed_mode_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
+    """Cycle 1 LEGACY (``--k 1,2``) then cycle 2 EXTINCTION over the SAME
+    root: the mode-blind tuple digest resume-skips the two legacy-minted
+    tuples (``cached=2``) and mints k=3,4 under apriori mode → a MIXED tree
+    (k=1,2 sidecars carry legacy census tallies; k=3,4 extinction ones)."""
+    monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    assert _sweep_all(lake_root, catalog_path, results_root, k="1,2") == EXIT_OK
+    monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+    assert _sweep_all(lake_root, catalog_path, results_root) == EXIT_OK
+    return lake_root, catalog_path, results_root
+
+
+def test_mixed_mode_tree_recount_reads_mode_divergence_never_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 R2-1 (the executed BEFORE/AFTER oracle): a matched-mode default
+    recount of the MIXED tree previously read verdict-grade
+    ``recount_divergence`` (rc 3) on a provably HEALTHY tree; it now reads the
+    confined ``recount_mode_divergence`` WARN and exits 0."""
+    lake_root, catalog_path, results_root = _mixed_mode_tree(tmp_path, monkeypatch)
+    out = capsys.readouterr().out
+    assert "cached=2" in out  # the mode-blind digest resume-skipped both
+    assert "tuples=2/4" in out  # only k=3,4 genuinely ran in cycle 2
+
+    rc = main(_verify_argv(lake_root, catalog_path, results_root, "--recount"))
+    out = capsys.readouterr().out
+    assert rc == EXIT_OK  # the BEFORE oracle read rc 3 here
+    assert "[CORRUPT]" not in out
+    assert "verdict: CLEAN" in out
+    assert (
+        "recount_mode_divergence: ONLY the exploration-MODE-dependent census "
+        "triple (n_enumerated/n_conflict_pruned/n_minhits_dropped) diverge" in out
+    )
+    assert "[WARN]" in out
+    assert "MIXED-mode" in out
+
+
+def test_apriori_tree_legacy_recount_under_allow_mismatch_keeps_the_attribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 R2-1, the cross-mode direction: an apriori-minted tree
+    recounted LEGACY (env removed, explicit ``--k 1,2``) under
+    ``--allow-context-mismatch`` reads the SAME precise attribution — the
+    confined sidecar diff never degrades to the generic inconclusive code and
+    never reads corrupt."""
+    monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    assert _sweep_all(lake_root, catalog_path, results_root) == EXIT_OK
+    capsys.readouterr()
+
+    monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+    rc = main(
+        [
+            *_verify_argv(lake_root, catalog_path, results_root, "--recount"),
+            "--k",
+            "1,2",
+            "--allow-context-mismatch",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "exploration_mode: recorded apriori-extinction vs effective legacy" in out
+    assert "recount_mode_divergence:" in out  # the precise code, context gate or not
+    assert "[CORRUPT]" not in out
+    assert " recount_divergence:" not in out  # never the verdict-grade code
+    assert "recount_divergence_inconclusive" not in out  # never the generic downgrade
+    assert rc == EXIT_OK  # warn-attributed findings are clean
+
+
+def test_tampered_store_byte_on_the_mixed_tree_stays_rc3_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 R2-1 confinement condition (a): the store-byte equality is the
+    proof obligation — a tampered store byte on the SAME mixed tree keeps the
+    verify verdict-grade (rc 3), never laundered through the mode family."""
+    from brutex.cli import EXIT_VERIFY_FINDINGS
+
+    lake_root, catalog_path, results_root = _mixed_mode_tree(tmp_path, monkeypatch)
+    k2_store = next(p for p in _tuple_stores(results_root) if "_k2_" in p.name)
+    k2_store.write_bytes(k2_store.read_bytes() + b"x")
+    capsys.readouterr()
+
+    rc = main(_verify_argv(lake_root, catalog_path, results_root, "--recount"))
+    out = capsys.readouterr().out
+    assert rc == EXIT_VERIFY_FINDINGS
+    assert "[CORRUPT]" in out
+
+
+def test_triple_plus_mode_invariant_divergence_stays_rc3_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 R2-1 confinement condition (c): a divergence spilling past the
+    census triple into a mode-INVARIANT field (``n_backtested``) stays
+    verdict-grade ``recount_divergence`` (rc 3) — the fields()-driven
+    must-equal side is the unsafe-drift firewall."""
+    import dataclasses
+
+    from brutex.cli import EXIT_VERIFY_FINDINGS
+    from brutex.engine.trial_stats import (
+        read_tuple_trial_stats,
+        trial_stats_sidecar_path,
+        write_tuple_trial_stats,
+    )
+
+    lake_root, catalog_path, results_root = _mixed_mode_tree(tmp_path, monkeypatch)
+    k2_store = next(p for p in _tuple_stores(results_root) if "_k2_" in p.name)
+    sidecar = trial_stats_sidecar_path(k2_store)
+    stats = read_tuple_trial_stats(sidecar)
+    # +1 on BOTH keeps the Tier-1 sidecar_tally_remainder law (== 0) intact,
+    # so the ONLY red is the recount's confinement refusal.
+    write_tuple_trial_stats(
+        sidecar,
+        dataclasses.replace(
+            stats,
+            n_backtested=stats.n_backtested + 1,
+            n_enumerated=stats.n_enumerated + 1,
+        ),
+    )
+    capsys.readouterr()
+
+    rc = main(_verify_argv(lake_root, catalog_path, results_root, "--recount"))
+    out = capsys.readouterr().out
+    assert rc == EXIT_VERIFY_FINDINGS
+    assert " recount_divergence:" in out  # the verdict-grade code, colon-anchored
+    assert "recount_mode_divergence:" not in out
