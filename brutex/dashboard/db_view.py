@@ -5520,6 +5520,33 @@ def _ledger_stamp_moved() -> bool:
     return True
 
 
+def _compute_cursor(conn: Any) -> Any:
+    """A statement-isolated DuckDB cursor for a cached window compute — never a raise.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the flagged
+    (``stale_while_revalidate``) window caches may run a compute on a
+    BACKGROUND daemon revalidator, CONCURRENT with the request thread's own
+    statements on the SAME shared connection — and DuckDB's execute→fetch is
+    per-connection pending-result state, so interleaved statements corrupt
+    each other's results (reproduced in-suite: a background counts fold
+    fetched the request's 16-column page rows and died on the 3-tuple
+    unpack). ``conn.cursor()`` yields an independent connection over the same
+    database, isolating every CACHED compute's statements; the inline
+    single-flight computes ride the same cursor, which also closes the
+    pre-existing (rare) cross-request interleave on these families. A conn
+    without ``cursor()`` (test fakes / exotic injections) — or a raising
+    ``cursor()`` — falls back to *conn* itself (those callers drive computes
+    inline + single-threaded; isolation is best-effort, never a 500).
+    """
+    factory = getattr(conn, "cursor", None)
+    if factory is None:
+        return conn
+    try:
+        return factory()
+    except Exception:  # pylint: disable=broad-except — isolation is best-effort
+        return conn
+
+
 #: Resident-key bound for the shared ledger read cache: 2 key families
 #: (records / spot-rollup — the ``ledger-rows`` family was RETIRED by
 #: DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3: the /db grid rows are now an
@@ -5606,7 +5633,9 @@ def _ledger_payload_size_hint(payload: object) -> int | None:
 
 
 def _make_ledger_read_cache(
-    *, clock: Callable[[], float] = _monotonic_clock
+    *,
+    clock: Callable[[], float] = _monotonic_clock,
+    swr_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> MoversSnapshotCache:
     """Construct THE shared stamped ledger read cache — parameters exist ONCE.
 
@@ -5616,8 +5645,9 @@ def _make_ledger_read_cache(
     third hand-rolled cache — CLAUDE.md §11 COMMON), plus the M1
     ledger-aware ``size_of`` sizing hint so a cold 841k-row parse never pays
     the measured 5.28 s deep-size walk (see :func:`_ledger_payload_size_hint`).
-    *clock* is injectable so the floor tests are deterministic (production
-    keeps the monotonic default).
+    *clock* / *swr_runner* are injectable so the floor + stale-while-
+    revalidate tests are deterministic (production keeps the monotonic
+    default and the daemon-thread runner).
     """
     return MoversSnapshotCache(
         capacity=_LEDGER_READ_CACHE_CAPACITY,
@@ -5629,6 +5659,16 @@ def _make_ledger_read_cache(
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G4 widened — the
+        # operator's live repro: /db window-ledger rows stuck behind an inline
+        # O(rows) re-parse past the floor mid-pull): PAST-floor stamp churn
+        # serves the PRIOR stamp's records instantly and re-parses in ONE
+        # tokenless background revalidator — bounded staleness (≤ floor + one
+        # parse behind the live ledger), every serve logged, converged by the
+        # next idle read (the constant-True probe keeps the arm armed exactly
+        # while the stamp churns).
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
 
@@ -5676,7 +5716,9 @@ def _reset_ledger_read_cache() -> None:
 
 
 def make_window_payload_caches(
-    *, clock: Callable[[], float] = _monotonic_clock
+    *,
+    clock: Callable[[], float] = _monotonic_clock,
+    swr_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> tuple[MoversSnapshotCache, MoversSnapshotCache]:
     """Construct the ``(counts_cache, page_cache)`` pair for ``/coverage/windows``.
 
@@ -5699,11 +5741,30 @@ def make_window_payload_caches(
     and page-key churn can never evict the counts entries (round-2 MEDIUM
     fold — see the capacity constant's envelope). *clock* is injectable so the
     floor tests are deterministic (production keeps the monotonic default).
+    Both instances ALSO opt into ``stale_while_revalidate``
+    (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 — see the construction
+    comment below for the sanctioned-staleness envelope).
     """
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G4): BOTH instances opt
+    # into stale-while-revalidate — a pull-progress / /coverage/windows poll
+    # landing PAST the 120 s-capped floor serves the PRIOR stamp's counts /
+    # page instantly and revalidates the O(rows + delta-footers) fold in ONE
+    # tokenless background daemon; concurrent pollers never block on the
+    # single-flight (the operator's live repro: the windows page stuck at
+    # "loading…" mid-pull, and the /universe feed dropping ~154 s recurring).
+    # The fold still RUNS (≤1 concurrent, ≤ floor cadence) — this bounds poll
+    # LATENCY, it does not eliminate the fold (Golden Rule #10). Because the
+    # probe is the constant-True `_ledger_stamp_moved`, the SWR arm also
+    # covers CROSS-PROCESS CLI-pull stamp churn: an idle-after-CLI-write read
+    # past the floor converges via one background fold instead of one inline
+    # fold (≤ seconds delayed freshness, log-labelled — the disclosed
+    # sanctioned delta for the counts family).
     counts_cache = MoversSnapshotCache(
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
     page_cache = MoversSnapshotCache(
@@ -5711,6 +5772,8 @@ def make_window_payload_caches(
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
     return counts_cache, page_cache
@@ -6538,7 +6601,7 @@ def query_window_ledger_page(
         ledger_glob = path.as_posix()
         probed = False
 
-        def _ensure_full_schema() -> None:
+        def _ensure_full_schema(c: Any) -> None:
             """Legacy-shape probe — LAZY, so a warm (fully-cached) click runs
             ZERO SQL. The _build_window_payload_duckdb precedent, but STRICTER:
             the /db grid projects ALL 16 columns, so ANY absent optional column
@@ -6548,14 +6611,18 @@ def query_window_ledger_page(
             list, whose NULL-fill would mask a legacy base's missing columns.
             Base-ABSENT (a first pull's delta-only checkpoint) skips it: every
             delta is written by `append_ledger_delta` with the full current
-            schema (writer-pinned). Run at most once per fresh attempt."""
+            schema (writer-pinned). Run at most once per fresh attempt; *c* is
+            the calling compute's statement-isolated cursor (`_compute_cursor`
+            — the flagged caches may run a compute on a background revalidator,
+            concurrent with the request thread's statements on the shared
+            conn)."""
             nonlocal probed
             if probed or not path.is_file():
                 return
             available = {
                 str(col[0])
                 for col in (
-                    conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
+                    c.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
                     or []
                 )
             }
@@ -6568,21 +6635,23 @@ def query_window_ledger_page(
         order_sql = ", ".join(f'"{name}"' for name in _WINDOW_KEY_COLUMNS)
 
         def _total() -> int:
-            _ensure_full_schema()
+            c = _compute_cursor(conn)
+            _ensure_full_schema(c)
             # COUNT(*) over the fold = the number of DISTINCT window keys (the
             # QUALIFY keeps exactly one row per key; a steady-state base holds
             # unique keys by construction — save writes the folded to_rows()).
-            row = conn.execute(
+            row = c.execute(
                 f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
                 list(source.params),
             ).fetchone()
             return int(row[0]) if row else 0
 
         def _page() -> tuple[tuple[Any, ...], ...]:
-            _ensure_full_schema()
+            c = _compute_cursor(conn)
+            _ensure_full_schema(c)
             # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
             # source params bind FIRST (the subquery precedes them in the text).
-            cursor = conn.execute(
+            cursor = c.execute(
                 f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
                 f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
                 [*source.params, limit, offset],
@@ -6856,10 +6925,13 @@ def phase_progress_payload(
             # #920 adaptive floor throttle mid-pull recomputes. The SAME key
             # `_build_window_payload_duckdb` uses, so the two routes share one
             # warm entry.
+            # The compute runs on a statement-isolated cursor: the flagged cache
+            # may execute it on a background revalidator, concurrent with this
+            # thread's own statements on the shared conn (`_compute_cursor`).
             counts, _total = count_cache.get_or_compute(
                 f"window-counts|{ledger_file.as_posix()}",
                 generation=revision_generation(source.stamp_token),
-                compute=lambda: _window_counts_total(conn, source),
+                compute=lambda: _window_counts_total(_compute_cursor(conn), source),
             )
         return counts
 
@@ -7081,10 +7153,13 @@ def _build_window_payload_duckdb(
         if since is not None:
             counts_since, _since_total = _window_counts_since(conn, source, since)
     else:
+        # Computes run on a statement-isolated cursor (`_compute_cursor`): the
+        # flagged caches may execute them on a background revalidator daemon,
+        # concurrent with this thread's own statements on the shared conn.
         counts, total = count_cache.get_or_compute(
             f"window-counts|{ledger_glob}",
             generation=stamp_generation,
-            compute=lambda: _window_counts_total(conn, source),
+            compute=lambda: _window_counts_total(_compute_cursor(conn), source),
         )
         if since is not None:
             # SAME memo pattern as the lifetime counts (REUSE, no new cache class —
@@ -7095,7 +7170,7 @@ def _build_window_payload_duckdb(
             counts_since, _since_total = count_cache.get_or_compute(
                 since_key,
                 generation=stamp_generation,
-                compute=lambda: _window_counts_since(conn, source, since),
+                compute=lambda: _window_counts_since(_compute_cursor(conn), source, since),
             )
 
     valid_buckets = ("spot", "options", "futures")
@@ -7161,8 +7236,11 @@ def _build_window_payload_duckdb(
             # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
             # a superseded row version can never resurrect through a filter); the
             # source params bind FIRST (the subquery precedes them in the SQL text).
+            # Statement-isolated cursor: this compute may run on the flagged page
+            # cache's background revalidator, concurrent with the request thread's
+            # own statements on the shared conn (`_compute_cursor`).
             params: list[Any] = [*source.params, *where_params, limit, offset]
-            cursor = conn.execute(
+            cursor = _compute_cursor(conn).execute(
                 f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
                 params,
             )

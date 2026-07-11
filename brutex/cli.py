@@ -3498,6 +3498,28 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         pull_intent_store = PullIntentStore(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("pull_intent.build_failed", error=str(exc))
+    # Event-loop liveness watchdog (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    # G5): default ON behind the fail-loud BRUTEX_LOOP_WATCHDOG kill switch —
+    # the env parse is DELIBERATELY outside the best-effort guard (a junk value
+    # aborts startup with a clean one-liner, the resolve_* house convention:
+    # a typo must never SILENTLY disable the watchdog), while the construction
+    # itself is best-effort (a fault logs and the dashboard still binds).
+    from brutex.observability.loop_watchdog import LoopWatchdog, resolve_loop_watchdog_enabled
+
+    try:
+        loop_watchdog_enabled = resolve_loop_watchdog_enabled()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    loop_watchdog: Any = None
+    if loop_watchdog_enabled:
+        try:
+            from brutex.notifications.sweep_alerts import SweepAlerter
+            from brutex.observability.metrics import get_registry
+
+            loop_watchdog = LoopWatchdog(alerter=SweepAlerter(), registry=get_registry())
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+            _log.warning("loop_watchdog.build_failed", error=str(exc))
     app = build_app(
         state,
         instrument_store=store,
@@ -3505,6 +3527,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         liveproof=liveproof,
         allowed_hosts=allowed_hosts,
         pull_intent_store=pull_intent_store,
+        loop_watchdog=loop_watchdog,
     )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs

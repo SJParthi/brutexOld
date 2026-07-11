@@ -98,10 +98,19 @@ def _append_delta(lake_root: Path, symbol: str) -> None:
 
 
 def _install_clocked_cache(monkeypatch: pytest.MonkeyPatch) -> dict[str, float]:
-    """Swap in a fresh ledger read cache driven by a mutable test clock."""
+    """Swap in a fresh ledger read cache driven by a mutable test clock.
+
+    The SWR revalidator runs INLINE (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    — the injectable ``swr_runner`` seam) so every past-floor stale-serve +
+    background-store sequence is deterministic: the past-floor read returns the
+    PRIOR entry and the store lands synchronously, so the NEXT read is fresh —
+    no real threads, no sleeps.
+    """
     clock = {"t": 0.0}
     monkeypatch.setattr(
-        db_view, "_LEDGER_READ_CACHE", db_view._make_ledger_read_cache(clock=lambda: clock["t"])
+        db_view,
+        "_LEDGER_READ_CACHE",
+        db_view._make_ledger_read_cache(clock=lambda: clock["t"], swr_runner=lambda job: job()),
     )
     return clock
 
@@ -242,11 +251,15 @@ class TestAdaptiveFloor:
     ) -> None:
         """T-b3: within ``min(max(2 s, duration), 120 s)`` of the last parse a
         stamp move serves the PRIOR entry with the ``movers_cache.stale_served``
-        honesty log; past the floor the same read parses fresh. The log fires on
-        the ``ledger-records`` BASE key — the entry that actually serves stale;
-        the derived rollup is stamped at the SERVED records generation, so it is
-        a clean generation hit on that stale epoch (the latch fix), never a
-        silently-fresh-stamped copy."""
+        honesty log; PAST the floor (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+        — this family is stale-while-revalidate-flagged) the read serves the
+        prior entry ONCE MORE (logged ``revalidate="spawned"``, never a blocking
+        inline re-parse) while the revalidator lands the fresh parse, so the
+        following reads converge layer-by-layer (records, then the derived
+        rollup). The floor log fires on the ``ledger-records`` BASE key — the
+        entry that actually serves stale; the derived rollup is stamped at the
+        SERVED records generation, so it is a clean generation hit on that stale
+        epoch (the latch fix), never a silently-fresh-stamped copy."""
         clock = _install_clocked_cache(monkeypatch)
         _seed(tmp_path, ["NIFTY"])
         assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}  # warm @ t=0
@@ -261,7 +274,17 @@ class TestAdaptiveFloor:
         assert served["floor_s"] == 2.0
         assert str(served["key"]).startswith("ledger-records|")
         assert served["entry_generation"] != served["generation"]
-        clock["t"] = 2.5  # past the floor → fresh parse
+        assert "revalidate" not in served  # the floor arm — no revalidator within the floor
+        clock["t"] = 2.5  # past the floor → SWR: serve last-known + revalidate inline
+        with capture_logs() as logs:
+            swr_served = spot_window_rollup(tmp_path)
+        assert swr_served == {("NIFTY", "1minute"): (1, 0, 0)}  # served, never blocked
+        (records_serve,) = _events(logs, "movers_cache.stale_served")
+        assert str(records_serve["key"]).startswith("ledger-records|")
+        assert records_serve["revalidate"] == "spawned"  # the background refresh ran
+        # The landed revalidate freshened the RECORDS; the derived rollup pays
+        # its own one-serve SWR cycle on the next read, then converges.
+        spot_window_rollup(tmp_path)  # the rollup key's own stale serve + revalidate
         assert spot_window_rollup(tmp_path) == {
             ("NIFTY", "1minute"): (1, 0, 0),
             ("BANKNIFTY", "1minute"): (1, 0, 0),
@@ -284,7 +307,9 @@ class TestAdaptiveFloor:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """T-b4 (slow arm): a 500 s parse earns the CAPPED 120 s floor — a
-        stamp move at age 119 s still serves stale; 121 s parses fresh."""
+        stamp move at age 119 s still serves stale; 121 s serves last-known ONCE
+        (the SWR arm — logged, never a blocking inline re-parse) while the
+        revalidator lands the fresh parse the next read returns."""
         clock = _install_clocked_cache(monkeypatch)
         _seed(tmp_path, ["NIFTY"])
         real_load = load_window_ledger
@@ -301,21 +326,30 @@ class TestAdaptiveFloor:
             assert _ledger_records_cached(tmp_path) == warmed  # stale-served
         (served,) = _events(logs, "movers_cache.stale_served")
         assert served["floor_s"] == 120.0  # min(max(2, 500), 120) — the cap's teeth
-        clock["t"] = 500.0 + 121.0  # past the cap → fresh parse (≤50%-duty law upheld)
-        refreshed = _ledger_records_cached(tmp_path)
+        assert "revalidate" not in served  # the floor arm — no revalidator spawned
+        clock["t"] = 500.0 + 121.0  # past the cap → SWR: last-known + inline revalidate
+        with capture_logs() as logs:
+            assert _ledger_records_cached(tmp_path) == warmed  # served, never blocked
+        (swr_served,) = _events(logs, "movers_cache.stale_served")
+        assert swr_served["revalidate"] == "spawned"
+        refreshed = _ledger_records_cached(tmp_path)  # the landed revalidate
         assert {r.security_id for r in refreshed} == {"NIFTY", "BANKNIFTY"}
 
     def test_cheap_parse_keeps_the_2s_base_floor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """T-b4 (cheap arm): a fast parse's floor is the snappy 2 s base — a
-        stamp move at age 2.1 s parses fresh immediately (no cap inflation)."""
+        stamp move at age 2.1 s leaves the floor arm (no cap inflation) and
+        rides the SWR arm: one last-known serve while the revalidator lands
+        the fresh parse the next read returns."""
         clock = _install_clocked_cache(monkeypatch)
         _seed(tmp_path, ["NIFTY"])
         _ledger_records_cached(tmp_path)  # duration 0 under the frozen clock
         _append_delta(tmp_path, "BANKNIFTY")
-        clock["t"] = 2.1  # just past min(max(2, 0), 120) = 2 s
-        refreshed = _ledger_records_cached(tmp_path)
+        clock["t"] = 2.1  # just past min(max(2, 0), 120) = 2 s → the SWR arm
+        stale = _ledger_records_cached(tmp_path)
+        assert {r.security_id for r in stale} == {"NIFTY"}  # last-known, never blocked
+        refreshed = _ledger_records_cached(tmp_path)  # the landed revalidate
         assert {r.security_id for r in refreshed} == {"NIFTY", "BANKNIFTY"}
 
 
@@ -421,13 +455,22 @@ class TestDerivedKeysNeverLatchStaleRecords:
         assert {str(e["key"]).split("|")[0] for e in served} == {"ledger-records"}
         # THE LATCH PIN: long past every floor the derived keys reconverge to
         # the on-disk truth. Pre-fix both were cached at the FRESH generation
-        # (a clean hit forever) and this still read ["NIFTY"] / settled-only.
+        # (a clean hit forever) and read ["NIFTY"] / settled-only WITH NO LOG.
+        # Under stale-while-revalidate (DEC-DASHBOARD-PULL-CONTENTION-
+        # RESILIENCE-001) reconvergence costs one LOGGED last-known serve per
+        # cached layer (records, then the rollup) — bounded and loud, never a
+        # silent forever-latch.
         clock["t"] = 990.0
         with capture_logs() as logs:
-            rows = window_ledger_rows_cached(tmp_path)
-            rollup = spot_window_rollup(tmp_path)
+            first_rows = window_ledger_rows_cached(tmp_path)
+        assert [r[1] for r in first_rows] == ["NIFTY"]  # the last-known serve
+        assert _events(logs, "movers_cache.stale_served")  # …is LOGGED, never silent
+        rows = window_ledger_rows_cached(tmp_path)  # the landed records revalidate
         assert sorted(r[1] for r in rows) == ["BANKNIFTY", "NIFTY"]
         assert list(rows) == load_window_ledger(tmp_path).to_rows()
+        spot_window_rollup(tmp_path)  # the rollup key's own one-serve SWR cycle
+        with capture_logs() as logs:
+            rollup = spot_window_rollup(tmp_path)
         assert rollup == {
             ("NIFTY", "1minute"): (1, 0, 0),
             ("BANKNIFTY", "1minute"): (1, 0, 0),
@@ -582,8 +625,10 @@ class TestStaleServeManyStampsBehind:
                 assert _ledger_records_cached(tmp_path) == warmed
         served = _events(logs, "movers_cache.stale_served")
         assert len(served) == 6  # EVERY multi-stamp-behind serve is logged
-        clock["t"] = 13.6 + 13.7  # past min(max(2, 13.6), 120) → fresh parse
-        refreshed = _ledger_records_cached(tmp_path)
+        clock["t"] = 13.6 + 13.7  # past min(max(2, 13.6), 120) → the SWR arm:
+        # one more last-known serve while the revalidator folds ALL six deltas.
+        assert _ledger_records_cached(tmp_path) == warmed
+        refreshed = _ledger_records_cached(tmp_path)  # the landed revalidate
         assert {r.security_id for r in refreshed} == {"NIFTY", *flushed}
 
 
@@ -654,24 +699,32 @@ class TestComposedDerivedFloorHonesty:
         # Cold: records parse (t 0→2, floor 2 s), rollup grouping (t 2→12, floor 10 s).
         assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
         _append_delta(tmp_path, "BANKNIFTY")  # the flush — the stamp moves
-        # Poll PAST the records floor (records age 13 s > 2 s): the records
-        # parse FRESH (t 15→17), then the rollup entry — generation-mismatched
-        # but only 5 s old against its OWN 10 s floor — serves STALE.
+        # Poll PAST the records floor (records age 13 s > 2 s): under
+        # stale-while-revalidate the records key serves last-known ONCE
+        # (logged on ledger-records) while the revalidator lands the fresh
+        # parse (t 15→17); the rollup — fed the stale-epoch records — stays a
+        # clean generation hit on that first read.
         clock["t"] = 15.0
-        with capture_logs() as logs:
-            stale_rollup = spot_window_rollup(tmp_path)
+        assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
         assert {r.security_id for r in _ledger_records_cached(tmp_path)} == {
             "NIFTY",
             "BANKNIFTY",
-        }  # the records ARE fresh — past their floor, delta folded in
+        }  # the records ARE fresh — the landed revalidate folded the delta in
+        # THE COMPOSED SECOND PHASE: records fresh, but the rollup entry —
+        # generation-mismatched and only 5 s old against its OWN 10 s floor —
+        # serves STALE under its own floor, logged on the spot-rollup key.
+        with capture_logs() as logs:
+            stale_rollup = spot_window_rollup(tmp_path)
         assert stale_rollup == {("NIFTY", "1minute"): (1, 0, 0)}  # the SECOND stale phase
         (served,) = _events(logs, "movers_cache.stale_served")
         assert str(served["key"]).startswith("spot-rollup|")  # the SERVING key, never records
         assert served["floor_s"] == 10.0  # the rollup entry's OWN floor drives this phase
         assert served["age_s"] == 5.0  # within the rollup floor, past the records floor
         assert served["entry_generation"] != served["generation"]
-        # Self-healing: past the composed bound the rollup reconverges fresh.
-        clock["t"] = 40.0  # rollup age 28 s > its 10 s floor
+        # Self-healing: past the composed bound the rollup reconverges — one
+        # last-known SWR serve + the landed revalidate, then genuinely fresh.
+        clock["t"] = 40.0  # rollup age 28 s > its 10 s floor → the SWR arm
+        spot_window_rollup(tmp_path)  # the rollup key's one-serve SWR cycle
         with capture_logs() as logs:
             rollup = spot_window_rollup(tmp_path)
         assert rollup == {
@@ -714,11 +767,21 @@ class TestComposedDerivedFloorHonesty:
         # Cold: records parse (t 0→2), slow rows projection (t 2→12, uncached).
         assert [r[1] for r in window_ledger_rows_cached(tmp_path)] == ["NIFTY"]
         _append_delta(tmp_path, "BANKNIFTY")  # the flush — the stamp moves
-        # Poll PAST the records floor (records age 13 s > 2 s): the records
-        # parse FRESH and the rows projection reflects them IMMEDIATELY —
-        # pre-fix this exact sequence served stale ["NIFTY"] off the cached
-        # rows entry's own floor with a ledger-rows stale_served log.
+        # Poll PAST the records floor (records age 13 s > 2 s): the RECORDS key
+        # rides its SWR arm (one logged last-known serve on ledger-records while
+        # the revalidator lands the fresh parse) — and the rows projection then
+        # reflects the fresh records IMMEDIATELY, with NO second phase and NO
+        # rows-key log at any point: pre-fix this sequence served stale
+        # ["NIFTY"] off the cached rows entry's OWN floor with a ledger-rows
+        # stale_served log.
         clock["t"] = 15.0
+        with capture_logs() as logs:
+            first = window_ledger_rows_cached(tmp_path)
+        assert [r[1] for r in first] == ["NIFTY"]  # the records key's one SWR serve
+        assert all(
+            str(e["key"]).startswith("ledger-records|")
+            for e in _events(logs, "movers_cache.stale_served")
+        )  # NEVER a rows-key log — the projection has no cache entry to serve
         with capture_logs() as logs:
             rows = window_ledger_rows_cached(tmp_path)
         assert sorted(r[1] for r in rows) == ["BANKNIFTY", "NIFTY"]

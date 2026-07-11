@@ -39,7 +39,7 @@ import math
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -286,6 +286,7 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
+from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.greeks_backfill import (
     dry_run_backfill_report,
     plan_greeks_backfill,
@@ -319,6 +320,7 @@ from brutex.engine.results_store import ResultsStoreError
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.notifications.sweep_alerts import emit_greeks_backfill_complete_alert
 from brutex.observability.correlation import request_id_scope
+from brutex.observability.loop_watchdog import LoopWatchdog
 from brutex.observability.power_keepawake import keep_awake
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
@@ -1284,6 +1286,7 @@ def build_app(
     session_rate: SessionRateController | None = None,
     census_spawn: Callable[[Callable[[], None]], None] | None = None,
     census_clock: Callable[[], float] | None = None,
+    loop_watchdog: LoopWatchdog | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1448,6 +1451,15 @@ def build_app(
         assert the dry-run / job-end eviction through the REAL routes); ``None``
         (the default) builds a fresh production holder — byte-identical to the
         pre-seam construction (mirrors the ``summary_cache`` injection pattern).
+    loop_watchdog
+        Optional :class:`~brutex.observability.loop_watchdog.LoopWatchdog`
+        (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 G5): when given, the app
+        registers ``startup``/``shutdown`` event handlers that start the 1 s
+        event-loop heartbeat task + monitor daemon and stop them cleanly.
+        ``None`` (the default) registers NOTHING — zero threads, tasks or
+        handlers (census-pinned), so every existing ``build_app()`` caller is
+        byte-identical. Production binds one in ``cli.cmd_dashboard`` behind
+        the fail-loud ``BRUTEX_LOOP_WATCHDOG`` kill switch (default ON).
 
     Returns
     -------
@@ -1508,7 +1520,36 @@ def build_app(
     # dashboard now authenticates via Groww TOTP, so the vestigial keepalive
     # lifespan wiring was removed. The retired-vendor adapter package has since been
     # deleted; the dashboard simply no longer drives any keepalive.
-    app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
+    #
+    # Event-loop liveness watchdog (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    # G5): OPT-IN — `None` (the default, every test construction) builds the app
+    # with NO lifespan at all, spawning ZERO threads/tasks (byte-identical app;
+    # census-pinned). A wired watchdog rides a minimal LIFESPAN (the modern
+    # Starlette seam — `add_event_handler`/on_event were REMOVED in Starlette
+    # 1.x, so the lifespan kwarg is the one lifecycle hook): startup starts the
+    # 1 s heartbeat task on THIS app's running loop + the monitor daemon;
+    # shutdown cancels the task + joins the monitor BOUNDED. Production binds
+    # one in `cli.cmd_dashboard` behind the fail-loud BRUTEX_LOOP_WATCHDOG kill
+    # switch (default ON).
+    if loop_watchdog is not None:
+        from contextlib import asynccontextmanager
+
+        watchdog = loop_watchdog  # narrow for the closure (mypy: not None)
+
+        @asynccontextmanager
+        async def _watchdog_lifespan(_app: Any) -> AsyncIterator[None]:
+            """Start/stop the loop watchdog around the app's serving lifetime."""
+            await watchdog.start_from_running_loop()
+            try:
+                yield
+            finally:
+                watchdog.stop()
+
+        app = FastAPI(
+            title="BruteX Dashboard", version="0.1.0a0", lifespan=_watchdog_lifespan
+        )
+    else:
+        app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
 
     # Serve the shared dashboard static assets (the date-picker component, etc.)
     # from ``/static`` — ONE source of truth loaded by every page via <link>/<script>
@@ -1847,7 +1888,18 @@ def build_app(
     # FNO_CASCADE_KEY) so it shares the pull-time floor + the discovery warm; the
     # bespoke single-slot `FnoCascadeCache` class this superseded was production-dead
     # and DELETED (fix 6a, DEC-MEMORY-FOOTPRINT-HARDENING-001).
-    _fno_cascade_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the THREE discovery-walk memos
+    # additionally opt into stale-while-revalidate — PAST the adaptive floor a
+    # mid-pull poll serves the last-known index IMMEDIATELY and at most ONE
+    # tokenless background daemon revalidates, instead of an inline O(datasets)
+    # walk (or a blocking single-flight wait pinning a 32-token lake worker per
+    # waiter — the 8-tab herd defect). Staleness stays bounded (≤ one walk/fold
+    # behind live), log-labelled (`movers_cache.stale_served` + the
+    # `stale_extended` escalation), and hard-converged by the pull-end
+    # `warm_discovery_memos` force_fresh reseed (which bypasses floor AND SWR).
+    _fno_cascade_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True, stale_while_revalidate=True
+    )
     # The /db candle-datasets discovery cache (DEC-DB-TAB-SWITCH-O1-001): the
     # `/api/v1/db/candles/datasets` endpoint walks the WHOLE `bars/` tree THREE times
     # (spot + F&O + options, each an O(files) `rglob("*.parquet")`) — and it fires on
@@ -1855,13 +1907,17 @@ def build_app(
     # between lake writes, so they are memoised behind the SAME generation signal as the
     # caches above (a pull bumps it → rediscover; otherwise a tab switch is an O(1) handoff
     # of the cached lists). REUSES the COMMON `MoversSnapshotCache` (one dataset key).
-    _db_datasets_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    _db_datasets_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True, stale_while_revalidate=True
+    )
     # The /db SPOT cascade cache (DEC-DB-SPOT-CASCADE-001): the symbol→interval index is
     # an O(datasets) build over the non-F&O lake partitions; memoised behind the SAME
     # write-generation as the caches above (the spot twin of `_fno_cascade_cache`), so a
     # pull rebuilds it but every symbol-picker open is an O(1) handoff — the small
     # symbols-with-intervals payload, never the flat ~750-row spot dropdown.
-    _spot_cascade_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    _spot_cascade_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True, stale_while_revalidate=True
+    )
     # The DEFAULT-poll latest-movers-date cache (GAP #4): the `/api/v1/movers` route with
     # NO explicit date resolves the latest available spot 1day via `latest_movers_date`,
     # an O(datasets) DuckDB MAX over the spot 1day globs — re-run on EVERY default poll.
@@ -8375,8 +8431,28 @@ def build_app(
         lake = lake_root.parent
 
         def _build() -> SpotCascadeIndex:
-            """Build the spot symbol→interval cascade from the non-F&O lake datasets."""
-            return build_spot_cascade(filter_spot_datasets(list_candle_datasets(lake)))
+            """Build the spot symbol→interval cascade from the non-F&O lake datasets.
+
+            DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G2): the walk PRUNES the
+            F&O contract tree AT DESCENT (``exclude_segments`` — the
+            DEC-COMPLETENESS-FNO-SKIP-001 mechanism db_view already implements at
+            the segment-dir level), so a cold spot-cascade build never pays the
+            ~10⁵-10⁶ per-contract partition dirs of a materialised options lake
+            (measured 42× on the synthetic repro; the production unfiltered walk's
+            own docstring figure is 29.7 min at 2.36M files). ``filter_spot_datasets``
+            stays as the provable-no-op belt (the ONE spot-vs-F&O split, §11
+            COMMON). A FILTERED walk deliberately NEVER rebuilds the dataset
+            manifest (db_view's :func:`list_candle_datasets` guard) — rebuild duty
+            stays with the unfiltered datasets route + ``warm_discovery_memos`` +
+            the write-side ``record_dataset`` convergence (spy-pinned).
+            """
+            return build_spot_cascade(
+                filter_spot_datasets(
+                    list_candle_datasets(
+                        lake, exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT})
+                    )
+                )
+            )
 
         # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
         # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.

@@ -940,7 +940,12 @@ def test_midpull_floor_throttles_recomputes_bounded_and_logged(tmp_path: Path) -
     _write_delta(tmp_path, [_row("BANKNIFTY", "SUCCESS", bars=3)])
     conn = duckdb.connect()
     now = {"t": 100.0}
-    counts_inner, page_inner = make_window_payload_caches(clock=lambda: now["t"])
+    # The SWR revalidator runs INLINE (the injectable swr_runner seam —
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001) so the past-floor
+    # serve-last-known + background-store sequence is deterministic.
+    counts_inner, page_inner = make_window_payload_caches(
+        clock=lambda: now["t"], swr_runner=lambda job: job()
+    )
     counts = _FamilyCountingCache(counts_inner)
     page = _FamilyCountingCache(page_inner)
     first = build_window_payload(
@@ -962,14 +967,22 @@ def test_midpull_floor_throttles_recomputes_bounded_and_logged(tmp_path: Path) -
     assert not any(r["symbol"] == "SENSEX" for r in stale["windows"])
     assert _events(logs, "movers_cache.stale_served")  # never a silent illusion
     # The floor AGES OUT (past even the 120 s cap, whatever the measured
-    # durations) → fresh recompute of BOTH families sees the delta row.
+    # durations) → the SWR arm serves the PRIOR payload ONCE MORE (never a
+    # blocking inline fold) while the revalidators — inline here — land the
+    # fresh fold of BOTH families; the NEXT poll serves the delta row.
     now["t"] += 121.0
-    aged = build_window_payload(
+    aged_stale = build_window_payload(
         tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
     )
-    assert counts.computes == {"window-counts": 2}
+    assert counts.computes == {"window-counts": 2}  # the revalidate DID fold fresh…
     assert page.computes == {"window-page": 2}
-    assert any(r["symbol"] == "SENSEX" for r in aged["windows"])
+    assert not any(r["symbol"] == "SENSEX" for r in aged_stale["windows"])  # …served next
+    fresh = build_window_payload(
+        tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
+    )
+    assert counts.computes == {"window-counts": 2}  # the landed store — no re-fold
+    assert page.computes == {"window-page": 2}
+    assert any(r["symbol"] == "SENSEX" for r in fresh["windows"])
 
 
 def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
@@ -980,7 +993,9 @@ def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
     _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
     conn = duckdb.connect()
     now = {"t": 50.0}
-    counts_inner, _page_inner = make_window_payload_caches(clock=lambda: now["t"])
+    counts_inner, _page_inner = make_window_payload_caches(
+        clock=lambda: now["t"], swr_runner=lambda job: job()
+    )
     cache = _FamilyCountingCache(counts_inner)
     path = wls.ledger_path(tmp_path)
     rows = phase_progress_payload(conn, path, current_phase="spot", count_cache=cache, generation=0)
@@ -994,11 +1009,17 @@ def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
     assert cache.computes == {"window-counts": 1}  # floor-stale serve, no recount
     assert next(r for r in stale_rows if r["phase"] == "spot")["done"] == 1  # prior stamp
     assert _events(logs, "movers_cache.stale_served")
-    now["t"] += 121.0  # past the 120 s cap → the delta row lands
+    now["t"] += 121.0  # past the 120 s cap → the SWR arm: one more last-known
+    # serve while the (inline) revalidator lands the fresh counts.
+    swr_rows = phase_progress_payload(
+        conn, path, current_phase="spot", count_cache=cache, generation=0
+    )
+    assert cache.computes == {"window-counts": 2}  # the revalidate folded fresh
+    assert next(r for r in swr_rows if r["phase"] == "spot")["done"] == 1  # last-known
     fresh_rows = phase_progress_payload(
         conn, path, current_phase="spot", count_cache=cache, generation=0
     )
-    assert cache.computes == {"window-counts": 2}
+    assert cache.computes == {"window-counts": 2}  # the landed store — no re-fold
     assert next(r for r in fresh_rows if r["phase"] == "spot")["done"] == 2
 
 
