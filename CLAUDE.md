@@ -2218,7 +2218,18 @@ hostile-review pass._
   Decimal/bar-construction work dominates — the slice lands the safe FFI stepping-stone, the
   judge's honest position); ships INERT — a default flip needs its own DEC/ADR with real-lake soak
   + zero autoreverts + mutation-green; the Vec-alloc abort residual is the same disclosed envelope
-  as every existing FFI path; GREEKS_FORMULA_VERSION stays 2, enrich goldens frozen. ENGINE
+  as every existing FFI path; GREEKS_FORMULA_VERSION stays 2, enrich goldens frozen.
+  HOSTILE-REVIEW ROUND 1 folded (4/4 SHIP; 2 MINOR + 5 NIT, all fixed same-branch pre-PR): the
+  batch.rs unit oracle reads the scalar `GreeksOut` FIELDS directly (the values_of
+  field-permutation mutant now dies at the UNIT layer — mutant re-applied + verified killed);
+  `greeks/batch.rs` added to `.cargo/mutants.toml`'s documented out-of-scope disclosure block
+  (14 mutants measured; NOT weekly-mutation-gated — the per-PR `cargo test` is its gate); the
+  `_RustBatchState` races-output-safe lockless clause + the ON-arm GIL-hold envelope (one
+  ≤65,536-row chunk per FFI call, no release — beats unaffected, per-target) + the measured
+  ON-arm peak working set (~1.74× OFF, ~109 vs ~63 MB @ 70k rows, O(N)) disclosed in the module
+  docs + ledger; the autorevert `error` payload rides `repr(str(exc))` (house log-injection
+  convention, pin updated); the burn-in-verifies-only-16 + ON-arm-MemoryError-surface honesty
+  clauses folded into #1724. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate
   change; ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline.)
   Earlier: `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —

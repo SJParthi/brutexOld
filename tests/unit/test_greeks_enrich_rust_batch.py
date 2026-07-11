@@ -595,6 +595,9 @@ class TestAutorevertLatch:
         assert len(errors) == 1
         assert errors[0]["reason"] == "exception"
         assert errors[0]["error_type"] == name
+        # The message rides repr()'d (house log-injection convention) — no
+        # raw newline/escape could forge a log line through the payload.
+        assert errors[0]["error"] == repr(str(exc))
         assert _RUST_BATCH_STATE.disabled is True
 
         # The latch holds: the NEXT call never dispatches (bomb-spy).

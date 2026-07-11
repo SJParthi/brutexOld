@@ -89,7 +89,12 @@ SHIPS THE ORACLE VALUES and latches the batch OFF for the process
 (``greeks_enrich.rust_batch_autoreverted`` ERROR — never a silently wrong
 bar). The flag is resolved per CALL from the process env, so spawn workers
 read their own inherited environment; the OFF (default) arm is byte- and
-log-identical to the pre-batch code.
+log-identical to the pre-batch code. GIL envelope (honest): the ON arm's
+FFI call deliberately holds the GIL for one whole ≤65,536-row chunk (no
+release — sub-second at the cap), so an in-process signal/thread is
+deferred until the chunk returns where the per-row arm yields between rows;
+watchdog beats are unaffected either way — they fire per TARGET/unit, never
+per row.
 """
 
 from __future__ import annotations
@@ -302,6 +307,13 @@ class _RustBatchState:
     ``brutex.engine.rust_metrics`` latch precedent): the autorevert latch
     MUST outlive one call so a poisoned wheel is consulted at most once per
     process, and the warn/engage memos exist precisely to bound log volume.
+    Plain writes, NO lock — races are OUTPUT-SAFE (the rust_metrics clause):
+    a racing thread can at worst run a few extra burn-in self-checks or
+    double-fire a once-only log line, NEVER produce a wrong bar (every
+    served element is batch≡oracle-verified or the oracle value itself).
+    The state is process-LOCAL and the house parallelism is spawn
+    PROCESSES (each worker owns its own copy); no production threadpool
+    wraps the enrich pass.
     """
 
     disabled: bool = False
@@ -1225,7 +1237,10 @@ def _batch_solve_outcomes(pending: list[_PendingSolve]) -> dict[int, GreeksBatch
         _LOG.error(
             "greeks_enrich.rust_batch_autoreverted",
             reason="exception",
-            error=str(exc),
+            # repr() the message per the house log-injection convention
+            # (the lake_heal precedent) — no lake string reaches this fence
+            # today; forward-looking belt-and-braces.
+            error=repr(str(exc)),
             error_type=type(exc).__name__,
         )
         return {}

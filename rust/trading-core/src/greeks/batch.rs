@@ -144,13 +144,32 @@ mod tests {
 
     /// Assert one batch element ≡ the scalar call on the same args:
     /// bit-for-bit values AND verbatim error-string equality.
+    ///
+    /// The oracle side reads the scalar `GreeksOut` STRUCT FIELDS directly —
+    /// deliberately NOT through the production `values_of` projection, so a
+    /// field-permutation mutant inside `values_of` (e.g. iv↔delta) cannot
+    /// satisfy its own output and dies at THIS unit layer (hostile-review
+    /// R2 MINOR-1; previously only the `tests/greeks_batch.rs` integration
+    /// layer killed it).
     fn assert_elem_matches_scalar(row: Row, elem: &GreeksBatchElem) {
         let scalar = greeks(row.0, row.1, row.2, row.3, row.4, row.5, row.6);
         match scalar {
             Ok(g) => {
                 let got = elem.0.expect("scalar Ok ⇒ batch values Some");
                 assert_eq!(elem.1, None, "scalar Ok ⇒ batch error None");
-                assert_eq!(bits_of(got), bits_of(values_of(g)), "bit drift on {row:?}");
+                let want = [g.iv, g.delta, g.gamma, g.theta, g.vega, g.rho, g.price];
+                let have = [got.0, got.1, got.2, got.3, got.4, got.5, got.6];
+                for (name, (w, h)) in ["iv", "delta", "gamma", "theta", "vega", "rho", "price"]
+                    .iter()
+                    .zip(want.iter().zip(have.iter()))
+                {
+                    assert_eq!(
+                        w.to_bits(),
+                        h.to_bits(),
+                        "{name}: bit drift on {row:?} — scalar {w:?} vs batch {h:?}"
+                    );
+                }
+                assert_eq!(g.admissible, got.7, "admissible drift on {row:?}");
             }
             Err(e) => {
                 assert_eq!(elem.0, None, "scalar Err ⇒ batch values None");
