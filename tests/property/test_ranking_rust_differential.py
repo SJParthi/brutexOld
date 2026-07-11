@@ -317,9 +317,14 @@ def test_composite_wrong_column_count_message_is_byte_identical() -> None:
 )
 def test_dsr_z_differential(dsr: list[float], weight: float) -> None:
     rust = fno_math.ranking_dsr_z_contributions(dsr, weight)
-    py = dsr_z_contributions(
-        dsr, len(dsr), OverfitGateConfig(weight=weight) if weight >= 0 else None
-    )
+    # The oracle ALWAYS gets an active config: the Rust kernel is the active
+    # (weighted-zscores) arm's twin, and the strategy draws weight from
+    # [0.0, 1.0] — a `cfg if weight >= 0 else None` ternary here would be
+    # dead (bounded hypothesis floats are never NaN, and -0.0 >= 0 is True)
+    # AND wrong if ever reached (the None arm is the inactive [0.0]*n
+    # Python path, which the Rust kernel deliberately does not implement —
+    # the seam keeps it Python-side, `rank_combos_via_rust`).
+    py = dsr_z_contributions(dsr, len(dsr), OverfitGateConfig(weight=weight))
     assert len(rust) == len(py)
     if _POW_IDENTITY:
         assert _pack_list(rust) == _pack_list(py)

@@ -90,14 +90,46 @@ def test_sqrt_identity_randomized(x: float) -> None:
 
 
 def test_exact_power_of_two_identities_hold_on_every_host() -> None:
-    """Powers of two square/sqrt EXACTLY — a floor even a ~1-ulp libm meets.
+    """The EXACTLY-REPRESENTABLE shapes hold unconditionally.
 
-    These are the shapes the strong golden legs are built from (the
-    ``_exact_pool`` construction), so they must hold unconditionally.
+    ``(2**e) ** 2 == 2**(2e)`` for every ``e`` and ``(2**e) ** 0.5 ==
+    2**(e/2)`` for EVEN ``e`` land on exactly-representable powers of two —
+    a floor even a faithfully-rounded (~1-ulp) libm meets, because when the
+    true result IS a float both faithful neighbours coincide with it. These
+    are the shapes the strong golden legs rest on (the ``_exact_pool``
+    construction keeps every z-score intermediate exact), so they assert
+    HARD on every host. The sqrt of an ODD power of two is IRRATIONAL
+    (``sqrt(8.0)`` is not a float), so ``x ** 0.5 == math.sqrt(x)`` there
+    is the host-dependent (b*) identity the shipped probe adjudicates — it
+    is asserted only on identity hosts, in the gated sibling test below,
+    NEVER here (on this repo's glibc container the probe measures that
+    exact identity FAILING; any agreement on these 101 points would be
+    coincidence, not a floor).
     """
     for e in range(-50, 51):
         x = math.ldexp(1.0, e)
         assert _bits(x**2) == _bits(x * x)
-        assert _bits(x**0.5) == _bits(math.sqrt(x))
+        if e % 2 == 0:
+            assert _bits(x**0.5) == _bits(math.sqrt(x))
     assert _bits(1.0**2) == _bits(1.0 * 1.0)
     assert _bits(0.0**0.5) == _bits(math.sqrt(0.0))
+
+
+def test_odd_exponent_sqrt_identity_gated_on_identity_hosts() -> None:
+    """The IRRATIONAL-sqrt half of the old unconditional loop, host-gated.
+
+    ``sqrt(2**odd)`` is irrational, so ``x ** 0.5 == math.sqrt(x)`` on
+    these points is exactly the modeled (b*) identity — host-dependent by
+    the two-arm law, asserted HARD only where the probe says the identity
+    holds (the production M4-Pro merge-precondition target) and skipped
+    LOUDLY elsewhere, mirroring the randomized legs above.
+    """
+    if not pow_identity_holds():
+        pytest.skip(
+            "host libm pow is NOT the sqrt identity — odd-exponent "
+            "power-of-two sqrt is host-dependent (the (b*) arm); covered at "
+            "runtime by the always-on differential."
+        )
+    for e in range(-49, 50, 2):
+        x = math.ldexp(1.0, e)
+        assert _bits(x**0.5) == _bits(math.sqrt(x))
