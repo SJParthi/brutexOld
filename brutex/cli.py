@@ -1765,6 +1765,108 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── verify-acceptance (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, #1756) ──
+    # The operator acceptance verifier: 7 composed checks + gating teeth
+    # smoke + the frozen evidence report. All logic in brutex/acceptance/.
+    verify_acc = sub.add_parser(
+        "verify-acceptance",
+        help=(
+            "Operator acceptance verifier: uniqueness / derived TFs / "
+            "incremental pull / rate evidence / movers truth / data sanity / "
+            "latency over the REAL lake, with PASS/FAIL/ABSTAIN(named) "
+            "verdicts, a gating teeth smoke and a frozen evidence report "
+            "under <lake>/acceptance/. Exit: 0 clean, 1 usage, 2 SUSPECT "
+            "(teeth/internal), 3 findings, 4 inconclusive"
+        ),
+    )
+    verify_acc.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    verify_acc.add_argument(
+        "--checks",
+        default=None,
+        help="Comma list of {unique,tf,pull,rate,movers,sanity,latency}; default all 7",
+    )
+    verify_acc.add_argument(
+        "--full",
+        action="store_true",
+        help="Lift sampling + month bounds everywhere (cost warning printed first)",
+    )
+    verify_acc.add_argument(
+        "--sample", type=int, default=12, help="Sampled datasets beyond the engine set"
+    )
+    verify_acc.add_argument(
+        "--seed",
+        default=None,
+        help="Sampling seed; DEFAULT = the IST report date (deterministic daily rotation)",
+    )
+    verify_acc.add_argument(
+        "--months", type=int, default=6, help="Time-bound for non-engine scans (default 6)"
+    )
+    verify_acc.add_argument(
+        "--date", default=None, help="Movers/latency coordinate day (default: latest lake day)"
+    )
+    verify_acc.add_argument(
+        "--top-n", type=int, default=20, help="Movers cross-check depth (default 20, cap 100)"
+    )
+    verify_acc.add_argument(
+        "--latency-budget",
+        action="append",
+        default=None,
+        metavar="KEY=MS",
+        help="Override a documented latency budget (repeatable; echoed in the report)",
+    )
+    verify_acc.add_argument(
+        "--latency-rounds", type=int, default=5, help="Best-of-N for latency probes"
+    )
+    verify_acc.add_argument(
+        "--abstain-budget",
+        type=int,
+        default=3,
+        help="Max NON-structural abstains before exit 4 (structural abstains exempt)",
+    )
+    verify_acc.add_argument(
+        "--max-runtime-s",
+        type=float,
+        default=None,
+        help="Soft budget; unreached checks ABSTAIN(time_budget_exhausted)",
+    )
+    verify_acc.add_argument(
+        "--force-during-pull",
+        action="store_true",
+        help="Run data checks even while a pull looks active (default: they ABSTAIN)",
+    )
+    verify_acc.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run the FULL poison battery before the real run",
+    )
+    verify_acc.add_argument(
+        "--self-test-only",
+        action="store_true",
+        help="Run the battery, print the per-poison table, exit",
+    )
+    verify_acc.add_argument(
+        "--no-self-test",
+        action="store_true",
+        help="Skip even the teeth smoke (report carries TEETH_SKIPPED)",
+    )
+    verify_acc.add_argument(
+        "--json", action="store_true", help="Machine summary on stdout (files always written)"
+    )
+    verify_acc.add_argument(
+        "--out", type=Path, default=None, help="Report dir override (default <lake>/acceptance/<run_id>/)"
+    )
+    verify_acc.add_argument(
+        "--repro",
+        default=None,
+        metavar="CHECK_ID",
+        help="Print the exact repro command for one check id; exit 0",
+    )
+
     # ── sweep-heal (DEC-SWEEP-HEAL-001) — quarantine, never delete ──
     sweep_heal = sub.add_parser(
         "sweep-heal",
@@ -7556,6 +7658,113 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
     return EXIT_OK
 
 
+def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 100%-tested acceptance core
+    *,
+    lake_root: Path | None,
+    checks: str | None,
+    full: bool,
+    sample: int,
+    seed: str | None,
+    months: int,
+    date_str: str | None,
+    top_n: int,
+    latency_budget: list[str] | None,
+    latency_rounds: int,
+    abstain_budget: int,
+    max_runtime_s: float | None,
+    force_during_pull: bool,
+    self_test: bool,
+    self_test_only: bool,
+    no_self_test: bool,
+    json_out: bool,
+    out_dir: Path | None,
+    repro: str | None,
+    argv: list[str],
+) -> int:
+    """``brutex verify-acceptance`` — thin shim over :mod:`brutex.acceptance`.
+
+    DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). All verdict /
+    report / exit logic lives in the 100%-gated ``brutex/acceptance/``
+    package; this shim only resolves flags, prints the human table and maps
+    the returned exit code (0 clean / 1 usage / 2 SUSPECT / 3 findings /
+    4 inconclusive — the verify-family vocabulary).
+    """
+    import json
+
+    from brutex.acceptance.checks import ALL_CHECK_IDS
+    from brutex.acceptance.report import render_human
+    from brutex.acceptance.run import RunConfig, repro_command, run_acceptance
+    from brutex.acceptance.selftest import render_battery_table, run_full_battery
+
+    if repro is not None:
+        if repro not in ALL_CHECK_IDS:
+            raise CliUserError(f"unknown check id for --repro: {repro!r} (choose from {', '.join(ALL_CHECK_IDS)})")
+        print(repro_command(repro, seed=seed))
+        return EXIT_OK
+    if self_test_only:
+        result = run_full_battery()
+        print(render_battery_table(result), end="")
+        return EXIT_OK if result.verdict.value == "TEETH_PROVEN" else EXIT_INTERNAL_ERROR
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="verify-acceptance")
+    if checks is None:
+        selected = ALL_CHECK_IDS
+    else:
+        selected = tuple(tok.strip() for tok in checks.split(",") if tok.strip())
+        unknown = [tok for tok in selected if tok not in ALL_CHECK_IDS]
+        if unknown:
+            raise CliUserError(
+                f"unknown check id(s): {', '.join(unknown)} (choose from {', '.join(ALL_CHECK_IDS)})"
+            )
+        if not selected:
+            raise CliUserError("--checks resolved to an empty list")
+    budgets: dict[str, float] = {}
+    for token in latency_budget or []:
+        key, _, value = token.partition("=")
+        try:
+            budgets[key.strip()] = float(value)
+        except ValueError:
+            raise CliUserError(f"bad --latency-budget entry: {token!r} (expected KEY=MS)") from None
+    if top_n > 100:
+        raise CliUserError("--top-n is capped at 100")
+    if no_self_test and (self_test or self_test_only):
+        raise CliUserError("--no-self-test conflicts with --self-test/--self-test-only")
+    if full:
+        print(
+            "[brutex] --full lifts sampling AND month bounds: the unique/tf legs "
+            "become whole-lake full-history scans (minutes to hours on a deep lake).",
+            file=sys.stderr,
+        )
+    mode = "skipped" if no_self_test else ("full" if self_test else "smoke")
+    cfg = RunConfig(
+        lake_root=resolved,
+        checks=selected,
+        seed=seed,
+        sample_n=sample,
+        months=months,
+        full=full,
+        date=date_str,
+        top_n=top_n,
+        latency_rounds=latency_rounds,
+        latency_budget_overrides=budgets,
+        abstain_budget=abstain_budget,
+        max_runtime_s=max_runtime_s,
+        force_during_pull=force_during_pull,
+        self_test_mode=mode,
+        out_dir=out_dir,
+        argv=tuple(argv),
+    )
+    exit_code, report = run_acceptance(cfg)
+    if "error" in report:
+        print(f"[brutex] verify-acceptance SUSPECT: {report['error']}", file=sys.stderr)
+        return exit_code
+    if json_out:
+        print(json.dumps(report, indent=1, sort_keys=True))
+    else:
+        print(render_human(report), end="")
+    return exit_code
+
+
 def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 100%-tested barrier
     *,
     lake_root: Path | None,
@@ -9540,6 +9749,29 @@ def _dispatch(argv: list[str] | None) -> int:
             results_root=args.results_root,
             catalog_path=args.catalog_path,
             run_id=args.run_id,
+        )
+    if args.command == "verify-acceptance":
+        return cmd_verify_acceptance(
+            lake_root=args.lake_root,
+            checks=args.checks,
+            full=args.full,
+            sample=args.sample,
+            seed=args.seed,
+            months=args.months,
+            date_str=args.date,
+            top_n=args.top_n,
+            latency_budget=args.latency_budget,
+            latency_rounds=args.latency_rounds,
+            abstain_budget=args.abstain_budget,
+            max_runtime_s=args.max_runtime_s,
+            force_during_pull=args.force_during_pull,
+            self_test=args.self_test,
+            self_test_only=args.self_test_only,
+            no_self_test=args.no_self_test,
+            json_out=args.json,
+            out_dir=args.out,
+            repro=args.repro,
+            argv=argv if argv is not None else sys.argv[1:],
         )
     if args.command == "verify-lookahead":
         return cmd_verify_lookahead(
