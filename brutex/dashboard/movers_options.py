@@ -1319,6 +1319,14 @@ def compute_options_candidates(
                 symbol=symbol,
                 day=day,
                 cutoff_min=cutoff_min,
+                # OPTIONS pass bad_tick=False (DEC-DASHBOARD-READ-SCREEN-001): option
+                # premia legitimately move ≥4×/minute on leverage, so the
+                # index-circuit-breaker-calibrated 4× bad-tick screen is INVALID for
+                # premia (it would drop legit bars → a wrong Top-Value / stale LTP)
+                # and the engine never screens options. Insane (positivity/ordering)
+                # bars ARE still dropped (universal). /db options screens the same way,
+                # so /movers-options == /db-options.
+                bad_tick=False,
             )
             if read is None:  # no session bar on the selected day/time → skip, never faked.
                 skipped += 1

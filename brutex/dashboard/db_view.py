@@ -71,6 +71,7 @@ from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
 from brutex.dashboard.movers_cache import MoversSnapshotCache, revision_generation
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
+from brutex.data.bar_screen import screen_rows
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
@@ -3272,6 +3273,58 @@ def query_candles(
             validated=stats_ctx.stats is not None,
             page_source="manifest" if pruned is not None else "live_scan",
         )
+    # Split-brain screen (DEC-DASHBOARD-READ-SCREEN-001): route the page through
+    # the ONE COMMON engine-parity screen so a bad-tick spike / an insane bar the
+    # engine + /movers drop is never SERVED raw here — /db == /movers == engine.
+    # Runs AFTER the raw page rows are resolved (pruned OR legacy path — the
+    # screen is path-agnostic) and AFTER the observed-lower-bound clamp above,
+    # which deliberately reads the RAW page length (a tighter bound on the RAW
+    # stored count the total describes). Spot/futures candles keep the FULL
+    # screen (insane + ×4 bad-tick), seeded with the last KEPT in-session bar
+    # before the page's earliest row so the cross-row bad-tick screen is correct
+    # at the page's left edge (`_bad_tick_seed_bar`; the deep-cluster residual is
+    # documented there). CONTRACT-TYPE-AWARE on the F&O segment: this route ALSO
+    # serves CE/PE contract partitions (via the FNO cascade), and option PREMIA
+    # legitimately move ≥4×/minute on leverage — so a decoded CE/PE symbol
+    # screens INSANE-ONLY (`bad_tick_enabled=False`, no seed — the cross-row arm
+    # is off), matching /movers-options + the /db expired-options tab exactly
+    # (the same scope rule as `_read_future_session(bad_tick=)`); FUT and
+    # unparseable F&O symbols keep the full default-ON screen. Clean pages
+    # return the same object (byte-identical; the screen is an O(page-rows)
+    # Python pass — honest cost, not zero work). HONEST envelope: the seed read
+    # is ONE additional DuckDB query per non-option page over the partition
+    # glob — an O(files) Parquet-metadata scan (a constant-factor addition to
+    # the per-click query count; the LIMIT-k row read itself is tiny), eager
+    # even on clean data; and `total` above is the DATASET-wide
+    # DISTINCT-timestamp count (manifest- OR legacy-served), so on a CORRUPT
+    # partition it OVER-counts by the number of screened-out rows (the served
+    # page shows fewer rows than `total`/`limit` imply) — a bounded honesty gap
+    # on corrupt data only, never a fabricated bar.
+    is_option_contract = False
+    if is_fno:
+        parts = parse_fno_symbol(symbol)
+        is_option_contract = parts is not None and parts.option_type is not None
+        # NIT (disclosed): an UNPARSEABLE F&O symbol falls to the default-ON
+        # full screen — unreachable via the product (the FNO cascade offers
+        # only parse-decoded contracts) and conservative in direction (a
+        # mystery partition is screened like a future, never served a spike).
+    raw_rows = screen_rows(
+        raw_rows,
+        out_columns,
+        source=skip_source,
+        # Options: no seed (the cross-row bad-tick arm is off, a seed is unused
+        # work); spot/FUT/unparseable: the bounded seeded default. `None` (not
+        # True) on the default arm preserves the BRUTEX_BAD_TICK_SCREEN
+        # kill-switch read — the engine-parity contract.
+        seed_bar=(
+            None
+            if is_option_contract
+            else _bad_tick_seed_bar(
+                conn, base, raw_rows=raw_rows, out_columns=out_columns, skip_source=skip_source
+            )
+        ),
+        bad_tick_enabled=False if is_option_contract else None,
+    )
     # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix,
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
     # coercion (shared helper).
@@ -3715,6 +3768,77 @@ def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> 
     if ts_idx < 0:
         return set()
     return {_bar_ist_date(row[ts_idx]) for row in raw_rows if isinstance(row[ts_idx], datetime)}
+
+
+#: How many same-session predecessor bars the ``/db`` bad-tick seed reads + screens
+#: to resolve the page's left edge (DEC-DASHBOARD-READ-SCREEN-001). Bounds the ROW
+#: read to k (the glob's O(files) metadata scan is the honest per-click cost — see
+#: `_bad_tick_seed_bar`); a spike cluster deeper than this is the honest
+#: documented residual (the whole-day /movers reader is always correct).
+_BAD_TICK_SEED_WINDOW: Final[int] = 8
+
+
+def _bad_tick_seed_bar(
+    conn: Any,
+    base: Path,
+    *,
+    raw_rows: list[tuple[Any, ...]],
+    out_columns: list[str],
+    skip_source: str,
+) -> tuple[Any, float, float, float, float] | None:
+    """Last KEPT in-session bar before the page's earliest row, or ``None``.
+
+    The bounded prior-bar seed for the ``/db`` cross-row bad-tick screen
+    (DEC-DASHBOARD-READ-SCREEN-001), mirroring the predecessor read of
+    :func:`_intraday_last_close_with_predecessor`: reads the last
+    :data:`_BAD_TICK_SEED_WINDOW` bars STRICTLY BEFORE the page's earliest row AND
+    on the same UTC/session date (``CAST(timestamp AS DATE)`` — an NSE session
+    never crosses a UTC date), SCREENS that ascending window through the SAME
+    :func:`~brutex.data.bar_screen.screen_rows`, and returns the LAST KEPT bar as
+    the seed — so the page's leading row is judged against the last GOOD close, not
+    a spike sitting immediately before the page (the single-spike / short-cluster
+    left-edge case; screening only the raw immediate predecessor would wrongly
+    baseline the page's first good row against that spike). The window read is
+    ``ORDER BY DESC LIMIT k`` over the partition glob — HONEST cost: the k-row
+    read is tiny, but the glob itself is an O(files) Parquet-metadata scan (a
+    constant-factor addition per click, NOT O(1) in partition depth). Returns
+    ``None`` when the page lacks OHLC/``timestamp`` columns, is empty, has no
+    same-session predecessor (a page that starts at 09:15), or the whole window
+    screens out. HONEST residual: a spike cluster DEEPER than the window, or a
+    spike as the window's own first bar, is not resolved — the whole-day
+    ``/movers`` reader is always correct; this bounded seed only narrows the
+    ``/db`` page-local left edge.
+    """
+    if any(name not in out_columns for name in ("timestamp", "open", "high", "low", "close")):
+        return None
+    ts_idx = out_columns.index("timestamp")
+    page_ts = [row[ts_idx] for row in raw_rows if isinstance(row[ts_idx], datetime)]
+    if not page_ts:
+        return None
+    earliest = min(page_ts)
+    window = _execute_parquet_resilient(
+        conn,
+        base,
+        'SELECT "timestamp", "open", "high", "low", "close" '
+        "FROM read_parquet(?, union_by_name=true) "
+        'WHERE "timestamp" < ? AND CAST("timestamp" AS DATE) = CAST(? AS DATE) '
+        'ORDER BY "timestamp" DESC LIMIT ?',
+        [earliest, earliest, _BAD_TICK_SEED_WINDOW],
+        source=skip_source,
+    )
+    if not window:
+        return None
+    # Screen the ascending predecessor window; the last SURVIVOR is the seed.
+    ascending = list(reversed(window))
+    kept = screen_rows(
+        ascending,
+        ["timestamp", "open", "high", "low", "close"],
+        source=skip_source,
+    )
+    if not kept:
+        return None
+    ts, open_, high, low, close = kept[-1]
+    return (ts, open_, high, low, close)
 
 
 def _intraday_last_close_with_predecessor(
@@ -4781,6 +4905,19 @@ def query_option_candles(
             validated=stats_ctx.stats is not None,
             page_source="manifest" if pruned is not None else "live_scan",
         )
+    # Split-brain screen (DEC-DASHBOARD-READ-SCREEN-001), INSANE-ONLY for options:
+    # positivity/ordering-impossible option bars are dropped so /db-options never
+    # SERVES a corrupt bar, but the ×4 bad-tick screen is DISABLED
+    # (`bad_tick_enabled=False`) — option PREMIA legitimately move ≥4×/minute on
+    # leverage, so the index-circuit-breaker-calibrated threshold would drop legit
+    # bars; the engine never screens options either. This MATCHES /movers-options
+    # (which passes bad_tick=False through _read_future_session), so the two agree.
+    # No bad-tick seed is needed (the cross-row arm is off). Runs AFTER the raw
+    # page rows are resolved (pruned OR legacy — path-agnostic) and AFTER the
+    # observed-lower-bound clamp above (which deliberately reads the RAW page
+    # length); on a CORRUPT partition the served page shows fewer rows than the
+    # RAW total implies — a bounded honesty gap, never a fabricated bar.
+    raw_rows = screen_rows(raw_rows, out_columns, source=skip_source, bad_tick_enabled=False)
     # Options roll a 1-minute table, so the bar always renders full HH:MM:SS (no
     # date-only collapse); options carry no spot derived %-columns.
     rows = _render_candle_rows(raw_rows, out_columns, "1minute")

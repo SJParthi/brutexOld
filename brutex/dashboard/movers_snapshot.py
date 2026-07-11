@@ -61,6 +61,7 @@ from brutex.dashboard.movers_underlying_class import (
     normalize_underlying_class,
     spot_kind_from_segment,
 )
+from brutex.data.bar_screen import screen_frame
 from brutex.data.derive_lock import derive_in_progress
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -805,6 +806,13 @@ def _read_cut_1m_frame(
     day_df = df.filter(ist_date == day).sort("ts_utc")
     if cutoff_min is not None:
         day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
+    # Screen bad-tick + insane bars through the ONE COMMON engine-parity screen
+    # (DEC-DASHBOARD-READ-SCREEN-001): a scaled fat-finger spike the engine drops
+    # must not be SERVED here (it fabricated the Top-Value turnover + the %-move
+    # and poisoned the movers cache). Clean frames return the SAME object; the
+    # screen itself is an O(rows) Python pass per read (honest cost, not free).
+    # The frame is ascending-sorted + as-of-cut, so the causal screen is exact.
+    day_df = screen_frame(day_df, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
         return None
     return day_df
@@ -1010,6 +1018,15 @@ def _read_intraday_bars(
                 if cutoff_min is None
                 else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
             )
+            # Screen the STORED derived-TF partition too (DEC-DASHBOARD-READ-SCREEN-001):
+            # the prebuild's make_lake_read_1m applies price_sanity but NOT the
+            # bad-tick screen, so a scaled spike can derive into a stored 5m/etc
+            # bucket unscreened — screen the stored read so it agrees with the
+            # 1m-resample path (and /db). Clean partitions return the SAME
+            # object; the screen is an O(rows) Python pass per read.
+            res = screen_frame(
+                res, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/{interval}"
+            )
             return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
     return (
         _read_session_bars(
@@ -1079,7 +1096,17 @@ def _read_daily_bars(
     # The 1-day partition stores the lake instant in `timestamp`; the shared
     # `_row_to_bar` reads `ts_utc` — rename so the one converter serves both
     # the daily and the resampled-intraday readers (CLAUDE.md §11 COMMON).
-    return [_row_to_bar(row) for row in sel.rename({"timestamp": "ts_utc"}).iter_rows(named=True)]
+    # Screen the stored 1day bar(s) (DEC-DASHBOARD-READ-SCREEN-001): each daily
+    # bar is its own session (first-of-session exempt), so only the insane
+    # (positivity/ordering) arm can fire here — a corrupt derived 1day bar is
+    # dropped, never served raw. Clean partitions return the SAME object; the
+    # screen is an O(rows) Python pass per read (honest cost, not free).
+    screened = screen_frame(
+        sel.rename({"timestamp": "ts_utc"}),
+        ts_col="ts_utc",
+        source=f"{exchange}/{segment}/{symbol}/1day",
+    )
+    return [_row_to_bar(row) for row in screened.iter_rows(named=True)]
 
 
 #: Max calendar days to walk back searching for the prior trading day's last
@@ -1177,6 +1204,13 @@ def resolve_prev_close(
     DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — this resolver ADDS only the found
     session date. Pure lake read — provenance judgement (and any warning) stays
     at the candidate-loop level.
+
+    HONEST residual (DEC-DASHBOARD-READ-SCREEN-001): this baseline read is NOT
+    routed through the bad-tick/insane screen, so a prior-session last bar that is
+    itself a scaled spike would inflate ``prev_close`` and thus the %-move on the
+    BASELINE side (the live LTP/turnover side IS screened). Disclosed, not fixed
+    here — re-pulling / healing the poisoned prior session is the real remedy; the
+    screened live side already closes the fabricated Top-Value class.
     """
     import polars as pl
 
