@@ -3350,6 +3350,23 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         )
         return EXIT_USER_ERROR
 
+    # Rust front flag (Rust-uniformity Wave 1, roadmap PR-1): resolved EAGERLY
+    # so a junk BRUTEX_RUST_FRONT value refuses the start loudly BEFORE any
+    # heavy setup (the house env-law; default absent/off = byte-identical
+    # single-process behaviour, no brutexd process spawned). The mechanism
+    # lives in brutex/dashboard/rust_front.py (its own self-contained 100%
+    # line+branch gate); this function only threads the decision.
+    from brutex.dashboard.rust_front import (
+        RustFrontError,
+        resolve_rust_front,
+        run_with_rust_front,
+    )
+
+    try:
+        _rust_front_on = resolve_rust_front()
+    except RustFrontError as exc:
+        raise CliUserError(str(exc)) from exc
+
     # Persist logs to a rotating file (in addition to the console) so a
     # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
     # json_renderer=False keeps the console human-readable; the file sink is
@@ -3559,6 +3576,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # root handlers (console + rotating JSON file) instead of uvicorn's own
     # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
     # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
+    if _rust_front_on:
+        # Two-process topology (BRUTEX_RUST_FRONT=on): brutexd owns the
+        # operator port; uvicorn binds a private loopback port picked inside
+        # run_with_rust_front. A launch refusal (missing binary /
+        # non-loopback host) is a loud CliUserError exit 1, never a
+        # half-started topology.
+        try:
+            run_with_rust_front(app, host=host, port=port, uvicorn_run=uvicorn.run)
+        except RustFrontError as exc:
+            raise CliUserError(str(exc)) from exc
+        return EXIT_OK
     uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
 
