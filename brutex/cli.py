@@ -4591,6 +4591,7 @@ def cmd_fetch(
         reconcile_pairs_with_pipeline,
     )
     from brutex.adapters.groww.run_ingest import (
+        flush_capture_to_audit,
         run_groww_spot_ingest_with_retry,
         with_paced_client,
     )
@@ -5054,6 +5055,24 @@ def cmd_fetch(
         # path. The pull OWNS their lifetime + MUST drain them in the `finally` below BEFORE
         # `end_pull_ledger` (settle-after-durable), so every queued window is processed +
         # ledger-recorded first.
+        # Audit→lake replay capture (DEC-AUDIT-LAKE-REPLAY-ORACLE-001): env-gated
+        # (BRUTEX_AUDIT_REPLAY_CAPTURE), default OFF → `resolve_audit_capture`
+        # returns the sink object UN-wrapped (identity) and `capture` stays None,
+        # so the default live pull is byte- and event-identical. Resolved HERE —
+        # immediately BEFORE build_write_consumer — so pool-routed shard-worker
+        # appends route THROUGH the wrapper (the pool owns the base sink; wrapping
+        # any later would let pooled writes bypass capture). `--dry-run`/`--inspect`
+        # (`_no_persist`) never consult the resolver: they wire no ingest audit
+        # chain, so capture would have nothing to drain into.
+        from brutex.data.audit_capture import AuditCaptureSink, resolve_audit_capture
+
+        capture: AuditCaptureSink | None = None
+        if not _no_persist:
+            sink, capture = resolve_audit_capture(
+                sink,
+                lake_root=sink_lake_root,
+                lmdb_dir=sink_lake_root / "audit" / "dedup-live.lmdb",
+            )
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
         fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
         # Vendor-down error-storm breaker + dead-credential StillStale escalation
@@ -5113,6 +5132,10 @@ def cmd_fetch(
                     observed_holidays=observed_holidays,
                     all_filtered_breaker=af_breaker,
                     storm_breaker=storm_breaker,
+                    # Replay-capture drains ride the SAME `audit=ingest_audit`
+                    # chain at the controller seams (None when the env gate is
+                    # OFF — the byte-identical default).
+                    capture=capture,
                     # Learned-floor clamp + in-pull depth learner
                     # (DEC-CLI-DEPTH-FLOORS-001): the SAME `floor_windows` the
                     # plan above tiled (planned keys == fetched keys) + the
@@ -5230,6 +5253,38 @@ def cmd_fetch(
                 # error is swallowed so the ledger persist still runs.
                 drain_fetch_pipeline(fetch_pipeline)
                 drain_write_consumer(write_consumer)
+                # FOURTH replay-capture drain seam (DEC-AUDIT-LAKE-REPLAY-ORACLE-001
+                # round-1 review fix, BLOCKER): under the default-ON async fetch
+                # pipeline a window's durable sink.append — where the capture sink
+                # buffers its LAKE_APPEND_WRITTEN / L3 'add' records — runs on a
+                # background consumer thread, so records buffered AFTER run_ingest's
+                # own final drain would be silently STRANDED (a structurally
+                # incomplete forensic log: false replay divergence + a permanent L3
+                # extra_in_live, since the settled windows are never re-pulled).
+                # Both drains above have completed every queued tail, so this flush —
+                # on the controller thread, while `ingest_audit` is still open —
+                # lands the last records on the chain. Replay is order-insensitive
+                # to the post-RUN_COMPLETE placement (events apply in
+                # (capture_run, capture_seq) order). A no-op when capture is None
+                # (the default OFF mode / --dry-run / --inspect). Best-effort at
+                # THIS seam (the drain_fetch_pipeline swallow pattern): a chain-write
+                # failure here must never mask the pull's real outcome nor skip the
+                # end_pull_ledger persist below — replay then honestly reports the
+                # gap (the torn-capture class), never a silent success. DELIBERATELY
+                # broader than drain_fetch_pipeline's `except LakeWriteHalt: raise`
+                # carve-out: the capture chain is a FORENSIC sidecar, not lake data
+                # — a flush-raised halt propagating out of this `finally` would
+                # mask the pull's real outcome AND skip the ledger persist, while a
+                # genuine disk-full is not lost: `end_pull_ledger`'s own
+                # `atomic_write_via` (moments below, on the DURABLE ledger path)
+                # still maps ENOSPC → `LakeWriteHalt` (round-3 review; regression:
+                # tests/integration/test_cli_fetch_capture_wiring.py).
+                try:
+                    flush_capture_to_audit(capture, ingest_audit)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    import structlog
+
+                    structlog.get_logger("brutex.cli").exception("pull.capture_flush_failed")
                 # DEC-LAKE-HEAL-001 L2 (CLI seam — DEC-CLI-LAKE-HEAL-L2-001, the #1175
                 # named follow-up): heal the just-pulled slice at the SAME post-drain
                 # seam the dashboard uses (the fetched 1-minute is durably in the lake
