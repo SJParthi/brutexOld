@@ -20,6 +20,19 @@ recur for THIS kernel OR any future one:
 It is DYNAMIC (CLAUDE.md §11): the native kernels are DISCOVERED from
 ``rust/*/pyproject.toml`` (maturin crates), not hard-coded — add a third
 PyO3 crate and import it, and this guard covers it automatically.
+
+Two kernel classes (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726):
+
+- REQUIRED — module-top imported by ``brutex/`` ⇒ a build PREREQUISITE, so
+  the turnkey build path (``make run-raw`` + ``bootstrap.sh``) must build it
+  (the original #479 invariant, unchanged).
+- OPTIONAL — registered in ``OPTIONAL_KERNELS`` with a documented reason:
+  NEVER module-top imported (consumed only through an import-GUARDED facade
+  that degrades gracefully when the crate is absent), deliberately NOT in the
+  turnkey build path, and built by its OWN dedicated CI lane. The inverse
+  invariants are pinned below so the classification cannot silently rot: a
+  future module-top import of an optional kernel FAILS here and forces its
+  promotion into the required class (where the build-path guards then fire).
 """
 
 from __future__ import annotations
@@ -108,23 +121,118 @@ def _make_target_body(makefile: str, target: str) -> str:
 
 KERNELS = _discover_maturin_kernels()
 
+# OPTIONAL kernels: {import_name: (guarded_facade_relpath, ci_lane_relpath)}.
+# Registration REQUIRES a documented reason — an unregistered new crate that
+# nothing imports still fails test_kernel_is_imported_by_brutex loudly.
+OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
+    # DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726 PR-1 / ADR-0019):
+    # brutex_lake is the default-OFF lake render crate. It is consumed ONLY
+    # through the import-guarded facade brutex/data/lake_rust_render.py
+    # (`importlib.import_module("brutex_lake")` inside the guard — an absent
+    # or broken install latches the flag OFF with one loud WARN and the
+    # Python render serves, byte-identical). It is deliberately NOT a build
+    # prerequisite: in NO cargo workspace, built ONLY by its own CI lane
+    # (.github/workflows/lake-rust-parity.yml). A module-top
+    # `import brutex_lake` anywhere in brutex/ would make a clean clone
+    # crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_lake": (
+        "brutex/data/lake_rust_render.py",
+        ".github/workflows/lake-rust-parity.yml",
+    ),
+}
 
-def test_at_least_the_two_known_kernels_are_discovered() -> None:
-    """Sanity: the two known PyO3 kernels are present (guards the discovery)."""
-    assert "fno_math" in KERNELS, KERNELS
-    assert "trading_core" in KERNELS, KERNELS
+REQUIRED_KERNELS = {
+    name: crate_dir for name, crate_dir in KERNELS.items() if name not in OPTIONAL_KERNELS
+}
 
 
-@pytest.mark.parametrize("import_name", sorted(KERNELS))
+def test_known_kernels_are_discovered() -> None:
+    """Sanity: the known PyO3 kernels are present (guards the discovery)."""
+    assert "fno_math" in REQUIRED_KERNELS, KERNELS
+    assert "trading_core" in REQUIRED_KERNELS, KERNELS
+    assert "brutex_lake" in KERNELS, KERNELS
+
+
+@pytest.mark.parametrize("import_name", sorted(REQUIRED_KERNELS))
 def test_kernel_is_imported_by_brutex(import_name: str) -> None:
-    """Every discovered kernel is a real runtime dependency of ``brutex/``."""
+    """Every REQUIRED kernel is a real runtime dependency of ``brutex/``."""
     assert _module_top_imports(import_name), (
         f"{import_name} is a maturin crate but no brutex/ module imports it "
-        "at module top — discovery is stale, update this guard."
+        "at module top — discovery is stale: update this guard, or (only if "
+        "the crate is deliberately import-guarded + built by its own CI lane) "
+        "register it in OPTIONAL_KERNELS with a documented reason."
     )
 
 
-@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(KERNELS.items()))
+@pytest.mark.parametrize("import_name", sorted(OPTIONAL_KERNELS))
+def test_optional_kernel_is_discovered(import_name: str) -> None:
+    """A stale OPTIONAL_KERNELS registration (crate deleted/renamed) fails."""
+    assert import_name in KERNELS, (
+        f"OPTIONAL_KERNELS registers {import_name} but no rust/*/pyproject.toml "
+        "maturin crate exports that module — remove the stale registration."
+    )
+
+
+@pytest.mark.parametrize("import_name", sorted(OPTIONAL_KERNELS))
+def test_optional_kernel_never_module_top_imported(import_name: str) -> None:
+    """The inverse invariant: an optional kernel must stay import-guarded.
+
+    A module-top ``import <name>`` would make the crate a hard runtime
+    dependency that the turnkey build path never builds (exactly the #479
+    bug). This pin forces the author of such an import to PROMOTE the kernel
+    out of OPTIONAL_KERNELS — at which point the run-raw/bootstrap build
+    guards below start firing for it.
+    """
+    assert not _module_top_imports(import_name), (
+        f"{import_name} is registered OPTIONAL (import-guarded, not in the "
+        "turnkey build path) but a brutex/ module now imports it at module "
+        "top — a clean clone would crash. Either remove the module-top import "
+        "(use the guarded facade) or promote the kernel out of "
+        "OPTIONAL_KERNELS and wire it into make run-raw + bootstrap.sh."
+    )
+
+
+@pytest.mark.parametrize(
+    ("import_name", "facade_relpath"),
+    sorted((name, spec[0]) for name, spec in OPTIONAL_KERNELS.items()),
+)
+def test_optional_kernel_consumed_via_guarded_facade(import_name: str, facade_relpath: str) -> None:
+    """The registered facade really guard-imports the optional kernel."""
+    facade = REPO_ROOT / facade_relpath
+    assert facade.is_file(), f"guarded facade {facade_relpath} does not exist"
+    source = facade.read_text(encoding="utf-8")
+    assert f'importlib.import_module("{import_name}")' in source, (
+        f"{facade_relpath} no longer guard-imports {import_name} via "
+        f'importlib.import_module("{import_name}") — the optional kernel is '
+        "unconsumed (dead crate) or the guard moved; update OPTIONAL_KERNELS."
+    )
+
+
+@pytest.mark.parametrize(
+    ("import_name", "lane_relpath"),
+    sorted((name, spec[1]) for name, spec in OPTIONAL_KERNELS.items()),
+)
+def test_optional_kernel_built_by_its_own_ci_lane(import_name: str, lane_relpath: str) -> None:
+    """An optional kernel is still BUILT somewhere: its dedicated CI lane."""
+    crate_dir = KERNELS.get(import_name)
+    assert crate_dir is not None, (
+        f"OPTIONAL_KERNELS registers {import_name} but no maturin crate "
+        "exports that module — remove the stale registration."
+    )
+    lane = REPO_ROOT / lane_relpath
+    assert lane.is_file(), (
+        f"{import_name} is optional (excluded from the turnkey build path) "
+        f"but its registered CI lane {lane_relpath} does not exist — the "
+        "crate would never be built anywhere."
+    )
+    lane_text = lane.read_text(encoding="utf-8")
+    assert f"rust/{crate_dir}" in lane_text, (
+        f"CI lane {lane_relpath} never references rust/{crate_dir} — the "
+        "optional kernel's own lane no longer builds it."
+    )
+
+
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(REQUIRED_KERNELS.items()))
 def test_make_run_raw_builds_kernel(import_name: str, crate_dir: str) -> None:
     """``make run-raw`` must build each kernel (cd rust/<crate> + maturin develop).
 
@@ -145,7 +253,7 @@ def test_make_run_raw_builds_kernel(import_name: str, crate_dir: str) -> None:
     )
 
 
-@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(KERNELS.items()))
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(REQUIRED_KERNELS.items()))
 def test_bootstrap_builds_kernel(import_name: str, crate_dir: str) -> None:
     """``bootstrap.sh`` must build each kernel (cd rust/<crate> + maturin)."""
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
