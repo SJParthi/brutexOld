@@ -13,7 +13,11 @@ Feed: a 6-trading-day, 2-roll futures stream (three 2-day contracts with a
 basis bump per roll — a superset of the design's named 3-day/2-roll shape so
 WARM anchors, EMA(20) warm-up completion and the D11 hard reset are all
 inside the frozen corpus), 26 volume-bearing bars per day driving the VWAP +
-BOS/CHoCH state machines through real signal.
+BOS/CHoCH state machines through real signal, with DIRECTION-VARIED opens
+(prev-close continuation clamped into range; each day's first bar a doji) so
+the Group-6 prior-flag deque is genuinely exercised — refuter RF-B F1
+regenerated the fixture from this fixed derivation (the original collapsed
+every bar to a doji, leaving the rolling direction window untested).
 
 Run:  .venv/bin/python tests/golden/generate_stage1a_batch_golden.py
 """
@@ -87,9 +91,16 @@ def _bars() -> list[CandleBar]:
     out: list[CandleBar] = []
     for d_idx, d in enumerate(_DAYS):
         basis = 40 * (d_idx // 2)  # +40 per contract (rolls after days 2 and 4)
+        # Refuter RF-B F1: the open CONTINUES from the prior close (clamped
+        # into the bar's own range) so the corpus carries REAL directions —
+        # the original `min(h, max(lo, c))` collapsed to `open == close` on
+        # every row (`lo <= c <= h`), leaving the prior-flag/direction deque
+        # untested by the fixture. `prev_close` resets per day, so each day's
+        # FIRST bar is a deliberate DOJI anchor (all three classes present).
+        prev_close: int | None = None
         for m, (h, lo, c) in enumerate(_HLC_SCRIPT):
             ts = datetime(d.year, d.month, d.day, 9, 15, tzinfo=_IST) + timedelta(minutes=m)
-            open_ = min(h, max(lo, c)) + basis
+            open_ = (c if prev_close is None else min(h, max(lo, prev_close))) + basis
             out.append(
                 CandleBar(
                     timestamp=ts.astimezone(UTC),
@@ -101,6 +112,14 @@ def _bars() -> list[CandleBar]:
                     open_interest=None,
                 )
             )
+            prev_close = c
+    # The F1 corpus-honesty gate: bull, bear AND doji bars must all be present
+    # or the direction dimension of the frozen fixture is degenerate again.
+    bull = sum(1 for b in out if b.close > b.open)
+    bear = sum(1 for b in out if b.close < b.open)
+    doji = sum(1 for b in out if b.close == b.open)
+    if not (bull and bear and doji):
+        raise AssertionError(f"degenerate direction corpus: bull={bull} bear={bear} doji={doji}")
     return out
 
 

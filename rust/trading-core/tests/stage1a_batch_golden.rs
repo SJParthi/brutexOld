@@ -147,6 +147,29 @@ fn golden_fixture_exercises_the_reset_and_warm_anchor_arms() {
     assert_eq!(fixture.day_tables.day_has_pivot.len(), 6);
     assert_eq!(fixture.day_tables.day_pivot_levels.len(), PIVOT_ROW_LEN * 6);
     assert_eq!(fixture.day_tables.day_fib_levels.len(), FIB_ROW_LEN * 6);
+    // Refuter RF-B F1: the DIRECTION dimension must be non-degenerate — the
+    // original corpus was 156/156 dojis (open == close on every bar), so the
+    // Group-6 prior-flag deque was untested by the replay. Bull, bear AND
+    // doji bars must all be present in the regenerated corpus.
+    let bull = fixture
+        .columns
+        .open_paisa
+        .iter()
+        .zip(&fixture.columns.close_paisa)
+        .filter(|(o, c)| c > o)
+        .count();
+    let bear = fixture
+        .columns
+        .open_paisa
+        .iter()
+        .zip(&fixture.columns.close_paisa)
+        .filter(|(o, c)| c < o)
+        .count();
+    let doji = fixture.columns.open_paisa.len() - bull - bear;
+    assert!(
+        bull > 0 && bear > 0 && doji > 0,
+        "degenerate direction corpus: bull={bull} bear={bear} doji={doji}"
+    );
 }
 
 #[test]
