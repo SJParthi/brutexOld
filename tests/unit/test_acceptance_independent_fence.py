@@ -24,7 +24,7 @@ UPPER = re.compile(r"^[A-Z_0-9]+$")
 
 
 def _stdlib(module: str) -> bool:
-    return module.split(".")[0] in sys.stdlib_module_names
+    return module.split(".", maxsplit=1)[0] in sys.stdlib_module_names
 
 
 def _imports(tree: ast.Module) -> list[tuple[str, list[str]]]:
@@ -78,8 +78,6 @@ class TestIndependentFence:
     def test_fence_test_is_load_bearing(self) -> None:
         # Self-check: a synthetic offending import IS flagged by the walker.
         tree = ast.parse("from brutex.dashboard.movers_snapshot import compute_snapshot\n")
-        offenders = [
-            module for module, _names in _imports(tree) if module.startswith("brutex")
-        ]
+        offenders = [module for module, _names in _imports(tree) if module.startswith("brutex")]
         assert offenders == ["brutex.dashboard.movers_snapshot"]
         assert offenders[0] not in ALLOWED_BRUTEX_MODULES

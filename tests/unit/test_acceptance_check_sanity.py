@@ -10,10 +10,10 @@ from decimal import Decimal
 from pathlib import Path
 
 import polars as pl
-
 from brutex.acceptance.checks import sanity
 from brutex.acceptance.model import AbstainReason, Verdict
 from brutex.acceptance.selftest import _month_file, _twin_bars
+
 from tests.fakes.acceptance_twin import DAY1, DAY2, make_ctx, make_twin
 
 

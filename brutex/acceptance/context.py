@@ -171,8 +171,8 @@ class AcceptanceContext:
             result = compute()
             after = fingerprint_paths(list(paths_fn()))
             moved_paths = sorted(
-                set(k for k in before if before[k] != after.get(k, "absent"))
-                | set(k for k in after if k not in before)
+                {k for k in before if before[k] != after.get(k, "absent")}
+                | {k for k in after if k not in before}
             )
             if not moved_paths:
                 return result, {"moved": attempt > 0, "retried": attempt > 0}, True

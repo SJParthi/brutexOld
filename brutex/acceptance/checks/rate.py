@@ -13,6 +13,7 @@ never imported — the package carries the structural zero-vendor-call pin.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from datetime import UTC, date, datetime
@@ -41,6 +42,9 @@ ROW_CAP = 20
 #: The documented production ceilings (CLAUDE.md §2 Rule 6).
 CEILING_RPS = 8.0
 CEILING_PER_MIN = 500
+
+#: The rolling-minute window the pair-bound evidence folds over, seconds.
+ROLLING_MINUTE_S = 60.0
 
 
 def _repro(ctx: AcceptanceContext) -> str:
@@ -86,10 +90,8 @@ def _market_hours_sub(ctx: AcceptanceContext) -> Any:
     ledger = ctx.ledger()
     if ledger is not None:
         stamps.extend(r.last_attempt_at for r in ledger.records() if r.last_attempt_at)
-    try:
+    with contextlib.suppress(OSError):  # a wedged journal read is not a verdict
         stamps.extend(str(e.wall_utc) for e in read_journal(ctx.lake_root) if not e.dry_run)
-    except OSError:
-        pass
     examined = 0
     excluded_pre_guard = 0
     offenders: list[str] = []
@@ -188,9 +190,9 @@ def _log_window_sub(ctx: AcceptanceContext) -> Any:
             histogram[name] = histogram.get(name, 0) + 1
             current = event.get("current_rps")
             minute = event.get("recent_minute")
-            if isinstance(current, (int, float)) and current > CEILING_RPS:
-                over.append(line[:200])
-            elif isinstance(minute, (int, float)) and minute > CEILING_PER_MIN:
+            if (isinstance(current, (int, float)) and current > CEILING_RPS) or (
+                isinstance(minute, (int, float)) and minute > CEILING_PER_MIN
+            ):
                 over.append(line[:200])
     if rate_lines == 0:
         return make_subcheck(
@@ -236,7 +238,7 @@ def _pair_bound_sub(ctx: AcceptanceContext) -> Any:
         try:
             verify_audit_file(path)
             chains[name] = "chain_ok"
-        except Exception as exc:  # noqa: BLE001 — verify errors are evidence here
+        except Exception as exc:
             chains[name] = f"chain_error: {type(exc).__name__}"
             continue
         stamps: list[float] = []
@@ -251,7 +253,7 @@ def _pair_bound_sub(ctx: AcceptanceContext) -> Any:
         pairs_total += len(stamps)
         lo = 0
         for hi, ts in enumerate(stamps):
-            while ts - stamps[lo] > 60.0:
+            while ts - stamps[lo] > ROLLING_MINUTE_S:
                 lo += 1
             max_per_minute = max(max_per_minute, hi - lo + 1)
     return make_subcheck(

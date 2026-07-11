@@ -122,9 +122,7 @@ def _write_grouped(
     for bar in bars:
         by_month.setdefault((bar.timestamp.year, bar.timestamp.month), []).append(bar)
     for _cell, group in sorted(by_month.items()):
-        writer.write(
-            exchange="NSE", segment=segment, symbol=symbol, interval=interval, bars=group
-        )
+        writer.write(exchange="NSE", segment=segment, symbol=symbol, interval=interval, bars=group)
 
 
 def build_twin_lake(
@@ -238,7 +236,9 @@ def run_smoke(*, now_utc: datetime | None = None) -> SelfTestResult:
         build_twin_lake(root, days=days)
         ctx_clean = _twin_context(root, now_utc=now)
         false_fails = sum(
-            1 for check in (unique_check.run(ctx_clean), tf_check.run(ctx_clean)) if _check_fails(check)
+            1
+            for check in (unique_check.run(ctx_clean), tf_check.run(ctx_clean))
+            if _check_fails(check)
         )
         # S1 — duplicate row: the composed uniqueness census must FAIL it.
         poison_duplicate_row(root, symbol="NIFTY", day=days[1])
@@ -251,14 +251,17 @@ def run_smoke(*, now_utc: datetime | None = None) -> SelfTestResult:
         # S3 — one perturbed movers cell via the comparator injection seam.
         bars = read_1m_bars(root / "bars" / "NSE" / "INDEX" / "NIFTY")
         ind_row = independent_spot_row("NIFTY", bars, day=days[1], cutoff_minute=None)
-        assert ind_row is not None  # the twin always stores day-2 bars
+        if ind_row is None:  # pragma: no cover — the twin always stores day-2 bars
+            raise RuntimeError("selftest twin lost its day-2 bars")
+        from brutex.acceptance.independent import format_inr_2dp
+
         page_row = {
             "symbol": "NIFTY",
             "ltp": ind_row.ltp_display,
-            "volume": ind_row.volume + 1,  # the planted perturbation
+            "volume": ind_row.volume + 1,  # the ONE planted perturbation
             "value_cr": ind_row.value_cr_display,
             "pct_change": None if ind_row.pct is None else f"{float(ind_row.pct):.10f}",
-            "change": None if ind_row.chng is None else None,
+            "change": None if ind_row.chng is None else format_inr_2dp(ind_row.chng),
         }
         s3 = bool(movers_check.compare_spot_cells(page_row, ind_row))
         outcomes.append(
@@ -360,7 +363,7 @@ _LEDGER_FIELDS: Final[tuple[str, ...]] = (
 def run_full_battery(
     *,
     now_utc: datetime | None = None,
-) -> SelfTestResult:  # noqa: PLR0915 — one poison per stanza, deliberately linear
+) -> SelfTestResult:
     """The FULL battery (~14 poisons) — CI mandatory, ``--self-test`` on demand."""
     import tempfile
 
@@ -395,7 +398,7 @@ def run_full_battery(
             root = _fresh_copy(clean, base, name)
             try:
                 detected = plant_and_probe(root)
-            except Exception as exc:  # noqa: BLE001 — a crashed detector is a MISSED tooth
+            except Exception as exc:
                 detected = False
                 detail = f"{detail} (detector crashed: {type(exc).__name__}: {exc})"
             outcomes.append(PoisonOutcome(name, detected, detail))
@@ -429,7 +432,8 @@ def run_full_battery(
         def _p3(root: Path) -> bool:
             bars = read_1m_bars(root / "bars" / "NSE" / "INDEX" / "NIFTY")
             row = independent_spot_row("NIFTY", bars, day=days[1], cutoff_minute=None)
-            assert row is not None
+            if row is None:  # pragma: no cover — the twin always stores day-2 bars
+                raise RuntimeError("battery twin lost its day-2 bars")
             page = {
                 "symbol": "NIFTY",
                 "ltp": row.ltp_display,
@@ -551,7 +555,9 @@ def run_full_battery(
             return _sanity_fails(root)
 
         scenario(
-            "negative_low", "sanity must FAIL a negative low", lambda r: _price_poison(r, "low", -5.0)
+            "negative_low",
+            "sanity must FAIL a negative low",
+            lambda r: _price_poison(r, "low", -5.0),
         )
         scenario(
             "high_lt_low",
@@ -586,7 +592,8 @@ def run_full_battery(
         def _p15(root: Path) -> bool:
             bars = read_1m_bars(root / "bars" / "NSE" / "INDEX" / "NIFTY")
             row = independent_spot_row("NIFTY", bars, day=days[1], cutoff_minute=None)
-            assert row is not None
+            if row is None:  # pragma: no cover — the twin always stores day-2 bars
+                raise RuntimeError("battery twin lost its day-2 bars")
             from dataclasses import replace
 
             holed = replace(row, prev_close_date=days[0] - timedelta(days=10))

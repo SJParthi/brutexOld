@@ -9,10 +9,10 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-
 from brutex.acceptance.checks import pull
 from brutex.acceptance.model import AbstainReason, Verdict
 from brutex.acceptance.selftest import _LEDGER_FIELDS, _month_file
+
 from tests.fakes.acceptance_twin import DAY1, DAY2, make_ctx, make_twin
 
 
@@ -149,9 +149,8 @@ class TestPullCheck:
         assert "whole series dir missing" in presence.evidence["missing_keys"][0]
 
     def test_fno_series_replans_via_contract_planner(self, tmp_path: Path) -> None:
-        from brutex.data.parquet_writer import ParquetWriter
-
         from brutex.acceptance.selftest import _twin_bars
+        from brutex.data.parquet_writer import ParquetWriter
 
         lake = make_twin(tmp_path)
         contract = "NSE-NIFTY-28Jul26-FUT"
@@ -202,6 +201,7 @@ class TestPullCheck:
     def test_pinned_now_determinism(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)
         _save(lake, [_row()])
+
         def _strip(check) -> list[dict]:
             subs = check.to_dict()["sub_checks"]
             for sub in subs:

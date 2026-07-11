@@ -24,6 +24,9 @@ from brutex.acceptance.model import (
 
 CHECK_ID = "latency"
 
+#: HTTP success status the probes require before timing warm rounds.
+HTTP_OK = 200
+
 #: key → (route path, params, warm budget ms, envelope citation).
 PROBES: Final[tuple[tuple[str, str, dict[str, Any], float, str], ...]] = (
     (
@@ -78,7 +81,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         t0 = timer()
         response = client.get(path, params=params)
         cold_ms = (timer() - t0) * 1000.0
-        if response.status_code != 200:
+        if response.status_code != HTTP_OK:
             subs.append(
                 make_subcheck(
                     f"{CHECK_ID}.{key}",
@@ -97,8 +100,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
             warm.append((timer() - t0) * 1000.0)
         best = min(warm)
         limits = [
-            f"on-box absolute budget ({envelope}) — not the CI 1.1x tier, "
-            "not an asymptotic proof"
+            f"on-box absolute budget ({envelope}) — not the CI 1.1x tier, not an asymptotic proof"
         ]
         if best >= cold_ms:
             limits.append("cache_not_faster: warm best did not beat the cold call")

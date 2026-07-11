@@ -7,12 +7,12 @@ battery itself must flip to TEETH_FAILED.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date
 
 import pytest
-
 from brutex.acceptance import selftest
 from brutex.acceptance.model import TeethVerdict
+
 from tests.fakes.acceptance_twin import NOW
 
 
@@ -23,13 +23,13 @@ class TestTwinSessions:
     def test_coverage_exhausted_falls_back_to_pinned_pair(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.calendars.nse as nse
+        from brutex.calendars import nse
 
         monkeypatch.setattr(nse, "previous_trading_session", lambda d, **k: None)
         assert selftest.twin_sessions(NOW) == (date(2026, 7, 8), date(2026, 7, 9))
 
     def test_single_session_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import brutex.calendars.nse as nse
+        from brutex.calendars import nse
 
         calls = {"n": 0}
 
@@ -75,9 +75,7 @@ class TestSmoke:
         )
 
         def _always_pass(ctx):
-            sub = make_subcheck(
-                "unique.census", Verdict.PASS, units_checked=1, evidence={"k": 1}
-            )
+            sub = make_subcheck("unique.census", Verdict.PASS, units_checked=1, evidence={"k": 1})
             return make_check(
                 "unique",
                 [sub],

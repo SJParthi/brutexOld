@@ -11,6 +11,7 @@ from pathlib import Path
 from brutex.acceptance.checks import unique
 from brutex.acceptance.model import AbstainReason, Verdict
 from brutex.acceptance.selftest import _month_file, poison_duplicate_row
+
 from tests.fakes.acceptance_twin import DAY2, make_ctx, make_twin
 
 

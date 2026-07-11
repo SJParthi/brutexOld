@@ -11,6 +11,7 @@ from pathlib import Path
 
 from brutex.acceptance.checks import latency
 from brutex.acceptance.model import AbstainReason, Verdict
+
 from tests.fakes.acceptance_twin import make_ctx, make_twin
 
 

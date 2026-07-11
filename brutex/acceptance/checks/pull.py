@@ -139,7 +139,7 @@ def _series_dir(lake_root: Path, market: str, security_id: str) -> Path | None:
     return _spot_symbol_dir(lake_root, security_id)
 
 
-def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear evidence pipeline
+def run(ctx: AcceptanceContext) -> CheckResult:
     """Run the four pull sub-checks over the ONE shared ledger load."""
     from brutex.calendars.nse import trading_days_between
     from brutex.data.spot_daily_resample import ist_span_partition_files
@@ -183,9 +183,9 @@ def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear 
     new_keys = sorted(set(after) - before_keys)
     max_end = max((date.fromisoformat(r.window_end) for r in records), default=None)
     newly_fetchable = [k for k in new_keys if date.fromisoformat(k[4]) <= (max_end or date.min)]
-    open_by_design = sum(
-        1 for r in records if r.status not in SETTLED_STATUSES
-    ) + (len(new_keys) - len(newly_fetchable))
+    open_by_design = sum(1 for r in records if r.status not in SETTLED_STATUSES) + (
+        len(new_keys) - len(newly_fetchable)
+    )
     # Anti-vacuous tooth: a trading session newer than the max settled end MUST
     # be plannable — a planner lobotomized to return [] FAILs here.
     tail_check = "not_applicable"
@@ -199,9 +199,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear 
             tail_copy = WindowLedger.from_rows(ledger.to_rows())
             tail_planned_before = {_row_key(r) for r in tail_copy.records()}
             post_close_ist = datetime.combine(ctx.run_date(), _POST_CLOSE_IST)
-            for (market, security_id, interval), (start, _end) in sorted(
-                settled_by_series.items()
-            ):
+            for (market, security_id, interval), (start, _end) in sorted(settled_by_series.items()):
                 _replan_series(
                     tail_copy,
                     market=market,
@@ -327,5 +325,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear 
         [replan_sub, net_new_sub, presence_sub, progress_sub],
         coverage=coverage,
         repro=_repro(ctx),
-        limits=[f"partition presence sampled {PRESENCE_SAMPLE_N} of {len(success_rows)} SUCCESS rows"],
+        limits=[
+            f"partition presence sampled {PRESENCE_SAMPLE_N} of {len(success_rows)} SUCCESS rows"
+        ],
     )

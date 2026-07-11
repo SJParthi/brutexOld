@@ -9,9 +9,9 @@ import json
 from pathlib import Path
 
 import pytest
-
 from brutex.acceptance.checks import rate
 from brutex.acceptance.model import AbstainReason, Verdict
+
 from tests.fakes.acceptance_twin import DAY2, make_ctx, make_twin
 
 
@@ -164,9 +164,7 @@ class TestBridge:
 
 
 class TestLogWindow:
-    def test_no_rate_lines_abstains(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_rate_lines_abstains(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         log = tmp_path / "logs" / "brutex.log"
         log.parent.mkdir(parents=True)
         log.write_text('{"event": "other.event"}\nnot-json\n', encoding="utf-8")

@@ -14,10 +14,9 @@ from fractions import Fraction
 from pathlib import Path
 
 import pytest
+from brutex.acceptance import independent as ind
 from hypothesis import given
 from hypothesis import strategies as st
-
-from brutex.acceptance import independent as ind
 
 IST = timedelta(hours=5, minutes=30)
 

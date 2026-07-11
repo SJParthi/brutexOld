@@ -9,12 +9,12 @@ import json
 from pathlib import Path
 
 import pytest
-
 from brutex.acceptance import report as report_mod
 from brutex.acceptance import selftest
 from brutex.acceptance.checks import ALL_CHECK_IDS, CHECK_REGISTRY
 from brutex.acceptance.model import TeethVerdict
 from brutex.acceptance.run import RunConfig, repro_command, run_acceptance
+
 from tests.fakes.acceptance_twin import NOW, make_twin
 
 PROVEN = selftest.SelfTestResult(
@@ -89,9 +89,7 @@ class TestCleanRun:
 
     def test_real_selftest_smoke_binds_by_default(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)
-        code, report = run_acceptance(
-            _cfg(lake, checks=("unique",)), now_utc=lambda: NOW
-        )
+        code, report = run_acceptance(_cfg(lake, checks=("unique",)), now_utc=lambda: NOW)
         assert report["self_test"]["verdict"] == "TEETH_PROVEN"
         assert code == 0
 
@@ -159,6 +157,7 @@ class TestFencing:
 class TestExitMatrix:
     def test_fail_finding_exit_3(self, tmp_path: Path) -> None:
         from brutex.acceptance.selftest import poison_duplicate_row
+
         from tests.fakes.acceptance_twin import DAY2
 
         lake = make_twin(tmp_path)
@@ -171,7 +170,7 @@ class TestExitMatrix:
         lake = make_twin(tmp_path)
         # pull (no ledger) + movers/latency-free selection keeps this cheap:
         # rate contributes 3 non-structural abstains on a bare twin.
-        code, report = _run(_cfg(lake, checks=("pull", "rate"), abstain_budget=0))
+        code, _report = _run(_cfg(lake, checks=("pull", "rate"), abstain_budget=0))
         assert code == 4
 
 
@@ -237,10 +236,7 @@ class TestChainAcrossRuns:
         assert second["deltas"]["verdict_transitions"] == []
         # tf.oi abstains both runs → streak 2 on run 2.
         oi = next(
-            sub
-            for check in second["checks"]
-            for sub in check["sub_checks"]
-            if sub["id"] == "tf.oi"
+            sub for check in second["checks"] for sub in check["sub_checks"] if sub["id"] == "tf.oi"
         )
         assert oi["abstain_streak"] == 2
 
@@ -301,7 +297,5 @@ class TestPerfTimerInjection:
     def test_perf_timer_threaded_to_context(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)
         ticks = iter(float(i) for i in range(10_000))
-        code, _report = _run(
-            _cfg(lake, checks=("unique",)), perf_timer=lambda: next(ticks)
-        )
+        code, _report = _run(_cfg(lake, checks=("unique",)), perf_timer=lambda: next(ticks))
         assert code == 0

@@ -10,7 +10,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-
 from brutex.acceptance.context import (
     PULL_ACTIVE_STALE_S,
     AcceptanceContext,
@@ -131,9 +130,7 @@ class TestPullActiveProbe:
         from brutex.observability.pull_journal import record_pull_start
 
         record_pull_start(tmp_path, pull_id="p1", dry_run=False)
-        ctx = AcceptanceContext(
-            lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC)
-        )
+        ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is True
 
     def test_finished_journal_run_idle(self, tmp_path: Path) -> None:
@@ -141,9 +138,7 @@ class TestPullActiveProbe:
 
         record_pull_start(tmp_path, pull_id="p1", dry_run=False)
         record_pull_finish(tmp_path, pull_id="p1", verdict="ok")
-        ctx = AcceptanceContext(
-            lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC)
-        )
+        ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is False
 
     def test_stale_unfinished_run_idle(self, tmp_path: Path) -> None:
@@ -159,9 +154,7 @@ class TestPullActiveProbe:
 
         record_pull_start(tmp_path, pull_id="p1", dry_run=False)
         record_pull_heartbeat(tmp_path, pull_id="p1")
-        ctx = AcceptanceContext(
-            lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC)
-        )
+        ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is True
 
     def test_bad_journal_stamp_is_idle(self, tmp_path: Path) -> None:
@@ -172,18 +165,14 @@ class TestPullActiveProbe:
             '"monotonic_s": 0.0, "dry_run": false}\n',
             encoding="utf-8",
         )
-        ctx = AcceptanceContext(
-            lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC)
-        )
+        ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is False
 
     def test_fresh_lease_active(self, tmp_path: Path) -> None:
         lease = tmp_path / ".locks" / "pull_lease.json"
         lease.parent.mkdir(parents=True)
         lease.write_text("{}", encoding="utf-8")
-        ctx = AcceptanceContext(
-            lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC)
-        )
+        ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is True
 
     def test_stale_lease_idle(self, tmp_path: Path) -> None:
@@ -262,9 +251,7 @@ class TestJournalProbeEdges:
             raise OSError("wedged volume")
 
         monkeypatch.setattr(pj, "read_journal", _boom)
-        ctx = AcceptanceContext(
-            lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC)
-        )
+        ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is False
 
     def test_naive_journal_stamp_treated_utc(self, tmp_path: Path) -> None:
@@ -276,7 +263,5 @@ class TestJournalProbeEdges:
             '"monotonic_s": 0.0, "dry_run": false}\n',
             encoding="utf-8",
         )
-        ctx = AcceptanceContext(
-            lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC)
-        )
+        ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is True

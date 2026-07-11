@@ -57,7 +57,9 @@ def _abstain_check(ctx: AcceptanceContext, reason: AbstainReason) -> CheckResult
         repro=_repro(ctx),
     )
     coverage = make_coverage(mode="none", population=0, examined=0, seed=ctx.seed)
-    return make_check(CHECK_ID, [sub, _oi_standing_abstain(ctx)], coverage=coverage, repro=_repro(ctx))
+    return make_check(
+        CHECK_ID, [sub, _oi_standing_abstain(ctx)], coverage=coverage, repro=_repro(ctx)
+    )
 
 
 def _oi_standing_abstain(ctx: AcceptanceContext) -> Any:
@@ -113,13 +115,12 @@ def _daily_compare_for_symbol(
     before = daily_derive_cutoff(ctx.now_ist())
     if any(has_muhurat_session(d) for d in _ist_dates(df_1m)):
         return {"key": key, "state": "daily_cutoff_ambiguous"}
-    resample = resample_1m_to_fno_daily if "/FNO/" in symbol_dir.as_posix() else (
-        resample_1m_to_daily
+    resample = (
+        resample_1m_to_fno_daily if "/FNO/" in symbol_dir.as_posix() else (resample_1m_to_daily)
     )
     expected = resample(df_1m, before=before)
     expected_map = {
-        bar.timestamp: (bar.open, bar.high, bar.low, bar.close, bar.volume)
-        for bar in expected
+        bar.timestamp: (bar.open, bar.high, bar.low, bar.close, bar.volume) for bar in expected
     }
     forming: list[str] = []
     divergent: list[str] = []
@@ -236,9 +237,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
             "equal": sum(1 for c in cells if c["state"] == "equal"),
             "failures": len(failures),
             "ambiguous_abstained": len(ambiguous),
-            "skipped": sum(
-                1 for c in cells if c["state"] in {"no_1m_base", "no_stored_partition"}
-            ),
+            "skipped": sum(1 for c in cells if c["state"] in {"no_1m_base", "no_stored_partition"}),
         },
         abstain_reason=daily_reason,
         limits=["forming sessions excluded from BOTH sides (cutoff law)"],

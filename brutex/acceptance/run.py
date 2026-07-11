@@ -12,7 +12,7 @@ from __future__ import annotations
 import socket
 import time
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -99,7 +99,7 @@ def _box_block(ctx: AcceptanceContext) -> dict[str, Any]:
         from brutex.config.hardware_envelope import hardware_key
 
         hw = hardware_key()
-    except Exception:  # noqa: BLE001 — box metadata is best-effort, never a verdict
+    except Exception:
         hw = None
     return {
         "hostname": socket.gethostname(),
@@ -166,7 +166,7 @@ def run_acceptance(
         )
         try:
             teeth = runner(now_utc=clock())
-        except Exception as exc:  # noqa: BLE001 — a crashed self-test is failed teeth
+        except Exception as exc:
             _LOG.error("acceptance.selftest_crashed", error=str(exc))
             teeth = selftest.SelfTestResult(
                 mode=cfg.self_test_mode,
@@ -180,16 +180,13 @@ def run_acceptance(
     checks: list[CheckResult] = []
     if teeth.verdict is not TeethVerdict.TEETH_FAILED:
         for check_id in cfg.checks:
-            if (
-                cfg.max_runtime_s is not None
-                and (time.monotonic() - started) > cfg.max_runtime_s
-            ):
+            if cfg.max_runtime_s is not None and (time.monotonic() - started) > cfg.max_runtime_s:
                 checks.append(_budget_check(check_id, seed=ctx.seed))
                 continue
             check_started = time.monotonic()
             try:
                 result = CHECK_REGISTRY[check_id](ctx)
-            except Exception as exc:  # noqa: BLE001 — fencing: ERROR + continue
+            except Exception as exc:
                 _LOG.error("acceptance.check_errored", check_id=check_id, error=str(exc))
                 result = _error_check(check_id, exc, seed=ctx.seed)
             from dataclasses import replace

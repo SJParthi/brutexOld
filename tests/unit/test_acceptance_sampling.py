@@ -111,9 +111,7 @@ class TestCoverageLedger:
 
     def test_summary_outside_window_not_counted(self) -> None:
         ledger = {"run": {"a": "2026-01-01"}}
-        summary = coverage_ledger_summary(
-            ledger, population_keys=["a"], run_date=date(2026, 7, 10)
-        )
+        summary = coverage_ledger_summary(ledger, population_keys=["a"], run_date=date(2026, 7, 10))
         assert summary["datasets_sampled_window_pct"] == 0.0
         assert summary["oldest_unsampled"] is None  # sampled EVER, just not recently
 

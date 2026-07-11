@@ -79,9 +79,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
     offenders = [str(getattr(f, "path", repr(f))) for f in report.findings]
     skipped = report.files_skipped + report.option_files_skipped
     units = report.files_scanned + report.option_files_scanned
-    census_verdict = (
-        Verdict.PASS if census.findings_total == 0 and skipped == 0 else Verdict.FAIL
-    )
+    census_verdict = Verdict.PASS if census.findings_total == 0 and skipped == 0 else Verdict.FAIL
     census_sub = make_subcheck(
         "unique.census",
         census_verdict,

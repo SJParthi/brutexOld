@@ -20,6 +20,7 @@ pytest.importorskip("fastapi", reason="movers leg A drives the real app")
 from brutex.acceptance import independent as ind
 from brutex.acceptance.checks import movers
 from brutex.acceptance.model import AbstainReason, Verdict
+
 from tests.fakes.acceptance_twin import DAY1, DAY2, make_ctx, make_twin
 
 
@@ -28,13 +29,14 @@ def _sub(check, sub_id: str):
 
 
 def _real_client(lake: Path):
-    from fastapi.testclient import TestClient
-
     from brutex.dashboard.app import DashboardState, build_app
     from brutex.data.instrument_store import InstrumentStore
+    from fastapi.testclient import TestClient
 
     store = InstrumentStore.open(lake / "instruments.duckdb")
-    return TestClient(build_app(DashboardState(), instrument_store=store), base_url="http://localhost")
+    return TestClient(
+        build_app(DashboardState(), instrument_store=store), base_url="http://localhost"
+    )
 
 
 class _MutatingClient:

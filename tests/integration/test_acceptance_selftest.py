@@ -9,9 +9,9 @@ teeth proving the battery itself has teeth.
 from __future__ import annotations
 
 import pytest
-
 from brutex.acceptance import selftest
 from brutex.acceptance.model import TeethVerdict
+
 from tests.fakes.acceptance_twin import NOW
 
 EXPECTED_POISONS = {

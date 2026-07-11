@@ -37,6 +37,9 @@ CHECK_ID = "sanity"
 #: Per-dataset offender samples are capped at this many entries.
 ROW_CAP = 20
 
+#: Float slack for the 2dp tick-grid law (prices are 2dp-snapped at write).
+_GRID_EPS = 1e-6
+
 
 def _repro(ctx: AcceptanceContext) -> str:
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
@@ -61,11 +64,10 @@ def _with_ist(frame: pl.DataFrame) -> pl.DataFrame:
 
 def _tick_grid_violations(frame: pl.DataFrame) -> int:
     """Bars whose any price has >2 decimals (violates the 2dp write law)."""
-    expr = None
-    for col in ("open", "high", "low", "close"):
-        bad = ((pl.col(col) * 100).round(0) - pl.col(col) * 100).abs() > 1e-6
-        expr = bad if expr is None else (expr | bad)
-    assert expr is not None  # four columns above — never None
+    columns = ("open", "high", "low", "close")
+    expr = ((pl.col(columns[0]) * 100).round(0) - pl.col(columns[0]) * 100).abs() > _GRID_EPS
+    for col in columns[1:]:
+        expr = expr | (((pl.col(col) * 100).round(0) - pl.col(col) * 100).abs() > _GRID_EPS)
     return int(frame.select(expr.sum()).item())
 
 
@@ -101,8 +103,10 @@ def _session_window_violations(frame_ist: pl.DataFrame) -> tuple[list[str], int]
 
     offenders: list[str] = []
     out_of_coverage = 0
-    for (d,), day_frame in frame_ist.group_by(["ist_date"], maintain_order=True):
-        assert isinstance(d, date)
+    for (key,), day_frame in frame_ist.group_by(["ist_date"], maintain_order=True):
+        if not isinstance(key, date):  # pragma: no cover — polars date group keys
+            continue
+        d = key
         if not is_holiday_data_available(d):
             out_of_coverage += day_frame.height
             continue
@@ -125,7 +129,7 @@ def _session_window_violations(frame_ist: pl.DataFrame) -> tuple[list[str], int]
     return offenders, out_of_coverage
 
 
-def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear evidence pipeline
+def run(ctx: AcceptanceContext) -> CheckResult:
     """Run the seven sanity sub-checks over the sampled datasets."""
     from brutex.data.bad_tick import BAD_TICK_MAX_RATIO
     from brutex.data.interior_gap_detect import interior_gap_runs

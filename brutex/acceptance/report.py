@@ -157,9 +157,7 @@ def previous_subcheck_index(
     return out
 
 
-def streak_for(
-    sub_id: str, verdict: Verdict, prev_index: Mapping[str, tuple[str, int]]
-) -> int:
+def streak_for(sub_id: str, verdict: Verdict, prev_index: Mapping[str, tuple[str, int]]) -> int:
     """Consecutive-abstain streak carried from the previous report chain."""
     if verdict is not Verdict.ABSTAIN:
         return 0
@@ -183,9 +181,7 @@ def compute_deltas(
         for sub in check.sub_checks:
             prev = prev_index.get(sub.id)
             if prev is not None and prev[0] != str(sub.verdict):
-                transitions.append(
-                    {"sub_check": sub.id, "from": prev[0], "to": str(sub.verdict)}
-                )
+                transitions.append({"sub_check": sub.id, "from": prev[0], "to": str(sub.verdict)})
     prev_evidence: dict[tuple[str, str], Mapping[str, Any]] = {}
     for check_dict in previous.get("checks", []):
         for sub_dict in check_dict.get("sub_checks", []):
@@ -194,9 +190,7 @@ def compute_deltas(
             )
     metric_deltas: dict[str, dict[str, Any]] = {}
     now_evidence: dict[tuple[str, str], Mapping[str, Any]] = {
-        (check.check_id, sub.id): sub.evidence
-        for check in checks
-        for sub in check.sub_checks
+        (check.check_id, sub.id): sub.evidence for check in checks for sub in check.sub_checks
     }
     for check_id, sub_id, key in METRIC_DELTA_CELLS:
         prev_val = prev_evidence.get((check_id, sub_id), {}).get(key)
@@ -221,9 +215,7 @@ def render_human(report: Mapping[str, Any]) -> str:
     overall = report["overall"]
     self_test = report["self_test"]
     inputs = report["inputs"]
-    lines.append(
-        f"BruteX acceptance — {report['run_id']} — lake {inputs.get('lake_root')}"
-    )
+    lines.append(f"BruteX acceptance — {report['run_id']} — lake {inputs.get('lake_root')}")
     teeth = self_test.get("verdict")
     lines.append(
         f"teeth: {teeth} (mode {self_test.get('mode')}, "
@@ -325,7 +317,9 @@ class AcceptanceAudit:
             },
         )
 
-    def run_complete(self, *, run_id: str, overall: str, report_sha256: str, report_path: str) -> None:
+    def run_complete(
+        self, *, run_id: str, overall: str, report_sha256: str, report_path: str
+    ) -> None:
         """Append the ``ACCEPTANCE_RUN_COMPLETE`` line with the report digest."""
         self._writer.append(
             action="ACCEPTANCE_RUN_COMPLETE",

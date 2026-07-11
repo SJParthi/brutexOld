@@ -9,10 +9,10 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
-
 from brutex.acceptance.checks import tf
 from brutex.acceptance.model import AbstainReason, Verdict
 from brutex.acceptance.selftest import _month_file, _twin_bars, poison_tf_high_x10
+
 from tests.fakes.acceptance_twin import DAY1, DAY2, make_ctx, make_twin
 
 
@@ -48,7 +48,9 @@ class TestTfCheck:
         check = tf.run(make_ctx(lake))
         intraday = _sub(check, "tf.intraday")
         assert intraday.verdict is Verdict.FAIL
-        assert any("BANKNIFTY" in pair and "5minute" in pair for pair in intraday.evidence["stale_pairs"])
+        assert any(
+            "BANKNIFTY" in pair and "5minute" in pair for pair in intraday.evidence["stale_pairs"]
+        )
 
     def test_tampered_1day_close_fails(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)
@@ -152,9 +154,9 @@ class TestTfCheck:
     def test_fno_contract_rides_the_same_seam(self, tmp_path: Path) -> None:
         from brutex.data.fno_daily_resample import resample_1m_to_fno_daily
         from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.spot_daily_resample import frame_to_candle_bars
         from brutex.data.tf_autoderive import read_lake_bars_frame
         from brutex.data.tf_resampler import resample_1m_to_tf
-        from brutex.data.spot_daily_resample import frame_to_candle_bars
 
         lake = make_twin(tmp_path)
         writer = ParquetWriter(lake_root=lake)
@@ -185,7 +187,10 @@ class TestTfCheck:
         check = tf.run(make_ctx(lake))
         assert check.verdict is Verdict.PASS
         daily = _sub(check, "tf.daily")
-        assert any(c["key"] == f"NSE/FNO/{contract}" and c["state"] == "equal" for c in daily.evidence["cells"])
+        assert any(
+            c["key"] == f"NSE/FNO/{contract}" and c["state"] == "equal"
+            for c in daily.evidence["cells"]
+        )
         intraday = _sub(check, "tf.intraday")
         assert intraday.evidence["pairs_keyed"] >= 4
 
@@ -207,7 +212,6 @@ class TestTfCheck:
 class TestTfEdges:
     def test_ist_dates_empty_frame(self) -> None:
         import polars as pl
-
         from brutex.acceptance.checks.tf import _ist_dates
 
         empty = pl.DataFrame(
@@ -223,9 +227,7 @@ class TestTfEdges:
         frame = pl.read_parquet(path)
         orphan_ts = datetime.combine(date(2026, 6, 30), time(18, 30), tzinfo=UTC)
         orphan = frame.head(1).with_columns(
-            pl.Series("timestamp", [orphan_ts.replace(tzinfo=None)]).cast(
-                frame.schema["timestamp"]
-            )
+            pl.Series("timestamp", [orphan_ts.replace(tzinfo=None)]).cast(frame.schema["timestamp"])
         )
         pl.concat([orphan, frame]).write_parquet(path)
         check = tf.run(make_ctx(lake))

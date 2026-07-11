@@ -17,6 +17,7 @@ pytest.importorskip("fastapi", reason="the movers/latency legs drive the real ap
 
 from brutex.acceptance.report import audit_path, render_human, validate_report_dict
 from brutex.acceptance.run import RunConfig, run_acceptance
+
 from tests.fakes.acceptance_twin import NOW, make_twin
 
 
@@ -63,9 +64,9 @@ class TestEndToEnd:
 
     def test_report_txt_names_every_check(self, two_runs, e2e_lake: Path) -> None:
         (_, report), _ = two_runs
-        text = (
-            e2e_lake / "acceptance" / report["run_id"] / "report.txt"
-        ).read_text(encoding="utf-8")
+        text = (e2e_lake / "acceptance" / report["run_id"] / "report.txt").read_text(
+            encoding="utf-8"
+        )
         for check_id in ("unique", "tf", "pull", "rate", "movers", "sanity", "latency"):
             assert check_id in text
         assert text == render_human(report)
@@ -89,8 +90,9 @@ class TestEndToEnd:
             for line in audit_path(e2e_lake).read_text(encoding="utf-8").splitlines()
         ]
         complete = next(
-            e for e in lines if e["action"] == "ACCEPTANCE_RUN_COMPLETE"
-            and e["subject"] == report["run_id"]
+            e
+            for e in lines
+            if e["action"] == "ACCEPTANCE_RUN_COMPLETE" and e["subject"] == report["run_id"]
         )
         report_path = Path(complete["payload"]["report_path"])
         assert (

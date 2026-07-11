@@ -29,6 +29,9 @@ SCHEMA_VERSION: Final[str] = "brutex-acceptance-report-v1"
 #: Selection lists inside a coverage block are capped at this many entries.
 SELECTION_CAP: Final[int] = 100
 
+#: The SUSPECT exit code (verifier internal error / TEETH_FAILED floor).
+EXIT_SUSPECT: Final[int] = 2
+
 #: A sub-check whose NON-structural abstain streak reaches this many
 #: consecutive runs flips the whole run to exit 4 (inconclusive) — an
 #: eternally-abstaining check can never hide at exit 0.
@@ -42,7 +45,7 @@ class AcceptanceModelError(ValueError):
 class Verdict(StrEnum):
     """The 4-valued machine verdict vocabulary (sample-ness lives in coverage)."""
 
-    PASS = "PASS"
+    PASS = "PASS"  # noqa: S105 — a verdict token, not a credential
     FAIL = "FAIL"
     ABSTAIN = "ABSTAIN"
     ERROR = "ERROR"
@@ -51,8 +54,8 @@ class Verdict(StrEnum):
 class OverallVerdict(StrEnum):
     """Whole-run verdict token for the report headline."""
 
-    PASS = "PASS"
-    PASS_WITH_ABSTAINS = "PASS_WITH_ABSTAINS"
+    PASS = "PASS"  # noqa: S105 — a verdict token, not a credential
+    PASS_WITH_ABSTAINS = "PASS_WITH_ABSTAINS"  # noqa: S105 — verdict token
     FAIL = "FAIL"
     SUSPECT = "SUSPECT"
 
@@ -397,9 +400,7 @@ def rollup_overall(
                 else:
                     nonstructural += 1
                     max_streak = max(max_streak, sub.abstain_streak)
-    passes_full = sum(
-        1 for c in checks if c.verdict is Verdict.PASS and c.coverage.mode == "full"
-    )
+    passes_full = sum(1 for c in checks if c.verdict is Verdict.PASS and c.coverage.mode == "full")
     passes_sample = sum(
         1 for c in checks if c.verdict is Verdict.PASS and c.coverage.mode != "full"
     )
@@ -412,7 +413,7 @@ def rollup_overall(
         max_nonstructural_streak=max_streak,
         time_truncated=time_truncated,
     )
-    if exit_code == 2:
+    if exit_code == EXIT_SUSPECT:
         verdict = OverallVerdict.SUSPECT
     elif fail_checks:
         verdict = OverallVerdict.FAIL

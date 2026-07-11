@@ -46,6 +46,9 @@ SPOT_COORDS: tuple[tuple[str, str | None], ...] = (
 #: Mismatch samples are capped at this many entries.
 MISMATCH_CAP = 20
 
+#: HTTP success status for the F&O tab probes.
+HTTP_OK = 200
+
 #: Options moneyness label grammar (DEC-FNO-MONEYNESS-LABEL-001).
 MONEYNESS_RE = re.compile(r"^(ATM|(ITM|OTM) [+-]?\d+)$")
 
@@ -73,9 +76,7 @@ def _pct_2dp(text: str) -> Fraction:
     return ind.half_up_2dp(Fraction(text))
 
 
-def compare_spot_cells(
-    page_row: dict[str, Any], ind_row: ind.IndependentSpotRow
-) -> list[str]:
+def compare_spot_cells(page_row: dict[str, Any], ind_row: ind.IndependentSpotRow) -> list[str]:
     """Cell-for-cell compare of ONE page row vs its independent recompute.
 
     The comparator the teeth smoke drives through its injection seam (S3) —
@@ -85,24 +86,21 @@ def compare_spot_cells(
     if page_row.get("ltp") != ind_row.ltp_display:
         mismatches.append(f"ltp: page={page_row.get('ltp')!r} independent={ind_row.ltp_display!r}")
     if int(page_row.get("volume", -1)) != ind_row.volume:
-        mismatches.append(
-            f"volume: page={page_row.get('volume')!r} independent={ind_row.volume!r}"
-        )
+        mismatches.append(f"volume: page={page_row.get('volume')!r} independent={ind_row.volume!r}")
     if page_row.get("value_cr") != ind_row.value_cr_display:
         mismatches.append(
-            f"value_cr: page={page_row.get('value_cr')!r} "
-            f"independent={ind_row.value_cr_display!r}"
+            f"value_cr: page={page_row.get('value_cr')!r} independent={ind_row.value_cr_display!r}"
         )
     page_pct = page_row.get("pct_change")
     ind_pct = ind_row.pct
     if (page_pct is None) != (ind_pct is None):
         mismatches.append(f"pct_change nullability: page={page_pct!r} independent={ind_pct!r}")
-    elif page_pct is not None and ind_pct is not None and _pct_2dp(str(page_pct)) != (
-        ind.half_up_2dp(ind_pct)
+    elif (
+        page_pct is not None
+        and ind_pct is not None
+        and _pct_2dp(str(page_pct)) != (ind.half_up_2dp(ind_pct))
     ):
-        mismatches.append(
-            f"pct_change(2dp): page={page_pct!r} independent={float(ind_pct):.6f}"
-        )
+        mismatches.append(f"pct_change(2dp): page={page_pct!r} independent={float(ind_pct):.6f}")
     if ind_row.chng is not None:
         expected_change = ind.format_inr_2dp(ind_row.chng)
         if page_row.get("change") != expected_change:
@@ -172,7 +170,7 @@ def _spot_payload(ctx: AcceptanceContext, *, interval: str, day: str, hhmm: str 
     return response.json()
 
 
-def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear evidence pipeline
+def run(ctx: AcceptanceContext) -> CheckResult:
     """Run the five movers sub-checks against the real wire + the fenced leg."""
     day_str = resolve_day(ctx)
     if day_str is None:
@@ -256,7 +254,9 @@ def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear 
                     else:
                         mismatches.append(label)
             mismatches.extend(_rank_consistent(rows, ind_by_symbol, category=category))
-    all_failures = mismatches + [f"[stored_tf_prevclose_divergence] {m}" for m in stored_tf_prevclose]
+    all_failures = mismatches + [
+        f"[stored_tf_prevclose_divergence] {m}" for m in stored_tf_prevclose
+    ]
     spot_sub = make_subcheck(
         "movers.spot",
         Verdict.FAIL if all_failures else Verdict.PASS,
@@ -350,7 +350,7 @@ def _futures_sub(ctx: AcceptanceContext, *, day: date, day_str: str) -> Any:
         "/api/v1/movers",
         params={"asset": "futures", "interval": "1minute", "date": day_str, "top_n": ctx.top_n},
     )
-    payload = response.json() if response.status_code == 200 else {}
+    payload = response.json() if response.status_code == HTTP_OK else {}
     rows = [r for rows in payload.values() if isinstance(rows, list) for r in rows]
     rows = [r for r in rows if isinstance(r, dict) and "symbol" in r]
     if not rows:
@@ -410,7 +410,7 @@ def _options_sub(ctx: AcceptanceContext, *, day_str: str) -> Any:
         "/api/v1/movers",
         params={"asset": "options", "interval": "1minute", "date": day_str, "top_n": ctx.top_n},
     )
-    payload = response.json() if response.status_code == 200 else {}
+    payload = response.json() if response.status_code == HTTP_OK else {}
     rows = [r for rows in payload.values() if isinstance(rows, list) for r in rows]
     rows = [r for r in rows if isinstance(r, dict) and "symbol" in r]
     if not rows:

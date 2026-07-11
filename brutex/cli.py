@@ -7725,7 +7725,7 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
             budgets[key.strip()] = float(value)
         except ValueError:
             raise CliUserError(f"bad --latency-budget entry: {token!r} (expected KEY=MS)") from None
-    if top_n > 100:
+    if top_n > 100:  # noqa: PLR2004 — the documented movers cross-check depth cap
         raise CliUserError("--top-n is capped at 100")
     if no_self_test and (self_test or self_test_only):
         raise CliUserError("--no-self-test conflicts with --self-test/--self-test-only")

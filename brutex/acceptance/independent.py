@@ -34,7 +34,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
 from typing import Final
@@ -47,12 +47,24 @@ from brutex.calendars.nse import (
     SPECIAL_WEEKEND_TRADING_SESSIONS,
 )
 
+#: Monday-indexed weekday ordinal of Saturday.
+_SATURDAY: Final[int] = 5
+
 #: Fixed IST offset — hand constant, never a tz database lookup.
 IST: Final = timezone(timedelta(hours=5, minutes=30))
 
 #: NSE regular session bounds as minutes-of-day (09:15 → 15:30 exclusive).
 SESSION_OPEN_MIN: Final[int] = 9 * 60 + 15
 SESSION_CLOSE_MIN: Final[int] = 15 * 60 + 30
+
+#: A TF at/over the whole session length (375 min) is a DAILY coordinate.
+DAILY_TF_MIN_FLOOR: Final[int] = 375
+
+#: ``<EXCH>-<UND...>-<DDMmmYY>-FUT`` needs at least 4 hyphen-split parts.
+_FUT_MIN_PARTS: Final[int] = 4
+
+#: The ``DDMmmYY`` expiry token is exactly 7 characters.
+_EXPIRY_TOKEN_LEN: Final[int] = 7
 
 
 def half_up_2dp(x: Fraction) -> Fraction:
@@ -88,16 +100,20 @@ def pct_chng(prev_close: Fraction, close: Fraction) -> Fraction | None:
 
 def ist_minute_of_day(ts_utc: datetime) -> int:
     """Minute-of-day of a UTC timestamp's IST wall time (hand +05:30 shift)."""
-    ist = ts_utc.astimezone(IST) if ts_utc.tzinfo is not None else ts_utc + timedelta(
-        hours=5, minutes=30
+    ist = (
+        ts_utc.astimezone(IST)
+        if ts_utc.tzinfo is not None
+        else ts_utc + timedelta(hours=5, minutes=30)
     )
     return ist.hour * 60 + ist.minute
 
 
 def ist_date_of(ts_utc: datetime) -> date:
     """IST calendar date of a UTC timestamp (hand +05:30 shift)."""
-    ist = ts_utc.astimezone(IST) if ts_utc.tzinfo is not None else ts_utc + timedelta(
-        hours=5, minutes=30
+    ist = (
+        ts_utc.astimezone(IST)
+        if ts_utc.tzinfo is not None
+        else ts_utc + timedelta(hours=5, minutes=30)
     )
     return ist.date() if isinstance(ist, datetime) else ist
 
@@ -110,7 +126,7 @@ def bucket_asof_cutoff_minute(tf_minutes: int, hhmm: str | None) -> int | None:
     ``min(anchor + tf − 1, 15:29)`` — the completed bucket's final minute. A
     non-anchor pick keeps the raw minute (honest mid-bucket as-of).
     """
-    if hhmm is None or tf_minutes >= 375:
+    if hhmm is None or tf_minutes >= DAILY_TF_MIN_FLOOR:
         return None
     hh, mm = hhmm.split(":")
     minute = int(hh) * 60 + int(mm)
@@ -164,7 +180,7 @@ def read_1m_bars(symbol_dir: Path, *, months: set[tuple[int, int]] | None = None
         for row in frame.iter_rows(named=True):
             ts = row["timestamp"]
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.replace(tzinfo=UTC)
             if ts in seen:
                 continue
             seen.add(ts)
@@ -182,9 +198,7 @@ def read_1m_bars(symbol_dir: Path, *, months: set[tuple[int, int]] | None = None
     return bars
 
 
-def session_bars(
-    bars: list[Bar1m], *, day: date, cutoff_minute: int | None
-) -> list[Bar1m]:
+def session_bars(bars: list[Bar1m], *, day: date, cutoff_minute: int | None) -> list[Bar1m]:
     """The day's bars up to (and including) the as-of cutoff minute."""
     out = [b for b in bars if ist_date_of(b.ts_utc) == day]
     if cutoff_minute is not None:
@@ -239,7 +253,7 @@ def is_trading_day_hand(d: date) -> bool:
         return True
     if d in ALL_HOLIDAYS:
         return False
-    return d.weekday() < 5
+    return d.weekday() < _SATURDAY
 
 
 def previous_session_hand(d: date, *, max_walk: int = 30) -> date | None:
@@ -343,10 +357,10 @@ def parse_fut_symbol_hand(name: str) -> tuple[str, date] | None:
     #1646 law re-stated by hand — never the production grammar).
     """
     parts = name.split("-")
-    if len(parts) < 4 or parts[-1] != "FUT":
+    if len(parts) < _FUT_MIN_PARTS or parts[-1] != "FUT":
         return None
     token = parts[-2]
-    if len(token) < 7:
+    if len(token) < _EXPIRY_TOKEN_LEN:
         return None
     month = _MONTHS.get(token[2:5].upper())
     if month is None:
@@ -374,9 +388,7 @@ def near_month_fut_hand(contract_names: list[str], *, on_date: date) -> dict[str
     return {u: n for u, (_e, n) in best.items()}
 
 
-def rank_rows(
-    rows: list[IndependentSpotRow], *, key: str, top_n: int
-) -> list[IndependentSpotRow]:
+def rank_rows(rows: list[IndependentSpotRow], *, key: str, top_n: int) -> list[IndependentSpotRow]:
     """Independent rank: single-pass negated-key sort, alphabetical tie.
 
     ``key`` ∈ {"volume", "value", "gainers", "losers"} — gainers/losers rank

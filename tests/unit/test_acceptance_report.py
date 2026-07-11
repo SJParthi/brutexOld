@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-
 from brutex.acceptance.model import (
     SCHEMA_VERSION,
     AbstainReason,
@@ -22,9 +21,7 @@ from brutex.acceptance.model import (
     rollup_overall,
     totals_for,
 )
-from brutex.acceptance.model import (
-    TeethVerdict as TV,
-)
+from brutex.acceptance.model import TeethVerdict as TeethV
 from brutex.acceptance.report import (
     AcceptanceAudit,
     ReportWriteError,
@@ -60,7 +57,7 @@ def _check(check_id: str = "unique", verdict: Verdict = Verdict.PASS, **evidence
 
 def _report_dict(checks=None, *, run_id: str = "acceptance-20260710T060000Z-abc123") -> dict:
     checks = checks if checks is not None else [_check()]
-    overall = rollup_overall(checks, teeth=TV.TEETH_PROVEN, abstain_budget=3)
+    overall = rollup_overall(checks, teeth=TeethV.TEETH_PROVEN, abstain_budget=3)
     return {
         "schema": SCHEMA_VERSION,
         "run_id": run_id,

@@ -10,7 +10,6 @@ from __future__ import annotations
 import itertools
 
 import pytest
-
 from brutex.acceptance.model import (
     ABSTAIN_STREAK_LIMIT,
     SCHEMA_VERSION,
@@ -50,12 +49,15 @@ class TestSchemaTokens:
     def test_structural_abstains_frozen_list(self) -> None:
         # The budget/streak exemption list is FROZEN — extending it is a
         # ledgered decision. This pin fails on any silent widening.
-        assert STRUCTURAL_ABSTAINS == frozenset(
-            {
-                AbstainReason.NO_PER_CALL_PERSISTENCE,
-                AbstainReason.NO_PER_CALL_LOG,
-                AbstainReason.NO_OI_COMPARE_SEAM,
-            }
+        assert (
+            frozenset(
+                {
+                    AbstainReason.NO_PER_CALL_PERSISTENCE,
+                    AbstainReason.NO_PER_CALL_LOG,
+                    AbstainReason.NO_OI_COMPARE_SEAM,
+                }
+            )
+            == STRUCTURAL_ABSTAINS
         )
 
     def test_abstain_reason_enum_frozen(self) -> None:
@@ -151,9 +153,7 @@ class TestSubCheckInvariants:
         from brutex.acceptance.model import SubCheckResult
 
         with pytest.raises(AcceptanceModelError, match="zero units"):
-            SubCheckResult(
-                id="x", verdict=Verdict.PASS, evidence={"units_checked": 0, "k": 1}
-            )
+            SubCheckResult(id="x", verdict=Verdict.PASS, evidence={"units_checked": 0, "k": 1})
 
     def test_zero_unit_fail_stays_fail(self) -> None:
         sub = make_subcheck("x", Verdict.FAIL, units_checked=0, evidence={"k": 1})

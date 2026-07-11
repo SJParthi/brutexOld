@@ -11,8 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from brutex.cli import EXIT_OK, EXIT_USER_ERROR, build_parser, main
+
 from tests.fakes.acceptance_twin import make_twin
 
 
@@ -134,9 +134,7 @@ class TestReproAndUserErrors:
 
 
 class TestEndToEndViaMain:
-    def test_json_run_exit_0(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_json_run_exit_0(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         import json
 
         lake = make_twin(tmp_path)
