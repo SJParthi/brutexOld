@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import fno_math
 import pytest
@@ -609,7 +609,7 @@ def test_enum_no_progress_belt(monkeypatch: pytest.MonkeyPatch) -> None:
     the kernel's guaranteed-progress law) trips the driver belt."""
 
     class _Stuck(_FakeCore):
-        def enumerate_prefilter(self, *args: object) -> tuple[int, int, int, bool, int, list[int]]:
+        def enumerate_prefilter(self, *args: Any) -> tuple[int, int, int, bool, int, list[int]]:
             return (0, 0, 0, False, 0, [])
 
     monkeypatch.setattr(fno_math, "ResidentSweepEnum", _Stuck)
@@ -629,7 +629,7 @@ class _EarlyExhaust:
     def n_bars(self) -> int:
         return self._real.n_bars()
 
-    def enumerate_prefilter(self, *args: object) -> tuple[int, int, int, bool, int, list[int]]:
+    def enumerate_prefilter(self, *args: Any) -> tuple[int, int, int, bool, int, list[int]]:
         enumerated, pruned, next_rank, _, hits, kept = self._real.enumerate_prefilter(*args)
         return (enumerated, pruned, next_rank, True, hits, kept)
 
@@ -711,7 +711,7 @@ class _DropOneKept:
     def n_bars(self) -> int:
         return self._real.n_bars()
 
-    def enumerate_prefilter(self, *args: object) -> tuple[int, int, int, bool, int, list[int]]:
+    def enumerate_prefilter(self, *args: Any) -> tuple[int, int, int, bool, int, list[int]]:
         enumerated, pruned, next_rank, exhausted, hits, kept = self._real.enumerate_prefilter(*args)
         if not self._poisoned and kept:
             self._poisoned = True

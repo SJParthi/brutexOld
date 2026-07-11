@@ -43,6 +43,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import fno_math
 import pytest
@@ -315,7 +316,7 @@ class _PoisonBase:
     def n_bars(self) -> int:
         return self._real.n_bars()
 
-    def enumerate_prefilter(self, *args: object) -> tuple[int, int, int, bool, int, list[int]]:
+    def enumerate_prefilter(self, *args: Any) -> tuple[int, int, int, bool, int, list[int]]:
         raw = self._real.enumerate_prefilter(*args)
         if not self.fired:
             poisoned = self._poison(raw)

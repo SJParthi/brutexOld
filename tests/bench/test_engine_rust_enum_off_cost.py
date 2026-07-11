@@ -31,7 +31,11 @@ from collections.abc import Iterator, Sequence
 import pytest
 from brutex.engine import rust_enum
 from brutex.engine.combo_mask import count_supermasks, iter_masks_k_of_bits
-from brutex.engine.rust_enum import SWEEP_RUST_ENUM_ENV, enum_prefilter_via_kernel
+from brutex.engine.rust_enum import (
+    SWEEP_RUST_ENUM_ENV,
+    RustEnumResult,
+    enum_prefilter_via_kernel,
+)
 from brutex.vocabulary import has_conflict
 
 from tests.bench._o1_tiers import ratio_ceiling
@@ -44,7 +48,7 @@ _LARGE_BITS = list(range(60))
 _PROBE_BARS: list[int] = [0b1011, 0b0001, 0b1111] * 4
 
 
-def _probe(bits: list[int], k: int, *, min_hits: int = 0) -> object:
+def _probe(bits: list[int], k: int, *, min_hits: int = 0) -> RustEnumResult | None:
     return enum_prefilter_via_kernel(
         bits,
         k,

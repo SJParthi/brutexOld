@@ -44,6 +44,7 @@ Invariants covered (the §6 Slice-1 battery)
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 
 import fno_math
 import pytest
@@ -323,8 +324,8 @@ def test_wrapper_matches_the_spine_with_production_pairs(
         reset_enum_self_check_for_tests()
         reset_observability_memo_for_tests()
 
-        def count_hits(masks: list[int]) -> list[int]:
-            return count_supermasks(bar_bits, masks)
+        def count_hits(masks: Sequence[int]) -> list[int]:
+            return count_supermasks(bar_bits, list(masks))
 
         result = enum_prefilter_via_kernel(
             bits,

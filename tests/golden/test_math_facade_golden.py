@@ -36,6 +36,8 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
     {
         # fno_math (rust/fno-math)
         "ResidentBars",
+        "ResidentSweepEnum",
+        "ResidentSweepEnumU128",
         "ResidentSweepSim",
         "ResidentSweepSimU128",
         "add_u64",
@@ -47,7 +49,6 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u64s_nthreads",
         "popcount_bytes",
         "sweep_drawdown_stats",
-        "sweep_enum_conflict_free",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",
         "GREEKS_DELTA_ADMISSION_FLOOR",
