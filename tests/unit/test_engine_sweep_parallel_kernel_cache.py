@@ -725,6 +725,32 @@ class TestInternBars:
         warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
         assert warned == []  # no spurious revisit_after_eviction disable
 
+    def test_len_mismatch_alone_disables_never_serves(self) -> None:
+        """Fix-round-9 (FD-M4 kill): the value probe's LEN arm has its OWN
+        teeth. A FEWER-bar arrival that AGREES with the resident at first /
+        its-own-mid / last — so ONLY the length comparison can catch it —
+        must take the mismatch path (fail-safe disable + one WARN), never a
+        resident serve (the mutant would sim the 5-bar resident where 3 bars
+        were shipped, mechanism silently still enabled). A strict PREFIX
+        cannot build this fixture (distinct timestamps make ``arrival[-1] ==
+        resident[-1]`` impossible), so the probe-agreeing shape is the
+        first/mid/last SUBSAMPLE — the FD-1 executed-probe fixture.
+        """
+        self._memo_on()
+        resident = list(_BARS[:5])
+        mod._intern_bars("NIFTY", "1minute", resident)
+        arrival = [resident[0], resident[2], resident[4]]  # 3 bars, probe-agreeing
+        assert arrival[0] == resident[0]
+        assert arrival[len(arrival) // 2] == resident[len(resident) // 2]
+        assert arrival[-1] == resident[-1]
+        with capture_logs() as logs:
+            got = mod._intern_bars("NIFTY", "1minute", arrival)
+        assert got is arrival  # the shipped 3-bar copy — never the 5-bar resident
+        assert mod._WORKER_BARS_MEMO is None  # fail-safe disable, not a serve
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert len(warned) == 1
+        assert warned[0]["reason"] == "resident_value_mismatch"
+
 
 # ─────────────── in-process worker reuse + counters (T1/T3/T6) ───────────────
 
@@ -1041,6 +1067,74 @@ class TestRunTupleInWorkerKernelCache:
         assert memo is not None
         assert memo[("NIFTY", "1minute")] is first_bars  # the FIRST copy stays resident
 
+    def test_second_dispatch_consumes_the_interned_resident(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fix-round-9 (FD-M1 kill): the intern-CONSUMPTION law end-to-end —
+        the bars object that actually FLOWS INTO ``run_one_tuple`` on a
+        same-key second dispatch IS the interned resident, on BOTH
+        consumption paths: the ``bars_for`` closure feeding the trade sim AND
+        the ``kernel_cache.get`` bars argument feeding the kernel. The memo
+        side-effect pin above cannot see this (under the severed
+        ``bars = _intern_bars(...)`` reassignment the memo still holds the
+        first copy while the sim runs the FRESH copy against the RESIDENT
+        kernel's ``bar_bits`` — the exact mixed pairing the identity-serve
+        law forbids, and the A.4 memory bound severed at its delivery point).
+        """
+        grid = _grid()
+        mod._worker_init(_worker_ctx_on(tmp_path, grid))
+        real_cache = mod._WORKER_KERNEL_CACHE
+        assert real_cache is not None
+        kernel_bars: list[Sequence[CandleBar]] = []
+
+        class _GetSpyCache:
+            """Delegating wrapper recording every ``get``'s bars argument."""
+
+            def get(self, bars: Sequence[CandleBar], **kwargs: Any) -> ResidentSweepKernel:
+                kernel_bars.append(bars)
+                assert real_cache is not None
+                return real_cache.get(bars, **kwargs)
+
+            @property
+            def builds(self) -> int:
+                assert real_cache is not None
+                return real_cache.builds
+
+            @property
+            def hits(self) -> int:
+                assert real_cache is not None
+                return real_cache.hits
+
+            def __len__(self) -> int:
+                assert real_cache is not None
+                return len(real_cache)
+
+        mod._WORKER_KERNEL_CACHE = _GetSpyCache()  # type: ignore[assignment]
+        sim_bars: list[Sequence[CandleBar]] = []
+        real_run_one_tuple = mod.run_one_tuple
+
+        def _spy_run_one_tuple(*args: Any, **kwargs: Any) -> Any:
+            # The bars_for closure yields the SAME local `bars` the worker
+            # passes to the sim — capture exactly what run_one_tuple consumes.
+            sim_bars.append(kwargs["bars_for"]("probe", "probe"))
+            return real_run_one_tuple(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "run_one_tuple", _spy_run_one_tuple)
+        tuples = list(iter_sweep_tuples(grid))
+        first_bars = list(_BARS)
+        fresh_copy = list(_BARS)  # a value-identical "fresh pickled copy"
+        assert mod._run_tuple_in_worker(0, tuples[0], first_bars).summary is not None
+        assert mod._run_tuple_in_worker(1, tuples[1], fresh_copy).summary is not None
+        assert (real_cache.builds, real_cache.hits) == (1, 1)  # the kernel WAS reused
+        # The first dispatch registered + consumed its own copy...
+        assert sim_bars[0] is first_bars
+        assert kernel_bars[0] is first_bars
+        # ...and the second dispatch CONSUMED the interned resident — never
+        # the fresh copy — on both the sim path and the kernel path.
+        assert sim_bars[1] is first_bars
+        assert kernel_bars[1] is first_bars
+        assert sim_bars[1] is not fresh_copy
+
 
 # ──────────── parent telemetry fold (fix-round-2, refuter-3 F3) ────────────
 
@@ -1272,3 +1366,80 @@ class TestRealSpawnWorkerReuse:
             if e.get("event") == "sweep_parallel.worker_kernel_cache.flag_unrecognised"
         ]
         assert len(warned) == 1
+
+
+class TestDriverCtxCapacityHandoff:
+    def test_env_capacity_reaches_the_pool_initializer_ctx(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fix-round-9 (FD-M12 kill): the driver-RESOLVED capacity provably
+        reaches the workers THROUGH THE DRIVER PATH — the ``_WorkerContext``
+        handed to the pool's ``initargs`` inside the real ``run()`` carries
+        the env-resolved value, never a constant. FM4 pins that
+        ``_worker_init`` honors ctx capacity, but every test exercising that
+        builds the ctx ITSELF — under the severed handoff (ctx capacity → 1)
+        the operator capacity lever (and the grid-derived sizing law) is
+        silently dead pool-wide while ``driver._worker_kernel_capacity``
+        still reads the resolved value. The pool is a deterministic
+        stamped-result fake (the ``_StampedResultPool`` discipline) so the
+        HANDOFF is asserted, not raced.
+        """
+        grid = _grid()
+        monkeypatch.setenv(mod.WORKER_KERNEL_CACHE_ENV, "1")
+        monkeypatch.setenv(mod.WORKER_KERNEL_CAPACITY_ENV, "3")
+        results = {
+            i: mod.TupleWorkResult(
+                index=i,
+                summary=None,  # a no-bars-shaped result — the stamped-pool shape
+                failed_error=None,
+                audit_records=(),
+                worker_pid=11111,
+                kernel_builds=1,
+                kernel_hits=0,
+            )
+            for i in range(count_sweep_tuples(grid))
+        }
+        captured: list[mod._WorkerContext] = []
+
+        class _CtxCaptureExecutor:
+            """A ``ProcessPoolExecutor`` stand-in capturing the real ``initargs``."""
+
+            def __init__(self, **kwargs: Any) -> None:
+                captured.extend(kwargs["initargs"])
+
+            def __enter__(self) -> _StampedResultPool:
+                return _StampedResultPool(results)
+
+            def __exit__(self, *_exc: object) -> None:
+                return None
+
+        monkeypatch.setattr(mod, "ProcessPoolExecutor", _CtxCaptureExecutor)
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            SweepAuditWriter.open(tmp_path / "sup.jsonl") as sup,
+            SweepCache.open(tmp_path / "cache", bloom_capacity=10_000) as cache,
+        ):
+            guards = SweepGuards(
+                audit=sup,
+                progress=SweepProgress(),
+                checkpoint=SweepCheckpointStore(
+                    path=tmp_path / "ckpt.json",
+                    sweep_id=grid_identity(grid),
+                    total_combos=count_sweep_tuples(grid),
+                ),
+                cache=cache,
+                watchdog=SweepWatchdog(),
+            )
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,
+            )
+            assert driver._worker_kernel_capacity == 3  # env-resolved in the parent
+            driver.run()
+        [ctx] = captured  # exactly ONE ctx built, inside run()
+        assert ctx.worker_kernel_cache is True
+        assert ctx.worker_kernel_capacity == 3  # the handoff — never a constant
