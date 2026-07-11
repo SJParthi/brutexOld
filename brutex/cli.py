@@ -5830,7 +5830,25 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
         to_dt = date.fromisoformat(args.to_date) if args.to_date else None
         if from_dt is not None and to_dt is not None and from_dt > to_dt:
             raise ValueError(f"--from-date {args.from_date} is after --to-date {args.to_date}")
-    except (NightlyEnvError, ValueError) as exc:
+        # DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) review fix
+        # round 2: the nightly's default --k is the extinction token, so a
+        # junk BRUTEX_SWEEP_APRIORI must refuse HERE — cron-red
+        # EXIT_USER_ERROR BEFORE any chain link runs (collision probe /
+        # locks / backup / pull) — never a mid-chain sweep-leg failure hours
+        # in. The resolved plan is DISCARDED (validation only; the sweep leg
+        # re-resolves at launch). An explicit legacy numeric --k never reads
+        # the env (the resolver's byte-identity mandate) — untouched.
+        if (args.k or "").strip().lower() == EXTINCTION_K_TOKEN:
+            resolve_sweep_exploration(
+                args.k,
+                condition_bits=(
+                    parse_condition_ids(args.conditions)
+                    if args.conditions
+                    else default_condition_bits()
+                ),
+                max_combos=args.max_combos,
+            )
+    except (NightlyEnvError, ValueError, CliUserError) as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
