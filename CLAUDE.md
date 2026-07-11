@@ -36,7 +36,13 @@ ZERO edits to serving paths/engine/pull/movers/db_view/ledger/doctor; compose-ne
 (the fenced movers leg is the single sanctioned exception, DEC-SURFACE-TRIAL-001 precedent).
 HONEST: rate.per_call_history is a PERMANENT named ABSTAIN (no per-call record persists — F3
 needs an operator ruling); tf.oi stands ABSTAIN until F2; sampled PASSes say so on the verdict
-line. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+line. HOSTILE-REVIEW ROUND 1 folded pre-merge (refuter-confirmed findings fixed: the §12.7
+TOCTOU law WIRED for real · per-day Muhurat 1day handling · the full moneyness sentinel
+grammar · expiry-capped covered-span replan · instruments.duckdb opened READ-ONLY only ·
+glob=False oracle reads · bounded 16 MiB evidence tails, chain-verify dropped from the
+evidence sub · `--months` made real for tf.daily/sanity + the census scoped to sampled
+coordinates — the per-round record lives in MIGRATION.md #1756, never this header).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
 Active-branch blurb + MIGRATION.md #1756.)
 Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
 the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
@@ -2208,10 +2214,29 @@ hostile-review pass._
   ALWAYS full-history; coverage{} REQUIRED per check; coverage ledger makes accumulation visible). Report:
   `<lake>/acceptance/<run_id>/report.json` schema-self-validated before writing + report.txt (ABSTAINs FIRST) +
   evidence spill + LATEST + the SweepAuditWriter hash chain verified by the EXISTING `brutex audit verify`; deltas +
-  abstain streaks carried in the report chain. Exits 0/1/2/3/4 (2>3>4>0). 339 tests; every new module 100.00%
+  abstain streaks carried in the report chain. Exits 0/1/2/3/4 (2>3>4>0). HOSTILE-REVIEW ROUND 1 folded
+  (same branch, pre-merge — 3-refuter panel, every CONFIRMED finding fixed with a fails-before regression;
+  refuted claims got no code change): the §12.7 stat-fingerprint retry-once TOCTOU law is WIRED into
+  unique/tf/pull/sanity (`checks.run_fingerprinted_check` — a mid-check real-writer append retries once then
+  ABSTAINs `input_moved_during_check`, never a PASS over a torn read); tf.daily skips Muhurat sessions PER-DAY
+  (counted `muhurat_days_skipped`; a multi-year engine lake keeps a real 1day verdict — the whole-history
+  abstain/exit-4-forever knock-on is dead); the movers moneyness grammar admits the FULL production vocabulary
+  incl. the honest `?`/`—`/bare-ITM/OTM sentinels; the pull replan threads production's expiry-capped
+  `contract_windows` + re-plans per MERGED covered span (disjoint operator ranges never false-FAIL; all-expired
+  lakes read `no_tail_eligible_series`) with the tail tooth reusing the ONE replan copy; `checks=()` is refused
+  in the core; the decorative `pull.progress_snapshot` PASS is DELETED (counters = replan evidence); market-hours
+  folds only `dry_run is False` journal records (heartbeats never count); instruments.duckdb is opened READ-ONLY
+  only (older-schema stores survive byte-identical; RW-held/foreign ⇒ named ABSTAIN); oracle reads ride
+  `glob=False`; report.txt repr()s vendor-influenceable cells; BRUTEX_LAKE_ROOT is run-scoped + restored;
+  rotating-log/audit evidence reads are bounded 16 MiB tails with the full-chain verify DROPPED from the
+  evidence-only sub; RecursionError bombs fold, MemoryError re-raises raw; `--months` genuinely bounds
+  tf.daily/sanity and the census scans sampled coordinates × months (never the whole-tree glob); enumerations
+  memoised per run; latency's first call relabeled `first_call_ms` (never claimed cold); the report golden
+  regenerated as a reviewed act. 400+ tests; every module re-measured 100.00%
   line+branch on the ci.yml-exact gates; full battery 15/15 detected, 0 false FAILs on the clean twin;
   ruff/ruff-format clean; `mypy --strict` clean (the one pre-existing env-specific cma stub note aside, 0 new);
-  pyright 0 errors on the new package. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+  pyright 0 errors on the new package (net −12 on the touched test files). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
   change; the per-item record lives in MIGRATION.md #1756.)
   Earlier: `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
   the dashboard FRONTEND latency-hardening pack, CLIENT-side only (templates + static JS + tests + docs; ZERO
@@ -5561,6 +5586,9 @@ hostile-review pass._
   `brutex verify-acceptance`: 7 composed checks over the real lake with PASS/FAIL/ABSTAIN(named)
   verdicts + evidence blocks, the gating teeth smoke + CI 15-poison battery, the frozen
   `brutex-acceptance-report-v1` report + hash-chained audit trail, verify-family exits 0/1/2/3/4;
+  hostile-review round 1 folded pre-merge (TOCTOU law wired · per-day Muhurat · full moneyness
+  grammar · expiry-capped covered-span replan · read-only instruments.duckdb · bounded evidence
+  tails · --months made real — per-round record in MIGRATION.md #1756);
   additive `brutex/acceptance/` package only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line)
   Earlier: `claude/frontend-latency-hardening-r2`

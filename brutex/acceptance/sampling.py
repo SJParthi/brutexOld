@@ -42,6 +42,77 @@ def dataset_key(coord: tuple[str, str, str]) -> str:
     return "/".join(coord)
 
 
+def recent_months(run_date: date, months: int) -> list[tuple[int, int]]:
+    """The last *months* calendar (year, month) cells ending at *run_date*."""
+    out: list[tuple[int, int]] = []
+    year, month = run_date.year, run_date.month
+    for _ in range(months):
+        out.append((year, month))
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+    return sorted(out)
+
+
+def month_bounded_files(root: Path, months: set[tuple[int, int]] | None) -> list[Path]:
+    """The ``<root>/<yyyy>/<mm>.parquet`` files whose FILENAME month is in *months*.
+
+    ``months=None`` = every stored file (the ``--full`` posture). Lexicographic
+    order (the lake read law); a non-grammar entry is skipped under a bound
+    (conservatively unreadable-by-month) and kept when unbounded.
+    """
+    if not root.is_dir():
+        return []
+    out: list[Path] = []
+    for year_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for file in sorted(year_dir.glob("*.parquet")):
+            if months is not None:
+                try:
+                    cell = (int(year_dir.name), int(file.stem))
+                except ValueError:
+                    continue
+                if cell not in months:
+                    continue
+            out.append(file)
+    return out
+
+
+def read_bars_frame_bounded(
+    symbol_dir: Path, interval: str, months: set[tuple[int, int]] | None
+) -> Any:
+    """A month-bounded twin of ``tf_autoderive.read_lake_bars_frame`` (additive).
+
+    Reads ONLY the partition files whose filename month is in *months*
+    (``None`` = all — delegates to the production seam verbatim), then applies
+    the SAME keep-first dedup + canonical projection the seam applies. This is
+    what makes ``--months`` actually bound the tf.daily/sanity reads (review
+    round 1 complexity MAJOR-2) without editing the production reader. Returns
+    ``None`` when no in-scope file exists.
+    """
+    import polars as pl
+
+    from brutex.data.lake_read import dedup_bars_frame
+
+    if months is None:
+        from brutex.data.tf_autoderive import read_lake_bars_frame
+
+        root = symbol_dir / interval
+        if not root.is_dir() or not any(root.rglob("*.parquet")):
+            return None
+        return read_lake_bars_frame(symbol_dir, interval)
+    files = month_bounded_files(symbol_dir / interval, months)
+    if not files:
+        return None
+    # glob=False — a metachar-named dir must read its literal files (#1594-R15).
+    raw = pl.concat([pl.read_parquet(f, glob=False) for f in files])
+    frame, _dropped = dedup_bars_frame(raw, source=f"{symbol_dir.name}/{interval}")
+    return (
+        frame.rename({"timestamp": "ts_utc"})
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+        .sort("ts_utc")
+    )
+
+
 def enumerate_spot_datasets(lake_root: Path) -> list[tuple[str, str, str]]:
     """Enumerate stored NON-F&O dataset coordinates by scanning ``bars/``.
 
@@ -151,7 +222,8 @@ def load_coverage_ledger(path: Path) -> dict[str, dict[str, str]]:
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: a deep-nested JSON bomb must not crash the run (MN5).
         return {}
     if not isinstance(raw, dict):
         return {}

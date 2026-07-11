@@ -2,10 +2,11 @@
 
 DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). In-process TestClient
 + ``perf_counter`` best-of-N-MIN (the house DEC-CANARY-MINTIME-001 idiom); one
-recorded COLD call + N warm rounds per probe. Verdicts gate the WARM
+recorded FIRST call + N warm rounds per probe. Verdicts gate the WARM
 best-of-N only; every number is emitted regardless. HONEST: on-box absolute
 budgets — NOT the CI 1.1x strict tier and not an asymptotic proof; a breach
-is a flag to investigate.
+is a flag to investigate. The first-call number is NOT claimed cold — earlier
+checks share the client and may have warmed the caches (review round 1).
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         budget = float(ctx.latency_budget_overrides.get(key, default_budget))
         t0 = timer()
         response = client.get(path, params=params)
-        cold_ms = (timer() - t0) * 1000.0
+        first_call_ms = (timer() - t0) * 1000.0
         if response.status_code != HTTP_OK:
             subs.append(
                 make_subcheck(
@@ -100,21 +101,26 @@ def run(ctx: AcceptanceContext) -> CheckResult:
             warm.append((timer() - t0) * 1000.0)
         best = min(warm)
         limits = [
-            f"on-box absolute budget ({envelope}) — not the CI 1.1x tier, not an asymptotic proof"
+            f"on-box absolute budget ({envelope}) — not the CI 1.1x tier, not an asymptotic proof",
+            # Honest relabel (review round 1 MINOR-2): earlier checks share this
+            # client, so the first call here may already be cache-warm — it is a
+            # FIRST-CALL number, never claimed cold; only the warm best gates.
+            "first_call_ms is not guaranteed cold (earlier checks may have "
+            "warmed shared caches) — warm best-of-N is the only gated number",
         ]
-        if best >= cold_ms:
-            limits.append("cache_not_faster: warm best did not beat the cold call")
+        if best >= first_call_ms:
+            limits.append("cache_not_faster: warm best did not beat the first call")
         subs.append(
             make_subcheck(
                 f"{CHECK_ID}.{key}",
                 Verdict.FAIL if best > budget else Verdict.PASS,
                 units_checked=len(warm) + 1,
                 evidence={
-                    "cold_ms": round(cold_ms, 3),
+                    "first_call_ms": round(first_call_ms, 3),
                     "warm_ms_best": round(best, 3),
                     "warm_ms_all": [round(w, 3) for w in warm],
                     "budget_ms": budget,
-                    "ratio_cold_over_warm": round(cold_ms / best, 3) if best > 0 else None,
+                    "ratio_first_over_warm": round(first_call_ms / best, 3) if best > 0 else None,
                 },
                 limits=limits,
                 repro=_repro(ctx),

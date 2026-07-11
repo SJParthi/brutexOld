@@ -9,6 +9,7 @@ import json
 from datetime import date
 from pathlib import Path
 
+from brutex.acceptance import sampling
 from brutex.acceptance.sampling import (
     ENGINE_COORDS,
     VIX_COORD,
@@ -150,3 +151,68 @@ class TestCoverageLedger:
             dataset_keys=["a"],
             run_date=date(2026, 7, 10),
         )  # must not raise — the ledger is a visibility aid only
+
+
+class TestRecentMonths:
+    def test_year_boundary(self) -> None:
+        from datetime import date
+
+        got = sampling.recent_months(date(2026, 2, 15), 4)
+        assert got == [(2025, 11), (2025, 12), (2026, 1), (2026, 2)]
+
+
+class TestCoverageLedgerBomb:
+    def test_deep_nested_json_bomb_returns_empty(self, tmp_path: Path) -> None:
+        # Round 1 MN5 regression: RecursionError on a nested-JSON bomb must
+        # fold to the empty ledger, never crash the run.
+        path = tmp_path / "coverage_ledger.json"
+        path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        assert sampling.load_coverage_ledger(path) == {}
+
+
+class TestMonthBoundedRead:
+    def _seed(self, tmp_path: Path) -> Path:
+        from datetime import date
+
+        from brutex.acceptance.selftest import _twin_bars
+        from brutex.data.parquet_writer import ParquetWriter
+
+        lake = tmp_path / "lake"
+        writer = ParquetWriter(lake_root=lake)
+        for day in (date(2026, 2, 4), date(2026, 7, 9)):
+            writer.write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="1minute",
+                bars=_twin_bars(day, base=100.0),
+            )
+        return lake / "bars" / "NSE" / "INDEX" / "NIFTY"
+
+    def test_month_bounded_files_filters_by_filename(self, tmp_path: Path) -> None:
+        symbol_dir = self._seed(tmp_path)
+        root = symbol_dir / "1minute"
+        all_files = sampling.month_bounded_files(root, None)
+        assert [f.name for f in all_files] == ["02.parquet", "07.parquet"]
+        only_july = sampling.month_bounded_files(root, {(2026, 7)})
+        assert [f.name for f in only_july] == ["07.parquet"]
+        # a non-grammar entry is skipped under a bound
+        (root / "2026" / "junk.parquet").write_bytes(b"x")
+        assert sampling.month_bounded_files(root, {(2026, 7)}) == only_july
+        assert sampling.month_bounded_files(tmp_path / "nowhere", None) == []
+
+    def test_read_bounded_matches_seam_when_unbounded(self, tmp_path: Path) -> None:
+        from brutex.data.tf_autoderive import read_lake_bars_frame
+
+        symbol_dir = self._seed(tmp_path)
+        unbounded = sampling.read_bars_frame_bounded(symbol_dir, "1minute", None)
+        assert unbounded is not None
+        assert unbounded.equals(read_lake_bars_frame(symbol_dir, "1minute"))
+
+    def test_read_bounded_reads_only_in_scope_months(self, tmp_path: Path) -> None:
+        symbol_dir = self._seed(tmp_path)
+        july = sampling.read_bars_frame_bounded(symbol_dir, "1minute", {(2026, 7)})
+        assert july is not None
+        assert july.height == 31  # one twin session only
+        assert sampling.read_bars_frame_bounded(symbol_dir, "1minute", {(2025, 1)}) is None
+        assert sampling.read_bars_frame_bounded(symbol_dir, "5minute", None) is None

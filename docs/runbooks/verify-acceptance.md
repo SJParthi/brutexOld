@@ -2,9 +2,11 @@
 
 > DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756.
 > ONE command that verifies the 7 acceptance classes on the REAL lake and
-> writes an evidence report you can prove untampered. Read-only on the lake;
-> writes ONLY under `<lake_root>/acceptance/`. ZERO vendor calls, ever
-> (AST-pinned) — the pull lock is never taken.
+> writes a hash-chained evidence report (tamper-EVIDENT against accidental
+> damage — see the §5 honest limit). Read-only on the lake (instruments.duckdb
+> opened read-only, never migrated); writes ONLY under
+> `<lake_root>/acceptance/`. ZERO vendor calls, ever (AST-pinned) — the pull
+> lock is never taken.
 
 ## 1. The one command
 
@@ -14,22 +16,30 @@ brutex verify-acceptance                # all 7 checks, teeth smoke, default sam
 
 Defaults resolve with zero prompts: lake root via `$BRUTEX_LAKE_ROOT` /
 `~/.brutex/lake`; sampling seed = the IST report date (deterministic daily
-rotation — a nightly cron covers all ~750 datasets in ~⌈750/12⌉ nights);
-non-engine scans bounded to the last 6 months. The engine set
+rotation — a nightly cron covers all ~750 datasets in ~⌈750/12⌉ nights).
+Scope bounds (honest, per surface): the uniqueness census scans the SAMPLED
+datasets × the last 6 months per-coordinate (+ one filename-bounded
+`options/` tree scan — never a whole-`bars/`-tree enumeration); the tf 1day
+compare and every sanity read are month-bounded; the INTRADAY freshness seam
+(`lake_derived_freshness_verdicts`) reads full stored history — seam-owned,
+disclosed in the report's limits. Rotating-log / ingest-audit evidence reads
+are bounded 16 MiB seek-from-end tails. The engine set
 (NIFTY/BANKNIFTY/SENSEX + INDIAVIX + the NIFTY-FUT contract dirs) is ALWAYS
-in scope at full stored history.
+in scope; the `unique.engine` census line is full stored history. The
+instrument master is opened READ-ONLY (never migrated, never written; a
+locked/older-schema store reads a named ABSTAIN).
 
 ## 2. What each check proves (and honestly cannot)
 
 | check | proves | permanent limits |
 |---|---|---|
-| unique | census fold (`scan_lake_invariants`) clean AND complete — a skipped file FAILs | month-bounded by default (`--full` lifts) |
-| tf | 19 intraday TFs fresh (the sweep-preflight seam) + the 1day re-derive compare | `tf.oi` ABSTAINs until follow-up F2 (OI not value-compared) |
-| pull | re-plan over the covered span mints ZERO new fetchable windows; keep-first counter laws; SUCCESS rows have backing files (sampled) | plan-level convergence, not vendor determinism; presence PASS is sample-scoped |
-| rate | constants pin · market-hours conformance (#1692) · bridge/log point evidence | `rate.per_call_history` = PERMANENT ABSTAIN — no per-call record persists (F3 needs an operator ruling); live probe = `brutex doctor --live --stage 13` |
-| movers | page cells == the FENCED independent recompute (raw parquet + hand math) | rank verified within served rows; Greeks presence-only |
-| sanity | price sanity · bad-tick (4x screen, #1616 escapes named) · tick grid · session windows · interior holes · VIX presence · completeness | heuristic screens stay heuristics |
-| latency | measured cold+warm ms vs on-box budgets | absolutes, not the CI 1.1x tier, not a proof |
+| unique | census scans (`scan_lake_invariants`, per sampled coordinate) clean AND complete — a skipped file FAILs; `unique.engine` full-history | sampled × month-bounded by default (`--full` = the whole-lake scan) |
+| tf | 19 intraday TFs fresh (the sweep-preflight seam) + the 1day re-derive compare (Muhurat sessions skipped PER-DAY + counted, never a whole-history abstain) | `tf.oi` ABSTAINs until follow-up F2 (OI not value-compared); intraday seam reads full history |
+| pull | re-plan over each MERGED covered span (production expiry-capped contract windows) mints ZERO new fetchable windows; keep-first counter laws; SUCCESS rows have backing files (sampled) | plan-level convergence, not vendor determinism; presence PASS is sample-scoped; a deleted ledger row that splits a span is invisible to replan |
+| rate | constants pin · market-hours conformance (#1692; genuine vendor-attempt records only — journal heartbeats never count) · bridge/log point evidence (bounded tails) | `rate.per_call_history` = PERMANENT ABSTAIN — no per-call record persists (F3 needs an operator ruling); live probe = `brutex doctor --live --stage 13` |
+| movers | page cells == the FENCED independent recompute (raw parquet + hand math; literal `glob=False` reads); moneyness grammar = the FULL production vocabulary incl. the honest `?`/`—`/bare-ITM/OTM sentinels | rank verified within served rows; Greeks presence-only |
+| sanity | price sanity · bad-tick (4x screen, #1616 escapes named) · tick grid · session windows · interior holes · VIX presence · completeness (read-only master) | heuristic screens stay heuristics; reads month-bounded by default |
+| latency | measured first-call+warm ms vs on-box budgets (warm best-of-N is the only gated number) | absolutes, not the CI 1.1x tier, not a proof; first-call is NOT claimed cold |
 
 ## 3. Teeth (why you can trust a PASS)
 
@@ -74,12 +84,18 @@ budget/streak-exempt — the standing by-design gaps never go permanently amber.
 <lake>/acceptance/audit/acceptance.jsonl  # hash-chained trail
 ```
 
-Prove a report untampered:
+Cross-check a report against its audit trail:
 
 ```bash
 brutex audit verify <lake>/acceptance/audit/acceptance.jsonl
 sha256sum <lake>/acceptance/<run_id>/report.json   # vs the ACCEPTANCE_RUN_COMPLETE line
 ```
+
+HONEST LIMIT: the hash chain carries no secret key and lives in the same
+operator-writable tree as the report — it detects ACCIDENTAL/casual tampering
+and torn writes, but an attacker with lake write access can restate the whole
+chain and pass `brutex audit verify`. Off-box anchoring (the backup lane's
+immutable store) is what defeats restatement, not this file.
 
 Run-over-run deltas + consecutive-ABSTAIN streaks are carried in the report
 chain (previous report via LATEST) — no separate state file.

@@ -49,15 +49,18 @@ class TestLatencyCheck:
         assert check.verdict is Verdict.PASS
         probe = _sub(check, "latency.movers_hit")
         assert set(probe.evidence) >= {
-            "cold_ms",
+            "first_call_ms",
             "warm_ms_best",
             "warm_ms_all",
             "budget_ms",
-            "ratio_cold_over_warm",
+            "ratio_first_over_warm",
             "units_checked",
         }
         assert len(probe.evidence["warm_ms_all"]) == 3
-        assert client.calls == len(latency.PROBES) * 4  # 1 cold + 3 warm each
+        assert client.calls == len(latency.PROBES) * 4  # 1 first + 3 warm each
+        # Round 1 MINOR-2 honesty relabel: the first call is never claimed
+        # cold — earlier checks share the client and may have warmed caches.
+        assert any("not guaranteed cold" in limit for limit in probe.limits)
 
     def test_budget_zero_fail_tooth(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)
