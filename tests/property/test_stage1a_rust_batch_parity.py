@@ -362,3 +362,33 @@ def test_beyond_schedule_bar_raises_identically_on_and_off() -> None:
     on = _arm_exception(bars, flag=True, roll_schedule=schedule)
     assert type(off) is type(on) is ValueError
     assert str(off) == str(on)
+
+
+def test_distinct_bps_triple_parity_with_anti_swap_teeth() -> None:
+    """RF-γ round-4 NIT: every committed dual-arm corpus drew ONE bps for all
+    three proximity channels — this pins a DISTINCT (pivot, pdh_pdl, fib)
+    triple through the FFI, with anti-swap teeth: on this feed swapping the
+    pivot and fib tolerances MOVES the masks, so a cross-wired bps channel
+    could never pass the parity vacuously.
+
+    Feed law: day-1 OHLC (110/90/100) puts P at 10_000 paisa and the bearish
+    retrace-38 at 10_236; day-2 closes 100.20 (20 paisa off P — near under
+    41 bps, far under 7) and 102.16 (20 paisa off retrace-38, same split).
+    """
+    d1, d2 = _TRADING_DAYS[0], _TRADING_DAYS[1]
+    bars = [
+        _bar_from(d1, 0, "100.00", "110.00", "90.00", "100.00", 100),
+        _bar_from(d2, 0, "100.10", "100.30", "99.90", "100.20", 100),
+        _bar_from(d2, 1, "102.10", "102.30", "101.90", "102.16", 100),
+    ]
+    distinct = ProximityParams(
+        pivot_proximity_bps=7, pdh_pdl_proximity_bps=23, fib_proximity_bps=41
+    )
+    off, on = _dual_arm(bars, proximity=distinct)
+    assert on == off
+    # Anti-swap teeth (flag-OFF oracle only — the parity above carries the
+    # FFI): the pivot<->fib swap changes which near bits fire on day 2.
+    swapped = ProximityParams(pivot_proximity_bps=41, pdh_pdl_proximity_bps=23, fib_proximity_bps=7)
+    assert build_bar_bits(bars, proximity=swapped) != off, (
+        "the feed cannot distinguish the pivot/fib tolerances — vacuous triple"
+    )
