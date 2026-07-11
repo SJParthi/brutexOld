@@ -10,7 +10,7 @@
 #    the tests don't actually cover that logic branch. Runs on EVERY
 #    trigger (push to main, weekly schedule, manual dispatch).
 #
-# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 6-shard matrix,
+# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 12-shard matrix,
 #    engine-critical scope defined ONCE in rust/fno-math/.cargo/mutants.toml.
 #    Schedule + workflow_dispatch ONLY (see the job-level `if:` comment).
 #
@@ -605,9 +605,10 @@ jobs:
             });
 
   # ─────────────────────────────────────────────────────────────────
-  # Rust mutation — cargo-mutants over rust/fno-math/ (6-shard matrix)
+  # Rust mutation — cargo-mutants over rust/fno-math/ (12-shard matrix)
   #
-  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
+  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs
+  # + the slice-9 audit_chain.rs / calendar_verdict.rs / rate_math.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
@@ -615,7 +616,7 @@ jobs:
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
-    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/6)"
+    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/12)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003):
@@ -629,7 +630,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     defaults:
       run:
         working-directory: rust/fno-math
@@ -667,30 +668,32 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants@27.1.0
-      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
+      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/12)
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
-          #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 599 mutants measured
-          #   2026-07-08 (`cargo mutants --list | wc -l` on the post-merge HEAD —
-          #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
-          #   trade_sim 124->167; the pre-merge 2026-07-07 measurement was 556).
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + the slice-9
+          #   audit_chain.rs + calendar_verdict.rs + rate_math.rs = 1,149 mutants
+          #   measured 2026-07-11 (`cargo mutants --list | wc -l` on the slice-9
+          #   phase-2b-2 tree — the prior scope was 599 measured 2026-07-08).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1597
-          #   pre-decided +1-shard dial, taken when the 599 re-measure pushed the
-          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin):
-          #   ceil(599/6)=100 mutants x 29-40 s/mutant serial (CI per-lane measured
-          #   4-9 s build + 25-31 s test) ~= 48-67 min + ~5.5 min baseline/setup
-          #   ~= 54-72 min nominal, ~86 at +20% on the worst end -> >= 34 min
-          #   margin per shard.
+          #   wall-clock parallelism = this 12-way shard matrix (6->12 = the
+          #   slice-9 re-shard, DEC-ORCH-CALENDAR-RUST-CONVERT-001 / MIGRATION
+          #   #1727a fix round 1, taken when the examine_globs expansion grew the
+          #   crate 599 -> 1,149 mutants — ~1.9x the budget the 6-shard matrix
+          #   was derived for): ceil(1149/12)=96 mutants/shard <= the measured
+          #   ceil(599/6)=100/shard 6-shard envelope (54-72 min nominal, ~86 at
+          #   +20% worst end under the SAME 29-40 s/mutant serial cost), so the
+          #   per-shard budget stays AT or BELOW the #1597-measured worst case
+          #   -> >= 34 min margin per shard under the 120-min cap.
           cargo mutants \
             --in-place \
-            --shard ${{ matrix.shard }}/6 \
+            --shard ${{ matrix.shard }}/12 \
             --test-tool cargo \
             --no-shuffle \
             --timeout 300 \

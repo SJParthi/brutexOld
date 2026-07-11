@@ -24,12 +24,14 @@
 # 1,149 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from
 # this dir on the slice-9 phase-2b-2 tree: metrics 358 + trade_sim 167 +
 # python 65 + lib 9 + audit_chain 120 + calendar_verdict 352 + rate_math 78).
-# The +550 growth (~1.9x the pre-slice-9 599) EXCEEDS the shard-budget
-# bands — the mutation.yml fno-math matrix re-shard (6 → a re-measured
-# count, planning number ~12 at the observed ~0.65 min/mutant worst-case vs
-# the 120-min cap) is a NAMED follow-up for the slice-9 review round; the
-# weekly gate owner re-shards before the next scheduled run, per the #1597
-# measured-not-projected convention.
+# The +550 growth (~1.9x the pre-slice-9 599) EXCEEDS the 6-shard budget
+# bands the matrix was derived for — the mutation.yml fno-math matrix was
+# RE-SHARDED 6 → 12 IN-SLICE (slice-9 fix round 1, per the review-confirmed
+# M1: shipping the examine_globs expansion while deferring the re-shard
+# would red the next scheduled run). ceil(1149/12) = 96 mutants/shard <=
+# the #1597-measured ceil(599/6) = 100/shard envelope (worst shard ~86 min
+# at +20%), so the per-shard budget stays at or below the measured worst
+# case under the 120-min job cap.
 # Prior: 1,071 mutants measured 2026-07-11 (phase 2b-1 tree: metrics 358 +
 # trade_sim 167 + python 65 + lib 9 + audit_chain 120 + calendar_verdict 352).
 # Prior measurement history: 599 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
