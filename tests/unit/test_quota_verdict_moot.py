@@ -1,45 +1,43 @@
-"""MOOT pins — the dashboard quota-verdict phone alert is closed as MOOT.
+"""MOOT pins — the dashboard quota-verdict phone alert stays closed as MOOT.
 
-DEC-QUOTA-VERDICT-MOOT-001. Groww backtesting has NO daily quota
-(``GROWW_DAILY_QUOTA_UNVERIFIED=None``, operator-confirmed 2026-06-13 —
-CLAUDE.md §2 Rule 6 / §6), so the whole quota ENFORCEMENT chain is
-production-inert by construction:
+DEC-QUOTA-VERDICT-MOOT-001 established the dormancy; DEC-ORCH-DEAD-SCAFFOLD-
+DELETE-001 (MIGRATION.md #1727 deletion record) then DELETED the dormant
+``DailyQuotaTracker`` implementation outright — the zero-construction AST pin
+this file once carried is now satisfied STRUCTURALLY (the class no longer
+exists to construct). What remains load-bearing, and stays pinned here:
 
-* ZERO ``DailyQuotaTracker(...)`` construction sites exist in ``brutex/``
-  production source (both controller build sites —
-  ``pull_controller._build_live_controller`` per DEC-GROWW-NO-DAILY-QUOTA-001
-  and the CLI ``cmd_fetch`` — omit the tracker);
-* therefore ``RateController.quota_exhausted()`` is constant ``False`` and
-  ``DailyQuotaExceeded`` / ``QuotaInvariantError`` can never be raised by a
-  live pull;
-* therefore the ``stop_quota`` until-clean brake and the
-  ``kind="quota_exhausted"`` verdict are unreachable from any live dashboard
-  pull, and the #889-flagged "verdict-driven phone alert" follow-up guards a
-  doubly-dead path — resolved MOOT, not wired.
+* ``DailyQuotaExceeded`` / ``QuotaInvariantError`` keep their byte-stable
+  import path and still classify as pull halts (#1591's "exception sets are
+  NOT narrowed" pin — both ingest spines' global-stop sets + the Telegram
+  halt matcher depend on it);
+* the ``stop_quota`` until-clean brake stays quota-silent under the
+  production ``quota_exhausted=None`` wiring;
+* the quota verdict, were it ever reached, returns via the SUCCESS branch —
+  display-only, no phone alert (the #889 resolution);
+* the deleted informational quota surface (route/gauge/panel keys) stays
+  deleted;
+* the ONE re-wire point survives as the structural ``QuotaGate`` Protocol on
+  ``RateController(quota_tracker=)`` / ``AdaptiveTokenBucket.quota_tracker``
+  — a future capped vendor implements the Protocol (this file pins its
+  member surface), never resurrects the deleted class.
 
-These pins convert that dormancy into a permanent CI invariant: a future PR
-that re-wires a tracker fails the AST pin LOUDLY and must consciously revisit
-DEC-QUOTA-VERDICT-MOOT-001 (the raise-path phone alert —
-``is_pull_halt`` → ``emit_pull_halt_alert``, #889 — then covers the quota
-exception with zero new code, which is why no verdict-path alert is added).
-The vendor-neutral enforcement seam (``RateController(quota_tracker=)`` +
-the verdict kind + the amber banner lane) is KEPT dormant by decision.
+This file is ALSO the ci.yml per-module covering suite for the trimmed
+``brutex.orchestrator.quota_tracker`` (exceptions + Protocol).
 """
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
-import brutex
 import pytest
 from brutex.adapters.ingest_common import UntilCleanRound, run_until_clean
 from brutex.dashboard import pull_jobs
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.pull_progress import STATE_DONE, PullProgress
-from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
-
-_PACKAGE_ROOT = Path(brutex.__file__).resolve().parent
+from brutex.orchestrator import quota_tracker
+from brutex.orchestrator.quota_tracker import (
+    DailyQuotaExceeded,
+    QuotaGate,
+    QuotaInvariantError,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -52,43 +50,48 @@ def _disable_account_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pull_jobs, "_default_lake_root_resolver", lambda: None)
 
 
-def _constructs_daily_quota_tracker(tree: ast.AST) -> bool:
-    """True iff the module contains a ``DailyQuotaTracker(...)`` Call node."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if (isinstance(func, ast.Name) and func.id == "DailyQuotaTracker") or (
-                isinstance(func, ast.Attribute) and func.attr == "DailyQuotaTracker"
-            ):
-                return True
-    return False
-
-
 class TestQuotaVerdictMootPins:
     """The inertness proof chain, pinned link by link (DEC-QUOTA-VERDICT-MOOT-001)."""
 
-    def test_no_production_quota_tracker_construction(self) -> None:
-        """AST pin (the G3 #1492 idiom): NO brutex/ module constructs a tracker.
+    def test_tracker_class_deleted_structurally(self) -> None:
+        """The dormant ``DailyQuotaTracker`` no longer exists to construct.
 
-        The root of the whole proof: with zero construction sites,
-        ``RateController.quota_exhausted()`` is constant ``False`` (pinned by
-        ``test_default_factory_builds_a_real_controller``) and the quota
-        exceptions have zero raise sites, so the ``quota_exhausted`` verdict is
-        unreachable from any live pull.
+        DEC-ORCH-DEAD-SCAFFOLD-DELETE-001: the AST zero-construction pin this
+        file once carried is superseded by structure — the module exports
+        EXACTLY the two live exception types + the ``QuotaGate`` re-wire
+        Protocol, nothing else. A future capped vendor implements the
+        Protocol; resurrecting a tracker class here fails this pin LOUDLY and
+        must consciously revisit DEC-QUOTA-VERDICT-MOOT-001 + #1727.
         """
-        offenders: list[str] = []
-        for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            if _constructs_daily_quota_tracker(tree):
-                offenders.append(str(path.relative_to(_PACKAGE_ROOT)))
-        assert offenders == [], (
-            f"production modules construct DailyQuotaTracker: {offenders} — a tracker "
-            "has been re-wired, so the quota-verdict MOOT decision "
-            "(DEC-QUOTA-VERDICT-MOOT-001) must be consciously revisited: the "
-            "stop_quota brake + the quota_exhausted verdict come back to life, and "
-            "the raise-path phone alert (is_pull_halt → emit_pull_halt_alert, #889) "
-            "covers the DailyQuotaExceeded raise automatically."
-        )
+        assert not hasattr(quota_tracker, "DailyQuotaTracker")
+        assert sorted(quota_tracker.__all__) == [
+            "DailyQuotaExceeded",
+            "QuotaGate",
+            "QuotaInvariantError",
+        ]
+
+    def test_quota_gate_protocol_surface(self) -> None:
+        """The ``QuotaGate`` Protocol carries EXACTLY the consumed members.
+
+        ``acquire_or_raise`` (the bucket's gate call), ``current_count`` /
+        ``remaining`` / ``daily_limit`` (the controller's snapshot gauge +
+        exhaustion brake) — the deleted tracker's consumed surface, verbatim.
+        """
+        for member in ("acquire_or_raise", "current_count", "remaining"):
+            assert callable(getattr(QuotaGate, member)), member
+        assert "daily_limit" in QuotaGate.__annotations__
+
+    def test_exception_shapes_are_byte_stable(self) -> None:
+        """The two live exceptions keep their safe-message discipline.
+
+        The halt chain (and the MarkdownV2 alert bodies) read ``str(exc)`` —
+        the categorical safe message must survive the module trim unchanged.
+        """
+        exceeded = DailyQuotaExceeded("daily_limit=3 already reached on 2026-06-13")
+        assert str(exceeded) == "Daily vendor API quota exceeded"
+        assert DailyQuotaExceeded().safe_message == "Daily vendor API quota exceeded"
+        invariant = QuotaInvariantError("persisted quota count is negative: -4")
+        assert str(invariant) == "Persisted quota state is corrupt or malformed"
 
     def test_until_clean_none_hook_never_stops_on_quota(self) -> None:
         """A ``quota_exhausted=None`` hook (the production wiring) never yields stop_quota.
@@ -119,7 +122,8 @@ class TestQuotaVerdictMootPins:
         (``BackgroundPullJob._run``'s except branch → ``is_pull_halt`` →
         ``emit_pull_halt_alert``); a quota VERDICT returns through the success
         branch and is display-only (the amber ``verdict_banner`` lane). Since
-        the verdict is unreachable in production (the AST pin above), wiring a
+        the verdict is unreachable in production (no gate is wired — the
+        structural pin above), wiring a
         verdict-path alert would ship an AUTOMATED surface that can never fire
         (Golden Rules #10/#11) — hence display-only is the decided behaviour.
         """

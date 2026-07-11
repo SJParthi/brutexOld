@@ -1009,9 +1009,9 @@ jobs:
           # modules' standalone 100% gates (DEC-ORCH-STRICT-GATES-001 below).
           # DEC-ORCH-DEAD-SCAFFOLD-DELETE-001 (MIGRATION.md #1727 deletion
           # record): the dead scaffolding modules' gates (state / store /
-          # pipeline / retry) were REMOVED with their
+          # pipeline / retry / adaptive_rate_limiter) were REMOVED with their
           # modules; the surviving live shapes are gated below as
-          # brutex.orchestrator.events.
+          # brutex.orchestrator.events + the trimmed quota_tracker.
           # DEC-AUDIT-TORN-TAIL-001 (MIGRATION.md #1042): the torn-tail
           # auto-resume recovery (_truncate_torn_tail + the resume-path
           # truncate call) is exercised by the dedicated cross-chain
@@ -1053,17 +1053,12 @@ jobs:
           else
             echo "(brutex.orchestrator.rate_limiter test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_adaptive_rate_limiter.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.adaptive_rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_adaptive_rate_limiter.py
-          else
-            echo "(brutex.orchestrator.adaptive_rate_limiter test file not present yet — gate inactive)"
-          fi
-          # quota_tracker composes TWO files: the dedicated unit file plus
-          # the DEC-QUOTA-ENV-SINGLE-OPEN-001 regression file, which owns
-          # the process-shared env-registry paths (registry hit + ref-
-          # counted release) — composed, not duplicated (Golden Rule COMMON).
-          if compgen -G "tests/unit/test_quota_tracker.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.quota_tracker --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_quota_tracker.py tests/unit/test_bugfix_quota_env_share.py
+          # quota_tracker was TRIMMED to the live exception types + the
+          # QuotaGate re-wire Protocol (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+          # MIGRATION.md #1727 — the dormant tracker machinery deleted); its
+          # covering suite is the DEC-QUOTA-VERDICT-MOOT-001 pin file.
+          if compgen -G "tests/unit/test_quota_verdict_moot.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.quota_tracker --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_quota_verdict_moot.py
           else
             echo "(brutex.orchestrator.quota_tracker test file not present yet — gate inactive)"
           fi

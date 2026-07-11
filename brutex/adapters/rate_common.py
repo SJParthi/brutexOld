@@ -27,8 +27,8 @@ swapped for a fresh object), so there is only ever a SINGLE shared token stream
 the aggregate physical rate strictly ≤ the current rate even across a 5→4→3
 cascade (DEC-DHAN-RATE-SINGLE-BUCKET-001 — closes the dual-bucket
 ``rate.breach rps_1s=11`` opening transient). The same
-:class:`DailyQuotaTracker` is retained throughout so the day's count is never
-reset.
+:class:`~brutex.orchestrator.quota_tracker.QuotaGate` (when one is wired) is
+retained throughout so the day's count is never reset.
 
 Wiring (next installment): ``pace`` → the ingest ``pace=`` hook;
 ``on_rate_limit`` ← a 429 (``GrowwRateLimitError``) in the fetch loop;
@@ -48,7 +48,7 @@ from typing import Final
 import structlog
 
 from brutex.observability.progress_beat import emit_progress_beat
-from brutex.orchestrator.quota_tracker import DailyQuotaTracker
+from brutex.orchestrator.quota_tracker import QuotaGate
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 
 #: Structured logger — surfaces the otherwise-invisible throttle: a 429
@@ -419,7 +419,7 @@ class RateController:
     def __init__(
         self,
         *,
-        quota_tracker: DailyQuotaTracker | None = None,
+        quota_tracker: QuotaGate | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         ceiling_rps: float = CEILING_RPS,
@@ -432,8 +432,12 @@ class RateController:
         Parameters
         ----------
         quota_tracker
-            The shared daily-quota gate (production MUST pass one; ``None`` is a
-            test-only "bucket-only" mode). Persists across rate steps.
+            An optional shared daily-quota gate (a
+            :class:`~brutex.orchestrator.quota_tracker.QuotaGate`). DORMANT in
+            production — Groww backtesting has NO daily quota, so both live
+            build sites pass ``None`` (DEC-QUOTA-VERDICT-MOOT-001); a future
+            capped vendor wires a Protocol implementation here. Persists
+            across rate steps.
         clock, sleep
             Injected for deterministic testing (default the real monotonic clock
             + sleep). Threaded into the reused token bucket.
@@ -1398,11 +1402,11 @@ class RateController:
     def snapshot(self) -> dict[str, object]:
         """A JSON-friendly state snapshot for the dashboard rate panel (thread-safe, O(1)).
 
-        When a :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker` is wired
-        (the live path — DEC-AUTO-RESUME-QUOTA-001), the snapshot ALSO carries the
-        day's quota gauge (``quota_used`` / ``quota_remaining`` / ``quota_limit``) so
-        the dashboard SHOWS how much of the mandatory 100,000/day quota is
-        spent, not just the live r/s. The quota tracker is read OUTSIDE the
+        When a :class:`~brutex.orchestrator.quota_tracker.QuotaGate` is wired
+        (DORMANT in production — DEC-QUOTA-VERDICT-MOOT-001), the snapshot ALSO
+        carries the day's quota gauge (``quota_used`` / ``quota_remaining`` /
+        ``quota_limit``) so the dashboard SHOWS how much of the vendor's daily
+        quota is spent, not just the live r/s. The quota gate is read OUTSIDE the
         controller lock (``self._quota`` is set once at construction, never mutated)
         to avoid nesting the controller lock over the tracker's own lock + LMDB read.
         """
