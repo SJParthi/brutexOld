@@ -111,6 +111,11 @@ class HeadlessPipeline:
     strict_gate: bool
     targets: int  # count, for the report/log line
     close: Callable[[], None]  # closes the InstrumentStore
+    #: Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the live-clock
+    #: predicate threaded into ``run_full_pipeline`` so a headless pull that reaches
+    #: the sequencer inside the NSE market-hours window skips the whole vendor chain.
+    #: ``None`` (a dry-run build, or a directly-constructed test double) never gates.
+    market_closed: Callable[[], bool] | None = None
 
 
 def build_headless_pipeline(
@@ -141,6 +146,7 @@ def build_headless_pipeline(
         at build — the pre-chain refusal), or junk ISO dates.
     """
     from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
+    from brutex.calendars.market_hours import resolve_market_closed
     from brutex.dashboard.composite_pull import pull_historical_for_underlyings
     from brutex.dashboard.fno_cascade import build_fno_cascade
     from brutex.dashboard.metadata_pull import pull_expiries_contracts
@@ -194,6 +200,14 @@ def build_headless_pipeline(
     registry_path = lake_root / "registry.duckdb"
     rate = SessionRateController() if session_rate is None else session_rate
 
+    # Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the nightly 01:30 IST
+    # headless pull is the MOTIVATING case — it must STOP gracefully at 08:45 if it runs
+    # long. The env kill switch is parsed ONCE here at build (fail-loud on junk); the
+    # bound predicate then reads the live clock only (no per-window env re-parse → a junk
+    # env set mid-pull can never crash the long nightly run). A dry-run threads ``None``
+    # (no vendor calls to gate), so nightly dry-run tests are byte-identical.
+    _market_closed = None if dry_run else resolve_market_closed(env=env)
+
     # F&O expiry scope with the LIVE-edge normalization the dashboard applies
     # (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): a default-shaped bound is lifted to
     # None so live/unexpired contracts are never scoped out.
@@ -220,6 +234,7 @@ def build_headless_pipeline(
             auto_retry=True,
             until_clean=True,
             floor_store=store,
+            market_closed=_market_closed,
         )
 
     def _run_metadata() -> MetadataPullReport:
@@ -232,6 +247,9 @@ def build_headless_pipeline(
                 years=years,
                 dry_run=dry_run,
                 session_rate=rate,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: a metadata phase CROSSING 08:45
+                # halts mid-phase (per-cell belt), like the spot/historical spines.
+                market_closed=_market_closed,
             )
 
     def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
@@ -309,6 +327,7 @@ def build_headless_pipeline(
         strict_gate=strict_gate,
         targets=len(targets),
         close=store.close,
+        market_closed=_market_closed,
     )
 
 
@@ -322,6 +341,7 @@ def execute_headless_pipeline(hp: HeadlessPipeline) -> PipelinePullReport:
         run_historical=hp.run_historical,
         run_prebuild=hp.run_prebuild,
         strict_gate=hp.strict_gate,
+        market_closed=hp.market_closed,
     )
 
 

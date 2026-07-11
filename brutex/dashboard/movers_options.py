@@ -29,7 +29,9 @@ exactly ONE place each. This module IMPORTS:
   options uses the ``value_paisa`` field DIRECTLY, so the option's session frame is
   read ONCE — no separate value reader), the prior-day OI resolver
   :func:`~brutex.dashboard.movers_futures.resolve_prev_oi`, and the underlying spot
-  resolver :func:`~brutex.dashboard.movers_futures._underlying_spot_ltp`.
+  resolver :class:`~brutex.dashboard.movers_futures._SpotLtpResolver` (the exact-key
+  probe first + the #1482 drift-recovery ladder on a miss — the
+  DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in).
 
 It adds only what options need: the contract-symbol parser (strike + CE/PE), the
 options ranking (highest OI / OI gainers / OI losers / volume / value / price
@@ -113,7 +115,7 @@ import structlog
 from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_futures import (
     _read_future_session,
-    _underlying_spot_ltp,
+    _SpotLtpResolver,
     format_contract_date,
     resolve_prev_oi,
 )
@@ -1306,6 +1308,12 @@ def compute_options_candidates(
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
     expected_session_for = make_expected_session_resolver(day)
+    # ONE per-compute spot resolver (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3
+    # fold-in — the futures loop's twin): exact-key probes stay byte-identical;
+    # a drifted stock spot dir (the #1482 class, which pre-fix read a silent
+    # '?' moneyness) recovers via the COMMON ladder, walked + logged ONCE per
+    # (exchange, underlying) even across a many-contract chain.
+    spot_resolver = _SpotLtpResolver(lake_root, day=day, cutoff_min=cutoff_min, source="options")
     # The spot→F&O index alias map for the class lookup, resolved ONCE per compute
     # call (an env parse + dict copy) and threaded into every per-candidate
     # `fno_kind_from_underlying` — the lookup stays O(1)/candidate (review round 1).
@@ -1340,13 +1348,7 @@ def compute_options_candidates(
             # The underlying spot is probed under the PARSED underlying (NIFTY); the
             # row's display name keeps the parsed underlying (the strike/type are in
             # `OptionMover.name`), optionally renamed via `names`.
-            spot_ltp = _underlying_spot_ltp(
-                lake_root,
-                exchange=contract_exchange,
-                underlying=underlying,
-                day=day,
-                cutoff_min=cutoff_min,
-            )
+            spot_ltp = spot_resolver.ltp(exchange=contract_exchange, underlying=underlying)
         except skip_errors as exc:
             # A corrupt / unreadable Parquet for ONE option must not 500 the screen —
             # skip it (logged + counted), never fabricate (DEC-MOVERS-CORRUPT-SKIP-001).
