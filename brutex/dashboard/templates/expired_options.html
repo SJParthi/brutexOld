@@ -125,6 +125,10 @@
      authority). -->
 <link rel="stylesheet" href="/static/bx-design.css">
 <script defer src="/static/bx-ui.js"></script>
+<!-- The ONE shared poll-discipline core (DEC-FRONTEND-LATENCY-HARDENING-001,
+     MIGRATION.md #1720): hidden guard, one-in-flight chain, 10 s fetch abort,
+     capped 3 s→30 s backoff, visibilitychange catch-up. -->
+<script defer src="/static/bx-poll.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
@@ -314,7 +318,7 @@ function showFetchError(status, offline) {
   if (hasResolved) return;
   panel.setAttribute("aria-busy", "false");
   if (window.BXUI) {
-    BXUI.errorCard(panel, { status: status || undefined, offline: offline, retry: poll });
+    BXUI.errorCard(panel, { status: status || undefined, offline: offline, retry: repoll });
   } else {
     /* pre-BXUI very first tick: still an honest terminal state (the 4 s
        interval keeps retrying), built via textContent. */
@@ -351,17 +355,13 @@ let lastHeadline = {};
 let lastRowCount = 0;
 
 async function poll() {
-  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
-     ZERO fetches; the interval keeps ticking (hidden ticks are free) and the
-     visibilitychange listener below re-polls immediately on return. */
-  if (document.hidden) return;
   try {
     const r = await doFetch("/api/v1/coverage/options");
     if (!r.ok) {
       lastCoverageTxt = null;
       liveTxt.textContent = "error " + r.status;
       showFetchError(r.status, false);
-      return;
+      return false;
     }
     const txt = await r.text();
     if (txt !== lastCoverageTxt) {
@@ -388,19 +388,56 @@ async function poll() {
       ? "pulling · " + num(h.series) + " series · " + num(h.total_bars) + " bars"
       : "live · " + lastRowCount + " underlyings";
     setPullState(running, prOk ? "ok" : "");
+    return true;
   } catch (e) {
     lastCoverageTxt = null;
     liveTxt.textContent = "offline";
     showFetchError(0, true);
+    return false;
   }
 }
 
-poll();
-setInterval(poll, 4000);
-/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001). */
-document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) poll();
-});
+/* Self-recovering scheduler (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md
+   #1720): the tick above rides the ONE shared BXPoll discipline core
+   (bx-poll.js — hidden-tab guard BEFORE any fetch, one-in-flight
+   self-scheduling chain, capped 3 s→30 s failure backoff when the coverage
+   read fails, visibilitychange catch-up) instead of a bare fixed setInterval;
+   the visible-tab cadence is unchanged (pollMs: 4000) and every
+   render/degrade above is byte-identical (the best-effort pull-progress
+   second read keeps its own inner try — its failure never backs the tick
+   off). The poller starts at DOMContentLoaded, by which every deferred
+   script has executed; a missing bx-poll.js degrades to the legacy guarded
+   interval — the page never goes pollerless. */
+let poller = null;
+function repoll() { if (poller) { poller.pollNow(); } else { void poll(); } }
+function startPolling() {
+  if (window.BXPoll) {
+    poller = window.BXPoll.createPoller({
+      url: "/api/v1/coverage/options", // informational — the tick owns its own fetches
+      pollMs: 4000,
+      fetchJson: function () {
+        return poll().then(function (ok) {
+          if (!ok) { throw new Error("coverage/options poll tick failed"); }
+          return { ok: true };
+        });
+      },
+      onData: function () { /* the tick already rendered */ }
+    });
+    poller.start();
+  } else {
+    const legacyTick = function () { if (!document.hidden) void poll(); };
+    legacyTick();
+    setInterval(legacyTick, 4000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) void poll();
+    });
+  }
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startPolling);
+} else {
+  startPolling();
+}
 </script>
 </body>
 </html>
