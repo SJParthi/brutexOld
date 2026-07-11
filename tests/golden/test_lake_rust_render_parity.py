@@ -1,7 +1,8 @@
 """Rust-vs-Python parquet byte-parity corpus (ADR-0019 PR-1 — the core gate).
 
 DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Regenerates the
-slice-8 spike's 5-case corpus through the REAL
+slice-8 spike's 5-case corpus (plus the review-round all-null-overlay case)
+through the REAL
 :meth:`ParquetWriter._render_bytes` and asserts the ``brutex_lake`` crate's
 render is BYTE-IDENTICAL (sha256 AND raw bytes) on every case, plus a
 whole-write-path ON/OFF parity through :meth:`ParquetWriter.write` to a real
@@ -104,15 +105,49 @@ def _mk_greeks_bar(i: int) -> FnoGreeksBar:
     )
 
 
+def _mk_all_null_overlay_bar(i: int) -> FnoGreeksBar:
+    """Whole-window solver-demotion shape (review-round fold): EVERY overlay
+    column fully null, plus an all-null Int64 OI.
+
+    A real production shape — a window whose every Greeks solve demoted →
+    all overlay fields ``None`` — whose FULLY-null Float64/Int32 overlay
+    pages are a distinct parquet byte surface the original Greeks case never
+    witnessed (it nulls only ``i % 7 == 3`` rows). The all-null-OI SPOT
+    shape was already pinned by ``c1``/``c2`` (wholly ``oi=None``).
+    """
+    b = _mk_bar(i, oi=None)
+    return FnoGreeksBar(
+        timestamp=b.timestamp,
+        open=b.open,
+        high=b.high,
+        low=b.low,
+        close=b.close,
+        volume=b.volume,
+        open_interest=None,
+        iv=None,
+        delta=None,
+        gamma=None,
+        theta=None,
+        vega=None,
+        rho=None,
+        spot_at_bar=None,
+        t_years_used=None,
+        rate_used=None,
+        greeks_provenance_id=None,
+    )
+
+
 # The spike's 5 corpus cases: small spot with null OI, 17-column Greeks with
 # null rows, the exact 100_000 row-group boundary, boundary+1 (2 row groups),
-# and a realistic 250k-row month (3 row groups).
+# and a realistic 250k-row month (3 row groups) — plus the review-round
+# all-null-overlay case (e).
 CORPUS: dict[str, list[CandleBar]] = {
     "a_small_spot_10": [_mk_bar(i, oi=(None if i % 3 == 0 else 1000 + i)) for i in range(10)],
     "b_greeks_options_50": [_mk_greeks_bar(i) for i in range(50)],
     "c1_rowgroup_100000": [_mk_bar(i, oi=None) for i in range(100_000)],
     "c2_rowgroup_100001": [_mk_bar(i, oi=None) for i in range(100_001)],
     "d_realistic_250000": [_mk_bar(i, oi=(i * 7 % 900_000)) for i in range(250_000)],
+    "e_greeks_all_null_overlay_50": [_mk_all_null_overlay_bar(i) for i in range(50)],
 }
 
 
@@ -170,6 +205,25 @@ class TestRenderByteParity:
         lrr.reset_lake_rust_render_for_tests()  # full burn-in budget
         rendered = ParquetWriter._render_bytes(bars)
         assert rendered == expected
+        assert not lrr.rust_render_disabled()
+
+    def test_shape_gate_compares_first_greeks_shape_after_spot_burn_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The review-round shape gate, driven through the REAL crate.
+
+        The count budget is spent entirely on the SPOT shape; the first-ever
+        Greeks-overlay shape must still run the byte-compare against the
+        live oracle — and agree (no autorevert) on the real encoder.
+        """
+        spot = CORPUS["a_small_spot_10"]
+        greeks = CORPUS["b_greeks_options_50"]
+        expected_greeks = _python_bytes(greeks, monkeypatch)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
+        lrr.reset_lake_rust_render_for_tests(remaining=1)  # budget spent on spot
+        ParquetWriter._render_bytes(spot)
+        rendered = ParquetWriter._render_bytes(greeks)  # first-ever Greeks shape
+        assert rendered == expected_greeks
         assert not lrr.rust_render_disabled()
 
 

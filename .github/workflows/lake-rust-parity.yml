@@ -13,15 +13,19 @@
 #   2. maturin wheel build + install beside the repo's Python deps.
 #   3. The REAL-crate byte-parity corpus
 #      (tests/golden/test_lake_rust_render_parity.py — the spike's 5 cases
-#      regenerated through the REAL ParquetWriter._render_bytes, Rust vs
-#      Python sha256 + raw bytes equal, plus the whole-write-path ON/OFF
-#      parity through ParquetWriter.write) and the crate-free facade unit
-#      suites.
+#      + the review-round all-null-overlay case, regenerated through the
+#      REAL ParquetWriter._render_bytes, Rust vs Python sha256 + raw bytes
+#      equal, plus the whole-write-path ON/OFF parity through
+#      ParquetWriter.write) and the crate-free facade unit suites.
 #
 # NOT a required gate (coordinator ruling): it gates the FUTURE default-ON
 # flip, not every PR — a red run here blocks re-engaging the flag, never an
-# unrelated merge. Path-triggered on the crate + the seam + the suites +
-# itself, plus workflow_dispatch for the lockstep ritual's manual re-run
+# unrelated merge. HONESTY (review-round fold): byte-identity is therefore
+# enforced ONLY by this non-required lane (+ local runs) — the future
+# default-ON flip DEC must either make this lane required or cite a fresh
+# green run of it as a stated precondition. Path-triggered on the crate +
+# the seam + the schema module + the suites + itself, plus
+# workflow_dispatch for the lockstep ritual's manual re-run
 # (docs/runbooks/lake-rust-render-lockstep.md).
 #
 # COST HONESTY: a cold run compiles the polars git graph from source — the
@@ -42,6 +46,9 @@ on:
       - "rust/brutex-lake/**"
       - "brutex/data/parquet_writer.py"
       - "brutex/data/lake_rust_render.py"
+      # models.py defines the CandleBar/FnoGreeksBar schema that dictates
+      # the rendered frame's byte surface (review-round fold).
+      - "brutex/data/models.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/golden/test_lake_rust_render_parity.py"
@@ -51,6 +58,7 @@ on:
       - "rust/brutex-lake/**"
       - "brutex/data/parquet_writer.py"
       - "brutex/data/lake_rust_render.py"
+      - "brutex/data/models.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/golden/test_lake_rust_render_parity.py"
@@ -106,13 +114,19 @@ jobs:
         working-directory: rust/brutex-lake
         run: cargo fmt --check
 
-      - name: cargo clippy -D warnings
+      # --locked on every cargo invocation (review-round fold): the committed
+      # Cargo.lock IS the byte pin (rev-locked polars graph + the zstd trio) —
+      # without it, a stale lock would be silently re-resolved in place and
+      # could move the rendered bytes with no CI failure. Lock drift must
+      # fail LOUD. (The maturin wheel build below enforces the same lock via
+      # `locked = true` in rust/brutex-lake/pyproject.toml.)
+      - name: cargo clippy -D warnings (--locked)
         working-directory: rust/brutex-lake
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: cargo test (incl. the lockstep + libzstd pins)
+      - name: cargo test (incl. the lockstep + libzstd pins, --locked)
         working-directory: rust/brutex-lake
-        run: cargo test --release
+        run: cargo test --release --locked
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -137,33 +151,47 @@ jobs:
             sleep 10
           done
 
-      - name: Wheel/crate polars version drift check (WARN-only — visibility ruling)
-        # Non-fatal by coordinator ruling: the runtime version guard already
-        # fail-closes the flag on a mismatch; this step makes the drift
-        # VISIBLE in the workflow log the moment the installed wheel moves
-        # past the crate pin (the parity suite below then SKIPS loudly, so a
-        # silent all-skipped-green run is impossible to misread).
+      - name: Align the installed polars wheel to the crate pin
+        # Review-round fold (supersedes the warn-only-drift-with-no-alignment
+        # shape): `pip install -e ".[data,dev]"` resolves the HIGHEST polars
+        # the range pin allows, so the moment upstream ships a newer wheel
+        # the parity corpus would module-skip and this lane would go GREEN
+        # having verified nothing — a green-but-vacuous check on the lane
+        # whose whole job is gating the future default-ON flip. Force the
+        # wheel to the crate's pinned version so green MEANS the corpus ran.
+        run: |
+          pin="$(python -c 'import brutex_lake; print(brutex_lake.pinned_polars_version())')"
+          echo "aligning installed polars to the crate pin: $pin"
+          pip install "polars==${pin}"
+
+      - name: Wheel/crate polars lockstep check (FATAL in this lane)
+        # Hard check (review-round fold; the earlier WARN-only visibility
+        # ruling predated the forced alignment above — with alignment in
+        # place this should never fire, and if it does the lane is broken
+        # and must fail LOUD, never serve a skipped-green). The runtime
+        # version guard remains the production safety regardless.
         run: |
           python - <<'EOF'
+          import sys
           import polars, brutex_lake
           installed = polars.__version__
           pinned = brutex_lake.pinned_polars_version()
           if installed != pinned:
               print(
-                  f"::warning title=lake-rust lockstep drift::installed polars "
-                  f"{installed} != crate pin {pinned} — the version guard keeps the "
-                  f"Rust render OFF; run the lockstep ritual "
+                  f"::error title=lake-rust lockstep drift::installed polars "
+                  f"{installed} != crate pin {pinned} after forced alignment — "
+                  f"the lane is broken; run the lockstep ritual "
                   f"(docs/runbooks/lake-rust-render-lockstep.md)"
               )
-          else:
-              print(f"lockstep aligned: polars {installed} == crate pin {pinned} "
-                    f"(libzstd {brutex_lake.linked_zstd_version()})")
+              sys.exit(1)
+          print(f"lockstep aligned: polars {installed} == crate pin {pinned} "
+                f"(libzstd {brutex_lake.linked_zstd_version()})")
           EOF
 
       - name: Byte-parity corpus + facade suites
-        # The parity suite auto-SKIPS (loudly) on a version-guard mismatch —
-        # -rs surfaces every skip reason in the log so a drifted run reads
-        # as "skipped: lockstep" and never as a silent green.
+        # With the wheel force-aligned above, the corpus module-level
+        # version-guard skip cannot fire here — -rs still surfaces any skip
+        # reason in the log as belt-and-suspenders.
         run: |
           pytest -rs -q \
             tests/golden/test_lake_rust_render_parity.py \
