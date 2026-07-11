@@ -478,6 +478,15 @@ jobs:
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
+          # DEC-STAGE1A-RUST-BATCH-001: the batch Rust Stage-1A seam (flag /
+          # burn-in / autorevert / observability leaf) — 100% line+branch
+          # STANDALONE under its dedicated unit file (the module also rides
+          # the whole-engine glob gate above).
+          if compgen -G "tests/unit/test_engine_rust_stage1a.py" > /dev/null; then
+            pytest --cov=brutex.engine.rust_stage1a --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_rust_stage1a.py
+          else
+            echo "(brutex.engine.rust_stage1a test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1671): the
           # rank-budget worker-divisor wiring — a dedicated per-module pin at
           # 100% line+branch over its two suites (the module also rides the
