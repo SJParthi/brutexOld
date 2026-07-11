@@ -292,7 +292,7 @@ class TestBurnIn:
         lrr.reset_lake_rust_render_for_tests(remaining=0)  # steady state
 
         def _oracle_must_not_run() -> bytes:
-            pytest.fail("python oracle must not run after burn-in")
+            raise AssertionError("python oracle must not run after burn-in")
 
         _install_crate(monkeypatch, _fake_crate(render=lambda ipc: b"rust-steady"))
         out = lrr.render_parquet_bytes(
@@ -433,7 +433,7 @@ class TestLatchAndReset:
         lrr._disable("crate_unavailable")
 
         def _must_not_import(name: str) -> types.ModuleType:
-            pytest.fail("a latched process must not re-attempt the crate import")
+            raise AssertionError("a latched process must not re-attempt the crate import")
 
         monkeypatch.setattr(lrr.importlib, "import_module", _must_not_import)
         out = lrr.render_parquet_bytes(

@@ -87,7 +87,7 @@ class TestFlagOff:
         monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
 
         def _must_not_route(**_: object) -> bytes:
-            pytest.fail("flag-OFF must never call render_parquet_bytes")
+            raise AssertionError("flag-OFF must never call render_parquet_bytes")
 
         monkeypatch.setattr(lrr, "render_parquet_bytes", _must_not_route)
         rendered = ParquetWriter._render_bytes(_bars())

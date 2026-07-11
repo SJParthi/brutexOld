@@ -15,7 +15,12 @@ REQUIRES the compiled crate + version lockstep. Auto-SKIPS loudly when
 either is missing — the dedicated ``.github/workflows/lake-rust-parity.yml``
 lane (and a local ``pip install rust/brutex-lake``) is where this suite has
 teeth; the main CI test job deliberately never installs the crate.
+
+Whitebox: drives the private ``_render_bytes`` seam directly (the seam under
+test — DEC-P0-017 convention), so ``reportPrivateUsage`` is silenced.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
