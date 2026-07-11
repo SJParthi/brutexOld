@@ -1756,7 +1756,13 @@ document.getElementById("tickconstbtn").onclick = async () => {
    pipeline button, "disable the pull controls while a pull runs" is just disabling
    that one button (PIPELINE_BTN was declared with the click handler above). Kept as
    setBulkDisabled so startAndPoll / finishLive call it unchanged. */
+let pullStopGen = 0;   // Stop-button watch-epoch (#1748 F4-SIBLING PORT — the gbStopGen idiom):
+                       // bumped on EVERY setBulkDisabled transition (startAndPoll /
+                       // pullAttachIfRunning begin-watch AND finishLive finish — the pull
+                       // panel's ONE lifecycle seam) so a LATE cancel-POST response can
+                       // never repaint a DIFFERENT pull's freshly-reset Stop button
 function setBulkDisabled(on) {
+  pullStopGen += 1;   // watch epoch moved: any in-flight Stop-POST straggler is now stale
   if (PIPELINE_BTN) PIPELINE_BTN.disabled = on;
   // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): visible exactly while the
   // Run button is disabled-because-running — startAndPoll disables, finishLive
@@ -1778,14 +1784,22 @@ function setBulkDisabled(on) {
 /* Cooperative pull cancel (DEC-JOB-COOPERATIVE-CANCEL-001): POST the kind-gated
    cancel route; the running pull stops at its next WINDOW boundary and settles
    through the NORMAL poll path as an honest amber partial ("(cancelled)").
-   textContent only — never markup. */
+   Late-response writes are pullStopGen watch-epoch guarded (#1748 F4-SIBLING
+   PORT — the gbStopGen idiom): a cancel POST that resolves after
+   finishLive/startAndPoll transitioned the panel (setBulkDisabled bumps the
+   epoch) must never repaint a DIFFERENT pull's freshly-reset Stop button with
+   a stale refusal. textContent only — never markup. */
 (function () {
   const stopBtn = document.getElementById('pullStopBtn');
   if (!stopBtn) return;
   stopBtn.onclick = async () => {
+    const gen = pullStopGen;   // watch-epoch capture at click time (the gbStopGen pattern)
     stopBtn.disabled = true;
     const lbl = document.getElementById('pullStopLabel');
     if (lbl) lbl.textContent = 'Stopping — finishing current window + draining queued writes…';
+    // Stale once the watch epoch moved (pull settled / a fresh watch began) or
+    // the button was hidden/reset — pull A's late refusal must never label pull B.
+    const stale = () => gen !== pullStopGen || stopBtn.hidden;
     try {
       const r = await fetch('/api/v1/pull/cancel', { method: 'POST' });
       const j = await r.json();
@@ -1793,14 +1807,18 @@ function setBulkDisabled(on) {
         /* Distinct refusal labels (fix round 4): the wire's additive `reason`
            separates "idle" from "running-but-uncancellable" — previously a
            visibly-running metadata pull read "No running pull to cancel". */
-        if (lbl) lbl.textContent = (j.reason === 'uncancellable')
-          ? 'This pull surface has no stop seam — it runs to completion'
-          : 'No running pull to cancel';
-        stopBtn.disabled = false;
+        if (!stale()) {
+          if (lbl) lbl.textContent = (j.reason === 'uncancellable')
+            ? 'This pull surface has no stop seam — it runs to completion'
+            : 'No running pull to cancel';
+          stopBtn.disabled = false;
+        }
       }
     } catch (e) {
-      if (lbl) lbl.textContent = 'Cancel request failed — retry';
-      stopBtn.disabled = false;
+      if (!stale()) {
+        if (lbl) lbl.textContent = 'Cancel request failed — retry';
+        stopBtn.disabled = false;
+      }
     }
   };
 })();

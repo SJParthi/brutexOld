@@ -448,6 +448,36 @@ def test_universe_template_carries_the_on_load_pull_attach(client: TestClient) -
     assert "metadata phase is honored only at the next phase boundary" in html.lower()
 
 
+def test_pull_stop_button_watch_epoch_guard(client: TestClient) -> None:
+    """F4-SIBLING PORT (#1748, ledger-coordinator-routed): the pull Stop
+    handler's late-response writes are watch-epoch guarded — the gbStopGen
+    idiom ported to #1369's ``pullStopBtn``. Without the guard a cancel POST
+    resolving AFTER pull A settled (finishLive) and pull B began
+    (startAndPoll / pullAttachIfRunning) repainted pull B's freshly-reset
+    Stop button with pull A's stale refusal label, which then PERSISTED (the
+    pull poll never re-writes the Stop label). The epoch (``pullStopGen``)
+    bumps in ``setBulkDisabled`` — the pull panel's ONE begin-watch/finish
+    transition seam, ridden by all three lifecycle callers — and the guard
+    also skips a hidden/reset button. Substring pins (presence, not
+    execution — the repo's no-headless-JS envelope).
+    """
+    html = client.get("/universe").text
+    assert "let pullStopGen = 0;" in html
+    # Bumped at the ONE transition seam, nowhere else (the gb twin bumps
+    # twice because begin/finish are two functions there; here they are one).
+    assert html.count("pullStopGen += 1;") == 1
+    bulk = html[html.index("function setBulkDisabled(on)") : html.index("stopBtn.onclick")]
+    assert "pullStopGen += 1;" in bulk
+    stop = html[
+        html.index("stopBtn.onclick = async () =>") : html.index("async function startAndPoll")
+    ]
+    assert "const gen = pullStopGen;" in stop
+    assert "const stale = () => gen !== pullStopGen || stopBtn.hidden;" in stop
+    # BOTH late-write sites (the refusal branch AND the failed-POST catch)
+    # ride the guard — a stale response writes nothing.
+    assert stop.count("if (!stale())") == 2
+
+
 def test_v29_sweep_stop_refusal_renders_the_route_error(client: TestClient) -> None:
     """The v29 sweep Stop handler renders the route's actionable ``error`` on refusal.
 
