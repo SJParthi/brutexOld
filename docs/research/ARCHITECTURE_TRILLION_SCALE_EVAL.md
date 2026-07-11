@@ -1,8 +1,8 @@
 # Trillion-Scale Architecture Evaluation — DB Engine + Frontend Verdicts
 
 > **Decision ID:** DEC-ARCH-EVAL-TRILLION-SCALE-001 · **MIGRATION.md #1723**
-> **Date:** 2026-07-11 · **Status:** DECIDED (measured) — hostile review pass to be
-> appended after it runs (§12).
+> **Date:** 2026-07-11 · **Status:** DECIDED (measured) — hostile-review pass run
+> 2026-07-11, FIX-FIRST findings folded (§12).
 > **Scope:** research/evaluation decision, DOCS-ONLY. ENGINE UNCHANGED —
 > NIFTY/BANKNIFTY/SENSEX; F&O lake stays REFERENCE_ONLY; no scope/vocab/rate change.
 >
@@ -29,11 +29,13 @@
 **(a) Paging is FLAT across 49× lake growth — trillion-row-safe BY
 ARCHITECTURE.** The control experiment (§4.3): a fresh 6-month symbol written
 through the production writer pages in **12.4 ms inside the 49M-row lake vs
-12.8 ms inside the 1M-row lake** — total lake size is irrelevant to a /db
+12.8 ms inside the 0.98M-row lake** — total lake size is irrelevant to a /db
 page; latency tracks only the queried dataset's own depth (rows + month
 files), and dataset depth grows with YEARS (bounded, ~12 month files/yr),
 never with symbols or lake width. A trillion-row TOTAL lake of bounded-depth
-datasets serves pages at the same tens-of-ms as today.
+datasets serves pages at the same tens-of-ms as today (extrapolated from the
+§4.3 control experiment + the partition-scheme argument; no ≥1B-row lake was
+materialized — §11).
 
 **(b) The ~33B trials never reach the serving layer — serving is
 O(finalists).** Only top-K finalists per tuple are ever flushed
@@ -42,7 +44,8 @@ O(finalists).** Only top-K finalists per tuple are ever flushed
 count (§2). The trillion-frame number is compute-time, ~all discarded.
 
 **The ClickHouse arm was really tested** (chdb 4.2.0, embedded ClickHouse,
-VERIFIED install — §5), side by side on the same lake (page/count/slice over
+VERIFIED install — embedded, default settings, NOT a tuned ClickHouse server
+deployment; §5, §11), side by side on the same lake (page/count/slice over
 one 2.4M-row dataset; the rollup over all 48.9M rows):
 
 | workload | DuckDB (parquet in place) | chdb (parquet in place) | chdb MergeTree copy |
@@ -51,17 +54,22 @@ one 2.4M-row dataset; the rollup over all 48.9M rows):
 | count (DISTINCT ts) | **59.5 ms** | 212.8 ms | 195.5 ms |
 | month_slice | **44.9 ms** | 83.3 ms | 9.9 ms |
 | full-lake symbol-day rollup (48.9M rows) | 3,592 ms | 2,659 ms | 771 ms |
-| the same rollup as a DuckDB materialized rollup (§4.6) | **2.7 ms** | — | — |
+| one-day movers READ off a PRE-BUILT DuckDB rollup (build cost 3.70 s; §4.6) | **2.7 ms** | — | — |
 
 DuckDB-in-place is FASTER than ClickHouse-in-place on every dashboard-shaped
 page/count/slice; the MergeTree copy's headline win — 13× on point-page
 lookups (5.9 vs 84 ms) — is against the UNassisted parquet path, while the
 production manifest-ON path already holds pages at 12–80 ms and (spine (a))
-those costs don't grow with lake size; and its 4.7× full-lake aggregation win
-(771 ms vs 3.6 s) is beaten ~940× harder by a 3.7 s-to-build DuckDB rollup
-serving the same question in 2.7 ms. The MergeTree copy costs a second store
-(735 MB vs 213 MB parquet, 3.4×), a 9.04 s/48.9M-row ingest sync, and a new
-operational surface.
+those costs don't grow with lake size; and its 4.7× from-scratch full-lake
+aggregation win (771 ms vs 3.6 s) is answered by pre-aggregation inside the
+current stack — the one-day whole-market movers READ off a PRE-BUILT DuckDB
+rollup is 2.7 ms (build cost 3.70 s; ~940× vs the 2,524.8 ms raw-parquet
+scan). Stated honestly: MergeTree's from-scratch whole-table daily rollup
+(771 ms) is itself FASTER than DuckDB's rollup BUILD (3.70 s) — the argument
+is "pre-aggregation beats switching engines", NOT "DuckDB is ~285× faster at
+this aggregation". The MergeTree copy costs a second store (735 MB vs 213 MB
+parquet, 3.4×), a 9.04 s/48.9M-row ingest sync, and a new operational
+surface.
 
 ### VERDICT A (DB engine): KEEP DuckDB + Parquet + stats-manifest. No ClickHouse / distributed migration.
 
@@ -74,9 +82,10 @@ Two named follow-up fixes carry the O(1) guarantee (neither is in this PR):
    (b≈1.17). Fix: a persisted cross-store leaderboard rollup — top-K
    materialized at sweep write time (the `top100_artifact` pattern generalized)
    — so serving reads O(K), never O(stores).
-2. **Materialized rollups for whole-lake aggregations** — measured 940×:
-   2,525 ms raw-parquet whole-market movers scan → 2.7 ms off a
-   3.7 s-to-build daily rollup (48.9M rows → 130,440 daily rows, 1.8 MB).
+2. **Materialized rollups for whole-lake aggregations** — measured ~940×:
+   2,525 ms raw-parquet whole-market movers scan → a 2.7 ms one-day movers
+   READ off a PRE-BUILT daily rollup (build cost 3.70 s; 48.9M rows →
+   130,440 daily rows, 1.8 MB).
 
 ### VERDICT B (frontend): KEEP vanilla JS. The data-shipping contract is the lever, not the language.
 
@@ -96,7 +105,7 @@ truncation named on the count line.
 
 ---
 
-## 2. The architectural spine — why O(1) holds at trillion scale
+## 2. The architectural spine — why per-query cost stays flat in lake size at trillion scale
 
 The honest physics (Golden Rule #10): O(1)-per-query at trillions is achieved
 by **never touching most of the data**. This is an ARCHITECTURE property —
@@ -124,7 +133,7 @@ language/engine property. Concretely, with the audit's file:line citations:
   ≈ 703M spot 1m rows, ×~2–3 with derived TFs; ~3.6M files) — and /db serving
   is per-DATASET-depth-bounded: the control experiment (§4.3) shows a fresh
   6-month symbol pages in 12.4 ms inside a 49M-row lake, identical to 12.8 ms
-  in a 1M-row lake. Total lake size is irrelevant to a /db page.
+  in a 0.98M-row lake. Total lake size is irrelevant to a /db page.
 - **The trillion-class number is the trial space** (~33B/sweep,
   `docs/TRACK1_PERFORMANCE_BUDGET.md:17-18`; Phase-10 730B), which is a COMPUTE
   problem (the O(1)-per-trial hot kernel + Bloom/LMDB dedup + the Stage 1A→4
@@ -262,7 +271,7 @@ Honest reading (Golden Rule #10):
 
 A FRESH 6-month symbol (`NSE-CTRL099`, 48,750 rows / 6 files) was written
 through the production writer INTO the 49M-row lake, and its page1 compared
-against the identically-shaped dataset in the 1M-row lake:
+against the identically-shaped dataset in the 0.98M-row lake:
 
 | query target | median / p99 ms |
 |---|---|
@@ -567,7 +576,8 @@ Each with a one-line cost estimate in complexity terms (never time):
   *Cost: one flush-time rollup writer + one reader repoint + goldens — the
   top100_artifact pattern generalized to the /results surface.*
 - **(b) Generalized materialized rollups** for any whole-lake aggregation
-  surface (movers-style): the measured 3.70 s build → 2.7 ms serve (~940×),
+  surface (movers-style): the measured 2.7 ms one-day movers READ off a
+  PRE-BUILT rollup that cost 3.70 s to build (~940× vs the raw scan),
   incremental-izable per month partition at the prebuild/write funnel.
   *Cost: one rollup builder at the existing partition-locked write hooks +
   per-surface reader repoints with the byte-identical legacy-scan degrade.*
@@ -712,7 +722,12 @@ loses today, and the explicit revisit trigger.
   serving-path audit, cache/manifest inventory, O(total) gaps,
   migration-cost dimensions, lake-vs-trials framing).
 - **Decision ID:** DEC-ARCH-EVAL-TRILLION-SCALE-001 (MIGRATION.md #1723).
-- **Hostile review:** per Golden Rule #9, the hostile-review pass runs on the
-  PR carrying this document; its verdict is to be appended here after it
-  runs — this line is the placeholder, not a claim that it has run.
+- **Hostile review (Golden Rule #9):** independent hostile-review pass run
+  2026-07-11 — verdict FIX-FIRST (1 MAJOR: the exec-summary framing conflated
+  a pre-built one-day rollup READ with a from-scratch full-lake aggregation;
+  3 MINOR: caveat placement on the flat-paging claim, the §2 header's bare
+  "O(1)", and the chdb "really tested" wording; 1 NIT: the 0.98M-row label
+  harmonization — ALL folded in the same-branch fix commit). Number fidelity,
+  15 spot-checked repo citations, ledger format, and steelman quality all
+  verified CLEAR.
 
