@@ -69,10 +69,8 @@ import structlog
 from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
-    _DAILY_MIN_FLOOR,
     _IST,
     _calendar_exchange,
-    _cutoff_minute,
     _NoncontiguousWarnState,
     _prior_session_last_from_minute,
     filter_to_ist_minute,
@@ -82,6 +80,7 @@ from brutex.dashboard.movers_snapshot import (
     normalize_min_volume,
     parse_snapshot_date,
     prev_baseline_provenance,
+    resolve_asof_cutoff,
     resolve_candle_datasets,
     resolve_prev_close,
     session_traded_value_paisa,
@@ -687,6 +686,7 @@ def build_futures_payload(
     min_volume: int | None = None,
     latest_time: str | None = None,
     underlying_class: str | None = None,
+    resolved_through: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
 
@@ -723,6 +723,12 @@ def build_futures_payload(
         (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — shown as
         ``latest (HH:MM)`` while the default cut stays whole-day; ``None`` for an
         explicit *time* / daily interval / empty lake. Never affects a number.
+    resolved_through
+        ADDITIVE display-only provenance echoed as ``asof_through``
+        (``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001``): the completed-bucket final
+        ``"HH:MM"`` an explicit bucket-anchor *time* was resolved forward to;
+        ``None`` (default) for daily / whole-day / TF-1minute / non-anchor keeps
+        the payload + note byte-identical. Never affects a number.
     skipped
         Count of underlyings/contracts dropped — no live contract at the tier,
         no session bars, OR an unreadable Parquet file (logged as
@@ -770,6 +776,11 @@ def build_futures_payload(
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the future's previous close, premium is vs the spot."
+            + (
+                f" {time} bucket · through {resolved_through}."
+                if resolved_through is not None and time
+                else ""
+            )
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
             + class_note
         )
@@ -783,6 +794,7 @@ def build_futures_payload(
         "instrument_count": instrument_count,
         "skipped_count": skipped,
         "latest_time": latest_time,
+        "asof_through": resolved_through,
         "note": note,
         **class_echo(wanted_class, excluded_unclassified),
         **ranked,
@@ -1274,7 +1286,10 @@ def compute_futures_candidates(
     minutes = interval_minutes(interval)
     day = parse_snapshot_date(date)
     date_str = day.isoformat()
-    cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
+    # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001: the ONE COMMON as-of seam — an explicit
+    # bucket-anchor pick resolves FORWARD to the bucket's final minute (the completed
+    # candle); daily/blank whole-day + TF=1minute identity are byte-unchanged.
+    cutoff_min = resolve_asof_cutoff(interval, time)
     resolved_names = names or {}
     by_underlying = _discover_futures(lake_root, exchange=exchange, datasets=datasets)
     if minutes is None or not by_underlying:
