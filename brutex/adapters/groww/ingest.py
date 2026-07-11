@@ -1179,7 +1179,19 @@ def _process_window_tail(
     # PHANTOM FUTURE partition. The window is already clamped (no current-day request), so
     # this only ever removes an out-of-window / clock-skew phantom — a bar ON the boundary
     # is KEPT, so the existing behaviour is byte-unchanged for every legitimate in-range bar.
-    bars = drop_bars_after(bars, window_end)
+    bars, future_dropped = drop_bars_after(bars, window_end)
+    if future_dropped:
+        # EXACTLY ONE aggregated WARNING per window (never per bar), mirroring the
+        # session-filter WARNING above (DEC-AUDIT-ALERT-CLAMP-OBS-001): a
+        # future-phantom bar mixed with good bars used to vanish silently here.
+        _LOG.warning(
+            "ingest.future_bar_dropped",
+            pull_id=pull_id,
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+            dropped=future_dropped,
+            **series_fields,
+        )
     # ALL-FILTERED at the WHOLE boundary (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
     # widening DEC-INGEST-BOUNDARY-INTEGRITY-001's session-filter-only check): the
     # kept count is read AFTER the session filter AND the future-bar drop, so a

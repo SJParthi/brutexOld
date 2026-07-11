@@ -593,19 +593,43 @@ def test_ingest_drops_future_dated_phantom_bar() -> None:
     # DEC-CANDLE-DROP-FUTURE-BAR-001: an option bar dated AFTER the clamped window end
     # (a clock-skew / out-of-window phantom) is dropped before the sink, never writing a
     # future partition. 2024-01-05 09:30 IST is IN-SESSION but PAST the Jan-2 window end.
+    # DEC-AUDIT-ALERT-CLAMP-OBS-001 (DATA-2): the drop now emits ONE aggregated
+    # ``option.ingest.future_bar_dropped`` WARNING per window naming the count.
     sdk = _FakeSDK(payload=_candles("2024-01-05T09:30:00"))
     sink = _Sink()
-    report = ingest_option_contract(
-        _client(sdk),
-        sink,
-        contract=_ce(),
-        interval="1minute",
-        start=date(2024, 1, 1),
-        end=date(2024, 1, 2),  # the Jan-5 bar is strictly after the clamped end
-        now_ist=_now,
-    )
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),  # the Jan-5 bar is strictly after the clamped end
+            now_ist=_now,
+        )
     assert report.bars_appended == 0  # the future phantom is dropped before the sink
     assert sink.appends[0][4] == 0
+    warns = [e for e in logs if e["event"] == "option.ingest.future_bar_dropped"]
+    assert len(warns) == 1  # one aggregated WARNING per window, never per bar
+    assert warns[0]["dropped"] == 1  # the future phantom is COUNTED, not silent
+
+
+def test_ingest_no_future_bar_emits_no_drop_warn() -> None:
+    # DEC-AUDIT-ALERT-CLAMP-OBS-001 (DATA-2): a clean in-window option pull emits NO
+    # ``option.ingest.future_bar_dropped`` WARNING (byte-identical to before).
+    sdk = _FakeSDK(payload=_candles())
+    sink = _Sink()
+    with capture_logs() as logs:
+        ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+        )
+    assert [e for e in logs if e["event"] == "option.ingest.future_bar_dropped"] == []
 
 
 def test_ingest_keeps_on_boundary_bar() -> None:

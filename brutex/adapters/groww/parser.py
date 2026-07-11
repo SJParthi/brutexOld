@@ -234,6 +234,19 @@ def parse_candle_rows(
         nonlocal clamped_bars
         clamped_bars += 1
 
+    # Negative-count-clamp counter (DEC-AUDIT-ALERT-CLAMP-OBS-001, sibling of
+    # the OHLC-clamp counter above): a vendor-emitted NEGATIVE volume /
+    # open_interest is clamped to 0 (DEC-VENDOR-VOLUME-NORMALIZE-001) — which
+    # used to fire with NO counter and NO log, unlike the OHLC clamp.
+    # OBSERVE-ONLY: parsed bars are byte-identical (the clamped value stays 0);
+    # ONE ``groww.parse.negative_volume_clamped`` WARNING per parsed window
+    # payload carries the count.
+    negative_count_clamped_bars = 0
+
+    def _count_negative_count_clamp() -> None:
+        nonlocal negative_count_clamped_bars
+        negative_count_clamped_bars += 1
+
     # Epoch-verdict samples (DEC-GROWW-EPOCH-VERDICT-001): raw NUMERIC row
     # timestamps, collected at ROW level (before ``assemble_candle``, so even
     # an all-no-trade epoch payload still yields evidence). Production string
@@ -270,6 +283,7 @@ def parse_candle_rows(
                 volume=None if drop_volume else volume,
                 open_interest=open_interest,
                 on_clamp=_count_clamp,
+                on_negative_count_clamp=_count_negative_count_clamp,
             )
         except EmptyCandleRow:
             continue  # graceful skip — no-trade minute
@@ -278,6 +292,18 @@ def parse_candle_rows(
         _LOG.warning(
             "groww.parse.ohlc_clamped",
             clamped_bars=clamped_bars,
+            total_rows=len(candles),
+            pull_id=current_pull_id(),
+        )
+    if negative_count_clamped_bars:
+        # ONE WARNING per window payload (mirrors ``ohlc_clamped``): the vendor
+        # emitted a NEGATIVE volume / open_interest on this many bars, each
+        # clamped to 0. OBSERVE-ONLY (DEC-AUDIT-ALERT-CLAMP-OBS-001) — the
+        # stored counts are byte-identical; the WARNING just makes the
+        # previously-silent clamp visible.
+        _LOG.warning(
+            "groww.parse.negative_volume_clamped",
+            negative_count_clamped_bars=negative_count_clamped_bars,
             total_rows=len(candles),
             pull_id=current_pull_id(),
         )

@@ -89,7 +89,7 @@ jobs:
             --report-path gitleaks.sarif
 
       - name: Upload redacted report
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: gitleaks-report
