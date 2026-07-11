@@ -1,1 +1,7 @@
 docs/MIGRATION.md merge=union
+# Byte-frozen parity goldens (DEC-AUDIT-CHAIN-PARITY-GOLDEN-001 +
+# DEC-CALENDAR-VERDICT-GOLDEN-001): never newline/text-normalized — the
+# in-test SHA-256 manifests pin the exact raw bytes on every platform.
+tests/golden/fixtures/audit_chain_parity_golden.jsonl -text
+tests/golden/fixtures/audit_chain_parity_scalars.json -text
+tests/golden/fixtures/calendar_verdict_table_golden.json -text
