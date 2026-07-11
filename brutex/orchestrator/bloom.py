@@ -1,8 +1,9 @@
 """Bloom filter — L1 fast-fail primitive for the 4-tier dedup hot-path.
 
 The :class:`BloomFilter` is the sub-microsecond probabilistic membership
-gate that sits in front of :meth:`WorkItemStore.exists_terminal`
-(LMDB ground-truth) in BruteX's 4-tier dedup (CLAUDE.md §2 rule 11):
+gate that sits in front of the exact LMDB ground-truth tier
+(:class:`brutex.data.lmdb_membership.LmdbMembership` under the engine's
+``sweep_cache`` dedup) in BruteX's 4-tier dedup (CLAUDE.md §2 rule 11):
 
 * **L1 — Bloom (this module).** Rejects 99.9999%+ of duplicates before
   touching LMDB. Hot-path budget: sub-µs per check.
@@ -79,8 +80,8 @@ to the 150M-1B target range.
 ## What does NOT ship in V1 (deferred to future DEC-P0-NNN)
 
 * **Persistence / mmap'd bit array.** Bloom is approximate by design;
-  cold-start rebuilds via L2 LMDB scan in
-  :meth:`WorkItemStore.open` (PR-I integration). Recoverable.
+  cold-start rebuilds via an L2 LMDB ground-truth scan at the caller
+  (the engine ``sweep_cache`` open path). Recoverable.
 * **Auto-resize.** FAIL_CLOSED instead — operator decides whether to
   bump capacity + restart.
 * **Sharded / hierarchical bucketing.** Past ~3B survivors the in-RAM
@@ -91,8 +92,8 @@ to the 150M-1B target range.
   sha256 → blake3 migration (DEC-P0-044 Q-02) lands in the engine PR
   without touching this module.
 * **AuditWriter integration.** ``BloomCapacityExceeded`` is raised but
-  the audit-action emission is the **caller's** job (PR-I will wire
-  this in :class:`WorkItemStore`). Keeps Bloom as a pure primitive.
+  the audit-action emission is the **caller's** job. Keeps Bloom as a
+  pure primitive.
 
 References
 ----------
@@ -294,8 +295,7 @@ class BloomCapacityExceeded(BruteXError):
     ``BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY`` env var, R2-SL-F4-F5).
 
     Reset path: future PR will add a CLI command that drops the filter
-    and rebuilds it from the LMDB ground-truth via
-    :meth:`WorkItemStore.iter_phase`.
+    and rebuilds it by iterating the LMDB ground-truth tier.
     """
 
 

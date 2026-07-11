@@ -20,7 +20,7 @@ the design is:
 * **Pure-detector, hysteresis-aware** — only edge transitions fire callbacks
   so a hung worker doesn't spam alerts on every check.
 * **No threads / no daemons** — the caller picks the cadence (scheduler,
-  PhaseRunner subscriber, periodic timer in the dashboard, etc.).
+  pipeline event subscriber, periodic timer in the dashboard, etc.).
 * **Caller-supplied clock** — :class:`Watchdog` accepts a ``clock``
   callable (defaults to :func:`time.monotonic`) so tests use a fake
   clock and avoid sleeping.

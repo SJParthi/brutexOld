@@ -684,7 +684,7 @@ class DashboardState:
         The daily-quota gauge fields the panel once carried are GONE
         (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has no daily quota
         (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6) and no
-        production controller wires a ``DailyQuotaTracker``, so the snapshot never
+        production controller wires a quota gate, so the snapshot never
         carried ``quota_*`` keys — the fields were a constant ``(0, 0, -1)``.
 
         ``recent_minute`` / ``ceiling_per_min`` are the controller's rolling-60s issue
@@ -940,7 +940,7 @@ def make_rate_observer(
     def _observe(rate: Mapping[str, Any], meter: Mapping[str, Any]) -> None:
         """Map one (rate-controller, call-meter) snapshot pair onto the rate panel."""
         # The controller snapshot's conditional ``quota_*`` keys (a wired
-        # DailyQuotaTracker only) are deliberately NOT mapped: no production
+        # QuotaGate only) are deliberately NOT mapped: no production
         # controller wires one (DEC-QUOTA-VERDICT-MOOT-001 — Groww has no daily
         # quota) and the panel's gauge fields are deleted with the /universe gauge.
         # ``ceiling_per_min`` is ``None`` in the snapshot when no governor is wired

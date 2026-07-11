@@ -11,8 +11,9 @@ PR event) FAILED on shared GHA runners — exactly the chronic-flake
 pattern Agent 2 of PR #42 pre-impl review warned about.
 
 Per CLAUDE.md Rule #5 — the right gate is the **ratio** `p99(N=1M)/p99(N=1K) ≤ 1.1`,
-NOT absolute throughput. This matches the existing pattern in
-`tests/bench/test_store_o1.py:162` and `test_rate_limiter_o1.py:126`.
+NOT absolute throughput. This matches the pattern in
+`test_rate_limiter_o1.py:126` (and the historical `test_store_o1.py`,
+deleted with its module — MIGRATION.md #1727).
 
 Absolute ops/s numbers are still measured + printed via pytest-benchmark
 (visible in `bench-results.json` artifact), but the GATE is the ratio.
@@ -26,8 +27,8 @@ Three operations from the brute-force engine hot path (CLAUDE.md Rule #5):
    Measured both as pure-Python (scalar) and numpy (vectorized).
 2. **Bar lookup** — `dict[(symbol, ts)] -> bar` access pattern.
 3. **Result append** — SKIPPED. `list.append` is ~50 M/s trivially; not
-   load-bearing, and `tests/bench/test_store_o1.py` already bench-scopes
-   the result lake write path separately.
+   load-bearing (the engine results-store write path carries its own
+   bench, `tests/bench/test_engine_results_store_o1.py`).
 
 ## Why ratio gate (not absolute)?
 
