@@ -241,10 +241,10 @@ def _pair_bound_sub(ctx: AcceptanceContext) -> Any:
             continue
         stamps: list[float] = []
         for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                entry = json.loads(line)
-            except ValueError:
+            if not line.strip():
                 continue
+            # chain-verified above — every non-blank line IS a JSON entry
+            entry = json.loads(line)
             if entry.get("action") == "INGEST_PAIR_DONE":
                 stamps.append(float(entry.get("ts_utc", 0.0)))
         stamps.sort()

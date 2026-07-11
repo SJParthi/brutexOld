@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import date, datetime, timedelta
+from datetime import time as _dt_time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +36,9 @@ PRESENCE_SAMPLE_N = 400
 
 #: Evidence key samples are capped at this many entries.
 KEY_CAP = 20
+
+#: The anti-vacuous tail replan pins this post-close IST wall time.
+_POST_CLOSE_IST = _dt_time(16, 0)
 
 
 def _repro(ctx: AcceptanceContext) -> str:
@@ -67,6 +71,7 @@ def _replan_series(
     start: date,
     end: date,
     now: datetime,
+    now_ist: datetime,
 ) -> None:
     """Re-plan ONE (market, series, interval) span through the real planners."""
     from brutex.data.fno_symbol import parse_fno_symbol
@@ -93,7 +98,7 @@ def _replan_series(
             start=start,
             end=end,
             market=market,
-            now_ist=lambda: now,
+            now_ist=lambda: now_ist,
         )
         return
     from brutex.adapters.groww.chunks import window_days_for_interval
@@ -105,7 +110,7 @@ def _replan_series(
         start=start,
         end=end,
         now=now,
-        now_ist=now,
+        now_ist=now_ist,
         market=market,
         window_days_for=window_days_for_interval,
     )
@@ -172,6 +177,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear 
             start=start,
             end=end,
             now=now,
+            now_ist=ctx.now_ist(),
         )
     after = {_row_key(r): r for r in copy.records()}
     new_keys = sorted(set(after) - before_keys)
@@ -184,10 +190,15 @@ def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear 
     # be plannable — a planner lobotomized to return [] FAILs here.
     tail_check = "not_applicable"
     if max_end is not None:
-        newer_sessions = trading_days_between(max_end + timedelta(days=1), ctx.run_date())
+        # A session ON/AFTER the max settled end (window ends are EXCLUSIVE)
+        # is uncovered; the planner MUST be able to plan it once the day has
+        # closed — so the tail replan pins a post-close IST clock on the run
+        # date (structural: the copy never fetches anything).
+        newer_sessions = trading_days_between(max_end, ctx.run_date())
         if newer_sessions:
             tail_copy = WindowLedger.from_rows(ledger.to_rows())
             tail_planned_before = {_row_key(r) for r in tail_copy.records()}
+            post_close_ist = datetime.combine(ctx.run_date(), _POST_CLOSE_IST)
             for (market, security_id, interval), (start, _end) in sorted(
                 settled_by_series.items()
             ):
@@ -197,8 +208,9 @@ def run(ctx: AcceptanceContext) -> CheckResult:  # noqa: PLR0915 — one linear 
                     security_id=security_id,
                     interval=interval,
                     start=start,
-                    end=ctx.run_date(),
+                    end=ctx.run_date() + timedelta(days=1),
                     now=now,
+                    now_ist=post_close_ist,
                 )
             tail_new = {_row_key(r) for r in tail_copy.records()} - tail_planned_before
             tail_check = "planned" if tail_new else "planner_vacuous"
