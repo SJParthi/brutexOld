@@ -334,9 +334,16 @@ def run_with_parity(  # noqa: UP047 — PEP 695 unparsable by the mutmut gate's 
         Maps a value to its BIT-exact comparison key (ints exact, floats
         via :func:`pack_float`-family helpers, orderings as tuples).
     validate
-        Optional O(1)-ish domain check on the kernel value (shape/type) —
-        the refuse-poison gate a post-burn-in (a)/(b) call needs (its value
-        ships uncompared). ``False`` refuses the result loudly
+        Optional domain check on the kernel value (shape/type) — the
+        refuse-poison gate a post-burn-in (a)/(b) call needs (its value
+        ships uncompared), so it runs on EVERY non-disabled kernel call
+        FOREVER — before the burn-in branch, NOT only during it. Its cost
+        is the CALLER's validator and is O(value), NOT O(1) (Golden Rule
+        #10): the ranking validators pay an O(n)/O(n·w) element-type scan
+        per call, and the order family's permutation check pays an
+        O(n log n) sort (~a second sort beside the kernel's own) — a
+        deliberate permanent correctness-over-cost trade on rank-time,
+        per-leaderboard code. ``False`` refuses the result loudly
         (``kernel_result_refused`` ERROR) and serves the oracle.
 
     Returns

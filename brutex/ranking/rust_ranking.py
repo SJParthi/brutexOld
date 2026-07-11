@@ -48,7 +48,16 @@ arithmetic).
 Rank-time, per-leaderboard code — NOT the sweep hot loop. NO speedup is
 claimed: the (b*) rows double-compute the Python oracle on EVERY call by
 design (bench-pinned ≤ a measured multiple of the OFF arm), and the
-(a)/(b) rows double-compute through their burn-in. The payoff is
+(a)/(b) rows double-compute through their burn-in. Past burn-in the
+(a)/(b) ORACLE double-compute stops, but the refuse-poison ``validate``
+gate does NOT: it runs on every kernel call FOREVER (a post-burn-in value
+ships uncompared, so the shape gate must be permanent) at the validator's
+own O(value) cost — the ``_is_*`` checks below are O(n)/O(n·w)
+element-type scans, and the ``ranking.order`` family's
+:func:`_is_permutation` pays an O(n log n) sort per call (~a second sort
+beside the kernel's own), so the ON ``_ORDER`` step permanently costs
+about 2× the OFF arm's sort work. A deliberate correctness-over-cost
+trade, never claimed cheap. The payoff is
 one-language consistency; the wire value is ALWAYS the Python oracle's
 value or a bit-identical Rust value.
 """

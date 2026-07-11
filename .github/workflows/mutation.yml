@@ -127,15 +127,23 @@ jobs:
     # "remaining 8 loop modules (~384) / >= 30 min margin" decomposition
     # back-derived the loop count from the stale -001-era 890 total while
     # pairing it with TODAY'S compute count, and was ~2.4x low on the loop
-    # modules). Mutant counts measured on THIS tree via mutmut 2.5.1
+    # modules; re-derived AGAIN slice-4 PR-1 review round 8 (R8.2) — the
+    # round-2 nominal enumerated only 10 of what are now 14 pass-2 pairs,
+    # omitting lake_stats_manifest + sweep_apriori (merged in AFTER it was
+    # written) and the two slice-4 wrapper modules, so the loop below ran
+    # ~818 mutants the nominal never counted and the earlier "14-26 min
+    # margin" figure was stale). Mutant counts measured via mutmut 2.5.1
     # list_mutations (method validated against two real run logs: audit
     # 243/243 pre-round-2, rate_common 360/360 pre-round-3): pass 1 = 258;
-    # compute.py = 354; remaining 8 loop modules = 932 (state 58 + retry 77 +
-    # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
-    # parser 33 + spec 91).
+    # compute.py = 354; the 8 historical loop modules = 932 (state 58 +
+    # retry 77 + audit 254 post-round-3 + rate_limiter 165 + store 146 +
+    # partition 108 + parser 33 + spec 91); PLUS the four pairs the round-2
+    # nominal predated/omitted, measured on the slice-4 tree (round 8):
+    # lake_stats_manifest ~463 + sweep_apriori ~172 + rust_parity_core 77 +
+    # rust_ranking 106 = ~818.
     # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
     # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
-    # Nominal: (258 + 354 + 932) x ~2.3 s ~= 59 min; + rate_common 369
+    # Nominal: (258 + 354 + 932 + ~818) x ~2.3 s ~= 91 min; + rate_common 369
     # (post-round-3: the 9 dropped slot pragmas return 9 mutants to the gate)
     # at an ASSUMED 5-7 s CI baseline (local 2.5-3.4 s x an assumed 2x
     # shared-GHA factor — the rehearsal never reached rate_common, so its CI
@@ -145,19 +153,24 @@ jobs:
     # MIN of the two preflight-measured baselines, capped 30 s -> ~1-3.5 min
     # across the admitted regime); + the TWO ~2-10 s preflight baseline runs
     # (~4-20 s total; two samples + min per fixer round 4 R4-2).
-    # Total ~= 94-106 min nominal at that band -> an HONEST 14-26 min margin
-    # under 120 (>= ~35 min if rate_common paces like its siblings — and the
-    # measured-baseline wrap sizing makes a sibling-pace baseline a
-    # first-class admitted regime, NOT a preflight red). A ~20%
-    # shared-runner bad day on the worst end CROSSES the 120-min kill —
-    # pre-decided dial (the Rust shards' "+1 shard" twin): any observed
-    # rehearsal/scheduled run > 100 min => split pass 2 across two parallel
-    # jobs (move rate_common + the slowest loop modules out), a mechanical
-    # edit that needs no new machinery. Admitted-regime honesty (R4-3): the
+    # HONEST margin (R8.2 — no rosy band is claimed): at the ASSUMED 5-7 s
+    # rate_common band the total is ~123-137 min, which CROSSES the 120-min
+    # kill ON PAPER with NO margin at all; at rate_common's sibling-measured
+    # ~2.3-3 s pace the total is ~106-113 min — a 7-14 min margin that
+    # ALREADY sits past the >100-min trigger of the pre-decided dial (the
+    # Rust shards' "+1 shard" twin): any observed rehearsal/scheduled run
+    # > 100 min => split pass 2 across two parallel jobs (move rate_common +
+    # the slowest loop modules out), a mechanical edit that needs no new
+    # machinery — so the dial is EXPECTED to fire on the first observed
+    # full-14-pair run. Either way the failure mode is LOUD (budget kill ->
+    # cancelled -> cause-aware issue below), never a silent skip.
+    # Admitted-regime honesty (R4-3, threshold re-derived round 8): the
     # preflight's [1200, 20000] ms band is CLASSIFIER arithmetic, not a
-    # budget guarantee — a rate_common baseline >= ~9.5-10 s (369 x ~10 s
-    # ~= 61 min on top of the ~59 min loop-module nominal) already crosses
-    # the 120-min kill from INSIDE the admitted band; the failure is LOUD
+    # budget guarantee — over the ~91 min counted nominal a rate_common
+    # baseline >= ~4.7 s (369 x 4.7 s ~= 29 min = the whole remaining
+    # budget) already crosses the 120-min kill from INSIDE the admitted
+    # band (the pre-round-8 wording said ~9.5-10 s against the
+    # under-counted ~59 min nominal); the failure is LOUD
     # (budget kill -> cancelled -> cause-aware issue) and the same
     # >100-min split dial is the remedy.
     # (The OLD broad `pytest tests/unit` runner could never finish here —
@@ -428,8 +441,13 @@ jobs:
           # packs, and the structural residue — quoted casts, PEP-526/563
           # annotations, a literal logger name, a tandem-redundant strict
           # zip — was RESTRUCTURED killable, never pragma'd). The 183 added
-          # mutants at the siblings' ~2.3-3 s pace add ~7-9 min, inside the
-          # budget comment's stated margin. TestMutationWorkflowWiring pins
+          # mutants at the siblings' ~2.3-3 s pace add ~7-9 min; the round-7
+          # "inside the budget comment's stated margin" framing is RETRACTED
+          # (review round 8, R8.2) — that margin was computed from a nominal
+          # that omitted lake_stats_manifest + sweep_apriori (and these two
+          # pairs). The budget block at the top of this job now counts ALL
+          # 14 pass-2 pairs and states the honest totals + the expected
+          # >100-min split-dial outcome. TestMutationWorkflowWiring pins
           # in both suites fail the unit gate if either pair is ever dropped.
           # The 13 proven wrap-less pairs (incl. data/lake_stats_manifest.py,
           # merged in from DEC-LAKE-STATS-MANIFEST-001 — see its rationale
