@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 —
+_Last updated: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
+the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
+pollers consolidate onto ONE BXPoll-disciplined consumer per endpoint (subscriber
+fan-outs added to bx-oneclick.js / bx-rate-monitor.js / bx-liveproof.js; the
+measured BEFORE on the idle operator page was 336 requests/120 s with
+sweep-progress / pull-rate / liveproof each polled by TWO-THREE summed pollers;
+measured AFTER, same harness: 240 requests/120 s — −96, −28.6%),
+the six fixed-interval template pollers (coverage · spot_coverage · fetch_windows
+· completeness · expired_options 4 s + launch 2.5 s) migrate onto the ONE shared
+`BXPoll.createPoller` core via a custom-fetchJson tick seam (renders
+byte-identical; failed ticks back off 3 s→30 s; DOMContentLoaded start;
+guarded-legacy degrade), the 8 /screener filter inputs + /results Top-N debounce
+200 ms, completeness/spot_coverage adopt the in-place tbody row-patch idiom (ONE
+shared esc()'d row builder, shell built once), and /reports' ~750 chips build
+ONCE with class-toggle selection. SKIPPED honestly: the bx-format/bx-movers-time
+defer (end-of-body includes with genuine parse-time consumers + a standing
+non-defer pin) and the universe.html integrity-interval catch-up (already shipped
+by #1623). NO measured hidden-tab win claimed (idle-page hidden was already
+0 req/s, measured); the `pollRunSweep` hidden-guard gap is source-asserted only.
+CLIENT-side only — templates + static JS + tests + docs; ZERO route/payload
+change, byte-stable wire; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1720.)
+Earlier: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 —
 renumbered #1633 → #1673 → #1692 (#1633 → #1673 at the 2026-07-10 merge-reconcile —
 main's in-flight renumber cascade holds the reservation band through #1672 — then
 #1673 → #1692 per the coordinator reservation map, #1673 reserved for PR #1369) —
@@ -2060,7 +2082,51 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
+- **Active branch:** `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
+  the dashboard FRONTEND latency-hardening pack, CLIENT-side only (templates + static JS + tests + docs; ZERO
+  route/payload/backend change — byte-stable wire): (Fix 1) the v29 operator page's DUPLICATE pollers consolidate onto
+  ONE BXPoll-disciplined consumer per endpoint — bx-oneclick.js's progressPoller fans out to
+  `window.__bxSweepProgressSubs`/`__bxSweepProgressFailSubs` (call-time-read arrays, throwing subscribers isolated) +
+  exposes `__bxSweepProgressPollNow`; the [data-sweep] panel, heartbeat sweep slot and Run-controls renderer all
+  SUBSCRIBE (the Run click flips `watching` + one shared pollNow — progress-bar cadence 3 s, was 1.2 s, disclosed);
+  bx-rate-monitor.js / bx-liveproof.js gain the same-shape `__bxPullRateSubs`/`__bxLiveproofSubs` fan-outs feeding the
+  heartbeat pull/proof slots (the notify helper stays LOCAL to each dependency-free widget — a ledgered §11 deviation);
+  the killed tokens (`setInterval(pollSweepProgress, 2000)` · `sweepPoll = setInterval(pollRunSweep, 1200)` ·
+  `setInterval(pollPull, 5000)` · `setInterval(pollProof, 10000)` · `setInterval(pollState, 2000)`) are
+  negative-pinned and /api/v1/state rides BXPoll at its unchanged 2 s. MEASURED BEFORE (coordinator harness, headless
+  Chromium, origin/main @ a268bd4c, idle `/`, 120 s visible): 336 requests — sweep-progress 99 / pull-rate 63 /
+  liveproof 36 = the summed duplicates this closes. MEASURED AFTER (same harness, head 31e9022c — whose
+  templates/static tree is byte-identical to this branch's head, verified empty diff; only docs/commit-message
+  differ): 240 requests/120 s = 2.000 req/s (−96, −28.6%) — sweep-progress 99→39, pull/rate 63→39, liveproof
+  36→24, state 60→60, universe/pull-progress 39→39, oneclick/runs 39→39; the same six endpoints on both runs.
+  HONEST: hidden-tab was 0 req/s measured on BOTH SHAs — no hidden-tab
+  win claimed; the pollRunSweep no-guard/no-backoff/un-timed-fetch gap is source-asserted (armed only mid-sweep,
+  unmeasured). (Fix 2) the six fixed-interval template pollers (coverage · spot_coverage · fetch_windows ·
+  completeness · expired_options 4 s + launch 2.5 s) migrate onto the ONE shared `BXPoll.createPoller` core through a
+  custom-fetchJson tick seam — every render/degrade byte-identical, failed ticks throw into the counted 3 s→30 s
+  backoff (coverage's 4-fetch composite backs off only at 0/4), cadence tokens unchanged (`pollMs: 4000`/2500),
+  DOMContentLoaded start, a missing bx-poll.js degrades to the legacy guarded interval; fetch_windows' chip/pager
+  clicks ride `poller.pollNow()` and its page-snap-back recursion returns the inner promise. (Fix 3) the 8 /screener
+  filter inputs + /results' Top-N input debounce 200 ms (the v29/movers precedent). (Fix 5) completeness (renderSpot +
+  the ~750-row renderOptions) + spot_coverage (renderSpot) adopt the fetch_windows/db patchGridRows idiom — ONE
+  esc()'d row builder shared by full rebuild AND tbody patch; the 3 new tbody sinks are the sanctioned narrow-target
+  pattern (`_SANCTIONED_EXTRA_SINKS` extended); MEASURED null result, framed honestly: the in-place tbody patch
+  preserves table-node identity across re-renders (no scroll/selection loss, less GC churn — structural probe main
+  false/false → branch true/true) while render WALL-TIME is UNCHANGED at 750 rows (renderSpot 70.1→69.3 ms /
+  renderOptions 52.3→54.0 ms second-render medians, inside main's own ±4-9% run-to-run variance — NO ms improvement
+  claimed). (Fix 6) /reports' chips build ONCE per symbol-SET key;
+  All/Clear/F&O/index-pick are now an O(chips) `.on` class sweep (`applySelection`), XSS build path byte-preserved.
+  SKIPPED honestly: Fix 4 defer (end-of-BODY includes, movers' genuine parse-time consumers, the standing
+  test_dashboard_halfup_format non-defer pin — the skip itself now pinned deliberate) and Fix 7 (already shipped by
+  DEC-DASHBOARD-POLL-HYGIENE-001 #1623). PINS UPDATED intent-preserved: poll_hygiene's five uniform-poller pins →
+  the BXPoll mechanism; js_perf's cadence pin → `pollMs: 4000`; ux_design's v29 fetch-deadline pin → the
+  BXPoll/subscription mechanism. TESTS: NEW tests/unit/test_dashboard_frontend_latency.py (node --check on EVERY
+  static/*.js + killed-token/subscription/debounce/tbody/chips pins + a node-EXECUTED fan-out isolation golden);
+  every touched template's inline scripts parse clean under node. HONEST envelope: source-string pins + node syntax
+  gates, no in-CI browser measurement — BEFORE/AFTER measured out-of-CI by the coordinator harness (AFTER on
+  31e9022c, frontend byte-identical to this head). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+  Earlier: `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
   renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
   cascade reserved #1633–#1649 — see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history — and the in-flight
   cascade holds the band through #1672), then #1673 → #1692 per the coordinator reservation map (#1673 is reserved
@@ -5267,7 +5333,20 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/groww-market-hours-guard`
+- **Active feature branch:** `claude/frontend-latency-hardening-r2`
+  (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the dashboard
+  FRONTEND latency-hardening pack: v29 duplicate pollers consolidated onto ONE
+  BXPoll-disciplined consumer per endpoint (measured BEFORE: 336 req/120 s idle
+  with sweep-progress/pull-rate/liveproof double-polled → measured AFTER 240
+  req/120 s, −28.6%, same harness), six template pollers
+  migrated onto the shared bx-poll.js core (renders byte-identical), /screener +
+  /results inputs debounced 200 ms, in-place tbody row patches on
+  completeness/spot_coverage, /reports chips build-once + class-toggle
+  selection; the bx-format/bx-movers-time defer + the universe catch-up were
+  SKIPPED honestly (parse-time consumers + standing pin; already shipped by
+  #1623); CLIENT-side only — byte-stable wire; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/groww-market-hours-guard`
   (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE
   market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
   days, keeping the shared account free for TickVault's live feed; matches
