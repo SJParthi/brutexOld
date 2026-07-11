@@ -37,6 +37,7 @@ from brutex.ranking.rust_ranking import (
 from structlog.testing import capture_logs
 
 from tests.fakes.metrics_fixtures import make_result_metrics
+from tests.fakes.pow_identity import pow_identity_holds
 
 
 @pytest.fixture(autouse=True)
@@ -80,6 +81,36 @@ def _rank_off(candidates: list[tuple[int, ResultMetrics]], **kw: Any) -> list[Ra
             del os.environ[RANKING_RUST_ENV]
         else:
             os.environ[RANKING_RUST_ENV] = prior
+
+
+#: The (b*) always-on-differential families — the ONLY families whose
+#: bit-agreement is HOST-dependent (they embed the ``_zscores`` pow-identity
+#: sites; every other family's arithmetic is deterministic IEEE ops).
+_B_STAR_FAMILIES = frozenset({"ranking.composite", "ranking.dsr_z"})
+
+
+def _assert_reverts_are_expected_or_loud_b_star(
+    logs: list[Any], expected: tuple[str, ...] = ()
+) -> None:
+    """The golden legs' pow-probe autorevert law (the R12.1 host-fragility fix).
+
+    *expected* names the deterministic burn-in autoreverts the test provokes
+    (exactly those, in pipeline order). ANY other autorevert must be a LOUD
+    (b*) always-on divergence — legal ONLY on a non-pow-identity host (a pool
+    with genuine column variance rides the ``_zscores`` pow sites, so its
+    (b*) bit-agreement is host-dependent by design; ship-the-oracle keeps the
+    wire byte-identical either way, pinned by each caller's OFF-arm equality).
+    On an identity host (the M4-Pro merge-precondition target) any unexpected
+    autorevert FAILS — the pre-fix strength is preserved where it was ever
+    honestly claimable.
+    """
+    reverted = [e for e in logs if e["event"] == "rust_parity.autoreverted"]
+    deterministic = [e["family"] for e in reverted if e["family"] not in _B_STAR_FAMILIES]
+    assert deterministic == list(expected)
+    for event in reverted:
+        if event["family"] in _B_STAR_FAMILIES:
+            assert event["reason"] == "divergence"
+            assert not pow_identity_holds()
 
 
 def _keys(ranked: list[RankedCombo]) -> list[tuple[int, bytes, object]]:
@@ -407,8 +438,11 @@ class TestPoisonAndDivergence:
             on = rank_combos_via_rust(pool, overfit=cfg)
         assert on is not None
         assert _keys(on) == _keys(_rank_off(pool, overfit=cfg))
-        reverted = [e for e in logs if e["event"] == "rust_parity.autoreverted"]
-        assert [e["family"] for e in reverted] == ["ranking.overfit_verdict"]
+        # After the shipped oracle verdicts keep all 3 survivors, the REAL
+        # (b*) kernels run over this genuine-variance pool — host-dependent
+        # by design, so the deterministic revert list is asserted through
+        # the pow-probe law (the R12.1 class, same fold).
+        _assert_reverts_are_expected_or_loud_b_star(logs, ("ranking.overfit_verdict",))
 
 
 # ── source-level AST pins on the new kernel file ────────────────────────
@@ -569,7 +603,15 @@ class TestMutationHardening:
         # A clean full-pipeline ON-arm run (gates → overfit DSR → terms →
         # dsr_z → composite → order) must not refuse a single kernel result
         # (kills the validate→None mutants: a refusal ships the oracle, so
-        # only THIS log assertion can see it) nor fall back nor autorevert.
+        # only THIS log assertion can see it) nor fall back — on ANY host.
+        # The autorevert clause rides the pow-probe law (R12.1): this pool's
+        # z-score columns have genuine variance, so its (b*) bit-agreement
+        # is HOST-dependent — a burn-in family may never autorevert, and a
+        # (b*) autorevert is legal only as a loud divergence on a
+        # non-identity host, with the wire pinned byte-identical to the OFF
+        # arm below (ship-the-oracle). The dsr-column z-arithmetic cannot be
+        # made exact-by-construction (DSR values are arbitrary CDF outputs),
+        # so a `_exact_pool()`-style unconditional claim is unavailable here.
         pool = [
             (0b0001, _m(sharpe_ratio=2.0, sortino_ratio=1.8, calmar_ratio=1.2)),
             (0b0010, _m(sharpe_ratio=2.5, sortino_ratio=2.0, calmar_ratio=1.5)),
@@ -581,12 +623,13 @@ class TestMutationHardening:
             on = rank_combos_via_rust(pool, overfit=cfg)
         assert on is not None
         assert len(on) > 0  # the dsr_z arm genuinely ran (kept non-empty)
+        assert _keys(on) == _keys(_rank_off(pool, overfit=cfg))  # the wire law
         bad_events = {
             "rust_parity.kernel_result_refused",
             "rust_parity.fallback",
-            "rust_parity.autoreverted",
         }
         assert [e["event"] for e in logs if e["event"] in bad_events] == []
+        _assert_reverts_are_expected_or_loud_b_star(logs)
 
     def test_rank_order_divergence_autoreverts_and_ships_the_oracle(
         self, monkeypatch: pytest.MonkeyPatch
