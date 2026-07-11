@@ -223,6 +223,64 @@ the f028fe65-era measure). The FULL
 per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
 #1625 — this header carries outcome summaries, never the round-by-round
 story.)
+Earlier: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 —
+renumbered #1633 → #1673 → #1692 (#1633 → #1673 at the 2026-07-10 merge-reconcile —
+main's in-flight renumber cascade holds the reservation band through #1672 — then
+#1673 → #1692 per the coordinator reservation map, #1673 reserved for PR #1369) —
+the NSE market-hours pull guard: NO Groww VENDOR pulls between 08:45 (inclusive)
+and 15:35 (exclusive) IST on a trading day; an in-flight nightly pull STOPS
+gracefully at 08:45 and start/resume is REFUSED until 15:35, keeping the SHARED
+Groww account free for TickVault's live feed (the shared TOTP token + 500/min
+governor, §2 Rule 6). NEW pure leaf `brutex/calendars/market_hours.py` —
+`BLOCK_START=08:45`/`BLOCK_END=15:35`, the clockless predicate `pull_allowed_now`,
+`pull_allowed_default` (binding `now_ist()` + the NON-raising `is_trading_day()`;
+an out-of-holiday-coverage WEEKDAY reads as a trading day → BLOCKS = the FAIL-SAFE
+posture protecting the shared account; a weekend → ALLOWED), the fail-LOUD env
+kill switch `BRUTEX_MARKET_HOURS_GUARD` (default ENABLED), `guard_active_default`,
+and a `now`-injectable `MarketHoursGuard`. NEW `MarketHoursHalt(BruteXError)` in
+`data/errors.py` added to BOTH ingest spines' `_GLOBAL_STOP_ERRORS` +
+`pull_jobs.is_pull_halt` (propagates past per-symbol/contract quarantine, fires the
+CRITICAL Telegram `emit_pull_halt_alert`). START GATES: `BackgroundPullJob.start`
+defers a `JOB_KIND_PULL` in-window UNLESS `market_hours_exempt=True` — the THREE
+vendor-free exemptions are the sweep (`job_kind != PULL`), the dashboard
+Greeks-backfill start and every dashboard dry-run pull start (both pass
+`market_hours_exempt`); `cmd_fetch` defers a LIVE pull at the START gate with a
+clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN (the CRITICAL requirement): a
+`market_closed` predicate threaded to the PER-WINDOW seam of both spines raises
+`MarketHoursHalt` (the durable window ledger leaves PLANNED/FAILED windows
+RESUMABLE — no new checkpoint); `run_until_clean` gains a `market_closed` hook →
+NEW `stop_market_hours` verdict; `pull_all_spot`/`pull_contract_candles` catch it
+mid-round + belt-break later steps + the minute phase (loud
+`pull.step.halted reason="market_hours"`); the METADATA phase
+(`pull_expiries_contracts`) gets a per-cell belt (raises `MarketHoursHalt` before
+each `get_expiries`/`get_contracts`; `run_two_phase` re-raises it, not
+record-and-resume); `run_full_pipeline` re-checks the belt BEFORE metadata AND
+before historical + wraps `run_metadata` in `try/except MarketHoursHalt`, skipping
+the rest of the vendor chain with `stopped_after="market_hours"`; and the CLI
+`brutex fetch` path is MID-RUN-guarded too — `cmd_fetch` threads `market_closed`
+into the spot spine + the between-rounds `run_until_clean`, catches
+`MarketHoursHalt` (drains + persists the ledger → resumable), and exits EXIT_OK.
+The mid-run env kill switch is resolved ONCE at pull start via
+`resolve_market_closed()` (fail-LOUD on junk at START; the bound predicate reads
+ONLY the live clock per call — so a junk env written MID-pull can never crash a
+long run with a per-window re-parse); the one-shot START gates keep
+`guard_active_default`. Production entrypoints (dashboard routes + the nightly
+headless binding — the MOTIVATING 01:30 case covered) bind `resolve_market_closed()`;
+a dry-run / un-wired caller passes `None` (byte-identical). NOT edited:
+`_start_auto_resume_on_boot`/`cmd_dashboard` (auto-resume covered transitively by
+the start-gates; conflict-free with PR #1343). HONEST: the CLI + metadata paths
+are now mid-run-guarded (not merely start-gated); the Groww F&O guard is
+per-CONTRACT granularity — a contract already started at 08:45 finishes its few
+small remaining windows before the next contract's belt stops the pull (an
+accepted bounded overrun, never a whole extra symbol); a pull interrupted at 08:45
+DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only (no fetch/rate/pool/
+governor change); `market_hours.py` + `data/errors.py` + `universe_phases.py` +
+`metadata_pull.py` + `pipeline_pull.py` + nightly binding 100% line+branch, the
+CLI/dashboard touched lines covered by the whole-package `--cov=brutex` gate;
+ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline; the
+per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1692 —
+this header carries the one-line summary, never the round-by-round story).
 Earlier: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
 DEC-STAGE1A-ROLL-RESET-001 + the round-1–8 review-fix packs DEC-FUTURES-LAUNCH-REVIEW-FIXES-001…-008,
 MIGRATION.md #1700–#1709 + #1710 — the ADR-0012 NIFTY-futures sweep LAUNCH
@@ -261,7 +319,7 @@ launch), the #1013 D8-stamping consumption, futures→options translation (PR-6)
 round-1 review-fix pack (#1703): the automatic Stage-4 cascade threads
 `roll_schedule_by_instrument`, the manifest carries `roll_schedules` for the MANUAL replay, and
 a schedule-less futures pool SKIPS loudly — never a schedule-blind re-score).
-Merged from main 2026-07-10: 2026-07-10 (DEC-ONECLICK-PERF-CLUB-001,
+Earlier: 2026-07-10 (DEC-ONECLICK-PERF-CLUB-001,
 MIGRATION.md #1711 — coordinator-ASSIGNED from the reservation map
 (next free above the #1264 reservation tail #1710; live-main max #1665
 at assignment — gaps are legal; renumbered from the interim provisional
@@ -2390,6 +2448,53 @@ hostile-review pass._
   no flag, no performance claim. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/lake-schema
   change; `compute.py` 100% line+branch (288 stmts / 54 branches, 0 missed); ruff/ruff-format clean, `mypy
   --strict` clean, pyright 0 new.)
+  Earlier: `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
+  renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
+  cascade reserved #1633–#1649 — see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history — and the in-flight
+  cascade holds the band through #1672), then #1673 → #1692 per the coordinator reservation map (#1673 is reserved
+  for PR #1369) —
+  the NSE market-hours pull guard: NO Groww VENDOR pulls between 08:45 (inclusive) and 15:35 (exclusive) IST on a
+  trading day; an in-flight nightly pull STOPS gracefully at 08:45 and start/resume is REFUSED until 15:35, keeping
+  the SHARED Groww account free for TickVault's live feed. NEW pure leaf `brutex/calendars/market_hours.py`
+  (`BLOCK_START=08:45`/`BLOCK_END=15:35`; the clockless `pull_allowed_now`; `pull_allowed_default` binding `now_ist()`
+  + the NON-raising `is_trading_day()` — out-of-coverage weekday BLOCKS = fail-safe, weekend ALLOWED; the fail-LOUD
+  env kill switch `BRUTEX_MARKET_HOURS_GUARD` default ENABLED; `guard_active_default`; a `now`-injectable
+  `MarketHoursGuard`) + NEW `MarketHoursHalt(BruteXError)` in `data/errors.py` (in BOTH spines' `_GLOBAL_STOP_ERRORS`
+  + `pull_jobs.is_pull_halt` → fires the CRITICAL Telegram pull-halt alert). START GATES: `BackgroundPullJob.start`
+  defers a `JOB_KIND_PULL` in-window UNLESS `market_hours_exempt=True` — the THREE vendor-free exemptions are the
+  sweep (`job_kind != PULL`), the dashboard Greeks-backfill start + every dashboard dry-run pull start (both pass
+  `market_hours_exempt`; the over-block fix — Greeks-backfill runs under `JOB_KIND_PULL`, so job_kind alone was not
+  enough); `cmd_fetch` defers a LIVE pull at the START gate with a clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN
+  (the CRITICAL requirement): a `market_closed` predicate threaded to the PER-WINDOW seam of both
+  spines raises `MarketHoursHalt` (durable ledger leaves PLANNED/FAILED windows RESUMABLE); `run_until_clean` gains a
+  `market_closed` hook → `stop_market_hours`; `pull_all_spot`/`pull_contract_candles` catch it mid-round + belt-break
+  later steps + the minute phase; the METADATA phase (`pull_expiries_contracts`) gets a per-cell belt (raises
+  `MarketHoursHalt` before each `get_expiries`/`get_contracts`; `run_two_phase` re-raises it, not record-and-resume);
+  `run_full_pipeline` re-checks the belt BEFORE metadata AND before historical + wraps `run_metadata` in a
+  `try/except MarketHoursHalt`, skipping the rest of the vendor chain with `stopped_after="market_hours"`; and the
+  CLI `brutex fetch` path is MID-RUN-guarded too (`cmd_fetch` threads `market_closed` into the spot spine + the
+  between-rounds `run_until_clean`, catches `MarketHoursHalt`, drains + persists the ledger → resumable, exits
+  EXIT_OK). The mid-run env kill switch is resolved ONCE at pull start via `resolve_market_closed()` (fail-LOUD on
+  junk at START; the bound predicate reads ONLY the live clock per call, so a junk env written MID-pull can never
+  crash a long run with a per-window re-parse); the one-shot START gates keep `guard_active_default`. Production
+  wiring binds `resolve_market_closed()` (dashboard routes + the nightly headless binding — the MOTIVATING
+  01:30 case covered); a dry-run / un-wired caller passes `None` (byte-identical). NOT edited:
+  `_start_auto_resume_on_boot`/`cmd_dashboard` (auto-resume covered transitively; conflict-free with PR #1343).
+  HONEST: the CLI + metadata paths are now mid-run-guarded (not merely start-gated); the Groww F&O guard is
+  per-CONTRACT granularity — a contract already started at 08:45 finishes its few small remaining windows before the
+  next contract's belt stops the pull (an accepted bounded overrun, never a whole extra symbol); a pull interrupted
+  at 08:45 DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up); out-of-coverage default is
+  BLOCK-in-window (fail-safe). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only, no fetch/rate/pool/
+  governor change; `market_hours.py` + `data/errors.py` + `universe_phases.py` + `metadata_pull.py` +
+  `pipeline_pull.py` + nightly binding 100% line+branch; ruff/ruff-format clean, `mypy --strict`
+  clean, pyright at the pre-change baseline. LAND-PASS FIX ROUND (2026-07-10, same branch, pre-merge): the async
+  `fetch_pipeline._is_pool_isolatable` now treats `MarketHoursHalt` as a POOL-WIDE trip (the #1038 drift-pin's demand — the
+  async twin of the spines' `_GLOBAL_STOP_ERRORS`; dedicated unit pin, module re-verified 100%); suite-wide WALL-CLOCK
+  hermeticity — `tests/conftest.py` runs the suite under the documented kill switch (`BRUTEX_MARKET_HOURS_GUARD=0`,
+  `setdefault`) because the real-clock START gate made every un-injected `BackgroundPullJob.start` test FAIL inside
+  08:45-15:35 IST (reproduced 2026-07-10; the #1380 hermeticity philosophy applied to the clock — the guard's own tests
+  inject env/clock/guards explicitly and stay armed on both arms); two stale `#1624` docstring citations corrected to
+  this entry's number (now #1692 after the coordinator-map renumber); the fold's duplicated #1632 ledger entry deduped).
   Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
   DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702** — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone: the ONE pinned series alias `NSE-NIFTY-FUT` (symbol_id 4; retired shapes get a
@@ -5607,6 +5712,11 @@ hostile-review pass._
   `combine_metrics_from_folds`), byte-identity golden-proven — zero Rust in
   this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
   branch line)
+  Earlier: `claude/groww-market-hours-guard`
+  (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE
+  market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
+  days, keeping the shared account free for TickVault's live feed; matches
+  §1's Active branch line)
   Earlier: `claude/magical-cray-g6agaw`
   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
   DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1710 — the ADR-0012
@@ -6015,7 +6125,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4807-4808` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4853-4854` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
