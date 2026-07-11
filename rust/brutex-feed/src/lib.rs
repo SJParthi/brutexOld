@@ -1,0 +1,36 @@
+//! `brutex-feed` — the engine read-boundary DECISION kernel.
+//!
+//! `DEC-FEED-RUST-CORE-001`: the decision plane of
+//! `brutex/feed/replay.py::arrow_table_to_bars` + the
+//! `brutex/data/bad_tick.py::BadTickScreen` state machine, transcribed to a
+//! single pure forward scan ([`scan_bars`]) that returns INTEGERS ONLY —
+//! kept row indices, owed-WARN coordinates, and the positivity-stop
+//! coordinate. Python (`brutex/feed_rust.py` + `brutex/feed/replay.py`)
+//! selects rows and builds every `Decimal` / `CandleBar` / error / log
+//! itself with the verbatim existing expressions, so run identity
+//! (`bxsnap2`, CLAUDE.md Golden Rule #4) is byte-preserved by construction.
+//!
+//! Shipped default-OFF behind `BRUTEX_FEED_RUST` (Pattern A opt-in); the
+//! retained Python loop is the parity oracle. The one-constant default flip
+//! is the LATER `DEC-FEED-RUST-FLIP-001` (burn-in + autorevert per the
+//! DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent).
+//!
+//! ## Honest envelope (Golden Rule #10)
+//!
+//! The scan is O(n_bars) per LAUNCH — a per-call latency win on the feed
+//! read boundary, NOT an O(1) claim and NOT on the ~33B-trial mask path.
+
+pub mod scan;
+
+pub use scan::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US, ScanOutcome, WarnEvent, scan_bars};
+
+/// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
+/// baked at build time by `build.rs` under the shared FRAMING v1 of
+/// `rust/source_digest_core.rs` (DEC-RUST-SOURCE-DIGEST-TWIN-001,
+/// `docs/MIGRATION.md` #1258). The PyO3 module exports it as
+/// `SOURCE_DIGEST` / `__source_digest__`; the `brutex doctor` freshness
+/// stage for this wheel is the named follow-up `DEC-FEED-RUST-DOCTOR-STAGE-001`.
+pub const SOURCE_DIGEST: &str = env!("BRUTEX_SOURCE_DIGEST");
+
+#[cfg(feature = "python")]
+mod python;

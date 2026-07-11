@@ -1,0 +1,9 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-FEED-RUST-CORE-001; the fno_math/trading_core R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_feed._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-feed surface or version change. The `brutex doctor` stage that reads it is the named follow-up `DEC-FEED-RUST-DOCTOR-STAGE-001` — this slice ships the stamp surfaces only. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible behavioral drift is watched by the baked `__source_digest__` (FRAMING v1, DEC-RUST-SOURCE-DIGEST-TWIN-001) and, at runtime, by the refuse-poison validate_scan gate + the default-OFF degrade-to-oracle posture in brutex/feed_rust.py.",
+  "crate_version": "0.1.0",
+  "symbols": [
+    "SOURCE_DIGEST",
+    "__version__",
+    "scan_bars"
+  ]
+}
