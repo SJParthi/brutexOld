@@ -2128,13 +2128,20 @@ class TestRustAuditSeam:
         dispatch routes it to the oracle; the kernel is never invoked."""
         self._arm(monkeypatch, burn_in_remaining=0)
         calls: list[str] = []
+
+        def _spy_hash(*args: object) -> str:
+            calls.append("hash")
+            return "x" * 64
+
+        def _spy_line(*args: object) -> str:
+            calls.append("line")
+            return "{}"
+
         kernel = audit_module._RustAuditKernel(
-            hash_fn=lambda *a: calls.append("hash") or "x" * 64,
-            line_fn=lambda *a: calls.append("line") or "{}",
-            envelope_error=KeyError,
+            hash_fn=_spy_hash, line_fn=_spy_line, envelope_error=KeyError
         )
         audit_module._set_rust_kernel_for_tests(kernel)
-        entry = self._entry(ts_utc=1_700_000_000, entry_hash="h")  # type: ignore[arg-type]
+        entry = self._entry(ts_utc=1_700_000_000, entry_hash="h")  # int, not float
         assert entry.compute_hash() == entry._compute_hash_python()
         assert entry.to_json_line() == entry._to_json_line_python()
         assert calls == []  # the kernel never saw the out-of-contract entry
