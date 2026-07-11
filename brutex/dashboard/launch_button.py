@@ -191,8 +191,12 @@ LOCKED_TOP: Final[int] = 20
 #: Worker count exported to the detached CLI process (CLAUDE.md §8 envelope).
 LOCKED_SWEEP_WORKERS: Final[str] = "8"
 
-#: Rank-region byte budget exported to the child (audit delta, W07_m4_oom_table:
-#: the divisor=1 worker OOM was live-proven and the 1 GiB arm bit-identical).
+#: Rank-region byte budget exported to the child. The divisor=1 worker-OOM gap
+#: this pin originally mitigated (audit delta, W07_m4_oom_table — live-proven,
+#: 1 GiB arm bit-identical) is CLOSED by DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+#: (MIGRATION.md #1671 — the engine now divides the derived budget across
+#: workers itself); this 1 GiB export REMAINS a deliberate PER-WORKER pin,
+#: passed undivided per the #1352 env-override contract.
 #: Verified against main's real env name (`sweep_mem_budget.MEM_BUDGET_ENV`) and
 #: its fail-loud positive-int parser (`resolve_mem_budget_bytes` accepts this
 #: literal).
