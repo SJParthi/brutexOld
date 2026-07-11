@@ -83,8 +83,10 @@ _POLLER_GUARDS: dict[str, tuple[str, ...]] = {
     "fetch_windows.html": (
         "let lastPayloadKey = null;",
         'let lastLiveLine = "";',
-        # Skip: replay the honest heartbeat line and return before JSON.parse.
-        "if (payloadKey === lastPayloadKey) { liveTxt.textContent = lastLiveLine; return; }",
+        # Skip: replay the honest heartbeat line and return before JSON.parse
+        # (`return true` since DEC-FRONTEND-LATENCY-HARDENING-001 — a skipped
+        # tick is a SUCCESSFUL tick for BXPoll's failure counting).
+        "if (payloadKey === lastPayloadKey) { liveTxt.textContent = lastLiveLine; return true; }",
         # Manual-refresh: a chip flip nulls the memo so a click ALWAYS renders.
         "lastPayloadKey = null; // manual filter flip: force the next render, never a stale skip",
     ),
@@ -98,14 +100,14 @@ _POLLER_GUARDS: dict[str, tuple[str, ...]] = {
     "spot_coverage.html": (
         "let lastPayloadTxt = null;",
         'let lastLiveLine = "";',
-        "if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return; }",
+        "if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return true; }",
     ),
     # completeness.html gained the raw-text memo in DEC-DASHBOARD-POLL-HYGIENE-001
     # (the ~750-row options table was rebuilt every 4 s with no diff gate).
     "completeness.html": (
         "let lastBoardTxt = null;",
         'let lastLiveLine = "";',
-        "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return; }",
+        "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return true; }",
     ),
 }
 
@@ -120,9 +122,15 @@ def test_poller_template_ships_skip_render_guard(name: str) -> None:
 
 @pytest.mark.parametrize("name", sorted(_POLLER_GUARDS))
 def test_poller_template_still_polls_every_4s(name: str) -> None:
-    """The skip guard must not have removed the 4 s poll cadence itself."""
+    """The skip guard must not have removed the 4 s poll cadence itself.
+
+    Since DEC-FRONTEND-LATENCY-HARDENING-001 (MIGRATION.md #1720) the cadence
+    token is BXPoll's ``pollMs: 4000`` (the scheduling moved onto the shared
+    bx-poll.js core; the bare ``setInterval(poll, 4000)`` is gone — pinned in
+    test_dashboard_poll_hygiene.py). The visible-tab cadence is unchanged.
+    """
     html = _template(name)
-    assert "setInterval(poll, 4000);" in html, f"{name}: the 4 s poll loop must survive"
+    assert "pollMs: 4000," in html, f"{name}: the 4 s poll cadence must survive"
 
 
 @pytest.mark.parametrize("name", sorted(_POLLER_GUARDS))
@@ -369,7 +377,17 @@ _BASELINE_INNERHTML_SINKS: dict[str, int] = {
 # SAME already-esc()'d row-string builder the pre-existing full rebuild writes,
 # against the narrower tbody target (pinned verbatim in
 # test_fetch_windows_ships_the_in_place_tbody_patch below).
-_SANCTIONED_EXTRA_SINKS: dict[str, int] = {"db.html": 1, "fetch_windows.html": 1}
+# spot_coverage.html joined the SAME sanctioned pattern in
+# DEC-FRONTEND-LATENCY-HARDENING-001 (MIGRATION.md #1720):
+# `tbody.innerHTML = spotRowsHtml(rows);` — the SAME already-esc()'d
+# row-string builder the pre-existing full rebuild writes, against the
+# narrower tbody target (pinned verbatim in
+# tests/unit/test_dashboard_frontend_latency.py).
+_SANCTIONED_EXTRA_SINKS: dict[str, int] = {
+    "db.html": 1,
+    "fetch_windows.html": 1,
+    "spot_coverage.html": 1,
+}
 
 
 @pytest.mark.parametrize("name", sorted(_BASELINE_INNERHTML_SINKS))
