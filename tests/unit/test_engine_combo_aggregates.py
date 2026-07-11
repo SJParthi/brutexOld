@@ -565,6 +565,9 @@ class TestTalliesAndRatios:
         assert agg.exits_forced_1520 == 1
         assert agg.exits_end_of_data == 1
         assert agg.exits_session_gap == 1
+        # The RECORD carries the real (nonzero) count too — a to_record()
+        # hardcoding "exits_session_gap": 0 dies here (refuter round 3 CM3).
+        assert agg.to_record()["exits_session_gap"] == 1
 
     def test_consecutive_runs_scratch_breaks_both(self) -> None:
         pnls = [-10, -10, -10, 0, 20, 20, -5, 20]
@@ -638,6 +641,47 @@ class TestRecordShape:
             paths, [capture], [agg.to_record()], store_content_hash="12" * 32
         )
         assert stamp.agg_rows == 1
+
+    def test_nonzero_session_gap_round_trips_through_the_sidecar_chain(
+        self, tmp_path: Path
+    ) -> None:
+        """``to_record()`` carries the REAL ``exits_session_gap`` count (refuter round 3 CM3).
+
+        Round-trips a NONZERO count through the REAL chain — ``to_record()`` →
+        ``write_tuple_sidecars`` → ``results_depth_pass._load_agg_records`` →
+        ``ComboAggregate(**record)`` (the loader constructs the dataclass, so
+        the ``__post_init__`` exit-tally sum invariant re-validates on
+        read-back). A ``to_record()`` hardcoding ``"exits_session_gap": 0``
+        dies twice over: the persisted five-tally sum (1) no longer equals
+        ``n_trades`` (3), so the read-back construction raises
+        ``ComboAggregateError`` — and even absent the invariant the read-back
+        count would read 0 ≠ 2.
+        """
+        from brutex.engine.results_depth_pass import _load_agg_records
+
+        root = tmp_path / "sweeps"
+        paths = sidecar_paths_for(
+            root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet",
+            root,
+            run_id="grid-0123456789abcdef",
+        )
+        trades = (
+            _trade(_DAY, 0, 10, reason="session_gap"),
+            _trade(_DAY, 1, 10, reason="session_gap"),
+            _trade(_DAY, 2, 10, reason="signal"),
+        )
+        capture = _capture(trades)
+        agg = _aggregate(capture, _row([10, 10, 10]))
+        assert agg.exits_session_gap == 2
+        record = agg.to_record()
+        write_tuple_sidecars(paths, [capture], [record], store_content_hash="12" * 32)
+        (read_back,) = _load_agg_records(paths)
+        assert read_back.exits_session_gap == 2
+        assert read_back.exits_signal == 1
+        assert read_back.n_trades == 3
+        # Belt (after the chain proved itself): the record itself carried the
+        # real count — the tally test pins the count-1 shape directly.
+        assert record["exits_session_gap"] == 2
 
     def test_validation_rejects_empty_run_id(self) -> None:
         with pytest.raises(ComboAggregateError, match="run_id"):

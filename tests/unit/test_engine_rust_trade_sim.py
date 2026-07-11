@@ -1646,6 +1646,27 @@ class TestSessionTailHoleWarn:
         assert suppressed[0]["total"] == 22  # the final (23rd) session is exempt
         assert suppressed[0]["shown"] == _TAIL_HOLE_WARN_CAP
 
+    def test_exactly_at_cap_20_warns_all_with_no_suppressed_summary(self) -> None:
+        # Boundary teeth on the strict `>` cap compare (refuter round 3 CM9):
+        # EXACTLY _TAIL_HOLE_WARN_CAP hole sessions (20 holes + the exempt
+        # final session) emit ALL 20 per-session WARNs and ZERO suppressed
+        # summaries — nothing was suppressed, so a summary event here would
+        # fabricate suppression. A `>` → `>=` mutant at the cap compare fires
+        # the summary at exactly-the-cap and fails this test.
+        session_days: list[int] = []
+        forced: list[bool] = []
+        for ordinal in range(738522, 738522 + 21):  # 20 holes + 1 exempt final
+            session_days.extend([ordinal, ordinal])
+            forced.extend([False, False])
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        holes = self._tail_hole_events(logs)
+        assert len(holes) == _TAIL_HOLE_WARN_CAP == 20
+        assert [e["session"] for e in holes] == [
+            date.fromordinal(o).isoformat() for o in range(738522, 738522 + 20)
+        ]
+        assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
     def test_forced_bearing_interior_session_is_not_a_hole(self) -> None:
         # Direct call: an interior session carrying ANY forced bar is healthy;
         # its forced-less interior sibling still warns (the run split logic).
