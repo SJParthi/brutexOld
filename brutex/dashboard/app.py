@@ -1703,6 +1703,22 @@ def build_app(
     # not share the 256-cap counts instance nor evict its tiny entries); both
     # stay outside the candle int-total cache's key namespace above.
     _window_counts_cache, _window_page_cache = make_window_payload_caches()
+    # The pre-open EXPORT rows cache (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md
+    # #1719): a repeat `.xlsx`/`.zip` export click previously RE-RAN the entire
+    # report build — measured 206 DuckDB per-symbol aggregates binding 616 files
+    # + a 1,442-scandir dataset walk per click (326–574 ms at 103 symbols,
+    # +22 MB RSS cold; identical statement counts on the REPEAT click — zero
+    # caching). The built `PreOpenRow` list is invariant within one write
+    # generation for one (basis, [from, to], symbols filter) coordinate, so it
+    # is memoised here behind `_summary_cache.generation` (a pull — or a
+    # cross-process CLI pull via the revision probe — bumps it → rebuild; the
+    # SAME invalidation signal every discovery cache above rides). SMALL
+    # dedicated instance (a row list holds symbols × days entries, so it must
+    # not share — nor churn-evict — the 256-cap generic caches; the
+    # WINDOW_PAGE_CACHE precedent). The workbook/zip SERIALISATION stays
+    # per-click (CPU-bound over the cached rows, mode/min_pct-dependent).
+    # Single-flight: two concurrent export clicks pay ONE build.
+    _preopen_rows_cache = MoversSnapshotCache(capacity=8)
     # The discovery-walk memos below (the F&O/spot cascades, the datasets
     # triple-walk, the latest-date/minute resolvers) additionally opt into the
     # PULL-TIME adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the
@@ -6803,17 +6819,24 @@ def build_app(
         lake_root = getattr(store, "path", None)
 
         def _build_rows(lake: Path) -> list[Any]:
-            """Build the pre-open report rows off the event loop (threadpool worker)."""
-            # Offloaded: the dataset discovery (filesystem walk) + the per-symbol
-            # DuckDB aggregate run on a threadpool worker, building store.connection
+            """Serve the memoised report rows off the event loop (threadpool worker)."""
+            # DEC-DB-LATENCY-HARDENING-001: rows memoised per (basis, range,
+            # symbols filter) at the write generation — a repeat click within one
+            # generation is an O(1) handoff (ZERO dataset walks, ZERO DuckDB
+            # statements, spy-pinned); the cold build (discovery walk + per-symbol
+            # aggregates) runs on this threadpool worker, building store.connection
             # here so the store RLock stays on this thread (DEC-DASHBOARD-FASTREAD-001).
-            return build_preopen_rows(
-                store.connection,
-                lake,
-                datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
-                start=start_d,
-                end=end_d,
-                basis=report_basis,
+            return _preopen_rows_cache.get_or_compute(
+                _preopen_rows_key(report_basis, start_d, end_d, wanted),
+                generation=_summary_cache.generation,
+                compute=lambda: build_preopen_rows(
+                    store.connection,
+                    lake,
+                    datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
+                    start=start_d,
+                    end=end_d,
+                    basis=report_basis,
+                ),
             )
 
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
@@ -6882,14 +6905,23 @@ def build_app(
         lake_root = getattr(store, "path", None)
 
         def _build_rows(lake: Path) -> list[Any]:
-            """Build the pre-open report rows off the event loop (threadpool worker)."""
-            return build_preopen_rows(
-                store.connection,
-                lake,
-                datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
-                start=start_d,
-                end=end_d,
-                basis=report_basis,
+            """Serve the memoised report rows off the event loop (threadpool worker).
+
+            DEC-DB-LATENCY-HARDENING-001: the SAME memo coordinate as the
+            ``.xlsx`` route — mode/min_pct shape only the RENDER below, so both
+            exports share ONE cached row build per (basis, range, symbols).
+            """
+            return _preopen_rows_cache.get_or_compute(
+                _preopen_rows_key(report_basis, start_d, end_d, wanted),
+                generation=_summary_cache.generation,
+                compute=lambda: build_preopen_rows(
+                    store.connection,
+                    lake,
+                    datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
+                    start=start_d,
+                    end=end_d,
+                    basis=report_basis,
+                ),
             )
 
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
@@ -8302,21 +8334,27 @@ def build_app(
         The response is now ONE ``LIMIT``/``OFFSET`` page with a real ``total``
         (DEC-DB-VIEWER-PAGINATE-ALL-001) so the /db viewer renders O(visible), not
         every window. Honest envelope (Golden Rule #10,
-        DEC-SUSPICION-SWEEP-FIXES-001 D3): the ledger is NOT small — a pre-planned
-        full-universe options pull holds ~841k rows (the measured shape behind
-        ``db_view.WINDOW_ROWS_CAP``), and this route previously re-PARSED the whole
-        Parquet (``load_window_ledger(...).to_rows()``) on EVERY paging click. The
-        read now rides :func:`~brutex.dashboard.db_view.window_ledger_rows_cached`
-        — the SAME mtime-keyed single parse the other ledger readers share — so a
-        paging click within one ledger generation is an O(1) cache handoff + an
-        O(page) slice/format; the FIRST read after a ledger flush still pays one
-        real O(rows) parse (true O(page) needs a write-time manifest, NOT claimed).
-        The page-slice preserves the canonical
-        :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort + derived
-        columns byte-for-byte (ONE row-shape source:
-        ``window_ledger.ledger_record_row``).
+        DEC-DB-LATENCY-HARDENING-001 — supersedes the D3 cached-Python-parse
+        cost model): the ledger is NOT small — a pre-planned full-universe
+        options pull holds ~841k rows (the measured shape behind
+        ``db_view.WINDOW_ROWS_CAP``), and the D3-era read still paid ONE full
+        ``load_window_ledger`` Python parse per ledger STAMP move (measured
+        7,177.5 ms of a 7,628 ms request at 400k rows — recurring every
+        mid-pull flush). The read now rides
+        :func:`~brutex.dashboard.db_view.query_window_ledger_page` — a DuckDB
+        ``LIMIT``/``OFFSET`` projection over the SAME delta-folded ledger scan
+        source the ``/coverage/windows`` fast paths use, with the total from
+        ONE stamp-memoised ``COUNT(*)`` — so a fresh-stamp click is one
+        columnar scan (O(total rows + delta footers), NOT the O(rows) Python
+        record fold) and a repeat click within one stamp is an O(1) cache
+        handoff + an O(page) format. A legacy-shape ledger / a persistently
+        malformed delta / no DuckDB conn degrades to the byte-identical cached
+        Python parse (``window_ledger_rows_cached``). The page preserves the
+        canonical :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort
+        + derived columns byte-for-byte (fast-equals-legacy pinned; ONE
+        row-shape source: ``window_ledger.ledger_record_row``).
         """
-        from brutex.dashboard.db_view import window_ledger_rows_cached
+        from brutex.dashboard.db_view import query_window_ledger_page
 
         columns = [
             "market",
@@ -8345,14 +8383,22 @@ def build_app(
         lake = lake_root.parent
 
         def _load() -> dict[str, Any]:
-            """Read the cached ledger rows, then slice + IST-format ONLY the page."""
+            """Read ONE DuckDB page (legacy-parse fallback), then IST-format it."""
             from brutex.data.session import format_ist_clock
 
-            all_rows = window_ledger_rows_cached(lake)
-            total = len(all_rows)
-            # Slice BEFORE formatting → only the page's rows are IST-coerced (O(page)).
-            # An offset past the end is a clean empty page (Python slice never raises).
-            page = all_rows[offset : offset + limit]
+            # DEC-DB-LATENCY-HARDENING-001: DuckDB LIMIT/OFFSET page + memoised
+            # COUNT over the delta-folded scan source (the /coverage/windows
+            # caches — distinct `wledger-*` key families, stamp-token keyed);
+            # the store connection is built + used on this threadpool worker so
+            # its RLock stays on one thread (DEC-DASHBOARD-FASTREAD-001).
+            page, total = query_window_ledger_page(
+                store.connection,
+                lake,
+                limit=limit,
+                offset=offset,
+                count_cache=_window_counts_cache,
+                page_cache=_window_page_cache,
+            )
             rows: list[list[Any]] = []
             for row in page:
                 cells: list[Any] = list(row)
@@ -9289,6 +9335,22 @@ def _load_results_template() -> str:
 def _render_results_html() -> str:
     """Return the brute-force sweep leaderboard page HTML (DEC-DASHBOARD-RESULTS-PAGE-001)."""
     return _load_results_template()
+
+
+def _preopen_rows_key(basis: str, start: date, end: date, wanted: Sequence[str] | None) -> str:
+    """The pre-open export rows-memo key — pure, deterministic, collision-safe.
+
+    DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md #1719): one memo coordinate per
+    ``(basis, inclusive [from, to] range, symbols filter)`` — the exact inputs
+    that shape the built ``PreOpenRow`` list (the ``.zip`` route's mode/min_pct
+    shape only the RENDER, so both export routes share one coordinate). The
+    filter segment rides one tuple ``repr`` (the window-page precedent —
+    unambiguous, a client-supplied comma-joined symbols string can never forge
+    a key collision through a bare separator); ``None`` (no filter) keys as
+    ``None``, distinct from any explicit tuple.
+    """
+    filter_token = None if wanted is None else tuple(wanted)
+    return f"preopen-rows|{basis}|{start.isoformat()}|{end.isoformat()}|{filter_token!r}"
 
 
 def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, date]:
