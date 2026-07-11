@@ -44,6 +44,8 @@ import brutex.engine.sweep_parallel as mod
 import pytest
 from brutex.config.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
 from brutex.data.models import CandleBar
+from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_audit import SweepAuditWriter
 from brutex.engine.sweep_cache import SweepCache
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
@@ -61,8 +63,6 @@ from brutex.engine.sweep_orchestrator import (
     Timeframe,
     count_sweep_tuples,
 )
-from brutex.data.option_dedup import OptionDedupIndex
-from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_progress import SweepProgress
 from brutex.engine.sweep_run import ComboDedup, SweepRunConfig, run_persisted_sweep
 from brutex.engine.sweep_supervisor import SweepGuards, grid_identity

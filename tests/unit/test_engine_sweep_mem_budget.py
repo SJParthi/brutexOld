@@ -276,9 +276,7 @@ class TestWorkerAwareBudgetScaleGuards:
     itself is pinned in test_engine_sweep_mem_budget_workers.py.
     """
 
-    def test_eight_workers_divide_the_default_total(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_eight_workers_divide_the_default_total(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The 48 GiB §8 box: default total 8 GiB ÷ 8 eval workers == 1 GiB/tuple.
         _simulate_ram(monkeypatch, 48 * _GIB)
         assert resolve_mem_budget_bytes({}, workers=8) == 1 * _GIB

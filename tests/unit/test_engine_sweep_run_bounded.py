@@ -37,11 +37,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from brutex.config.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_driver import metrics_from_trades
-from brutex.config.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
 from brutex.engine.sweep_mem_budget import (
     BATCH_RANK_BYTES_PER_KEPT,
     BOUNDED_RANK_MODE_ENV,
