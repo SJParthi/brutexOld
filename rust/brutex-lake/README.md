@@ -21,10 +21,10 @@ byte-identity under version lockstep.
 | Leg | Pin | Enforced by |
 |---|---|---|
 | Python wheel | `polars==1.42.1` (installed) | the facade's runtime **version guard** (`brutex/data/lake_rust_render.py` — engages ONLY when `polars.__version__ == pinned_polars_version()`) |
-| This crate | every polars git dep at `tag = "py-1.42.1"` | `manifest_tag_matches_pinned_version` (cargo test) against `PINNED_POLARS_PY_VERSION` |
+| This crate | every polars git dep REV-pinned at the commit the `py-1.42.1` tag pointed at (tags are movable; review-round fold) | `manifest_rev_matches_pinned_rev` + `lockfile_resolves_pinned_rev` (cargo tests) against `PINNED_POLARS_GIT_REV`; every CI cargo step `--locked`, maturin `locked = true` |
 | zstd trio | zstd 0.13.3 / zstd-safe 7.2.4 / zstd-sys 2.0.16 (libzstd 1.5.7) via the **committed `Cargo.lock`** | `linked_libzstd_matches_pin` (cargo test) |
 
-Bump ritual: `docs/runbooks/lake-rust-render-lockstep.md` — wheel bump ⇒ tag
+Bump ritual: `docs/runbooks/lake-rust-render-lockstep.md` — wheel bump ⇒ rev
 bump ⇒ zstd re-pin (Cargo.lock) ⇒ parity corpus re-run ⇒ only then re-engage.
 
 ## Python surface
@@ -36,15 +36,18 @@ brutex_lake.pinned_polars_version()             # -> "1.42.1"
 brutex_lake.linked_zstd_version()               # -> "1.5.7"
 ```
 
-Errors cross the FFI as `ValueError`/`RuntimeError` (panics are caught at the
-boundary — never a `pyo3_runtime.PanicException`, which as a `BaseException`
-would escape the facade's degrade catch).
+Errors cross the FFI as `ValueError`/`RuntimeError` (the render AND the
+result construction are each caught at the boundary — never a
+`pyo3_runtime.PanicException`, which as a `BaseException` would escape the
+facade's degrade catch; the facade additionally carries a `BaseException`
+belt as defense-in-depth). The render runs GIL-free (`Python::detach`),
+matching the wheel's own `write_parquet` posture.
 
 ## Build / test
 
 ```bash
 cd rust/brutex-lake
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --release
+cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --release --locked
 pip install maturin && pip install .   # or: maturin develop --release
 ```
 
