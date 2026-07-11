@@ -399,6 +399,7 @@ class TestBuildTop100:
             "signal": 20,
             "forced_1520": 5,
             "end_of_data": 0,
+            "session_gap": 0,
         }
         regime = entry["regime"]
         assert isinstance(regime, dict)

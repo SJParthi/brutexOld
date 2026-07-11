@@ -155,6 +155,7 @@ def _agg_record(run_id: str, **overrides: object) -> dict[str, object]:
         "exits_signal": 0,
         "exits_forced_1520": 0,
         "exits_end_of_data": 0,
+        "exits_session_gap": 0,
         "max_consecutive_losses": 1,
         "max_consecutive_wins": 1,
         "composite_score": 1.234567890123,
@@ -588,9 +589,15 @@ class TestValidatorEdges:
 
 
 def test_agg_columns_cover_the_b2_schema() -> None:
-    """The B2 schema authority: 49 pinned columns, run_id first."""
+    """The B2 schema authority: 50 pinned columns, run_id first.
+
+    49 → 50: ``exits_session_gap`` joined the per-reason counter block
+    (DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the exit-reason vocabulary is
+    append-only, and the agg schema tracks it in lockstep).
+    """
     names = [name for name, _ in AGG_COLUMNS]
     assert names[0] == "run_id"
-    assert len(names) == len(set(names)) == 49
+    assert len(names) == len(set(names)) == 50
+    assert "exits_session_gap" in names
     assert "fingerprint" in names
     assert "composite_score" in names

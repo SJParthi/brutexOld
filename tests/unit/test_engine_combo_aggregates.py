@@ -216,6 +216,7 @@ def _assert_null_stats(agg: ComboAggregate) -> None:
         == agg.exits_signal
         == agg.exits_forced_1520
         == agg.exits_end_of_data
+        == agg.exits_session_gap
         == 0
     )
     assert agg.max_consecutive_losses == 0
@@ -544,15 +545,26 @@ class TestTimeAndEventLenses:
 
 
 class TestTalliesAndRatios:
-    def test_exit_reason_tallies_cover_all_five(self) -> None:
-        reasons = ["stop_loss", "take_profit", "signal", "forced_1520", "end_of_data"]
+    def test_exit_reason_tallies_cover_all_six(self) -> None:
+        # One trade per vocabulary member incl. session_gap
+        # (DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the counter is the persistent
+        # session-tail-hole signal).
+        reasons = [
+            "stop_loss",
+            "take_profit",
+            "signal",
+            "forced_1520",
+            "end_of_data",
+            "session_gap",
+        ]
         trades = tuple(_trade(_DAY, i, 10, reason=reason) for i, reason in enumerate(reasons))
-        agg = _aggregate(_capture(trades), _row([10] * 5))
+        agg = _aggregate(_capture(trades), _row([10] * 6))
         assert agg.exits_stop_loss == 1
         assert agg.exits_take_profit == 1
         assert agg.exits_signal == 1
         assert agg.exits_forced_1520 == 1
         assert agg.exits_end_of_data == 1
+        assert agg.exits_session_gap == 1
 
     def test_consecutive_runs_scratch_breaks_both(self) -> None:
         pnls = [-10, -10, -10, 0, 20, 20, -5, 20]
