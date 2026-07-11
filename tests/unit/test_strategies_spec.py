@@ -76,10 +76,12 @@ class TestSymbolRegistry:
     def test_table_pinned_literally(self) -> None:
         # The full assignment table, pinned in the MUTATION-gated unit file
         # (the golden pins it too): a renumber, rename, or drift fails here.
+        # Row 4 appended by DEC-FUTURES-ADDRESSING-PIN-001 (ADR-0012).
         assert dict(SYMBOL_IDS) == {
             "NSE-NIFTY": 1,
             "NSE-BANKNIFTY": 2,
             "BSE-SENSEX": 3,
+            "NSE-NIFTY-FUT": 4,
         }
 
     def test_unregistered_label_raises(self) -> None:
@@ -89,19 +91,28 @@ class TestSymbolRegistry:
             symbol_id_for("NSE-NOSUCH")
         assert str(exc.value) == (
             "symbol_id_for: unregistered instrument label 'NSE-NOSUCH' "
-            "(registered: ['BSE-SENSEX', 'NSE-BANKNIFTY', 'NSE-NIFTY'])"
+            "(registered: ['BSE-SENSEX', 'NSE-BANKNIFTY', 'NSE-NIFTY', 'NSE-NIFTY-FUT'])"
         )
 
     def test_unregistered_id_raises(self) -> None:
         with pytest.raises(StrategyError) as exc:
             symbol_label_for(999)
         assert str(exc.value) == (
-            "symbol_label_for: unregistered symbol_id 999 (registered: [1, 2, 3])"
+            "symbol_label_for: unregistered symbol_id 999 (registered: [1, 2, 3, 4])"
         )
 
     def test_registry_is_readonly(self) -> None:
         with pytest.raises(TypeError):
             SYMBOL_IDS["NSE-HACK"] = 42  # type: ignore[index]
+
+    def test_futures_row_import_identity_with_the_universe_alias(self) -> None:
+        # Row 4's label IS brutex.universe.NIFTY_FUTURES_SERIES_SYMBOL —
+        # import-identity-pinned so the registry literal can never drift from
+        # the ONE pinned addressing constant (DEC-FUTURES-ADDRESSING-PIN-001).
+        from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
+
+        assert symbol_id_for(NIFTY_FUTURES_SERIES_SYMBOL) == 4
+        assert symbol_label_for(4) == NIFTY_FUTURES_SERIES_SYMBOL
 
     def test_build_rejects_duplicate_label(self) -> None:
         with pytest.raises(StrategyError) as exc:
@@ -126,6 +137,16 @@ class TestSymbolRegistry:
             _build_registry((("A", 2**32),))
         assert str(exc.value) == (
             "symbol registry: id 4294967296 for 'A' outside [1, 4294967295] "
+            "(0 is the RESERVED unassigned sentinel)"
+        )
+
+    def test_build_rejects_negative_id(self) -> None:
+        # The lower boundary's negative side (the 0 < symbol_id arm) — a
+        # forged negative id can never mint a registry row.
+        with pytest.raises(StrategyError) as exc:
+            _build_registry((("A", -1),))
+        assert str(exc.value) == (
+            "symbol registry: id -1 for 'A' outside [1, 4294967295] "
             "(0 is the RESERVED unassigned sentinel)"
         )
 
@@ -308,6 +329,16 @@ class TestRejectionParity:
             make_spec(symbol_id=2**32)
         with pytest.raises(OverflowError):
             trading_core.spec_canonical_bytes("1f", 0, 50, 10, 25, 3, 2**32)
+
+    def test_symbol_id_negative_backstop(self) -> None:
+        # The u32 boundary's NEGATIVE side (the FFI-contract twin of the
+        # width backstop above, ADR-0012 launch pin): Python policy refuses
+        # a negative id; a raw binding call raises PyO3 OverflowError — a
+        # forged negative key can never reach the canonical-bytes encoder.
+        with pytest.raises(StrategyError):
+            make_spec(symbol_id=-1)
+        with pytest.raises(OverflowError):
+            trading_core.spec_canonical_bytes("1f", 0, 50, 10, 25, 3, -1)
 
     def test_symbol_id_zero_is_policy_not_shared_rule(self) -> None:
         # The shared crate ACCEPTS id 0 (spec.rs "zero is valid"); only the

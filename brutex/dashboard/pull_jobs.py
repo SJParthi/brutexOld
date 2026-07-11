@@ -39,6 +39,7 @@ from brutex.adapters.groww.pull_singleflight import (
     pull_lease_guard,
     pull_singleflight_lock,
 )
+from brutex.calendars.market_hours import guard_active_default
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S, PullWatchdog
@@ -251,13 +252,18 @@ def is_pull_halt(exc: BaseException) -> bool:
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import VendorDownError
     from brutex.adapters.groww.errors import is_terminal_auth_failure
-    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt, MarketHoursHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
     return isinstance(
         exc,
         (
             LakeWriteHalt,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: a pull crossed into the NSE
+            # market-hours window and halted to free the shared Groww account for
+            # TickVault's live feed — a pull-wide graceful stop, alerted like a
+            # LakeWriteHalt if it escapes to the job layer.
+            MarketHoursHalt,
             # The two quota classes are DORMANT under Groww (no daily quota, no
             # tracker constructed anywhere — DEC-QUOTA-VERDICT-MOOT-001) but
             # deliberately KEPT: they are the raise-path phone-alert net that
@@ -423,6 +429,7 @@ class BackgroundPullJob:
         on_run_end: FinallyHook | None = None,
         journal_heartbeat_interval_s: float = ALIVE_LOG_MIN_INTERVAL_S,
         journal_clock: Callable[[], float] = time.monotonic,
+        market_hours_guard: Callable[[], bool] = guard_active_default,
     ) -> None:
         self._progress = progress if progress is not None else PullProgress()
         self._spawn = spawn
@@ -471,6 +478,14 @@ class BackgroundPullJob:
         #: and before the single-flight release, in its OWN try/except. Production wiring:
         #: ``SessionRateController.clear_meter`` (the C0 cross-pull meter-leak fix).
         self._on_run_end = on_run_end
+        #: Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): a zero-arg
+        #: ``() -> bool`` predicate returning ``True`` when a vendor pull must be
+        #: DEFERRED because the clock is inside the NSE market-hours window
+        #: ``[08:45, 15:35)`` IST on a trading day AND the guard is enabled. The
+        #: default resolves the live clock + env kill switch; tests inject a lambda.
+        #: Consulted ONLY for :data:`JOB_KIND_PULL` starts (the Greeks-backfill /
+        #: sweep kinds make no vendor calls and stay exempt).
+        self._market_hours_guard = market_hours_guard
         self._lock = threading.Lock()
         self._running = False
         #: The CURRENT run's job kind (DEC-RATE-METER-LIFECYCLE-001) — :data:`JOB_KIND_PULL`
@@ -565,6 +580,7 @@ class BackgroundPullJob:
         job_kind: str = JOB_KIND_PULL,
         pull_id: str | None = None,
         cancellable: bool = True,
+        market_hours_exempt: bool = False,
     ) -> bool:
         """Launch *work* in the background over *total* units; return whether it started.
 
@@ -642,7 +658,42 @@ class BackgroundPullJob:
         probe so a 2-4-day sweep reads an honest "idle", never a site-wide red
         "stalled" (the #1593 C5 fix). It changes NOTHING else — ``running``, the
         progress feed and the single-flight are byte-identical for either kind.
+
+        *market_hours_exempt* (DEC-GROWW-MARKET-HOURS-GUARD-001) exempts THIS start
+        from the market-hours START gate below — set ``True`` by callers that make
+        ZERO Groww API calls and are therefore safe to run inside the NSE trading
+        window: the dashboard Greeks-backfill start (a stamp-driven re-enrich over
+        ALREADY-STORED bars) and every ``--dry-run`` pull start (a synthetic adapter,
+        no vendor call). Default ``False`` gates a REAL ``JOB_KIND_PULL`` vendor pull.
+        Orthogonal to *job_kind*: a sweep is already exempt by kind; this flag covers
+        the vendor-free operations that still run under ``JOB_KIND_PULL``.
         """
+        # Market-hours START gate (DEC-GROWW-MARKET-HOURS-GUARD-001): refuse to BEGIN a
+        # VENDOR pull inside the NSE market-hours window ``[08:45, 15:35)`` IST on a
+        # trading day, so a manual/auto-resume click during the session never competes
+        # with TickVault's live feed for the shared Groww account. THREE exemptions —
+        # each makes ZERO Groww API calls, so each is safe in market hours:
+        #   (a) the sweep route (``job_kind != JOB_KIND_PULL`` — a brute-force sweep
+        #       reads the lake, never the vendor);
+        #   (b) any caller that sets ``market_hours_exempt=True`` — the dashboard's
+        #       Greeks-backfill start (a stamp-driven re-enrich over stored bars) AND
+        #       every ``--dry-run`` pull start (a synthetic adapter, no vendor call).
+        # Only a REAL (``JOB_KIND_PULL``, non-exempt) vendor pull is deferred here.
+        # Returns ``False`` with a distinct "deferred" detail + log, exactly like a
+        # refused single-flight (no watchdog built, no lock taken, no worker spawned →
+        # a clean no-op). The pull resumes on the next out-of-hours run.
+        if job_kind == JOB_KIND_PULL and not market_hours_exempt and self._market_hours_guard():
+            self._progress.fail(
+                "deferred — inside NSE market-hours window (08:45-15:35 IST); "
+                "pulls run outside market hours only"
+            )
+            _LOG.warning(
+                "pull.deferred.market_hours",
+                job_kind=job_kind,
+                detail=detail,
+                reason="inside NSE market-hours window (08:45-15:35 IST)",
+            )
+            return False
         # Build the per-run stall watchdog BEFORE the lock (DEC-PULL-STALL-DETECTION-001):
         # the worker beats it on real progress (per window / per post-fetch unit via the
         # emit_progress_beat seams), and its daemon timer declares the worker HUNG if no
@@ -929,10 +980,20 @@ class BackgroundPullJob:
         ``finally`` when the thread actually exits; a wedge that never exits keeps the
         flag held (honest — the zombie still owns the lake; a process restart releases the
         ``flock`` on fd close, and the CRITICAL alert + marker make the wedge LOUD, never
-        silent). The timer keeps polling so a later heartbeat (the greeks/prebuild/movers
-        seams now beat — the false-positive class is closed) fires the recovery edge and
-        :meth:`_on_recovered` clears the marker. Identity-gated: a late edge for a
-        superseded run never marks a newer run.
+        silent). The timer keeps polling so a later heartbeat fires the recovery edge and
+        :meth:`_on_recovered` clears the marker. HONESTY RECONCILE
+        (DEC-HEAL-SCAN-LIVENESS-BEATS-001): the earlier "the greeks/prebuild/movers seams
+        now beat — the false-positive class is closed" claim here was FALSIFIED by
+        production forensics — the L2 post-pull HEAL SCAN (O(files), 36 min over 101,682
+        files) and the synchronous drain-time window-ledger FULL SAVE (a 12.96 s
+        ``save_slow`` over 68,234 rows) emitted ZERO beats, so this edge falsely fired
+        ``stalled_suspect`` for ~27 min on a provably-healthy run. Those two surfaces now
+        beat too (per-target + per-file inside ``lake_heal.heal_after_pull``'s scan +
+        per healed finding; entry/completion beats around
+        ``window_ledger_store.save_window_ledger``). The class is NARROWED, not closed:
+        any FUTURE >timeout silent stage on the worker re-opens it — the safe failure
+        direction stays a loud false SUSPECT, never a masked true stall.
+        Identity-gated: a late edge for a superseded run never marks a newer run.
 
         The whole body is wrapped in its own ``try/except`` (best-effort): an alert or
         progress call that raises is logged + swallowed so it can never kill the daemon

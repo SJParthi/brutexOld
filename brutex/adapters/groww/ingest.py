@@ -105,7 +105,7 @@ from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
 )
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.errors import PartitionLockTimeout, WriteDeadlineExceeded
+from brutex.data.errors import MarketHoursHalt, PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP, observe_interior_gap
 from brutex.data.models import CandleBar
@@ -349,6 +349,7 @@ def ingest_spot(
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
     should_stop: CancelCheck | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -555,6 +556,7 @@ def ingest_spot(
                 storm_breaker=storm_breaker,
                 write_breaker=write_breaker,
                 floor_learner=floor_learner,
+                market_closed=market_closed,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -703,6 +705,7 @@ def _ingest_one_window(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -727,7 +730,15 @@ def _ingest_one_window(
     (DEC-EMPTY-INPULL-RETRY-001) — see :func:`_fetch_window_raw`. *old_cutoff*
     (DEC-OLD-GAP-FAST-SETTLE-001) drives the OLD-gap fast-settle — see
     :func:`_process_window_tail`.
+
+    Market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001): consulted FIRST — before
+    the vendor fetch, the ledger-skip probe, or any I/O — so a pull that crossed into
+    the NSE trading window ``[08:45, 15:35)`` IST halts on THIS window instead of
+    issuing a vendor call. ``MarketHoursHalt`` is a ``_GLOBAL_STOP_ERRORS`` member, so
+    it propagates past the per-symbol quarantine and stops the whole pull gracefully.
     """
+    if market_closed is not None and market_closed():
+        raise MarketHoursHalt()
     outcome, raw = _fetch_window_raw(
         adapter,
         instrument=instrument,

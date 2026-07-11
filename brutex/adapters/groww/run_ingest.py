@@ -73,7 +73,7 @@ from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest
 from brutex.adapters.groww.vendor_floor import VendorFloorLearner
 from brutex.adapters.ingest_common import CancelCheck, PullCancelled, maybe_audit
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.write_breaker import WriteHealthBreaker, resolve_write_breaker
@@ -127,6 +127,12 @@ _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
+    # DEC-GROWW-MARKET-HOURS-GUARD-001: the per-window market-hours guard raised —
+    # the pull crossed into the NSE trading window and must halt to leave the shared
+    # Groww account free for TickVault's live feed. A PULL-WIDE stop: propagates past
+    # the per-symbol quarantine so the whole pull halts gracefully (the ledger's
+    # PLANNED/FAILED windows stay resumable on the next out-of-hours run).
+    MarketHoursHalt,
     MassEmptySettleHalt,
     GrowwAuthError,
     VendorDownError,
@@ -351,6 +357,7 @@ def run_groww_spot_ingest(
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
     should_stop: CancelCheck | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -481,6 +488,16 @@ def run_groww_spot_ingest(
         default — dry-run / synthetic / unit-test callers) never probes; ONLY the
         real-vendor production sites arm it
         (:func:`~brutex.adapters.groww.vendor_floor.make_vendor_floor_learner`).
+    market_closed
+        Optional zero-arg ``() -> bool`` predicate (DEC-GROWW-MARKET-HOURS-GUARD-001)
+        consulted at the TOP of every window worker: ``True`` means the pull has
+        crossed into the NSE market-hours window (``[08:45, 15:35)`` IST on a trading
+        day) and must STOP to free the shared Groww account for TickVault's live feed,
+        so the worker raises :class:`~brutex.data.errors.MarketHoursHalt` — a
+        :data:`_GLOBAL_STOP_ERRORS` member that halts the pull gracefully (the
+        ledger's PLANNED/FAILED windows stay resumable next out-of-hours run). ``None``
+        (the default — dry-run / synthetic / unit-test callers) never gates; ONLY the
+        real production entrypoints bind the live guard.
 
     Returns
     -------
@@ -594,6 +611,7 @@ def run_groww_spot_ingest(
                 write_breaker=wbreaker,
                 floor_learner=floor_learner,
                 should_stop=should_stop,
+                market_closed=market_closed,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -806,6 +824,7 @@ def run_groww_spot_ingest_with_retry(
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
     should_stop: CancelCheck | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -870,6 +889,10 @@ def run_groww_spot_ingest_with_retry(
     per-symbol probe budget holds across rounds (a retry round re-observing the same
     boundary-empty window never re-probes). ``None`` (the default) keeps every
     dry-run / synthetic / test caller un-armed.
+    *market_closed* (DEC-GROWW-MARKET-HOURS-GUARD-001) is forwarded verbatim to every
+    pass, so a retry round that begins after the market opens halts on the first
+    window it tries (:class:`~brutex.data.errors.MarketHoursHalt`). ``None`` (the
+    default) never gates.
 
     Returns
     -------
@@ -911,6 +934,7 @@ def run_groww_spot_ingest_with_retry(
             write_breaker=write_breaker,
             floor_learner=floor_learner,
             should_stop=should_stop,
+            market_closed=market_closed,
         )
 
     report = _one_pass()

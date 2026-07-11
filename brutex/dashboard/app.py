@@ -59,6 +59,7 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
+from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.paths import resolve_lake_root
@@ -138,6 +139,10 @@ from brutex.dashboard.fno_underlying import (
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
+from brutex.dashboard.lake_census_holder import (
+    FIRST_SCAN_PER_FILE_BUDGET_S,
+    LakeCensusHolder,
+)
 from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
@@ -164,6 +169,7 @@ from brutex.dashboard.movers_snapshot import (
     parse_snapshot_date,
     pending_asset_payload,
 )
+from brutex.dashboard.movers_underlying_class import build_underlying_kind_map
 from brutex.dashboard.movers_warm import (
     MoversWarmResult,
     futures_warm_grid,
@@ -214,6 +220,7 @@ from brutex.dashboard.pull_intent import (
     persist_intent_for_launch,
     probe_pull_singleflight,
     run_auto_resume,
+    run_legacy_resume,
 )
 from brutex.dashboard.pull_jobs import (
     JOB_KIND_PULL,
@@ -235,7 +242,7 @@ from brutex.dashboard.spot_cascade import (
     build_spot_cascade,
     symbol_to_json,
 )
-from brutex.dashboard.summary_cache import LAKE_UNIQUENESS, OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 
 if TYPE_CHECKING:  # runtime import is LAZY inside build_app — anyio is [ui]-only
@@ -259,7 +266,11 @@ from brutex.dashboard.sweep_runner import (
     run_sweep_from_request,
     sweep_progress_file,
 )
-from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revision
+from brutex.dashboard.universe_cache import (
+    UniverseSnapshotCache,
+    coverage_revision,
+    master_revision,
+)
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
@@ -276,7 +287,7 @@ from brutex.data.greeks_backfill import (
     scan_stale_greeks_targets,
 )
 from brutex.data.greeks_enrich import resolve_risk_free_source
-from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
+from brutex.data.lake_footprint import META_MEASURED_AT, make_disk_guard, record_lake_footprint
 from brutex.data.lake_invariants import (
     build_lake_census,
     census_to_dict,
@@ -1184,6 +1195,8 @@ def build_app(
     pull_intent_store: PullIntentStore | None = None,
     oneclick_trades_reader: oneclick_artifacts.TradesReader | None = None,
     session_rate: SessionRateController | None = None,
+    census_spawn: Callable[[Callable[[], None]], None] | None = None,
+    census_clock: Callable[[], float] | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1778,6 +1791,48 @@ def build_app(
     # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
     # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
     _options_strikes_cache = MoversSnapshotCache()
+    # The Futures/Options underlying-CLASS kind map cache (DEC-MOVERS-UNDERLYING-CLASS-001):
+    # the `{underlying → index|stock}` map built from the STORED instrument master
+    # (`build_underlying_kind_map`, an O(underlyings) read) stamps each F&O candidate's
+    # `underlying_kind` for the RANK-time `All | Indices | Stocks` filter. The map is a
+    # pure function of the instrument MASTER, so it is keyed on the master CONTENT
+    # revision (`master_revision` — the `_nav_latency_key` component) at a FIXED
+    # generation=0. Review round 1: the original generation-only key missed a keyless
+    # `load-instruments`, which moves the master WITHOUT bumping the write generation
+    # (the documented master_revision trap the sibling nav-latency caches close) — and
+    # a write-generation key would ALSO rebuild pointlessly on every mid-pull write
+    # tick (the #920 lesson), which the content token avoids. Built on the threadpool
+    # worker (it reads `store.connection`). SPOT needs no map (its class comes from
+    # the lake segment). REUSES the COMMON cache.
+    _movers_kind_cache = MoversSnapshotCache()
+    # The cache-key STEM for the underlying-kind map; the master content token is
+    # folded in by `_underlying_kinds_cached` — the ONE key-law home (review round 1).
+    movers_kind_key = "movers_underlying_kinds"
+
+    def _underlying_kinds_cached(store: Any) -> tuple[dict[str, str], str]:
+        """Return ``({F&O underlying → kind}, master_token)``, memoised on the master content token.
+
+        The ONE home of the underlying-kind-map key law (review round 1 — previously
+        two copy-pasted ``get_or_compute`` sites keyed on the write generation alone):
+        the map is a pure function of the instrument MASTER, so the key folds
+        :func:`master_revision` — the content token a keyless ``load-instruments``
+        moves WITHOUT bumping the write generation — at a FIXED ``generation=0``
+        (the ``_nav_latency_key`` / ``_sweep_leaderboard_cache`` token-in-key
+        precedent). The returned *master_token* MUST also be folded into the F&O
+        candidate cache keys by every caller (the movers route AND the post-pull
+        warmer), because the computed candidates carry the map's verdict STAMPED per
+        row — a fresh map beside a stale stamped candidate set would still
+        misclassify (the same staleness class, closed end-to-end).
+        """
+        count, latest = master_revision(store)
+        master_token = f"{count}:{latest}"
+        kinds: dict[str, str] = _movers_kind_cache.get_or_compute(
+            f"{movers_kind_key}|m={master_token}",
+            generation=0,
+            compute=lambda: build_underlying_kind_map(store.list_index_equity_instruments()),
+        )
+        return kinds, master_token
+
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -1810,10 +1865,15 @@ def build_app(
     # O(files), one key-column read per file — and `pull_jobs` bumps the write
     # generation on EVERY per-pair write tick, so a generation-keyed memo would
     # re-run the whole-lake scan on every 15 s chip poll during a pull (the #920
-    # regression class). It rides `_summary_cache.get_or_refresh(LAKE_UNIQUENESS,
-    # …)` instead — the COMMON adaptive-TTL-floor path /coverage/spot uses — so
-    # an expensive scan self-throttles to max(2 s, its own duration) capped 120 s
-    # while an idle lake stays snappy (see `_build_lake_census_payload_cached`).
+    # regression class). Since DEC-LAKE-CENSUS-NONBLOCKING-001 it rides the
+    # `LakeCensusHolder` (constructed beside the route, which needs the scan
+    # closure defined below): the scan runs on a DEDICATED daemon thread (zero
+    # AnyIO tokens), the route serves an O(1) last-known-verdict snapshot, and
+    # the SAME adaptive-TTL-floor law throttles rescans — SUPERSEDING the prior
+    # `_summary_cache.get_or_refresh(LAKE_UNIQUENESS, …)` wiring, whose COLD
+    # single-flight parked every stacked 15 s poller in an unbounded wait ON a
+    # threadpool worker and starved the shared AnyIO limiter for the whole
+    # 26-minute production scan (the reproduced dashboard-wide freeze).
     # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001,
     # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001): the `<lake>/sweeps` discovery +
     # per-tuple Parquet read is O(stores × rows); the ranked leaderboard for a
@@ -1835,12 +1895,20 @@ def build_app(
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
     # `"mtime_ns:size"` stat token folded into the KEY at a FIXED generation=0
     # (the `_sweep_leaderboard_cache` `rev=` precedent) — a repeat poll of an
-    # unchanged artifact is an O(1) hit, a token move re-parses, and a `None`
-    # token (absent / stat outage) computes fresh and caches NOTHING (never a
-    # stale serve, never a poisoned key). HONEST envelope (Golden Rule #10):
-    # the FIRST read per revision pays the O(artifact) parse; the cached hit is
-    # O(1) vs run count / artifact size. REUSES the COMMON `MoversSnapshotCache`.
+    # unchanged artifact is an O(1) hit, a token move re-parses, and an ABSENT
+    # artifact computes fresh and caches NOTHING (never a stale serve, never a
+    # poisoned key). A stat-probe OUTAGE (the artifact may still exist) serves
+    # the LAST-KNOWN payload through `_oneclick_outages` with one loud WARN per
+    # outage instead of a silent uncached O(artifact) re-parse per poll
+    # (C-r2-5, DEC-ONECLICK-PERF-CLUB-001 — the serve-last-known doctrine; the
+    # gate + chokepoint live in `oneclick_artifacts.serve_revision_cached`;
+    # SIBLING stats folded into the verify/manifest keys ride the SAME gate
+    # via `sibling_key_token` — r1 MINOR-1 fold).
+    # HONEST envelope (Golden Rule #10): the FIRST read per revision pays the
+    # O(artifact) parse; the cached hit is O(1) vs run count / artifact size.
+    # REUSES the COMMON `MoversSnapshotCache`.
     _oneclick_cache = MoversSnapshotCache()
+    _oneclick_outages = oneclick_artifacts.OutageGate()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
@@ -2925,6 +2993,12 @@ def build_app(
                 # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this surface was
                 # un-wired, so the cancel route fabricated success for it).
                 should_stop=_pull_job.cancel_requested,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
+                # into the NSE market-hours window (the shared-account belt). The env
+                # kill switch is parsed ONCE here (fail-loud); the bound predicate then
+                # reads the live clock only (no per-window env re-parse → a junk env
+                # set mid-pull can never crash a long pull).
+                market_closed=resolve_market_closed(),
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -2938,7 +3012,15 @@ def build_app(
         # bar's completed / total / bars / failed are driven per-WINDOW from the live
         # WindowLedger via _ledger_sync, so it advances continuously instead of ticking
         # once per finished symbol (DEC-SPOT-WINDOW-PROGRESS-001).
-        started = _pull_job.start(_work, total=unit_total, detail=detail, ledger_synced=True)
+        started = _pull_job.start(
+            _work,
+            total=unit_total,
+            detail=detail,
+            ledger_synced=True,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: a --dry-run pull uses a synthetic
+            # adapter (no Groww API call), so it is EXEMPT from the market-hours gate.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3153,7 +3235,13 @@ def build_app(
         # cancel token would never be observed — /api/v1/pull/cancel refuses
         # HONESTLY for this surface instead of fabricating {"cancelling": true}.
         started = _pull_job.start(
-            _work, total=len(instruments), detail=detail, ledger_synced=True, cancellable=False
+            _work,
+            total=len(instruments),
+            detail=detail,
+            ledger_synced=True,
+            cancellable=False,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
         )
         return JSONResponse(
             {
@@ -3297,7 +3385,13 @@ def build_app(
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
             composite_detail = label_synthetic(composite_detail)
-        started = _pull_job.start(_work, total=tradable_count, detail=composite_detail)
+        started = _pull_job.start(
+            _work,
+            total=tradable_count,
+            detail=composite_detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3541,7 +3635,13 @@ def build_app(
             _greeks_health.observe(report.greeks_enrich_ok, error=report.greeks_enrich_error)
             return report.to_dict()
 
-        started = _pull_job.start(_work, total=len(selected), detail=detail)
+        started = _pull_job.start(
+            _work,
+            total=len(selected),
+            detail=detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3744,6 +3844,15 @@ def build_app(
             # pulls/processes. A dry-run threads store=None (base-identical).
             form_preference = PersistentSymbolFormPreference(None if dry_run else instrument_store)
 
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: resolve the env kill switch ONCE, here
+            # at pull start (fail-loud on junk), and reuse the SAME bound clock-only
+            # predicate across every phase of this pipeline run — the spot spine's
+            # per-window belt (_run_spot), the metadata phase's per-cell belt
+            # (_run_metadata → pull_expiries_contracts), and the sequencer's
+            # between-phase belt (run_full_pipeline). So a junk BRUTEX_MARKET_HOURS_GUARD
+            # set MID-pull can never crash a long run with a per-call ValueError.
+            _market_closed = resolve_market_closed()
+
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
 
@@ -3783,6 +3892,9 @@ def build_app(
                     # Cooperative cancel at the spot WINDOW boundary
                     # (DEC-JOB-COOPERATIVE-CANCEL-001).
                     should_stop=_pull_job.cancel_requested,
+                    # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull
+                    # crosses into the NSE market-hours window (shared-account belt).
+                    market_closed=_market_closed,
                 )
 
             def _run_metadata() -> MetadataPullReport:
@@ -3801,6 +3913,10 @@ def build_app(
                         session_rate=_session_rate,
                         on_progress=partial(_metadata_progress_sync, _pull_job),
                         form_preference=form_preference,
+                        # DEC-GROWW-MARKET-HOURS-GUARD-001: a metadata phase CROSSING
+                        # 08:45 halts mid-phase (per-cell belt), exactly like the
+                        # spot/historical spines — dry-run threads None (never gated).
+                        market_closed=None if dry_run else _market_closed,
                     )
 
             def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
@@ -3983,6 +4099,15 @@ def build_app(
                 # ONE memoised discovery walk shared by every job in this warm
                 # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
                 warm_datasets = _warm_datasets(gen)
+                # The stored-master kind map + its content token (review round 1):
+                # thread the SAME kinds the route computes with AND fold the SAME
+                # master token into the candidate key, so a warmed entry (a) carries
+                # CORRECT `underlying_kind` stamps (previously the warm computed with
+                # the default `underlying_kinds=None`, stamping everything unknown —
+                # an Indices/Stocks click on a freshly-warmed coordinate returned
+                # EMPTY rows) and (b) is actually HIT by the route's composite key
+                # (key parity, CLAUDE.md §11 COMMON).
+                underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
                     tier = normalize_futures_tier(raw_tier)
@@ -3996,7 +4121,8 @@ def build_app(
                                 date=warm_date,
                                 time=None,
                                 expiry_tier=tier,
-                            ),
+                            )
+                            + f"|m={kinds_token}",
                             generation=gen,
                             compute=lambda: compute_futures_candidates(
                                 lake_root=lake_root,
@@ -4006,6 +4132,7 @@ def build_app(
                                 exchange=exch,
                                 expiry_tier=tier,
                                 datasets=warm_datasets,
+                                underlying_kinds=underlying_kinds,
                             ),
                             # force_fresh — the warm re-seed must never be served
                             # its own pull-active floor's stale pre-pull entry
@@ -4042,6 +4169,9 @@ def build_app(
                 # ONE memoised discovery walk shared by every job in this warm
                 # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
                 warm_datasets = _warm_datasets(gen)
+                # The stored-master kind map + its content token (review round 1 —
+                # see the futures warm above): correct stamps + route key parity.
+                underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
@@ -4074,7 +4204,8 @@ def build_app(
                                 time=None,
                                 expiry_tier=tier,
                                 expiry_track=trk,
-                            ),
+                            )
+                            + f"|m={kinds_token}",
                             generation=gen,
                             compute=lambda: compute_options_candidates(
                                 lake_root=lake_root,
@@ -4087,6 +4218,7 @@ def build_app(
                                 datasets=warm_datasets,
                                 calendar_expiries=calendar_expiries,
                                 registry_chain_for=registry_chain_for,
+                                underlying_kinds=underlying_kinds,
                             ),
                             # force_fresh — the warm re-seed must never be served
                             # its own pull-active floor's stale pre-pull entry
@@ -4302,6 +4434,12 @@ def build_app(
                         # the honest "(cancelled)" stop — never a red error,
                         # never a fabricated green).
                         should_stop=_pull_job.cancel_requested,
+                        # DEC-GROWW-MARKET-HOURS-GUARD-001: if this pipeline pull
+                        # reaches the sequencer inside the NSE market-hours window,
+                        # skip the whole vendor chain (spot/metadata/historical), and
+                        # halt between phases if it crosses in. ONE bound predicate,
+                        # env parsed once at pull start (see _market_closed above).
+                        market_closed=_market_closed,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -4389,6 +4527,8 @@ def build_app(
             detail=pipeline_detail,
             ledger_synced=True,
             on_finally=on_finally,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
         )
         if pull_intent_store is not None:
             # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
@@ -4503,6 +4643,34 @@ def build_app(
 
         app.state.brutex_resume_pipeline = _resume_pipeline_from_intent
 
+        def _resume_legacy_pull() -> None:
+            """Boot-time seam: the LEGACY ledger-triggered resume, in-process.
+
+            Exposed as ``app.state.brutex_resume_legacy`` for the
+            ``cli.cmd_dashboard`` startup launcher (DEC-AUTO-RESUME-INPROCESS-001
+            — replaces the deleted DOA ``brutex fetch --until-clean`` subprocess
+            child, which died in ~0.3 s every opted-in boot on DuckDB's
+            exclusive cross-process locks: ``catalog.duckdb`` first — held by
+            the boot-window L3 lake-heal sweeper, the incident's first-raising
+            site — and the dashboard's lifetime-held ``instruments.duckdb``
+            one step later). Every load-bearing
+            decision lives in the 100 %-tested
+            :func:`~brutex.dashboard.pull_intent.run_legacy_resume` /
+            :func:`~brutex.dashboard.pull_intent.run_auto_resume`; this binding
+            supplies the SAME real launcher + JOB-root-keyed single-flight probe
+            the intent seam above binds, so the two resumes contend on ONE lock.
+            Raises only on the loud intent-write refusal (an unwritable lake) —
+            the caller's ``maybe_resume_on_boot`` guard turns that into the
+            honest ``error`` verdict.
+            """
+            run_legacy_resume(
+                _intent_store,
+                launch=_resume_launch,
+                probe_singleflight=_probe_job_singleflight,
+            )
+
+        app.state.brutex_resume_legacy = _resume_legacy_pull
+
     @app.post("/api/v1/universe/retry-failed")
     async def api_universe_retry_failed(  # pragma: no cover — thin route over the 100%-tested core
         kind: str | None = Query(default=None),
@@ -4610,12 +4778,24 @@ def build_app(
                 # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: retry-failed was
                 # un-wired, so the cancel route fabricated success for it).
                 should_stop=_pull_job.cancel_requested,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
+                # into the NSE market-hours window (the shared-account belt). The env
+                # kill switch is parsed ONCE here (fail-loud); the bound predicate then
+                # reads the live clock only (no per-window env re-parse → a junk env
+                # set mid-pull can never crash a long pull).
+                market_closed=resolve_market_closed(),
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
 
         unit_total = len(instruments) * len(fetch_intervals)
-        started = _pull_job.start(_work, total=unit_total, detail=detail)
+        started = _pull_job.start(
+            _work,
+            total=unit_total,
+            detail=detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -4775,6 +4955,10 @@ def build_app(
             detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
             ledger_synced=True,
             cross_process_lock=not dry_run,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: the Greeks backfill re-enriches
+            # ALREADY-STORED bars and makes ZERO Groww API calls, so it is EXEMPT
+            # from the market-hours start gate (safe to run in the trading window).
+            market_hours_exempt=True,
         )
         return JSONResponse(
             {
@@ -5107,20 +5291,27 @@ def build_app(
         """Build the COMPOSITE cache key for the nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001).
 
         Encodes the route name, the dashboard write-generation (``_summary_cache.generation``,
-        bumped by every pull / materialize) AND the instrument-master content revision
+        bumped by every pull / materialize), the instrument-master content revision
         (:func:`master_revision`, moved by a keyless ``load-instruments`` that does NOT bump
-        the generation) into ONE string key, plus any route-specific ``extra`` discriminants
-        (e.g. the coverage ``years`` span). Folding BOTH freshness signals into the KEY — and
-        passing ``generation=0`` to :meth:`MoversSnapshotCache.get_or_compute` — means a cache
-        hit fires ONLY when neither the ledger NOR the master has changed since the entry was
-        stored, so a pull or an instrument load always yields a fresh key (never a stale
-        payload — Golden Rule #1). The token is cheap (a COUNT+MAX over the lean master table
-        plus an O(1) generation read), strictly lighter than the projection it guards.
+        the generation) AND the coverage-ledger content revision (:func:`coverage_revision`,
+        moved by every ``upsert_coverage`` — a metadata pull, in THIS process or another one,
+        writes coverage cells without moving either of the first two signals;
+        DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660) into ONE string key, plus any
+        route-specific ``extra`` discriminants (e.g. the coverage ``years`` span). Folding ALL
+        THREE freshness signals into the KEY — and passing ``generation=0`` to
+        :meth:`MoversSnapshotCache.get_or_compute` — means a cache hit fires ONLY when neither
+        the ledger, the master, NOR the coverage ledger has changed since the entry was
+        stored, so a pull, an instrument load, or a coverage write always yields a fresh key
+        (never a stale payload — Golden Rule #1). The token is cheap (two COUNT+MAX
+        aggregates over the lean master + the PK-indexed coverage ledger plus an O(1)
+        generation read), strictly lighter than the projections it guards; an unchanged
+        store yields a byte-identical key (no thrash).
         """
         gen = _summary_cache.generation
         count, latest = master_revision(store)
+        c_count, c_latest = coverage_revision(store)
         extra_repr = "|".join(repr(item) for item in extra)
-        return f"{name}|gen={gen}|m={count}:{latest}|{extra_repr}"
+        return f"{name}|gen={gen}|m={count}:{latest}|c={c_count}:{c_latest}|{extra_repr}"
 
     @app.get("/api/v1/coverage")
     async def api_coverage() -> JSONResponse:
@@ -5732,16 +5923,22 @@ def build_app(
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
 
-    def _build_lake_census_payload() -> dict[str, Any]:
+    def _build_lake_census_payload(
+        per_file_pause: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """Scan the lake + fold the duplicate census JSON (DEC-LAKE-HEAL-001, thin I/O glue).
 
-        The ONE builder behind the cached ``/api/v1/universe/lake-uniqueness`` route:
+        The ONE builder behind the ``/api/v1/universe/lake-uniqueness`` route —
+        since DEC-LAKE-CENSUS-NONBLOCKING-001 invoked ONLY by the
+        ``LakeCensusHolder``'s dedicated daemon scan thread, never a request:
         runs the bounded invariant scanner (READ-ONLY / observe — the ROUTE never
         heals; healing belongs to the L2 pull seams + the L3 startup sweep), folds
         :func:`~brutex.data.lake_invariants.build_lake_census`, and stamps the heal
         mode + the ``.lake_heal`` stats/sentinel reads into the SAME dict shape
         ``brutex lake audit-unique --json`` prints. ``{"present": False}`` when no
         lake root can be resolved (mirrors the sibling panel routes' honest gate).
+        *per_file_pause* is the holder's live progress tick, threaded through the
+        scanner's EXISTING L3 throttle seam (fires per file incl. skips).
         """
         from brutex.data.lake_heal import (
             load_heal_stats,
@@ -5753,7 +5950,7 @@ def build_app(
         if not isinstance(lake_db, Path):
             return {"present": False}
         lake = lake_db.parent
-        census = build_lake_census(scan_lake_invariants(lake))
+        census = build_lake_census(scan_lake_invariants(lake, per_file_pause=per_file_pause))
         return census_to_dict(
             census,
             mode=resolve_lake_heal_mode(),
@@ -5761,52 +5958,152 @@ def build_app(
             last_sweep=load_last_sweep(lake),
         )
 
-    def _build_lake_census_payload_cached() -> dict[str, Any]:
-        """Memoise the lake census behind the ``SummaryCache`` adaptive TTL floor.
+    def _census_files_estimate() -> int | None:
+        """The honest census progress denominator — the L3 sweep sentinel's count.
 
-        DEC-LAKE-HEAL-001 (hostile-review MAJOR fold): the census rides the SAME
-        ``_summary_cache.get_or_refresh`` path ``/coverage/spot`` uses — NOT a
-        generation-KEYED memo. ``pull_jobs`` bumps the write generation on every
-        per-pair write tick, so a generation-keyed cache re-ran this whole-lake
-        O(files) scan on every 15 s chip poll during a pull (the #920 regression
-        class); the ``SummaryCache`` instead serves the dirty entry until the
-        ADAPTIVE floor — ``max(2 s, the last scan's own duration)`` capped 120 s
-        (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001) — elapses, so an expensive scan
-        self-throttles to a ≤50% duty cycle while an idle lake keeps the snappy
-        2 s floor. Freshness: a pull, a materialize, OR a heal (the L3 sweeper's
-        ``on_healed=summary_cache.mark_dirty``) dirties the entry → one fresh
-        scan once past the floor; staleness is bounded by that floor, never
-        indefinite (Golden Rule #1, stated honestly per Golden Rule #10). The
-        payload dict is byte-identical to the uncached build — only the refresh
-        SCHEDULING changed. (The single-payload dict rides the ``SummaryPayload``
-        list shape as a one-element list.)
+        Reads ``.lake_heal/last_sweep.json``'s ``files_scanned`` (the last L3
+        startup sweep's own full-lake tally — the best available prior for how
+        many files THIS scan will visit). ``None`` on a first-ever lake with no
+        sentinel / a foreign-shaped sentinel — the UI then reads ``~?`` instead
+        of a fabricated total (Golden Rule #1). Runs ON the census daemon
+        thread (it is lake I/O), guarded by the holder's estimate fence.
         """
-        rows = _summary_cache.get_or_refresh(
-            LAKE_UNIQUENESS, recompute=lambda: [_build_lake_census_payload()]
-        )
-        return rows[0]
+        from brutex.data.lake_heal import load_last_sweep
+
+        lake_db = getattr(instrument_store, "path", None)
+        if not isinstance(lake_db, Path):
+            return None
+        sweep = load_last_sweep(lake_db.parent)
+        if sweep is None:
+            return None
+        files = sweep.get("files_scanned")
+        if isinstance(files, bool) or not isinstance(files, int) or files < 0:
+            return None
+        return files
+
+    def _census_first_scan_bound_hint() -> float | None:
+        """Seed the FIRST-scan stall bound from the L3 sweep sentinel.
+
+        Prefers the sentinel's own recorded duration (``duration_ms`` /
+        ``duration_s`` when a future sweep stores one — none does today),
+        else derives ``files_scanned × FIRST_SCAN_PER_FILE_BUDGET_S`` (the
+        conservative 2 ms/file budget). ``None`` on a first-ever lake / a
+        foreign-shaped sentinel — the holder then uses the bare 30-min
+        floor. NON-FINITE sentinel values are junk, never a hint (round-1
+        refuter: ``Infinity`` is valid JSON to Python's tolerant decoder,
+        passes ``> 0``, and would have yielded an INFINITE stall bound —
+        staleness detection silently disabled); a FINITE positive hint of
+        ANY magnitude is ACCEPTED here and CLAMPED by the holder's
+        ``_stale_bound_locked`` at ``FIRST_SCAN_BOUND_CEILING_S`` (24 h) —
+        the ONE clamp site (rounds 2+3 refuters: the round-2 upper REJECT
+        here dropped a legitimate >24 h hint — the conservative 2 ms/file
+        budget crosses 24 h at ~43.2M files — to the 30-min floor,
+        re-opening the large-lake first-scan false-stall the hint exists
+        to prevent; the most-authoritative signal is never discarded, only
+        bounded). Round-4 refuter: the ``duration_ms`` arm converts under
+        a local ``OverflowError`` guard — a JSON int beyond float range
+        (``10**309``) made ``math.isfinite`` RAISE, failing the whole hint
+        callable (repeating WARN each check cycle) and collapsing the
+        bound to the floor; a positive-huge int now SATURATES to a huge
+        finite float and rides the same holder-clamp path as its ``1e308``
+        float twin. The ``files_scanned`` arm is a non-negative int
+        (structurally finite) whose product with the per-file budget is
+        guarded against an absurd-magnitude ``OverflowError`` → ``None``;
+        its result rides the same holder clamp. Runs ON the census daemon
+        thread (lake I/O), guarded by the holder's hint fence.
+        """
+        from brutex.data.lake_heal import load_last_sweep
+
+        lake_db = getattr(instrument_store, "path", None)
+        if not isinstance(lake_db, Path):
+            return None
+        sweep = load_last_sweep(lake_db.parent)
+        if sweep is None:
+            return None
+        duration_ms = sweep.get("duration_ms")
+        if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+            d: float | None
+            try:
+                d = float(duration_ms)
+            except OverflowError:
+                # Round-4 refuter: a JSON *int* beyond float range (10**309)
+                # made `math.isfinite(duration_ms)` raise pre-fix — the whole
+                # hint callable failed (a repeating holder
+                # `first_scan_bound_hint_failed` WARN each check cycle) and
+                # the bound collapsed to the bare floor: the round-3
+                # never-a-floor-collapse doctrine violated again, through the
+                # INT shape. A positive-huge int is mathematically FINITE —
+                # SATURATE it to a huge finite float so it rides the SAME
+                # finite-positive → holder-clamp path as its 1e308 float twin
+                # (→ the 24 h ceiling, never the floor); a negative-huge int
+                # is unusable like any non-positive value (falls through to
+                # the files arm).
+                d = 1e308 if duration_ms > 0 else None
+            if d is not None and math.isfinite(d) and d > 0:
+                return d / 1000.0
+        files = sweep.get("files_scanned")
+        if isinstance(files, bool) or not isinstance(files, int) or files < 0:
+            return None
+        try:
+            return files * FIRST_SCAN_PER_FILE_BUDGET_S
+        except OverflowError:
+            # An int too large for float conversion — junk sentinel.
+            return None
+
+    # DEC-LAKE-CENSUS-NONBLOCKING-001: the census holder — the scan runs on a
+    # DEDICATED named daemon thread (zero AnyIO threadpool tokens), single-flight
+    # (a concurrent poll neither spawns a second scan nor waits), and the route
+    # below serves an O(1) snapshot. The generation probe (`_summary_cache
+    # .generation` — one ledger stat + the O(dirs) sweeps digest, lake I/O per
+    # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002 #1622) is read ON the daemon thread,
+    # never the event loop. `census_spawn`/`census_clock` are the build_app test
+    # seams (a synchronous spawn + fake clock make the holder deterministic).
+    _lake_census_holder = LakeCensusHolder(
+        scan=_build_lake_census_payload,
+        generation=lambda: _summary_cache.generation,
+        files_total_estimate=_census_files_estimate,
+        spawn=census_spawn,
+        clock=census_clock,
+        first_scan_bound_hint=_census_first_scan_bound_hint,
+    )
 
     @app.get("/api/v1/universe/lake-uniqueness")
     async def api_universe_lake_uniqueness() -> JSONResponse:
         """GET /api/v1/universe/lake-uniqueness — the lake duplicate-census verdict.
 
-        DEC-LAKE-HEAL-001: per-segment (INDEX/CASH/FNO/OPTIONS) clean vs
-        dup/foreign/overlap/drift file counts + the ENGINE-index
-        (NIFTY/BANKNIFTY/SENSEX) ``engine_clean`` verdict + the heal mode and
-        ``.lake_heal`` stats/sentinel — the ``/universe`` chip's data source.
-        READ-ONLY (never heals). Served through the ``SummaryCache`` adaptive
-        TTL floor (the #920 machinery): a repeat poll is an O(1) handoff
-        within the TTL window, and a scan's own cost sets its refresh floor
-        (``max(2 s, scan duration)`` capped 120 s) — so a pull's write-tick
-        generation storm can never amplify the 15 s poll into back-to-back
-        whole-lake scans. HONEST: the refresh itself stays O(files); a dirty
-        census may be served up to one floor window stale — bounded, never
-        indefinite. No store wired → 503; no resolvable lake root →
-        ``{"present": false}``.
+        DEC-LAKE-HEAL-001 payload; DEC-LAKE-CENSUS-NONBLOCKING-001 serving law:
+        per-segment (INDEX/CASH/FNO/OPTIONS) clean vs dup/foreign/overlap/drift
+        file counts + the ENGINE-index (NIFTY/BANKNIFTY/SENSEX) ``engine_clean``
+        verdict + the heal mode and ``.lake_heal`` stats/sentinel — the
+        ``/universe`` chip's data source. READ-ONLY (never heals). The route is
+        **O(1) and never blocks**: it returns the holder's LAST-KNOWN verdict
+        merged with the additive ``scan_in_progress`` / ``scan_progress`` /
+        ``as_of_utc`` / ``scan_error`` / ``scan_stalled`` keys (the last =
+        the LOUD staleness verdict — an in-flight scan past
+        ``max(2 x last duration, 30 min)`` is flagged + WARNed once per
+        episode; detection, never termination), after arming (at most) ONE
+        single-flight background freshness check on the DEDICATED census daemon
+        thread — no ``run_in_threadpool`` (a 26-minute production scan + the
+        stacked 15 s pollers previously starved the shared AnyIO limiter and
+        froze the whole data surface), no on-loop lake I/O (the generation
+        probe runs on the daemon thread, the #1622 offload law). Rescans keep
+        the pre-fix freshness law: generation moved AND past the adaptive
+        floor (``max(2 s, scan duration)`` capped 120 s). HONEST: the scan
+        itself stays O(files); the first-ever boot serves ``scan_in_progress``
+        with live progress until one scan lands — never a fabricated verdict.
+        No store wired → 503; no resolvable lake root → ``{"present": false}``.
         """
-        _require_store()
-        payload = await _run_lake(_build_lake_census_payload_cached)
-        return JSONResponse(payload)
+        store = _require_store()
+        lake_db = getattr(store, "path", None)
+        if not isinstance(lake_db, Path):
+            return JSONResponse({"present": False})
+        # DEC-LAKE-CENSUS-NONBLOCKING-001: the census deliberately does NOT ride
+        # `_run_lake` (DEC-DASHBOARD-LAKE-IO-LIMITER-001) — its ~26-min scan
+        # would pin a limiter token for its whole runtime; the holder keeps the
+        # census OFF every request path (zero AnyIO/limiter tokens), the
+        # ledgered L4 doctrine exception.
+        _lake_census_holder.maybe_refresh()
+        return JSONResponse(_lake_census_holder.snapshot())
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
@@ -5943,6 +6240,7 @@ def build_app(
         track: str | None = Query(default=None),
         exchange: str | None = Query(default=None),
         min_volume: int = Query(default=0, ge=0),
+        underlying_class: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/movers — point-in-time markets-screen-style movers snapshot (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
@@ -5997,6 +6295,13 @@ def build_app(
             whole-day bar). A malformed value is a 400.
         top_n
             Ranking depth for each category (1..500; default 100 — DEC-MOVERS-COMPLETENESS-001).
+        underlying_class
+            ``All`` / ``Indices`` / ``Stocks`` underlying-class filter
+            (DEC-MOVERS-UNDERLYING-CLASS-001) applied at RANK time on all three
+            tabs; blank / unknown ⇒ ``all`` (byte-identical default — no filtering).
+            SPOT class comes from the lake segment; FUTURES/OPTIONS from the stored
+            instrument-master ``is_index`` kind map. An unclassifiable underlying is
+            in ``all`` but excluded from both ``Indices`` and ``Stocks`` (counted).
 
         **Honest envelope (Golden Rule #10):** the snapshot is only as good as the
         ingested lake — an empty lake (or a store with no lake root) returns an
@@ -6005,6 +6310,19 @@ def build_app(
         day's close; volume/value are the cumulative FRESH session from 09:15.
         """
         store = _require_store()
+        # ECHO HONESTY (DEC-MOVERS-DAILY-ASOF-ECHO-HONEST-001): a non-intraday
+        # interval (``1day`` / any unknown label) has NO intraday as-of — the bar
+        # IS the day, so the VALUE already ignores ``time``
+        # (``compute_spot_candidates`` cuts whole-day via ``cutoff_min=None``,
+        # DEC-MOVERS-ASOF-LATEST-DEFAULT-001). Null the echoed ``time`` here — the
+        # ONE COMMON ``is_intraday_interval`` predicate (mirroring the ``latest_time``
+        # gate below) — so every downstream echo surface (the "As-of …" note +
+        # ``payload["time"]`` across spot/futures/options/empty/pending/gated) is
+        # truthful instead of claiming an as-of the served whole-day close never
+        # honoured. Byte-identical for value (daily already ignores it) and for a
+        # genuine intraday interval (the predicate is True → ``time`` untouched).
+        if not is_intraday_interval(interval):
+            time = None
         try:
             # Movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while
             # the one-click pull pipeline runs, answer with the honest `gated: true`
@@ -6060,6 +6378,7 @@ def build_app(
                             top_n=top_n,
                             skipped=0,
                             min_volume=min_volume,
+                            underlying_class=underlying_class,
                         )
                     )
                 if asset == "options":
@@ -6072,6 +6391,7 @@ def build_app(
                             top_n=top_n,
                             skipped=0,
                             min_volume=min_volume,
+                            underlying_class=underlying_class,
                         )
                     )
                 return JSONResponse(
@@ -6083,6 +6403,7 @@ def build_app(
                         top_n=top_n,
                         skipped=0,
                         min_volume=min_volume,
+                        underlying_class=underlying_class,
                     )
                 )
             lake_root = store_path.parent
@@ -6187,14 +6508,27 @@ def build_app(
                         cache=_options_strikes_cache,
                         generation=generation,
                     )
-                    key = candidate_key(
-                        asset="options",
-                        exchange=exch,
-                        interval=interval,
-                        date=date_str,
-                        time=time,
-                        expiry_tier=tier,
-                        expiry_track=trk,
+                    # The stored-master index-vs-stock kind map for the RANK-time
+                    # `All | Indices | Stocks` filter (DEC-MOVERS-UNDERLYING-CLASS-001) —
+                    # memoised on the master CONTENT token via the ONE
+                    # `_underlying_kinds_cached` helper (review round 1: a keyless
+                    # load-instruments moves the master with NO generation bump). The
+                    # class itself is NOT a candidate_key coordinate (rank-time filter
+                    # over the shared set), but the MASTER token IS folded into the key
+                    # below — the candidates carry the map's verdict STAMPED per row,
+                    # so stale stamps would defeat a fresh map.
+                    underlying_kinds, kinds_token = _underlying_kinds_cached(store)
+                    key = (
+                        candidate_key(
+                            asset="options",
+                            exchange=exch,
+                            interval=interval,
+                            date=date_str,
+                            time=time,
+                            expiry_tier=tier,
+                            expiry_track=trk,
+                        )
+                        + f"|m={kinds_token}"
                     )
                     opt_cands = _movers_cache.get_or_compute(
                         key,
@@ -6210,6 +6544,7 @@ def build_app(
                             datasets=movers_datasets,
                             calendar_expiries=calendar_expiries,
                             registry_chain_for=registry_chain_for,
+                            underlying_kinds=underlying_kinds,
                         ),
                     )
                     return build_options_payload(
@@ -6225,6 +6560,7 @@ def build_app(
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
                         pcr=opt_cands.pcr,
                         latest_time=latest_time,
+                        underlying_class=underlying_class,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -6233,13 +6569,23 @@ def build_app(
                     # cache + rank independently (never a stale Near row served for
                     # a Far request) — DEC-MOVERS-FUTURES-TIER-001.
                     fut_tier = normalize_futures_tier(expiry)
-                    key = candidate_key(
-                        asset="futures",
-                        exchange=exch,
-                        interval=interval,
-                        date=date_str,
-                        time=time,
-                        expiry_tier=fut_tier,
+                    # The stored-master kind map for the RANK-time class filter
+                    # (DEC-MOVERS-UNDERLYING-CLASS-001) — memoised on the master
+                    # CONTENT token via the ONE `_underlying_kinds_cached` helper
+                    # (review round 1); the master token is ALSO folded into the
+                    # candidate key below (the stamped-verdict staleness class —
+                    # see the options arm above).
+                    underlying_kinds, kinds_token = _underlying_kinds_cached(store)
+                    key = (
+                        candidate_key(
+                            asset="futures",
+                            exchange=exch,
+                            interval=interval,
+                            date=date_str,
+                            time=time,
+                            expiry_tier=fut_tier,
+                        )
+                        + f"|m={kinds_token}"
                     )
                     fut_cands = _movers_cache.get_or_compute(
                         key,
@@ -6252,6 +6598,7 @@ def build_app(
                             exchange=exch,
                             datasets=movers_datasets,
                             expiry_tier=fut_tier,
+                            underlying_kinds=underlying_kinds,
                         ),
                     )
                     return build_futures_payload(
@@ -6264,6 +6611,7 @@ def build_app(
                         expiry_tier=fut_cands.expiry_tier,
                         min_volume=min_volume,
                         latest_time=latest_time,
+                        underlying_class=underlying_class,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -6304,6 +6652,7 @@ def build_app(
                     stored_reads=spot_cands.stored_reads,
                     resampled_reads=spot_cands.resampled_reads,
                     latest_time=latest_time,
+                    underlying_class=underlying_class,
                 )
 
             payload = await _run_lake(_resolve)
@@ -6423,7 +6772,17 @@ def build_app(
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse({"symbols": []})
+            # Same additive freshness-key shape as the real path (stable key set;
+            # DEC-STALENESS-CACHE-TRUTH-001) — a store without a filesystem lake
+            # has trivially never observed a prebuild.
+            return JSONResponse(
+                {
+                    "symbols": [],
+                    "basis": report_basis,
+                    "basis_derived": report_basis == "day",
+                    "derived_last_built": None,
+                }
+            )
         lake = lake_root.parent
 
         def _resolve() -> dict[str, Any]:
@@ -6460,6 +6819,17 @@ def build_app(
                     for e, s, y in triples
                 ],
                 "basis": report_basis,
+                # 1day-basis freshness (DEC-STALENESS-CACHE-TRUTH-001): the 1day
+                # partitions the "day" basis reads are written ONLY by the
+                # pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001), so a
+                # CLI-pulled / mid-pull lake serves a 1day basis that lags the
+                # 1-minute truth. `derived_last_built` = the last SUCCESSFUL
+                # post-prebuild footprint OBSERVATION (lake_footprint's
+                # META_MEASURED_AT stamp, one O(1) get_meta — lake-wide, not
+                # per-symbol; best-effort writer, so None = honestly never
+                # observed, e.g. a CLI-only lake — never a fabricated time).
+                "basis_derived": report_basis == "day",
+                "derived_last_built": store.get_meta(META_MEASURED_AT),
             }
 
         return JSONResponse(await _run_lake(_resolve))
@@ -6636,7 +7006,7 @@ def build_app(
         return _render_results_html()
 
     @app.post("/api/v1/cascade/run")
-    async def api_cascade_run() -> JSONResponse:  # pragma: no cover — live lake + DuckDB replay
+    async def api_cascade_run() -> JSONResponse:
         """POST /api/v1/cascade/run — re-run the Stage-4 cascade on the latest sweep.
 
         The dashboard "Run cascade" button (DEC-CASCADE-WIRE-001): reloads the
@@ -6656,6 +7026,7 @@ def build_app(
 
         def _run() -> tuple[int, dict[str, object]]:
             """Replay the cascade off the event loop (threadpool worker)."""
+            from brutex.data.futures_series import FuturesSeriesError
             from brutex.engine.cascade_wire import (
                 CascadeWireError,
                 load_bars_for_manifest,
@@ -6667,8 +7038,21 @@ def build_app(
                 manifest = load_manifest(root)
             except CascadeWireError as exc:
                 return 400, {"ok": False, "error": str(exc)}
-            bars_for = load_bars_for_manifest(manifest, lake_root=lake)
-            report = run_and_write_from_manifest(root, bars_for=bars_for)
+            # The dashboard twin of cmd_cascade's user-error net (review
+            # round-2 findings 10/12): the replay's frozen-vs-re-derived
+            # roll-schedule cross-check refusal + a futures-series resolution
+            # refusal (interior hole appeared since launch) are operator-
+            # remediable lake states — a clear 400, never a 500 traceback.
+            # NO VIX stamper build here (DEC-VIX-STAMP-WIRE-001 round-6): the
+            # replayed candidates' trades are DISCARDED streams (report bytes
+            # identical either way), so the old per-click
+            # vix_stamper_for_manifest build paid a full window-bounded VIX
+            # lake read for zero observable output.
+            try:
+                bars_for = load_bars_for_manifest(manifest, lake_root=lake)
+                report = run_and_write_from_manifest(root, bars_for=bars_for)
+            except (CascadeWireError, FuturesSeriesError) as exc:
+                return 400, {"ok": False, "error": str(exc)}
             return 200, {
                 "ok": True,
                 "sweep_id": manifest.sweep_id,
@@ -7055,7 +7439,9 @@ def build_app(
         Lists the Ruling-4 ``sweep_runs/<run_id>/`` directories with per-artifact
         presence flags + the manifest's ``suspect`` verdict (``null`` until
         readable — never fabricated). Memoised per ``runs/`` dir stat token;
-        an empty/absent tree is the loud ``status:"awaiting"`` payload.
+        an empty/absent tree is the loud ``status:"awaiting"`` payload; a
+        stat OUTAGE serves the last-known listing with one loud WARN per
+        outage (C-r2-5 — never a silent per-poll re-walk).
         """
 
         def _resolve() -> dict[str, Any]:
@@ -7065,7 +7451,7 @@ def build_app(
             if root is None:
                 return oneclick_view.build_runs_payload((), fixture_root_active=fixture_active)
             results_root: Path = root
-            rev = oneclick_artifacts.runs_revision(results_root)
+            probe = oneclick_artifacts.runs_revision_probe(results_root)
 
             def _fresh() -> dict[str, Any]:
                 return oneclick_view.build_runs_payload(
@@ -7073,10 +7459,14 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
 
-            if rev is None:
-                return _fresh()
-            return _oneclick_cache.get_or_compute(
-                f"oc_runs|rev={rev}|fx={fixture_active}", generation=0, compute=_fresh
+            key = None if probe.token is None else f"oc_runs|rev={probe.token}|fx={fixture_active}"
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=f"oc_runs|fx={fixture_active}",
+                probe=probe,
+                key=key,
+                compute=_fresh,
             )
 
         return JSONResponse(await _run_lake(_resolve))
@@ -7108,7 +7498,7 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(
+            probe = oneclick_artifacts.artifact_probe(
                 run_dir / oneclick_artifacts.MANIFEST_FILENAME
             )
             # Sibling-artifact PRESENCE rides the cache KEY as two cheap stat
@@ -7116,12 +7506,23 @@ def build_app(
             # refreshes when top100.json / events.jsonl land without a
             # manifest rewrite; the manifest PARSE (incl. the pill probe)
             # stays inside the cached compute — parse once per revision.
-            has_top100 = (
-                oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.TOP100_FILENAME)
-                is not None
+            # r1 MINOR-1: the sibling stats ride the SAME outage doctrine via
+            # sibling_key_token — a transient sibling stat flap holds the
+            # last-known token (one WARN) instead of flapping the key.
+            top100_tok = oneclick_artifacts.sibling_key_token(
+                _oneclick_outages,
+                coordinate=f"oc_manifest|{rid}|sib=top100|fx={fixture_active}",
+                probe=oneclick_artifacts.artifact_probe(
+                    run_dir / oneclick_artifacts.TOP100_FILENAME
+                ),
             )
-            events_rev = oneclick_artifacts.artifact_revision(
-                run_dir / oneclick_artifacts.EVENTS_FILENAME
+            has_top100 = top100_tok is not None
+            events_rev = oneclick_artifacts.sibling_key_token(
+                _oneclick_outages,
+                coordinate=f"oc_manifest|{rid}|sib=events|fx={fixture_active}",
+                probe=oneclick_artifacts.artifact_probe(
+                    run_dir / oneclick_artifacts.EVENTS_FILENAME
+                ),
             )
             has_events = events_rev is not None
 
@@ -7142,14 +7543,21 @@ def build_app(
                 payload["chain_links"] = oneclick_view.chain_links(manifest_result, kinds)
                 return payload
 
-            if rev is None:
-                return _fresh()
             # The key folds the manifest revision AND the events revision (the
             # chain-map input) — a growing events.jsonl refreshes the links.
-            return _oneclick_cache.get_or_compute(
-                f"oc_manifest|{rid}|rev={rev}|files={int(has_top100)}{int(has_events)}"
-                f"|ev={events_rev}|fx={fixture_active}",
-                generation=0,
+            key = None
+            if probe.token is not None:
+                key = (
+                    f"oc_manifest|{rid}|rev={probe.token}"
+                    f"|files={int(has_top100)}{int(has_events)}"
+                    f"|ev={events_rev}|fx={fixture_active}"
+                )
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=f"oc_manifest|{rid}|fx={fixture_active}",
+                probe=probe,
+                key=key,
                 compute=_fresh,
             )
 
@@ -7182,7 +7590,7 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.TOP100_FILENAME)
+            probe = oneclick_artifacts.artifact_probe(run_dir / oneclick_artifacts.TOP100_FILENAME)
 
             def _fresh() -> dict[str, Any]:
                 return oneclick_view.build_top100_payload(
@@ -7191,11 +7599,15 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
 
-            if rev is None:
-                return _fresh()
-            return _oneclick_cache.get_or_compute(
-                f"oc_top100|{rid}|rev={rev}|fx={fixture_active}",
-                generation=0,
+            key = None
+            if probe.token is not None:
+                key = f"oc_top100|{rid}|rev={probe.token}|fx={fixture_active}"
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=f"oc_top100|{rid}|fx={fixture_active}",
+                probe=probe,
+                key=key,
                 compute=_fresh,
             )
 
@@ -7241,7 +7653,7 @@ def build_app(
                     window_filtered=window_filtered,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.EVENTS_FILENAME)
+            probe = oneclick_artifacts.artifact_probe(run_dir / oneclick_artifacts.EVENTS_FILENAME)
 
             def _fresh() -> dict[str, Any]:
                 page = oneclick_artifacts.tail_events(
@@ -7254,14 +7666,25 @@ def build_app(
                     window_filtered=window_filtered,
                 )
 
-            if rev is None:
-                return _fresh()
             # json-encoded key parts: kind/q are operator-typed strings that
             # may contain the `|` separator — encoding keeps keys collision-free.
-            key = "oc_events|" + json.dumps(
-                [rid, offset, limit, kind, q, rev, fixture_active], ensure_ascii=False
+            coordinate = "oc_events|" + json.dumps(
+                [rid, offset, limit, kind, q, fixture_active], ensure_ascii=False
             )
-            return _oneclick_cache.get_or_compute(key, generation=0, compute=_fresh)
+            key = None
+            if probe.token is not None:
+                key = "oc_events|" + json.dumps(
+                    [rid, offset, limit, kind, q, probe.token, fixture_active],
+                    ensure_ascii=False,
+                )
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=coordinate,
+                probe=probe,
+                key=key,
+                compute=_fresh,
+            )
 
         return JSONResponse(await _run_lake(_resolve))
 
@@ -7302,6 +7725,45 @@ def build_app(
 
         return JSONResponse(await _run_lake(_resolve))
 
+    @app.get("/api/v1/oneclick/equity")
+    async def api_oneclick_equity(
+        run_id: str | None = Query(default=None),
+        rank: int = Query(default=1, ge=1),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=5000, ge=1, le=5000),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/equity — the stored minute-path equity SERIES page.
+
+        DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (audit item 4C — the #48
+        overlap): serves the entry's ``equity_ref`` sidecar points
+        (``{session_date, equity_close_paisa, equity_intraday_low_paisa,
+        trades_closed}``) through the SAME typed reader seam + honesty
+        degrades as the trades route (pre-#1275 artifact / absent sidecars /
+        fixture / no-lake → honest awaiting; hostile tuple ref / unreadable
+        sidecar → NAMED corrupt; never a 500, never a fabricated curve).
+        HONEST O-envelope: the FIRST read per (sidecar revision, combo) is an
+        O(equity-file) run_id filter (the stamp indexes no equity spans);
+        repeat pages slice the reader's memo — O(page). One row per session,
+        so the default limit 5000 charts ~20 years in one fetch.
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Build the equity payload off the event loop via the TradesReader seam."""
+            root, fixture_root = _oneclick_roots()
+            reader = _oneclick_reader(root, fixture_root)
+            page = reader.equity_page(rid, rank, offset=offset, limit=limit)
+            return oneclick_view.build_equity_payload(
+                rid,
+                rank,
+                page,
+                offset=offset,
+                limit=limit,
+                fixture_root_active=fixture_root is not None,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
+
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(
         run_id: str | None = Query(default=None),
@@ -7317,6 +7779,20 @@ def build_app(
         without it the chain row serves the LAST cached verdict, or the
         honest ``awaiting`` when this revision was never verified (the
         raising-compute peek stores nothing — T-M4 cache-keyed resolution).
+
+        F1 (DEC-ONECLICK-PERF-CLUB-001): the WHOLE payload is revision-cached
+        like the sibling routes — the key folds the manifest stat token
+        (primary probe) + the events + top100 tokens + the chain
+        verified-state, so a primed poll is three ``os.stat`` probes + the
+        raising chain cache-peek + one hit (r2 sweep M1 — the chain state is
+        a cache-peek, never a stat; the B-7 bench measures exactly this
+        shape); the FIRST poll per changed revision pays the
+        O(manifest) parse + funnel reconcile + the one-row trades probe.
+        HONEST bound (Golden Rule #10): a results-depth sidecar rewrite that
+        moves NONE of the three artifact tokens does not move the key — in
+        the shipped #1617 pass the sidecars land BEFORE top100.json, so the
+        trades-wired flag refreshes with the top100 token; a manifest-less
+        run computes fresh per poll (cheap: no manifest to parse).
         """
         rid = _oneclick_require_run_id(run_id)
 
@@ -7335,11 +7811,30 @@ def build_app(
                     fixture_root_active=fixture_active,
                 )
             run_dir = oneclick_artifacts.runs_root(root) / rid
-            manifest = oneclick_artifacts.load_manifest(run_dir)
-            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.EVENTS_FILENAME)
+            probe = oneclick_artifacts.artifact_probe(
+                run_dir / oneclick_artifacts.MANIFEST_FILENAME
+            )
+            # r1 MINOR-1: sibling stats ride the outage doctrine too — a
+            # transient events/top100 stat flap during a manifest-healthy
+            # poll keeps the last-known sibling token in the key (one WARN),
+            # so the chain row never momentarily degrades to "awaiting".
+            events_rev = oneclick_artifacts.sibling_key_token(
+                _oneclick_outages,
+                coordinate=f"oc_verify|{rid}|sib=events|fx={fixture_active}",
+                probe=oneclick_artifacts.artifact_probe(
+                    run_dir / oneclick_artifacts.EVENTS_FILENAME
+                ),
+            )
+            top100_rev = oneclick_artifacts.sibling_key_token(
+                _oneclick_outages,
+                coordinate=f"oc_verify|{rid}|sib=top100|fx={fixture_active}",
+                probe=oneclick_artifacts.artifact_probe(
+                    run_dir / oneclick_artifacts.TOP100_FILENAME
+                ),
+            )
             chain: tuple[bool, int, int | None, str] | None = None
-            if rev is not None:
-                chain_key = f"oc_chain|{rid}|rev={rev}"
+            if events_rev is not None:
+                chain_key = f"oc_chain|{rid}|rev={events_rev}"
                 if check == "chain":
                     chain = _oneclick_cache.get_or_compute(
                         chain_key,
@@ -7355,13 +7850,32 @@ def build_app(
                         )
                     except oneclick_artifacts.ChainNotVerifiedError:
                         chain = None
-            trades_probe = _oneclick_reader(root, fixture_root).page(rid, 1, offset=0, limit=1)
-            return oneclick_view.build_verify_payload(
-                rid,
-                manifest,
-                chain,
-                trades_probe.status in {"ok", "partial"},
-                fixture_root_active=fixture_active,
+
+            def _fresh() -> dict[str, Any]:
+                manifest = oneclick_artifacts.load_manifest(run_dir)
+                trades_probe = _oneclick_reader(root, fixture_root).page(rid, 1, offset=0, limit=1)
+                return oneclick_view.build_verify_payload(
+                    rid,
+                    manifest,
+                    chain,
+                    trades_probe.status in {"ok", "partial"},
+                    fixture_root_active=fixture_active,
+                )
+
+            key = None
+            if probe.token is not None:
+                key = (
+                    f"oc_verify|{rid}|rev={probe.token}|ev={events_rev}"
+                    f"|t100={top100_rev}|chain={int(chain is not None)}"
+                    f"|fx={fixture_active}"
+                )
+            return oneclick_artifacts.serve_revision_cached(
+                _oneclick_cache,
+                _oneclick_outages,
+                coordinate=f"oc_verify|{rid}|fx={fixture_active}",
+                probe=probe,
+                key=key,
+                compute=_fresh,
             )
 
         return JSONResponse(await _run_lake(_resolve))

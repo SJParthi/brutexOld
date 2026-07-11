@@ -33,6 +33,7 @@ from brutex.data.option_parquet_writer import (
     OptionParquetWriter,
     OptionSeriesCoordinate,
     _record_option_stats,
+    _remove_option_stats,
 )
 from structlog.testing import capture_logs
 
@@ -280,3 +281,43 @@ class TestBestEffortAbstains:
         assert str(_dest(tmp_path)) not in statted  # dest never statted
         shard = str(lsm.stats_shard_path(tmp_path, lsm.KIND_OPTIONS, _SERIES_KEY))
         assert statted.count(shard) == 1  # exactly the one probe
+
+
+class TestWhollyRemovedRemoveHook:
+    """The ``kept == 0`` quarantine-MOVE drops the unlinked file's shard row.
+
+    The options twin of ``ParquetWriter._remove_stats_hook`` (merge-time
+    composition of DEC-LAKE-STATS-MANIFEST-001 with
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001's wholly-removed branch, which
+    post-dates the manifest PR): without the hook the shard would fail the
+    read-side file-set gate on every consult until a reseed — safe (fallback,
+    never a wrong answer) but defeating the manifest for the series.
+    """
+
+    def test_wholly_removed_heal_drops_shard_row(self, tmp_path: Path) -> None:
+        assert _write(tmp_path, [_option_bar(side="CE")]) == 1
+        dest = _dest(tmp_path)
+        shard = _seed_shard(tmp_path, rows=1)
+        heal = OptionParquetWriter(lake_root=tmp_path).heal_partition(
+            dest,
+            remove_keys={("CE", datetime(2021, 1, 4, 4, 0, tzinfo=UTC))},
+            quarantine_to=tmp_path / "q" / "2021-01.parquet",
+        )
+        assert heal.changed is True
+        assert heal.kept == 0
+        assert not dest.exists()  # quarantine-MOVED away
+        # The LAST row's removal unlinks the whole shard (an empty dataset
+        # has no shard) — the read side never sees a stale file-set.
+        assert not shard.exists()
+
+    def test_kill_switch_off_remove_is_pure_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert _write(tmp_path, [_option_bar(side="CE")]) == 1
+        shard = _seed_shard(tmp_path, rows=1)
+        before = shard.read_bytes()
+        monkeypatch.setenv(lsm.STATS_MANIFEST_ENV, "off")
+        with capture_logs() as logs:
+            _remove_option_stats(tmp_path, dest=_dest(tmp_path))
+        assert logs == []  # a pure no-op — not even a probe warning
+        assert shard.read_bytes() == before

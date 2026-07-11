@@ -118,14 +118,19 @@ class ScopeReport:
 
     def refusal_message(self) -> str:
         """Render the operator-facing refusal (every symbol + law + remedy)."""
+        # {…!r} on exchange/segment AND every symbol: all are operator-typed
+        # and echoed to stderr — repr-quote so an embedded \n/ESC can never
+        # forge a '[brutex]' line or inject ANSI (round-4 finding 3 + round-8
+        # finding 2; #907/#919 repr-naming convention).
         lines = [
             f"sweep REFUSED: {len(self.refused)} of the requested symbol(s) under "
-            f"{self.exchange}/{self.segment} are outside the brute-force engine scope:"
+            f"{self.exchange!r}/{self.segment!r} are outside the brute-force engine scope:"
         ]
-        lines.extend(f"  - {verdict.symbol}: {verdict.reason}" for verdict in self.refused)
+        lines.extend(f"  - {verdict.symbol!r}: {verdict.reason}" for verdict in self.refused)
         lines.append(
             "The engine sweeps ONLY NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) "
-            "plus NIFTY futures (ADR-0012 / DEC-NIFTY-DYNAMIC-STRATEGY-001). "
+            "plus the NIFTY-futures series alias 'NSE-NIFTY-FUT' (ADR-0012 / "
+            "DEC-FUTURES-ADDRESSING-PIN-001). "
             f"Rationale: {_CORP_ACTION_HAZARD} "
             "Remedy: drop the out-of-scope symbol(s), or — CLI research runs ONLY — "
             "re-run with --allow-out-of-scope (loud + audit-stamped; no dashboard "
@@ -135,10 +140,12 @@ class ScopeReport:
 
     def override_warning(self) -> str:
         """Render the loud WARNING printed when an override lets symbols through."""
-        names = ", ".join(verdict.symbol for verdict in self.refused)
+        # repr-quoted (symbols AND exchange/segment — round-8 finding 2) for
+        # the same stderr/log-forging reason as refusal_message.
+        names = ", ".join(repr(verdict.symbol) for verdict in self.refused)
         return (
             f"WARNING: --allow-out-of-scope OVERRIDE — sweeping {len(self.refused)} "
-            f"out-of-engine-scope symbol(s) under {self.exchange}/{self.segment}: "
+            f"out-of-engine-scope symbol(s) under {self.exchange!r}/{self.segment!r}: "
             f"{names}. This is a research escape hatch (DEC-ENGINE-SCOPE-GUARD-001); "
             "results are OUTSIDE the CLAUDE.md §2 Rule 3 engine scope and the launch "
             "is audit-stamped scope_override=True."

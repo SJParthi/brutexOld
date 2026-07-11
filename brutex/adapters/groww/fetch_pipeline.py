@@ -114,7 +114,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from brutex.adapters.groww.fetch_spill import FetchSpillArea, SpilledWindow
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
 from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 
@@ -136,7 +136,11 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
     DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001), an operator's COOPERATIVE cancel
     (:class:`~brutex.adapters.ingest_common.PullCancelled`,
     DEC-JOB-COOPERATIVE-CANCEL-001 — quarantining it per-symbol would silently
-    CONTINUE the very pull the operator asked to stop), or a TERMINAL Groww auth failure
+    CONTINUE the very pull the operator asked to stop), a market-hours halt
+    (:class:`~brutex.data.errors.MarketHoursHalt` — the NSE session opened mid-pull,
+    DEC-GROWW-MARKET-HOURS-GUARD-001: every remaining vendor window is equally
+    forbidden until 15:35 IST, so the whole pull must stop, never a per-window
+    quarantine), or a TERMINAL Groww auth failure
     (:func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` — a dead credential
     / an exhausted re-mint budget, DEC-GROWW-AUTH-HALT-001), which fail/poison every
     remaining window identically and so MUST halt the whole pull. The RETRYABLE
@@ -156,6 +160,12 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
         return False  # a genuine code bug → trip the pool (surface it)
     if isinstance(exc, LakeWriteHalt):
         return False  # disk-full / OOM → pull-wide halt
+    if isinstance(exc, MarketHoursHalt):
+        # DEC-GROWW-MARKET-HOURS-GUARD-001: the NSE market-hours window opened mid-pull —
+        # every remaining vendor call is equally forbidden (shared-account protection),
+        # so this is a pull-wide STOP (the async twin of the sync spines'
+        # ``_GLOBAL_STOP_ERRORS`` carve-out), NEVER a per-window quarantine.
+        return False
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import VendorDownError
     from brutex.adapters.groww.errors import GrowwCredentialDeadError, is_terminal_auth_failure

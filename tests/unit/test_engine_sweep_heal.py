@@ -267,6 +267,23 @@ class TestBuildHealPlan:
         )
         assert plan.entries == ()
 
+    def test_vix_divergence_findings_are_never_heal_grade(self, tmp_path: Path) -> None:
+        """DEC-VIX-STAMP-WIRE-001 round-2: the VIX-only recount family — the
+        India-VIX lake moved between run and recount, a REFERENCE-ONLY
+        annotation drift — must never condemn a tuple (the heal consumes
+        exactly ``recount_divergence``; the VIX codes are not aliases)."""
+        original, _, grid, _report = _condemned_tree(tmp_path)
+        plan_map = plan_expected_stores(original, grid)  # type: ignore[arg-type]
+        findings = tuple(
+            VerifyFinding(path="x.parquet", code=code, severity="warn", detail="d")
+            for code in ("recount_vix_divergence", "cell_recount_vix_divergence")
+        )
+        report = TreeVerifyReport(root="r", tier="recount", checked_stores=1, findings=findings)
+        plan = build_heal_plan(
+            report, plan_map, root=original, grid_identity=_GID, context=_CTX, created_utc="x1"
+        )
+        assert plan.entries == ()
+
 
 # ── assess_heal arms ─────────────────────────────────────────────────────────
 

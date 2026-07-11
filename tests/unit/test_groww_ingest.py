@@ -234,6 +234,61 @@ def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str
     return [e for e in logs if e["event"] == name]
 
 
+class TestMarketHoursGuard:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 — the per-window market-hours halt."""
+
+    def test_blocked_guard_raises_before_any_fetch(self) -> None:
+        from brutex.data.errors import MarketHoursHalt
+
+        adapter = _Adapter()
+        sink = _Sink()
+        with pytest.raises(MarketHoursHalt) as excinfo:
+            ingest_spot(
+                adapter,  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                market_closed=lambda: True,
+            )
+        assert excinfo.value.reason == "market_hours"
+        # The guard fires BEFORE the vendor fetch — no call, no write.
+        assert adapter.calls == 0
+        assert sink.appends == []
+
+    def test_open_market_guard_does_not_gate(self) -> None:
+        """market_closed returning False (the A-True/B-False branch) never halts."""
+        adapter = _Adapter()
+        sink = _Sink()
+        report = ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            sink,
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            market_closed=lambda: False,
+        )
+        assert report.windows == 2
+        assert adapter.calls == 2
+
+    def test_none_guard_is_pre_guard_behaviour(self) -> None:
+        """The default (None) guard never consults a clock — byte-identical to before."""
+        adapter = _Adapter()
+        sink = _Sink()
+        report = ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            sink,
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            market_closed=None,
+        )
+        assert report.windows == 2
+
+
 class TestIngestSpot:
     def test_daily_single_window(self) -> None:
         # 1day tiles at 180 days; ~212-day range → 2 windows.
