@@ -908,9 +908,10 @@ Determinism is the audit oracle (Golden Rule #7 idempotence).
 ## 16. Open items (block code-lock) — EXPANDED 2026-05-16
 
 Per `TRACK2_OPTIONS_SPEC.md §8b` + 2026-05-16 deep research, items
-still UNVERIFIED — 13 rows: 3 original + 5 added 2026-05-16 (items
+still UNVERIFIED — 14 rows: 3 original + 5 added 2026-05-16 (items
 4-8) + 3 further 2026-05-16 additions (items 15-17) + 2 §4.2
-drift registrations 2026-07-06 (items 18-19). *(Count corrected
+drift registrations 2026-07-06 (items 18-19) + 1 Step-12 drift
+registration 2026-07-11 (item 20). *(Count corrected
 2026-07-07: the former "3 original + 5 new" intro predated items
 15-19.)*
 
@@ -929,6 +930,7 @@ drift registrations 2026-07-06 (items 18-19). *(Count corrected
 | 17 | **STT-on-exercise rate 0.125% pre-Apr-2026 vs 0.15% post** | Both rates cited but Finance Act 2026 gazette text not pulled | Only fires for `EXPIRY_EXERCISE` outcome (Track 2 never sets this) | LOW for Track 2; MEDIUM for future tracks |
 | 18 | **`EXPIRY_*` STT-era key: `exit_dt` vs entry date** — §4.2's illustrative pseudo-code keys the exercise STT era on `exit_dt`, while DEC-COST-002 (MIGRATION.md #127) locked the NORMAL_CLOSE key to `entry_dt_ist.date()` (§4 Step 5, §7) | Exercise settles AT expiry so exit-keying may be intended — an undecided design question, not a typo. Registered 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001), deliberately NOT decided | Only fires if the `EXPIRY_*` branches are ever implemented (Track 2 never sets them, DEC-RISK-011) | LOW for Track 2; owned by the DEC that implements the expiry branches |
 | 19 | **`EXPIRY_ASSIGN` premium-STT parenthetical is era-dependent** — §4.2's "(already paid at sell-open as 0.15% × premium)" hardcodes one era's rate; the actual sell-open rate is 0.0625% / 0.10% / 0.15% by era (`brutex/costs/constants.py` `STT_OPTIONS_*`; the 0.0625% regime is COSTS_VERIFIED §13/§14, the 0.10%→0.15% arm DEC-COST-003 #128) | Spec note written against the post-Apr-2026 era only. Registered 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001), deliberately NOT decided | Documentation/impl of `EXPIRY_ASSIGN` only (unreachable in Track 2) | LOW for Track 2; the implementing DEC must apply the era rate |
+| 20 | **Step-12 options SHORT-side gross-P&L sign: code `buy − sell` vs spec `sell − buy`** — `_charge_stack_py` Step 12 (`brutex/costs/calculator.py:328`, the byte-identical extraction of the historical inline step — identical on origin/main), its consciously-mirroring Rust twin (`rust/fno-math/src/exec/costs_options.rs:204` "sign-branched — the options law"), and the frozen exec golden corpus (`tests/golden/fixtures/exec_costs_golden_vectors.json` short vectors `ostack-001`/`ostack-003`, gross **+131_300**) all compute the short-side gross as `buy_notional − sell_notional`, while §4 Step 12's pseudocode is the UNCONDITIONAL `gross_pnl_paisa = sell_notional_paisa - buy_notional_paisa` ("short side inverts at construction" — the code NEGATES instead) and §13's "Short side" row states "PnL = sell_notional - buy_notional ≥ 0 means profit"; an independent recompute of `ostack-001` under the §13 law gives **−131_300** (a short sold at 9_990 and covered at 12_010 lost money). Discovered by the slice-7 refuter round 1 (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724); the SIBLING precedent is DEC-TRACK2-COSTS-SPEC-RECONCILE-001 (#1552), which reconciled the DISTINCT §4 Step-1 short-side SLIPPAGE sign — this gross-P&L drift is deliberately NOT folded into #1552's items 18/19 | Which law is intended (the spec's unconditional `sell − buy` over already-leg-swapped short fills, or the code's sign-branch) is an undecided design question now FROZEN cross-language by the corpus + the Rust twin; Rust↔Python parity holds bit-for-bit either way. Registered 2026-07-11, deliberately NOT decided (never silently decided) | **Production-UNREACHABLE**: DEC-EXEC-008 locks the executor BUY-only (sides are always `long_call`/`long_put`), so no reachable Track-2 trade takes the short branch — this is NOT a live P&L bug | LOW for Track 2; resolution owned by the (unauthorized, future) DEC that enables short options — it must reconcile code + Rust twin + corpus + §4/§13 together |
 
 **Items 1-3:** original 3 from `TRACK2_OPTIONS_SPEC §8b`.
 **Items 4-8:** added 2026-05-16 from deep research on long/short
@@ -937,11 +939,17 @@ asymmetry + freeze quantity + hidden costs.
 §4.2 expiry-branch drift observations REGISTERED without deciding them;
 they are design questions for the (unauthorized, future) DEC that
 implements the `EXPIRY_*` branches, not operator-verification items.
+**Item 20:** added 2026-07-11 (slice-7 refuter round 1,
+DEC-EXEC-RUST-CORE-001 #1724) — the Step-12 short-side gross-P&L
+code-vs-spec sign drift REGISTERED without deciding it (the #1552
+register-don't-decide pattern); production-unreachable under the
+DEC-EXEC-008 BUY-only lock, owned by the future short-options DEC.
 
 **All 11 verification items (1-8, 15-17) require operator manual
-verification** — items 18-19 are registered design questions owned by
-the future DEC that implements the `EXPIRY_*` branches, NOT
-operator-verification items (see the note above). *(Count corrected
+verification** — items 18-20 are registered design questions owned by
+the future DECs that implement the `EXPIRY_*` branches (18-19) /
+short options (20), NOT operator-verification items (see the notes
+above). *(Count corrected
 2026-07-07: the former "All 8 items" trailer predated items 15-19.)*
 Items 1, 2, 4 materially affect calculator output. Items 3, 5-8
 affect edge cases or related modules.
@@ -1003,6 +1011,7 @@ work but calculator can ship without them.
 | 2026-05-16 | TradeOutcome enum added to §11 API | Replaces `held_to_expiry_exercise: bool`. Backward-compat via DEPRECATED label on the bool. New fixtures use enum. |
 | 2026-07-06 | §4 Step-1 short-side slippage resolved to the §8 ADVERSE rule (DEC-TRACK2-COSTS-SPEC-RECONCILE-001) | §4's pseudocode disagreed with §8 on BOTH short legs (short sell = `exit_open + tick` — wrong bar; short cover buy = `exit_open − tick` — favorable) and carried a literal "# CHECK SIGN" inside a LOCKED spec (the #963 MINOR-4 contradiction). §8 (adverse — buy higher, sell lower; consistent with `TRACK2_OPTIONS_SPEC §9.2`'s per-action rule) is authoritative; "# CHECK SIGN" deleted; `brutex/costs/calculator.py`'s short SELL leg + the byte-exact test re-pinned to the resolved rule (branch stays production-unreachable — BUY-only DEC-EXEC-008 unchanged). §4.2 gained the implementation-status block (Step-0 guard ≠ state machine, MIGRATION.md #963); the `exit_dt` era-key + assign premium-STT drifts registered as §16 items 18-19 WITHOUT deciding them; §2 gained the pre-2024-10-01 0.0625% STT regime row. |
 | 2026-07-07 | Citation hygiene on the pre-2024-10-01 0.0625% STT regime (§2 row, §4.2 EXPIRY_ASSIGN note, §16 item 19) — reconstruction round-4 review | The three sites added on 2026-07-06 attributed the 0.0625% rate to DEC-COST-003 (MIGRATION.md #128), which locks ONLY the Finance-Act-2026 0.10%→0.15% arm and never states 0.0625% (Golden Rule #1: a citation must resolve to a source stating the claim). Re-cited to COSTS_VERIFIED §13 (three-regime history) / §14 (rate constants) + DEC-COST-002 (#127, the date-keyed regime lookup), keeping DEC-COST-003 only for the 0.10%→0.15% arm. Rate VALUES unchanged. |
+| 2026-07-11 | §16 item 20 registered: Step-12 options SHORT-side gross-P&L sign — code/Rust-twin/frozen-corpus `buy − sell` vs §4 Step 12 + §13 `sell − buy` (slice-7 refuter round 1, DEC-EXEC-RUST-CORE-001 MIGRATION.md #1724) | The Rust exec conversion froze the code's sign-branch cross-language (calculator.py:328 / costs_options.rs:204 / `ostack-001`/`ostack-003` gross +131_300 where the §13 law recomputes −131_300), so the code-vs-spec contradiction is now certified by two languages against each other with NO registration — registered WITHOUT deciding (the DEC-TRACK2-COSTS-SPEC-RECONCILE-001 #1552 pattern; #1552 reconciled the DISTINCT Step-1 short-side SLIPPAGE sign — not deduped into its items 18/19). Production-unreachable: DEC-EXEC-008 BUY-only lock; no rate/value/code change — DOCS-only registration owned by the future short-options DEC. |
 
 ---
 
