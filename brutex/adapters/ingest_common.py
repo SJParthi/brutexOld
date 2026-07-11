@@ -1249,6 +1249,7 @@ LoopVerdict = Literal[
     "continue",
     "stop_clean",
     "stop_dead",
+    "stop_market_hours",
     "stop_quota",
     "stop_no_progress",
     "stop_budget",
@@ -1392,6 +1393,16 @@ class UntilCleanOutcome:
         return self.verdict == "stop_no_progress"
 
     @property
+    def stopped_market_hours(self) -> bool:
+        """True iff the loop paused because the market-hours window opened.
+
+        DEC-GROWW-MARKET-HOURS-GUARD-001 — the NEXT round would have run inside the
+        NSE market-hours window, so the loop stopped to keep the shared Groww account
+        free for TickVault's live feed; the pull resumes on the next out-of-hours run.
+        """
+        return self.verdict == "stop_market_hours"
+
+    @property
     def final_still_failed(self) -> int:
         """Transient residual after the LAST round ran (0 when none ran / clean)."""
         return self.rounds[-1].still_failed_windows if self.rounds else 0
@@ -1433,6 +1444,7 @@ class UntilCleanOutcome:
             "stopped_on_budget": self.stopped_on_budget,
             "stopped_on_quota": self.stopped_on_quota,
             "stopped_no_progress": self.stopped_no_progress,
+            "stopped_market_hours": self.stopped_market_hours,
             "final_still_failed": self.final_still_failed,
         }
 
@@ -1446,8 +1458,9 @@ def decide_until_clean(
     quota_exhausted: bool = False,
     made_progress: bool = True,
     outstanding_windows: int | None = None,
+    market_closed: bool = False,
 ) -> LoopVerdict:
-    """Decide what the until-clean loop does after a round — the pure 6-way controller.
+    """Decide what the until-clean loop does after a round — the pure 7-way controller.
 
     Priority (matching :func:`retry_failed_windows` + :func:`classify_pull`, worst
     first):
@@ -1456,21 +1469,29 @@ def decide_until_clean(
        (``RenewToken`` cannot revive a dead token) — halt for re-auth.
     2. **stop_clean** — ``still_failed_windows == 0``: the coverage ledger is clean
        (success outranks every "can't continue" reason — if we're done, we're done).
-    3. **stop_quota** — ``quota_exhausted``: the day's 100,000-call quota is
+    3. **stop_market_hours** — ``market_closed`` (DEC-GROWW-MARKET-HOURS-GUARD-001):
+       the NEXT round would run inside the NSE market-hours window ``[08:45, 15:35)``
+       IST, so the loop must NOT re-fire a vendor pass that would compete with
+       TickVault's live feed for the shared account. Like a dead token, no immediate
+       retry can proceed — the pull resumes on the next out-of-hours run. Ranked above
+       ``stop_quota`` because it is a HARD external gate on issuing any vendor call at
+       all (the between-rounds belt; the mid-round per-window guard raises
+       ``MarketHoursHalt`` directly).
+    4. **stop_quota** — ``quota_exhausted``: the day's 100,000-call quota is
        spent (DEC-AUTO-RESUME-QUOTA-001). Like a dead token, NO amount of immediate
        retrying can land a bar today — the auto-resume pauses itself rather than
        burn a dead quota; the operator re-pulls after the IST-midnight reset. Ranked
        above ``no_progress`` because it is the SPECIFIC reason no progress is
        possible.
-    4. **stop_no_progress** — ``not made_progress``: the last round shrank the
+    5. **stop_no_progress** — ``not made_progress``: the last round shrank the
        residual by ZERO. A stuck window can never be drained by more identical
        rounds, so spinning is futile — halt instead of churning to the budget cap.
        This is what makes a LARGE ``max_rounds`` (the auto-resume budget) safe: the
        loop self-terminates the instant it stops making headway.
-    5. **stop_budget** — ``rounds_used >= max_rounds``: residual remains, the loop is
+    6. **stop_budget** — ``rounds_used >= max_rounds``: residual remains, the loop is
        still making progress, but the bounded outer budget is spent (the final
        backstop).
-    6. **continue** — residual remains, progress is being made, budget is left.
+    7. **continue** — residual remains, progress is being made, budget is left.
 
     Pure + O(1) (a constant number of comparisons). No I/O, no clock. The
     ``quota_exhausted`` + ``made_progress`` args default to the
@@ -1485,6 +1506,11 @@ def decide_until_clean(
     window is SUCCESS / SKIPPED (the "pull until successful" guarantee), not merely
     until the transient failures clear (which left PLANNED + EMPTY windows behind).
     ``None`` falls back to the ``still_failed_windows == 0`` test (byte-identical).
+
+    *market_closed* (DEC-GROWW-MARKET-HOURS-GUARD-001) defaults to ``False`` (the
+    pre-guard behaviour, byte-unchanged for every existing caller). ``True`` means
+    the NEXT round would run inside the NSE market-hours window — the loop stops with
+    ``stop_market_hours`` rather than re-firing a vendor pass into the shared account.
     """
     if auth_aborted:
         return "stop_dead"
@@ -1493,6 +1519,8 @@ def decide_until_clean(
     )
     if clean:
         return "stop_clean"
+    if market_closed:
+        return "stop_market_hours"
     if quota_exhausted:
         return "stop_quota"
     if not made_progress:
@@ -1509,6 +1537,7 @@ def run_until_clean(
     sleep: Callable[[int], None] | None = None,
     decide: Callable[..., LoopVerdict] = decide_until_clean,
     quota_exhausted: Callable[[], bool] | None = None,
+    market_closed: Callable[[], bool] | None = None,
     stop_when_stuck: bool = False,
 ) -> UntilCleanOutcome:
     """Run bounded re-pull rounds until CLEAN, the token dies, or the budget is spent.
@@ -1557,6 +1586,16 @@ def run_until_clean(
         bounded ``DEFAULT_MAX_ROUNDS`` path + tests). The hook reads the shared
         persisted :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`, so
         it reflects the SAME counter the rate bucket increments per call.
+    market_closed
+        Optional ``() -> bool`` hook checked AFTER each round (DEC-GROWW-MARKET-HOURS-
+        GUARD-001): ``True`` means the NEXT round would run inside the NSE
+        market-hours window ``[08:45, 15:35)`` IST, so the loop stops with
+        ``stop_market_hours`` rather than re-firing a vendor pass that would compete
+        with TickVault's live feed for the shared Groww account. ``None`` (the
+        default) → the market never stops the loop (the pre-feature behaviour, for
+        tests + the bounded path). This is the BETWEEN-ROUNDS belt; a round already
+        in flight when the market opens is halted mid-round by the per-window
+        ``MarketHoursHalt`` raise in the spines.
     stop_when_stuck
         When ``True`` (the auto-resume path, DEC-AUTO-RESUME-QUOTA-001), a round
         that shrinks the residual by ZERO stops the loop with ``stop_no_progress``
@@ -1632,6 +1671,7 @@ def run_until_clean(
             quota_exhausted=quota_exhausted() if quota_exhausted is not None else False,
             made_progress=made_progress,
             outstanding_windows=outcome.outstanding_windows,
+            market_closed=market_closed() if market_closed is not None else False,
         )
         prev_failed = outcome.still_failed_windows
         # Per-round observability (DEC-PULL-TELEMETRY-TRIAD-001): the loop that rescues
