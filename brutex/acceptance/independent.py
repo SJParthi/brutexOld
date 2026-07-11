@@ -229,12 +229,17 @@ def enumerate_spot_symbol_dirs(lake_root: Path) -> list[tuple[str, str, str, Pat
 
 
 def is_trading_day_hand(d: date) -> bool:
-    """Hand trading-day predicate over calendar DATA constants only."""
+    """Hand DISPLAY-session predicate over calendar DATA constants only.
+
+    Muhurat evenings + special weekend sessions ARE sessions for the movers
+    prev-close baseline law (#1649b) even when the date is a listed holiday /
+    weekend; every other holiday/weekend is not.
+    """
+    if d in MUHURAT_SESSIONS or d in SPECIAL_WEEKEND_TRADING_SESSIONS:
+        return True
     if d in ALL_HOLIDAYS:
         return False
-    if d.weekday() >= 5:
-        return d in SPECIAL_WEEKEND_TRADING_SESSIONS or d in MUHURAT_SESSIONS
-    return True
+    return d.weekday() < 5
 
 
 def previous_session_hand(d: date, *, max_walk: int = 30) -> date | None:
