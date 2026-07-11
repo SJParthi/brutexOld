@@ -651,9 +651,24 @@ def build_preopen_rows(
             daily: dict[date, Decimal] = {}
             daily_dates: list[date] = []
             minute_last: dict[date, Decimal] = {}
+            # The IEP (open) reads are SPAN-BOUNDED (DEC-DB-LATENCY-HARDENING-001):
+            # only in-range days of `opens` are ever consumed (the loop below
+            # `continue`s past out-of-range days), so binding only the report
+            # span's month files is byte-identical — the profiling evidence
+            # measured the unbounded minute basis binding EVERY 1-minute month
+            # file of every symbol (616 files/click at 103 symbols). The CLOSE
+            # maps deliberately stay whole-partition: the contiguity guards'
+            # `found = nearest_lake_session` hole diagnostics + the calendar
+            # back-walk depth need the unbounded view (a bounded close map could
+            # silently change a WARN's evidence or an anchor refusal).
             if basis == "minute":
                 opens = _intraday_open_by_date(
-                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                    conn,
+                    lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    span=(start, end),
                 )
                 minute_last = _intraday_last_close_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
@@ -668,7 +683,12 @@ def build_preopen_rows(
                 # _minute_prev_close_contiguous.
             else:
                 opens = _daily_open_by_date(
-                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                    conn,
+                    lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    span=(start, end),
                 )
                 daily = _daily_close_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol

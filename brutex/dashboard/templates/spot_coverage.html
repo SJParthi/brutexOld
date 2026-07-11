@@ -137,6 +137,10 @@
      chips, truthful live dot. Linked AFTER bx-theme (the header authority). -->
 <link rel="stylesheet" href="/static/bx-design.css">
 <script defer src="/static/bx-ui.js"></script>
+<!-- The ONE shared poll-discipline core (DEC-FRONTEND-LATENCY-HARDENING-001,
+     MIGRATION.md #1720): hidden guard, one-in-flight chain, 10 s fetch abort,
+     capped 3 s→30 s backoff, visibilitychange catch-up. -->
+<script defer src="/static/bx-poll.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
@@ -260,12 +264,12 @@ function completenessChip(r) {
    (data changed) or the skip path can never re-trigger the motion. */
 let rowsAnimated = false;
 
-function renderSpot(rows) {
-  if (!rows.length) {
-    panel.innerHTML = '<div class="empty">no spot datasets in the lake yet — pull a spot symbol (e.g. NIFTY 1minute) from the Database page</div>';
-    return;
-  }
-  const body = rows.map(r =>
+/* One esc()'d row-string builder shared by the full rebuild AND the in-place
+   tbody patch below (the fetch_windows.html / db.html gridRowsHtml idiom —
+   DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): every payload
+   value stays escaped exactly as before. */
+function spotRowsHtml(rows) {
+  return rows.map(r =>
     "<tr>"
     + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
     + "<td>" + esc(r.exchange) + "</td>"
@@ -277,6 +281,26 @@ function renderSpot(rows) {
     + "<td>" + completenessChip(r) + "</td>"
     + "</tr>"
   ).join("");
+}
+
+function renderSpot(rows) {
+  if (!rows.length) {
+    panel.innerHTML = '<div class="empty">no spot datasets in the lake yet — pull a spot symbol (e.g. NIFTY 1minute) from the Database page</div>';
+    return;
+  }
+  /* In-place tbody patch (DEC-FRONTEND-LATENCY-HARDENING-001 — the
+     fetch_windows.html / db.html patchGridRows idiom): the column set is
+     FIXED, so when the table shell already stands, swap ONLY the tbody rows —
+     the SAME esc()'d builder strings the full rebuild writes, against a
+     NARROWER target — instead of tearing down the whole shell + sticky header
+     on every changed mid-pull payload. Empty states and the first paint take
+     the full-rebuild path below (the outer raw-text skip memo already
+     guarantees an identical payload never re-renders at all). */
+  const tbody = panel.querySelector("table > tbody");
+  if (tbody) {
+    tbody.innerHTML = spotRowsHtml(rows);
+    return;
+  }
   /* The 20-word honesty caveat moved OUT of the header subtitle (it overflowed
      the no-wrap header at ~900-1300px) into this column tooltip + the status
      line, which already carries it. */
@@ -285,7 +309,7 @@ function renderSpot(rows) {
     + "<th>Symbol</th><th>Exchange</th><th>Segment</th><th>Interval</th>"
     + "<th>Bars</th><th>First date</th><th>Last date</th>"
     + '<th title="chip = ledger-settled within planned ranges — a trading-day gap audit is NOT claimed">Fetch windows ⓘ</th>'
-    + "</tr></thead><tbody>" + body + "</tbody></table>";
+    + "</tr></thead><tbody>" + spotRowsHtml(rows) + "</tbody></table>";
   if (!rowsAnimated && window.BXUI) {
     BXUI.stagger(panel.querySelector("tbody"), "first-render", { rows: true, cap: 20 });
     rowsAnimated = true;
@@ -345,7 +369,7 @@ function clearStale() {
    — never a stuck placeholder. Pre-BXUI fallback is a plain honest line. */
 function renderErrorState(o) {
   if (window.BXUI) {
-    BXUI.errorCard(panel, { status: o.status, offline: o.offline, retry: poll });
+    BXUI.errorCard(panel, { status: o.status, offline: o.offline, retry: repoll });
     return;
   }
   while (panel.firstChild) { panel.removeChild(panel.firstChild); }
@@ -399,22 +423,18 @@ function renderStaleChip(body) {
 }
 
 async function poll() {
-  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
-     ZERO fetches; the interval keeps ticking (hidden ticks are free) and the
-     visibilitychange listener below re-polls immediately on return. */
-  if (document.hidden) return;
   try {
     const r = await doFetch("/api/v1/coverage/spot");
     if (!r.ok) {
       lastPayloadTxt = null;
       liveTxt.textContent = "error " + r.status;
       showFailure({ status: r.status, verdict: "error " + r.status });
-      return;
+      return false;
     }
     const txt = await r.text();
     setDot("ok");
     clearStale();
-    if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return; }
+    if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return true; }
     lastPayloadTxt = txt;
     const body = JSON.parse(txt);
     renderStaleChip(body);
@@ -429,20 +449,56 @@ async function poll() {
     hasRendered = true;
     lastLiveLine = "live · " + (body.rows || []).length + " datasets";
     liveTxt.textContent = lastLiveLine;
+    return true;
   } catch (e) {
     lastPayloadTxt = null;
     const timedOut = !!(e && e.timeout);
     liveTxt.textContent = timedOut ? "timed out" : "offline";
     showFailure({ offline: !timedOut, verdict: timedOut ? "timed out" : "offline" });
+    return false;
   }
 }
 
-poll();
-setInterval(poll, 4000);
-/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001). */
-document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) poll();
-});
+/* Self-recovering scheduler (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md
+   #1720): the tick above rides the ONE shared BXPoll discipline core
+   (bx-poll.js — hidden-tab guard BEFORE any fetch, one-in-flight
+   self-scheduling chain, capped 3 s→30 s failure backoff, visibilitychange
+   catch-up) instead of a bare fixed setInterval; the visible-tab cadence is
+   unchanged (pollMs: 4000) and every render/degrade above is byte-identical
+   (a failed tick keeps its own honest error rendering and backs off). The
+   poller starts at DOMContentLoaded, by which every deferred script has
+   executed; a missing bx-poll.js degrades to the legacy guarded interval —
+   the page never goes pollerless. */
+let poller = null;
+function repoll() { if (poller) { poller.pollNow(); } else { void poll(); } }
+function startPolling() {
+  if (window.BXPoll) {
+    poller = window.BXPoll.createPoller({
+      url: "/api/v1/coverage/spot", // informational — the tick owns its own fetch
+      pollMs: 4000,
+      fetchJson: function () {
+        return poll().then(function (ok) {
+          if (!ok) { throw new Error("coverage/spot poll tick failed"); }
+          return { ok: true };
+        });
+      },
+      onData: function () { /* the tick already rendered */ }
+    });
+    poller.start();
+  } else {
+    const legacyTick = function () { if (!document.hidden) void poll(); };
+    legacyTick();
+    setInterval(legacyTick, 4000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) void poll();
+    });
+  }
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startPolling);
+} else {
+  startPolling();
+}
 /* Deferred bx-ui.js is guaranteed executed by DOMContentLoaded: pause every
    ambient animation while the tab is hidden (richer feel, lower cost). */
 document.addEventListener("DOMContentLoaded", function () {

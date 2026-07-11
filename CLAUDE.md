@@ -18,7 +18,56 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 —
+_Last updated: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
+the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
+pollers consolidate onto ONE BXPoll-disciplined consumer per endpoint (subscriber
+fan-outs added to bx-oneclick.js / bx-rate-monitor.js / bx-liveproof.js; the
+measured BEFORE on the idle operator page was 336 requests/120 s with
+sweep-progress / pull-rate / liveproof each polled by TWO-THREE summed pollers;
+measured AFTER, same harness: 240 requests/120 s — −96, −28.6%),
+the six fixed-interval template pollers (coverage · spot_coverage · fetch_windows
+· completeness · expired_options 4 s + launch 2.5 s) migrate onto the ONE shared
+`BXPoll.createPoller` core via a custom-fetchJson tick seam (renders
+byte-identical; failed ticks back off 3 s→30 s; DOMContentLoaded start;
+guarded-legacy degrade), the 8 /screener filter inputs + /results Top-N debounce
+200 ms, completeness/spot_coverage adopt the in-place tbody row-patch idiom (ONE
+shared esc()'d row builder, shell built once), and /reports' ~750 chips build
+ONCE with class-toggle selection. SKIPPED honestly: the bx-format/bx-movers-time
+defer (end-of-body includes with genuine parse-time consumers + a standing
+non-defer pin) and the universe.html integrity-interval catch-up (already shipped
+by #1623). NO measured hidden-tab win claimed (idle-page hidden was already
+0 req/s, measured); the `pollRunSweep` hidden-guard gap is source-asserted only.
+CLIENT-side only — templates + static JS + tests + docs; ZERO route/payload
+change, byte-stable wire; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1720.)
+Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
+the DB/query-latency hardening pack, READ-side only: (1) the `/db`
+window-ledger pager rides a DuckDB LIMIT/OFFSET fast path over the #1533
+delta-folded ledger scan source (`db_view.query_window_ledger_page` —
+measured 7,321–8,778 ms cold at 400k rows → 564.8 ms; the O(rows) Python
+record fold per stamp is GONE; the byte-identical legacy parse stays the
+degrade for legacy-shape / NULL-derivable-cell / persistent-duckdb-error /
+no-conn); (2) the pre-open export rows are memoised per (basis, range,
+symbols) at the write generation (repeat click 326–574 ms / 206 DuckDB
+statements → 4.2–18.6 ms / 0 statements, bytes identical) + the IEP (open)
+reads are span-bounded (the CLOSE maps deliberately stay whole-partition —
+the #1649a hole diagnostics need the unbounded view); (3) the `/db` candles
+%CHNG baseline binds the page's own month files instead of the whole glob
+(72 files bound twice per click → 2; the #863 timestamp bounds pruned ROW
+GROUPS, this bounds the Parquet FOOTER opens too — merged-tree mechanism =
+main's #1670 `_bars_file_windows`, this pack's interim arm superseded at the
+merge-reconcile, behavior pins re-run green). HONEST: the
+window-ledger fresh-stamp click stays ONE O(total rows + delta footers)
+columnar scan (never literal O(page) — the repeat click is the O(1)
+handoff); the ONE behavior-visible class is corrupt-lake-only — a corrupt
+file provably OUTSIDE a bounded read's candidates no longer blanks it (a
+strictly-narrower degrade, named in #1719). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+healthy-lake payloads byte-identical (fast-equals-legacy pinned);
+`db_view.py` + `preopen_report.py` 100% line+branch on their ci.yml gates;
+the per-fix record lives in the §1 Active-branch blurb + MIGRATION.md
+#1719 — this header carries the one-line summary, never the story).
+Earlier: 2026-07-08 (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 —
 an explicit `/movers` bucket-anchor TIME pick now resolves to the COMPLETED bucket
 (broker-matching close) instead of a PARTIAL forming bucket. The TIME dropdown on a
 coarse timeframe offers only the 09:15-anchored bucket-ANCHOR grid, but the backend
@@ -2119,7 +2168,102 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-bucket-asof-fix` (**DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001,
+- **Active branch:** `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
+  the dashboard FRONTEND latency-hardening pack, CLIENT-side only (templates + static JS + tests + docs; ZERO
+  route/payload/backend change — byte-stable wire): (Fix 1) the v29 operator page's DUPLICATE pollers consolidate onto
+  ONE BXPoll-disciplined consumer per endpoint — bx-oneclick.js's progressPoller fans out to
+  `window.__bxSweepProgressSubs`/`__bxSweepProgressFailSubs` (call-time-read arrays, throwing subscribers isolated) +
+  exposes `__bxSweepProgressPollNow`; the [data-sweep] panel, heartbeat sweep slot and Run-controls renderer all
+  SUBSCRIBE (the Run click flips `watching` + one shared pollNow — progress-bar cadence 3 s, was 1.2 s, disclosed);
+  bx-rate-monitor.js / bx-liveproof.js gain the same-shape `__bxPullRateSubs`/`__bxLiveproofSubs` fan-outs feeding the
+  heartbeat pull/proof slots (the notify helper stays LOCAL to each dependency-free widget — a ledgered §11 deviation);
+  the killed tokens (`setInterval(pollSweepProgress, 2000)` · `sweepPoll = setInterval(pollRunSweep, 1200)` ·
+  `setInterval(pollPull, 5000)` · `setInterval(pollProof, 10000)` · `setInterval(pollState, 2000)`) are
+  negative-pinned and /api/v1/state rides BXPoll at its unchanged 2 s. MEASURED BEFORE (coordinator harness, headless
+  Chromium, origin/main @ a268bd4c, idle `/`, 120 s visible): 336 requests — sweep-progress 99 / pull-rate 63 /
+  liveproof 36 = the summed duplicates this closes. MEASURED AFTER (same harness, head 31e9022c — validity
+  scoped PER FILE: the five files the page-`/` measurement depends on — v29.html + bx-oneclick.js +
+  bx-rate-monitor.js + bx-liveproof.js + bx-poll.js — are byte-identical to this branch's head, verified
+  empty diff): 240 requests/120 s = 2.000 req/s (−96, −28.6%) — sweep-progress 99→39, pull/rate 63→39, liveproof
+  36→24, state 60→60, universe/pull-progress 39→39, oneclick/runs 39→39; the same six endpoints on both runs.
+  HONEST: hidden-tab was 0 req/s measured on BOTH SHAs — no hidden-tab
+  win claimed; the pollRunSweep no-guard/no-backoff/un-timed-fetch gap is source-asserted (armed only mid-sweep,
+  unmeasured). (Fix 2) the six fixed-interval template pollers (coverage · spot_coverage · fetch_windows ·
+  completeness · expired_options 4 s + launch 2.5 s) migrate onto the ONE shared `BXPoll.createPoller` core through a
+  custom-fetchJson tick seam — every render/degrade byte-identical, failed ticks throw into the counted 3 s→30 s
+  backoff (coverage's 4-fetch composite backs off only at 0/4), cadence tokens unchanged (`pollMs: 4000`/2500),
+  DOMContentLoaded start, a missing bx-poll.js degrades to the legacy guarded interval; fetch_windows' chip/pager
+  clicks ride `poller.pollNow()` and its page-snap-back recursion returns the inner promise. (Fix 3) the 8 /screener
+  filter inputs + /results' Top-N input debounce 200 ms (the v29/movers precedent). (Fix 5) completeness (renderSpot +
+  the ~750-row renderOptions) + spot_coverage (renderSpot) adopt the fetch_windows/db patchGridRows idiom — ONE
+  esc()'d row builder shared by full rebuild AND tbody patch; the 3 new tbody sinks are the sanctioned narrow-target
+  pattern (`_SANCTIONED_EXTRA_SINKS` extended); MEASURED null result, framed honestly: the in-place tbody patch
+  preserves table-node identity across re-renders (no scroll/selection loss, less GC churn — structural probe main
+  false/false → branch true/true) while render WALL-TIME is UNCHANGED at 750 rows (renderSpot 70.1→69.3 ms /
+  renderOptions 52.3→54.0 ms second-render medians, inside main's own ±4-9% run-to-run variance — NO ms improvement
+  claimed). (Fix 6) /reports' chips build ONCE per symbol-SET key;
+  All/Clear/F&O/index-pick are now an O(chips) `.on` class sweep (`applySelection`), XSS build path byte-preserved.
+  SKIPPED honestly: Fix 4 defer (end-of-BODY includes, movers' genuine parse-time consumers, the standing
+  test_dashboard_halfup_format non-defer pin — the skip itself now pinned deliberate) and Fix 7 (already shipped by
+  DEC-DASHBOARD-POLL-HYGIENE-001 #1623). PINS UPDATED intent-preserved: poll_hygiene's five uniform-poller pins →
+  the BXPoll mechanism; js_perf's cadence pin → `pollMs: 4000`; ux_design's v29 fetch-deadline pin → the
+  BXPoll/subscription mechanism. TESTS: NEW tests/unit/test_dashboard_frontend_latency.py (node --check on EVERY
+  static/*.js + killed-token/subscription/debounce/tbody/chips pins + a node-EXECUTED fan-out isolation golden);
+  every touched template's inline scripts parse clean under node. HONEST envelope: source-string pins + node syntax
+  gates, no in-CI browser measurement — BEFORE/AFTER measured out-of-CI by the coordinator harness (AFTER on
+  31e9022c; the five measured-page files byte-identical to this head). HOSTILE-REVIEW FIX ROUND folded
+  (pre-open, FIX-FIRST verdict — the per-item record lives in MIGRATION.md #1720): the fetch_windows/
+  completeness tick fetches are now BOUNDED through the body read via a per-template `fetchTextBounded`
+  honoring the seam's timeoutMs (the MAJOR — a headers-then-stalled-body tick would have wedged BXPoll's
+  one-in-flight chain forever; the ledger's "bare un-timed fetches closed" claim was ahead of the code, now
+  true + pinned); /reports' chip map keys symbol+exchange (the dual-listed stale-highlight MINOR); the
+  touched templates' inline scripts gain an executable node --check pin; completeness.html joins the
+  innerHTML-sink baseline guard at 7. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+  Earlier: `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
+  the DB/query-latency hardening pack, READ-side only, three evidence-driven fixes off the 2026-07-11
+  profiling run (a 1,178-file real-writer lake, 400k-row ledger + 5 deltas, real routes via
+  `build_app` + `TestClient`): **(1)** the `/db` window-ledger pager — NEW
+  `db_view.query_window_ledger_page`, a DuckDB LIMIT/OFFSET projection over the SAME #1533
+  delta-folded `_ledger_scan_source` the `/coverage/windows` fast paths scan, total from ONE
+  stamp-memoised COUNT(*) (the NEW `wledger-*` key families on the injected window-payload caches);
+  measured 7,321–8,778 ms cold at 400k rows → 564.8 ms (the 7,177 ms O(rows) Python record fold per
+  stamp is GONE); a legacy-shape base / a NULL in a legacy-DERIVABLE cell / a persistent
+  `duckdb.Error` (torn-read retry-once first) / `conn=None` each degrade to the byte-identical
+  legacy cached parse (`window_ledger_rows_cached`, byte-untouched — the fenced #1533 cache
+  families were NOT restructured); **(2)** the pre-open exports — both routes memoise
+  `build_preopen_rows` on the NEW dedicated `_preopen_rows_cache` keyed
+  `(basis, [from, to], symbols-filter)` at `_summary_cache.generation` (repeat click 326–574 ms /
+  206 DuckDB statements binding 616 files → 4.2–18.6 ms / 0 statements, bytes identical; the `.zip`
+  shares the `.xlsx`'s coordinate) + the IEP (open) readers gain an additive `span=` binding only
+  the report span's month files via NEW `_existing_month_files_in_span` (±1-day pad law, domain
+  saturation, non-grammar strays conservatively kept) through `_execute_parquet_resilient`'s NEW
+  bounded `files=` arm — the CLOSE maps deliberately stay whole-partition (the #1649a contiguity
+  guards' `found=nearest_lake_session` diagnostics + the calendar back-walk depth need the
+  unbounded view); the #1649a pre-fix goldens pass UNMODIFIED; **(3)** the `/db` candles %CHNG
+  baseline — `_intraday_last_close_with_predecessor`'s two reads bind explicit file lists, so a
+  page click binds 2 baseline files instead of 72 (warm p50 30.7 → 21.1 ms; the residual is the
+  #1614 manifest revalidation sweep, out of scope). FIX-3 MECHANISM SUPERSEDED at the 2026-07-11
+  merge-reconcile (main 652301b5, PR #1386): main's DEC-DB-BASELINE-MANIFEST-ROUTE-001 (#1670)
+  landed the SAME footer-open fix in-flight with a richer mechanism (`_bars_file_windows` —
+  manifest-exact per-file bounds + month-grammar fallback + predecessor step-back, ALSO covering
+  the moneyness spot join) — the merged tree serves #1670's mechanism, this pack's interim
+  `_predecessor_candidate_files` helper was DELETED at the reconcile, and this pack's
+  behavior-level pins + bench re-ran GREEN over it unchanged; the bounded-`files=` resilient-read
+  arm CONVERGED with #1670/#1668's (main's kwarg + two-stage probe + readable-subset latch
+  adopted); fixes 1 + 2 untouched, `_existing_month_files_in_span` stays (the fix-2 consumer). SANCTIONED (corrupt lakes
+  only): a corrupt file provably OUTSIDE a bounded read's candidates no longer blanks that read —
+  correct-or-absent preserved, blast radius strictly narrower; a corrupt CANDIDATE still blanks
+  (both directions pinned). The D3 route spy tightened 1 → 0 Python parses (byte-parity half
+  unmodified). HONEST: the window-ledger fresh-stamp click is ONE O(total rows + delta footers)
+  columnar scan, never literal O(page); the export render stays O(report rows) per click; candidate
+  enumeration is an O(existing files) listing. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; no new required wire fields; `db_view.py` +
+  `preopen_report.py` 100% line+branch on their ci.yml gates (two new unit files joined the db_view
+  gate); ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline;
+  fast-equals-legacy + bounded-equals-unbounded parity pinned exhaustively; benches
+  `test_db_window_ledger_page_o1.py` + `test_db_candles_baseline_bound_o1.py`.)
+  Earlier: `claude/movers-bucket-asof-fix` (**DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001,
   MIGRATION.md #1601** — an explicit `/movers` bucket-anchor TIME pick now resolves to the
   COMPLETED bucket (broker-matching close) instead of a PARTIAL forming bucket. The TIME
   dropdown on a coarse timeframe offers only the 09:15-anchored bucket-ANCHOR grid, but the
@@ -5367,7 +5511,29 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-bucket-asof-fix`
+- **Active feature branch:** `claude/frontend-latency-hardening-r2`
+  (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the dashboard
+  FRONTEND latency-hardening pack: v29 duplicate pollers consolidated onto ONE
+  BXPoll-disciplined consumer per endpoint (measured BEFORE: 336 req/120 s idle
+  with sweep-progress/pull-rate/liveproof double-polled → measured AFTER 240
+  req/120 s, −28.6%, same harness), six template pollers
+  migrated onto the shared bx-poll.js core (renders byte-identical), /screener +
+  /results inputs debounced 200 ms, in-place tbody row patches on
+  completeness/spot_coverage, /reports chips build-once + class-toggle
+  selection; the bx-format/bx-movers-time defer + the universe catch-up were
+  SKIPPED honestly (parse-time consumers + standing pin; already shipped by
+  #1623); CLIENT-side only — byte-stable wire; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/db-latency-hardening`
+  (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 — the DB/query-latency
+  hardening pack, READ-side only: the /db window-ledger DuckDB page fast path
+  (7.3–8.8 s cold at 400k rows → 0.56 s, zero Python parses), the pre-open
+  export rows memo (repeat click 206 DuckDB statements → 0, bytes identical)
+  + span-bounded IEP reads, and the /db candles %CHNG baseline file bound
+  (72 files bound twice per click → 2); healthy-lake payloads byte-identical;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1719 for the full blurb)
+  Earlier: `claude/movers-bucket-asof-fix`
   (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 — an explicit `/movers`
   bucket-anchor TIME pick resolves to the COMPLETED bucket (broker-matching close)
   via the ONE COMMON `movers_snapshot.resolve_asof_cutoff` seam shared by all three
