@@ -46,6 +46,18 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
         "popcount_bytes",
+        # Slice-4 PR-1 (feat(ranking): Rust ranking conversion) — the nine
+        # ranking kernels join the surface (a deliberate, reviewed ADDITION
+        # per this module's docstring contract).
+        "ranking_composite_scores",
+        "ranking_composite_term_inputs",
+        "ranking_cr_div_i64",
+        "ranking_dsr_z_contributions",
+        "ranking_gate_reasons",
+        "ranking_overfit_verdicts",
+        "ranking_passes_gates",
+        "ranking_rank_order",
+        "ranking_zscores",
         "sweep_drawdown_stats",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",
