@@ -169,11 +169,15 @@ def ranking_composite_term_inputs(
     win_loss_ratio: list[float | None],
     avg_mfe_paisa: list[int],
     avg_mae_paisa: list[int],
-) -> list[tuple[float, float, float, float, float, float, float]]:
+) -> list[list[float]]:
     """Batched `brutex.ranking.composite_term_inputs` twin (7 columns each).
 
-    Raises `ValueError` on unequal column lengths or a paisa magnitude
-    beyond the 2**53 correctly-rounded-division fast-path envelope.
+    Returns one 7-element ROW per survivor as a `list[list[float]]` —
+    deliberately NOT list-of-tuples (the Rust wrapper is `Vec<Vec<f64>>`;
+    a 7-tuple return type was measured to explode the cargo-mutants
+    value-enumeration ~45× and was avoided — see `ranking.rs`). Raises
+    `ValueError` on unequal column lengths or a paisa magnitude beyond
+    the 2**53 correctly-rounded-division fast-path envelope.
     """
     ...
 

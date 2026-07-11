@@ -13,7 +13,12 @@ asserts, per pool:
   become an order or wire delta);
 * **identical gate-verdict + gate-reason tuples** per row, Python vs the
   Rust gates twins — HARD ZERO divergence (class (a));
-* a **per-family bit-agreement census** for the (b*) composite surface —
+* a **DIRECT-kernel bit-agreement census** for the (b*) composite
+  surfaces — the RAW ``fno_math`` composite / DSR-z kernels re-run on the
+  Python pipeline's own inputs and bit-compared against the Python
+  oracle, deliberately BYPASSING ``run_with_parity`` (which ships the
+  oracle value on any mismatch, so a two-arm WIRE comparison is bit-equal
+  by construction and can never observe a host-libm divergence) —
   REPORTED (one structlog INFO), with the hard requirement carried by the
   order/verdict assertions above, not by the census count (a (b*) bit
   delta is legal only as a logged, latching event — the design's
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import struct
 from typing import Any
 
@@ -35,7 +41,18 @@ import fno_math
 import pytest
 import structlog
 from brutex.metrics.compute import ResultMetrics
-from brutex.ranking import OverfitGateConfig, RankedCombo, gate_reasons, passes_gates, rank_combos
+from brutex.ranking import (
+    N_COMPOSITE_TERMS,
+    OverfitGateConfig,
+    RankedCombo,
+    composite_scores,
+    composite_term_inputs,
+    dsr_z_contributions,
+    gate_reasons,
+    overfit_gate_positions,
+    passes_gates,
+    rank_combos,
+)
 from brutex.ranking.rust_ranking import RANKING_RUST_ENV, reset_ranking_rust_for_tests
 
 from tests.fakes.metrics_fixtures import make_result_metrics
@@ -76,6 +93,57 @@ def _keys(ranked: list[RankedCombo]) -> list[tuple[int, bytes, object]]:
         )
         for rc in ranked
     ]
+
+
+def _pack_column(values: list[float]) -> tuple[bytes, ...]:
+    return tuple(struct.pack("<d", v) for v in values)
+
+
+def _direct_kernel_census(
+    candidates: list[tuple[int, ResultMetrics]],
+    cfg: OverfitGateConfig | None,
+) -> dict[str, int]:
+    """The (b*) DIRECT-kernel bit-agreement census for one pool (REPORTED).
+
+    Re-derives the Python pipeline's composite inputs (gates → opt-in
+    overfit gate → term columns → DSR contribution) and calls the RAW
+    ``fno_math`` (b*) kernels on them, bit-comparing against the Python
+    oracle — deliberately BYPASSING ``run_with_parity``, which ships the
+    oracle value on any bit mismatch, so a wire comparison between the two
+    ``rank_combos`` arms is bit-equal BY CONSTRUCTION and can never observe
+    the modeled host-libm arm this census exists to survey. Emit-on-
+    applicable: a pool with no rank-reaching survivors computes composite
+    bits on NEITHER arm, so it contributes no census keys (the ``dsr_z``
+    key appears only when the 8th term was active for the pool).
+    """
+    survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
+    dsr_by_survivor: list[float] | None = None
+    if cfg is not None and survivors:
+        outcome = overfit_gate_positions(
+            [m.sharpe_ratio for _, m in candidates],
+            [(m.sharpe_ratio, m.total_trades, m.skewness, m.kurtosis) for _, m in survivors],
+            cfg,
+        )
+        if outcome is not None:  # a non-deflatable pool ABSTAINS (dsr stays None)
+            kept_positions, dsr_by_survivor = outcome
+            survivors = [survivors[position] for position in kept_positions]
+    if not survivors:
+        return {}
+    term_rows = [composite_term_inputs(m) for _, m in survivors]
+    term_columns = [[row[term] for row in term_rows] for term in range(N_COMPOSITE_TERMS)]
+    dsr_contrib = dsr_z_contributions(dsr_by_survivor, len(survivors), cfg)
+    py_composites = composite_scores(tuple(term_columns), dsr_contrib)
+    rust_composites = fno_math.ranking_composite_scores(term_columns, dsr_contrib)
+    entry = {
+        "composite_kernel_bit_agree": int(
+            _pack_column(py_composites) == _pack_column(rust_composites)
+        ),
+    }
+    if dsr_by_survivor is not None:
+        assert cfg is not None  # dsr_by_survivor is set only under an active cfg
+        rust_dsr = fno_math.ranking_dsr_z_contributions(dsr_by_survivor, cfg.weight)
+        entry["dsr_z_kernel_bit_agree"] = int(_pack_column(dsr_contrib) == _pack_column(rust_dsr))
+    return entry
 
 
 def test_corpus_fixture_is_sha_pinned() -> None:
@@ -140,13 +208,42 @@ def test_rank_order_identity_and_gate_census_across_both_arms(
             pool["name"]
         )
 
-        # REPORTED census: the (b*) composite surface's direct kernel
-        # bit-agreement on this host (informational — the wire law above is
-        # the hard gate; a disagreement here is the modeled host-libm arm).
-        agree = int(_keys(on) == _keys(off))
-        census[pool["name"]] = {
-            "rows": len(candidates),
-            "ranked": len(on),
-            "wire_bit_agree": agree,
-        }
+        # REPORTED census: the (b*) surfaces' DIRECT kernel bit-agreement on
+        # this host — the raw fno_math kernels vs the Python oracle on the
+        # pipeline's own inputs (informational; the wire law above is the
+        # hard gate). Deliberately NOT a two-arm wire comparison: the
+        # always-on differential ships the oracle value on any mismatch, so
+        # ON-vs-OFF wire bits are equal by construction and a wire census
+        # could never observe the modeled host-libm arm.
+        entry: dict[str, int] = {"rows": len(candidates), "ranked": len(on)}
+        entry.update(_direct_kernel_census(candidates, cfg))
+        census[pool["name"]] = entry
     _LOG.info("ranking_parity_corpus.census", census=census)
+
+
+def test_direct_kernel_census_can_observe_a_kernel_divergence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anti-tautology teeth for the census (hostile-review round 1, R1.3).
+
+    The census compares RAW ``fno_math`` kernel bits against the Python
+    oracle, so a genuinely divergent (b*) kernel is REPORTED as ``0`` — a
+    two-arm wire comparison could never show this (``run_with_parity``
+    ships the oracle value on any mismatch, making ON-vs-OFF wire bits
+    equal by construction). Pinned with a last-ULP perturbation of the
+    real kernel: the census must flip 1 → 0.
+    """
+    candidates = [
+        (1, make_result_metrics(sharpe_ratio=1.0)),
+        (2, make_result_metrics(sharpe_ratio=2.0)),
+        (3, make_result_metrics(sharpe_ratio=3.0)),
+    ]
+    assert _direct_kernel_census(candidates, None) == {"composite_kernel_bit_agree": 1}
+
+    real_kernel = fno_math.ranking_composite_scores
+
+    def _one_ulp_off(term_columns: list[list[float]], dsr_contrib: list[float]) -> list[float]:
+        return [math.nextafter(v, math.inf) for v in real_kernel(term_columns, dsr_contrib)]
+
+    monkeypatch.setattr(fno_math, "ranking_composite_scores", _one_ulp_off)
+    assert _direct_kernel_census(candidates, None) == {"composite_kernel_bit_agree": 0}
