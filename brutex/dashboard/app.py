@@ -5071,9 +5071,23 @@ def build_app(
                 batch_size=batch,
                 pause_s=pause_s,
                 on_progress=_sync,
+                # Cooperative cancel at the BETWEEN-BATCHES boundary
+                # (DEC-JOB-CANCEL-CONTROL-001 — the Greeks-backfill arm of the
+                # DEC-JOB-COOPERATIVE-CANCEL-001 mechanism): the runner probes
+                # the job's per-run token before each batch; a cancelled run
+                # RETURNS its honest CANCELLED report (checkpoint kept, next
+                # run resumes) — never a raise, so the job settles "done" with
+                # the cancelled note as its headline and the alert below still
+                # fires the ⏹ summary. HONEST cancel-blind span: the O(files)
+                # scan above has no interior probe — a Stop acked mid-scan is
+                # honored at the FIRST batch boundary (the #1369 metadata-
+                # phase precedent; a per-contract scan probe is a named
+                # follow-up, not claimed).
+                should_stop=_greeks_backfill_job.cancel_requested,
             )
             # EXACTLY-ONCE completion summary — the one dashboard chokepoint
-            # (the halt path is covered by the job's is_pull_halt handling).
+            # (the halt path is covered by the job's is_pull_halt handling; a
+            # CANCELLED run reads the honest ⏹ head under a distinct dedupe key).
             emit_greeks_backfill_complete_alert(report)
             return report.to_dict()
 
@@ -5088,6 +5102,13 @@ def build_app(
             detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
             ledger_synced=True,
             cross_process_lock=not dry_run,
+            # cancellable=not dry_run (DEC-JOB-CANCEL-CONTROL-001, the #1369
+            # standalone-metadata-pull precedent): the DRY-RUN work is scan +
+            # report ONLY — it never observes the cancel token — so the cancel
+            # route refuses HONESTLY ("uncancellable") instead of fabricating a
+            # {"cancelling": true} the run could never act on. The WET run
+            # genuinely observes it at every between-batches boundary.
+            cancellable=not dry_run,
             # DEC-GROWW-MARKET-HOURS-GUARD-001: the Greeks backfill re-enriches
             # ALREADY-STORED bars and makes ZERO Groww API calls, so it is EXEMPT
             # from the market-hours start gate (safe to run in the trading window).
@@ -5120,9 +5141,48 @@ def build_app(
 
         The backfill job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
         (state / total / completed / failed / bars / current / detail / percent …)
-        — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001).
+        — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001). The
+        ADDITIVE ``cancelling`` key (DEC-JOB-CANCEL-CONTROL-001, the
+        pull-progress idiom) reads ``True`` while the CURRENT run's cooperative
+        cancel token is set — the panel shows "stopping · finishing current
+        batch…" until the job settles; every pre-existing key is byte-identical.
         """
-        return JSONResponse(_greeks_backfill_job.snapshot().to_dict())
+        snap = _greeks_backfill_job.snapshot().to_dict()
+        snap["cancelling"] = _greeks_backfill_job.cancel_requested()
+        return JSONResponse(snap)
+
+    @app.post("/api/v1/universe/greeks-backfill-cancel")
+    async def api_universe_greeks_backfill_cancel() -> JSONResponse:
+        """POST /api/v1/universe/greeks-backfill-cancel — cooperative backfill Stop.
+
+        DEC-JOB-CANCEL-CONTROL-001 (the Stop button on the ``universe.html``
+        backfill panel) — the Greeks-backfill arm of the
+        DEC-JOB-COOPERATIVE-CANCEL-001 mechanism, on the SAME
+        ``request_cancel_verdict`` core and the SAME
+        ``{"cancelling": bool, "reason"?}`` wire as ``/api/v1/pull/cancel``.
+        NO ``expected_kind`` gate, deliberately: ``_greeks_backfill_job`` is a
+        DEDICATED job instance only this route family ever starts (unlike the
+        shared pull/sweep job the pull route must kind-gate), so a kind
+        compare would be vacuous. Refusal reasons: ``"idle"`` (no run in
+        flight — a between-runs or after-finish request can never pre-poison a
+        later run, the fresh-Event-per-start identity gate) and
+        ``"uncancellable"`` (a DRY-RUN is scan + report only, started
+        ``cancellable=False`` — its work never observes the token, so the
+        refusal is honest, never a fabricated ack). A double-Stop on a live
+        wet run is an idempotent ``{"cancelling": true}``. HONEST latency
+        (Golden Rule #10): cooperative — the in-flight batch (default 25
+        contracts) completes its driver writes + checkpoint record first, and
+        the O(files) SCAN phase has NO interior probe (a Stop acked mid-scan
+        is honored at the FIRST batch boundary — the #1369 metadata-phase
+        cancel-blind-span precedent). The stopped run settles as an honest
+        "done" whose headline reads CANCELLED + resumable; the frozen
+        checkpoint makes the next same-plan run fast-resume.
+        """
+        cancelling, reason = _greeks_backfill_job.request_cancel_verdict()
+        payload: dict[str, object] = {"cancelling": bool(cancelling)}
+        if reason is not None:
+            payload["reason"] = reason
+        return JSONResponse(payload)
 
     @app.get("/api/v1/universe/pull-progress")
     async def api_universe_pull_progress() -> JSONResponse:

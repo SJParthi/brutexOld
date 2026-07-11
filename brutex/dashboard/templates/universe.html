@@ -650,6 +650,18 @@
     <label style="margin-left:8px;color:var(--muted);">
       <input type="checkbox" id="gbDry"> dry-run (scan + report only — zero writes)
     </label>
+    <!-- Cooperative backfill Stop (DEC-JOB-CANCEL-CONTROL-001): shown while a
+         backfill runs; POSTs /api/v1/universe/greeks-backfill-cancel. The stop
+         lands at the next BETWEEN-BATCHES boundary — the in-flight batch's
+         durable writes + checkpoint record complete first — and the run settles
+         as an honest CANCELLED partial (checkpoint kept; the next run resumes).
+         A stop during the O(files) SCAN phase is honored only at the FIRST
+         batch boundary; a DRY-RUN (scan + report only) has no stop seam and is
+         refused honestly. -->
+    <button id="gbStopBtn" class="vbtn" hidden style="margin-left:8px;cursor:pointer;"
+            title="Cooperative stop — the in-flight batch (default 25 contracts) finishes its durable writes + checkpoint record, then the backfill settles as an honest CANCELLED partial. The checkpoint is kept, so the next run resumes. A stop during the O(files) scan is honored at the first batch boundary; a dry-run scan has no stop seam and runs to completion.">
+      ⏹ Stop backfill
+    </button>
     <span id="gbstatus" style="margin-left:10px;color:var(--muted);"></span>
   </div>
 
@@ -2443,6 +2455,12 @@ function gbBeginWatch() {
   gbFeedRetries = 0;
   const btn = document.getElementById('greeksBackfillBtn');
   if (btn) btn.disabled = true;   // re-enabled ONLY once a terminal state is observed
+  // Cooperative Stop (DEC-JOB-CANCEL-CONTROL-001): visible exactly while the
+  // panel watches a live job — shown + reset here (start click AND the
+  // page-load / refusal re-attach), hidden + reset in gbFinish, so a fresh
+  // run never inherits a stale "Stopping…" label.
+  const sbtn = document.getElementById('gbStopBtn');
+  if (sbtn) { sbtn.hidden = false; sbtn.disabled = false; sbtn.textContent = '⏹ Stop backfill'; }
   pollGreeksBackfill();
 }
 function gbFinish() {
@@ -2452,6 +2470,8 @@ function gbFinish() {
   if (gbTimer) { clearTimeout(gbTimer); gbTimer = null; }
   const btn = document.getElementById('greeksBackfillBtn');
   if (btn) btn.disabled = false;
+  const sbtn = document.getElementById('gbStopBtn');
+  if (sbtn) { sbtn.hidden = true; sbtn.disabled = false; sbtn.textContent = '⏹ Stop backfill'; }
 }
 async function startGreeksBackfill() {
   const btn = document.getElementById('greeksBackfillBtn');
@@ -2508,7 +2528,15 @@ async function pollGreeksBackfill() {
       const line = (s.total || 0) > 0
         ? `${(s.completed || 0).toLocaleString('en-IN')} / ${(s.total || 0).toLocaleString('en-IN')} contracts · ${(s.bars || 0).toLocaleString('en-IN')} bars · ${s.current || '…'}`
         : 'scanning the options lake (O(files) — may take a while)…';
-      gbStatus('running · ' + line);
+      if (s.cancelling === true) {
+        // A cancel is acked (possibly from ANOTHER tab — the additive
+        // `cancelling` payload key, DEC-JOB-CANCEL-CONTROL-001): reflect the
+        // honest stopping state on both the status line and the Stop button
+        // until the job settles through the normal terminal branch below.
+        const sbtn = document.getElementById('gbStopBtn');
+        if (sbtn) { sbtn.disabled = true; sbtn.textContent = 'Stopping — finishing current batch…'; }
+      }
+      gbStatus((s.cancelling === true ? 'stopping · ' : 'running · ') + line);
       gbTimer = setTimeout(pollGreeksBackfill, GB_MS);
       return;
     }
@@ -2551,11 +2579,41 @@ document.addEventListener('visibilitychange', () => {
   // a backoff (the pollProgress visibilitychange pattern above).
   if (!document.hidden && gbWatchActive) pollGreeksBackfill();
 });
+/* Cooperative backfill Stop (DEC-JOB-CANCEL-CONTROL-001 — the #1369
+   pullStopBtn idiom): POST the cancel route via the panel's own bounded
+   gbFetchJson; the running WET backfill stops at its next BETWEEN-BATCHES
+   boundary (the in-flight batch's durable writes + checkpoint record land
+   first) and settles through the NORMAL poll path with the honest CANCELLED
+   headline — the checkpoint is kept, so the next run resumes. Distinct
+   refusal labels: "idle" vs the dry-run's honest "uncancellable" (a dry-run
+   is scan + report only — no stop seam, never a fabricated ack).
+   textContent only — never markup. */
+async function gbStopBackfill() {
+  const sbtn = document.getElementById('gbStopBtn');
+  if (sbtn) { sbtn.disabled = true; sbtn.textContent = 'Stopping — finishing current batch…'; }
+  try {
+    const res = await gbFetchJson('/api/v1/universe/greeks-backfill-cancel', {method: 'POST'});
+    const j = res.body;
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!j || j.cancelling !== true) {
+      if (sbtn) {
+        sbtn.textContent = (j && j.reason === 'uncancellable')
+          ? 'Dry-run scan has no stop seam — it runs to completion'
+          : 'No running backfill to stop';
+        sbtn.disabled = false;
+      }
+    }
+  } catch (e) {
+    if (sbtn) { sbtn.textContent = 'Stop request failed — retry'; sbtn.disabled = false; }
+  }
+}
 const greeksBackfillBtn = document.getElementById('greeksBackfillBtn');
 if (greeksBackfillBtn) {
   greeksBackfillBtn.addEventListener('click', startGreeksBackfill);
   gbAttachIfRunning();   // a re-opened page re-attaches to a running backfill
 }
+const gbStopBtnEl = document.getElementById('gbStopBtn');
+if (gbStopBtnEl) gbStopBtnEl.addEventListener('click', gbStopBackfill);
 
 const verdictRefreshBtn = document.getElementById('verdictRefresh');
 if (verdictRefreshBtn) verdictRefreshBtn.addEventListener('click', refreshVerdict);

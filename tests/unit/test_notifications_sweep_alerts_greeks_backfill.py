@@ -53,6 +53,7 @@ class FakeBackfillReport:
     errored: int = 0
     stale_unfixable: int = 0
     bars_written: int = 123
+    cancelled: bool = False
 
 
 class TestGreeksBackfillComplete:
@@ -103,6 +104,40 @@ class TestGreeksBackfillComplete:
         assert "⚠️" in event.message
         assert escape_markdown_v2("2 errored (re-runnable)") in event.message
         assert escape_markdown_v2("1 unfixable") in event.message
+
+    def test_cancelled_head_and_distinct_dedupe_key(self) -> None:
+        """DEC-JOB-CANCEL-CONTROL-001: an operator-cancelled run reads the
+        honest ⏹ head (never a ✅ for a run the operator halted, never the
+        ⚠️ "with failures" wording for a deliberate stop) under a DISTINCT
+        ``…:cancelled`` dedupe key — the resumed run shares the SAME
+        content-addressed ``backfill_id``, so a shared key would suppress its
+        genuine completion summary.
+        """
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        report = FakeBackfillReport(enriched=2, planned=5, cancelled=True)
+        assert alerter.greeks_backfill_complete(report) is True
+        (event,) = fake.published
+        assert event.kind == TelegramEventKind.RUN_COMPLETE
+        assert event.severity == TelegramSeverity.INFO
+        assert event.dedupe_key == f"greeks-backfill:{'a' * 12}:cancelled"
+        assert "⏹ Greeks backfill CANCELLED by operator" in event.message
+        assert escape_markdown_v2("2/5 contracts re-stamped v2 before the stop") in event.message
+        assert escape_markdown_v2("resumable (re-run resumes)") in event.message
+        assert "✅" not in event.message and "⚠️" not in event.message
+
+    def test_cancelled_clauses_still_ride_along(self) -> None:
+        """A cancelled run with errored/unfixable contracts keeps those honest
+        clauses appended to the ⏹ head (a Stop never hides real failures)."""
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        report = FakeBackfillReport(enriched=1, errored=2, stale_unfixable=1, cancelled=True)
+        assert alerter.greeks_backfill_complete(report) is True
+        (event,) = fake.published
+        assert "⏹ Greeks backfill CANCELLED by operator" in event.message
+        assert escape_markdown_v2("2 errored (re-runnable)") in event.message
+        assert escape_markdown_v2("1 unfixable") in event.message
+        assert "⚠️" not in event.message  # the stop headlines, never "complete with failures"
 
     def test_zero_target_run_still_answers_honestly(self) -> None:
         fake = FakeNotifier()
