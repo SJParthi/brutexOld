@@ -2578,7 +2578,9 @@ class TestParallelOnProgress:
         assert snaps[-1].state == "error"
         assert snaps[-1].running is False
 
-    def test_cache_skip_prefix_batches_publishes(self, tmp_path: Path) -> None:
+    def test_cache_skip_prefix_batches_publishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A resumed/cached prefix publishes O(1) per drain, NOT once per skipped tuple.
 
         Fix round 4 (fails-before): `_advance` → `_publish_progress` fired one
@@ -2591,6 +2593,14 @@ class TestParallelOnProgress:
         LAST pre-terminal snapshot still carries the FULL cumulative skip count
         (no tick is lost — only the write cadence is batched).
         """
+        # Legacy (guard-OFF) arm: run 2 deliberately probes a DIFFERENT (empty)
+        # results root, which the default-ON resume store guard
+        # (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces back through the
+        # workers — the publish-batching cadence over cache SKIPS is what this
+        # test pins; guard-ON behaviour is pinned in
+        # test_engine_sweep_parallel_store_guard.py (merge-fold adaptation, the
+        # test_cache_skip_short_circuits_a_completed_tuple idiom).
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()  # 4 tuples
         total = count_sweep_tuples(grid)
         # First run populates the cache + results (no hook needed).
