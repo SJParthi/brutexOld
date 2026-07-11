@@ -2361,3 +2361,114 @@ class TestEquityPage:
         assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
         assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
         assert calls["n"] == 2  # nothing was cached (lake_revision doctrine)
+
+
+from structlog.testing import capture_logs  # noqa: E402
+
+
+def _cascade_obj(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "status": "pass",
+        "rejected_at": None,
+        "detail": "survived all Stage-4 filters",
+        "cascade_composite": 1.5,
+        "provisional": False,
+        "cpcv_pass_rate": 0.75,
+        "survivor_rank": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestBridgeCascade:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the per-row cascade bridge."""
+
+    def test_absent_key_passes_through_untouched(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        assert "cascade" not in result.rows[0]
+
+    @pytest.mark.parametrize(
+        ("status", "expected_text"),
+        [
+            ("pass", "PASS"),
+            ("provisional_pass", "PASS (provisional)"),
+            ("fail", "FAIL @ cpcv"),
+            ("not_validated", "not validated"),
+        ],
+    )
+    def test_valid_statuses_stamped_with_server_text(
+        self, tmp_path: Path, status: str, expected_text: str
+    ) -> None:
+        obj = _cascade_obj(status=status)
+        if status == "fail":
+            obj["rejected_at"] = "cpcv"
+        if status == "not_validated":
+            obj = {"status": "not_validated", "reason": "no_report"}
+        _write_top100(tmp_path, [_top100_row(1, cascade=obj)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        cascade = result.rows[0]["cascade"]
+        assert cascade["status_text"] == expected_text
+        # The raw fields ride through untouched beside the stamp.
+        assert cascade["status"] == status
+
+    def test_actionable_reasons_carry_their_suffix(self, tmp_path: Path) -> None:
+        rows = [
+            _top100_row(1, cascade={"status": "not_validated", "reason": "sweep_id_mismatch"}),
+            _top100_row(2, cascade={"status": "not_validated", "reason": "duplicate_candidate_id"}),
+        ]
+        _write_top100(tmp_path, rows)
+        result = oc.load_top100(tmp_path)
+        assert result.rows[0]["cascade"]["status_text"] == "not validated · sweep_id_mismatch"
+        assert result.rows[1]["cascade"]["status_text"] == "not validated · duplicate verdict"
+
+    @pytest.mark.parametrize(
+        "obj",
+        [
+            "not-a-dict",
+            {"status": "GREEN"},
+            {"status": 7},
+            {"status": "pass", "detail": 42},
+            {"status": "pass", "provisional": "yes"},
+            {"status": "pass", "cpcv_pass_rate": "high"},
+            {"status": "pass", "cascade_composite": True},
+            {"status": "pass", "survivor_rank": 1.5},
+            {"status": "not_validated", "reason": 9},
+            {"status": "fail", "rejected_at": 3},
+            None,
+        ],
+    )
+    def test_invalid_object_dropped_and_named_partial(self, tmp_path: Path, obj: Any) -> None:
+        _write_top100(tmp_path, [_top100_row(1, cascade=obj)])
+        with capture_logs() as logs:
+            result = oc.load_top100(tmp_path)
+        # Row KEPT, key DROPPED, degrade NAMED — never a fabricated verdict.
+        assert result.status == "partial"
+        assert "invalid cascade object" in result.detail
+        assert "cascade" not in result.rows[0]
+        assert [e for e in logs if e["event"] == "oneclick.cascade_object_dropped"]
+
+    def test_root_cascade_join_passthrough(self, tmp_path: Path) -> None:
+        meta = {"state": "joined", "sweep_id": "s" * 64, "n_input": 4, "n_survived": 2}
+        _write_top100(tmp_path, [_top100_row(1)], cascade_join=meta)
+        result = oc.load_top100(tmp_path)
+        assert result.cascade_join == meta
+
+    def test_non_object_root_meta_reads_none(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)], cascade_join="junk")
+        assert oc.load_top100(tmp_path).cascade_join is None
+
+    def test_pre_change_doc_defaults_none(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)])
+        assert oc.load_top100(tmp_path).cascade_join is None
+
+    def test_row_cap_partial_detail_wins_over_cascade_drop(self, tmp_path: Path) -> None:
+        rows = [_top100_row(i + 1, cascade="junk") for i in range(oc.TOP100_ROW_CAP + 1)]
+        _write_top100(tmp_path, rows)
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        # The oversized-cap detail wins the slot; the drops still happened.
+        assert "beyond the" in result.detail
+        assert all("cascade" not in row for row in result.rows)
