@@ -25,8 +25,8 @@ dependencies and is fully unit-testable offline.
 ## State lifecycle
 
 The state is updated via pipeline event subscriptions —
-:meth:`DashboardState.on_pipeline_event` is intended to be passed
-to :class:`~brutex.orchestrator.pipeline.PhaseRunner` as a subscriber.
+:meth:`DashboardState.on_pipeline_event` consumes the
+:class:`~brutex.orchestrator.events.PipelineEvent` stream as a subscriber.
 A second subscription point,
 :meth:`DashboardState.on_telegram_stats`, is called periodically to
 refresh the Telegram panel.
@@ -308,11 +308,11 @@ from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.notifications.sweep_alerts import emit_greeks_backfill_complete_alert
 from brutex.observability.correlation import request_id_scope
 from brutex.observability.power_keepawake import keep_awake
-from brutex.orchestrator.pipeline import (
+from brutex.orchestrator.events import (
+    IngestPhase,
     PipelineEvent,
     PipelineEventKind,
 )
-from brutex.orchestrator.state import IngestPhase
 from brutex.universe import (
     derive_lake_underlyings,
     is_index_instrument,
@@ -582,8 +582,9 @@ class DashboardState:
     def on_pipeline_event(self, event: PipelineEvent) -> None:
         """Apply a :class:`PipelineEvent` to the state.
 
-        Intended to be passed as a subscriber callback to
-        :class:`~brutex.orchestrator.pipeline.PhaseRunner`. This
+        Intended to be registered as an
+        :data:`~brutex.orchestrator.events.EventSubscriber` callback on any
+        pipeline event producer. This
         method is thread-safe — it acquires the state lock.
         """
         with self._lock:

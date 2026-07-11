@@ -211,10 +211,10 @@ __all__ = (
 # Pipeline-integration helper
 # ────────────────────────────────────────────────────────────────────────
 
-# Local import inside the function body so this module stays
-# import-cycle safe: brutex.orchestrator.pipeline transitively imports
-# bloom → fastbloom_rs, and we don't want every Watchdog construction
-# to drag that in unless the caller actually uses the helper.
+# The subscriber contract lives in brutex.orchestrator.events (a
+# stdlib-only leaf) — the callable below is typed structurally
+# (Callable[[object], None]) so this module imports nothing from the
+# orchestrator package.
 
 
 def make_heartbeat_subscriber(
@@ -224,8 +224,8 @@ def make_heartbeat_subscriber(
     """Return a pipeline `EventSubscriber` that beats *watchdog* on every
     pipeline event.
 
-    The pipeline driver (`brutex.orchestrator.pipeline.PhaseRunner`)
-    fans every `PipelineEvent` out to its registered subscribers. The
+    A pipeline event producer fans every `PipelineEvent`
+    (`brutex.orchestrator.events`) out to its registered subscribers. The
     callable returned here records a heartbeat for ``worker_name`` on
     EACH event — phase start, per-item complete, phase complete,
     everything. That keeps the watchdog timer fresh whenever the

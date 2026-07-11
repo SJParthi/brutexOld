@@ -128,9 +128,13 @@ jobs:
     # modules). Mutant counts measured on THIS tree via mutmut 2.5.1
     # list_mutations (method validated against two real run logs: audit
     # 243/243 pre-round-2, rate_common 360/360 pre-round-3): pass 1 = 258;
-    # compute.py = 354; remaining 8 loop modules = 932 (state 58 + retry 77 +
-    # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
-    # parser 33 + spec 91).
+    # compute.py = 354; remaining loop modules at the -003 measurement = 932
+    # (state 58 + retry 77 + audit 254 post-round-3 + rate_limiter 165 +
+    # store 146 + partition 108 + parser 33 + spec 91) — since REDUCED by 281
+    # (state 58 + retry 77 + store 146): those three modules were DELETED as
+    # dead scaffolding (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md
+    # #1727), so the loop below carries 5 pairs = 651 mutants and the timing
+    # margin only WIDENS.
     # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
     # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
     # Nominal: (258 + 354 + 932) x ~2.3 s ~= 59 min; + rate_common 369
@@ -269,8 +273,9 @@ jobs:
           # DISJOINT path sets, so no mutant result is lost — each pass has
           # its own survivors check.
           mv .mutmut-cache .mutmut-cache-math
-          # 2. Orchestration / data plumbing (the FSM, retry classifier, audit
-          #    chain, rate limiter, store, partition/parser) — one pass per
+          # 2. Orchestration / data plumbing (the audit chain, rate limiter,
+          #    partition/parser; the FSM/retry/store pairs were deleted with
+          #    their modules — MIGRATION.md #1727) — one pass per
           #    module against its dedicated unit test file, all driven to
           #    ZERO survivors by DEC-MUTATION-RUNTIME-001 (the measured 223
           #    survivors of the per-module enumeration were killed by
@@ -402,7 +407,8 @@ jobs:
           #     sits < 1.5x a legit pass) into explicit loud refusals at the
           #     start of the pass; a mid-pass swing INSIDE the (1.2, 20) s
           #     regime remains the accepted, disclosed residual.
-          # The 10 proven pairs (incl. data/lake_stats_manifest.py, merged in
+          # The proven pairs — 10 at the -003 measurement, 7 after the #1727
+          # scaffolding deletion (incl. data/lake_stats_manifest.py, merged in
           # from DEC-LAKE-STATS-MANIFEST-001 — see its rationale block above)
           # keep their exact historical runner + no
           # --test-time-base (minimal diff — their verified interplay is
@@ -420,17 +426,14 @@ jobs:
           # — post-round-3 on the F1-restructured audit.py, byte-identical to
           # this tree; MIGRATION.md #1597) but silently defeatable by future test insertion or
           # a new spin loop without a fail-fast twin. Pre-decided dial: if a
-          # rehearsal/scheduled run ever wedges on one of the 9 pairs again, give
-          # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
-          # measured CI baseline. rate_common runs LAST so a survivor there never
-          # masks the 10 proven modules.
+          # rehearsal/scheduled run ever wedges on one of the proven pairs again,
+          # give THAT pair the same wrap (a one-token 3rd-field pair edit) sized
+          # to its measured CI baseline. rate_common runs LAST so a survivor
+          # there never masks the proven modules.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
-            "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
-            "brutex/orchestrator/retry.py:tests/unit/test_orchestrator_retry.py:" \
             "brutex/orchestrator/audit.py:tests/unit/test_orchestrator_audit.py:" \
             "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py:" \
-            "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py:" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \

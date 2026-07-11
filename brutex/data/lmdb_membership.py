@@ -7,8 +7,7 @@ value (a pure set). LMDB is memory-mapped, so membership state lives **off the
 Python heap** — per-operation RAM is O(1) regardless of how many keys are
 stored (the operator O(1)-space requirement; MIGRATION.md #342). LMDB's B+tree
 makes ``__contains__`` / ``add`` O(log n) in theory but O(1) in practice for a
-dense working set (the same envelope as :mod:`brutex.orchestrator.store`,
-proven by ``tests/bench/test_lmdb_membership_o1.py``).
+dense working set (proven by ``tests/bench/test_lmdb_membership_o1.py``).
 
 It satisfies the :class:`~brutex.data.option_dedup.ExactMembership` protocol
 (``__contains__`` + ``add``, positional-only), so it drops straight into

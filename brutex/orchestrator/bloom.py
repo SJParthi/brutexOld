@@ -6,7 +6,8 @@ gate that sits in front of :meth:`WorkItemStore.exists_terminal`
 
 * **L1 — Bloom (this module).** Rejects 99.9999%+ of duplicates before
   touching LMDB. Hot-path budget: sub-µs per check.
-* **L2 — LMDB ground-truth** (:mod:`brutex.orchestrator.store`). 150 µs
+* **L2 — LMDB ground-truth** (:class:`brutex.data.lmdb_membership.LmdbMembership`
+  under the engine's ``sweep_cache`` dedup tier). ~150 µs
   per lookup; only invoked when L1 returns "maybe seen".
 * **L3 — Audit JSONL replay** (Golden Rule #7 oracle). Bit-equality test.
 * **L4 — CI property test.** Runtime invariant `false_neg_rate == 0`
@@ -492,12 +493,14 @@ class BloomFilter:
         twice), so the honesty of the gate depends on the caller adding
         each key AT MOST ONCE.
 
-        The production caller (:meth:`brutex.orchestrator.store.WorkItemStore.put`)
+        The production caller (the engine sweep's ``ComboDedup`` tier over
+        :mod:`brutex.engine.sweep_cache`'s exact LMDB membership)
         honours that contract: it Bloom-adds a key ONLY on its FIRST
-        LMDB insertion, never on a subsequent state-transition put of an
+        exact-membership insertion, never on a repeat probe of an
         already-stored key (DEC-DEDUP-CAPACITY-UNIQUE-001). LMDB is the
-        ground truth for newness. Before that fix, every combo — put
-        multiple times as it moves PENDING→RUNNING→SUCCESS — inflated
+        ground truth for newness. Before that fix, a key added
+        multiple times — the historical WorkItemStore state-transition
+        put pattern (module deleted, MIGRATION.md #1727) — inflated
         this counter, so the gate could raise
         :class:`BloomCapacityExceeded` at a small FRACTION of ``capacity``
         distinct combos and halt a heavy sweep prematurely. With the fix

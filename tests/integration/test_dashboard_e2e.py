@@ -33,11 +33,11 @@ pytest.importorskip("fastapi")
 pytest.importorskip("httpx2")
 
 from brutex.dashboard.app import DashboardState, build_app
-from brutex.orchestrator.pipeline import (
+from brutex.orchestrator.events import (
+    IngestPhase,
     PipelineEvent,
     PipelineEventKind,
 )
-from brutex.orchestrator.state import IngestPhase
 from fastapi.testclient import TestClient
 
 # ────────────────────────────────────────────────────────────────────────

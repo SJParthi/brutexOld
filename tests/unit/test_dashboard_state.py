@@ -15,8 +15,7 @@ from brutex.dashboard.app import (
     SweepFunnelSnapshot,
     snapshot_to_json,
 )
-from brutex.orchestrator.pipeline import PipelineEvent, PipelineEventKind
-from brutex.orchestrator.state import IngestPhase
+from brutex.orchestrator.events import IngestPhase, PipelineEvent, PipelineEventKind
 
 # ────────────────────────────────────────────────────────────────────────
 # PhaseSnapshot

@@ -31,8 +31,8 @@ _.exc_val
 _.exc_tb
 
 # Dataclass __post_init__ is called by the dataclass machinery, not by
-# direct reference. Verified used in brutex/orchestrator/state.py and
-# several test fixtures.
+# direct reference. Verified used in several brutex dataclasses and
+# test fixtures.
 _.__post_init__
 
 # Audit chain integrity verifier — currently invoked by tests/property/
