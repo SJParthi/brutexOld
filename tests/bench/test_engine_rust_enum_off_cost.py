@@ -5,7 +5,7 @@ OFF (the shipped default) the sweep's enumeration path must be byte-identical
 AND cost-unchanged. Three complementary proofs + one honest measurement:
 
 1. **Structural (the load-bearing one):** flag OFF, the seam probe
-   (:func:`enum_survivors_via_kernel`) returns ``None`` BEFORE any kernel
+   (:func:`enum_prefilter_via_kernel`) returns ``None`` BEFORE any kernel
    resolution, and the sweep iterates the identical lazy
    ``iter_masks_k_of_bits`` generator (iteration-spy proven) — the OFF hot
    path is the pre-change hot path by construction.
@@ -30,8 +30,8 @@ from collections.abc import Iterator, Sequence
 
 import pytest
 from brutex.engine import rust_enum
-from brutex.engine.combo_mask import iter_masks_k_of_bits
-from brutex.engine.rust_enum import SWEEP_RUST_ENUM_ENV, enum_survivors_via_kernel
+from brutex.engine.combo_mask import count_supermasks, iter_masks_k_of_bits
+from brutex.engine.rust_enum import SWEEP_RUST_ENUM_ENV, enum_prefilter_via_kernel
 from brutex.vocabulary import has_conflict
 
 from tests.bench._o1_tiers import ratio_ceiling
@@ -39,11 +39,26 @@ from tests.bench._o1_tiers import ratio_ceiling
 _SMALL_BITS = [0, 2, 5, 7]
 _LARGE_BITS = list(range(60))
 
+#: A tiny shared bar window for the probe/A-B calls (the OFF probe never
+#: reads it; the ON segment A/B uses min_hits=0 so the planes go unread).
+_PROBE_BARS: list[int] = [0b1011, 0b0001, 0b1111] * 4
+
+
+def _probe(bits: list[int], k: int, *, min_hits: int = 0) -> object:
+    return enum_prefilter_via_kernel(
+        bits,
+        k,
+        min_hits=min_hits,
+        bar_bits=_PROBE_BARS,
+        count_hits=lambda masks: count_supermasks(_PROBE_BARS, masks),
+        digest_path=True,
+    )
+
 
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch: pytest.MonkeyPatch) -> None:
     rust_enum.reset_observability_memo_for_tests()
-    rust_enum.reset_self_check_for_tests()
+    rust_enum.reset_enum_self_check_for_tests()
     monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
 
 
@@ -52,7 +67,7 @@ def _median_probe_seconds(bits: list[int], k: int, *, rounds: int = 200) -> floa
     samples: list[float] = []
     for _ in range(rounds):
         t0 = time.perf_counter()
-        result = enum_survivors_via_kernel(bits, k)
+        result = _probe(bits, k)
         samples.append(time.perf_counter() - t0)
         assert result is None  # OFF on every sample — never a kernel engage
     samples.sort()
@@ -63,11 +78,11 @@ class TestOffModeIsFree:
     def test_off_probe_never_resolves_the_kernel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The structural zero-cost proof: OFF returns before ANY kernel work."""
 
-        def _must_not_resolve() -> None:
+        def _must_not_resolve(width: str) -> None:
             raise AssertionError("flag-OFF probe must never resolve the kernel")
 
-        monkeypatch.setattr(rust_enum, "_resolve_kernel", _must_not_resolve)
-        assert enum_survivors_via_kernel(_LARGE_BITS, 3) is None
+        monkeypatch.setattr(rust_enum, "_resolve_kernel_class", _must_not_resolve)
+        assert _probe(_LARGE_BITS, 3) is None
 
     def test_off_probe_cost_is_independent_of_the_combination_space(
         self, monkeypatch: pytest.MonkeyPatch
@@ -165,7 +180,7 @@ class TestOnArmStructure:
         """Flag ON + kernel served: the fallback generator is created lazily
         but NEVER iterated — the deterministic no-double-work proof."""
         monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
-        rust_enum.reset_self_check_for_tests(remaining=0)  # steady state
+        rust_enum.reset_enum_self_check_for_tests(masks_remaining=0)  # steady state
         state = self._iteration_spy(monkeypatch)
         self._run_cell(tmp_path, "abad1deaabad1dea")
         assert state["created"] is True
@@ -189,13 +204,13 @@ class TestSegmentAbMeasured:
         t_py = time.perf_counter() - t0
 
         monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
-        rust_enum.reset_self_check_for_tests(remaining=0)  # steady state
+        rust_enum.reset_enum_self_check_for_tests(masks_remaining=0)  # steady state
         t0 = time.perf_counter()
-        result = enum_survivors_via_kernel(bits, k)
+        result = _probe(bits, k)
         t_rs = time.perf_counter() - t0
 
         assert result is not None
-        assert result.survivors == survivors_py
+        assert result.kept == survivors_py
         ratio = t_py / t_rs if t_rs > 0 else float("inf")
         print(
             f"\nenum+prune segment A/B (k={k}, C(60,3)={result.enumerated}): "
