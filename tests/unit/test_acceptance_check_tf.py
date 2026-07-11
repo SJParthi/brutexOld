@@ -110,16 +110,36 @@ class TestTfCheck:
         divergent = [c for c in daily.evidence["cells"] if c["state"] == "divergent"]
         assert divergent and divergent[0]["missing_from_stored"]
 
-    def test_muhurat_session_abstains_daily(self, tmp_path: Path) -> None:
+    def test_muhurat_day_skipped_per_day_rest_still_compared(self, tmp_path: Path) -> None:
+        # Review round 1 MAJOR-2 regression: a Muhurat session in the history
+        # must NOT abstain the WHOLE symbol — the regular days still get a
+        # real 1day verdict, the Muhurat days are skipped + COUNTED.
         lake = tmp_path / "lake"
         from brutex.acceptance.selftest import build_twin_lake
 
         # 2025-10-21 is the Diwali Muhurat date; 2025-10-22 the next regular day.
         build_twin_lake(lake, days=(date(2025, 10, 21), date(2025, 10, 22)), symbols=("NIFTY",))
-        check = tf.run(make_ctx(lake))
+        check = tf.run(make_ctx(lake, months=12))  # window reaches Oct 2025
+        daily = _sub(check, "tf.daily")
+        assert daily.verdict is Verdict.PASS
+        assert daily.evidence["muhurat_days_skipped"] >= 1
+        cell = next(c for c in daily.evidence["cells"] if c["key"] == "NSE/INDEX/NIFTY")
+        assert cell["state"] == "equal"
+        assert cell["muhurat_days_skipped"] >= 1
+
+    def test_muhurat_only_symbol_abstains_daily(self, tmp_path: Path) -> None:
+        # Only when EVERY comparable day is Muhurat does the cell abstain.
+        lake = tmp_path / "lake"
+        from brutex.acceptance.selftest import build_twin_lake
+
+        build_twin_lake(lake, days=(date(2025, 10, 21), date(2025, 10, 21)), symbols=("NIFTY",))
+        check = tf.run(make_ctx(lake, months=12))
         daily = _sub(check, "tf.daily")
         assert daily.verdict is Verdict.ABSTAIN
         assert daily.abstain_reason is AbstainReason.DAILY_CUTOFF_AMBIGUOUS
+        cell = next(c for c in daily.evidence["cells"] if c["key"] == "NSE/INDEX/NIFTY")
+        assert cell["state"] == "daily_cutoff_ambiguous"
+        assert cell["muhurat_days_skipped"] >= 1
 
     def test_no_1m_base_and_no_stored_partition_skips(self, tmp_path: Path) -> None:
         from brutex.data.parquet_writer import ParquetWriter
@@ -210,14 +230,107 @@ class TestTfCheck:
 
 
 class TestTfEdges:
-    def test_ist_dates_empty_frame(self) -> None:
-        import polars as pl
-        from brutex.acceptance.checks.tf import _ist_dates
+    def test_daily_month_cells_pads_predecessor(self) -> None:
+        # A midnight-IST 1day bar lives in the PREVIOUS UTC month's file —
+        # the stored side pads one month back (incl. across a year boundary).
+        from brutex.acceptance.checks.tf import _daily_month_cells
 
-        empty = pl.DataFrame(
-            {"ts_utc": pl.Series([], dtype=pl.Datetime(time_unit="us", time_zone="UTC"))}
+        assert _daily_month_cells(None) is None
+        got = _daily_month_cells({(2026, 1), (2026, 3)})
+        assert got == {(2025, 12), (2026, 1), (2026, 2), (2026, 3)}
+
+    def test_months_bound_is_real_old_divergence_out_of_window(self, tmp_path: Path) -> None:
+        # Review round 1 complexity MAJOR-2 regression: --months must actually
+        # bound the 1day compare — a tampered OLD-month stored bar is caught
+        # with a wide window and OUT OF SCOPE with a narrow one.
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.spot_daily_resample import resample_1m_to_daily
+        from brutex.data.tf_autoderive import read_lake_bars_frame
+
+        lake = make_twin(tmp_path)
+        old_day = date(2026, 2, 4)  # a regular Wednesday, 5 months back
+        writer = ParquetWriter(lake_root=lake)
+        writer.write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=_twin_bars(old_day, base=90.0),
         )
-        assert _ist_dates(empty) == []
+        symbol_dir = lake / "bars" / "NSE" / "INDEX" / "NIFTY"
+        df_1m = read_lake_bars_frame(symbol_dir, "1minute")
+        old_daily = [
+            b
+            for b in resample_1m_to_daily(df_1m, before=DAY2 + timedelta(days=1))
+            if b.timestamp.month == 2 or (b.timestamp.month == 1 and b.timestamp.day == 31)
+        ]
+        writer.write(
+            exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1day", bars=old_daily
+        )
+        path = _month_file(lake, "NIFTY", "1day", old_day)
+        frame = pl.read_parquet(path)
+        closes = frame.get_column("close").to_list()
+        closes[0] = closes[0] + 1.0
+        frame.with_columns(pl.Series("close", closes)).write_parquet(path)
+        wide = _sub(tf.run(make_ctx(lake, months=6)), "tf.daily")
+        assert wide.verdict is Verdict.FAIL  # Feb is inside the 6-month window
+        narrow = _sub(tf.run(make_ctx(lake, months=1)), "tf.daily")
+        assert narrow.verdict is Verdict.PASS  # Feb is honestly out of scope
+        assert any("1day compare bounded" in note for note in narrow.limits)
+
+    def test_padded_predecessor_rows_filtered_not_divergent(self, tmp_path: Path) -> None:
+        # The stored-1day read pads one month back (a July-1 IST bar lives in
+        # the June UTC file); the padded file's own out-of-window rows are
+        # filtered, never read as "not derivable" divergences.
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.spot_daily_resample import resample_1m_to_daily
+        from brutex.data.tf_autoderive import read_lake_bars_frame
+
+        lake = make_twin(tmp_path)
+        june_day = date(2026, 6, 24)  # regular Wednesday, previous month
+        writer = ParquetWriter(lake_root=lake)
+        writer.write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=_twin_bars(june_day, base=95.0),
+        )
+        symbol_dir = lake / "bars" / "NSE" / "INDEX" / "NIFTY"
+        df_1m = read_lake_bars_frame(symbol_dir, "1minute")
+        june_daily = [
+            b
+            for b in resample_1m_to_daily(df_1m, before=DAY2 + timedelta(days=1))
+            if b.timestamp.month == 6
+        ]
+        writer.write(
+            exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1day", bars=june_daily
+        )
+        narrow = _sub(tf.run(make_ctx(lake, months=1)), "tf.daily")
+        assert narrow.verdict is Verdict.PASS  # June rows skipped, July compared
+
+    def test_all_data_outside_window_reads_no_1m_base(self, tmp_path: Path) -> None:
+        from brutex.data.parquet_writer import ParquetWriter
+
+        lake = make_twin(tmp_path)
+        ParquetWriter(lake_root=lake).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="OLDONLY",
+            interval="1minute",
+            bars=_twin_bars(date(2026, 2, 4), base=80.0),
+        )
+        # a 1day dir with an out-of-window file so the interval-files gate passes
+        ParquetWriter(lake_root=lake).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="OLDONLY",
+            interval="1day",
+            bars=_twin_bars(date(2026, 2, 4), base=80.0)[:1],
+        )
+        daily = _sub(tf.run(make_ctx(lake, months=1)), "tf.daily")
+        states = {c["key"]: c["state"] for c in daily.evidence["cells"]}
+        assert states["NSE/INDEX/OLDONLY"] == "no_1m_base"
 
     def test_stored_bar_not_derivable_from_1m(self, tmp_path: Path) -> None:
         from datetime import UTC, datetime, time

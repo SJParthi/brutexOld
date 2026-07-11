@@ -8,11 +8,55 @@ verdict ``ERROR``, the run continues) lives in :mod:`brutex.acceptance.run`.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from pathlib import Path
 from typing import Final
 
 from brutex.acceptance.context import AcceptanceContext
-from brutex.acceptance.model import CheckResult
+from brutex.acceptance.model import (
+    AbstainReason,
+    CheckResult,
+    Verdict,
+    make_check,
+    make_coverage,
+    make_subcheck,
+)
+
+
+def run_fingerprinted_check(
+    ctx: AcceptanceContext,
+    *,
+    check_id: str,
+    sub_id: str,
+    paths_fn: Callable[[], Sequence[Path]],
+    body: Callable[[], CheckResult],
+) -> CheckResult:
+    """Run one check body under the §12.7 stat-fingerprint retry-once TOCTOU law.
+
+    The check's ACTUAL sampled input files are stat-tokened before AND after
+    the compute (O(sampled files) stats); a move retries the WHOLE body ONCE;
+    a second move ⇒ the check ABSTAINS ``input_moved_during_check`` naming the
+    movers — never a PASS over a torn read (review round 1 MAJOR-1: the law
+    existed but had ZERO production callers).
+    """
+    result, fingerprint, ok = ctx.run_fingerprinted(paths_fn, body)
+    if not ok:
+        sub = make_subcheck(
+            sub_id,
+            Verdict.ABSTAIN,
+            units_checked=0,
+            evidence={
+                "reason": "sampled input files moved on BOTH attempts",
+                "movers": list(fingerprint.get("movers", [])),
+            },
+            abstain_reason=AbstainReason.INPUT_MOVED_DURING_CHECK,
+            repro=f"brutex verify-acceptance --checks {check_id} --seed {ctx.seed}",
+        )
+        coverage = make_coverage(mode="none", population=0, examined=0, seed=ctx.seed)
+        return make_check(check_id, [sub], coverage=coverage, input_fingerprint=fingerprint)
+    checked: CheckResult = replace(result, input_fingerprint=dict(fingerprint))
+    return checked
 
 
 def _run_unique(ctx: AcceptanceContext) -> CheckResult:

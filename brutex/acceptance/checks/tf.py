@@ -15,10 +15,10 @@ in v1 — ``tf.oi`` is a standing structural ABSTAIN until follow-up F2.
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
-import polars as pl
-
+from brutex.acceptance.checks import run_fingerprinted_check
 from brutex.acceptance.context import IST_OFFSET, AcceptanceContext
 from brutex.acceptance.model import (
     AbstainReason,
@@ -29,8 +29,8 @@ from brutex.acceptance.model import (
     make_subcheck,
 )
 from brutex.acceptance.sampling import (
-    enumerate_fno_contracts,
-    enumerate_spot_datasets,
+    read_bars_frame_bounded,
+    recent_months,
     sample_datasets,
 )
 
@@ -83,50 +83,72 @@ def _has_interval_files(symbol_dir: Any, interval: str) -> bool:
     return root.is_dir() and any(root.rglob("*.parquet"))
 
 
-def _ist_dates(frame: pl.DataFrame) -> list[Any]:
-    """Distinct IST dates of a bars frame (ts_utc + 05:30)."""
-    if frame.height == 0:
-        return []
-    return sorted(
-        frame.get_column("ts_utc")
-        .dt.replace_time_zone("UTC")
-        .dt.offset_by("5h30m")
-        .dt.date()
-        .unique()
-        .to_list()
-    )
+def _daily_month_cells(months: set[tuple[int, int]] | None) -> set[tuple[int, int]] | None:
+    """The stored-1day file cells for a months bound: each cell + its predecessor.
+
+    A midnight-IST daily bar for day 1 of month M is 18:30 UTC on the LAST day
+    of month M−1, so its partition file lives in the PREVIOUS UTC month cell —
+    the stored side pads one month back and the rows are re-filtered by IST
+    date afterwards (never a false month-boundary divergence).
+    """
+    if months is None:
+        return None
+    padded = set(months)
+    for year, month in months:
+        padded.add((year, month - 1) if month > 1 else (year - 1, 12))
+    return padded
 
 
 def _daily_compare_for_symbol(
-    ctx: AcceptanceContext, symbol_dir: Any, *, key: str
+    ctx: AcceptanceContext,
+    symbol_dir: Any,
+    *,
+    key: str,
+    months: set[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
-    """One symbol's 1day verdict cell: equal / divergent / forming / skip reason."""
+    """One symbol's 1day verdict cell: equal / divergent / forming / skip reason.
+
+    Muhurat handling is PER-DAY (review round 1 MAJOR-2): a Muhurat session's
+    daily bar is skipped + COUNTED on BOTH sides (``muhurat_days_skipped``) —
+    the rest of the history still gets a real verdict. Only a symbol whose
+    EVERY comparable day is Muhurat-ambiguous abstains.
+    """
     from brutex.calendars.nse import daily_derive_cutoff, has_muhurat_session
     from brutex.data.fno_daily_resample import resample_1m_to_fno_daily
     from brutex.data.spot_daily_resample import resample_1m_to_daily
-    from brutex.data.tf_autoderive import read_lake_bars_frame
 
     if not _has_interval_files(symbol_dir, "1minute"):
         return {"key": key, "state": "no_1m_base"}
     if not _has_interval_files(symbol_dir, "1day"):
         return {"key": key, "state": "no_stored_partition"}
-    df_1m = read_lake_bars_frame(symbol_dir, "1minute")
-    stored = read_lake_bars_frame(symbol_dir, "1day")
+    df_1m = read_bars_frame_bounded(symbol_dir, "1minute", months)
+    stored = read_bars_frame_bounded(symbol_dir, "1day", _daily_month_cells(months))
+    if df_1m is None or stored is None or df_1m.height == 0:
+        return {"key": key, "state": "no_1m_base"}
     before = daily_derive_cutoff(ctx.now_ist())
-    if any(has_muhurat_session(d) for d in _ist_dates(df_1m)):
-        return {"key": key, "state": "daily_cutoff_ambiguous"}
     resample = (
         resample_1m_to_fno_daily if "/FNO/" in symbol_dir.as_posix() else (resample_1m_to_daily)
     )
     expected = resample(df_1m, before=before)
-    expected_map = {
-        bar.timestamp: (bar.open, bar.high, bar.low, bar.close, bar.volume) for bar in expected
-    }
+    muhurat_skipped = 0
+    expected_map: dict[Any, tuple[Any, ...]] = {}
+    for bar in expected:
+        bar_ist_date = (bar.timestamp + IST_OFFSET).date()
+        if has_muhurat_session(bar_ist_date):
+            muhurat_skipped += 1
+            continue
+        expected_map[bar.timestamp] = (bar.open, bar.high, bar.low, bar.close, bar.volume)
     forming: list[str] = []
     divergent: list[str] = []
+    compared = 0
     for row in stored.iter_rows(named=True):
         ts = row["ts_utc"]
         ist_date = (ts + IST_OFFSET).date()
+        if months is not None and (ist_date.year, ist_date.month) not in months:
+            continue  # the padded predecessor file's out-of-window rows
+        if has_muhurat_session(ist_date):
+            muhurat_skipped += 1
+            continue
         if ist_date >= before:
             forming.append(ts.isoformat())
             continue
@@ -134,6 +156,7 @@ def _daily_compare_for_symbol(
         if got is None:
             divergent.append(f"{ts.isoformat()}: stored bar not derivable from 1m")
             continue
+        compared += 1
         stored_vals = tuple(Decimal(str(row[c])) for c in ("open", "high", "low", "close"))
         if stored_vals != tuple(got[:4]) or int(row["volume"]) != int(got[4]):
             divergent.append(f"{ts.isoformat()}: stored != re-derived")
@@ -146,29 +169,56 @@ def _daily_compare_for_symbol(
             "state": "divergent",
             "divergent": divergent[:5],
             "missing_from_stored": missing,
+            "muhurat_days_skipped": muhurat_skipped,
         }
-    return {"key": key, "state": "equal"}
+    if compared == 0 and muhurat_skipped:
+        # EVERY comparable day was a Muhurat session — the only whole-cell abstain.
+        return {
+            "key": key,
+            "state": "daily_cutoff_ambiguous",
+            "muhurat_days_skipped": muhurat_skipped,
+        }
+    return {"key": key, "state": "equal", "muhurat_days_skipped": muhurat_skipped}
 
 
 def run(ctx: AcceptanceContext) -> CheckResult:
     """Run intraday + daily derived-TF freshness over the sampled scope."""
-    from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
-    from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
-
     if ctx.pull_active() and not ctx.force_during_pull:
         return _abstain_check(ctx, AbstainReason.PULL_IN_PROGRESS)
     plan = sample_datasets(
-        enumerate_spot_datasets(ctx.lake_root),
+        ctx.spot_datasets(),
         seed=ctx.seed,
         sample_n=ctx.sample_n,
         full=ctx.full,
     )
-    contracts = enumerate_fno_contracts(ctx.lake_root)
+    contracts = ctx.fno_contracts()
     if not ctx.full:
         contracts = contracts[:FNO_SAMPLE_N]
     if not plan.selected and not contracts:
         return _abstain_check(ctx, AbstainReason.NO_DATASETS)
 
+    def _paths() -> list[Path]:
+        paths: list[Path] = []
+        for exchange, segment, symbol in plan.selected:
+            paths.extend((ctx.lake_root / "bars" / exchange / segment / symbol).rglob("*.parquet"))
+        for contract in contracts:
+            paths.extend((ctx.lake_root / "bars" / "NSE" / "FNO" / contract).rglob("*.parquet"))
+        return sorted(set(paths))
+
+    return run_fingerprinted_check(
+        ctx,
+        check_id=CHECK_ID,
+        sub_id="tf.intraday",
+        paths_fn=_paths,
+        body=lambda: _run_body(ctx, plan=plan, contracts=contracts),
+    )
+
+
+def _run_body(ctx: AcceptanceContext, *, plan: Any, contracts: list[str]) -> CheckResult:
+    from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
+    from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
+
+    months = None if ctx.full else set(recent_months(ctx.run_date(), ctx.months))
     intervals = tuple(INTRADAY_TF_INTERVALS.values())
     verdicts: dict[tuple[str, str], str] = {}
     by_group: dict[tuple[str, str], list[str]] = {}
@@ -200,7 +250,11 @@ def run(ctx: AcceptanceContext) -> CheckResult:
             "stale_pairs_total": len(stale),
             "stale_pairs_truncated": len(stale) > PAIR_CAP,
         },
-        limits=["exact OHLCV value equality after keep-first dedup — no tolerance"],
+        limits=[
+            "exact OHLCV value equality after keep-first dedup — no tolerance",
+            "the freshness seam reads full stored history (seam-owned; --months "
+            "bounds the 1day compare only)",
+        ],
         repro=_repro(ctx),
     )
 
@@ -208,11 +262,15 @@ def run(ctx: AcceptanceContext) -> CheckResult:
     for exchange, segment, symbol in plan.selected:
         symbol_dir = ctx.lake_root / "bars" / exchange / segment / symbol
         cells.append(
-            _daily_compare_for_symbol(ctx, symbol_dir, key=f"{exchange}/{segment}/{symbol}")
+            _daily_compare_for_symbol(
+                ctx, symbol_dir, key=f"{exchange}/{segment}/{symbol}", months=months
+            )
         )
     for contract in contracts:
         symbol_dir = ctx.lake_root / "bars" / "NSE" / "FNO" / contract
-        cells.append(_daily_compare_for_symbol(ctx, symbol_dir, key=f"NSE/FNO/{contract}"))
+        cells.append(
+            _daily_compare_for_symbol(ctx, symbol_dir, key=f"NSE/FNO/{contract}", months=months)
+        )
     bad_states = {"divergent", "forming_day_stored"}
     failures = [c for c in cells if c["state"] in bad_states]
     ambiguous = [c for c in cells if c["state"] == "daily_cutoff_ambiguous"]
@@ -237,16 +295,22 @@ def run(ctx: AcceptanceContext) -> CheckResult:
             "equal": sum(1 for c in cells if c["state"] == "equal"),
             "failures": len(failures),
             "ambiguous_abstained": len(ambiguous),
+            "muhurat_days_skipped": sum(int(c.get("muhurat_days_skipped", 0)) for c in cells),
             "skipped": sum(1 for c in cells if c["state"] in {"no_1m_base", "no_stored_partition"}),
         },
         abstain_reason=daily_reason,
-        limits=["forming sessions excluded from BOTH sides (cutoff law)"],
+        limits=[
+            "forming sessions excluded from BOTH sides (cutoff law)",
+            "Muhurat sessions skipped PER-DAY on both sides (counted — never a "
+            "whole-history abstain)",
+            f"1day compare bounded to the last {ctx.months} months (--full lifts)",
+        ],
         repro=_repro(ctx),
     )
 
     coverage = make_coverage(
         mode=plan.mode,
-        population=plan.population + len(enumerate_fno_contracts(ctx.lake_root)),
+        population=plan.population + len(ctx.fno_contracts()),
         examined=len(plan.selected) + len(contracts),
         seed=ctx.seed,
         selection=[*plan.selection_keys, *(f"NSE/FNO/{c}" for c in contracts)],

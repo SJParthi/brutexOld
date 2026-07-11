@@ -126,6 +126,11 @@ def run_acceptance(
     """
     clock = now_utc or (lambda: datetime.now(UTC))
     started = time.monotonic()
+    if not cfg.checks:
+        # Design LAW 2 at run level (review round 1 MINOR): an empty check
+        # list can never read as a clean exit-0 run — usage error in the CORE,
+        # not just the CLI guard.
+        return 1, {"error": "no checks requested — refusing a zero-work PASS run"}
     ctx = AcceptanceContext(
         lake_root=cfg.lake_root,
         seed=cfg.seed or "",
@@ -147,6 +152,30 @@ def run_acceptance(
         seed_mode = "rotated"
     else:
         seed_mode = "fixed"
+    try:
+        return _run_with_ctx(
+            cfg,
+            ctx,
+            clock=clock,
+            seed_mode=seed_mode,
+            started=started,
+            selftest_runner=selftest_runner,
+        )
+    finally:
+        # Run-scoped teardown (MN1): restores any BRUTEX_LAKE_ROOT override
+        # and closes the shared client + read-only store handle.
+        ctx.close()
+
+
+def _run_with_ctx(
+    cfg: RunConfig,
+    ctx: AcceptanceContext,
+    *,
+    clock: Callable[[], datetime],
+    seed_mode: str,
+    started: float,
+    selftest_runner: Callable[..., selftest.SelfTestResult] | None,
+) -> tuple[int, dict[str, Any]]:
     run_id = report_mod.mint_run_id(clock())
 
     audit: report_mod.AcceptanceAudit | None
@@ -156,7 +185,32 @@ def run_acceptance(
     except OSError as exc:
         _LOG.error("acceptance.audit_open_failed", error=str(exc))
         return 2, {"error": f"audit chain unavailable: {exc}", "run_id": run_id}
+    try:
+        return _run_audited(
+            cfg,
+            ctx,
+            audit=audit,
+            run_id=run_id,
+            clock=clock,
+            seed_mode=seed_mode,
+            started=started,
+            selftest_runner=selftest_runner,
+        )
+    finally:
+        audit.close()  # idempotent — a raising run never leaks the chain fd
 
+
+def _run_audited(
+    cfg: RunConfig,
+    ctx: AcceptanceContext,
+    *,
+    audit: report_mod.AcceptanceAudit,
+    run_id: str,
+    clock: Callable[[], datetime],
+    seed_mode: str,
+    started: float,
+    selftest_runner: Callable[..., selftest.SelfTestResult] | None,
+) -> tuple[int, dict[str, Any]]:
     # ── teeth before trust ─────────────────────────────────────────────
     if cfg.self_test_mode == "skipped":
         teeth = selftest.skipped_selftest()
@@ -166,6 +220,8 @@ def run_acceptance(
         )
         try:
             teeth = runner(now_utc=clock())
+        except MemoryError:
+            raise  # house law (N3): OOM re-raises raw, never a soft verdict
         except Exception as exc:
             _LOG.error("acceptance.selftest_crashed", error=str(exc))
             teeth = selftest.SelfTestResult(
@@ -186,6 +242,8 @@ def run_acceptance(
             check_started = time.monotonic()
             try:
                 result = CHECK_REGISTRY[check_id](ctx)
+            except MemoryError:
+                raise  # house law (N3): OOM re-raises raw, never an ERROR verdict
             except Exception as exc:
                 _LOG.error("acceptance.check_errored", check_id=check_id, error=str(exc))
                 result = _error_check(check_id, exc, seed=ctx.seed)
@@ -231,7 +289,7 @@ def run_acceptance(
     )
 
     # ── coverage ledger accumulation (visibility aid) ──────────────────
-    population = sampling.enumerate_spot_datasets(cfg.lake_root)
+    population = ctx.spot_datasets()
     population_keys = [sampling.dataset_key(c) for c in population]
     ledger_path = sampling.coverage_ledger_path(cfg.lake_root)
     examined_keys = sorted(

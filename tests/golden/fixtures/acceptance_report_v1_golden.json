@@ -12,12 +12,14 @@
   {
    "check_id": "unique",
    "coverage": {
-    "examined": 9,
+    "examined": 3,
     "mode": "bounded",
-    "population": 9,
+    "population": 3,
     "seed": "2026-07-10",
     "selection": [
-     "months=6"
+     "NSE/INDEX/NIFTY",
+     "NSE/INDEX/BANKNIFTY",
+     "NSE/INDEX/INDIAVIX"
     ],
     "selection_truncated": false
    },
@@ -27,7 +29,7 @@
     "retried": false
    },
    "limits": [
-    "non-engine scope bounded to the last 6 months (--full lifts)"
+    "non-engine census scope = sampled datasets x last 6 months + the whole options tree (--full lifts to the whole-lake scan)"
    ],
    "repro": "brutex verify-acceptance --checks unique --seed 2026-07-10",
    "sub_checks": [
@@ -35,69 +37,9 @@
      "abstain_reason": null,
      "abstain_streak": 0,
      "evidence": {
-      "census": {
-       "engine_clean": true,
-       "engine_detail": "NIFTY/BANKNIFTY/SENSEX: 0 findings over 6 files",
-       "engine_files_skipped": 0,
-       "files_scanned": 9,
-       "files_skipped": 0,
-       "findings_total": 0,
-       "first_skipped_path": null,
-       "healed_total": 0,
-       "last_heal_utc": null,
-       "last_sweep_utc": null,
-       "mode": "acceptance",
-       "present": true,
-       "quarantined_files_total": 0,
-       "segments": [
-        {
-         "alien_files": 0,
-         "clean": 9,
-         "drift_dirs": 0,
-         "dup_files": 0,
-         "files": 9,
-         "foreign_files": 0,
-         "overlap_files": 0,
-         "price_files": 0,
-         "segment": "INDEX"
-        },
-        {
-         "alien_files": 0,
-         "clean": 0,
-         "drift_dirs": 0,
-         "dup_files": 0,
-         "files": 0,
-         "foreign_files": 0,
-         "overlap_files": 0,
-         "price_files": 0,
-         "segment": "CASH"
-        },
-        {
-         "alien_files": 0,
-         "clean": 0,
-         "drift_dirs": 0,
-         "dup_files": 0,
-         "files": 0,
-         "foreign_files": 0,
-         "overlap_files": 0,
-         "price_files": 0,
-         "segment": "FNO"
-        },
-        {
-         "alien_files": 0,
-         "clean": 0,
-         "drift_dirs": 0,
-         "dup_files": 0,
-         "files": 0,
-         "foreign_files": 0,
-         "overlap_files": 0,
-         "price_files": 0,
-         "segment": "OPTIONS"
-        }
-       ]
-      },
       "files_scanned": 9,
       "files_skipped": 0,
+      "finding_kinds": {},
       "findings_total": 0,
       "first_skipped_path": null,
       "offenders": [],
@@ -169,7 +111,8 @@
      },
      "id": "tf.intraday",
      "limits": [
-      "exact OHLCV value equality after keep-first dedup \u2014 no tolerance"
+      "exact OHLCV value equality after keep-first dedup \u2014 no tolerance",
+      "the freshness seam reads full stored history (seam-owned; --months bounds the 1day compare only)"
      ],
      "repro": "brutex verify-acceptance --checks tf --seed 2026-07-10",
      "structural": false,
@@ -183,14 +126,17 @@
       "cells": [
        {
         "key": "NSE/INDEX/NIFTY",
+        "muhurat_days_skipped": 0,
         "state": "equal"
        },
        {
         "key": "NSE/INDEX/BANKNIFTY",
+        "muhurat_days_skipped": 0,
         "state": "equal"
        },
        {
         "key": "NSE/INDEX/INDIAVIX",
+        "muhurat_days_skipped": 0,
         "state": "equal"
        }
       ],
@@ -198,12 +144,15 @@
       "cells_truncated": false,
       "equal": 3,
       "failures": 0,
+      "muhurat_days_skipped": 0,
       "skipped": 0,
       "units_checked": 3
      },
      "id": "tf.daily",
      "limits": [
-      "forming sessions excluded from BOTH sides (cutoff law)"
+      "forming sessions excluded from BOTH sides (cutoff law)",
+      "Muhurat sessions skipped PER-DAY on both sides (counted \u2014 never a whole-history abstain)",
+      "1day compare bounded to the last 6 months (--full lifts)"
      ],
      "repro": "brutex verify-acceptance --checks tf --seed 2026-07-10",
      "structural": false,
@@ -308,11 +257,14 @@
       "block_window_ist": "08:45-15:35",
       "excluded_pre_guard": 0,
       "in_window_attempts": 0,
+      "journal_stamp_law": "pull-start records with dry_run=False only \u2014 heartbeats are job liveness, never vendor attempts",
       "offending_stamps": [],
       "units_checked": 0
      },
      "id": "rate.market_hours",
-     "limits": [],
+     "limits": [
+      "the sanctioned #1692 per-contract finish overrun can stamp minutes past 08:45 \u2014 an in-window offender needs operator judgment"
+     ],
      "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
      "structural": false,
      "verdict": "ABSTAIN"
@@ -349,17 +301,20 @@
      "abstain_reason": "no_per_call_log",
      "abstain_streak": 1,
      "evidence": {
-      "chains": {
+      "chain_verify": "not run here \u2014 bounded evidence tail; verify via brutex audit verify",
+      "max_pairs_per_rolling_minute": 0,
+      "pairs_total": 0,
+      "tail_bytes_cap": 16777216,
+      "tails": {
        "fno-ingest.jsonl": "absent",
        "spot-ingest.jsonl": "absent"
       },
-      "max_pairs_per_rolling_minute": 0,
-      "pairs_total": 0,
       "units_checked": 0
      },
      "id": "rate.pair_bound",
      "limits": [
-      "pair-completion times are not call-issue times \u2014 evidence only"
+      "pair-completion times are not call-issue times \u2014 evidence only",
+      "bounded tail read \u2014 last 16777216 bytes per audit file"
      ],
      "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
      "structural": true,

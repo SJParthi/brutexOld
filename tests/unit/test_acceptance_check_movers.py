@@ -355,6 +355,56 @@ class TestOptionsLeg:
         assert options.evidence["bad_labels"]
         assert options.evidence["missing_overlay_keys"]
 
+    def test_honest_sentinels_are_in_grammar(self, tmp_path: Path) -> None:
+        # Round 1 MAJOR-3 regression: the FULL production label vocabulary
+        # (moneyness._format_label) is in-grammar — a correct sparse lake
+        # serving "?" (spot unavailable) / bare ITM/OTM (no grid) / "—"
+        # (non-option) must never redden the nightly.
+        lake = make_twin(tmp_path)
+        real = _real_client(lake)
+        rows = [
+            {"symbol": "Q", "moneyness": "?", "iv": None, "oi": 1},
+            {"symbol": "G1", "moneyness": "ITM", "iv": None, "oi": 1},
+            {"symbol": "G2", "moneyness": "OTM", "iv": None, "oi": 1},
+            {"symbol": "NA", "moneyness": "—", "iv": None, "oi": 1},
+            {"symbol": "D1", "moneyness": "ITM -2", "iv": None, "oi": 1},
+            {"symbol": "D2", "moneyness": "OTM +10", "iv": None, "oi": 1},
+        ]
+        options = _sub(
+            movers.run(make_ctx(lake, client_factory=lambda: _FnoClient(real, [], rows))),
+            "movers.options",
+        )
+        assert options.verdict is Verdict.PASS
+        assert options.evidence["bad_labels"] == []
+
+    def test_wrong_sign_stays_off_grammar(self, tmp_path: Path) -> None:
+        # The sign tracks the BUCKET (ITM always -, OTM always +): a flipped
+        # sign is NOT production vocabulary and must still FAIL.
+        lake = make_twin(tmp_path)
+        real = _real_client(lake)
+        rows = [{"symbol": "X", "moneyness": "ITM +2", "iv": None, "oi": 1}]
+        options = _sub(
+            movers.run(make_ctx(lake, client_factory=lambda: _FnoClient(real, [], rows))),
+            "movers.options",
+        )
+        assert options.verdict is Verdict.FAIL
+
+
+class TestStoreUnavailableAbstain:
+    def test_non_200_spot_route_abstains_named(self, tmp_path: Path) -> None:
+        # Round 1 M1 knock-on: a locked/absent instrument master 503s the
+        # store-backed movers route — a named ABSTAIN, never a crash/ERROR.
+        lake = make_twin(tmp_path)
+
+        class _Unavailable:
+            def get(self, path: str, params: dict | None = None) -> Any:
+                return _CannedResponse({"detail": "no store"}, status_code=503)
+
+        check = movers.run(make_ctx(lake, client_factory=_Unavailable))
+        spot = _sub(check, "movers.spot")
+        assert spot.verdict is Verdict.ABSTAIN
+        assert spot.abstain_reason is AbstainReason.NO_INSTRUMENT_STORE
+
 
 class TestCompareCellsUnits:
     def _row(self) -> ind.IndependentSpotRow:

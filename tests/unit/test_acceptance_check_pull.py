@@ -189,14 +189,124 @@ class TestPullCheck:
         check = pull.run(make_ctx(lake, now_utc=lambda: datetime.now(UTC)))
         assert check.sub_checks[0].abstain_reason is AbstainReason.PULL_IN_PROGRESS
 
-    def test_progress_snapshot_evidence(self, tmp_path: Path) -> None:
+    def test_ledger_progress_is_evidence_not_a_verdict(self, tmp_path: Path) -> None:
+        # Review round 1 MINOR regression: the decorative always-PASS
+        # pull.progress_snapshot sub-check is DELETED — the counters ride as
+        # evidence on replan_zero and can never inflate passes_full.
         lake = make_twin(tmp_path)
         _save(lake, [_row()])
         check = pull.run(make_ctx(lake))
-        progress = _sub(check, "pull.progress_snapshot")
-        assert progress.verdict is Verdict.PASS
-        assert progress.evidence["total"] == 1
-        assert progress.evidence["settled"] == 1
+        assert all(s.id != "pull.progress_snapshot" for s in check.sub_checks)
+        replan = _sub(check, "pull.replan_zero")
+        assert replan.evidence["ledger_progress"]["total"] == 1
+        assert replan.evidence["ledger_progress"]["settled"] == 1
+
+    def test_disjoint_operator_ranges_never_false_fail(self, tmp_path: Path) -> None:
+        # Review round 1 regression (interior-gap keying): TWO disjoint
+        # explicit operator ranges (DEC-UNIVERSE-PULL-DATERANGE-001) leave a
+        # BY-DESIGN gap between them — the replan oracle must re-plan each
+        # covered span, never the min→max hull that plans the gap.
+        lake = make_twin(tmp_path)
+        jan = _row(
+            window_start="2024-01-02",
+            window_end="2024-02-01",
+            bars=0,
+            bars_net_new=0,
+            in_pull_fetches=0,
+        )
+        mar = _row(
+            window_start="2024-03-04",
+            window_end="2024-04-03",
+            bars=0,
+            bars_net_new=0,
+            in_pull_fetches=0,
+        )
+        _save(lake, [jan, mar])
+        check = pull.run(make_ctx(lake))
+        replan = _sub(check, "pull.replan_zero")
+        assert replan.verdict is Verdict.PASS
+        assert replan.evidence["newly_fetchable"] == 0
+        assert replan.evidence["spans_replanned"] == 2
+
+    def test_all_expired_options_lake_tail_honest(self, tmp_path: Path) -> None:
+        # Review round 1 MAJOR-4 root-cause regression: the replan threads the
+        # SAME expiry-capped contract windows production derives, so an
+        # all-expired options-only lake neither mints past-expiry windows nor
+        # reads planner_vacuous — the tail is honestly ineligible.
+        lake = make_twin(tmp_path)
+        contract = "NSE-NIFTY-26Jun25-24000-CE"
+        # Production stores ONE ledger row per (contract, interval): the
+        # default option window [expiry-30 → expiry+1) = [05-27 → 06-27).
+        rows = [
+            _row(
+                market="groww-option",
+                security_id=contract,
+                window_start="2025-05-27",
+                window_end="2025-06-27",
+                bars=0,
+                bars_net_new=0,
+                in_pull_fetches=0,
+            ),
+        ]
+        _save(lake, rows)
+        check = pull.run(make_ctx(lake))
+        replan = _sub(check, "pull.replan_zero")
+        assert replan.verdict is Verdict.PASS
+        assert replan.evidence["newly_fetchable"] == 0
+        assert replan.evidence["tail_check"] == "no_tail_eligible_series"
+        assert replan.evidence["tail_eligible_series"] == 0
+
+    def test_not_yet_open_contract_plans_nothing(self, tmp_path: Path) -> None:
+        # DEC-FNO-FAR-EXPIRY-WINDOW-001 parity: a contract whose default
+        # window has not OPENED inside the covered envelope plans NOTHING —
+        # the replan skips it exactly as production would.
+        lake = make_twin(tmp_path)
+        row = _row(
+            market="groww-option",
+            security_id="NSE-NIFTY-24Dec26-24000-CE",
+            window_start="2026-07-01",
+            window_end="2026-07-02",
+            bars=0,
+            bars_net_new=0,
+            in_pull_fetches=0,
+        )
+        _save(lake, [row])
+        check = pull.run(make_ctx(lake))
+        replan = _sub(check, "pull.replan_zero")
+        assert replan.evidence["newly_fetchable"] == 0
+        assert replan.evidence["tail_check"] in {"planned", "no_tail_eligible_series"}
+
+    def test_deltas_dir_oserror_tolerated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.data.window_ledger_store as store_mod
+
+        lake = make_twin(tmp_path)
+        _save(lake, [_row()])
+        ctx = make_ctx(lake)
+        ctx.ledger()  # warm the shared load BEFORE the deltas dir wedges
+
+        def _boom(lake_root: Path) -> list[Path]:
+            raise OSError("wedged deltas dir")
+
+        monkeypatch.setattr(store_mod, "list_ledger_deltas", _boom)
+        check = pull.run(ctx)
+        assert _sub(check, "pull.replan_zero").verdict is Verdict.PASS
+
+    def test_merge_covered_spans_law(self) -> None:
+        from datetime import date
+
+        merged = pull.merge_covered_spans(
+            [
+                (date(2024, 3, 1), date(2024, 3, 30)),
+                (date(2024, 1, 1), date(2024, 1, 31)),
+                (date(2024, 1, 31), date(2024, 2, 5)),  # touching → merges
+            ]
+        )
+        assert merged == [
+            (date(2024, 1, 1), date(2024, 2, 5)),
+            (date(2024, 3, 1), date(2024, 3, 30)),
+        ]
 
     def test_pinned_now_determinism(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)
@@ -228,8 +338,6 @@ class TestPullEdges:
         replan = _sub(check, "pull.replan_zero")
         assert replan.evidence["tail_check"] == "not_applicable"
         assert replan.verdict is Verdict.ABSTAIN  # zero units → nothing_to_check
-        progress = _sub(check, "pull.progress_snapshot")
-        assert progress.abstain_reason is AbstainReason.NOTHING_TO_CHECK
 
     def test_ledger_covering_past_run_date_tail_not_applicable(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)

@@ -299,3 +299,49 @@ class TestPerfTimerInjection:
         ticks = iter(float(i) for i in range(10_000))
         code, _report = _run(_cfg(lake, checks=("unique",)), perf_timer=lambda: next(ticks))
         assert code == 0
+
+
+class TestEmptyChecksRefusedInCore:
+    def test_empty_checks_is_usage_error_never_pass(self, tmp_path: Path) -> None:
+        # Round 1 MINOR regression: run_acceptance(checks=()) returned a
+        # zero-work exit-0 PASS — the CORE now refuses (LAW 2 at run level).
+        lake = make_twin(tmp_path)
+        exit_code, report = _run(_cfg(lake, checks=(), self_test_mode="skipped"))
+        assert exit_code == 1
+        assert "no checks requested" in report["error"]
+
+
+class TestMemoryErrorPropagates:
+    def test_check_oom_reraises_raw(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # N3 regression (house law): OOM is never swallowed into an ERROR verdict.
+        def _oom(ctx: object) -> object:
+            raise MemoryError("boom")
+
+        monkeypatch.setitem(CHECK_REGISTRY, "unique", _oom)
+        lake = make_twin(tmp_path)
+        with pytest.raises(MemoryError):
+            _run(_cfg(lake, checks=("unique",)))
+
+    def test_selftest_oom_reraises_raw(self, tmp_path: Path) -> None:
+        def _oom_runner(**kwargs: object) -> selftest.SelfTestResult:
+            raise MemoryError("boom")
+
+        lake = make_twin(tmp_path)
+        with pytest.raises(MemoryError):
+            _run(_cfg(lake), selftest_runner=_oom_runner)
+
+
+class TestRunScopedEnvRestore:
+    def test_env_override_never_leaks_out_of_the_run(self, tmp_path: Path) -> None:
+        # MN1 regression at the RUN level: the in-process F1 nightly chain
+        # must not inherit a mutated BRUTEX_LAKE_ROOT after run_acceptance.
+        import os
+
+        pytest.importorskip("fastapi")
+        os.environ.pop("BRUTEX_LAKE_ROOT", None)
+        lake = make_twin(tmp_path)
+        # latency uses the DEFAULT client factory (no instruments.duckdb →
+        # the scoped-env arm engages), then close() must restore.
+        exit_code, _report = _run(_cfg(lake, checks=("latency",)))
+        assert exit_code in (0, 4)
+        assert "BRUTEX_LAKE_ROOT" not in os.environ

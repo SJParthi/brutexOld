@@ -49,8 +49,13 @@ MISMATCH_CAP = 20
 #: HTTP success status for the F&O tab probes.
 HTTP_OK = 200
 
-#: Options moneyness label grammar (DEC-FNO-MONEYNESS-LABEL-001).
-MONEYNESS_RE = re.compile(r"^(ATM|(ITM|OTM) [+-]?\d+)$")
+#: Options moneyness label grammar — the FULL production vocabulary of
+#: ``moneyness._format_label`` (DEC-FNO-MONEYNESS-LABEL-001): graded
+#: ``"ITM -N"``/``"OTM +N"`` (sign tracks the bucket), ``"ATM"``, the no-grid
+#: bare ``"ITM"``/``"OTM"``, the spot-unavailable ``"?"`` and the non-option
+#: ``"—"`` — the honest sentinels are IN-grammar (review round 1 MAJOR-3: a
+#: correct sparse lake serves ``"?"`` and must never redden the nightly).
+MONEYNESS_RE = re.compile(r"^(ATM|ITM|OTM|\?|—|ITM -\d+|OTM \+\d+)$")
 
 
 def _repro(ctx: AcceptanceContext) -> str:
@@ -158,7 +163,15 @@ def _rank_consistent(
     return []
 
 
-def _spot_payload(ctx: AcceptanceContext, *, interval: str, day: str, hhmm: str | None) -> Any:
+def _spot_payload(
+    ctx: AcceptanceContext, *, interval: str, day: str, hhmm: str | None
+) -> Any | None:
+    """One spot movers payload; ``None`` on a non-200 (locked/absent master → 503).
+
+    The acceptance client opens the instrument master READ-ONLY and degrades
+    to no-store when it is locked (review round 1 M1) — the store-backed
+    movers route then 503s, which must map to a named ABSTAIN, never a crash.
+    """
     params: dict[str, Any] = {
         "asset": "spot",
         "interval": interval,
@@ -168,7 +181,8 @@ def _spot_payload(ctx: AcceptanceContext, *, interval: str, day: str, hhmm: str 
     if hhmm is not None:
         params["time"] = hhmm
     response = ctx.client().get("/api/v1/movers", params=params)
-    response.raise_for_status()
+    if response.status_code != HTTP_OK:
+        return None
     return response.json()
 
 
@@ -191,12 +205,31 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 
     payloads: dict[tuple[str, str | None], Any] = {}
     gated = False
+    unavailable = False
     for interval, hhmm in SPOT_COORDS:
         payload = _spot_payload(ctx, interval=interval, day=day_str, hhmm=hhmm)
+        if payload is None:
+            unavailable = True
+            break
         if payload.get("gated"):
             gated = True
             break
         payloads[(interval, hhmm)] = payload
+
+    if unavailable:
+        sub = make_subcheck(
+            "movers.spot",
+            Verdict.ABSTAIN,
+            units_checked=0,
+            evidence={
+                "reason": "movers route unavailable (non-200) — instrument master "
+                "absent or held read-write by another process"
+            },
+            abstain_reason=AbstainReason.NO_INSTRUMENT_STORE,
+            repro=_repro(ctx),
+        )
+        coverage = make_coverage(mode="none", population=0, examined=0, seed=ctx.seed)
+        return make_check(CHECK_ID, [sub], coverage=coverage, repro=_repro(ctx))
 
     if gated:
         sub = make_subcheck(
@@ -343,6 +376,10 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         [spot_sub, tf_sub, cache_sub, futures_sub, options_sub],
         coverage=coverage,
         repro=_repro(ctx),
+        limits=[
+            "independent-leg reads are not fingerprint-guarded — a concurrent "
+            "writer surfaces as a loud mismatch FAIL, never a silent PASS"
+        ],
     )
 
 

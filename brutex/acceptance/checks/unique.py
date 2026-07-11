@@ -1,17 +1,23 @@
 """Check 1 — uniqueness / dedup / foreign / overlap census (composed, never re-read).
 
 DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Verbatim reuse of the
-``scan_lake_invariants → build_lake_census → census_to_dict`` fold the
-``brutex lake audit-unique`` CLI + doctor + ``/universe`` chip share. PASS only
-when the scope is COMPLETE and clean — any finding OR any skipped/unreadable
-file FAILs (DEC-AUDIT-CENSUS-HONESTY-001: incompleteness never certifies clean).
+``scan_lake_invariants`` scanner the ``brutex lake audit-unique`` CLI + doctor +
+``/universe`` chip share. PASS only when the scope is COMPLETE and clean — any
+finding OR any skipped/unreadable file FAILs (DEC-AUDIT-CENSUS-HONESTY-001:
+incompleteness never certifies clean). Default (non ``--full``) scope is the
+SAMPLED datasets × the last ``--months`` month cells via per-coordinate bounded
+scans (+ the whole ``options/`` tree, filename-bounded) — never a whole-lake
+``bars/`` tree enumeration (review round 1 complexity MAJOR-3); ``--full`` is
+the sanctioned whole-lake single scan.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from collections import Counter
+from pathlib import Path
 from typing import Any
 
+from brutex.acceptance.checks import run_fingerprinted_check
 from brutex.acceptance.context import AcceptanceContext
 from brutex.acceptance.model import (
     AbstainReason,
@@ -21,23 +27,19 @@ from brutex.acceptance.model import (
     make_coverage,
     make_subcheck,
 )
+from brutex.acceptance.sampling import (
+    month_bounded_files,
+    recent_months,
+    sample_datasets,
+)
 
 CHECK_ID = "unique"
 
 #: Offender-path samples are capped at this many entries (named in evidence).
 OFFENDER_CAP = 20
 
-
-def recent_months(run_date: date, months: int) -> list[tuple[int, int]]:
-    """The last *months* calendar (year, month) cells ending at *run_date*."""
-    out: list[tuple[int, int]] = []
-    year, month = run_date.year, run_date.month
-    for _ in range(months):
-        out.append((year, month))
-        month -= 1
-        if month == 0:
-            year, month = year - 1, 12
-    return sorted(out)
+#: Sampled F&O contract dirs scanned per non-``--full`` run (mirrors tf).
+FNO_SAMPLE_N = 6
 
 
 def _repro(ctx: AcceptanceContext) -> str:
@@ -57,8 +59,69 @@ def _abstain_check(ctx: AcceptanceContext, reason: AbstainReason) -> CheckResult
     return make_check(CHECK_ID, [sub], coverage=coverage, repro=_repro(ctx))
 
 
+def _symbol_dir_files(symbol_dir: Path, months: set[tuple[int, int]] | None) -> list[Path]:
+    """Every month-bounded partition file under one symbol dir (all intervals)."""
+    if not symbol_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for interval_dir in sorted(p for p in symbol_dir.iterdir() if p.is_dir()):
+        out.extend(month_bounded_files(interval_dir, months))
+    return out
+
+
 def run(ctx: AcceptanceContext) -> CheckResult:
-    """Run the uniqueness census over the engine set + the bounded rest."""
+    """Run the uniqueness census over the engine set + the sampled bounded rest."""
+    from brutex.data.lake_invariants import ENGINE_INDEX_COORDS
+
+    if not (ctx.lake_root / "bars").is_dir():
+        return _abstain_check(ctx, AbstainReason.NO_LAKE)
+    if ctx.pull_active() and not ctx.force_during_pull:
+        return _abstain_check(ctx, AbstainReason.PULL_IN_PROGRESS)
+
+    plan = sample_datasets(ctx.spot_datasets(), seed=ctx.seed, sample_n=ctx.sample_n, full=ctx.full)
+    contracts_all = ctx.fno_contracts()
+    contracts = contracts_all if ctx.full else contracts_all[:FNO_SAMPLE_N]
+    months = None if ctx.full else set(recent_months(ctx.run_date(), ctx.months))
+
+    def _paths() -> list[Path]:
+        paths: list[Path] = []
+        if ctx.full:
+            paths.extend((ctx.lake_root / "bars").rglob("*.parquet"))
+        else:
+            for exchange, segment, symbol in ENGINE_INDEX_COORDS:
+                # Engine coords are scanned FULL-history — fingerprint them so.
+                paths.extend(
+                    _symbol_dir_files(ctx.lake_root / "bars" / exchange / segment / symbol, None)
+                )
+            for exchange, segment, symbol in plan.selected:
+                paths.extend(
+                    _symbol_dir_files(ctx.lake_root / "bars" / exchange / segment / symbol, months)
+                )
+            for contract in contracts:
+                paths.extend(
+                    _symbol_dir_files(ctx.lake_root / "bars" / "NSE" / "FNO" / contract, months)
+                )
+        options_tree = ctx.lake_root / "options"
+        if options_tree.is_dir():
+            paths.extend(options_tree.rglob("*.parquet"))
+        return sorted(set(paths))
+
+    return run_fingerprinted_check(
+        ctx,
+        check_id=CHECK_ID,
+        sub_id="unique.census",
+        paths_fn=_paths,
+        body=lambda: _run_body(ctx, plan=plan, contracts=contracts, months=months),
+    )
+
+
+def _run_body(
+    ctx: AcceptanceContext,
+    *,
+    plan: Any,
+    contracts: list[str],
+    months: set[tuple[int, int]] | None,
+) -> CheckResult:
     from brutex.data.lake_invariants import (
         ENGINE_INDEX_COORDS,
         build_lake_census,
@@ -66,32 +129,65 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         scan_lake_invariants,
     )
 
-    if not (ctx.lake_root / "bars").is_dir():
-        return _abstain_check(ctx, AbstainReason.NO_LAKE)
-    if ctx.pull_active() and not ctx.force_during_pull:
-        return _abstain_check(ctx, AbstainReason.PULL_IN_PROGRESS)
+    census_evidence: dict[str, Any] = {}
+    if ctx.full:
+        report = scan_lake_invariants(ctx.lake_root, months=None, include_options=True)
+        reports = [report]
+        census = build_lake_census(report)
+        census_evidence["census"] = census_to_dict(census, mode="acceptance")
+    else:
+        # Per-coordinate BOUNDED scans (the symbol filter prunes the glob) —
+        # the census never enumerates the whole derived F&O tree by default.
+        reports = [
+            scan_lake_invariants(
+                ctx.lake_root,
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                months=months,
+                include_options=False,
+            )
+            for exchange, segment, symbol in plan.selected
+        ]
+        reports.extend(
+            scan_lake_invariants(
+                ctx.lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbol=contract,
+                months=months,
+                include_options=False,
+            )
+            for contract in contracts
+        )
+        # The legacy expired-options tree: ONE filename-bounded options-only scan.
+        reports.append(
+            scan_lake_invariants(
+                ctx.lake_root, months=months, include_bars=False, include_options=True
+            )
+        )
+        census_evidence["finding_kinds"] = dict(
+            Counter(type(f).__name__ for r in reports for f in r.findings)
+        )
 
-    months = None if ctx.full else recent_months(ctx.run_date(), ctx.months)
-    report = scan_lake_invariants(ctx.lake_root, months=months, include_options=True)
-    census = build_lake_census(report)
-    census_dict = census_to_dict(census, mode="acceptance")
-
-    offenders = [str(getattr(f, "path", repr(f))) for f in report.findings]
-    skipped = report.files_skipped + report.option_files_skipped
-    units = report.files_scanned + report.option_files_scanned
-    census_verdict = Verdict.PASS if census.findings_total == 0 and skipped == 0 else Verdict.FAIL
+    findings = [f for r in reports for f in r.findings]
+    offenders = [str(getattr(f, "path", repr(f))) for f in findings]
+    skipped = sum(r.files_skipped + r.option_files_skipped for r in reports)
+    units = sum(r.files_scanned + r.option_files_scanned for r in reports)
+    first_skipped = next(
+        (str(r.first_skipped_path) for r in reports if r.first_skipped_path is not None), None
+    )
+    census_verdict = Verdict.PASS if not findings and skipped == 0 else Verdict.FAIL
     census_sub = make_subcheck(
         "unique.census",
         census_verdict,
         units_checked=units,
         evidence={
-            "census": census_dict,
-            "findings_total": census.findings_total,
+            **census_evidence,
+            "findings_total": len(findings),
             "files_scanned": units,
             "files_skipped": skipped,
-            "first_skipped_path": (
-                None if report.first_skipped_path is None else str(report.first_skipped_path)
-            ),
+            "first_skipped_path": first_skipped,
             "offenders": offenders[:OFFENDER_CAP],
             "offenders_total": len(offenders),
             "offenders_truncated": len(offenders) > OFFENDER_CAP,
@@ -106,6 +202,7 @@ def run(ctx: AcceptanceContext) -> CheckResult:
     engine_units = 0
     engine_clean = True
     if ctx.full:
+        census = build_lake_census(reports[0])
         engine_clean = census.engine_clean
         engine_evidence["engine_detail"] = census.engine_detail
         engine_units = census.files_scanned
@@ -136,10 +233,14 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 
     coverage = make_coverage(
         mode="full" if ctx.full else "bounded",
-        population=units,
-        examined=units,
+        population=plan.population + len(ctx.fno_contracts()),
+        examined=len(plan.selected) + len(contracts),
         seed=ctx.seed,
-        selection=[f"months={ctx.months}" if not ctx.full else "whole-lake"],
+        selection=(
+            ["whole-lake"]
+            if ctx.full
+            else [*plan.selection_keys, *(f"NSE/FNO/{c}" for c in contracts)]
+        ),
     )
     return make_check(
         CHECK_ID,
@@ -149,6 +250,9 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         limits=(
             []
             if ctx.full
-            else [f"non-engine scope bounded to the last {ctx.months} months (--full lifts)"]
+            else [
+                f"non-engine census scope = sampled datasets x last {ctx.months} months "
+                "+ the whole options tree (--full lifts to the whole-lake scan)"
+            ]
         ),
     )
