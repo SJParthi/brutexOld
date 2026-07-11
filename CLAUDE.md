@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
+_Last updated: 2026-07-11 (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1724
+(PROVISIONAL — coordinator confirms at the drain) — additive
+`trading_core.greeks_batch` columnar FFI face of the frozen Black-76 kernel
+(calls the SAME scalar `greeks` per element — zero math duplication; crate
+STAYS 0.3.1, no `_indicator_version` re-key) + the default-OFF
+`BRUTEX_GREEKS_RUST_BATCH` batch-solve seam in the Greeks enrich loop:
+`_compute_bar` split into the ONE shared `_screen_bar`/`_solve_one`/
+`_finish_bar` copy serving BOTH arms (every Decimal/repr/exp/gate op stays
+Python — the anti-drift core), 16-element per-process burn-in bit-compare +
+autorevert latch (mismatch or batch fault ships the ORACLE values;
+MemoryError re-raises raw), chunk cap 65,536. OFF (default) arm byte- AND
+log-identical (bomb-spy + zero-event + OFF-cost-bench teeth); ON arm's ONLY
+deltas are three fault/engagement-scoped events; the EXISTING enrich golden
+reproduces byte-identically with the flag ON (fixture untouched,
+engaged-INFO anti-vacuous pin). HONEST: both arms O(rows) — measured ON/OFF
+≈1.0× on the sandbox (0.996× solve-heavy / 0.960× reuse-heavy — stated,
+never claimed as a win; the retained Python work dominates); ships INERT —
+a default flip needs its own DEC/ADR. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+GREEKS_FORMULA_VERSION stays 2; `greeks_enrich.py` + `spot_join.py` +
+`options/greeks.py` 100% line+branch on their ci.yml gates; the full record
+lives in the §1 Active-branch blurb + MIGRATION.md #1724 — this header
+carries the one-line summary, never the story).
+Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
 the DB/query-latency hardening pack, READ-side only: (1) the `/db`
 window-ledger pager rides a DuckDB LIMIT/OFFSET fast path over the #1533
 delta-folded ledger scan source (`db_view.query_window_ledger_page` —
@@ -2146,7 +2169,59 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
+- **Active branch:** `claude/greeks-rust-batch` (**DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1724** —
+  entry number PROVISIONAL (#1724 = observed live-main max #1723 + 1 at append; coordinator
+  confirms/renumbers from the reservation map at the drain — the #1711 precedent, gaps are legal) —
+  the additive `trading_core.greeks_batch` columnar FFI face + the default-OFF
+  `BRUTEX_GREEKS_RUST_BATCH` batch-solve seam in the Greeks enrich loop. **Rust:** NEW
+  `rust/trading-core/src/greeks/batch.rs` under DEFAULT features (per-PR `cargo test` exercises it) —
+  7 parallel columns mirroring the scalar `greeks` entry 1:1 (sigma as Option — the TickVault
+  sigma-direct generality), calling the SAME frozen kernel per element (zero math duplication;
+  jaeckel pin + `greeks_golden.json` + every kernel constant byte-untouched); per-element
+  `(values, error)` outcomes with exactly-one-Some carrying the kernel's `invalid_input:`/
+  `no_solution:` strings VERBATIM (one unsolvable strike never aborts its siblings); whole-call Err
+  ONLY on a column-length mismatch naming every length; thin fenced `py_greeks_batch` (deliberately
+  NO GIL release — `Python::detach` does not link under the extension-module `cargo test` build, the
+  fno-math precedent, and enrich workers are spawn PROCESSES); same-commit registration surface
+  (`_EXPECTED_COMPILED_SYMBOLS` + `EXPECTED_BUILD.json` + `__init__` re-export/`__all__` + the
+  math-facade `_EXPECTED_SURFACE`; crate STAYS 0.3.1 — no `_indicator_version` re-key;
+  `test_doctor_wheel_freshness.py` needed NO edit, verified). **Wrapper (12d gate):**
+  `GreeksSolveRequest` + `GreeksBatchOutcome` (both-set refused) + `compute_greeks_batch` — the
+  per-element RiskFreeRate seam guard raises whole-call BEFORE any FFI; rate provenance stamped
+  Python-side per request; `zip(strict=True)`. **Enrich seam (the anti-drift core):** `_compute_bar`
+  split by VERBATIM body moves into `_screen_bar` (snap + the 6-screen ladder + the Python
+  `forward = S·e^{rT}` — NO exp ever computed in Rust that Python didn't already compute) /
+  `_solve_one` (the per-row oracle arm) / `_finish_bar`; the recomposed `_compute_bar` DELETED —
+  grep proved ZERO consumers outside the loop (the spec assumed direct-call tests that do not
+  exist; code-wins deviation, disclosed in #1724); the loop gains the order-invariant `_account`
+  fold + `_PendingSolve` placeholders + post-loop fill-in (`outcomes.get(slot) is None → _solve_one`
+  IS the autorevert path — reachable, tested, zero pragmas); `_batch_solve_outcomes` chunks at
+  `GREEKS_BATCH_MAX_ROWS=65_536`, burn-in bit-compares the first 16 elements per PROCESS
+  (`struct.pack` bit patterns, signed zeros, admissible + rate provenance) and ANY mismatch or
+  batch fault EXCEPT MemoryError (re-raises raw) discards the batch → per-row oracle for the WHOLE
+  call + process latch + ONE `greeks_enrich.rust_batch_autoreverted` ERROR. **Flag:**
+  `env_flag_tristate` IMPORTED from `sweep_lookahead` (never copied); truthy→ON, falsy→OFF,
+  unset/blank→OFF silently, junk→OFF + warn-once; resolved PER CALL so spawn workers read their own
+  env (zero `_GreeksWorkerContext` change). **Sanctioned ON-arm log deltas — exactly three:**
+  `rust_batch_engaged` (INFO once/process) · `rust_batch_autoreverted` (ERROR, fault only) ·
+  `rust_batch_flag_unrecognised` (WARNING once/process); OFF arm ZERO delta (bomb-spy + zero-event
+  + OFF-cost-bench teeth). EVIDENCE: extended 12e gate 261 passed — `greeks_enrich.py` (598/148) +
+  `spot_join.py` 100.00%; 12d 55 passed — `options/greeks.py` (71/16) 100.00%; cargo test default
+  (lib 109 + greeks_batch.rs 2) AND `--features python,serde` (lib 176) green; fmt + clippy
+  (`-D warnings`, the CI invocation) clean; the EXISTING enrich golden byte-identical with the flag
+  ON (fixture untouched, engaged-INFO anti-vacuous pin) + the 2-worker REAL-spawn sha256 parity
+  golden + the hypothesis OFF≡ON property + the hostile status matrix (BELOW_INTRINSIC ±1-ULP band
+  CE AND PE, T-floor µs boundary, reuse hit + per-term misses, NaN-OHLC skip, invalid-spot WARN,
+  repr-boundary spot 100.005, interleave ordering, log-SEQUENCE equality). HONEST: both arms
+  O(rows) — NO O(1) claim; measured ON/OFF ≈1.0× sandbox (0.996× solve-heavy / 0.960× reuse-heavy —
+  printed by the bench, gated only at a generous ≤1.5× no-regression ceiling; the retained Python
+  Decimal/bar-construction work dominates — the slice lands the safe FFI stepping-stone, the
+  judge's honest position); ships INERT — a default flip needs its own DEC/ADR with real-lake soak
+  + zero autoreverts + mutation-green; the Vec-alloc abort residual is the same disclosed envelope
+  as every existing FFI path; GREEKS_FORMULA_VERSION stays 2, enrich goldens frozen. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate
+  change; ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline.)
+  Earlier: `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
   the DB/query-latency hardening pack, READ-side only, three evidence-driven fixes off the 2026-07-11
   profiling run (a 1,178-file real-writer lake, 400k-row ledger + 5 deltas, real routes via
   `build_app` + `TestClient`): **(1)** the `/db` window-ledger pager — NEW
@@ -5437,7 +5512,17 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/db-latency-hardening`
+- **Active feature branch:** `claude/greeks-rust-batch`
+  (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1724 PROVISIONAL — the additive
+  `trading_core.greeks_batch` columnar face of the frozen Greeks kernel + the
+  default-OFF `BRUTEX_GREEKS_RUST_BATCH` batch-solve seam in
+  `enrich_option_bars` (shared-single-copy screens, 16-element burn-in +
+  autorevert latch, chunk cap 65,536); OFF arm byte- and log-identical, the
+  existing enrich golden byte-identical with the flag ON; measured ON/OFF
+  ≈1.0× (stated, not claimed); crate stays 0.3.1; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1724 for the full blurb)
+  Earlier: `claude/db-latency-hardening`
   (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 — the DB/query-latency
   hardening pack, READ-side only: the /db window-ledger DuckDB page fast path
   (7.3–8.8 s cold at 400k rows → 0.56 s, zero Python parses), the pre-open
