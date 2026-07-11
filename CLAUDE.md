@@ -18,20 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-RUST-DATALAKE-IO-DECLINE-001, MIGRATION.md #1726 —
+_Last updated: 2026-07-11 (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726 —
 slice 8 of the Rust-first conversion program (the data-lake I/O layer: 16 `brutex/data/`
-modules + `brutex/feed/resampler.py`) is ASSESSED AND DECLINED, DOCS-ONLY: all 17 modules
-KEEP-PYTHON, the defensible conversion subset is EMPTY — the lake's parquet bytes are
-ALREADY produced by Rust (polars' native zstd encoder, `use_pyarrow=False`) or C++
-(pyarrow, no Rust twin), expected payoff ≈ 0 (IO-bound glue over native engines; the two
-Python hotspots that ever mattered were already vectorized in-place, #1023/#1313), and a
-hand-rewritten byte-producer would break the exact-bytes guarantee run-reproducibility
-depends on. Assessment record = ADR-0019 (`docs/adr/0019-datalake-rust-conversion-declined.md`)
-with the per-module ruling table, the MEASURED/MODELED/UNKNOWN honest-benefit table, FIVE
-surfaced operator flags (incl. the NAMED-NOT-FILED DEC-LAKE-EXACT-PIN-001 lockstep route —
-refusal recommended — and the `feed/resampler.py` deletion-vs-retention DEC) and the 3
-reopening conditions. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate
-change; zero code ships.)
+modules + `brutex/feed/resampler.py`): the panel's keep-Python verdict was
+OPERATOR-OVERRIDDEN to Rust-everywhere — a byte-identity-gated CONVERSION ROADMAP is
+adopted (ADR-0019, `docs/adr/0019-datalake-rust-conversion-roadmap.md`), DOCS-ONLY in
+this commit. Honesty banner kept MANDATORY verbatim: "expected payoff ≈ 0 — conversion
+is for uniformity, not speed" (IO-bound glue over native engines; the two Python
+hotspots that ever mattered were already vectorized in-place, #1023/#1313). Mechanism:
+the port calls polars' NATIVE Rust API — the same encoder family the Python path
+already invokes (`use_pyarrow=False`) — so parity is achievable by construction IFF the
+crate↔wheel lockstep holds, and the empirical spike PROVED it (ADR-0019 §1:
+FEASIBLE-BY-LOCKSTEP — a polars `py-1.42.1` crate build byte-matched the installed
+wheel on the full 5-case corpus through the REAL `_render_bytes`; production carries
+the wheel==tag==zstd atomic pin + the fail-closed version guard — wheel ≠ pin ⇒ the
+flag refuses with one loud WARN). Order: PR-1 the `parquet_writer` render seam (new
+`rust/brutex-lake` crate, default-OFF env flag, Python as live parity oracle, A/B byte
+gates + frozen goldens + the #1531/#1532 burn-in-autorevert pattern) → PR-2 option
+writer render → PR-3 merge/dedup → PR-4 locks/atomic-replace → resampler/stdlib/policy
+waves; `window_ledger_store` (pyarrow C++ encoder, no Rust twin) is the LAST-MILE named
+escalation point — polars-native route first, else escalate with the priced
+DEC-LAKE-EXACT-PIN-001. The panel's findings persist as the risk register + standing
+hazards (lockstep fails LOUD flag-stays-OFF; zstd stack identity; exception-taxonomy
+re-derivation; run-identity bytes downstream). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; zero code ships in this commit.)
 Earlier: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
 DEC-STAGE1A-ROLL-RESET-001 + the round-1–8 review-fix packs DEC-FUTURES-LAUNCH-REVIEW-FIXES-001…-008,
 MIGRATION.md #1700–#1709 + #1710 — the ADR-0012 NIFTY-futures sweep LAUNCH
@@ -2016,26 +2026,48 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-datalake-io-slice8` (**DEC-RUST-DATALAKE-IO-DECLINE-001,
+- **Active branch:** `claude/rust-datalake-io-slice8` (**DEC-RUST-DATALAKE-IO-ROADMAP-001,
   MIGRATION.md #1726** — slice 8 of the Rust-first conversion program (the data-lake I/O
-  layer: 16 `brutex/data/` modules + `brutex/feed/resampler.py`, 17 total) ASSESSED AND
-  DECLINED, DOCS-ONLY: all 17 KEEP-PYTHON, the defensible conversion subset is EMPTY.
-  Grounds (ADR-0019): the byte-parity wall (the parquet bytes are ALREADY polars'
-  Rust zstd encoder / pyarrow's C++ encoder; range pins + no lockfile ⇒ no independent
-  Rust producer can be robustly bit-identical, and `window_ledger_store`'s own docstring
-  disclaims byte parity); no Python hot loop to win (the two that mattered were already
-  vectorized in-place — DEC-LAKE-WRITE-VECTORIZE-001 #1023 MEASURED 1.78×,
-  DEC-PREBUILD-GIL-VECTORIZE-001 #1313 — the residue is statx/fsync/encoder-bound);
-  the parity-feasible remainder (`lake_stats_manifest` + `partition` + `window_ledger`)
-  fails the honest-benefit test (zero-to-negative value, re-creates the twin-drift
-  hazard #1548 eliminated); and the risk side is uniquely heavy (exception-taxonomy
-  verdict flips, live flock/TOCTOU interop, `raw_hash`/run-identity adjacency). FIVE
-  operator flags surfaced, none executed — incl. the NAMED-NOT-FILED
-  DEC-LAKE-EXACT-PIN-001 lockstep route (refusal recommended), the `lake_stats_manifest`
-  if-ever-forced first candidate (frozen `render_shard` byte golden as the
-  cross-language pin), and the `feed/resampler.py` deletion-vs-retention DEC. Umbrella
-  DEC-RUST-FIRST-MANDATE-001 (ledger #1713) is in flight on the Slice-1 PR, NOT on main
-  at this HEAD. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; zero code ships.)
+  layer: 16 `brutex/data/` modules + `brutex/feed/resampler.py`, 17 total): the panel
+  protocol (6 readers → 3 designers → judge) rendered keep-Python; the operator
+  OVERRODE to Rust-everywhere, and a byte-identity-gated CONVERSION ROADMAP is adopted
+  (ADR-0019) — DOCS-ONLY in this commit, zero code ships. Honesty banner MANDATORY
+  verbatim: "expected payoff ≈ 0 — conversion is for uniformity, not speed" (the two
+  Python hotspots that ever mattered were already vectorized in-place —
+  DEC-LAKE-WRITE-VECTORIZE-001 #1023 MEASURED 1.78×, DEC-PREBUILD-GIL-VECTORIZE-001
+  #1313; the residue is statx/fsync/encoder-bound). Mechanism: the port calls polars'
+  NATIVE Rust API — the same encoder family the Python render already invokes — so
+  parity is achievable by construction IFF the crate↔wheel lockstep holds — and the
+  empirical spike PROVED it (ADR-0019 §1, 2026-07-11: FEASIBLE-BY-LOCKSTEP — a Rust
+  polars build at git tag `py-1.42.1` reproduced the installed wheel's parquet bytes
+  bit-identically on all 5 corpus cases through the REAL `_render_bytes`, debug AND
+  release, thread-count invariant; the port must mirror 1.42.1's streaming-engine
+  `sink_parquet` call chain; production = the wheel==tag==zstd ATOMIC pin + the
+  fail-closed version guard — installed wheel ≠ the crate's pin ⇒ the Rust flag
+  REFUSES to engage with one loud WARN — + the CI corpus parity gate on every bump).
+  Order: PR-1 the `parquet_writer` render seam (NEW `rust/brutex-lake` crate,
+  default-OFF env flag, Python retained as the LIVE parity oracle, A/B byte gates +
+  frozen goldens + the #1531/#1532 burn-in self-check with ship-the-oracle-value
+  autorevert) → PR-2 `option_parquet_writer` render (+ defaults-mode probe) → PR-3
+  merge/dedup orchestration (held to the #1023 goldens Rust-vs-Python) → PR-4
+  locks/atomic-replace (flock path law + `LakeWriteHalt` mapping; in-process lock
+  registry never forked off the facade) → Wave B resamplers → Wave C stdlib-byte trio
+  (`lake_stats_manifest` first — the frozen `render_shard` golden as the cross-language
+  byte pin; `partition` as a crate-internal helper; `window_ledger` pyclass
+  single-source per the #1548 pattern) → Wave D policy/orchestration (`lake_invariants`
+  flips only after the full poison-corpus differential). LAST-MILE named ESCALATION
+  POINT: `window_ledger_store` (pyarrow C++ encoder, no Rust twin; its own docstring
+  disclaims byte parity) — polars-native route first, else that ONE module escalates to
+  the coordinator with the priced exact-pin DEC-LAKE-EXACT-PIN-001. The panel's
+  findings persist as the risk register + STANDING HAZARDS: crate↔wheel lockstep (gate
+  fails LOUD, flag stays OFF when the wheel moves past the crate), zstd stack identity,
+  exception-taxonomy re-derivation on the heal/scan waves, and run-identity bytes
+  downstream (`raw_hash` → the FR-CAT-004 catalog rollup; bar VALUES → the
+  run-identity `bxsnap2` digest, #1179 — two distinct chains, both downstream of writer
+  output). `feed/resampler.py` stays EXEMPT (production-dead test oracle, #1492 G3;
+  deletion-vs-retention a separate DEC). Umbrella DEC-RUST-FIRST-MANDATE-001 (ledger
+  #1713) is in flight on the Slice-1 PR, NOT on main at this HEAD. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
   Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
   DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702** — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone: the ONE pinned series alias `NSE-NIFTY-FUT` (symbol_id 4; retired shapes get a
@@ -5197,11 +5229,14 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-datalake-io-slice8`
-  (DEC-RUST-DATALAKE-IO-DECLINE-001, MIGRATION.md #1726 — slice 8 of the
-  Rust-first conversion program, the data-lake I/O layer, ASSESSED AND
-  DECLINED docs-only: all 17 scoped modules KEEP-PYTHON, assessment record
-  ADR-0019; five operator flags surfaced, none executed; ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726 — slice 8 of the
+  Rust-first conversion program, the data-lake I/O layer: the panel's
+  keep-Python verdict OPERATOR-OVERRIDDEN to Rust-everywhere; the
+  byte-identity-gated conversion roadmap is adopted as ADR-0019 (PR-1 =
+  the `parquet_writer` render seam, default-OFF, Python as live parity
+  oracle; `window_ledger_store` = the LAST-MILE named escalation point);
+  DOCS-ONLY in this commit; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  see §1 Active branch for the full blurb)
   Earlier: `claude/magical-cray-g6agaw`
   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
   DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1710 — the ADR-0012
