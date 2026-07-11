@@ -35,6 +35,7 @@ from brutex.dashboard.db_view import (
     _execute_parquet_resilient,
     _existing_month_files_in_span,
     _intraday_open_by_date,
+    _predecessor_candidate_files,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
@@ -269,3 +270,164 @@ class TestExecuteParquetResilientFilesArm:
             == []
         )
         assert spy.binds == []
+
+
+class TestPredecessorCandidateFiles:
+    """Fix 3 of MIGRATION.md #1719 — the %CHNG-baseline predecessor file bound."""
+
+    def test_own_month_plus_single_greatest_prior(self, tmp_path: Path) -> None:
+        from zoneinfo import ZoneInfo
+
+        base = _seed_months(tmp_path, interval="1minute", months=8)
+        # IST midnight of 2024-05-10 = 2024-05-09 18:30 UTC → own UTC month May.
+        before = datetime(2024, 5, 10, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+        files = [Path(f).name for f in _predecessor_candidate_files(base, before)]
+        assert files == ["05.parquet", "04.parquet"]  # own month + ONE prior
+
+    def test_ist_midnight_month_edge_shifts_the_utc_month(self, tmp_path: Path) -> None:
+        """IST midnight of the 1st = the PRIOR UTC month's 18:30 — the own-month
+        candidate must be the prior calendar month's file (the 05:30 shift)."""
+        from zoneinfo import ZoneInfo
+
+        base = _seed_months(tmp_path, interval="1minute", months=8)
+        before = datetime(2024, 5, 1, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+        files = [Path(f).name for f in _predecessor_candidate_files(base, before)]
+        assert files == ["04.parquet", "03.parquet"]  # UTC month April + prior March
+
+    def test_no_prior_month_and_stray_kept(self, tmp_path: Path) -> None:
+        from zoneinfo import ZoneInfo
+
+        base = _seed_months(tmp_path, interval="1minute", months=2)
+        stray = base / "stray.parquet"
+        stray.write_bytes((base / "2024" / "01.parquet").read_bytes())
+        before = datetime(2024, 1, 15, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+        files = _predecessor_candidate_files(base, before)
+        # Own month (Jan; IST midnight of the 15th stays in Jan UTC), the stray
+        # (unknowable month — conservative), and NO prior grammar file exists.
+        # Order is enumeration order — irrelevant to the SQL, compared as a set.
+        assert {Path(f).name for f in files} == {"stray.parquet", "01.parquet"}
+
+    def test_empty_partition_yields_no_candidates(self, tmp_path: Path) -> None:
+        from zoneinfo import ZoneInfo
+
+        base = tmp_path / "empty"
+        base.mkdir()
+        before = datetime(2024, 1, 15, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+        assert _predecessor_candidate_files(base, before) == []
+
+
+class TestPrevCloseBaselineBounded:
+    """Fix 3 of MIGRATION.md #1719: the /db candles %CHNG baseline reads bind
+    O(page-span) month files, byte-identical to the whole-glob answer.
+
+    Evidence (profiling worker, 2026-07-11): even manifest-ON, every candles
+    page click bound the FULL 72-file glob TWICE (7.4 + 9.5 ms) for the
+    prev-close baseline, dwarfing the 1-file manifest-served page read (4.5 ms).
+    """
+
+    def test_bounded_baseline_equals_full_scan_exhaustively(self, tmp_path: Path) -> None:
+        """THE #863 proof pattern, extended: for EVERY stored day (as a page's
+        date set — including every month's FIRST stored day, whose predecessor
+        lives in the PRIOR month's file), the file-bounded
+        ``_intraday_prev_close_by_page_date`` equals the whole-partition oracle
+        (``_prev_trading_close`` over ``_intraday_last_close_by_date``)."""
+        from brutex.dashboard.db_view import (
+            _intraday_last_close_by_date,
+            _intraday_prev_close_by_page_date,
+            _prev_trading_close,
+        )
+
+        _seed_months(tmp_path, interval="1minute", months=8)
+        with duckdb.connect() as conn:
+            oracle = _prev_trading_close(
+                _intraday_last_close_by_date(
+                    conn, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
+                )
+            )
+            all_days = sorted(
+                _intraday_last_close_by_date(
+                    conn, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
+                )
+            )
+            assert len(all_days) == 24  # sanity — the fixture really is deep
+            for day in all_days:
+                bounded = _intraday_prev_close_by_page_date(
+                    conn,
+                    tmp_path,
+                    exchange="NSE",
+                    segment="CASH",
+                    symbol="NSE-NIFTY",
+                    page_dates={day},
+                )
+                assert bounded.get(day) == oracle.get(day), f"divergence at {day}"
+            # A multi-day page spanning a month boundary agrees too.
+            page = {all_days[4], all_days[5], all_days[6]}  # Feb 15/27 + Mar 2
+            bounded = _intraday_prev_close_by_page_date(
+                conn,
+                tmp_path,
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-NIFTY",
+                page_dates=page,
+            )
+            assert {d: bounded.get(d) for d in page} == {d: oracle.get(d) for d in page}
+
+    def test_baseline_click_binds_o_span_files_not_o_all(self, tmp_path: Path) -> None:
+        """THE fix-3 op-count teeth (fails-before): both baseline statements bind
+        O(page-span) files (span ≤ 3 with the ±1-day pad; predecessor ≤ 2) —
+        the pre-fix statements each bound ALL 8 stored months (72 in the
+        profiling evidence)."""
+        from brutex.dashboard.db_view import _intraday_prev_close_by_page_date
+
+        _seed_months(tmp_path, interval="1minute", months=8)
+        spy = _BindSpy()
+        out = _intraday_prev_close_by_page_date(
+            spy,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            page_dates={date(2024, 5, 15), date(2024, 5, 27)},
+        )
+        assert out  # baselines really served
+        assert len(spy.binds) == 2  # span read + predecessor read
+        assert max(spy.binds) <= 3  # never the 8-file whole glob (72 measured)
+
+    def test_corrupt_candidate_still_blanks_the_page(self, tmp_path: Path) -> None:
+        """The adjacency guard is candidate-scoped but intact: a corrupt file
+        INSIDE the bounded candidates (here the predecessor's own month) blanks
+        the page's %CHNG — correct-or-absent, never a bridged baseline."""
+        from brutex.dashboard.db_view import _intraday_prev_close_by_page_date
+
+        base = _seed_months(tmp_path, interval="1minute", months=4)
+        (base / "2024" / "02.parquet").write_bytes(b"garbage")
+        with duckdb.connect() as conn:
+            out = _intraday_prev_close_by_page_date(
+                conn,
+                tmp_path,
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-NIFTY",
+                page_dates={date(2024, 3, 2)},
+            )
+        assert out == {}  # honest blank — the predecessor may have lived there
+
+    def test_corrupt_file_outside_candidates_never_blanks(self, tmp_path: Path) -> None:
+        """The strictly-narrower degrade (named in MIGRATION.md #1719): a corrupt
+        month provably OUTSIDE the page's baseline candidates (months before the
+        single greatest prior file) no longer blanks the %CHNG — pre-fix, ANY
+        corrupt file in the partition blanked every page."""
+        from brutex.dashboard.db_view import _intraday_prev_close_by_page_date
+
+        base = _seed_months(tmp_path, interval="1minute", months=6)
+        (base / "2024" / "01.parquet").write_bytes(b"garbage")
+        with duckdb.connect() as conn:
+            out = _intraday_prev_close_by_page_date(
+                conn,
+                tmp_path,
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-NIFTY",
+                page_dates={date(2024, 5, 15)},
+            )
+        assert out  # served — January cannot hold May's span nor its predecessor

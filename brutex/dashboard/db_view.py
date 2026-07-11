@@ -3771,14 +3771,31 @@ def _intraday_last_close_with_predecessor(
        first page row).
 
     Both reads are bounded by the bar ``timestamp`` (IST-midnight instants), which
-    DuckDB row-group-prunes, so the per-click cost is O(page date-span) — flat as
-    the lake deepens, never O(all stored years). The page's dates are contiguous
-    trading days (a page is a ``LIMIT``/``OFFSET`` slice of timestamp-sorted bars),
-    and prepending their single shared predecessor makes :func:`_prev_trading_close`
-    map each page date to the same prior-day close the full scan would (proven in
-    ``tests/unit/test_dashboard_db_query.py``). Returns ``{}`` when *page_dates* is
-    empty, the symbol has no 1-minute partition, or a corrupt file was skipped (the
-    adjacency guard — a bridged predecessor would baseline a NON-ADJACENT close).
+    DuckDB row-group-prunes, AND — DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md
+    #1719) — by an explicit month-FILE list, which bounds the Parquet FOOTER
+    opens too: the #863 timestamp bounds pruned row groups but each statement
+    still bound the whole ``/**/*.parquet`` glob, so DuckDB opened EVERY stored
+    month's footer per statement, TWICE per page click (the profiling evidence
+    measured both baseline statements binding the full 72-file glob at 7.4 +
+    9.5 ms while the manifest-served page read bound 1 file at 4.5 ms). The
+    span read now binds :func:`_existing_month_files_in_span` (the page's own
+    months, ±1-day padded); the predecessor read binds
+    :func:`_predecessor_candidate_files` (the earliest page instant's own UTC
+    month file + the single greatest earlier month file + any non-grammar
+    stray) — so the per-click cost is O(page date-span) footer opens + row
+    groups, flat as the lake deepens, never O(all stored years). The page's
+    dates are contiguous trading days (a page is a ``LIMIT``/``OFFSET`` slice
+    of timestamp-sorted bars), and prepending their single shared predecessor
+    makes :func:`_prev_trading_close` map each page date to the same prior-day
+    close the full scan would (proven in ``tests/unit/test_dashboard_db_query.py``;
+    the file-bounded reads are pinned byte-equal to the whole-glob reads in
+    ``tests/unit/test_dashboard_db_span_bounded_reads.py``). Returns ``{}`` when
+    *page_dates* is empty, the symbol has no 1-minute partition, or a corrupt
+    CANDIDATE file was skipped (the adjacency guard — a bridged predecessor
+    would baseline a NON-ADJACENT close; a corrupt file OUTSIDE the bounded
+    candidates provably cannot hold the span's bars or the true predecessor —
+    see :func:`_predecessor_candidate_files`'s ordering proof — so it no longer
+    blanks the page, the strictly-narrower degrade named in MIGRATION.md #1719).
 
     The baseline ALWAYS reads the ``1minute`` partition (DEC-SPOT-PREVCLOSE-1MIN-001),
     even when a coarser intraday timeframe is being VIEWED — *page_dates* come from
@@ -3802,16 +3819,21 @@ def _intraday_last_close_with_predecessor(
     hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
     skip_source = f"candle-prevclose:{exchange}/{segment}/{symbol}"
     # ADJACENCY GUARD (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix): the prior-day-close baseline
-    # is ONLY valid if the partition read in full — `_prev_trading_close` maps each page
-    # date to its IMMEDIATE predecessor, and the predecessor read (#2 below) finds "the
-    # bar just before `lo`". If ANY file in this 1-minute partition was skipped (corrupt),
-    # the true adjacent predecessor may have lived in the dropped file, so any %-change we
+    # is ONLY valid if every CANDIDATE file read cleanly — `_prev_trading_close` maps each
+    # page date to its IMMEDIATE predecessor, and the predecessor read (#2 below) finds
+    # "the bar just before `lo`". If a bounded-candidate file was skipped (corrupt), the
+    # true adjacent predecessor may have lived in the dropped file, so any %-change we
     # computed would be baselined on a NON-ADJACENT earlier day — a confidently-WRONG
-    # number. So we record whether either read omitted a file and, if so, return {} → every
-    # affected bar gets an honest BLANK %-change, never a fabricated one (Golden Rule #1).
+    # number. So we record whether either read omitted a candidate and, if so, return {} →
+    # every affected bar gets an honest BLANK %-change, never a fabricated one (Golden
+    # Rule #1). A corrupt file OUTSIDE the candidates provably cannot hold the span's
+    # bars or the true predecessor (DEC-DB-LATENCY-HARDENING-001 — see
+    # `_predecessor_candidate_files`'s ordering proof), so it no longer blanks the page.
     skip_sink: list[bool] = []
-    # 1) last 1-minute close per day, bounded to the page's [lo, hi] span. glob is
-    #    built from validated coordinates (no free user text); path + instants bound.
+    # 1) last 1-minute close per day, bounded to the page's [lo, hi] span — by the
+    #    timestamp instants (row-group pruning) AND the span's own month FILES
+    #    (footer-open pruning, MIGRATION.md #1719). glob/file list built from
+    #    validated coordinates (no free user text); path + instants bound.
     span = _execute_parquet_resilient(
         conn,
         base,
@@ -3821,10 +3843,12 @@ def _intraday_last_close_with_predecessor(
         [lo_instant, hi_instant],
         source=skip_source,
         skip_sink=skip_sink,
+        files=_existing_month_files_in_span(base, lo, hi),
     )
     last_close: dict[date, Decimal] = {day: _to_decimal(close) for day, close in span}
     # 2) the single bar immediately BEFORE lo — the predecessor of the earliest
-    #    page date (ORDER BY DESC LIMIT 1 reads ~one row-group, not the whole past).
+    #    page date (ORDER BY DESC LIMIT 1 over ONLY the files that can hold it:
+    #    lo_instant's own UTC month + the single greatest earlier month + strays).
     pred_rows = _execute_parquet_resilient(
         conn,
         base,
@@ -3834,6 +3858,7 @@ def _intraday_last_close_with_predecessor(
         [lo_instant],
         source=skip_source,
         skip_sink=skip_sink,
+        files=_predecessor_candidate_files(base, lo_instant),
     )
     if skip_sink:
         # A corrupt file was skipped → adjacency is no longer guaranteed → honest blank.
@@ -3941,6 +3966,44 @@ def _existing_month_files_in_span(base: Path, start: date, end: date) -> list[st
         parsed = parse_rel_month(KIND_BARS, f"{path.parent.name}/{path.name}")
         if parsed is None or lo_key <= parsed <= hi_key:
             keep.append(path.as_posix())
+    return keep
+
+
+def _predecessor_candidate_files(base: Path, before: datetime) -> list[str]:
+    """The existing month files that can hold the LATEST bar strictly before *before*.
+
+    DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md #1719): the file bound for the
+    %CHNG baseline's predecessor read (``... WHERE timestamp < ? ORDER BY
+    timestamp DESC LIMIT 1``) — the #863 timestamp bound pruned row groups but
+    the whole-glob bind still opened EVERY stored month's Parquet footer per
+    click. ORDERING PROOF that the candidates suffice: the lake partitions by
+    the bar's UTC month (``partition_for_timestamp`` — a grammar file
+    ``<yyyy>/<mm>.parquet`` holds ONLY that UTC month's bars), so every bar of
+    month ``m`` precedes every bar of month ``m+1``. Let ``M`` = *before*'s own
+    UTC month. Any bar ``< before`` lives in a month ``<= M``; if the argmax
+    bar lived in a grammar month ``m1 < M`` while another grammar file with
+    ``m1 < m2 < M`` existed, ``m2``'s bars (every file holds >= 1 bar by writer
+    construction) would ALL be later than ``m1``'s and still ``< before`` — a
+    contradiction — so the argmax lives in ``M``'s own file, the single
+    GREATEST grammar file strictly before ``M``, or a NON-grammar stray file
+    (unknowable month — conservatively always included, the byte-parity rule of
+    :func:`_existing_month_files_in_span`). Exactly those are returned:
+    <= 2 grammar files + strays, O(existing files) enumeration per call (the
+    listing cost the caller's presence guard already pays — stated, never O(1)).
+    """
+    utc_before = before.astimezone(UTC)
+    month_key = (utc_before.year, utc_before.month)
+    prior: tuple[tuple[int, int], str] | None = None
+    keep: list[str] = []
+    for path in sorted(base.rglob("*.parquet")):
+        parsed = parse_rel_month(KIND_BARS, f"{path.parent.name}/{path.name}")
+        posix = path.as_posix()
+        if parsed is None or parsed == month_key:
+            keep.append(posix)
+        elif parsed < month_key and (prior is None or parsed > prior[0]):
+            prior = (parsed, posix)
+    if prior is not None:
+        keep.append(prior[1])
     return keep
 
 
