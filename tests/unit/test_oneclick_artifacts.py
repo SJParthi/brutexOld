@@ -2044,20 +2044,139 @@ class TestTradeStoreReader:
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2
 
-    def test_unstattable_top100_computes_fresh_uncached(
+    def test_absent_top100_computes_fresh_uncached(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A None revision computes fresh and caches NOTHING (lake_revision law)."""
+        """An ABSENT top100 (probe answered: no file) computes fresh, caches NOTHING.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 narrows the old blanket None-revision
+        doctrine to the absent arm only — a deleted/never-written artifact
+        must never be served from the memo (no stale illusion).
+        """
         results_root = _rebind_run(tmp_path)
         reader = oc.TradeStoreReader(results_root)
-        monkeypatch.setattr(oc, "artifact_revision", lambda _path: None)
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, False))
         page = reader.page("r-x", 1, offset=0, limit=5)
-        # revision None on top100 → fresh parse; then the stamp probe also
-        # reads None → the awaiting sidecars arm (nothing fabricated).
+        # absent top100 → fresh parse of the (missing) artifact → awaiting.
         assert page.status == "awaiting"
         assert reader.parse_count == 1
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2  # nothing was cached
+
+    def test_top100_probe_outage_serves_last_known_memo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A probe OUTAGE serves the memoised top100 (labelled) — no re-parse storm.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (fails-before: the pre-change reader
+        re-parsed the whole artifact on EVERY trades-page request while the
+        stat probe was down).
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "ok"
+        assert reader.parse_count == 1  # memo primed pre-outage
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        for _ in range(3):
+            page = reader.page("r-x", 1, offset=0, limit=5)
+            assert page.status == "ok"
+            assert "top100 revision probe outage — serving last-known" in page.detail
+        assert reader.parse_count == 1  # the memo served every outage page
+        monkeypatch.setattr(oc, "artifact_probe", real_probe)
+        clean = reader.page("r-x", 1, offset=0, limit=5)
+        assert clean.status == "ok"
+        assert "outage" not in clean.detail  # the label clears on recovery
+        assert reader.parse_count == 1  # same revision → the memo still holds
+
+    def test_top100_outage_note_rides_a_served_corrupt_memo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A last-known CORRUPT top100 served under outage carries BOTH notes."""
+        results_root = tmp_path / "sweeps"
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write(run_dir / oc.TOP100_FILENAME, "{not json")
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "corrupt"
+        assert reader.parse_count == 1  # corrupt verdict memoised per revision
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        page = reader.page("r-x", 1, offset=0, limit=5)
+        assert page.status == "corrupt"
+        assert "top100 revision probe outage — serving last-known" in page.detail
+        assert ";" in page.detail  # the corrupt detail is kept, the note appended
+        assert reader.parse_count == 1  # served from the memo — no re-parse
+
+    def test_top100_probe_outage_without_memo_parses_fresh_uncached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An outage with NO primed memo falls back to the fresh uncached parse."""
+        results_root = _rebind_run(tmp_path)
+        reader = oc.TradeStoreReader(results_root)
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        page = reader.page("r-x", 1, offset=0, limit=5)
+        assert page.status == "awaiting"
+        assert reader.parse_count == 1
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 2  # nothing cached — no memo to serve
+
+    def test_top100_outage_memo_for_a_different_path_is_not_served(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The memo serves ONLY its own path under outage — never a foreign run's."""
+        results_root = _rebind_run(tmp_path)
+        _rebind_run(tmp_path, run_id="r-y")
+        reader = oc.TradeStoreReader(results_root)
+        reader.page("r-x", 1, offset=0, limit=5)  # memo primed for r-x
+        assert reader.parse_count == 1
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        reader.page("r-y", 1, offset=0, limit=5)
+        assert reader.parse_count == 2  # r-y parsed fresh — r-x's memo not served
+
+    def test_top100_outage_warns_once_per_outage_and_logs_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reader's OutageGate WARNs once per outage per path + recovery INFO.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 reconciled onto #1406's ONE
+        ``OutageGate`` mechanism: no route gate covers this reader, so it owns
+        a gate keyed on the top100 path — ``oneclick.probe_outage`` fires on
+        the FIRST outage poll only, ``oneclick.probe_recovered`` on the flip
+        back, never per poll.
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "ok"
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(3):
+                reader.page("r-x", 1, offset=0, limit=5)
+        warns = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(warns) == 1  # once per outage, never per poll
+        assert warns[0]["coordinate"] == str(run_dir / oc.TOP100_FILENAME)
+        assert warns[0]["last_known"] is True
+        monkeypatch.setattr(oc, "artifact_probe", real_probe)
+        with structlog.testing.capture_logs() as logs:
+            reader.page("r-x", 1, offset=0, limit=5)
+        assert any(e["event"] == "oneclick.probe_recovered" for e in logs)
 
 
 _EQUITY_POINTS = (
@@ -2126,6 +2245,33 @@ class TestEquityPage:
         assert page.total == 3
         clamped = reader.equity_page("r-x", 1, offset=-5, limit=100)
         assert len(clamped.rows) == 3  # negative offset clamps to 0
+
+    def test_equity_page_names_a_top100_probe_outage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The equity page's detail carries the top100 outage note too.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (club reconcile): the note threads
+        through the SHARED ``_resolve_sidecars`` 3-tuple, so BOTH pages name
+        a last-known top100 serve — never a silent stale resolution.
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.equity_page("r-x", 1, offset=0, limit=100).status == "ok"
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        page = reader.equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "ok"
+        assert "top100 revision probe outage — serving last-known" in page.detail
 
     def test_limit_beyond_the_equity_cap_is_clamped_and_named(self, tmp_path: Path) -> None:
         results_root = _rebind_run(tmp_path)
