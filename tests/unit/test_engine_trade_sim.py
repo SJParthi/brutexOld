@@ -1063,8 +1063,11 @@ class TestOpenPositionSessionGapClose:
     def test_v2_pending_next_open_exit_is_subsumed(self) -> None:
         # V2: a NEXT_OPEN stop scheduled on day-D's LAST stored bar pre-fix
         # filled at day D+1's 09:15 open (+50000 paisa fabricated). Now the
-        # boundary close SUBSUMES the pending exit: fill = day-D's last CLOSE,
-        # and the flat walker carries nothing into day D+1 (no later fill).
+        # boundary close SUBSUMES the pending exit: fill = day-D's last CLOSE.
+        # This pins the flat-walker TRADE SHAPE only (exactly one trade,
+        # priced on day D) — with no day-D+1 entry there is no position a
+        # stale pending could bite, so the CLEAR's killing teeth live in
+        # test_cross_session_stale_pending_exit_never_reaches_a_new_position.
         bars = [
             _bar(11, 10, "100", "101", "99", "100"),  # signal
             _bar(11, 11, "104", "104", "103.50", "104"),  # entry @ open 104.00
@@ -1116,6 +1119,56 @@ class TestOpenPositionSessionGapClose:
         assert trades[0].exit_ts == _ts(11, 14)
         assert trades[0].pnl_paisa == 0
         assert [d.exit_reason for d in sink] == ["session_gap"]
+
+    def test_cross_session_stale_pending_exit_never_reaches_a_new_position(self) -> None:
+        """The (A2) pending-exit CLEAR has teeth (the Rust directed test's Python twin).
+
+        After the boundary close, a NEW day-D+1 position must ride normally to
+        end of data — under a mutant that drops the ``self._pending_exit =
+        None`` clear in the (A2) guard, the stale day-D NEXT_OPEN stop pending
+        would close the new position instantly at its first managed bar's open
+        (its own ENTRY bar, managed same-push) with the stale ``stop_loss``
+        reason. Day-D+1 lows stay ABOVE the second trade's own stop level
+        (entry 605.00 − 4.00 = 601.00), so only a stale pending exit could
+        close it before the end of data. ONE killer test covers BOTH pending
+        kinds: the NEXT_OPEN SL/TP pending and the Mode-B SIGNAL pending share
+        the ONE ``_pending_exit`` slot, so the single (A2) clear subsumes both
+        (V2/V3 pin each shape's boundary-close fill; this test pins the CLEAR
+        itself).
+        """
+        bars = [
+            _bar(11, 10, "100", "101", "99", "100"),  # signal
+            _bar(11, 11, "104", "104", "103.50", "104"),  # entry @ open 104.00
+            # low 100.00 hits the −400 stop (level 100.00) → NEXT_OPEN pending
+            # armed on day-D's LAST stored bar.
+            _bar(11, 12, "101", "104.50", "100", "101"),
+            _gap_bar(9, 15, "600", "601", "599", "600"),  # boundary → session_gap
+            _gap_bar(9, 16, "600", "601", "599", "600"),  # signal → earliest re-arm
+            _gap_bar(9, 17, "605", "606", "604", "605"),  # NEW entry @ open 605.00
+            _gap_bar(9, 18, "607", "608", "606", "607.50"),  # rides → EOD close
+        ]
+        signals = [True, False, False, False, True, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=400,
+            detail_sink=sink,
+            policy=FillPolicy(stop_loss=LevelFill.NEXT_OPEN),
+        )
+        assert len(trades) == 2
+        assert trades[0].exit_ts == _ts(11, 12)  # the V2-shape session_gap close
+        assert trades[0].pnl_paisa == 10_100 - 10_400
+        # The NEW position rides to end of data — never an instant
+        # stale-pending close at its first managed bar (which would read
+        # exit_ts == entry_ts with the stale ``stop_loss`` reason).
+        assert trades[1].entry_ts == _ts(9, 17, day=_NEXT_DAY)
+        assert trades[1].exit_ts == _ts(9, 18, day=_NEXT_DAY)
+        assert trades[1].pnl_paisa == 60_750 - 60_500  # EOD close 607.50 − entry 605.00
+        assert trades[1].holding_bars == 2
+        assert [d.exit_reason for d in sink] == ["session_gap", "end_of_data"]
 
     def test_sell_direction_symmetric_session_gap_close(self) -> None:
         # SELL variant of V1 (§8.9): a short pre-fix would have "profited" the
