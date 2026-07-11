@@ -1168,8 +1168,13 @@ _WORKER_BARS_KEYS_SEEN: set[tuple[str, str]] = set()
 #: process — reset by :func:`_worker_init`). Belt-and-braces since the
 #: fix-round-1 disable: any disable kills the memo outright, so a SECOND
 #: natural disable per worker is structurally unreachable — the latch guards
-#: only a future re-enable path (arm pinned by a direct test).
-_WORKER_BARS_MEMO_WARNED: bool = False
+#: only a future re-enable path (arm pinned by a direct test). A one-slot
+#: mutable holder rather than a bare ``global`` bool, because CodeQL's
+#: ``py/unused-global-variable`` query cannot see a read that happens only
+#: inside a function via a ``global`` statement (repo CodeQL Trap 3 — the
+#: ``progress_beat._WARN_THROTTLE`` precedent; the semantics are identical,
+#: the item write just never rebinds the module name).
+_WORKER_BARS_MEMO_WARN: Final[dict[str, bool]] = {"warned": False}
 
 
 def _worker_init(ctx: _WorkerContext) -> None:
@@ -1224,8 +1229,8 @@ def _worker_init(ctx: _WorkerContext) -> None:
     # returns the bars object unchanged, the telemetry helpers return None
     # values).
     global _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO  # noqa: PLW0603
-    global _WORKER_BARS_KEYS_SEEN, _WORKER_BARS_MEMO_WARNED  # noqa: PLW0603
-    _WORKER_BARS_MEMO_WARNED = False
+    global _WORKER_BARS_KEYS_SEEN  # noqa: PLW0603
+    _WORKER_BARS_MEMO_WARN["warned"] = False
     _WORKER_BARS_KEYS_SEEN = set()
     if ctx.worker_kernel_cache:
         _WORKER_KERNEL_CACHE = ResidentKernelCache(capacity=ctx.worker_kernel_capacity)
@@ -1354,11 +1359,11 @@ def _disable_worker_kernel_cache(instrument: str, tf_label: str, reason: str) ->
     carrying the machine ``reason`` (``resident_value_mismatch`` /
     ``revisit_after_eviction``). O(1).
     """
-    global _WORKER_BARS_MEMO_WARNED, _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO  # noqa: PLW0603
+    global _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO  # noqa: PLW0603
     _WORKER_KERNEL_CACHE = None
     _WORKER_BARS_MEMO = None
-    if not _WORKER_BARS_MEMO_WARNED:
-        _WORKER_BARS_MEMO_WARNED = True
+    if not _WORKER_BARS_MEMO_WARN["warned"]:
+        _WORKER_BARS_MEMO_WARN["warned"] = True
         _LOG.warning(
             "sweep_parallel.worker_bars_memo_mismatch",
             instrument=instrument,

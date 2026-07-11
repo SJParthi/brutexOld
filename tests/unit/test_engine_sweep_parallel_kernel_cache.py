@@ -117,7 +117,7 @@ def _reset_worker_state() -> Generator[None, None, None]:
     mod._WORKER_KERNEL_CACHE = None
     mod._WORKER_BARS_MEMO = None
     mod._WORKER_BARS_KEYS_SEEN = set()
-    mod._WORKER_BARS_MEMO_WARNED = False
+    mod._WORKER_BARS_MEMO_WARN["warned"] = False
     mod.reset_worker_kernel_flag_warnings_for_tests()
     reset_configuration()
 
@@ -421,7 +421,7 @@ class TestWorkerInitKernelCache:
         cache = mod._WORKER_KERNEL_CACHE
         assert isinstance(cache, ResidentKernelCache)
         assert isinstance(mod._WORKER_BARS_MEMO, OrderedDict)
-        assert mod._WORKER_BARS_MEMO_WARNED is False
+        assert mod._WORKER_BARS_MEMO_WARN["warned"] is False
         # Capacity travelled from the ctx (T6 bound is enforced by the cache).
         assert len(cache) == 0
 
@@ -450,7 +450,7 @@ class TestWorkerInitKernelCache:
     def test_reinit_resets_the_seen_key_ledger_and_warn_latch(self, tmp_path: Path) -> None:
         """Fix-round-7 (final-refuter B1 MINOR-1): the two ``_worker_init``
         reset lines ``_WORKER_BARS_KEYS_SEEN = set()`` and
-        ``_WORKER_BARS_MEMO_WARNED = False`` have TEETH — severing either
+        ``_WORKER_BARS_MEMO_WARN["warned"] = False`` have TEETH — severing either
         (a self-assign no-op) fails HERE. Production-inert under the
         spawn-only contract (a spawn worker's globals start fresh); the
         resets defend exactly the in-process ``_worker_init`` reuse this
@@ -461,14 +461,14 @@ class TestWorkerInitKernelCache:
         mod._WORKER_KERNEL_CACHE = stale_cache
         mod._WORKER_BARS_MEMO = OrderedDict({("JUNK", "1minute"): _BARS})
         mod._WORKER_BARS_KEYS_SEEN = {("JUNK", "1minute")}
-        mod._WORKER_BARS_MEMO_WARNED = True
+        mod._WORKER_BARS_MEMO_WARN["warned"] = True
         mod._worker_init(
             mod._WorkerContext(
                 grid=_grid(), root=tmp_path, worker_kernel_cache=True, worker_kernel_capacity=2
             )
         )
         assert not mod._WORKER_BARS_KEYS_SEEN
-        assert mod._WORKER_BARS_MEMO_WARNED is False
+        assert mod._WORKER_BARS_MEMO_WARN["warned"] is False
         fresh = mod._WORKER_KERNEL_CACHE
         assert isinstance(fresh, ResidentKernelCache)
         assert fresh is not stale_cache
@@ -567,7 +567,7 @@ class TestInternBars:
     def _memo_on(self) -> None:
         mod._WORKER_BARS_MEMO = OrderedDict()
         mod._WORKER_BARS_KEYS_SEEN = set()
-        mod._WORKER_BARS_MEMO_WARNED = False
+        mod._WORKER_BARS_MEMO_WARN["warned"] = False
 
     def test_memo_off_returns_bars_untouched(self) -> None:
         mod._WORKER_BARS_MEMO = None
@@ -651,7 +651,7 @@ class TestInternBars:
         second natural mismatch per worker unreachable), a mismatch still
         fail-safe-disables both globals, without a second WARN."""
         self._memo_on()
-        mod._WORKER_BARS_MEMO_WARNED = True
+        mod._WORKER_BARS_MEMO_WARN["warned"] = True
         first = list(_BARS)
         mod._intern_bars("NIFTY", "1minute", first)
         with capture_logs() as logs:
@@ -673,7 +673,7 @@ class TestInternBars:
         self._memo_on()  # latch explicitly False
         with capture_logs() as logs:
             mod._disable_worker_kernel_cache("NIFTY", "1minute", "resident_value_mismatch")
-            assert mod._WORKER_BARS_MEMO_WARNED is True  # the WRITE arm, pinned
+            assert mod._WORKER_BARS_MEMO_WARN["warned"] is True  # the WRITE arm, pinned
             mod._disable_worker_kernel_cache("NIFTY", "1minute", "resident_value_mismatch")
         assert mod._WORKER_BARS_MEMO is None
         assert mod._WORKER_KERNEL_CACHE is None
