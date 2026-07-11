@@ -1521,7 +1521,7 @@ jobs:
           #          integration-tested by
           #          tests/integration/test_timeframe_materialize_roundtrip.py.
           if compgen -G "tests/unit/test_timeframe_materialize.py" > /dev/null; then
-            pytest --cov=brutex.data.timeframe_materialize --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframe_materialize.py tests/unit/test_timeframe_materialize_segment.py tests/integration/test_timeframe_materialize_roundtrip.py tests/integration/test_timeframe_materialize_grounded_cutoff.py
+            pytest --cov=brutex.data.timeframe_materialize --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframe_materialize.py tests/unit/test_timeframe_materialize_segment.py tests/integration/test_timeframe_materialize_roundtrip.py tests/integration/test_timeframe_materialize_grounded_cutoff.py tests/integration/test_timeframe_materialize_daily_range.py
           else
             echo "(brutex.data.timeframe_materialize test file not present yet — gate inactive)"
           fi
@@ -1793,6 +1793,14 @@ jobs:
             pytest --cov=brutex.data.today_completeness --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_today_completeness.py
           else
             echo "(brutex.data.today_completeness test file not present yet — gate inactive)"
+          fi
+          # DEC-SESSION-DENSITY-CENSUS-001: the WARN-only per-session bar-density
+          # census (pure classifier + guarded emitter, stdlib+structlog+calendars
+          # only). 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_session_density.py" > /dev/null; then
+            pytest --cov=brutex.data.session_density --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_session_density.py
+          else
+            echo "(brutex.data.session_density test file not present yet — gate inactive)"
           fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR

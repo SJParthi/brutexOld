@@ -1,0 +1,607 @@
+"""Tests for `brutex.data.session_density` — the WARN-only bar-density census.
+
+DEC-SESSION-DENSITY-CENSUS-001. 100% line+branch STANDALONE (the ci.yml
+per-module gate): the deficiency law (abs-floor AND fraction, both boundary
+sides), every abstain reason (out_of_coverage · non_trading · observed-overlay
+· muhurat · forming_session · boundary), the interior zero-bar
+``missing_session`` arm, the shape taxonomy + gap bounds, the known-irregular
+INFO arm (2021-02-24's 375/465 + the 2020 halt days), the fail-soft env knobs
++ the default-ON kill switch, the cap-20 + suppressed-summary emit discipline,
+and the error-guard twin (an emitter crash never propagates).
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import pytest
+from brutex.calendars.nse import is_trading_day
+from brutex.data import session_density as sd
+from brutex.data.session_density import (
+    SESSION_DENSITY_ABS_FLOOR,
+    SESSION_DENSITY_ERROR_EVENT,
+    SESSION_DENSITY_KILL_ENV,
+    SESSION_DENSITY_KNOWN_EVENT,
+    SESSION_DENSITY_LOW_EVENT,
+    SESSION_DENSITY_MIN_FRACTION,
+    SESSION_DENSITY_SUPPRESSED_EVENT,
+    SESSION_DENSITY_WARN_CAP,
+    SHAPE_INTRADAY_HOLE,
+    SHAPE_MISSING_SESSION,
+    SHAPE_SPARSE,
+    SessionDensityFlag,
+    classify_session_density,
+    observe_session_density,
+    session_density_census_enabled,
+)
+from structlog.testing import capture_logs
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+#: A far-future forming-session cutoff so historical fixtures always judge.
+_FAR_FUTURE = date(2026, 12, 31)
+
+
+def _minute_ts(d: date, hh: int, mm: int) -> datetime:
+    """A UTC-aware timestamp for the IST wall clock ``hh:mm`` on ``d``."""
+    return datetime(d.year, d.month, d.day, hh, mm, tzinfo=_IST).astimezone(UTC)
+
+
+def _session_minutes(
+    d: date, *, skip: set[int] | None = None, open_minute: int = 9 * 60 + 15, count: int = 375
+) -> list[datetime]:
+    """One bar per session minute on ``d``, minus the ``skip`` minute-of-day set."""
+    skipped = skip or set()
+    out: list[datetime] = []
+    for i in range(count):
+        minute_of_day = open_minute + i
+        if minute_of_day in skipped:
+            continue
+        out.append(_minute_ts(d, *divmod(minute_of_day, 60)))
+    return out
+
+
+# Regular NSE trading days used as fixtures (Tue/Wed/Thu, verified calendar).
+_TUE = date(2024, 1, 2)
+_WED = date(2024, 1, 3)
+_THU = date(2024, 1, 4)
+
+
+def _bracketed(middle_bars: list[datetime]) -> list[datetime]:
+    """Full boundary sessions on Tue + Thu around *middle_bars* on Wednesday."""
+    return _session_minutes(_TUE) + middle_bars + _session_minutes(_THU)
+
+
+class TestKillSwitch:
+    def test_default_on(self) -> None:
+        assert session_density_census_enabled(None) is True
+
+    @pytest.mark.parametrize("raw", ["0", "false", "no", "off", " OFF ", "False"])
+    def test_falsy_literals_disable(self, raw: str) -> None:
+        assert session_density_census_enabled(raw) is False
+
+    @pytest.mark.parametrize("raw", ["", "1", "on", "junk"])
+    def test_everything_else_stays_on(self, raw: str) -> None:
+        assert session_density_census_enabled(raw) is True
+
+    def test_env_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(SESSION_DENSITY_KILL_ENV, "off")
+        assert session_density_census_enabled() is False
+        monkeypatch.delenv(SESSION_DENSITY_KILL_ENV)
+        assert session_density_census_enabled() is True
+
+
+class TestTunableKnobs:
+    """Fail-soft env parsing — malformed env NEVER crashes a pull."""
+
+    def test_fraction_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("BRUTEX_SESSION_DENSITY_MIN_FRACTION", raising=False)
+        assert (
+            sd._tunable_fraction("BRUTEX_SESSION_DENSITY_MIN_FRACTION", 0.9)  # pyright: ignore[reportPrivateUsage]
+            == 0.9
+        )
+
+    @pytest.mark.parametrize("raw", ["junk", "", "nan", "inf", "-0.5", "0", "1.5"])
+    def test_fraction_junk_falls_back(self, raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_SESSION_DENSITY_MIN_FRACTION", raw)
+        assert (
+            sd._tunable_fraction("BRUTEX_SESSION_DENSITY_MIN_FRACTION", 0.9)  # pyright: ignore[reportPrivateUsage]
+            == 0.9
+        )
+
+    def test_fraction_valid_value_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_SESSION_DENSITY_MIN_FRACTION", "0.5")
+        assert (
+            sd._tunable_fraction("BRUTEX_SESSION_DENSITY_MIN_FRACTION", 0.9)  # pyright: ignore[reportPrivateUsage]
+            == 0.5
+        )
+
+    def test_fraction_one_is_valid_boundary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_SESSION_DENSITY_MIN_FRACTION", "1.0")
+        assert (
+            sd._tunable_fraction("BRUTEX_SESSION_DENSITY_MIN_FRACTION", 0.9)  # pyright: ignore[reportPrivateUsage]
+            == 1.0
+        )
+
+    def test_floor_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("BRUTEX_SESSION_DENSITY_ABS_FLOOR", raising=False)
+        assert sd._tunable_floor("BRUTEX_SESSION_DENSITY_ABS_FLOOR", 30) == 30  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.parametrize("raw", ["junk", "", "0", "-5", "1.5"])
+    def test_floor_junk_falls_back(self, raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_SESSION_DENSITY_ABS_FLOOR", raw)
+        assert sd._tunable_floor("BRUTEX_SESSION_DENSITY_ABS_FLOOR", 30) == 30  # pyright: ignore[reportPrivateUsage]
+
+    def test_floor_valid_value_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_SESSION_DENSITY_ABS_FLOOR", "5")
+        assert sd._tunable_floor("BRUTEX_SESSION_DENSITY_ABS_FLOOR", 30) == 5  # pyright: ignore[reportPrivateUsage]
+
+
+class TestLargestMissingRun:
+    def test_interior_run(self) -> None:
+        present = set(range(10)) - {3, 4, 5}
+        assert sd._largest_missing_run(present, 10) == (3, 5)  # pyright: ignore[reportPrivateUsage]
+
+    def test_tail_run_wins_when_longer(self) -> None:
+        present = set(range(10)) - {2, 6, 7, 8, 9}
+        assert sd._largest_missing_run(present, 10) == (6, 9)  # pyright: ignore[reportPrivateUsage]
+
+    def test_earliest_run_wins_ties(self) -> None:
+        present = set(range(10)) - {1, 2, 7, 8}
+        assert sd._largest_missing_run(present, 10) == (1, 2)  # pyright: ignore[reportPrivateUsage]
+
+    def test_all_missing(self) -> None:
+        assert sd._largest_missing_run(frozenset(), 5) == (0, 4)  # pyright: ignore[reportPrivateUsage]
+
+    def test_gap_free_input_raises_loudly(self) -> None:
+        with pytest.raises(ValueError, match="no missing bucket slot"):
+            sd._largest_missing_run(set(range(5)), 5)  # pyright: ignore[reportPrivateUsage]
+
+
+class TestDeficiencyLaw:
+    """The two-condition AND — both boundaries pinned on both sides."""
+
+    def test_45_minute_hole_flags(self) -> None:
+        # 330 observed: deficit 45 >= 30 AND 330 < ceil(375*0.9)=338 → FLAG.
+        hole = set(range(600, 645))  # 10:00-10:44 IST
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)), today_ist=_FAR_FUTURE
+        )
+        assert len(verdict.flags) == 1
+        flag = verdict.flags[0]
+        assert flag.session == _WED
+        assert (flag.expected, flag.observed) == (375, 330)
+        assert flag.shape == SHAPE_INTRADAY_HOLE
+        assert flag.largest_gap_minutes == 45
+        assert flag.gap_start_ist == time(10, 0)
+        assert flag.gap_end_ist == time(10, 45)
+        assert flag.known_irregular is False
+
+    def test_30_minute_hole_passes_fraction_arm(self) -> None:
+        # 345 observed: deficit 30 >= 30 BUT 345 >= 338 → the fraction arm
+        # saves it (deliberately below the 45-min..4-hr target class).
+        hole = set(range(600, 630))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)), today_ist=_FAR_FUTURE
+        )
+        assert verdict.flags == ()
+        assert verdict.sessions_checked == 1
+
+    def test_29_missing_bars_passes_abs_floor_arm(self) -> None:
+        # Force a permissive fraction so ONLY the abs floor gates: 29 < 30.
+        hole = set(range(600, 629))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)),
+            min_fraction=1.0,
+            today_ist=_FAR_FUTURE,
+        )
+        assert verdict.flags == ()
+
+    def test_exactly_30_missing_bars_flags_under_permissive_fraction(self) -> None:
+        # The abs-floor boundary: deficit == 30 flags (>=, not >).
+        hole = set(range(600, 630))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)),
+            min_fraction=1.0,
+            today_ist=_FAR_FUTURE,
+        )
+        assert len(verdict.flags) == 1
+        assert verdict.flags[0].largest_gap_minutes == 30
+
+    def test_missing_interior_session_flags_at_zero(self) -> None:
+        # The 1-session hole invisible to interior-gap's tolerance-5.
+        verdict = classify_session_density(_bracketed([]), today_ist=_FAR_FUTURE)
+        assert len(verdict.flags) == 1
+        flag = verdict.flags[0]
+        assert flag.session == _WED
+        assert flag.shape == SHAPE_MISSING_SESSION
+        assert flag.fraction == 0.0
+        assert flag.observed == 0
+        assert flag.largest_gap_minutes == 375
+        assert (flag.gap_start_ist, flag.gap_end_ist) == (time(9, 15), time(15, 30))
+
+    def test_scattered_deficit_reads_sparse(self) -> None:
+        # 40 isolated missing minutes (every other minute over 10:00-11:19):
+        # deficit 40 >= 30, 335 < 338, largest gap 1 min < 30 → sparse.
+        scattered = set(range(600, 680, 2))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=scattered)), today_ist=_FAR_FUTURE
+        )
+        assert len(verdict.flags) == 1
+        flag = verdict.flags[0]
+        assert flag.shape == SHAPE_SPARSE
+        assert flag.largest_gap_minutes == 1
+
+    def test_full_session_never_flags(self) -> None:
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED)), today_ist=_FAR_FUTURE
+        )
+        assert verdict.flags == ()
+        assert verdict.known_irregular == ()
+        assert verdict.sessions_checked == 1
+
+    def test_off_session_strays_and_duplicates_never_inflate_density(self) -> None:
+        # A hollow Wednesday (one real bar) + pre-open/post-close strays +
+        # duplicate timestamps still reads observed == 1.
+        one_bar = [_minute_ts(_WED, 9, 15)]
+        strays = [
+            _minute_ts(_WED, 9, 0),  # pre-open
+            _minute_ts(_WED, 15, 45),  # post-close
+            _minute_ts(_WED, 9, 15),  # duplicate of the real bar
+        ]
+        verdict = classify_session_density(_bracketed(one_bar + strays), today_ist=_FAR_FUTURE)
+        assert len(verdict.flags) == 1
+        assert verdict.flags[0].observed == 1
+
+    def test_env_knobs_reach_the_law(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A 45-min hole passes under an env-loosened fraction (0.5).
+        monkeypatch.setenv("BRUTEX_SESSION_DENSITY_MIN_FRACTION", "0.5")
+        hole = set(range(600, 645))
+        verdict = classify_session_density(
+            _bracketed(_session_minutes(_WED, skip=hole)), today_ist=_FAR_FUTURE
+        )
+        assert verdict.flags == ()
+
+    def test_default_constants_are_the_documented_values(self) -> None:
+        assert SESSION_DENSITY_MIN_FRACTION == 0.90
+        assert SESSION_DENSITY_ABS_FLOOR == 30
+        assert SESSION_DENSITY_WARN_CAP == 20
+
+
+class TestAbstains:
+    def test_empty_input_is_the_zero_verdict(self) -> None:
+        verdict = classify_session_density([], today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert verdict.known_irregular == ()
+        assert verdict.sessions_checked == 0
+        assert verdict.abstained == ()
+
+    def test_boundary_dates_abstain(self) -> None:
+        # Hollow FIRST and LAST covered dates (one bar each) never flag — a
+        # mid-day-clamped / chunk-tiled window edge is not a hole.
+        bars = [_minute_ts(_TUE, 12, 0), *_session_minutes(_WED), _minute_ts(_THU, 9, 15)]
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert dict(verdict.abstained)["boundary"] == 2
+        assert verdict.sessions_checked == 1
+
+    def test_single_covered_date_is_boundary_only(self) -> None:
+        verdict = classify_session_density([_minute_ts(_TUE, 12, 0)], today_ist=_FAR_FUTURE)
+        assert verdict.sessions_checked == 0
+        assert verdict.abstained == (("boundary", 1),)
+
+    def test_non_trading_interior_days_skip(self) -> None:
+        # Fri 2024-01-05 .. Mon 2024-01-08: the weekend days are non_trading.
+        bars = _session_minutes(date(2024, 1, 5)) + _session_minutes(date(2024, 1, 8))
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert dict(verdict.abstained)["non_trading"] == 2  # Sat + Sun
+        assert verdict.sessions_checked == 0  # both covered dates are boundary
+
+    def test_observed_overlay_day_reads_non_trading(self) -> None:
+        # The remove-only overlay: an overlaid interior trading day is NOT a
+        # session, so it can never false-flag as missing.
+        verdict = classify_session_density(
+            _bracketed([]), observed=frozenset({_WED}), today_ist=_FAR_FUTURE
+        )
+        assert verdict.flags == ()
+        assert dict(verdict.abstained)["non_trading"] == 1
+
+    def test_muhurat_interior_day_abstains(self) -> None:
+        # 2024-11-01 is the Diwali Muhurat (18:00-19:00) — bracket it with the
+        # sessions around it (Thu 2024-10-31 and Mon 2024-11-04).
+        bars = _session_minutes(date(2024, 10, 31)) + _session_minutes(date(2024, 11, 4))
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        abstained = dict(verdict.abstained)
+        assert abstained["muhurat"] == 1
+        assert abstained["non_trading"] == 2  # the weekend
+
+    def test_forming_session_abstains(self) -> None:
+        # today_ist == the interior date → forming, never judged.
+        verdict = classify_session_density(_bracketed([]), today_ist=_WED)
+        assert verdict.flags == ()
+        abstained = dict(verdict.abstained)
+        assert abstained["forming_session"] == 2  # Wed (== today) + Thu (> today)
+        # Tue is the first covered date → boundary.
+        assert abstained["boundary"] == 1
+
+    def test_out_of_coverage_abstains_first(self) -> None:
+        # 2027 is outside the published holiday span — every walked date
+        # abstains out_of_coverage BEFORE any trading-day call.
+        bars = [_minute_ts(date(2027, 1, 4), 12, 0), _minute_ts(date(2027, 1, 6), 12, 0)]
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert verdict.abstained == (("out_of_coverage", 3),)
+        assert verdict.sessions_checked == 0
+
+    def test_default_today_reads_live_clock(self) -> None:
+        # Omitting today_ist reads now_ist() — 2024 fixtures stay judgeable.
+        verdict = classify_session_density(_bracketed(_session_minutes(_WED)))
+        assert verdict.sessions_checked == 1
+
+    def test_abstains_partition_the_walk(self) -> None:
+        # judged + abstained == every date walked (first → last inclusive).
+        bars = _session_minutes(date(2024, 1, 5)) + _session_minutes(date(2024, 1, 10))
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        walked = (date(2024, 1, 10) - date(2024, 1, 5)).days + 1
+        assert verdict.sessions_checked + sum(n for _, n in verdict.abstained) == walked
+
+
+class TestKnownIrregularArm:
+    def test_extended_day_deficit_routes_to_info_arm(self) -> None:
+        # The standing 2021-02-24 375/465 line: a full pre-fix 375-bar day on
+        # the extended 465-minute session is DEFICIENT but KNOWN — INFO, never
+        # WARN. (2021-02-23/25 bracket it.)
+        bars = (
+            _session_minutes(date(2021, 2, 23))
+            + _session_minutes(date(2021, 2, 24))  # 375 of 465
+            + _session_minutes(date(2021, 2, 25))
+        )
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert len(verdict.known_irregular) == 1
+        flag = verdict.known_irregular[0]
+        assert (flag.expected, flag.observed) == (465, 375)
+        assert flag.known_irregular is True
+        assert flag.shape == SHAPE_INTRADAY_HOLE  # the missing 15:30-17:00 tail
+        assert flag.largest_gap_minutes == 90
+
+    def test_halt_day_deficit_routes_to_info_arm(self) -> None:
+        # 2020-03-13 (halt 09:20→10:20): the ~59 missing halt-window minutes
+        # are a documented market fact — INFO, never WARN. Bracketed by
+        # 2020-03-12 (Thu) + 2020-03-16 (Mon).
+        halt_window = set(range(9 * 60 + 20, 10 * 60 + 20))
+        bars = (
+            _session_minutes(date(2020, 3, 12))
+            + _session_minutes(date(2020, 3, 13), skip=halt_window)
+            + _session_minutes(date(2020, 3, 16))
+        )
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert len(verdict.known_irregular) == 1
+        assert verdict.known_irregular[0].session == date(2020, 3, 13)
+
+    def test_healthy_extended_day_never_flags(self) -> None:
+        # A POST-re-pull 465-bar extended day is dense — nothing fires.
+        bars = (
+            _session_minutes(date(2021, 2, 23))
+            + _session_minutes(date(2021, 2, 24), count=465)
+            + _session_minutes(date(2021, 2, 25))
+        )
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert verdict.known_irregular == ()
+
+
+class _Log:
+    """A duck-typed structlog stand-in recording (level, event, fields)."""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, Any]]] = []
+
+    def warning(self, event: str, **fields: Any) -> None:
+        self.records.append(("warning", event, fields))
+
+    def info(self, event: str, **fields: Any) -> None:
+        self.records.append(("info", event, fields))
+
+    def events(self, name: str) -> list[dict[str, Any]]:
+        return [f for _, e, f in self.records if e == name]
+
+
+class TestObserveSessionDensity:
+    def test_flag_emits_one_capped_warn_with_remediation(self) -> None:
+        log = _Log()
+        hole = set(range(600, 645))
+        verdict = observe_session_density(
+            log,
+            bar_timestamps=_bracketed(_session_minutes(_WED, skip=hole)),
+            symbol="NIFTY",
+            interval="1minute",
+            pull_id="pid-1",
+            today_ist=_FAR_FUTURE,
+        )
+        assert verdict is not None
+        warns = log.events(SESSION_DENSITY_LOW_EVENT)
+        assert len(warns) == 1
+        fields = warns[0]
+        assert fields["symbol"] == repr("NIFTY")
+        assert fields["session"] == "2024-01-03"
+        assert (fields["expected"], fields["observed"]) == (375, 330)
+        assert fields["shape"] == SHAPE_INTRADAY_HOLE
+        assert (fields["gap_start"], fields["gap_end"]) == ("10:00", "10:45")
+        assert "re-pull this window" in fields["remediation"]
+        assert log.events(SESSION_DENSITY_SUPPRESSED_EVENT) == []
+
+    def test_sparse_flag_carries_the_inspect_remediation(self) -> None:
+        log = _Log()
+        scattered = set(range(600, 680, 2))
+        observe_session_density(
+            log,
+            bar_timestamps=_bracketed(_session_minutes(_WED, skip=scattered)),
+            symbol="NIFTY",
+            interval="1minute",
+            today_ist=_FAR_FUTURE,
+        )
+        (fields,) = log.events(SESSION_DENSITY_LOW_EVENT)
+        assert fields["shape"] == SHAPE_SPARSE
+        assert "vendor 1m depth" in fields["remediation"]
+
+    def test_known_extended_day_emits_info_with_repull_pointer(self) -> None:
+        log = _Log()
+        bars = (
+            _session_minutes(date(2021, 2, 23))
+            + _session_minutes(date(2021, 2, 24))
+            + _session_minutes(date(2021, 2, 25))
+        )
+        observe_session_density(
+            log,
+            bar_timestamps=bars,
+            symbol="NIFTY",
+            interval="1minute",
+            today_ist=_FAR_FUTURE,
+        )
+        assert log.events(SESSION_DENSITY_LOW_EVENT) == []
+        infos = log.events(SESSION_DENSITY_KNOWN_EVENT)
+        assert len(infos) == 1
+        assert infos[0]["reason"] == "exchange_outage_extended_close"
+        assert "re-pull this window" in infos[0]["remediation"]
+        assert ("info", SESSION_DENSITY_KNOWN_EVENT, infos[0]) in log.records
+
+    def test_known_halt_day_reads_no_action_needed(self) -> None:
+        log = _Log()
+        halt_window = set(range(9 * 60 + 58, 10 * 60 + 58))
+        bars = (
+            _session_minutes(date(2020, 3, 20))  # Friday before
+            + _session_minutes(date(2020, 3, 23), skip=halt_window)
+            + _session_minutes(date(2020, 3, 24))
+        )
+        observe_session_density(
+            log,
+            bar_timestamps=bars,
+            symbol="SENSEX",
+            interval="1minute",
+            today_ist=_FAR_FUTURE,
+        )
+        (info,) = log.events(SESSION_DENSITY_KNOWN_EVENT)
+        assert info["reason"] == "market_wide_circuit_halt"
+        assert "no action needed" in info["remediation"]
+
+    def test_warn_cap_plus_suppressed_summary(self) -> None:
+        # >20 hollow interior sessions (the real Jan-Feb 2024 trading days —
+        # calendar-derived, never guessed) → exactly 20 WARNs + ONE suppressed
+        # summary carrying the TRUE count.
+        log = _Log()
+        span = [date(2024, 1, 2) + timedelta(days=i) for i in range(45)]
+        trading = [d for d in span if is_trading_day(d)]
+        bars = _session_minutes(trading[0])
+        for d in trading[1:-1]:
+            bars.append(_minute_ts(d, 9, 15))  # one hollow bar per interior day
+        bars += _session_minutes(trading[-1])
+        observe_session_density(
+            log,
+            bar_timestamps=bars,
+            symbol="NIFTY",
+            interval="1minute",
+            today_ist=_FAR_FUTURE,
+        )
+        warns = log.events(SESSION_DENSITY_LOW_EVENT)
+        assert len(warns) == SESSION_DENSITY_WARN_CAP
+        (summary,) = log.events(SESSION_DENSITY_SUPPRESSED_EVENT)
+        assert summary["arm"] == "low"
+        assert summary["cap"] == SESSION_DENSITY_WARN_CAP
+        assert summary["total"] == len(trading) - 2  # every interior day flagged
+        assert summary["total"] > SESSION_DENSITY_WARN_CAP
+
+    def test_kill_switch_disables_with_zero_work(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(SESSION_DENSITY_KILL_ENV, "0")
+        calls = {"n": 0}
+
+        def _boom(*args: Any, **kwargs: Any) -> None:
+            calls["n"] += 1
+            raise AssertionError("classifier must not run under the kill switch")
+
+        monkeypatch.setattr(sd, "classify_session_density", _boom)
+        log = _Log()
+        assert (
+            observe_session_density(log, bar_timestamps=[], symbol="NIFTY", interval="1minute")
+            is None
+        )
+        assert calls["n"] == 0
+        assert log.records == []
+
+    def test_error_guard_never_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("injected census crash")
+
+        monkeypatch.setattr(sd, "classify_session_density", _boom)
+        log = _Log()
+        got = observe_session_density(
+            log,
+            bar_timestamps=[_minute_ts(_TUE, 12, 0)],
+            symbol="NIFTY",
+            interval="1minute",
+            pull_id="pid-9",
+        )
+        assert got is None
+        (err,) = log.events(SESSION_DENSITY_ERROR_EVENT)
+        assert err["pull_id"] == "pid-9"
+        assert "injected census crash" in err["error"]
+
+    def test_healthy_window_emits_nothing(self) -> None:
+        log = _Log()
+        verdict = observe_session_density(
+            log,
+            bar_timestamps=_bracketed(_session_minutes(_WED)),
+            symbol="NIFTY",
+            interval="1minute",
+            today_ist=_FAR_FUTURE,
+        )
+        assert verdict is not None
+        assert log.records == []
+
+    def test_structlog_capture_smoke(self) -> None:
+        # The duck-typed contract holds against the REAL structlog logger too.
+        import structlog
+
+        with capture_logs() as logs:
+            observe_session_density(
+                structlog.get_logger("test"),
+                bar_timestamps=_bracketed([]),
+                symbol="NIFTY",
+                interval="1minute",
+                today_ist=_FAR_FUTURE,
+            )
+        assert [e["event"] for e in logs] == [SESSION_DENSITY_LOW_EVENT]
+
+    def test_emit_arm_tolerates_none_gap_bounds(self) -> None:
+        # The frozen record ADMITS None gap bounds (the dataclass contract);
+        # the emitter renders them as honest nulls, never a crash.
+        flag = SessionDensityFlag(
+            session=_WED,
+            expected=375,
+            observed=300,
+            fraction=0.8,
+            largest_gap_minutes=0,
+            gap_start_ist=None,
+            gap_end_ist=None,
+            shape=SHAPE_SPARSE,
+            known_irregular=False,
+        )
+        log = _Log()
+        sd._emit_arm(  # pyright: ignore[reportPrivateUsage]
+            log,
+            [flag],
+            event=SESSION_DENSITY_LOW_EVENT,
+            arm="low",
+            info=False,
+            symbol="NIFTY",
+            interval="1minute",
+            pull_id=None,
+        )
+        (fields,) = log.events(SESSION_DENSITY_LOW_EVENT)
+        assert fields["gap_start"] is None
+        assert fields["gap_end"] is None

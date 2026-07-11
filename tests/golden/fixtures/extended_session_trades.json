@@ -1,0 +1,14 @@
+{
+  "note": "SYNTHETIC prices on the REAL 2021-02-24 extended session (DEC-EXTENDED-SESSION-OUTAGE-001) \u2014 the 16:50 forced-exit golden",
+  "trades": [
+    {
+      "direction": "BUY",
+      "entry_ts": "2021-02-24T09:49:00+00:00",
+      "exit_ts": "2021-02-24T11:20:00+00:00",
+      "holding_bars": 6,
+      "mae_paisa": 0,
+      "mfe_paisa": 60,
+      "pnl_paisa": 60
+    }
+  ]
+}

@@ -450,6 +450,97 @@ class TestSessionAwareForcedExitParity:
         ]
         assert got == expected
 
+    def test_rust_kernel_extended_outage_day_matches_oracle_at_1650(self) -> None:
+        # DEC-EXTENDED-SESSION-OUTAGE-001 (fails-before pin, Rust ≡ Python):
+        # on the 2021-02-24 extended day (close 17:00 IST at NSE + BSE + MSEI,
+        # SEBI press releases verified 2026-07-11) the kernel's forced flags
+        # resolve the 16:50 boundary — a 15:25 bar is NOT forced (the pre-fix
+        # resolver forced every bar >= 15:20), and both paths agree
+        # field-for-field.
+        outage = date(2021, 2, 24)
+
+        def _outage_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
+            ts = datetime(outage.year, outage.month, outage.day, hh, mm, tzinfo=IST).astimezone(UTC)
+            return CandleBar(
+                timestamp=ts,
+                open=Decimal(o),
+                high=Decimal(h),
+                low=Decimal(lo),
+                close=Decimal(c),
+                volume=0,
+                open_interest=None,
+            )
+
+        bars = [
+            _outage_bar(15, 18, "100", "100", "100", "100"),
+            _outage_bar(15, 25, "100", "100", "100", "100"),  # NOT forced (pre-fix: forced)
+            _outage_bar(16, 49, "100", "100", "100", "100"),  # NOT forced
+            _outage_bar(16, 50, "100.60", "101", "100", "100.80"),  # forced @ 16:50
+            _outage_bar(16, 51, "200", "200", "200", "200"),  # never reached
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1, 1 << 63]
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        got = sim.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        expected = [
+            _oracle(
+                bars,
+                bar_bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=100_000,
+                take_profit_paisa=100_000,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
+        # Anti-vacuity: the fire-every-bar mask opens AND force-exits at the
+        # 16:50 extended boundary (NOT 15:20, NOT the 200-print next bar).
+        fire_trades = got[0]
+        assert len(fire_trades) == 1
+        assert fire_trades[0].exit_ts == bars[3].timestamp
+        assert fire_trades[0].pnl_paisa == 60  # forced at OPEN 100.60, never 200
+
+    def test_rust_and_fallback_agree_on_extended_outage_day(self) -> None:
+        # The Rust path and the forced pure-Python fallback agree on the
+        # extended day too (the whole contract on the new session tier).
+        outage = date(2021, 2, 24)
+        bars = [
+            CandleBar(
+                timestamp=datetime(
+                    outage.year, outage.month, outage.day, hh, mm, tzinfo=IST
+                ).astimezone(UTC),
+                open=Decimal(o),
+                high=Decimal(h),
+                low=Decimal(lo),
+                close=Decimal(c),
+                volume=0,
+                open_interest=None,
+            )
+            for hh, mm, o, h, lo, c in [
+                (16, 40, "100", "100", "100", "100"),
+                (16, 49, "100", "100", "100", "100"),
+                (16, 50, "100.50", "101", "100", "100.90"),
+                (16, 51, "100", "100", "100", "100"),
+            ]
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1, 2, 3]
+        rust = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        rust_out = rust.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        fallback = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        fallback._rust = None
+        fb_out = fallback.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        assert rust_out == fb_out
+
 
 # ── cross-session pending-entry drop parity (R2-OC-2) ─────────────────────────
 

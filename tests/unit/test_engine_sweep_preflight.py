@@ -7,7 +7,18 @@ zero bars is NAMED in deterministic order, with the per-class remediation
 
 from __future__ import annotations
 
-from brutex.engine.sweep_preflight import PreflightReport, preflight_slices
+from datetime import UTC, date, datetime
+from decimal import Decimal
+
+import pytest
+from brutex.calendars.nse import IST
+from brutex.data.models import CandleBar
+from brutex.engine import sweep_preflight as sweep_preflight_mod
+from brutex.engine.sweep_preflight import (
+    PreflightReport,
+    preflight_session_density,
+    preflight_slices,
+)
 
 
 class TestPreflightSlices:
@@ -193,3 +204,106 @@ class TestOneDayTradeLawNote:
 
         assert one_day_trade_law_note(["1minute", "5minute", "15minute"]) is None
         assert one_day_trade_law_note([]) is None
+
+
+class TestSessionDensityNote:
+    """DEC-SESSION-DENSITY-CENSUS-001 — the WARN-only preflight density note."""
+
+    @staticmethod
+    def _minute_bars(d: date, *, count: int = 375) -> list[CandleBar]:
+        bars: list[CandleBar] = []
+        for i in range(count):
+            hh, mm = divmod(9 * 60 + 15 + i, 60)
+            ts = datetime(d.year, d.month, d.day, hh, mm, tzinfo=IST).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal("100"),
+                    high=Decimal("100"),
+                    low=Decimal("100"),
+                    close=Decimal("100"),
+                    volume=0,
+                    open_interest=None,
+                )
+            )
+        return bars
+
+    @classmethod
+    def _holey_slice(cls) -> list[CandleBar]:
+        # Tue + Thu full; Wed 2024-01-03 missing entirely (an interior hole).
+        return cls._minute_bars(date(2024, 1, 2)) + cls._minute_bars(date(2024, 1, 4))
+
+    def test_clean_slices_read_ok(self) -> None:
+        slices = {
+            ("NIFTY", "1minute"): (
+                self._minute_bars(date(2024, 1, 2))
+                + self._minute_bars(date(2024, 1, 3))
+                + self._minute_bars(date(2024, 1, 4))
+            )
+        }
+        note = preflight_session_density(slices, today_ist=date(2026, 12, 31))
+        assert note.ok
+        assert note.flagged == ()
+        assert note.slices_checked == 1
+        assert note.lines() == ()
+
+    def test_holey_slice_is_named_with_shape_and_gap(self) -> None:
+        note = preflight_session_density(
+            {("NIFTY", "1minute"): self._holey_slice()}, today_ist=date(2026, 12, 31)
+        )
+        assert not note.ok
+        assert len(note.flagged) == 1
+        symbol, interval, flag = note.flagged[0]
+        assert (symbol, interval) == ("NIFTY", "1minute")
+        assert flag.session == date(2024, 1, 3)
+        assert flag.shape == "missing_session"
+        (line,) = note.lines()
+        assert "NIFTY/1minute 2024-01-03: 0/375 bars" in line
+        assert "missing_session" in line
+
+    def test_delegates_to_the_one_common_classifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # §11 COMMON: the note DELEGATES — no second copy of the deficiency law.
+        calls = {"n": 0}
+        real = sweep_preflight_mod.classify_session_density
+
+        def _counting(*args: object, **kwargs: object) -> object:
+            calls["n"] += 1
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(sweep_preflight_mod, "classify_session_density", _counting)
+        preflight_session_density(
+            {("NIFTY", "1minute"): self._holey_slice()}, today_ist=date(2026, 12, 31)
+        )
+        assert calls["n"] == 1
+
+    def test_derived_tf_slices_are_skipped(self) -> None:
+        # A derived TF's density follows its 1-minute base — judging it would
+        # double-report every hole.
+        note = preflight_session_density(
+            {("NIFTY", "5minute"): self._holey_slice()}, today_ist=date(2026, 12, 31)
+        )
+        assert note.ok
+        assert note.slices_checked == 0
+
+    def test_empty_slices_are_skipped(self) -> None:
+        note = preflight_session_density({("NIFTY", "1minute"): []}, today_ist=date(2026, 12, 31))
+        assert note.ok
+        assert note.slices_checked == 0
+
+    def test_lines_cap_with_honest_overflow_tail(self) -> None:
+        note = preflight_session_density(
+            {("NIFTY", "1minute"): self._holey_slice()}, today_ist=date(2026, 12, 31)
+        )
+        capped = note.lines(cap=0)
+        assert capped == ("... +1 more low-density session(s)",)
+
+    def test_note_is_pure_data_never_a_refusal(self) -> None:
+        # The note carries NO refusal surface — no remediation() gate method,
+        # no exit code, nothing but printable facts (the one_day_trade_law_note
+        # posture: the CLI prints and PROCEEDS; there is no escape flag to add
+        # because nothing is ever refused).
+        note = preflight_session_density(
+            {("NIFTY", "1minute"): self._holey_slice()}, today_ist=date(2026, 12, 31)
+        )
+        assert isinstance(note.flagged, tuple)
+        assert not hasattr(note, "remediation")

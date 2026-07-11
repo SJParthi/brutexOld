@@ -17,6 +17,10 @@ from typing import ClassVar
 import pytest
 from brutex.calendars.nse import (
     ALL_HOLIDAYS,
+    CIRCUIT_HALT_REASON,
+    CIRCUIT_HALT_SESSIONS,
+    EXTENDED_SESSION_REASON,
+    EXTENDED_SESSIONS,
     FORCED_EXIT_IST,
     HOLIDAY_COVERAGE_FIRST_YEAR,
     HOLIDAY_COVERAGE_LAST_YEAR,
@@ -29,24 +33,30 @@ from brutex.calendars.nse import (
     TICK_SIZE_PAISA,
     HolidayDataUnavailableError,
     SessionType,
+    TradingSession,
     daily_derive_cutoff,
     daily_derive_cutoff_grounded,
+    expected_bars_for_session,
     expected_bars_per_day_for_tf,
     forced_exit_seconds_for_session,
     forced_exit_time_for_session,
     get_session,
     get_session_checked,
+    has_extended_session,
     has_muhurat_session,
+    is_circuit_halt_session,
     is_forced_exit_bar,
     is_holiday,
     is_holiday_checked,
     is_holiday_data_available,
+    is_known_irregular_session,
     is_nifty_rebalance_day,
     is_pre_open,
     is_special_weekend_session,
     is_trading_day,
     is_trading_day_checked,
     is_weekend,
+    known_irregular_reason,
     nifty_rebalance_event_on,
     now_ist,
     previous_trading_session,
@@ -1556,3 +1566,269 @@ class TestPreviousTradingSession:
             previous_trading_session(
                 date(2024, 7, 10), exchange="LSE", observed=frozenset({date(2024, 7, 9)})
             )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Session-integrity pack (DEC-EXTENDED-SESSION-OUTAGE-001 +
+# DEC-HALT-DAY-TREATMENT-001 + DEC-SESSION-DENSITY-CENSUS-001)
+# ────────────────────────────────────────────────────────────────────────
+
+#: The 2021-02-24 NSE exchange-outage day — close extended to 17:00 IST at
+#: NSE, BSE and MSEI (SEBI press releases, verified 2026-07-11).
+_OUTAGE_DAY = date(2021, 2, 24)
+#: The two 2020 market-wide circuit-breaker halt days (verified 2026-07-11).
+_HALT_MARCH_13 = date(2020, 3, 13)
+_HALT_MARCH_23 = date(2020, 3, 23)
+
+
+class TestExtendedSessions:
+    """DEC-EXTENDED-SESSION-OUTAGE-001 — the 2021-02-24 extended-close tier."""
+
+    def test_get_session_resolves_extended_close(self) -> None:
+        # FAILS on the pre-fix resolver (which fabricated a regular 15:30 close).
+        session = get_session(_OUTAGE_DAY)
+        assert session is not None
+        assert session.session_type is SessionType.REGULAR
+        assert session.open_time_ist == SESSION_OPEN_IST
+        assert session.close_time_ist == time(17, 0)
+        assert session.duration_minutes == 465
+
+    def test_get_session_checked_twin_is_byte_identical(self) -> None:
+        # The strict twin resolves the SAME extended session (verbatim tier
+        # duplication — the muhurat/special-weekend twin law).
+        assert get_session_checked(_OUTAGE_DAY) == get_session(_OUTAGE_DAY)
+
+    def test_extended_map_content_pinned(self) -> None:
+        # Exactly ONE extended session exists (2021-02-24, 09:15→17:00 IST) —
+        # a new entry is a conscious, ledgered act, never a drive-by.
+        assert {_OUTAGE_DAY: (SESSION_OPEN_IST, time(17, 0))} == EXTENDED_SESSIONS
+
+    def test_has_extended_session_truth_table(self) -> None:
+        assert has_extended_session(_OUTAGE_DAY) is True
+        assert has_extended_session(date(2021, 2, 23)) is False  # the eve
+        assert has_extended_session(date(2021, 2, 25)) is False  # the morrow
+        assert has_extended_session(_HALT_MARCH_13) is False  # halt ≠ extended
+
+    def test_neighbor_days_keep_regular_close(self) -> None:
+        for d in (date(2021, 2, 23), date(2021, 2, 25)):
+            session = get_session(d)
+            assert session is not None
+            assert session.close_time_ist == SESSION_CLOSE_IST
+
+
+class TestCircuitHaltAnnotation:
+    """DEC-HALT-DAY-TREATMENT-001 — ANNOTATE, never drop: the halt days stay
+    full REGULAR 09:15-15:30 sessions on BOTH resolver twins."""
+
+    def test_halt_set_content_pinned(self) -> None:
+        assert frozenset({_HALT_MARCH_13, _HALT_MARCH_23}) == CIRCUIT_HALT_SESSIONS
+
+    @pytest.mark.parametrize("d", [_HALT_MARCH_13, _HALT_MARCH_23])
+    def test_halt_days_stay_full_regular_sessions(self, d: date) -> None:
+        for resolver in (get_session, get_session_checked):
+            session = resolver(d)
+            assert session is not None
+            assert session.session_type is SessionType.REGULAR
+            assert session.open_time_ist == SESSION_OPEN_IST
+            assert session.close_time_ist == SESSION_CLOSE_IST
+            assert session.duration_minutes == SESSION_DURATION_MINUTES
+
+    def test_is_circuit_halt_session_truth_table(self) -> None:
+        assert is_circuit_halt_session(_HALT_MARCH_13) is True
+        assert is_circuit_halt_session(_HALT_MARCH_23) is True
+        assert is_circuit_halt_session(date(2020, 3, 16)) is False  # between them
+        assert is_circuit_halt_session(_OUTAGE_DAY) is False  # extended ≠ halt
+
+
+class TestKnownIrregularPredicates:
+    """The union predicate + machine reason tokens the censuses key on."""
+
+    def test_union_predicate(self) -> None:
+        assert is_known_irregular_session(_HALT_MARCH_13) is True
+        assert is_known_irregular_session(_HALT_MARCH_23) is True
+        assert is_known_irregular_session(_OUTAGE_DAY) is True
+        assert is_known_irregular_session(date(2024, 1, 2)) is False
+
+    def test_reason_tokens(self) -> None:
+        assert known_irregular_reason(_HALT_MARCH_13) == CIRCUIT_HALT_REASON
+        assert known_irregular_reason(_HALT_MARCH_23) == "market_wide_circuit_halt"
+        assert known_irregular_reason(_OUTAGE_DAY) == EXTENDED_SESSION_REASON
+        assert known_irregular_reason(_OUTAGE_DAY) == "exchange_outage_extended_close"
+        assert known_irregular_reason(date(2024, 1, 2)) is None
+
+
+class TestExpectedBarsForSession:
+    """DEC-SESSION-DENSITY-CENSUS-001 — the session-aware expected-bars twin."""
+
+    def test_regular_session_matrix(self) -> None:
+        regular = get_session(date(2024, 1, 2))
+        assert regular is not None
+        assert expected_bars_for_session(regular, 1) == 375
+        assert expected_bars_for_session(regular, 30) == 13
+        assert expected_bars_for_session(regular, 60) == 7
+
+    def test_extended_session_matrix(self) -> None:
+        extended = get_session(_OUTAGE_DAY)
+        assert extended is not None
+        assert expected_bars_for_session(extended, 1) == 465  # NOT 375
+        assert expected_bars_for_session(extended, 30) == 16  # ceil(465/30)
+        assert expected_bars_for_session(extended, 60) == 8  # ceil(465/60)
+
+    def test_muhurat_session(self) -> None:
+        muhurat = get_session(date(2025, 10, 21))  # 13:45-14:45 = 60 min
+        assert muhurat is not None
+        assert expected_bars_for_session(muhurat, 1) == 60
+        assert expected_bars_for_session(muhurat, 60) == 1  # tf == duration → 1
+
+    def test_tf_at_or_beyond_duration_is_one(self) -> None:
+        extended = get_session(_OUTAGE_DAY)
+        assert extended is not None
+        assert expected_bars_for_session(extended, 465) == 1
+        assert expected_bars_for_session(extended, 1000) == 1
+
+    @pytest.mark.parametrize("bad_tf", [0, -1])
+    def test_non_positive_tf_rejected(self, bad_tf: int) -> None:
+        regular = get_session(date(2024, 1, 2))
+        assert regular is not None
+        with pytest.raises(ValueError, match="tf_minutes must be >= 1"):
+            expected_bars_for_session(regular, bad_tf)
+
+    def test_regular_parity_with_date_blind_law(self) -> None:
+        # For every REGULAR 375-minute session the session-aware twin equals
+        # the byte-untouched date-blind law (the DEC-CALENDAR-BARS-CEIL-001
+        # oracle is preserved; the fuller sweep lives in the property suite).
+        regular = get_session(date(2024, 1, 2))
+        assert regular is not None
+        for tf in (1, 2, 3, 5, 10, 15, 25, 30, 45, 60, 75, 120, 180, 375, 376):
+            assert expected_bars_for_session(regular, tf) == expected_bars_per_day_for_tf(tf)
+
+
+class TestExtendedForcedExit:
+    """R-3 — the 16:50 forced exit on the extended day via the EXISTING
+    close−10min law (the same rule Muhurat sessions already follow)."""
+
+    def test_forced_exit_is_1650_on_the_outage_day(self) -> None:
+        session = get_session(_OUTAGE_DAY)
+        assert session is not None
+        assert forced_exit_time_for_session(session) == time(16, 50)
+        assert forced_exit_seconds_for_session(session) == 16 * 3600 + 50 * 60
+
+    def test_forced_exit_boundary_bars(self) -> None:
+        session = get_session(_OUTAGE_DAY)
+        assert session is not None
+        boundary = forced_exit_seconds_for_session(session)
+        assert is_forced_exit_bar(time(16, 49), 1, boundary) is False
+        assert is_forced_exit_bar(time(16, 50), 1, boundary) is True
+        # The regular 15:20 boundary does NOT force this day's bars.
+        assert is_forced_exit_bar(time(15, 20), 1, boundary) is False
+
+    def test_neighbor_day_forced_exit_unchanged(self) -> None:
+        eve = get_session(date(2021, 2, 23))
+        assert eve is not None
+        assert forced_exit_time_for_session(eve) == FORCED_EXIT_IST  # 15:20
+
+
+class TestSessionMapEnumerationPins:
+    """The #1492-G2 twin over the NEW maps + trading-day sanity pins."""
+
+    _PIVOT = date(2025, 1, 1)
+    _REGULAR_CLOSE = time(15, 30)
+
+    def test_no_current_or_future_extended_session_closes_after_1530(self) -> None:
+        # EXTENDED_SESSIONS is HISTORICAL-only: an entry on/after 2025 closing
+        # after 15:30 would re-arm the date-blind clamp_window_end
+        # partial-settle hazard (ingest_common's #1492 G2 pin class) for a
+        # LIVE pull day. Adding one must fail loudly here and force a
+        # conscious clamp_window_end calendar-awareness decision first.
+        offenders = {
+            d: (open_t, close_t)
+            for d, (open_t, close_t) in EXTENDED_SESSIONS.items()
+            if d >= self._PIVOT and close_t > self._REGULAR_CLOSE
+        }
+        assert offenders == {}, (
+            f"EXTENDED_SESSIONS entries on/after {self._PIVOT} close AFTER 15:30 IST: "
+            f"{offenders} — make clamp_window_end extended-session-aware BEFORE "
+            "adding a live extended session (DEC-EXTENDED-SESSION-OUTAGE-001)."
+        )
+
+    def test_every_extended_session_key_is_a_trading_day(self) -> None:
+        # A mis-entered non-trading date in the map would be dead weight the
+        # tier can never resolve honestly (the tier runs BEFORE the regular
+        # trading-day arm) — the pin replaces a runtime gate.
+        for d in EXTENDED_SESSIONS:
+            assert is_trading_day(d) is True, f"{d} in EXTENDED_SESSIONS is not a trading day"
+
+    def test_every_circuit_halt_key_is_a_trading_day(self) -> None:
+        for d in CIRCUIT_HALT_SESSIONS:
+            assert is_trading_day(d) is True, f"{d} in CIRCUIT_HALT_SESSIONS is not a trading day"
+
+    def test_extended_keys_never_collide_with_other_session_maps(self) -> None:
+        # The resolver tiers are ordered — a key living in two maps would make
+        # the EARLIER tier win silently. Keep the maps disjoint.
+        assert not set(EXTENDED_SESSIONS) & set(MUHURAT_SESSIONS)
+        assert not set(EXTENDED_SESSIONS) & set(SPECIAL_WEEKEND_TRADING_SESSIONS)
+        assert not set(EXTENDED_SESSIONS) & CIRCUIT_HALT_SESSIONS
+
+
+def _pre_fix_get_session(d: date) -> TradingSession | None:
+    """A VERBATIM in-test copy of the PRE-fix ``get_session`` resolver.
+
+    Muhurat map → special-weekend map → regular/None — exactly the resolver
+    shape before DEC-EXTENDED-SESSION-OUTAGE-001 added the extended tier (the
+    #1649a delegation-equivalence pattern). The whole-domain parity pin below
+    proves the extended tier changed NO date outside ``EXTENDED_SESSIONS``.
+    """
+    if has_muhurat_session(d):
+        open_t, close_t = MUHURAT_SESSIONS[d]
+        return TradingSession(
+            date=d,
+            session_type=SessionType.MUHURAT,
+            open_time_ist=open_t,
+            close_time_ist=close_t,
+        )
+    if is_special_weekend_session(d):
+        open_t, close_t = SPECIAL_WEEKEND_TRADING_SESSIONS[d]
+        return TradingSession(
+            date=d,
+            session_type=SessionType.REGULAR,
+            open_time_ist=open_t,
+            close_time_ist=close_t,
+        )
+    if not is_trading_day(d):
+        return None
+    return TradingSession(
+        date=d,
+        session_type=SessionType.REGULAR,
+        open_time_ist=SESSION_OPEN_IST,
+        close_time_ist=SESSION_CLOSE_IST,
+    )
+
+
+class TestWholeDomainSessionParity:
+    """The PROOF every date outside EXTENDED_SESSIONS is byte-identical."""
+
+    def test_every_covered_date_matches_pre_fix_resolver(self) -> None:
+        d = date(2020, 1, 1)
+        end = date(2026, 12, 31)
+        checked = 0
+        while d <= end:
+            if d not in EXTENDED_SESSIONS:
+                assert get_session(d) == _pre_fix_get_session(d), d
+                checked += 1
+            d += timedelta(days=1)
+        # 7 years minus the single extended day — the sweep genuinely ran.
+        assert checked == (end - date(2020, 1, 1)).days + 1 - len(EXTENDED_SESSIONS)
+
+    def test_the_one_excluded_date_differs_exactly_in_the_close(self) -> None:
+        # The complement teeth: the ONE excluded date differs from the pre-fix
+        # resolver ONLY in its close (15:30 → 17:00), nothing else.
+        got = get_session(_OUTAGE_DAY)
+        old = _pre_fix_get_session(_OUTAGE_DAY)
+        assert got is not None and old is not None
+        assert got.close_time_ist == time(17, 0)
+        assert old.close_time_ist == SESSION_CLOSE_IST
+        assert (got.date, got.session_type, got.open_time_ist) == (
+            old.date,
+            old.session_type,
+            old.open_time_ist,
+        )

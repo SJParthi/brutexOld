@@ -738,6 +738,7 @@ def materialize_lake_timeframes(
             fill_daily_from_minute,
             make_lake_write_1day,
             observe_daily_open_substitutions,
+            observe_extreme_daily_ranges,
         )
 
         # Read the 1-minute base ONCE and share the frame between the intraday
@@ -797,6 +798,14 @@ def materialize_lake_timeframes(
             opens_substituted = observe_daily_open_substitutions(
                 df_1m, before=effective_before, symbol=symbol, dense=dense_symbol
             )
+            # OBSERVE-ONLY >9% daily-range detector (DEC-HALT-DAY-TREATMENT-001)
+            # — INDEX only (``dense_symbol`` ⇔ a SPOT INDEX per the #1031 gate;
+            # market-wide circuit breakers are an index phenomenon — a 750-stock
+            # scan would be a false-positive machine). Same in-memory frame,
+            # zero extra lake I/O; guarded inside (an error logs + returns 0);
+            # derived/stored bytes byte-unchanged either way (pinned).
+            if dense_symbol:
+                observe_extreme_daily_ranges(df_1m, before=effective_before, symbol=symbol)
         _stamp(
             last_1m_ist_date=None if last_bar_ist is None else last_bar_ist.date().isoformat(),
             daily_before_iso=effective_before.isoformat(),

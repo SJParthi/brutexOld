@@ -564,6 +564,10 @@ class TestExcursions:
 # Real in-scope short sessions (verified from ``MUHURAT_SESSIONS``):
 _EVENING_MUHURAT = date(2021, 11, 4)  # 18:15-19:15 IST → forced 19:05
 _AFTERNOON_MUHURAT = date(2025, 10, 21)  # 13:45-14:45 IST → forced 14:35
+# The 2021-02-24 NSE exchange-outage EXTENDED session (close 17:00 IST at
+# NSE + BSE + MSEI per the SEBI press releases, verified 2026-07-11) →
+# forced exit 16:50 (DEC-EXTENDED-SESSION-OUTAGE-001, the close−10min law).
+_EXTENDED_OUTAGE = date(2021, 2, 24)
 
 
 def _trade_with_signal_then_ride(
@@ -635,6 +639,53 @@ class TestSessionAwareForcedExit:
         trades = _trade_with_signal_then_ride(bars)
         assert len(trades) == 1
         assert trades[0].exit_ts == _ts(14, 35, day=_AFTERNOON_MUHURAT)
+        assert trades[0].pnl_paisa == 20
+
+    def test_extended_outage_day_1525_bar_is_not_forced(self) -> None:
+        # DEC-EXTENDED-SESSION-OUTAGE-001 (fails-before pin): on the 2021-02-24
+        # extended day (close 17:00) a 15:25 bar is NOT a forced-exit bar — on
+        # the pre-fix resolver every bar >= 15:20 forced out immediately. The
+        # trade rides through the old 15:20 boundary and exits at 16:50.
+        bars = [
+            _bar(15, 18, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),
+            _bar(15, 25, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # NOT forced
+            _bar(16, 49, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # NOT forced
+            _bar(16, 50, "100.60", "101", "100", "100.80", day=_EXTENDED_OUTAGE),  # forced
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(16, 50, day=_EXTENDED_OUTAGE)  # NOT 15:20
+        assert trades[0].pnl_paisa == 60  # forced at the 16:50 bar OPEN 100.60
+        assert trades[0].holding_bars == 3  # 15:25, 16:49, 16:50
+
+    def test_extended_outage_neighbor_day_still_exits_at_1520(self) -> None:
+        # The delta is ONE date: the identical scenario on the EVE (2021-02-23,
+        # a regular Tuesday) still force-exits at 15:20 — byte-identical law.
+        eve = date(2021, 2, 23)
+        bars = [
+            _bar(15, 18, "100", "100", "100", "100", day=eve),
+            _bar(15, 19, "100", "100", "100", "100", day=eve),
+            _bar(15, 20, "100.30", "101", "100", "100.50", day=eve),
+            _bar(15, 21, "100", "100", "100", "100", day=eve),
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(15, 20, day=eve)
+        assert trades[0].pnl_paisa == 30
+
+    def test_circuit_halt_day_keeps_regular_1520_exit(self) -> None:
+        # DEC-HALT-DAY-TREATMENT-001: the annotated 2020-03-23 halt day stays a
+        # full REGULAR session — the forced exit is the ordinary 15:20, and the
+        # halt annotation changes NOTHING in the trade sim.
+        halt_day = date(2020, 3, 23)
+        bars = [
+            _bar(15, 18, "100", "100", "100", "100", day=halt_day),
+            _bar(15, 19, "100", "100", "100", "100", day=halt_day),
+            _bar(15, 20, "100.20", "101", "100", "100.40", day=halt_day),
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(15, 20, day=halt_day)
         assert trades[0].pnl_paisa == 20
 
     def test_position_open_exactly_at_forced_minute_exits_that_bar(self) -> None:
