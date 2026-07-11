@@ -77,10 +77,10 @@ jobs:
     # duration-derived timeout (DEC-SOAK-REAL-TIER-001).
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -94,7 +94,7 @@ jobs:
         # `fno_math` extension. Match the main CI test job's pattern
         # (DEC-P0-050, ci.yml test job): install Rust stable first,
         # then pip-install the maturin-built extension.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
@@ -202,7 +202,7 @@ jobs:
 
       - name: Upload stress artifacts (if any)
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: stress-logs
           path: |
@@ -225,7 +225,7 @@ jobs:
         # would die silently — the exact DEC-MUTATION-ALERT-CANCELLED-001
         # pathology, mirrored from soak-selfhosted.yml's AL-SOAK-1 fix.
         if: (failure() || cancelled()) && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const title = `stress-nightly: failure on ${context.sha.substring(0, 7)}`;

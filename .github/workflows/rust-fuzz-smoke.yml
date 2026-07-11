@@ -74,10 +74,10 @@ jobs:
       run:
         working-directory: ${{ matrix.path }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install nightly Rust (sanitizer support)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.NIGHTLY }}
           components: rust-src
@@ -86,14 +86,14 @@ jobs:
           targets: ${{ env.FUZZ_TARGET }}
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: |
             ${{ matrix.path }}/fuzz -> target
           key: fuzz-smoke-${{ matrix.crate }}
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
         with:
           tool: cargo-fuzz
 
@@ -128,7 +128,7 @@ jobs:
 
       - name: Upload crash artifacts (on failure)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fuzz-artifacts-${{ matrix.crate }}
           path: ${{ matrix.path }}/fuzz/artifacts/
