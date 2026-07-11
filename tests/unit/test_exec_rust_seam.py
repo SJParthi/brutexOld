@@ -643,7 +643,7 @@ class TestKernelWireShapeGuard:
             (("trade", None), "verdict ('trade', None) is missing its stack wire"),
             (("stale_bar", list(range(19))), "verdict kind 'stale_bar' carries an unexpected wire"),
             ((["unhashable"], None), "unknown verdict kind ['unhashable']"),
-            (("trade", "not-a-list"), "wire is str, expected a list"),
+            (("trade", "not-a-list"), "wire is str, expected a list or tuple"),
         ],
         ids=[
             "unknown-kind",
@@ -690,6 +690,44 @@ class TestKernelWireShapeGuard:
             assert exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS) is None
         self._assert_one_wire_fallback(logs, "charge_stack_option")
         assert logs[0]["error"] == "wire[3] is bool, expected int"
+
+    @pytest.mark.parametrize("junk", [2**64, -(2**63) - 1], ids=["past-i64-max", "below-i64-min"])
+    def test_out_of_i64_range_wire_element_falls_back_options(
+        self, monkeypatch: pytest.MonkeyPatch, junk: int
+    ) -> None:
+        """rA round-2 NIT-1: an int-TYPED element outside the i64 range in a
+        right-length wire was silently ADOPTED whole (a junk net=2**64
+        breakdown served with zero warns — the last int-shaped adoption
+        channel). The real kernel wire is ``Vec<i64>``, so an out-of-range
+        int is the same build/contract skew as a wrong element type: now a
+        counted range fault → warn-once → the byte-identical OFF-arm value
+        at the REAL ``compute_trade_cost`` dispatch."""
+        trade = _option_trade()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = compute_trade_cost(trade)
+        exec_rust.reset_warn_memo_for_tests()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(exec_option_charge_stack=lambda *_a: [junk] * 17)
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS) is None
+            assert compute_trade_cost(trade) == off
+        self._assert_one_wire_fallback(logs, "charge_stack_option")
+        assert logs[0]["error"] == "wire[0] is outside the i64 range"
+
+    @pytest.mark.parametrize("junk", [2**64, -(2**63) - 1], ids=["past-i64-max", "below-i64-min"])
+    def test_out_of_i64_range_wire_element_falls_back_futures(
+        self, monkeypatch: pytest.MonkeyPatch, junk: int
+    ) -> None:
+        """The futures twin — an out-of-i64-range element in a right-length
+        19-slot trade wire is a warn-once range fault → the Python arm."""
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(exec_futures_materialize=lambda *_a: ("trade", [junk] * 19))
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            assert _futures_tail_call() is None
+        self._assert_one_wire_fallback(logs, "materialize_futures_tail")
+        assert logs[0]["error"] == "wire[0] is outside the i64 range"
 
     def test_malformed_wire_at_the_real_dispatch_equals_the_python_arm(
         self, monkeypatch: pytest.MonkeyPatch

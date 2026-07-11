@@ -1185,9 +1185,9 @@ jobs:
             echo "(brutex.costs.calculator test file not present yet — gate inactive)"
           fi
           # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
-          # 19f1 · brutex.exec_rust (198 stmts, 68 branches — re-measured at
-          #        the review-round-2 wire-shape-guard HEAD; the round-1
-          #        146/38 figure had gone stale, R2-NIT) — the
+          # 19f1 · brutex.exec_rust (200 stmts, 70 branches — re-measured at
+          #        the round-2 NIT-polish HEAD after the i64 wire-element
+          #        range guard; history: 146/38 round 1 → 198/68 round 2) — the
           #        BRUTEX_EXEC_RUST default-OFF seam over the fno-math exec
           #        cores; standalone 100% gate (the rust_metrics precedent).
           if compgen -G "tests/unit/test_exec_rust_seam.py" > /dev/null; then

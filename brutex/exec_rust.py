@@ -48,8 +48,9 @@ state).
 * a wheel that imports but LACKS an ``exec_*`` entry (stale-wheel build
   skew) raises the named :class:`StaleExecWheelError` with the rebuild
   remediation — LOUD, never a silent Python-arm fallback;
-* a MALFORMED kernel result — wrong wire length, a non-int wire element, an
-  unknown verdict kind, or a broken kind↔wire pairing — is VALIDATED inside
+* a MALFORMED kernel result — wrong wire length, a non-int or
+  out-of-i64-range wire element, an unknown verdict kind, or a broken
+  kind↔wire pairing — is VALIDATED inside
   the seam BEFORE any indexing/adoption (:func:`_wire_fault` /
   :func:`_verdict_fault`, review round 2: R2-MINOR/R3-F2 killed the 17/18-
   slot futures-wire ``IndexError`` escape + the over-long/wrong-type silent
@@ -272,21 +273,28 @@ def _wire_fault(wire: object, *, expected_len: int) -> str | None:
     """Describe a malformed kernel wire, or ``None`` when well-formed.
 
     Well-formed = a ``list``/``tuple`` of EXACTLY *expected_len* genuine
-    ``int`` elements (``bool`` is refused — the kernel wire is ``Vec<i64>``,
-    so anything else is build/contract skew). Review round 2
+    ``int`` elements, each inside the i64 range (``bool`` and an
+    out-of-range int are refused — the kernel wire is ``Vec<i64>``, so
+    anything else is build/contract skew). Review round 2
     (R2-MINOR/R3-F2): every kernel-returned wire is validated through this
     predicate BEFORE any indexing — a 17/18-slot futures wire previously
     raised an UNCAUGHT ``IndexError`` past every catch on the dispatch
     path, a ≥20-slot wire was silently truncated-adopted, and a
-    right-length wire of junk elements was silently adopted whole.
+    right-length wire of junk elements was silently adopted whole (the
+    range check closes rA round-2 NIT-1's last int-shaped adoption
+    channel).
     """
     if not isinstance(wire, list | tuple):
-        return f"wire is {type(wire).__name__}, expected a list"
+        return f"wire is {type(wire).__name__}, expected a list or tuple"
     if len(wire) != expected_len:
         return f"wire length {len(wire)} != the pinned {expected_len}"
     for i, item in enumerate(wire):
         if not isinstance(item, int) or isinstance(item, bool):
             return f"wire[{i}] is {type(item).__name__}, expected int"
+        if not _fits_i64(item):
+            # The real kernel wire is Vec<i64>, so an out-of-range int is
+            # the same build/contract skew as a wrong element type.
+            return f"wire[{i}] is outside the i64 range"
     return None
 
 
