@@ -504,6 +504,7 @@ def run_supervised_grid(
     reuse_bar_bits: bool = True,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    rollup_hook: Callable[[SweepTuple], None] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
 
@@ -616,6 +617,12 @@ def run_supervised_grid(
         ONLY the three nullable ``vix_mean``/``vix_min``/``vix_max`` columns
         differ (Stage C persists the trio; the pre-Stage-C "byte-identical
         persisted output" wording was reconciled by the round-2 panel, MINOR).
+    rollup_hook
+        Optional per-tuple ``/results`` rollup merge seam
+        (DEC-RESULTS-TOPK-ROLLUP-001 Hook A — ``RollupMergeHook.merge_tuple``),
+        fired after each SUCCESSFUL tuple (after *on_tuple*). FENCED
+        INTERNALLY at BLOCKER-1 strength — never raises into the grid.
+        ``None`` (the default) is byte-identical to the pre-rollup driver.
 
     Returns
     -------
@@ -856,6 +863,11 @@ def run_supervised_grid(
             )
             if on_tuple is not None:
                 on_tuple(tuple_, summary)
+            if rollup_hook is not None:
+                # Hook A (DEC-RESULTS-TOPK-ROLLUP-001): merge THIS tuple's
+                # freshly flushed store into the /results rollup. Internally
+                # fenced — never raises into the grid (BLOCKER-1).
+                rollup_hook(tuple_)
 
         payload = {
             "sweep_id": sweep_id,

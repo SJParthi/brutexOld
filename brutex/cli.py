@@ -6908,6 +6908,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                             },
                         },
                     )
+            # ── /results rollup Hook A (DEC-RESULTS-TOPK-ROLLUP-001) ──
+            # ONE launch-scoped merge hook shared by the grid drivers (per
+            # completed tuple) + the Stage-3 pass (once per pass). Internally
+            # FENCED at BLOCKER-1 strength: any merge failure latches merging
+            # OFF for this launch + stamps conflict_suspect and NEVER raises
+            # into the grid; the run-end Hook B below restores exactness.
+            from brutex.engine.results_rollup import RollupMergeHook
+
+            rollup_hook = RollupMergeHook(sweeps_root=out_root, grid=grid)
             dedup = plan_launch_dedup(grid, digest_path=True)
             guards = SweepGuards(
                 audit=sup_audit,
@@ -6947,6 +6956,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     workers=workers,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
+                    rollup_hook=rollup_hook.merge_tuple,
                 )
             else:
                 result = run_supervised_grid(
@@ -6961,6 +6971,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
+                    rollup_hook=rollup_hook.merge_tuple,
                 )
             # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
             # Runs INSIDE the open audit with-block on this single thread (review
@@ -6985,6 +6996,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 # read); resolved lazily by the pass so a stage3-disabled
                 # grid pays nothing extra.
                 stamper_for=lambda: reference_stamper,
+                # Hook A, stage-3 arm (DEC-RESULTS-TOPK-ROLLUP-001): one
+                # fenced rollup merge per pass over the flushed cell stores.
+                rollup_paths_hook=rollup_hook.merge_paths,
             )
         # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
         # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
@@ -7170,6 +7184,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 "[brutex] results-depth: disabled via BRUTEX_RESULTS_DEPTH — the run-end "
                 "pass was SKIPPED (no trade sidecars / baselines / top-100 refresh this run)"
             )
+
+        # ── /results rollup Hook B (DEC-RESULTS-TOPK-ROLLUP-001) ──
+        # ONE full legacy-loader reconcile at run end — the exactness anchor:
+        # clears conflict_suspect, restores total_rows_exact + the legacy
+        # first-wins row content, and folds anything Hook A missed (a latched
+        # fence, Stage-3 cells, a pre-rollup history). O(stores × rows) ONCE
+        # per run (logged, never hidden). Fenced like the results-depth
+        # adapter above — a rollup failure NEVER fails the sweep.
+        _run_results_rollup_reconcile(out_root=out_root)
 
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError — or any stage-3 cell
@@ -9220,6 +9243,61 @@ def _run_results_depth_adapter(
         f"entries={report.top100_entries}"
     )
     return True
+
+
+def _run_results_rollup_reconcile(
+    *,
+    out_root: Path,
+    rebuild: Callable[[Path], bool] | None = None,
+) -> bool:
+    """The fenced run-end ``/results`` rollup reconcile (DEC-RESULTS-TOPK-ROLLUP-001, Hook B).
+
+    ONE full fold through the legacy loader
+    (:func:`brutex.engine.results_rollup.rebuild_rollup` →
+    ``load_sweep_scan_tree`` verbatim) + a rollup write — the exactness
+    anchor after a launch's incremental Hook-A merges (restores
+    ``total_rows_exact`` / ``run_id_conflicts`` / the legacy first-wins row
+    content and clears ``conflict_suspect``, including after a latched
+    BLOCKER-1 fence).
+
+    The fence mirrors ``_run_results_depth_adapter``: a failure prints LOUD
+    on stderr + logs ``cli.results_rollup.failed`` and NEVER changes the
+    sweep's exit path (the rollup is a display artifact — /results falls
+    back to the byte-identical legacy scan + the serve-side Hook-C rebuild);
+    ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` always re-raise
+    raw. Returns ``True`` iff a rollup was written (``False`` covers both
+    the fenced failure and the honest zero-store skip).
+
+    ``rebuild`` is an injection seam for tests; ``None`` runs the real
+    :func:`brutex.engine.results_rollup.rebuild_rollup`.
+    """
+    import structlog
+
+    from brutex.engine.results_rollup import rebuild_rollup
+
+    runner = rebuild_rollup if rebuild is None else rebuild
+    try:
+        written = runner(out_root)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        print(
+            f"[brutex] WARNING: /results rollup reconcile FAILED "
+            f"({type(exc).__name__}: {exc}) — the sweep itself SUCCEEDED; /results serves "
+            "the legacy scan and rebuilds the rollup on its next poll (Hook C).",
+            file=sys.stderr,
+        )
+        structlog.get_logger("brutex.cli").error(
+            "cli.results_rollup.failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    print(
+        f"[brutex] results-rollup — "
+        f"{'reconciled (topk.parquet + stamp refreshed)' if written else 'skipped (no stores)'}"
+    )
+    return written
 
 
 # ════ END P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001) ════

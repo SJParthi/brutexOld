@@ -1052,6 +1052,7 @@ class ParallelGridDriver:
         "_quarantined",
         "_reference_stamper",
         "_roll_schedule_by_instrument",
+        "_rollup_hook",
         "_root",
         "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
@@ -1073,6 +1074,7 @@ class ParallelGridDriver:
         monotonic: Callable[[], float] = time.monotonic,
         roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
         reference_stamper: TradeReferenceStamper | None = None,
+        rollup_hook: Callable[[SweepTuple], None] | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -1119,6 +1121,16 @@ class ParallelGridDriver:
             the picklable :class:`_WorkerContext` so EVERY spawn worker binds
             the same stamper — parallel output stays byte-identical to the
             sequential run (regression-pinned).
+        rollup_hook
+            Optional per-tuple ``/results`` rollup merge seam
+            (DEC-RESULTS-TOPK-ROLLUP-001 Hook A —
+            ``RollupMergeHook.merge_tuple``), fired PARENT-SIDE from the
+            contiguous apply point (:meth:`_apply`, the one place tuple
+            outcomes land in canonical order — worker-side merges would
+            contend on the rollup flock and complicate determinism). The
+            hook is FENCED INTERNALLY at BLOCKER-1 strength — it never
+            raises into the grid. ``None`` (the default) is byte-identical
+            to the pre-rollup driver.
 
         Raises
         ------
@@ -1164,6 +1176,7 @@ class ParallelGridDriver:
             dict(roll_schedule_by_instrument) if roll_schedule_by_instrument is not None else None
         )
         self._reference_stamper = reference_stamper
+        self._rollup_hook = rollup_hook
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
@@ -1697,6 +1710,12 @@ class ParallelGridDriver:
                 "store_content_hash": summary.store_content_hash,
             },
         )
+        if self._rollup_hook is not None:
+            # Hook A (DEC-RESULTS-TOPK-ROLLUP-001): merge this tuple's durably
+            # written store into the /results rollup — parent-side, in
+            # canonical apply order. Internally fenced (BLOCKER-1): never
+            # raises into the grid.
+            self._rollup_hook(outcome.tuple_)
 
     def _quarantine_broken_pool(
         self,
@@ -1955,6 +1974,7 @@ def run_parallel_grid(
     monotonic: Callable[[], float] = time.monotonic,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    rollup_hook: Callable[[SweepTuple], None] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -1993,6 +2013,7 @@ def run_parallel_grid(
         monotonic=monotonic,
         roll_schedule_by_instrument=roll_schedule_by_instrument,
         reference_stamper=reference_stamper,
+        rollup_hook=rollup_hook,
     )
     return driver.run()
 
