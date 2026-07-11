@@ -68,12 +68,15 @@ era markers (O(1) memory — :func:`brutex.orchestrator.audit.iter_entries`).
 Since DEC-LEDGER-DELTA-O-PAGE-001 that generation-invariant work is split into
 :func:`load_sweep_scan` (a :class:`SweepScan`), which the route caches behind
 the ``sweep_results_revision`` content token — so a filter/rank/top_n click
-within one revision re-pays ONLY the O(N log N) rank + O(top_n) projection,
+within one revision re-pays ONLY the bounded O(N log top_n) rank (fix 5,
+DEC-MEMORY-FOOTPRINT-HARDENING-001; the preset arm stays the engine-shared
+full-sort law) + O(top_n) projection,
 zero store loads + zero audit reads; a repeat poll is an O(1) cache hit.
 """
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -805,7 +808,8 @@ def build_sweep_leaderboard(
     inline via :func:`load_sweep_scan` — byte-identical to the pre-split
     behaviour for every existing caller; passing a cached *scan* skips the
     O(stores × rows) load + the audit era pass entirely
-    (DEC-LEDGER-DELTA-O-PAGE-001) and pays ONLY the O(N log N) rank +
+    (DEC-LEDGER-DELTA-O-PAGE-001) and pays ONLY the bounded O(N log top_n)
+    rank (full-sort on the preset arm — the engine-shared law) +
     O(top_n) projection.
 
     Parameters
@@ -858,14 +862,32 @@ def build_sweep_leaderboard(
     if resolved_preset is None:
         # Deterministic rank: by the chosen column descending, ties broken by run_id
         # ascending (the SAME total order ResultsStore.top_k uses — Golden Rule #4), so
-        # the leaderboard is identical for any discovery order.
-        ordered = sorted(filtered, key=lambda r: r.run_id)
-        ordered.sort(key=lambda r: _rank_value(r, resolved_rank), reverse=True)
+        # the leaderboard is identical for any discovery order. Fix 5
+        # (DEC-MEMORY-FOOTPRINT-HARDENING-001): only the top-`depth` rows are ever
+        # projected, so the former whole-list two-pass sort (O(rows·log rows) per
+        # request) becomes ONE bounded `heapq.nsmallest` (O(rows·log depth)) over the
+        # composite key `(-value, run_id)` — order PROVEN byte-identical to the
+        # two-pass law: negation is exact for int (arbitrary precision) AND float
+        # (sign-bit flip; `-0.0 == 0.0` so a zero tie still falls to run_id), int↔float
+        # comparisons are exact-value in Python, and `nsmallest` is stable in
+        # iteration order for fully-equal keys — exactly the stable two-pass residue
+        # (duplicate (value, run_id) pairs keep scan order). Parity is property-pinned
+        # (test_sweep_results_topk_order_parity.py) incl. ties, ±0.0, >2**53 paisa
+        # ints and duplicate run_ids. HONEST limit: a NaN metric has no total order
+        # under EITHER path (the store writers persist finite metrics — the gates'
+        # fail-closed non_finite_input law), so NaN is outside the parity claim.
+        ordered: Sequence[ResultRow] = heapq.nsmallest(
+            depth, filtered, key=lambda r: (-_rank_value(r, resolved_rank), r.run_id)
+        )
     else:
         # THIN preset adapter (ruling 10): the ENTIRE ordering law — key,
         # direction, run_id-ASC tie pre-sort — lives in brutex.ranking.presets;
         # this call site only projects the persisted rows (raw full-precision
         # values, see _preset_rank_record) and never re-derives a ranking rule.
+        # DELIBERATELY still the full sort (fix 5 honesty): the preset law is
+        # a stable multi-pass composite (None-after-scored, the top_k two-pass
+        # idiom) shared verbatim with the engine's top100 writer — bounding it
+        # here would re-derive the rule this adapter is pinned never to.
         ordered = list(
             sort_by_preset(filtered, preset=PRESETS[resolved_preset], record_of=_preset_rank_record)
         )
