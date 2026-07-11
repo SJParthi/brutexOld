@@ -1,0 +1,748 @@
+"""Per-worker resident-kernel cache tests — `brutex.engine.sweep_parallel`.
+
+DEC-SWEEP-WORKER-KERNEL-CACHE-001 (MIGRATION.md #1729, slice-5 PR-A): the
+parallel sweep threads ONE per-worker-process
+:class:`~brutex.engine.sweep_kernel.ResidentKernelCache` through the EXISTING
+``run_one_tuple(kernel_cache=)`` seam, behind the DEFAULT-OFF
+``BRUTEX_SWEEP_WORKER_KERNEL_CACHE`` flag. The design's proof obligations
+(T1-T6 + the flag hygiene + the real-spawn reuse pin), each held to the
+100% line+branch gate alongside ``test_engine_sweep_parallel.py``:
+
+* **T1 — mixed-key reuse byte-parity**: a real 2-instrument parallel run,
+  flag ON, produces the byte-identical result tree / ingest chain /
+  per-tuple ``store_content_hash`` sequence as the SAME grid flag OFF, with
+  the parent's ``kernel_reuse_summary`` proving ``builds ≤ keys × workers``
+  and ``hits > 0``.
+* **T2 — LRU-thrash correctness**: a ``capacity=1`` override under a
+  2-proximity grid rebuilds MORE, bytes IDENTICAL (correctness never
+  depends on hit rate).
+* **T3 — roll-schedule / #1062 pin**: a mixed spot + ``NSE-NIFTY-FUT`` grid
+  keys distinct kernels per instrument (the schedule is IN the key), bytes ≡
+  sequential; a hand-built WRONG-schedule kernel still trips the
+  ``run_persisted_sweep`` fail-fast THROUGH the worker path.
+* **T4 — bars-intern memo**: same-``(instrument, tf)`` dispatches share ONE
+  resident bars copy (object identity); a mismatching fresh copy degrades
+  safely (WARN-once + fresh bars + entry dropped).
+* **T5 — flag hygiene**: junk env → OFF + warn-once; invalid capacity →
+  grid default + loud warn; the OFF arm constructs NO cache (spy).
+* **T6 — memory bound**: the cache length never exceeds its capacity.
+* **SPAWN** — a REAL spawn pool (``workers=2`` → ONE EVAL worker, so the
+  arithmetic is deterministic) reuses the kernel across tuples:
+  ``builds_total == distinct keys``, ``hits_total == tuples − builds``.
+
+The existing byte-identity/golden suites pass UNMODIFIED (default-OFF pins
+the legacy path); the RAYON_NUM_THREADS=1 determinism pin is re-asserted
+with the cache ON (the pin is LOAD-BEARING for the published perf law).
+"""
+
+# pyright: reportPrivateUsage=false
+
+from __future__ import annotations
+
+import hashlib
+import os
+from collections import OrderedDict
+from collections.abc import Generator, Mapping, Sequence
+from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import brutex.engine.sweep_parallel as mod
+import pytest
+from brutex.data.models import CandleBar
+from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine.sweep_audit import SweepAuditWriter
+from brutex.engine.sweep_audit import read_entries as read_sup_entries
+from brutex.engine.sweep_cache import SweepCache
+from brutex.engine.sweep_checkpoint import SweepCheckpointStore
+from brutex.engine.sweep_kernel import ResidentKernelCache, ResidentSweepKernel
+from brutex.engine.sweep_orchestrator import (
+    SweepGridConfig,
+    Timeframe,
+    count_sweep_tuples,
+    iter_sweep_tuples,
+    make_store_for,
+)
+from brutex.engine.sweep_progress import SweepProgress
+from brutex.engine.sweep_run import ComboDedup
+from brutex.engine.sweep_supervisor import (
+    SweepGuards,
+    grid_identity,
+    run_supervised_grid,
+)
+from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.observability.logging import reset_configuration
+from brutex.orchestrator.audit import AuditWriter
+from brutex.orchestrator.audit import read_entries as read_ingest_entries
+from brutex.strategies.types import Side
+from brutex.vocabulary.evaluator import ProximityParams
+from structlog.testing import capture_logs
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+@pytest.fixture(autouse=True)
+def _reset_worker_state() -> Generator[None, None, None]:
+    """Reset the per-worker module globals + warn-once memos + structlog.
+
+    In-process ``_worker_init`` calls mutate module-global worker state (the
+    kernel cache / bars memo / warn latch) and configure GLOBAL structlog —
+    reset after each test so the suite is leak-free (the sibling suite's
+    ``_reset_logging_state`` discipline, extended to the cache globals).
+    """
+    yield
+    mod._WORKER_KERNEL_CACHE = None
+    mod._WORKER_BARS_MEMO = None
+    mod._WORKER_BARS_MEMO_WARNED = False
+    mod.reset_worker_kernel_flag_warnings_for_tests()
+    reset_configuration()
+
+
+# ────────────────────────── shared fixtures ──────────────────────────
+# Mirrors of the sibling suite's deterministic synthetic-session fixtures
+# (tz-aware Decimal OHLC, Golden Rule #1) — duplicated MINIMALLY here so this
+# file stays importable standalone (the coverage-gate discovery collects both
+# files together; neither imports the other).
+
+
+def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
+    ts = (
+        datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
+    ).astimezone(UTC)
+    hi = max(o, c) + 0.5
+    lo = min(o, c) - 0.5
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(str(round(o, 2))),
+        high=Decimal(str(round(hi, 2))),
+        low=Decimal(str(round(lo, 2))),
+        close=Decimal(str(round(c, 2))),
+        volume=100,
+        open_interest=None,
+    )
+
+
+def _trending_bars(n_days: int = 4, per_day: int = 60) -> list[CandleBar]:
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 0.6 if m % 3 else price - 0.3
+            bars.append(_bar(d, m, price, close))
+            price = close
+    return bars
+
+
+_BARS = _trending_bars()
+
+
+def _bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
+    return _BARS
+
+
+def _grid(**overrides: object) -> SweepGridConfig:
+    base: dict[str, object] = {
+        "instruments": ["NIFTY"],
+        "timeframes": [Timeframe("1minute", 1)],
+        "directions": [Side.BUY, Side.SELL],
+        "k_values": [1, 2],
+        "condition_bits": [0, 1, 2, 3, 4],
+        "stop_losses": [80],
+        "take_profits": [50],
+        "proximities": [None],
+        "mode": "A",
+        "data_snapshot_hash": "snap0001",
+        "indicator_version": "ind-v1",
+        "code_commit_sha": "deadbeef",
+    }
+    base.update(overrides)
+    return SweepGridConfig(**base)  # type: ignore[arg-type]
+
+
+#: An ADR-0012 roll schedule spanning the ``_trending_bars`` fixture (which
+#: starts 2026-01-05 IST): one mid-stream roll boundary + a covering tail
+#: entry, expressed as owning-expiry day-ordinals (the orchestrator-suite twin).
+_FUT_SCHEDULE: tuple[int, ...] = (
+    datetime(2026, 1, 8, tzinfo=_IST).date().toordinal(),
+    datetime(2026, 3, 31, tzinfo=_IST).date().toordinal(),
+)
+
+#: A DIFFERENT but bars-covering schedule — used ONLY to hand-build the
+#: wrong-schedule kernel for the T3 fail-fast re-pin.
+_WRONG_SCHEDULE: tuple[int, ...] = (
+    datetime(2026, 1, 9, tzinfo=_IST).date().toordinal(),
+    datetime(2026, 3, 31, tzinfo=_IST).date().toordinal(),
+)
+
+
+def _run_grid(
+    tmp: Path,
+    grid: SweepGridConfig,
+    *,
+    workers: int,
+    roll: dict[str, tuple[int, ...]] | None = None,
+) -> tuple[Path, Path, int]:
+    """Run the grid (sequential when ``workers == 1``, else parallel)."""
+    out = tmp / "out"
+    with (
+        AuditWriter.open(tmp / "ingest.jsonl") as ingest,
+        SweepAuditWriter.open(tmp / "sup.jsonl") as sup,
+        SweepCache.open(tmp / "cache", bloom_capacity=10_000) as cache,
+    ):
+        guards = SweepGuards(
+            audit=sup,
+            progress=SweepProgress(),
+            checkpoint=SweepCheckpointStore(
+                path=tmp / "ckpt.json",
+                sweep_id=grid_identity(grid),
+                total_combos=count_sweep_tuples(grid),
+            ),
+            cache=cache,
+            watchdog=SweepWatchdog(),
+        )
+        if workers == 1:
+            run_supervised_grid(
+                grid,
+                bars_for=_bars_for,
+                store_for=make_store_for(out, grid),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                ingest_audit=ingest,
+                guards=guards,
+                roll_schedule_by_instrument=roll,
+            )
+        else:
+            mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=workers,
+                roll_schedule_by_instrument=roll,
+            )
+        ckpt = guards.checkpoint.next_index
+    return out, tmp / "ingest.jsonl", ckpt
+
+
+def _tree(root: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def _ingest_lines(path: Path) -> list[tuple[int, str, str, dict[str, Any]]]:
+    return [(e.seq, e.action, e.subject, e.payload) for e in read_ingest_entries(path)]
+
+
+def _tuple_done_hashes(sup_path: Path) -> list[tuple[object, object]]:
+    """The per-tuple ``(tuple, store_content_hash)`` sequence from the sup chain."""
+    return [
+        (e.payload.get("tuple"), e.payload.get("store_content_hash"))
+        for e in read_sup_entries(sup_path)
+        if e.action == "TUPLE_DONE"
+    ]
+
+
+def _summary_events(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    return [e for e in logs if e.get("event") == "sweep_parallel.kernel_reuse_summary"]
+
+
+# ────────────────────────── flag resolution (T5) ──────────────────────────
+
+
+class TestResolveWorkerKernelCache:
+    def test_unset_is_the_default_off(self) -> None:
+        assert mod.resolve_worker_kernel_cache({}) is mod.WORKER_KERNEL_CACHE_DEFAULT
+        assert mod.WORKER_KERNEL_CACHE_DEFAULT is False
+
+    def test_blank_is_the_default_off(self) -> None:
+        assert mod.resolve_worker_kernel_cache({mod.WORKER_KERNEL_CACHE_ENV: "  "}) is False
+
+    @pytest.mark.parametrize("raw", ["1", "true", "YES", " on "])
+    def test_truthy_enables(self, raw: str) -> None:
+        assert mod.resolve_worker_kernel_cache({mod.WORKER_KERNEL_CACHE_ENV: raw}) is True
+
+    @pytest.mark.parametrize("raw", ["0", "false", "NO", " off "])
+    def test_falsy_disables(self, raw: str) -> None:
+        assert mod.resolve_worker_kernel_cache({mod.WORKER_KERNEL_CACHE_ENV: raw}) is False
+
+    def test_unrecognised_fails_safe_off_and_warns_once(self) -> None:
+        env = {mod.WORKER_KERNEL_CACHE_ENV: "maybe"}
+        with capture_logs() as logs:
+            assert mod.resolve_worker_kernel_cache(env) is False
+            assert mod.resolve_worker_kernel_cache(env) is False
+        warned = [
+            e
+            for e in logs
+            if e.get("event") == "sweep_parallel.worker_kernel_cache.flag_unrecognised"
+        ]
+        assert len(warned) == 1  # warn-ONCE per process
+        assert warned[0]["requested_env"] == repr("maybe")
+
+    def test_warn_once_reset_seam(self) -> None:
+        env = {mod.WORKER_KERNEL_CACHE_ENV: "junk"}
+        with capture_logs() as logs:
+            mod.resolve_worker_kernel_cache(env)
+            mod.reset_worker_kernel_flag_warnings_for_tests()
+            mod.resolve_worker_kernel_cache(env)
+        assert len(_summary_events(logs)) == 0
+        assert (
+            len(
+                [
+                    e
+                    for e in logs
+                    if e.get("event") == "sweep_parallel.worker_kernel_cache.flag_unrecognised"
+                ]
+            )
+            == 2
+        )
+
+    def test_reads_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(mod.WORKER_KERNEL_CACHE_ENV, "1")
+        assert mod.resolve_worker_kernel_cache() is True
+
+
+class TestResolveWorkerKernelCapacity:
+    def test_default_is_the_orchestrator_law(self) -> None:
+        grid = _grid(
+            proximities=[None, ProximityParams(pivot_proximity_bps=25)],
+        )
+        assert mod.worker_kernel_capacity_default(grid) == 2 * len(grid.fib_anchors)
+        assert mod.resolve_worker_kernel_capacity(grid, {}) == mod.worker_kernel_capacity_default(
+            grid
+        )
+
+    def test_single_axis_grid_floors_at_one(self) -> None:
+        grid = _grid()
+        assert mod.worker_kernel_capacity_default(grid) == 1
+
+    def test_blank_env_is_the_default(self) -> None:
+        grid = _grid()
+        assert mod.resolve_worker_kernel_capacity(grid, {mod.WORKER_KERNEL_CAPACITY_ENV: " "}) == 1
+
+    def test_valid_override_is_verbatim(self) -> None:
+        grid = _grid()
+        env = {mod.WORKER_KERNEL_CAPACITY_ENV: "7"}
+        assert mod.resolve_worker_kernel_capacity(grid, env) == 7
+
+    @pytest.mark.parametrize("raw", ["zero", "0", "-3", "2.5"])
+    def test_invalid_falls_back_to_default_and_warns(self, raw: str) -> None:
+        grid = _grid()
+        with capture_logs() as logs:
+            got = mod.resolve_worker_kernel_capacity(grid, {mod.WORKER_KERNEL_CAPACITY_ENV: raw})
+        assert got == mod.worker_kernel_capacity_default(grid)
+        warned = [
+            e for e in logs if e.get("event") == "sweep_parallel.worker_kernel_capacity.invalid"
+        ]
+        assert len(warned) == 1
+        assert warned[0]["requested_env"] == repr(raw)
+
+    def test_reads_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(mod.WORKER_KERNEL_CAPACITY_ENV, "5")
+        assert mod.resolve_worker_kernel_capacity(_grid()) == 5
+
+
+# ────────────────────────── worker init (T5 / T6) ──────────────────────────
+
+
+class TestWorkerInitKernelCache:
+    def test_on_constructs_cache_and_memo(self, tmp_path: Path) -> None:
+        ctx = mod._WorkerContext(
+            grid=_grid(),
+            root=tmp_path,
+            worker_kernel_cache=True,
+            worker_kernel_capacity=3,
+        )
+        mod._worker_init(ctx)
+        cache = mod._WORKER_KERNEL_CACHE
+        assert isinstance(cache, ResidentKernelCache)
+        assert isinstance(mod._WORKER_BARS_MEMO, OrderedDict)
+        assert mod._WORKER_BARS_MEMO_WARNED is False
+        # Capacity travelled from the ctx (T6 bound is enforced by the cache).
+        assert len(cache) == 0
+
+    def test_off_constructs_no_cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The OFF arm is allocation-identical: no cache object is EVER built."""
+        calls: list[object] = []
+
+        class _Spy:
+            def __init__(self, **kwargs: object) -> None:
+                calls.append(kwargs)
+
+        monkeypatch.setattr(mod, "ResidentKernelCache", _Spy)
+        mod._worker_init(mod._WorkerContext(grid=_grid(), root=tmp_path))
+        assert calls == []
+        assert mod._WORKER_KERNEL_CACHE is None
+        assert mod._WORKER_BARS_MEMO is None
+
+    def test_rayon_determinism_pin_survives_cache_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The RAYON_NUM_THREADS=1 pin is LOAD-BEARING (the published perf
+        law's walk-cost coefficient was measured under it) — the kernel-cache
+        block is APPENDED after it and must never disturb it."""
+        for var in ("OMP_NUM_THREADS", "RAYON_NUM_THREADS", "POLARS_MAX_THREADS"):
+            monkeypatch.delenv(var, raising=False)
+        mod._worker_init(
+            mod._WorkerContext(
+                grid=_grid(), root=tmp_path, worker_kernel_cache=True, worker_kernel_capacity=1
+            )
+        )
+        assert os.environ["RAYON_NUM_THREADS"] == "1"
+        assert os.environ["OMP_NUM_THREADS"] == "1"
+        assert os.environ["POLARS_MAX_THREADS"] == "1"
+
+
+# ────────────────────────── bars-intern memo (T4) ──────────────────────────
+
+
+class TestInternBars:
+    def _memo_on(self) -> None:
+        mod._WORKER_BARS_MEMO = OrderedDict()
+        mod._WORKER_BARS_MEMO_WARNED = False
+
+    def test_memo_off_returns_bars_untouched(self) -> None:
+        mod._WORKER_BARS_MEMO = None
+        bars = list(_BARS)
+        assert mod._intern_bars("NIFTY", "1minute", bars) is bars
+
+    def test_empty_bars_never_memoized(self) -> None:
+        self._memo_on()
+        empty: list[CandleBar] = []
+        assert mod._intern_bars("NIFTY", "1minute", empty) is empty
+        assert not mod._WORKER_BARS_MEMO
+
+    def test_hit_returns_the_resident_copy(self) -> None:
+        self._memo_on()
+        first = list(_BARS)
+        fresh = list(_BARS)  # a value-identical "fresh pickled copy"
+        assert mod._intern_bars("NIFTY", "1minute", first) is first
+        assert mod._intern_bars("NIFTY", "1minute", fresh) is first  # interned!
+
+    @pytest.mark.parametrize(
+        "mutant",
+        ["shorter", "first_bar", "last_bar"],
+    )
+    def test_mismatch_degrades_to_fresh_and_warns_once(self, mutant: str) -> None:
+        self._memo_on()
+        first = list(_BARS)
+        mod._intern_bars("NIFTY", "1minute", first)
+        if mutant == "shorter":
+            fresh = first[:-1]
+        elif mutant == "first_bar":
+            fresh = [_bar(0, 0, 999.0, 999.5), *first[1:]]
+        else:
+            fresh = [*first[:-1], _bar(3, 59, 999.0, 999.5)]
+        with capture_logs() as logs:
+            got = mod._intern_bars("NIFTY", "1minute", fresh)
+            # A SECOND mismatch on a re-seeded key warns no second time.
+            mod._intern_bars("NIFTY", "1minute", first)
+            got2 = mod._intern_bars("NIFTY", "1minute", fresh)
+        assert got is fresh  # the FRESH bars are used, never the stale resident
+        assert got2 is fresh
+        memo = mod._WORKER_BARS_MEMO
+        assert memo is not None
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert len(warned) == 1  # warn-once per worker process
+
+    def test_mismatch_drops_the_entry(self) -> None:
+        self._memo_on()
+        first = list(_BARS)
+        mod._intern_bars("NIFTY", "1minute", first)
+        mod._intern_bars("NIFTY", "1minute", first[:-1])  # mismatch → dropped
+        memo = mod._WORKER_BARS_MEMO
+        assert memo is not None
+        assert ("NIFTY", "1minute") not in memo
+
+    def test_lru_bound_capacity_two(self) -> None:
+        self._memo_on()
+        a, b, c = list(_BARS), list(_BARS), list(_BARS)
+        mod._intern_bars("A", "1minute", a)
+        mod._intern_bars("B", "1minute", b)
+        mod._intern_bars("C", "1minute", c)  # evicts A (LRU)
+        memo = mod._WORKER_BARS_MEMO
+        assert memo is not None
+        assert len(memo) == mod._BARS_MEMO_CAPACITY == 2
+        assert set(memo) == {("B", "1minute"), ("C", "1minute")}
+
+
+# ─────────────── in-process worker reuse + counters (T1/T3/T6) ───────────────
+
+
+def _worker_ctx_on(
+    tmp_path: Path,
+    grid: SweepGridConfig,
+    *,
+    capacity: int = 4,
+    roll: dict[str, tuple[int, ...]] | None = None,
+) -> mod._WorkerContext:
+    return mod._WorkerContext(
+        grid=grid,
+        root=tmp_path / "out",
+        roll_schedule_by_instrument=roll,
+        worker_kernel_cache=True,
+        worker_kernel_capacity=capacity,
+    )
+
+
+class TestRunTupleInWorkerKernelCache:
+    def test_reuse_within_a_worker_and_counters(self, tmp_path: Path) -> None:
+        grid = _grid()
+        mod._worker_init(_worker_ctx_on(tmp_path, grid))
+        tuples = list(iter_sweep_tuples(grid))
+        with capture_logs() as logs:
+            first = mod._run_tuple_in_worker(0, tuples[0], _BARS)
+            second = mod._run_tuple_in_worker(1, tuples[1], _BARS)
+        cache = mod._WORKER_KERNEL_CACHE
+        assert cache is not None
+        # One key (one instrument × tf × proximity × anchor) → ONE build, one hit.
+        assert cache.builds == 1
+        assert cache.hits == 1
+        # The additive telemetry fields are stamped (cumulative snapshots).
+        assert first.worker_pid == os.getpid() == second.worker_pid
+        assert (first.kernel_builds, first.kernel_hits) == (1, 0)
+        assert (second.kernel_builds, second.kernel_hits) == (1, 1)
+        # ONE bounded worker_kernel_built INFO — the MISS logged, the hit silent.
+        built = [e for e in logs if e.get("event") == "sweep_parallel.worker_kernel_built"]
+        assert len(built) == 1
+        assert built[0]["instrument"] == "NIFTY"
+        assert built[0]["roll"] is False
+        # Both tuples produced real summaries (the reuse is byte-safe).
+        assert first.summary is not None
+        assert second.summary is not None
+
+    def test_off_results_carry_default_none_telemetry(self, tmp_path: Path) -> None:
+        grid = _grid()
+        mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+        result = mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS)
+        assert result.worker_pid is None
+        assert result.kernel_builds is None
+        assert result.kernel_hits is None
+
+    def test_failed_tuple_still_stamps_counters(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine import sweep_run as sr
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise ValueError("combo blew up")
+
+        monkeypatch.setattr(sr, "metrics_from_trades", _boom)
+        grid = _grid()
+        mod._worker_init(_worker_ctx_on(tmp_path, grid))
+        with capture_logs() as logs:
+            result = mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS)
+        assert result.failed_error is not None
+        assert result.worker_pid == os.getpid()
+        assert result.kernel_builds == 1  # the kernel HAD been built before the failure
+        assert result.kernel_hits == 0
+        built = [e for e in logs if e.get("event") == "sweep_parallel.worker_kernel_built"]
+        assert len(built) == 1  # the miss is logged on the failed path too
+
+    def test_distinct_instruments_key_distinct_kernels(self, tmp_path: Path) -> None:
+        """T3 (#1062 class): spot + NSE-NIFTY-FUT coexisting in ONE worker cache."""
+        grid = _grid(instruments=["NIFTY", "NSE-NIFTY-FUT"], k_values=[1])
+        roll = {"NSE-NIFTY-FUT": _FUT_SCHEDULE}
+        mod._worker_init(_worker_ctx_on(tmp_path, grid, roll=roll))
+        tuples = list(iter_sweep_tuples(grid))
+        spot = [t for t in tuples if t.instrument == "NIFTY"]
+        fut = [t for t in tuples if t.instrument == "NSE-NIFTY-FUT"]
+        with capture_logs() as logs:
+            assert mod._run_tuple_in_worker(0, spot[0], _BARS).summary is not None
+            assert mod._run_tuple_in_worker(1, fut[0], _BARS).summary is not None
+            assert mod._run_tuple_in_worker(2, spot[1], _BARS).summary is not None
+            assert mod._run_tuple_in_worker(3, fut[1], _BARS).summary is not None
+        cache = mod._WORKER_KERNEL_CACHE
+        assert cache is not None
+        assert cache.builds == 2  # one kernel per INSTRUMENT (schedule in the key)
+        assert cache.hits == 2
+        assert len(cache) == 2
+        built = [e for e in logs if e.get("event") == "sweep_parallel.worker_kernel_built"]
+        assert [e["roll"] for e in built] == [False, True]
+
+    def test_wrong_schedule_kernel_trips_the_fail_fast_through_the_worker(
+        self, tmp_path: Path
+    ) -> None:
+        """T3 belt: the sweep_run schedule fail-fast still guards the worker path.
+
+        Unreachable through the REAL cache (the schedule is in its key) — so a
+        stub cache serves a hand-built WRONG-schedule kernel to prove the
+        run_persisted_sweep guard refuses it loudly (and propagates: it is not
+        a SweepComboError, so the worker never converts it to a failed marker).
+        """
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], k_values=[1], directions=[Side.BUY])
+        roll = {"NSE-NIFTY-FUT": _FUT_SCHEDULE}
+        mod._worker_init(_worker_ctx_on(tmp_path, grid, roll=roll))
+        wrong = ResidentSweepKernel(
+            _BARS,
+            proximity=None,
+            prior_n=grid.prior_n,
+            roll_schedule=_WRONG_SCHEDULE,
+        )
+
+        class _StubCache:
+            builds = 1
+            hits = 0
+
+            def get(self, *_a: object, **_k: object) -> ResidentSweepKernel:
+                return wrong
+
+            def __len__(self) -> int:
+                return 1
+
+        mod._WORKER_KERNEL_CACHE = _StubCache()  # type: ignore[assignment]
+        with pytest.raises(ValueError, match="must match this tuple's schedule"):
+            mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS)
+
+    def test_capacity_one_thrash_is_correct_and_bounded(self, tmp_path: Path) -> None:
+        """T2/T6 in-process arm: capacity 1 under 2 keys thrashes (more builds),
+        results stay real, and the cache never exceeds its capacity."""
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"], k_values=[1], directions=[Side.BUY])
+        mod._worker_init(_worker_ctx_on(tmp_path, grid, capacity=1))
+        tuples = list(iter_sweep_tuples(grid))
+        # Interleave the two instruments so every access misses under LRU-1.
+        order = [tuples[0], tuples[1], tuples[0], tuples[1]]
+        for i, t in enumerate(order):
+            assert mod._run_tuple_in_worker(i, t, _BARS).summary is not None
+        cache = mod._WORKER_KERNEL_CACHE
+        assert cache is not None
+        assert cache.builds == 4  # 100% miss on the cycle — the LRU pathology
+        assert cache.hits == 0
+        assert len(cache) == 1  # T6: never exceeds capacity
+
+    def test_bars_interned_across_same_key_dispatches(self, tmp_path: Path) -> None:
+        """T4 integration: a fresh value-equal pickled copy is swapped for the
+        resident copy, so the cached kernel and every later dispatch share ONE
+        underlying bars object."""
+        grid = _grid()
+        mod._worker_init(_worker_ctx_on(tmp_path, grid))
+        tuples = list(iter_sweep_tuples(grid))
+        first_bars = list(_BARS)
+        fresh_copy = list(_BARS)
+        mod._run_tuple_in_worker(0, tuples[0], first_bars)
+        mod._run_tuple_in_worker(1, tuples[1], fresh_copy)
+        memo = mod._WORKER_BARS_MEMO
+        assert memo is not None
+        assert memo[("NIFTY", "1minute")] is first_bars  # the FIRST copy stays resident
+
+
+# ─────────────── T1/T2/T3 — real-pool byte-identity goldens ───────────────
+
+
+class TestByteIdentityOnVsOff:
+    def test_mixed_key_grid_on_equals_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T1 HEADLINE: flag-ON parallel ≡ flag-OFF parallel, byte-for-byte,
+        with the parent summary proving builds ≤ keys × workers and hits > 0."""
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        monkeypatch.delenv(mod.WORKER_KERNEL_CACHE_ENV, raising=False)
+        off_root, off_audit, off_ckpt = _run_grid(tmp_path / "off", grid, workers=3)
+        monkeypatch.setenv(mod.WORKER_KERNEL_CACHE_ENV, "1")
+        with capture_logs() as logs:
+            on_root, on_audit, on_ckpt = _run_grid(tmp_path / "on", grid, workers=3)
+        assert _tree(off_root) == _tree(on_root)
+        assert len(_tree(on_root)) > 0
+        assert _ingest_lines(off_audit) == _ingest_lines(on_audit)
+        assert off_ckpt == on_ckpt
+        # Per-tuple store_content_hash equality (the T1 letter).
+        assert _tuple_done_hashes(tmp_path / "off" / "sup.jsonl") == _tuple_done_hashes(
+            tmp_path / "on" / "sup.jsonl"
+        )
+        summaries = _summary_events(logs)
+        assert len(summaries) == 1  # ONE parent INFO at drain end
+        builds_total = summaries[0]["builds_total"]
+        hits_total = summaries[0]["hits_total"]
+        assert isinstance(builds_total, int)
+        assert isinstance(hits_total, int)
+        # 2 (instrument, tf) keys × 2 EVAL workers — the A.3 arithmetic.
+        assert 0 < builds_total <= 2 * 2
+        # 8 tuples over ≤2 workers in 2 contiguous key blocks of 4: pigeonhole
+        # guarantees some worker sees a key at least twice → at least one hit.
+        assert hits_total > 0
+        assert builds_total + hits_total == count_sweep_tuples(grid)
+
+    def test_capacity_one_thrash_bytes_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T2: an operator-shrunk capacity trades builds for RSS, NEVER bytes."""
+        grid = _grid(
+            proximities=[None, ProximityParams(pivot_proximity_bps=25)],
+            k_values=[1],
+        )
+        monkeypatch.delenv(mod.WORKER_KERNEL_CACHE_ENV, raising=False)
+        off_root, _off_audit, _ = _run_grid(tmp_path / "off", grid, workers=3)
+        monkeypatch.setenv(mod.WORKER_KERNEL_CACHE_ENV, "1")
+        monkeypatch.setenv(mod.WORKER_KERNEL_CAPACITY_ENV, "1")
+        with capture_logs() as logs:
+            on_root, _on_audit, _ = _run_grid(tmp_path / "thrash", grid, workers=3)
+        assert _tree(off_root) == _tree(on_root)
+        summaries = _summary_events(logs)
+        assert len(summaries) == 1
+        builds_total = summaries[0]["builds_total"]
+        assert isinstance(builds_total, int)
+        assert builds_total > 0  # correctness never depended on the hit rate
+
+    def test_futures_grid_on_equals_sequential(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T3: mixed spot + NSE-NIFTY-FUT, flag ON ≡ the sequential reference
+        (the #1062 pin through REAL spawn workers — two instruments' kernels
+        genuinely coexist in one long-lived per-worker cache)."""
+        grid = _grid(instruments=["NIFTY", "NSE-NIFTY-FUT"], k_values=[1])
+        roll = {"NSE-NIFTY-FUT": _FUT_SCHEDULE}
+        monkeypatch.delenv(mod.WORKER_KERNEL_CACHE_ENV, raising=False)
+        seq_root, seq_audit, seq_ckpt = _run_grid(tmp_path / "seq", grid, workers=1, roll=roll)
+        monkeypatch.setenv(mod.WORKER_KERNEL_CACHE_ENV, "1")
+        par_root, par_audit, par_ckpt = _run_grid(tmp_path / "par", grid, workers=3, roll=roll)
+        assert _tree(seq_root) == _tree(par_root)
+        assert len(_tree(par_root)) > 0
+        assert _ingest_lines(seq_audit) == _ingest_lines(par_audit)
+        assert seq_ckpt == par_ckpt
+
+
+class TestRealSpawnWorkerReuse:
+    def test_single_eval_worker_reuses_across_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The REAL-spawn reuse pin: ``workers=2`` → ONE EVAL worker process, so
+        every tuple lands on the SAME long-lived worker and the arithmetic is
+        deterministic — builds_total == distinct keys (1), hits_total ==
+        tuples − builds (3), workers == 1. Proves the cache genuinely persists
+        across tasks in a spawned worker (not just in-process)."""
+        grid = _grid()  # 4 tuples, ONE (instrument, tf, prox, anchor) key
+        monkeypatch.setenv(mod.WORKER_KERNEL_CACHE_ENV, "1")
+        with capture_logs() as logs:
+            _run_grid(tmp_path, grid, workers=2)
+        summaries = _summary_events(logs)
+        assert len(summaries) == 1
+        assert summaries[0]["builds_total"] == 1
+        assert summaries[0]["hits_total"] == count_sweep_tuples(grid) - 1
+        assert summaries[0]["workers"] == 1
+
+    def test_off_run_emits_no_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(mod.WORKER_KERNEL_CACHE_ENV, raising=False)
+        with capture_logs() as logs:
+            _run_grid(tmp_path, _grid(), workers=2)
+        assert _summary_events(logs) == []
+
+    def test_junk_flag_resolves_off_for_the_whole_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T5 run-level: a junk env value fails SAFE to OFF (no summary, one
+        parent warn) — the memory-shape change never switches on via a typo."""
+        monkeypatch.setenv(mod.WORKER_KERNEL_CACHE_ENV, "definitely")
+        with capture_logs() as logs:
+            _run_grid(tmp_path, _grid(), workers=2)
+        assert _summary_events(logs) == []
+        warned = [
+            e
+            for e in logs
+            if e.get("event") == "sweep_parallel.worker_kernel_cache.flag_unrecognised"
+        ]
+        assert len(warned) == 1
