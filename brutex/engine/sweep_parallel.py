@@ -119,15 +119,17 @@ the flag, not a real production limitation.
   MODELED worst case ~0.66–0.73 GB/worker at the default capacity sizing
   (two ~318 MB 555k-bar CandleBar
   list copies dominate) ≈ +5.3–5.8 GB pool-wide at 8 workers — and that RSS
-  stacks on UNDIVIDED rank peaks: the per-tuple rank budget does NOT yet
-  divide across workers (``sweep_run`` resolves it at the default
-  ``workers=1``, so EVERY worker plans against the FULL total-RAM/6
-  allowance; the per-worker division is in-flight PR #1386,
-  DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001), and
+  stacks on each worker's DIVIDED per-tuple rank allowance: the rank budget
+  genuinely divides across the pool's eval workers
+  (``total × 1/6 ÷ eval_workers`` — the MERGED
+  DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 wiring described below), so the
+  cache's retained gigabytes are a LARGER fraction of each worker's
+  now-smaller admission budget, and
   DEC-SWEEP-STALL-OOM-GUARDS-001 is the REACTIVE OOM quarantine — a
   backstop, never a divider. That tighter-than-it-looks boundary is a plain
   reason this ships default-OFF; the default-ON flip is a separate later
-  one-constant ADR'd PR gated on §8 M4-Pro soak RSS + wall evidence.
+  one-constant ADR'd PR gated on §8 M4-Pro soak RSS + wall evidence
+  (measured against the DIVIDED per-worker allowance).
 * ~~Raising the default worker count above 1~~ — DONE per ADR-0016
   (DEC-MULTICORE-SWEEP-AUTODEFAULT-001): an unset ``BRUTEX_SWEEP_WORKERS`` now
   resolves to the AUTO count ``max(1, min(cpu_count - 2, 8))`` with a
@@ -514,11 +516,13 @@ WORKER_KERNEL_CACHE_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CACHE"
 #: kernels + interned bars — MODELED worst case ~0.66–0.73 GB/worker at the
 #: default capacity sizing, two
 #: ~318 MB 555k-bar CandleBar list copies dominate, ≈ +5.3–5.8 GB pool-wide
-#: at 8 workers), and that RSS stacks on UNDIVIDED rank peaks: TODAY each
-#: worker plans a heavy tuple against the FULL total-RAM/6 rank allowance
-#: (``sweep_run`` resolves ``memory_budget_bytes`` at the default
-#: ``workers=1``; the per-worker division is in-flight PR #1386,
-#: DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001), while
+#: at 8 workers), and that RSS stacks on each worker's DIVIDED per-tuple
+#: rank allowance: each eval worker plans a heavy tuple against
+#: ``total × 1/6 ÷ eval_workers`` (the MERGED
+#: DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 wiring — :func:`_worker_init`
+#: exports :data:`~brutex.engine.sweep_mem_budget.BUDGET_WORKERS_ENV`), so
+#: the cache's retained gigabytes are a LARGER fraction of that now-smaller
+#: admission budget, while
 #: DEC-SWEEP-STALL-OOM-GUARDS-001 is the REACTIVE OOM quarantine — a
 #: backstop, never a divider — and a heavy k=5 tuple already sits near that
 #: boundary. Hence default-ON ships only as a separate one-constant PR
@@ -2545,9 +2549,8 @@ class ParallelGridDriver:
             f"sidecar {sidecar}: [{labels}]. An identical-config resume SKIPS them "
             f"(reported as tuples_quarantined_prior — they are NOT silently "
             f"recomputed). Remediation: relieve the memory pressure — reduce "
-            f"{SWEEP_WORKERS_ENV} (fewer workers cuts total concurrent memory "
-            f"pressure; the per-worker budget division is in-flight PR #1386), "
-            f"reduce the grid's k, or raise "
+            f"{SWEEP_WORKERS_ENV} (fewer workers raises each worker's per-tuple "
+            f"memory budget AND cuts total pressure), reduce the grid's k, or raise "
             f"{MEM_BUDGET_ENV}; if {WORKER_KERNEL_CACHE_ENV} is enabled, "
             f"disabling it (=0) or lowering {WORKER_KERNEL_CAPACITY_ENV} also "
             f"cuts per-worker RSS — then DELETE the tuples' entries from the "
