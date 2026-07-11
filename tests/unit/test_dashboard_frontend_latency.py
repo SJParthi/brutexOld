@@ -37,9 +37,9 @@ HONEST envelope (Golden Rule #10):
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess  # nosec B404 — fixed-argv node invocation, test-only
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -327,22 +327,45 @@ _TOUCHED_TEMPLATES = [
     "v29.html",
 ]
 
-# ONE robust block matcher (whitespace-tolerant `</script\s*>` end tag,
-# case-insensitive to mirror the open tag — the CodeQL js/bad-tag-filter
-# shape); the src-less filter runs in Python over the captured attrs
-# instead of a negative lookahead inside the tag match. This is a
-# TEST-side parser of our own trusted templates, never a sanitizer.
-_SCRIPT_BLOCK = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
-_SRC_ATTR = re.compile(r"\bsrc\s*=", re.IGNORECASE)
+# NO tag regex here (CodeQL js/bad-tag-filter whack-a-mole: `</script\s*>`
+# still missed `</script\t\n bar>` variants — HTML allows junk between the
+# tag name and `>`): the stdlib ``html.parser.HTMLParser`` does the tag
+# grammar natively, including the script-element CDATA content mode (script
+# bodies arrive verbatim via ``handle_data``). This is a TEST-side reader of
+# our own trusted templates, never a sanitizer.
+
+
+class _InlineScriptExtractor(HTMLParser):
+    """Collect every src-less inline ``<script>`` body."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bodies: list[str] = []
+        self._in_inline_script = False
+        self._chunks: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script":
+            self._in_inline_script = all(name != "src" for name, _value in attrs)
+            self._chunks = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self._in_inline_script:
+            self.bodies.append("".join(self._chunks))
+            self._in_inline_script = False
+            self._chunks = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_inline_script:
+            self._chunks.append(data)
 
 
 def _inline_script_bodies(html: str) -> list[str]:
     """Every non-empty src-less inline ``<script>`` body in ``html``."""
-    return [
-        body
-        for attrs, body in _SCRIPT_BLOCK.findall(html)
-        if not _SRC_ATTR.search(attrs) and body.strip()
-    ]
+    parser = _InlineScriptExtractor()
+    parser.feed(html)
+    parser.close()
+    return [body for body in parser.bodies if body.strip()]
 
 
 @pytest.mark.skipif(_NODE is None, reason="node not installed")
