@@ -126,7 +126,12 @@ from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
 from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
-from brutex.options.greeks import T_FLOOR_YEARS, GreeksInputError, compute_greeks
+from brutex.options.greeks import (
+    T_FLOOR_YEARS,
+    GreeksBatchOutcome,
+    GreeksInputError,
+    compute_greeks,
+)
 from brutex.options.risk_free import (
     CsvRateSource,
     FixedRateSource,
@@ -598,9 +603,30 @@ def enrich_option_bars(
     current_inputs = current_inputs_pack(rate_source)
     rate_by_date: dict[date, RiskFreeRate | None] = {}
 
-    bars: list[FnoGreeksBar] = []
+    out: list[FnoGreeksBar] = []
     solved = nulls = reused = changed = skipped = 0
     reasons: dict[int, int] = {}
+
+    def _account(bar: FnoGreeksBar, stored_overlay: tuple[object, ...]) -> None:
+        """Fold one recomputed bar into the tallies — order-invariant sums.
+
+        Extracted so the per-row and batch arms share ONE accounting copy
+        (`DEC-GREEKS-RUST-BATCH-001`): every counter is a plain sum and
+        ``reasons`` folds name-sorted at return, so deferring a batch
+        element's accounting to the fill-in pass is observationally
+        invisible. Reused bars never flow through here (they cannot count
+        ``changed`` — unchanged historical contract).
+        """
+        nonlocal solved, nulls, changed
+        status = unpack_greeks_provenance(bar.greeks_provenance_id or 0).status
+        if status == STATUS_OK:
+            solved += 1
+        else:
+            nulls += 1
+            reasons[status] = reasons.get(status, 0) + 1
+        if _overlay_of_bar(bar) != stored_overlay:
+            changed += 1
+
     for row in rows:
         ts = utc_instant(row["timestamp"])  # type: ignore[arg-type]
         stored_overlay = _overlay_of_row(row)
@@ -674,11 +700,11 @@ def enrich_option_bars(
                 # re-solves or DEMOTES (NO_RATE / NO_SPOT) and lets the
                 # latest-wins write heal the lake. The spot is compared
                 # AFTER the 2dp ``round_money`` snap because the SNAPPED spot
-                # IS the recompute's solve input (`_compute_bar` snaps first,
+                # IS the recompute's solve input (`_screen_bar` snaps first,
                 # SPOTJOIN-3) — value-identical to recomputing, and a legacy
                 # non-2dp spot partition keeps the O(reuse) fast path instead
                 # of re-solving every bar on every pass (review fold).
-                bars.append(
+                out.append(
                     FnoGreeksBar(
                         timestamp=ts,
                         open=open_,
@@ -703,7 +729,7 @@ def enrich_option_bars(
                 continue
 
         t_years = t_years_act365(ts, expiry_at)
-        bar = _compute_bar(
+        screened = _screen_bar(
             ts=ts,
             open_=open_,
             high=high,
@@ -719,16 +745,14 @@ def enrich_option_bars(
             style_flag=style_flag,
             source_id=source_id,
         )
-        bars.append(bar)
-        status = unpack_greeks_provenance(bar.greeks_provenance_id or 0).status
-        if status == STATUS_OK:
-            solved += 1
-        else:
-            nulls += 1
-            reasons[status] = reasons.get(status, 0) + 1
-        if _overlay_of_bar(bar) != stored_overlay:
-            changed += 1
-    return bars, EnrichStats(
+        bar = (
+            screened
+            if isinstance(screened, FnoGreeksBar)
+            else _finish_bar(screened, _solve_one(screened))
+        )
+        out.append(bar)
+        _account(bar, stored_overlay)
+    return out, EnrichStats(
         solved=solved,
         nulls=nulls,
         reused=reused,
@@ -783,7 +807,40 @@ def _null_bar(
     )
 
 
-def _compute_bar(
+@dataclass(frozen=True, slots=True)
+class _PendingSolve:
+    """One screened-SOLVABLE bar awaiting its kernel solve.
+
+    Produced by :func:`_screen_bar` when every honest-NULL pre-screen passed
+    (`DEC-GREEKS-RUST-BATCH-001` — the shared-single-copy seam split): the
+    fields are exactly what :func:`_solve_one` needs to run today's
+    ``compute_greeks`` call and what :func:`_finish_bar` needs to build the
+    final bar. ``spot`` is the 2dp-SNAPPED join spot and ``rate`` the
+    resolved :class:`~brutex.options.risk_free.RiskFreeRate` — both non-None
+    by construction (their None screens returned a NULL bar instead);
+    ``forward`` is the Python-computed ``float(spot)·e^{rate·T}`` (the
+    ``math.exp`` stays Python-side on BOTH arms — no exp is ever computed in
+    Rust that Python didn't already compute).
+    """
+
+    ts: datetime
+    open_: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+    oi: int | None
+    spot: Decimal
+    rate: RiskFreeRate
+    t_years: float
+    strike_f: float
+    is_call: bool
+    style_flag: int
+    source_id: int
+    forward: float
+
+
+def _screen_bar(
     *,
     ts: datetime,
     open_: Decimal,
@@ -799,10 +856,13 @@ def _compute_bar(
     is_call: bool,
     style_flag: int,
     source_id: int,
-) -> FnoGreeksBar:
-    """Price one bar's overlay through the pre-screen + the shared kernel.
+) -> FnoGreeksBar | _PendingSolve:
+    """Run the honest-NULL pre-screens for one bar — the pre-solve half.
 
-    The join spot is snapped to the 2-decimal tick grid ONCE here
+    The VERBATIM pre-screen body of the historical ``_compute_bar``
+    (`DEC-GREEKS-RUST-BATCH-001` split — one shared copy serves the per-row
+    AND the batch arm, so the status ladder can never drift between them):
+    the join spot is snapped to the 2-decimal tick grid ONCE here
     (:func:`~brutex.money.round_money`, ``ROUND_HALF_UP`` —
     DEC-GREEKS-CORRECTNESS-AUDIT-001 SPOTJOIN-3), so the stored
     ``spot_at_bar`` is byte-identical to what the lake writer's boundary snap
@@ -810,10 +870,11 @@ def _compute_bar(
     non-2dp spot partition (pre-fix: a never-ending ``enriched=1`` rewrite
     loop). The snap applies to ``spot_at_bar``/the solve input ONLY — never
     to any Greek, ``iv``, ``t_years_used`` or ``rate_used``
-    (DEC-MONEY-2DP-001 forbids rounding statistics). The kernel's admission
-    verdict (``GreeksResult.admissible``) is deliberately NOT stored this
-    round — it is exactly re-derivable downstream as ``abs(delta) >= 0.02
-    and vega * 100 >= 1e-6`` over the stored columns.
+    (DEC-MONEY-2DP-001 forbids rounding statistics).
+
+    Returns a stamped honest-NULL :class:`FnoGreeksBar` when any screen
+    refuses, else the :class:`_PendingSolve` carrying everything the solve
+    + finish steps need.
     """
     import math
 
@@ -864,42 +925,109 @@ def _compute_bar(
         # arbitrary root (plan §15.8; DEC-GREEKS-CORRECTNESS-AUDIT-001).
         return _null(STATUS_BELOW_INTRINSIC, with_spot=spot)
     forward = float(spot) * math.exp(rate.rate * t_years)
-    try:
-        result = compute_greeks(
-            price=float(close),
-            forward=forward,
-            strike=strike_f,
-            t_years=t_years,
-            rate=rate,
-            is_call=is_call,
-        )
-    except GreeksInputError:
-        # A caller-contract reject (e.g. a zero-price stored bar) — stamped,
-        # quarantined to this one bar, never a crash.
-        return _null(STATUS_BAD_INPUT, with_spot=spot)
-    if result is None:
-        return _null(STATUS_NO_SOLUTION, with_spot=spot)
-    return FnoGreeksBar(
-        timestamp=ts,
-        open=open_,
+    return _PendingSolve(
+        ts=ts,
+        open_=open_,
         high=high,
         low=low,
         close=close,
         volume=volume,
-        open_interest=oi,
+        oi=oi,
+        spot=spot,
+        rate=rate,
+        t_years=t_years,
+        strike_f=strike_f,
+        is_call=is_call,
+        style_flag=style_flag,
+        source_id=source_id,
+        forward=forward,
+    )
+
+
+def _solve_one(p: _PendingSolve) -> GreeksBatchOutcome:
+    """Solve one pending bar through today's scalar kernel call — the oracle arm.
+
+    The VERBATIM solve try/except of the historical ``_compute_bar``,
+    returning the outcome as :class:`~brutex.options.greeks.GreeksBatchOutcome`
+    DATA (so the per-row and batch arms share ONE finish step).
+    """
+    try:
+        result = compute_greeks(
+            price=float(p.close),
+            forward=p.forward,
+            strike=p.strike_f,
+            t_years=p.t_years,
+            rate=p.rate,
+            is_call=p.is_call,
+        )
+    except GreeksInputError as exc:
+        # A caller-contract reject (e.g. a zero-price stored bar) — stamped,
+        # quarantined to this one bar, never a crash.
+        return GreeksBatchOutcome(result=None, invalid_input=str(exc))
+    return GreeksBatchOutcome(result=result, invalid_input=None)
+
+
+def _finish_bar(p: _PendingSolve, outcome: GreeksBatchOutcome) -> FnoGreeksBar:
+    """Build the final bar from a pending solve's outcome — the post-solve half.
+
+    The VERBATIM tail of the historical ``_compute_bar``: an
+    ``invalid_input`` reject stamps :data:`STATUS_BAD_INPUT`, an honest
+    no-solution stamps :data:`STATUS_NO_SOLUTION`, and a solved result builds
+    the OK bar with full-precision Greeks + the packed provenance. The
+    kernel's admission verdict (``GreeksResult.admissible``) is deliberately
+    NOT stored this round — it is exactly re-derivable downstream as
+    ``abs(delta) >= 0.02 and vega * 100 >= 1e-6`` over the stored columns.
+    """
+    if outcome.invalid_input is not None:
+        return _null_bar(
+            ts=p.ts,
+            open_=p.open_,
+            high=p.high,
+            low=p.low,
+            close=p.close,
+            volume=p.volume,
+            oi=p.oi,
+            spot=p.spot,
+            status=STATUS_BAD_INPUT,
+            style_flag=p.style_flag,
+            source_id=p.source_id,
+        )
+    result = outcome.result
+    if result is None:
+        return _null_bar(
+            ts=p.ts,
+            open_=p.open_,
+            high=p.high,
+            low=p.low,
+            close=p.close,
+            volume=p.volume,
+            oi=p.oi,
+            spot=p.spot,
+            status=STATUS_NO_SOLUTION,
+            style_flag=p.style_flag,
+            source_id=p.source_id,
+        )
+    return FnoGreeksBar(
+        timestamp=p.ts,
+        open=p.open_,
+        high=p.high,
+        low=p.low,
+        close=p.close,
+        volume=p.volume,
+        open_interest=p.oi,
         iv=result.iv,
         delta=result.delta,
         gamma=result.gamma,
         theta=result.theta,
         vega=result.vega,
         rho=result.rho,
-        spot_at_bar=spot,
-        t_years_used=t_years,
-        rate_used=rate.rate,
+        spot_at_bar=p.spot,
+        t_years_used=p.t_years,
+        rate_used=p.rate.rate,
         greeks_provenance_id=pack_greeks_provenance(
-            rate_source_id=source_id,
+            rate_source_id=p.source_id,
             rate_version=result.rate_version,
-            style_flag=style_flag,
+            style_flag=p.style_flag,
             status=STATUS_OK,
         ),
     )

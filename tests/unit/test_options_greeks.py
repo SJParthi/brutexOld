@@ -394,17 +394,13 @@ class TestBatchFace:
     """`compute_greeks_batch` ≡ per-element `compute_greeks` (DEC-GREEKS-RUST-BATCH-001)."""
 
     def test_outcome_refuses_both_set(self) -> None:
-        solved = compute_greeks(
-            sigma=0.18, forward=F, strike=K, t_years=T, rate=RATE, is_call=True
-        )
+        solved = compute_greeks(sigma=0.18, forward=F, strike=K, t_years=T, rate=RATE, is_call=True)
         assert solved is not None
         with pytest.raises(ValueError, match="BOTH a result and an invalid_input"):
             GreeksBatchOutcome(result=solved, invalid_input="invalid_input: nope")
 
     def test_outcome_allows_each_legal_shape(self) -> None:
-        solved = compute_greeks(
-            sigma=0.18, forward=F, strike=K, t_years=T, rate=RATE, is_call=True
-        )
+        solved = compute_greeks(sigma=0.18, forward=F, strike=K, t_years=T, rate=RATE, is_call=True)
         assert solved is not None
         assert GreeksBatchOutcome(result=solved, invalid_input=None).result is solved
         both_none = GreeksBatchOutcome(result=None, invalid_input=None)
@@ -449,9 +445,7 @@ class TestBatchFace:
                 price=100.0, forward=-1.0, strike=K, t_years=T, rate=RATE, is_call=True
             ),
             # invalid_input: neither price nor sigma.
-            GreeksSolveRequest(
-                price=None, forward=F, strike=K, t_years=T, rate=RATE, is_call=True
-            ),
+            GreeksSolveRequest(price=None, forward=F, strike=K, t_years=T, rate=RATE, is_call=True),
         ]
 
     def test_per_element_parity_with_scalar_entry(self) -> None:
@@ -460,6 +454,8 @@ class TestBatchFace:
         outcomes = compute_greeks_batch(requests)
         assert len(outcomes) == len(requests)
         for req, outcome in zip(requests, outcomes, strict=True):
+            scalar_error: str | None = None
+            scalar: GreeksResult | None = None
             try:
                 scalar = compute_greeks(
                     price=req.price,
@@ -471,8 +467,10 @@ class TestBatchFace:
                     is_call=req.is_call,
                 )
             except GreeksInputError as exc:
+                scalar_error = str(exc)
+            if scalar_error is not None:
                 assert outcome.result is None
-                assert outcome.invalid_input == str(exc)
+                assert outcome.invalid_input == scalar_error
                 continue
             if scalar is None:
                 assert outcome.result is None
@@ -485,15 +483,11 @@ class TestBatchFace:
     def test_matrix_genuinely_covers_all_three_families(self) -> None:
         outcomes = compute_greeks_batch(self._matrix())
         assert sum(1 for o in outcomes if o.result is not None) == 3
-        assert (
-            sum(1 for o in outcomes if o.result is None and o.invalid_input is None)
-            == 2
-        )
+        assert sum(1 for o in outcomes if o.result is None and o.invalid_input is None) == 2
         rejects = [o for o in outcomes if o.invalid_input is not None]
         assert len(rejects) == 2
         assert all(
-            o.invalid_input is not None
-            and o.invalid_input.startswith("invalid_input")
+            o.invalid_input is not None and o.invalid_input.startswith("invalid_input")
             for o in rejects
         )
 
@@ -515,7 +509,9 @@ class TestBatchFace:
     def test_empty_request_list_is_empty_outcomes(self) -> None:
         assert compute_greeks_batch([]) == []
 
-    def test_short_kernel_return_fails_the_strict_zip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_short_kernel_return_fails_the_strict_zip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A length-lying kernel is refused by ``strict=True``, never truncated."""
         import brutex.options.greeks as greeks_mod
 
