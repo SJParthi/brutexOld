@@ -177,13 +177,16 @@ from brutex.engine.sweep_orchestrator import (
     iter_sweep_tuples,
     make_store_for,
     run_one_tuple,
+    tuple_store_path,
 )
+from brutex.engine.sweep_quarantine import quarantine_tuple_trio
 from brutex.engine.sweep_run import (
     SweepComboError,
     SweepRunSummary,
     direction_label,
 )
 from brutex.engine.sweep_supervisor import (
+    RESUME_STORE_GUARD_WARN_CAP,
     SUPERVISOR_ACTION_ABORT,
     SUPERVISOR_ACTION_CANCELLED,
     SUPERVISOR_ACTION_COMPLETE,
@@ -199,6 +202,7 @@ from brutex.engine.sweep_supervisor import (
     tuple_cache_params,
     tuple_label,
 )
+from brutex.engine.tuple_complete import missing_tuple_artifacts, resume_store_guard_enabled
 from brutex.models import BruteXError
 from brutex.observability.logging import configure_process_logging_best_effort
 from brutex.orchestrator.audit import BufferedAuditCollector, BufferedAuditRecord
@@ -805,12 +809,21 @@ class TupleWorkResult:
     worker collected as plain data — the parent replays them into the real
     hash-chained :class:`~brutex.orchestrator.audit.AuditWriter` in enumeration
     order. :attr:`index` is the canonical enumeration index (the reorder key).
+
+    :attr:`quarantine_events` (MAJOR round-2 fix, G1) are the ``(dest_rel,
+    reason)`` pairs the worker's in-process store quarantine produced — a
+    corrupt on-disk tuple store is quarantined + retried IN THE WORKER so it can
+    NEVER abort the whole grid (the sequential G1 guarantee, now in parallel);
+    the parent replays them into the run core's flight recorder as ``QUARANTINE``
+    records (in enumeration order) so the forensic trail matches the sequential
+    path. Empty on the common (no-corruption) path.
     """
 
     index: int
     summary: SweepRunSummary | None
     failed_error: str | None
     audit_records: tuple[BufferedAuditRecord, ...]
+    quarantine_events: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -927,6 +940,28 @@ def _run_tuple_in_worker(
         raise SweepParallelUsageError("worker context was not initialised")
     collector = BufferedAuditCollector()
     store_for = make_store_for(ctx.root, ctx.grid)
+    # G1 (MAJOR round-2 fix): a corrupt on-disk tuple store raises a
+    # ResultsStoreError from run_one_tuple's persist. WITHOUT a store_quarantine
+    # that would be a NON-SweepComboError propagating out of the worker → the
+    # future breaks → the WHOLE grid aborts — exactly the failure G1 exists to
+    # prevent. Build a worker-side quarantine (a PURE filesystem move of the
+    # corrupt trio, needing only ctx) so run_one_tuple quarantines + retries
+    # ONCE in-process (byte-identical regeneration by the sentinel-redo law);
+    # a 2nd failure demotes to SweepComboError → the failed marker (grid counts
+    # it, continues). The quarantine events return as DATA so the parent replays
+    # them into the flight recorder (forensic parity with the sequential path).
+    quarantine_events: list[tuple[str, str]] = []
+    run_id = grid_identity(ctx.grid)
+
+    def _worker_store_quarantine(tuple_: SweepTuple, exc: BaseException) -> None:
+        outcome = quarantine_tuple_trio(
+            tuple_store_path(ctx.root, tuple_, ctx.grid),
+            results_root=ctx.root,
+            reason=f"{type(exc).__name__}: {exc}",
+            run_id=run_id,
+        )
+        quarantine_events.append((str(outcome.dest.relative_to(ctx.root)), outcome.reason))
+
     try:
         summary = run_one_tuple(
             ctx.grid,
@@ -936,6 +971,7 @@ def _run_tuple_in_worker(
             dedup=_NoDedup(),
             audit=collector,
             skip_empty=True,
+            store_quarantine=_worker_store_quarantine,
             roll_schedule_by_instrument=ctx.roll_schedule_by_instrument,
             # The pool-wide stamper (DEC-VIX-STAMP-WIRE-001): every worker
             # binds the SAME pickled stamper, so parallel == sequential.
@@ -947,12 +983,14 @@ def _run_tuple_in_worker(
             summary=None,
             failed_error=f"{type(exc).__name__}: {exc}",
             audit_records=collector.records,
+            quarantine_events=tuple(quarantine_events),
         )
     return TupleWorkResult(
         index=index,
         summary=summary,
         failed_error=None,
         audit_records=collector.records,
+        quarantine_events=tuple(quarantine_events),
     )
 
 
@@ -1022,6 +1060,7 @@ class _Outcome:
     summary: SweepRunSummary | None
     failed_error: str | None
     audit_records: tuple[BufferedAuditRecord, ...]
+    quarantine_events: tuple[tuple[str, str], ...] = ()
 
     def __lt__(self, other: _Outcome) -> bool:
         """Order two outcomes by enumeration ``index`` (the canonical apply order)."""
@@ -1076,6 +1115,8 @@ class ParallelGridDriver:
         "_bars_for",
         "_cancelled",
         "_grid",
+        "_guard_warns",
+        "_guard_warns_suppressed",
         "_guards",
         "_heap",
         "_ingest_audit",
@@ -1083,6 +1124,8 @@ class ParallelGridDriver:
         "_n_unique",
         "_next_apply",
         "_on_progress",
+        "_on_quarantine",
+        "_on_tuple",
         "_quarantined",
         "_reference_stamper",
         "_roll_schedule_by_instrument",
@@ -1090,6 +1133,8 @@ class ParallelGridDriver:
         "_should_stop",
         "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
+        "_store_guard",
+        "_store_guard_forced",
         "_subject",
         "_workers",
     )
@@ -1108,6 +1153,8 @@ class ParallelGridDriver:
         monotonic: Callable[[], float] = time.monotonic,
         should_stop: Callable[[], bool] | None = None,
         on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
+        on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
+        on_quarantine: Callable[[str, str], None] | None = None,
         roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
         reference_stamper: TradeReferenceStamper | None = None,
     ) -> None:
@@ -1165,7 +1212,29 @@ class ParallelGridDriver:
             fold; previously only the sequential arm published, so the dashboard's
             Stop button never showed on a parallel sweep). ``None`` (every
             pre-existing caller) is byte-identical. Never crosses the process
-            boundary (parent-only, like the progress mutation itself).
+            boundary (parent-only, like the progress mutation itself). Also the
+            G3 (DEC-SWEEP-UNKILLABLE-CORE-001) live-progress stream seam —
+            ticked from the single-threaded writer-actor apply path, so the
+            parallel run streams live progress exactly like the sequential
+            driver.
+        on_tuple
+            Optional per-SUCCESSFUL-tuple hook fired with
+            ``(tuple, SweepRunSummary)`` from the single-threaded writer-actor
+            apply path (MAJOR round-2 fix), so the run core's TUPLE_DONE flight
+            records + the R39 NaN/absurd per-tuple SUSPECT tripwire
+            (``on_tuple_summary``) run in the DEFAULT multi-core mode exactly
+            like the sequential driver — the applied summary is already in
+            parent memory here, so no closure crosses the spawn boundary. Fired
+            ONLY on the ``"done"`` branch (a resume/cache/no-bars/failed slot has
+            no metric summary), in canonical enumeration order. ``None``
+            (default) is byte-identical to before.
+        on_quarantine
+            Optional ``(dest_rel, reason)`` hook fired once per worker
+            store-quarantine event (MAJOR round-2 fix, G1), replayed from the
+            writer-actor apply path in enumeration order so the run core's
+            flight recorder logs a ``QUARANTINE`` record for a corrupt store the
+            worker quarantined + retried — forensic parity with the sequential
+            G1 path. ``None`` (default) is byte-identical to before.
         roll_schedule_by_instrument
             ADR-0012 futures roll schedules keyed by instrument symbol
             (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — marshalled to every worker
@@ -1218,6 +1287,9 @@ class ParallelGridDriver:
         #: mask count — the heavy-grid work estimate (DEC-SWEEP-STALL-OOM-GUARDS-001).
         self._n_unique = len(set(grid.condition_bits))
         self._monotonic = monotonic
+        self._on_progress = on_progress
+        self._on_tuple = on_tuple
+        self._on_quarantine = on_quarantine
         self._roll_schedule_by_instrument = (
             dict(roll_schedule_by_instrument) if roll_schedule_by_instrument is not None else None
         )
@@ -1239,6 +1311,17 @@ class ParallelGridDriver:
         #: resume classifies them VISIBLY as ``quarantined_prior``, regardless of
         #: the checkpoint/cache state (DEC-SWEEP-STALL-OOM-GUARDS-001).
         self._quarantined: frozenset[str] = frozenset()
+        #: Resume store guard state (DEC-SWEEP-RESUME-STORE-GUARD-001): the kill
+        #: switch is resolved ONCE per run (parent-side, in :meth:`run` — the
+        #: gates never execute in workers, so no spawn env-divergence surface);
+        #: ``_store_guard_forced`` counts tuples whose MISSING persisted
+        #: artifacts forced a re-dispatch, ``_guard_warns*`` implement the
+        #: capped WARN discipline (RESUME_STORE_GUARD_WARN_CAP, shared with the
+        #: sequential driver).
+        self._store_guard = False
+        self._store_guard_forced = 0
+        self._guard_warns = 0
+        self._guard_warns_suppressed = 0
 
     def run(self) -> SupervisedGridSummary:
         """Execute the whole grid in parallel; return the aggregate tally.
@@ -1251,6 +1334,12 @@ class ParallelGridDriver:
         test (``test_..._modulo_ts``). ``ts_utc`` participates in the chain hash, so
         the chains are not literally byte-for-byte across runs.
         """
+        # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the
+        # kill switch ONCE, before any tuple work — junk raises HERE (pre
+        # progress/audit), never mid-run. Parent-side only: the gates never
+        # execute in workers.
+        self._store_guard = resume_store_guard_enabled()
+
         sweep_id = grid_identity(self._grid)
         total = count_sweep_tuples(self._grid)
 
@@ -1336,6 +1425,13 @@ class ParallelGridDriver:
                 )
             raise
 
+        if self._guard_warns_suppressed:
+            _LOG.warning(
+                "sweep_parallel.resume_store_guard_forced_suppressed",
+                subject=self._subject,
+                suppressed=self._guard_warns_suppressed,
+                total_forced=self._store_guard_forced,
+            )
         if self._cancelled:
             # COOPERATIVE cancel terminal (DEC-JOB-COOPERATIVE-CANCEL-001): every
             # in-flight tuple was drained + applied above, the checkpoint holds
@@ -1372,6 +1468,7 @@ class ParallelGridDriver:
                 tuples_failed=acc.tuples_failed,
                 tuples_quarantined_prior=acc.tuples_quarantined_prior,
                 cancelled=True,
+                store_guard_forced=self._store_guard_forced,
             )
 
         payload = {
@@ -1390,6 +1487,10 @@ class ParallelGridDriver:
             "ranked": acc.ranked,
             "persisted": acc.persisted,
         }
+        if self._store_guard_forced:
+            # Additive EMIT-ON-NONZERO (chain-safe; a zero-forced payload is
+            # byte-identical to pre-guard) — DEC-SWEEP-RESUME-STORE-GUARD-001.
+            payload["store_guard_forced"] = self._store_guard_forced
         quarantine_note = (
             f" · {acc.tuples_quarantined_prior} QUARANTINED-prior "
             f"(see {quarantine_sidecar_path(self._root)})"
@@ -1424,6 +1525,7 @@ class ParallelGridDriver:
             persisted=acc.persisted,
             tuples_failed=acc.tuples_failed,
             tuples_quarantined_prior=acc.tuples_quarantined_prior,
+            store_guard_forced=self._store_guard_forced,
         )
 
     def _drive(
@@ -1544,11 +1646,31 @@ class ParallelGridDriver:
         checkpoint/cache state. A dispatched tuple's ``_Dispatched`` record carries
         its ``mask·bar`` work estimate so :meth:`_await_next_result` can size the
         heavy-grid stall bound (DEC-SWEEP-STALL-OOM-GUARDS-001).
+
+        RESUME STORE GUARD (DEC-SWEEP-RESUME-STORE-GUARD-001): BOTH skip tiers
+        honour a skip ONLY when the tuple's persisted artifacts (store Parquet
+        + completion sentinel + trial-stats sidecar) are INTACT at stat level
+        (:func:`~brutex.engine.tuple_complete.missing_tuple_artifacts` — ≤3
+        lstats, zero reads/hashing, computed at most ONCE per tuple and reused
+        across the two tiers); a MISSING artifact falls through to a worker
+        dispatch, where ``run_persisted_sweep``'s ``_sentinel_resume``
+        self-heals with a byte-identical redo. MISSING-only by contract —
+        corruption heals when the tuple re-enters. The quarantined_prior tier
+        stays FIRST and UNGATED (a quarantined tuple must stay visibly
+        quarantined). The parallel driver computes the store path directly
+        from ``(self._root, tuple_, self._grid)`` — it never holds a
+        ``store_for`` closure.
         """
         if self._quarantined and tuple_label(tuple_) in self._quarantined:
             return _skip_outcome(index, tuple_, "quarantined_prior")
+        guard_missing: tuple[str, ...] = ()
+        guard_checked = False
         if index < resume_from:
-            return _skip_outcome(index, tuple_, "resume")
+            guard_missing = self._guard_missing(tuple_)
+            guard_checked = True
+            if not guard_missing:
+                return _skip_outcome(index, tuple_, "resume")
+            self._record_forced(index, tuple_, guard_missing, tier="checkpoint")
         if self._guards.cache.seen(
             tuple_.k,
             tuple_.instrument,
@@ -1559,13 +1681,51 @@ class ParallelGridDriver:
             indicator_version=self._grid.indicator_version,
             code_commit_sha=self._grid.code_commit_sha,
         ):
-            return _skip_outcome(index, tuple_, "cache")
+            if not guard_checked:
+                guard_missing = self._guard_missing(tuple_)
+                if guard_missing:
+                    self._record_forced(index, tuple_, guard_missing, tier="cache")
+            if not guard_missing:
+                return _skip_outcome(index, tuple_, "cache")
+            # A forced tuple's cache hit is NOT honoured (artifacts missing) —
+            # fall through to dispatch; the checkpoint-tier WARN (if any) is
+            # not duplicated here.
         bars = self._bars_for(tuple_.instrument, tuple_.tf.label)
         future = pool.submit(_run_tuple_in_worker, index, tuple_, bars)
         pending[future] = _Dispatched(
             index=index, tuple_=tuple_, work=self._tuple_work(tuple_, len(bars))
         )
         return None
+
+    def _guard_missing(self, tuple_: SweepTuple) -> tuple[str, ...]:
+        """The tuple's missing persisted artifacts, or ``()`` when guard OFF — O(1).
+
+        ≤3 lstats + one small BLAKE3 path digest (the same digest the run path
+        computes) per call; the caller evaluates it at most ONCE per tuple and
+        reuses the answer across the resume + cache tiers.
+        """
+        if not self._store_guard:
+            return ()
+        return missing_tuple_artifacts(tuple_store_path(self._root, tuple_, self._grid))
+
+    def _record_forced(
+        self, index: int, tuple_: SweepTuple, missing: tuple[str, ...], *, tier: str
+    ) -> None:
+        """Count + WARN (capped) one guard-forced tuple — the sequential twin."""
+        self._store_guard_forced += 1
+        if self._guard_warns >= RESUME_STORE_GUARD_WARN_CAP:
+            self._guard_warns_suppressed += 1
+            return
+        self._guard_warns += 1
+        _LOG.warning(
+            "sweep_parallel.resume_store_guard_forced",
+            subject=self._subject,
+            index=index,
+            tuple=tuple_label(tuple_),
+            store_path=str(tuple_store_path(self._root, tuple_, self._grid)),
+            missing=list(missing),
+            tier=tier,
+        )
 
     def _tuple_work(self, tuple_: SweepTuple, n_bars: int) -> float:
         """The tuple's ``mask·bar`` work estimate = ``C(n_unique, k) × N_bars``.
@@ -1782,6 +1942,14 @@ class ParallelGridDriver:
         # real chain FIRST (in enumeration order), then apply the supervisor line
         # + checkpoint/cache/progress, mirroring the sequential ordering.
         self._replay_ingest_audit(outcome.audit_records)
+        # G1 (MAJOR round-2 fix): replay any store-quarantine events the worker
+        # produced into the run core's flight recorder (forensic parity with the
+        # sequential path), in enumeration order, BEFORE the branch dispatch so a
+        # quarantine that ended in either a "done" retry OR a "failed" 2nd-attempt
+        # is recorded either way.
+        if self._on_quarantine is not None:
+            for dest_rel, reason in outcome.quarantine_events:
+                self._on_quarantine(dest_rel, reason)
 
         if outcome.kind == "failed":
             acc.tuples_failed += 1
@@ -1854,6 +2022,13 @@ class ParallelGridDriver:
                 "store_content_hash": summary.store_content_hash,
             },
         )
+        # MAJOR round-2 fix: fire the per-tuple hook from the single-threaded
+        # writer-actor path (mirrors run_supervised_grid's on_tuple call), so the
+        # run core's TUPLE_DONE flight records + the R39 NaN/absurd SUSPECT
+        # tripwire run in the DEFAULT multi-core mode too. The applied summary is
+        # already in parent memory — no closure crosses the spawn boundary.
+        if self._on_tuple is not None:
+            self._on_tuple(outcome.tuple_, summary)
         return True
 
     def _quarantine_broken_pool(
@@ -2003,6 +2178,11 @@ class ParallelGridDriver:
     ) -> None:
         """Tick progress once + stream the fresh snapshot (parent-only mutation).
 
+        Runs ONLY on the single-threaded writer-actor apply path
+        (:meth:`_apply_ready_prefix` → :meth:`_apply`), mirroring the
+        sequential driver's ``_advance`` — the hook observes ordered state and
+        can never reorder a result byte (G3, DEC-SWEEP-UNKILLABLE-CORE-001).
+
         ``publish=False`` (fix round 4) ticks the in-memory counters ONLY — the
         parent-synchronous skip branches defer their fsync'd bridge write to
         :meth:`_apply_ready_prefix`'s end-of-drain flush (see its docstring).
@@ -2090,6 +2270,7 @@ def _result_to_outcome(result: TupleWorkResult, tuple_: SweepTuple) -> _Outcome:
         summary=result.summary,
         failed_error=result.failed_error,
         audit_records=result.audit_records,
+        quarantine_events=result.quarantine_events,
     )
 
 
@@ -2127,6 +2308,8 @@ def run_parallel_grid(
     monotonic: Callable[[], float] = time.monotonic,
     should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
+    on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
+    on_quarantine: Callable[[str, str], None] | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> SupervisedGridSummary:
@@ -2188,6 +2371,8 @@ def run_parallel_grid(
         monotonic=monotonic,
         should_stop=should_stop,
         on_progress=on_progress,
+        on_tuple=on_tuple,
+        on_quarantine=on_quarantine,
         roll_schedule_by_instrument=roll_schedule_by_instrument,
         reference_stamper=reference_stamper,
     )
