@@ -18,7 +18,63 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 —
+_Last updated: 2026-07-08 (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 —
+an explicit `/movers` bucket-anchor TIME pick now resolves to the COMPLETED bucket
+(broker-matching close) instead of a PARTIAL forming bucket. The TIME dropdown on a
+coarse timeframe offers only the 09:15-anchored bucket-ANCHOR grid, but the backend
+treated a picked anchor as an as-of INSTANT, so 3-minute @ 15:27 showed the partial
+15:27 minute close (₹27,932.80) rather than the completed 15:27–15:29 bucket close
+(₹27,940.85 = the broker's = 2min@15:29 = 1min@latest); the stored derived-TF partitions
+were always CORRECT, only the read-time as-of resolution was wrong. FIX: ONE COMMON as-of
+seam `movers_snapshot.resolve_asof_cutoff(interval, time)` (consumed by all three tabs)
+resolves an anchor pick FORWARD to the bucket's final minute `min(anchor + minutes − 1,
+15:29)`, and the downstream `<= cutoff` `filter_to_ist_minute` caps at the day's latest
+available minute (NO look-ahead). TF=1minute identity, "Latest"/blank whole-day
+byte-identical (DEC-MOVERS-ASOF-LATEST-DEFAULT-001), non-anchor picks keep as-of-instant
+semantics, prev-close %CHNG untouched; additive `asof_through` payload echo + note
+provenance. Value TF-invariance (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001) now holds PER
+shared *resolved* as-of. READ-ONLY dashboard — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX);
+no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options 100%
+line+branch; ruff/ruff-format/`mypy --strict` clean, pyright at the pre-change baseline.
+Review-round history is deliberately not narrated in this header — each DEC's
+per-round record lives ONLY in the §1 Active-branch blurb + its own
+MIGRATION.md entry.
+Earlier: 2026-07-09 (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md
+#1646 — the `/movers` Futures contract-symbol parse is RIGHT-anchored via the
+ONE canonical grammar: `movers_futures.parse_future_symbol` now DELEGATES to
+`data/fno_symbol.parse_fno_symbol` (FUT-restricted; the local left-anchored
+twin — `_parse_expiry_token` + its constants — DELETED), so a hyphenated
+underlying (`NSE-BAJAJ-AUTO-30Sep25-FUT`) parses to `BAJAJ-AUTO` instead of
+the `parts[1]` truncation `BAJAJ` that made `_underlying_spot_ltp` probe the
+nonexistent `bars/NSE/CASH/BAJAJ/` — spot + premium were SILENTLY dropped for
+every hyphenated F&O underlying (executed real-lake repro: spot 8010.00
+present under the correct key, served row `spot=None`) and the wrong rows were
+persisted as warm-grid cache hits. HONEST disclosed delta (sanctioned, junk
+tokens only): the deleted twin was shape-stricter than the canonical
+`strptime("%d%b%y")`, so a junk lake dir like `NSE-NIFTY-30SEP25-FUT` flips
+reject→accept — exactly what options//db/Greeks already accepted; every
+well-formed vendor `DDMmmYY` symbol byte-identical, non-hyphenated rows
+byte-parity-pinned end-to-end, `&`-names (M&M — no hyphen in the grammar) were
+and remain correct. `movers_options` already delegated; `futures_warm_grid`
+needed zero change. SAME-PR FOLD-IN (W3 spot-drift ladder): the movers
+underlying-spot probe now walks the #1482 (DEC-GREEKS-SPOTJOIN-STOCK-001)
+drift-recovery ladder on an exact-key MISS — NEW
+`movers_futures._SpotLtpResolver`, ONE per-candidates-compute instance in
+BOTH the futures and options loops: exact probe byte-unchanged FIRST; the
+COMMON `lake_keys.spot_recovery_candidates(..., stock_drift=)` ladder only on
+a miss, fed by a LAZY at-most-once `spot_drift.load_stock_drift_map`
+(master-verified; ambiguity POISONED + capped warns; no-master fail-softs to
+today's honest no-spot; MemoryError re-raises), the recovery OUTCOME memoised
+per (exchange, underlying) with ONE rung-attributed
+`movers.spot_key_recovered` INFO — so a spelling-drifted stock spot dir
+(chain `BAJAJAUTO` vs on-disk `BAJAJ-AUTO`, executed repro) no longer blanks
+futures spot/premium or reads `?` options moneyness; a resolving lake never
+builds the map (spy-pinned byte-identity); NO `%26`→`&` recovery — the #1482
+pledge stands; read-time recovery only, nothing healed on disk. READ-ONLY
+dashboard display fix — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+`movers_futures.py` + `movers_options.py` BOTH 100% line+branch.)
+Earlier: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 —
 renumbered #1633 → #1673 → #1692 (#1633 → #1673 at the 2026-07-10 merge-reconcile —
 main's in-flight renumber cascade holds the reservation band through #1672 — then
 #1673 → #1692 per the coordinator reservation map, #1673 reserved for PR #1369) —
@@ -2060,7 +2116,48 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
+- **Active branch:** `claude/movers-bucket-asof-fix` (**DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001,
+  MIGRATION.md #1601** — an explicit `/movers` bucket-anchor TIME pick now resolves to the
+  COMPLETED bucket (broker-matching close) instead of a PARTIAL forming bucket. The TIME
+  dropdown on a coarse timeframe offers only the 09:15-anchored bucket-ANCHOR grid, but the
+  backend treated a picked anchor as an as-of INSTANT, so 3-minute @ 15:27 cut at 15:27 and
+  showed the partial 15:27 minute close (₹27,932.80) instead of the completed 15:27–15:29
+  bucket close (₹27,940.85 = the broker's = 2min@15:29 = 1min@latest). The stored derived-TF
+  partitions were always CORRECT; only the read-time as-of resolution was wrong. FIX: ONE
+  COMMON as-of seam `movers_snapshot.resolve_asof_cutoff(interval, time)` (consumed by all
+  three tabs — spot/futures/options) resolves an anchor pick FORWARD to the bucket's final
+  minute `min(anchor + minutes − 1, 15:29)`, and the downstream `<= cutoff`
+  `filter_to_ist_minute` caps at the day's latest available minute (NO look-ahead). Laws:
+  TF=1minute identity; "Latest"/blank whole-day byte-identical (DEC-MOVERS-ASOF-LATEST-DEFAULT-001
+  preserved); non-anchor picks keep as-of-instant semantics; prev-close %CHNG untouched. Honest
+  provenance: additive `asof_through` payload echo + " HH:MM bucket · through HH:MM" note
+  (default `None` → byte-identical). Value TF-invariance (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001)
+  now holds PER shared *resolved* as-of (a sanctioned narrowing). READ-ONLY dashboard — ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX); no lake/schema/scope/vocab/rate change; the three touched
+  movers modules 100% line+branch; ruff/ruff-format/`mypy --strict` clean, pyright at baseline).
+  Earlier: `claude/movers-futures-hyphen-parse` (**DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md
+  #1646** — the `/movers` Futures contract-symbol parse is RIGHT-anchored via the ONE canonical grammar:
+  `parse_future_symbol` DELEGATES to `data/fno_symbol.parse_fno_symbol` (FUT-restricted; the left-anchored local twin
+  DELETED), so a hyphenated underlying (`NSE-BAJAJ-AUTO-30Sep25-FUT`) parses to `BAJAJ-AUTO` — not the `parts[1]`
+  truncation `BAJAJ` whose nonexistent-spot-key probe silently dropped spot + premium for every hyphenated F&O
+  underlying and let the warm grid cache the wrong rows (executed real-lake repro). Disclosed sanctioned delta:
+  junk lake-dir expiry tokens the shape-stricter twin rejected (`30SEP25` etc.) now accept exactly as
+  options//db/Greeks already did; well-formed vendor symbols + non-hyphenated rows byte-identical (pinned);
+  `&`-names were and remain correct (pinned). SAME-PR FOLD-IN (W3 spot-drift ladder): the movers underlying-spot
+  probe gains the #1482 (DEC-GREEKS-SPOTJOIN-STOCK-001) drift-recovery ladder — NEW `movers_futures._SpotLtpResolver`,
+  ONE per-candidates-compute instance in BOTH the futures loop and the options moneyness loop: the exact-key
+  `_underlying_spot_ltp` probe (byte-unchanged) runs FIRST; only an exact MISS walks the COMMON
+  `lake_keys.spot_recovery_candidates(..., stock_drift=)` ladder over the same two spot segments, fed by a LAZY
+  at-most-once `spot_drift.load_stock_drift_map` (master-verified unique-fold map; ambiguity POISONED + capped
+  warns; no-master / read error fail-softs to today's honest no-spot; MemoryError re-raises), with the recovery
+  OUTCOME memoised per (exchange, underlying) + ONE rung-attributed `movers.spot_key_recovered` INFO per compute —
+  so a spelling-drifted stock spot dir (chain `BAJAJAUTO` vs the master's on-disk `BAJAJ-AUTO`; executed repro on
+  the REAL computes) no longer blanks futures spot/premium or reads a silent `?` options moneyness. A resolving
+  lake never builds the map (spy-pinned byte-identity, index symbols untouched); NO `%26`→`&` recovery (the #1482
+  pledge stands); read-time recovery ONLY — nothing healed on disk. READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX;
+  `movers_futures.py` + `movers_options.py` BOTH 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
   renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
   cascade reserved #1633–#1649 — see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history — and the in-flight
   cascade holds the band through #1672), then #1673 → #1692 per the coordinator reservation map (#1673 is reserved
@@ -5267,7 +5364,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/groww-market-hours-guard`
+- **Active feature branch:** `claude/movers-bucket-asof-fix`
+  (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 — an explicit `/movers`
+  bucket-anchor TIME pick resolves to the COMPLETED bucket (broker-matching close)
+  via the ONE COMMON `movers_snapshot.resolve_asof_cutoff` seam shared by all three
+  tabs; READ-ONLY dashboard, ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/movers-futures-hyphen-parse`
+  (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md #1646 — the `/movers`
+  Futures contract-symbol parse right-anchored by DELEGATING to the canonical
+  `data/fno_symbol.parse_fno_symbol`; hyphenated underlyings keep their full
+  name so spot + premium resolve; + the W3 fold-in: the movers spot probe
+  (futures premium + options moneyness) walks the #1482 spot-drift recovery
+  ladder on an exact-key miss via the per-compute
+  `movers_futures._SpotLtpResolver`; READ-ONLY dashboard fix; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
+  blurb)
+  Earlier: `claude/groww-market-hours-guard`
   (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE
   market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
   days, keeping the shared account free for TickVault's live feed; matches

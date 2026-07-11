@@ -203,6 +203,18 @@ class TestPcrColdScanAddsNoRead:
                 interval="1minute",
                 bars=[_min_bar(minute=0, oi=1000 + i)],
             )
+        # The underlying spot must resolve on the EXACT-key probe so the
+        # one-read-per-contract law stays crisp — a spot-less lake now
+        # additionally pays ONE memoised drift-recovery walk per underlying
+        # (the DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in), pinned in
+        # its own suites, not here.
+        writer.write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[_min_bar(minute=0, oi=1000)],
+        )
         counts = spy_all_movers_readers(mo_module, monkeypatch)
         candidates = compute_options_candidates(
             lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
