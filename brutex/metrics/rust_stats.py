@@ -89,15 +89,26 @@ fresh view for test isolation.
   bytecodes — sub-ms at the production C(16, 8), so immaterial there.
 * An env flip MID-process takes effect on the next call (per-call read);
   results are bit-identical either way.
-* The kernel engages only when ``float(min_sharpe)`` is VALUE-exact — an
-  inexact conversion (an ``int`` past 2^53, or NaN by the ``!=`` test) is a
-  pre-burn-in domain refusal to the oracle (``min_sharpe_inexact``): the
-  oracle's int↔float comparison is EXACT where the FFI rounds, and nothing
-  is normalized on the OFF arm (it stays byte-identical for every input).
+* The kernel engages only for an exact-TYPE ``float``/``int``/``bool``
+  ``min_sharpe`` whose f64 image is VALUE-exact (refuter rounds 1 + 2): a
+  NaN, an ``int`` past 2^53, or an ``int`` past float range (where
+  ``float()`` would raise OverflowError — caught, never propagated) is a
+  pre-burn-in ``min_sharpe_inexact`` refusal to the oracle, whose int↔float
+  comparison is EXACT where the FFI rounds; ANY other type — a ``float``
+  subclass (whose own ordering dispatch could contradict the kernel's f64
+  compare), Decimal/Fraction, numpy scalars, junk — is a
+  ``min_sharpe_foreign_type`` refusal, so the oracle applies the ORIGINAL
+  object's own comparison/raising semantics identically on BOTH arms
+  (exact value and exception parity). Nothing is normalized on the OFF arm
+  (it stays byte-identical for every input). SANCTIONED NARROWING (round
+  2): ``np.float64``/``np.int64`` thresholds previously engaged the kernel
+  and now refuse to the oracle — ON≡OFF holds either way, and both in-repo
+  production callers pass plain Python floats (performance-neutral).
 """
 
 from __future__ import annotations
 
+import math
 import os
 from typing import TYPE_CHECKING, Final, TypeGuard
 
@@ -379,10 +390,15 @@ def cpcv_pass_count_via_kernel(
     Returns the integer pass-count on success. Returns ``None`` — after a
     warn-once (or, for a refused result, an ERROR) — when the kernel is
     latched, unavailable, raises a boundary/conversion error, returns a
-    domain-invalid value, or when ``float(min_sharpe)`` is not value-exact
-    (``min_sharpe_inexact`` — the FFI would round what the oracle compares
-    EXACTLY; a NaN threshold conservatively takes this arm too, result-
-    identical — see the in-body note); the caller then serves the call
+    domain-invalid value, or when *min_sharpe* fails the exact-type domain
+    gate: only an exact-TYPE ``float``/``int``/``bool`` whose f64 image is
+    value-exact engages — a NaN or a non-representable/unconvertible
+    ``int`` (incl. past float range, where ``float()``'s OverflowError is
+    caught into the refusal, never raised) refuses as
+    ``min_sharpe_inexact``, and ANY other type (float subclass / Decimal /
+    numpy scalar / junk) refuses as ``min_sharpe_foreign_type`` so the
+    oracle applies the original object's own comparison semantics on both
+    arms — see the in-body note; the caller then serves the call
     through the bit-exact Python oracle, so wheel state can never change
     results or error behaviour (within the documented exception envelope —
     module docstring). The catch is NARROW (``ValueError`` — the kernel's
@@ -400,25 +416,73 @@ def cpcv_pass_count_via_kernel(
     if kernel_disabled(fn):
         warn_fallback_once(fn, "kernel_disabled")
         return None
-    min_sharpe_f = float(min_sharpe)
-    if min_sharpe_f != min_sharpe:
-        # Exactness DOMAIN GUARD (refuter-round-1 confirmed defect): the FFI
-        # necessarily rounds ``min_sharpe`` through ``float()``, while the
-        # Python oracle compares ``sharpe > min_sharpe`` on the ORIGINAL
-        # object — and CPython's mixed-type int↔float comparison is EXACT.
-        # A type-legal ``int`` threshold past 2^53 whose float image rounds
-        # across a fold Sharpe would make the two engines count DIFFERENT
-        # passes (ON≠OFF) and false-fire the burn-in autorevert against a
-        # FAITHFUL kernel. The kernel therefore engages ONLY when the float
-        # conversion is provably value-exact by ``==``; anything else is a
-        # pre-burn-in domain refusal to the oracle (no sample consumed, no
-        # latch risk — the OFF arm stays byte-identical: nothing normalized).
-        # NaN note (documented choice): ``float('nan') != float('nan')`` is
-        # True, so a NaN threshold conservatively takes this refusal too —
-        # SAFE and result-identical (``sharpe > nan`` is False on BOTH
-        # engines, every fold a non-pass, unit-pinned); a degenerate
-        # all-non-pass threshold has no kernel win worth a special case.
-        warn_fallback_once(fn, "min_sharpe_inexact", min_sharpe=repr(min_sharpe))
+    # min_sharpe EXACT-TYPE + exactness DOMAIN GUARD (refuter rounds 1 + 2).
+    # The FFI necessarily feeds the kernel a plain f64, while the Python
+    # oracle dispatches ``sharpe > min_sharpe`` to the ORIGINAL threshold
+    # OBJECT — so the kernel may engage ONLY when the value crosses the FFI
+    # boundary exactly AND the object's comparison semantics are provably
+    # CPython's own float/int ordering (which matches the kernel's f64
+    # compare wherever the conversion is value-exact). Round 1 caught the
+    # VALUE half (an ``int`` past 2^53 rounds through ``float()`` while the
+    # oracle's mixed-type int↔float compare is EXACT — ON≠OFF + a burn-in
+    # false autorevert). Round 2 caught the SEMANTICS half (a type-legal
+    # ``float`` SUBCLASS with reversed ordering but honest equality passes
+    # any value-exactness test yet flips the oracle's ``>``) and the
+    # CONVERSION half (``float(10**400)`` raised OverflowError out of the
+    # ON arm where OFF returns a rate — the hoisted conversion sat outside
+    # the narrow catch). The gate is therefore exact-TYPE first; every
+    # refusal is pre-burn-in (no sample consumed, no latch risk) and the
+    # OFF arm stays byte-identical: nothing is ever normalized.
+    # ``type[object]`` (not the inferred ``type[float]``): the param is
+    # ANNOTATED ``float`` but the PEP-484 numeric tower + hostile callers
+    # deliver ints/subclasses/foreign objects at runtime — the widened
+    # annotation keeps the int/bool arm reachable for the type checkers.
+    ms_type: type[object] = type(min_sharpe)
+    if ms_type is float:
+        if math.isnan(min_sharpe):
+            # NaN note (documented round-1 choice, retained): a NaN
+            # threshold conservatively refuses to the oracle — SAFE and
+            # result-identical (``sharpe > nan`` is False on BOTH engines,
+            # every fold a non-pass, unit-pinned); a degenerate
+            # all-non-pass threshold has no kernel win worth a special
+            # case. ``math.isnan`` on the exact-type float — the gate
+            # above guarantees no subclass dispatch reaches the seam.
+            warn_fallback_once(fn, "min_sharpe_inexact", min_sharpe=repr(min_sharpe))
+            return None
+        min_sharpe_f = min_sharpe
+    elif ms_type is int or ms_type is bool:
+        # Exact ``int`` (and ``bool`` — an exact, unsubclassable int
+        # subtype carrying int's own ordering; documented choice: it
+        # engages like the exact 0/1 it is) engages IFF ``float()`` is
+        # value-exact. The conversion is GUARDED: an int past float range
+        # makes ``float()`` raise OverflowError — the same
+        # not-float-representable class as an inexact 2^53+k, so it takes
+        # the SAME refusal, never a raise (the round-2 D1 regression:
+        # pre-guard this crashed the ON arm where OFF returns a rate).
+        try:
+            min_sharpe_f = float(min_sharpe)
+        except OverflowError:
+            warn_fallback_once(fn, "min_sharpe_inexact", min_sharpe=repr(min_sharpe))
+            return None
+        if min_sharpe_f != min_sharpe:
+            warn_fallback_once(fn, "min_sharpe_inexact", min_sharpe=repr(min_sharpe))
+            return None
+    else:
+        # ANY other type — a ``float`` subclass (its own ``__lt__``/``__gt__``
+        # take dispatch priority over ``float.__gt__`` in the oracle's
+        # compare), Decimal/Fraction, numpy scalars, strings, arbitrary
+        # objects — refuses to the oracle, which applies the ORIGINAL
+        # object's own comparison/raising semantics identically on BOTH
+        # arms (exact value AND exception parity — the round-2 D1
+        # exception-parity regression + the D2 subclass ordering attack).
+        # SANCTIONED NARROWING vs fix round 2: ``np.float64``/``np.int64``
+        # thresholds previously engaged the kernel and now refuse — ON≡OFF
+        # holds either way (the oracle serves), and both in-repo
+        # production callers pass plain Python floats. The warn context
+        # carries the TYPE NAME only, never ``repr`` — a hostile
+        # ``__repr__`` must not raise ON-only (round-2 NIT closed; the
+        # seam never dispatches ANY operation to a foreign object).
+        warn_fallback_once(fn, "min_sharpe_foreign_type", min_sharpe_type=ms_type.__name__)
         return None
     kernel = _resolve_kernel(fn, "stats_cpcv_pass_count")
     if kernel is None:

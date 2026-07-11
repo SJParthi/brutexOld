@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import struct
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -549,6 +550,218 @@ def test_refuter_round1_rate_level_on_off_bit_equal_and_no_false_autorevert() ->
         e["event"] == "rust_stats.fallback" and e["reason"] == "min_sharpe_inexact" for e in logs
     )
     assert kernel_disabled("cpcv") is False  # latch state clean afterwards
+
+
+# ── the FFI call site: exact-TYPE gate (refuter round 2) ────────────────
+# Refuter-round-2 CONFIRMED defects (fix round 3), both in the round-2
+# equality-only guard: (D1) the hoisted ``float(min_sharpe)`` ran OUTSIDE
+# the narrow catch, so an int past float range CRASHED the ON arm
+# (OverflowError) where OFF returns a rate — and it changed the exception
+# TYPE/site for garbage thresholds ("abc": ON ValueError vs OFF TypeError);
+# (D2) the guard tested conversion EQUALITY while the oracle's predicate is
+# ORDERING — a type-legal float SUBCLASS with reversed ``__lt__`` (honest
+# ``__eq__``) passed the guard yet flipped ``sharpe > min_sharpe``:
+# steady-state ON≠OFF bit divergence AND a burn-in FALSE AUTOREVERT. The
+# exact-TYPE gate closes both: only exact-type float (non-NaN) / int / bool
+# with a value-exact (guarded) conversion engages; everything else refuses
+# to the oracle, which applies the ORIGINAL object's semantics on BOTH arms.
+
+
+class _DescendingFloat(float):
+    """Refuter-A round-2 D2 attack verbatim: a type-legal ``float`` subclass
+    (``isinstance(…, float)`` is True; mypy-clean for ``min_sharpe: float``)
+    whose ORDERING is reversed while equality stays honest — it passes any
+    value-exactness test (``float(ms) == ms``) yet flips the oracle's
+    ``sharpe > min_sharpe`` dispatch (the reflected ``__lt__`` outranks
+    ``float.__gt__``)."""
+
+    def __gt__(self, other: float) -> bool:
+        return float.__lt__(self, other)
+
+    def __lt__(self, other: float) -> bool:
+        return float.__gt__(self, other)
+
+    def __ge__(self, other: float) -> bool:
+        return float.__le__(self, other)
+
+    def __le__(self, other: float) -> bool:
+        return float.__ge__(self, other)
+
+
+class _FloatReturnsStr:
+    """A ``__float__`` protocol liar (returns a non-float). The seam must
+    never call ``float()`` on it — both arms raise the oracle's comparison
+    TypeError identically."""
+
+    def __float__(self) -> str:  # the deliberate protocol lie under test
+        return "not-a-float"
+
+
+def test_min_sharpe_float_subclass_refuses_to_oracle_on_off_bit_equal() -> None:
+    """Refuter-round-2 D2 repro VERBATIM (rA2_float_subclass.py): pre-fix
+    the ordering-reversed subclass gave steady-state ON 0.833… ≠ OFF 0.166…
+    (bits differ) and the burn-in falsely LATCHED the faithful kernel
+    (got=5 want=1). Post-fix the exact-type gate refuses the subclass
+    (``min_sharpe_foreign_type``, type name only — never repr) so the
+    oracle — with the ORIGINAL object's own ordering — serves BOTH arms
+    bit-identically, no autorevert, no engage, latch clean."""
+    ms = _DescendingFloat(0.5)
+    # The properties that defeat an equality-only guard:
+    assert isinstance(ms, float)
+    assert float(ms) == ms
+    returns = [0.01, 0.02, -0.005, 0.03, 0.015, -0.01, 0.02, 0.01]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=ms)
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv", remaining=0)  # steady state
+        on_steady = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=ms)
+        reset_self_check_for_tests("cpcv")  # fresh-process burn-in
+        reset_observability_memo_for_tests()
+        with capture_logs() as logs:
+            on_burn_in = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=ms)
+    assert struct.pack("<d", on_steady) == struct.pack("<d", off)
+    assert struct.pack("<d", on_burn_in) == struct.pack("<d", off)
+    assert kernel_disabled("cpcv") is False  # NO false autorevert
+    assert not any(e["event"] == "rust_stats.kernel_autoreverted" for e in logs)
+    assert not any(e["event"] == "rust_stats.engaged" for e in logs)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_foreign_type"]
+    assert events[0]["fn"] == "cpcv"
+    assert events[0]["min_sharpe_type"] == "_DescendingFloat"
+
+
+@pytest.mark.parametrize("huge", [10**400, -(10**400), 2**1024])
+def test_min_sharpe_int_past_float_range_refuses_not_crashes(huge: int) -> None:
+    """Refuter-round-2 D1 repro (repro_hugeint_minsharpe.py): a type-legal
+    ``int`` past float range makes ``float()`` raise OverflowError — pre-fix
+    the hoisted conversion sat OUTSIDE the narrow catch and CRASHED the ON
+    arm where OFF returns a rate. Post-fix the overflow is caught into the
+    SAME ``min_sharpe_inexact`` not-float-representable refusal: ON≡OFF
+    bit-equal via the oracle, one warn, no burn-in sample consumed, no
+    latch, never a raise."""
+    returns = [0.01, -0.02, 0.03, -0.01, 0.02, 0.005, -0.015, 0.025] * 4
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=8, n_test_groups=4, min_sharpe=huge)
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv")  # fresh burn-in budget
+        budgets_before = dict(rust_stats._SELF_CHECK_REMAINING)  # pyright: ignore[reportPrivateUsage]
+        with capture_logs() as logs:
+            on = cpcv_pass_rate(returns, n_groups=8, n_test_groups=4, min_sharpe=huge)
+    assert struct.pack("<d", on) == struct.pack("<d", off)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_inexact"]
+    assert events[0]["min_sharpe"] == repr(huge)
+    assert budgets_before == rust_stats._SELF_CHECK_REMAINING  # pyright: ignore[reportPrivateUsage]
+    assert kernel_disabled("cpcv") is False
+    assert not any(e["event"] == "rust_stats.engaged" for e in logs)
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    ["abc", Decimal("sNaN"), complex(1, 2), _FloatReturnsStr()],
+    ids=["str", "decimal_snan", "complex", "float_returns_str"],
+)
+def test_min_sharpe_garbage_types_raise_identically_on_and_off(garbage: object) -> None:
+    """Exception-parity quartet (refuter-round-2 D1 generalization): pre-fix
+    the ON arm raised from the guard's own ``float()`` — "abc" gave
+    ValueError where OFF gives TypeError; ``Decimal('sNaN')`` gave
+    ValueError where OFF gives ``decimal.InvalidOperation``. Post-fix the
+    foreign-type refusal routes BOTH arms through the oracle's comparison,
+    so the exception TYPE and MESSAGE are identical (raised at the same
+    site) and nothing latches."""
+    returns = [0.01, 0.02, -0.005, 0.03, 0.015, -0.01, 0.02, 0.01]
+
+    def _arm(flag: str) -> tuple[str, str]:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(STATS_RUST_ENV, flag)
+            reset_self_check_for_tests("cpcv")
+            reset_observability_memo_for_tests()
+            try:
+                rate = cpcv_pass_rate(
+                    returns,
+                    n_groups=4,
+                    n_test_groups=2,
+                    min_sharpe=garbage,  # type: ignore[arg-type]  # the deliberate bad type under test
+                )
+            except Exception as exc:  # the parity harness compares arbitrary raises
+                return (type(exc).__name__, str(exc))
+            return ("value", struct.pack("<d", rate).hex())
+
+    off_outcome = _arm("0")
+    on_outcome = _arm("1")
+    assert off_outcome[0] != "value"  # every quartet member raises on OFF
+    assert on_outcome == off_outcome  # identical exception type + message
+    assert kernel_disabled("cpcv") is False
+
+
+def test_min_sharpe_garbage_with_undefined_folds_returns_on_both_arms() -> None:
+    """The value-vs-exception shape (refuter A's state-torture Part A): a
+    zero-variance series makes every fold Sharpe undefined, so the oracle's
+    comparison is NEVER reached and OFF returns 0.0 even for a garbage
+    threshold — pre-fix the ON arm raised ValueError from the guard's
+    ``float("abc")`` instead. Post-fix ON refuses to the oracle and returns
+    the identical 0.0."""
+    returns = [0.01] * 8  # constant → zero variance → every fold undefined
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe="abc")  # type: ignore[arg-type]  # deliberate
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv")
+        with capture_logs() as logs:
+            on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe="abc")  # type: ignore[arg-type]  # deliberate
+    assert struct.pack("<d", on) == struct.pack("<d", off) == struct.pack("<d", 0.0)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_foreign_type"]
+    assert events[0]["min_sharpe_type"] == "str"
+
+
+@pytest.mark.parametrize(
+    "np_ms",
+    [np.float64(0.5), np.int64(3)],
+    ids=["np_float64", "np_int64"],
+)
+def test_min_sharpe_numpy_scalar_refuses_to_oracle_value_equal(np_ms: float) -> None:
+    """SANCTIONED NARROWING pin (refuter round 2, documented in the seam
+    header): ``np.float64``/``np.int64`` thresholds previously ENGAGED the
+    kernel (their conversions are value-exact); the exact-type gate now
+    refuses them (``min_sharpe_foreign_type``) — SAFE because the oracle
+    serves both arms with numpy's own promoting comparison (refuter-A
+    verified it agrees with the kernel everywhere), and performance-neutral
+    because the in-repo production callers pass plain Python floats."""
+    returns = [0.01, 0.02, -0.005, 0.03, 0.015, -0.01, 0.02, 0.01]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=np_ms)
+        mp.setenv(STATS_RUST_ENV, "1")
+        reset_self_check_for_tests("cpcv")
+        with capture_logs() as logs:
+            on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, min_sharpe=np_ms)
+    assert struct.pack("<d", on) == struct.pack("<d", off)
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["min_sharpe_foreign_type"]
+    assert events[0]["min_sharpe_type"] == type(np_ms).__name__
+    assert not any(e["event"] == "rust_stats.engaged" for e in logs)
+    assert kernel_disabled("cpcv") is False
+
+
+@pytest.mark.parametrize("exact_bool", [True, False])
+def test_min_sharpe_bool_engages_the_kernel(exact_bool: bool) -> None:
+    """The documented bool choice: ``bool`` is an exact, UNSUBCLASSABLE int
+    subtype carrying int's own ordering — it engages the kernel like the
+    exact 0/1 it is (kills the ``is bool`` arm-drop mutant, under which a
+    bool threshold would silently refuse)."""
+    counts, means, m2s = _golden_moments()
+    expected = _fold_pass_count(counts, means, m2s, 4, 2, exact_bool)
+    reset_self_check_for_tests("cpcv", remaining=0)
+    with capture_logs() as logs:
+        got = cpcv_pass_count_via_kernel(
+            counts, means, m2s, 2, exact_bool, n_total=6, oracle=lambda: -1
+        )
+    assert got == expected
+    assert any(e["event"] == "rust_stats.engaged" for e in logs)
+    assert not any(e["event"] == "rust_stats.fallback" for e in logs)
 
 
 # ── the FFI call site: burn-in + engagement ─────────────────────────────

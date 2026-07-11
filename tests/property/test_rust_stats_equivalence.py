@@ -21,16 +21,24 @@ Adversarial input classes: near-zero-mean folds (the sign of the fold mean
 IS the pass verdict at ``min_sharpe=0``), exact-constant series (zero
 variance → undefined folds), 1e300-scale overflow (the inf/NaN fail-safe
 must flow IEEE-identically), and the tiny ``n == n_groups`` boundary
-(singleton groups). ``min_sharpe`` is drawn from floats ∪ INTS — including
-non-float-representable ints past 2^53, the refuter-round-1 exactness-leak
-class the seam's domain guard refuses to the oracle. The strict-``>``
-boundary at an ACHIEVED fold Sharpe is pinned deterministically below.
+(singleton groups). ``min_sharpe`` is drawn from floats ∪ UNBOUNDED ints —
+including non-float-representable ints past 2^53 (the refuter-round-1
+exactness-leak class) and ints past 2^1024 whose ``float()`` raises
+OverflowError (the refuter-round-2 crash class) — the seam's exact-type
+domain gate refuses both to the oracle. A second hypothesis test widens the
+threshold to the EXOTIC type corpus (bools, numpy scalars, an
+ordering-reversed float subclass, Decimals, NaN/inf) under the round-2
+invariant: ON≡OFF ALWAYS — a bit-equal value or an IDENTICAL exception
+type + message (the oracle serves both arms with the ORIGINAL object's own
+semantics). The strict-``>`` boundary at an ACHIEVED fold Sharpe is pinned
+deterministically below.
 """
 
 from __future__ import annotations
 
 import math
 import struct
+from decimal import Decimal
 
 import numpy as np
 import pytest
@@ -87,20 +95,43 @@ def _cases(draw: st.DrawFn) -> tuple[list[float], int, int, float]:
                 max_size=n,
             )
         )
-    # min_sharpe over floats ∪ INTS (refuter-round-1 fold): the ON≡OFF law
-    # must hold for EVERY type-legal threshold. Ints past 2^53 (2^53+3,
-    # 2^60+1, and random draws up to ±2^60) are not float-representable —
-    # the seam's exactness domain guard refuses the kernel for those
-    # (never a rounded FFI compare against the oracle's EXACT int↔float
-    # compare); value-exact ints (0, ±1, 2^53) stay kernel-served.
+    # min_sharpe over floats ∪ UNBOUNDED ints ∪ bools (refuter rounds 1+2):
+    # the ON≡OFF law must hold for EVERY type-legal threshold. Ints past
+    # 2^53 (2^53+3, 2^60+1) are not float-representable and ints past
+    # ~2^1024 (10^400, ±2^1200-band draws) make ``float()`` raise
+    # OverflowError — the seam's exact-type domain gate refuses BOTH to the
+    # oracle (never a rounded FFI compare, never an ON-arm crash);
+    # value-exact ints (0, ±1, 2^53) and bools stay kernel-served.
     min_sharpe: float = draw(
         st.one_of(
             st.sampled_from([0.0, 0.5, -0.5]),
-            st.sampled_from([0, 1, -1, 2**53, 2**53 + 3, -(2**53 + 3), 2**60 + 1]),
+            st.sampled_from([0, 1, -1, 2**53, 2**53 + 3, -(2**53 + 3), 2**60 + 1, 10**400]),
             st.integers(min_value=-(2**60), max_value=2**60),
+            st.integers(min_value=2**1024, max_value=2**1200),
+            st.integers(min_value=-(2**1200), max_value=-(2**1024)),
+            st.booleans(),
         )
     )
     return vals, s, k, min_sharpe
+
+
+def _kernel_gate_engages(min_sharpe: float) -> bool:
+    """Mirror of the seam's exact-TYPE engagement gate (the expected-
+    engagement predicate): exact-type ``float`` (non-NaN) or exact-type
+    ``int``/``bool`` whose ``float()`` image is value-exact — anything
+    else (incl. an OverflowError-raising huge int) is a refusal."""
+    # ``type[object]`` mirrors the seam's own widened annotation: the param
+    # is ANNOTATED float but the numeric tower delivers ints/bools at
+    # runtime — the widening keeps the int/bool arm reachable for mypy.
+    ms_type: type[object] = type(min_sharpe)
+    if ms_type is float:
+        return not math.isnan(min_sharpe)
+    if ms_type is int or ms_type is bool:
+        try:
+            return float(min_sharpe) == min_sharpe
+        except OverflowError:
+            return False
+    return False
 
 
 def _rate_under_flag(
@@ -127,9 +158,12 @@ def test_on_off_rate_bit_equal_and_count_exact(
     case: tuple[list[float], int, int, float], burn_in: bool
 ) -> None:
     returns, s, k, min_sharpe = case
-    # Value-exact conversion ⇒ the kernel engages; an inexact threshold (an
-    # int past 2^53) is domain-refused to the oracle — refuter-round-1 fold.
-    exact = float(min_sharpe) == min_sharpe
+    # The exact-type gate's engagement predicate (refuter rounds 1+2): a
+    # value-exact exact-type threshold engages; an inexact int (past 2^53),
+    # an OverflowError-raising huge int, or a foreign type is domain-refused
+    # to the oracle. (Computing ``float(min_sharpe)`` directly here would
+    # itself crash on the huge-int draws — the gate mirror guards it.)
+    exact = _kernel_gate_engages(min_sharpe)
     off_rate, off_engaged = _rate_under_flag("0", returns, s, k, min_sharpe, burn_in=burn_in)
     on_rate, on_engaged = _rate_under_flag("1", returns, s, k, min_sharpe, burn_in=burn_in)
     assert not off_engaged
@@ -180,6 +214,97 @@ def test_strict_gt_boundary_at_achieved_fold_sharpe() -> None:
     on_b, _ = _rate_under_flag("1", returns, s, k, below, burn_in=True)
     assert struct.pack("<d", on_b) == struct.pack("<d", off_b)
     assert on_b > on_rate
+
+
+class _ReversedFloat(float):
+    """Refuter-round-2 D2 attack class: a type-legal float subclass whose
+    ordering is REVERSED while equality stays honest — it defeats any
+    value-exactness-only guard, so the exact-type gate must refuse it."""
+
+    def __gt__(self, other: float) -> bool:
+        return float.__lt__(self, other)
+
+    def __lt__(self, other: float) -> bool:
+        return float.__gt__(self, other)
+
+    def __ge__(self, other: float) -> bool:
+        return float.__le__(self, other)
+
+    def __le__(self, other: float) -> bool:
+        return float.__ge__(self, other)
+
+
+def _exotic_thresholds() -> st.SearchStrategy[object]:
+    """The refuter-round-2 exotic threshold corpus: everything a hostile or
+    exotic caller could feed ``min_sharpe`` without tripping the type
+    checker's numeric tower (plus outright junk-adjacent numerics)."""
+    return st.one_of(
+        st.floats(allow_nan=True, allow_infinity=True),  # incl. NaN/±inf
+        st.integers(),  # UNBOUNDED — rare astronomically-huge draws included
+        st.integers(min_value=2**1024, max_value=2**1300),  # float() overflow
+        st.integers(min_value=-(2**1300), max_value=-(2**1024)),
+        st.booleans(),
+        st.sampled_from(
+            [
+                np.float64(0.5),
+                np.float64("nan"),
+                np.float32(0.25),
+                np.int64(3),
+                np.int64(2**60 + 255),
+                np.int32(-2),
+            ]
+        ),
+        st.builds(_ReversedFloat, st.floats(min_value=-2.0, max_value=2.0, allow_nan=False)),
+        st.decimals(allow_nan=True, allow_infinity=True),
+        st.sampled_from([Decimal("sNaN"), Decimal("0.1"), Decimal(2**53 + 3)]),
+    )
+
+
+@settings(max_examples=150)
+@given(
+    ms=_exotic_thresholds(),
+    series_kind=st.sampled_from(["mixed", "constant"]),
+    burn_in=st.booleans(),
+)
+def test_on_off_parity_for_exotic_threshold_types(
+    ms: object, series_kind: str, burn_in: bool
+) -> None:
+    """The refuter-round-2 invariant: ON≡OFF ALWAYS — a bit-equal value or
+    an IDENTICAL exception (type + message, raised at the same oracle
+    site) — for EVERY threshold in the exotic corpus, burn-in and steady
+    state, with no false autorevert. The ``constant`` series makes every
+    fold undefined so the comparison is never reached (the
+    value-vs-exception shape: garbage thresholds must return 0.0 on BOTH
+    arms, not raise on one)."""
+    returns = (
+        [0.01, 0.02, -0.005, 0.03, 0.015, -0.01, 0.02, 0.01]
+        if series_kind == "mixed"
+        else [0.01] * 8
+    )
+
+    def _arm(flag: str) -> tuple[str, ...]:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(rust_stats.STATS_RUST_ENV, flag)
+            rust_stats.reset_observability_memo_for_tests()
+            rust_stats.reset_self_check_for_tests("cpcv", remaining=None if burn_in else 0)
+            try:
+                with np.errstate(all="ignore"):
+                    rate = cpcv_pass_rate(
+                        returns,
+                        n_groups=4,
+                        n_test_groups=2,
+                        min_sharpe=ms,  # type: ignore[arg-type]  # the exotic corpus under test
+                    )
+            except Exception as exc:  # the parity harness compares arbitrary raises
+                outcome: tuple[str, ...] = ("exc", type(exc).__name__, str(exc))
+            else:
+                outcome = ("value", struct.pack("<d", rate).hex())
+            assert not rust_stats.kernel_disabled("cpcv"), "false autorevert fired: kernel≠oracle"
+            return outcome
+
+    on_outcome = _arm("1")
+    off_outcome = _arm("0")
+    assert on_outcome == off_outcome
 
 
 def test_production_shape_s16_k8_bit_equal() -> None:

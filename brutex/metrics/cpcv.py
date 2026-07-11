@@ -424,7 +424,8 @@ def cpcv_pass_rate(
     if rust_stats.stats_rust_enabled():
         # The flag-gated Rust fold kernel (DEC-METRICS-RUST-STATS-001).
         # ``None`` — latched / wheel-absent / kernel error / refused result /
-        # inexact-``float(min_sharpe)`` domain refusal — falls through to the
+        # the min_sharpe exact-type+exactness domain refusal (foreign types,
+        # inexact or float-unconvertible ints, NaN) — falls through to the
         # retained-forever Python oracle, and the flag resolution above
         # degrades to the default (warn-once) when the engine package itself
         # cannot import — so wheel state (fno_math OR trading_core) can never
