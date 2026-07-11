@@ -7265,9 +7265,12 @@ def build_app(
 
             Runs OFF the event loop: the ``sweep_results_revision`` probe is
             O(dirs)+O(1-stat) per poll, the ``composite_index_revision``
-            probe adds O(run dirs + results-depth dirs) stats per poll
-            (disclosed — fix round 1), and the ``compute=`` closures perform
-            the real ``<lake>/sweeps`` scan / rank ONLY on a miss
+            probe adds O(run dirs + results-depth dirs) ``scandir``/``stat``
+            per poll — NAME-only, zero manifest reads/parses (disclosed —
+            fix round 1; the per-poll manifest.json read+parse the
+            ``discover_runs`` hop hid was removed in fix round 2,
+            bench-pinned) — and the ``compute=`` closures perform the real
+            ``<lake>/sweeps`` scan / rank ONLY on a miss
             (DEC-LEDGER-DELTA-O-PAGE-001).
             """
             rev = sweep_results_revision(lake_root)

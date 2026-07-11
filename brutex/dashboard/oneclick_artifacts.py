@@ -124,6 +124,7 @@ __all__ = [
     "load_manifest",
     "load_preflight_fixture",
     "load_top100",
+    "newest_run_name",
     "probe_run_dir",
     "raise_chain_not_verified",
     "raise_no_cached_payload",
@@ -1037,17 +1038,78 @@ def _probe_run_dir_known(run_dir: Path, dir_mtime_ns: int) -> RunInfo:
     )
 
 
+def _stamped_run_dirs(results_root: Path) -> list[tuple[int, str]]:
+    """Stat-stamp every run dir under the Ruling-4 tree, ``(mtime_ns, name)`` DESC.
+
+    The ONE newest-first selection core (§11 COMMON) shared by
+    :func:`discover_runs` (which pays the :class:`RunInfo` manifest probe per
+    SELECTED dir) and :func:`newest_run_name` (which pays NO manifest work at
+    all) — never a second selection law. An unreadable runs root folds into
+    the empty listing; an unreadable entry is SKIPPED with one
+    ``oneclick.run_skipped`` WARN, never a raise (the whole listing survives
+    one poisoned dir).
+    """
+    root = runs_root(results_root)
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    stamped: list[tuple[int, str]] = []
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            mtime_ns = entry.stat().st_mtime_ns
+        except OSError as exc:
+            _LOG.warning(
+                "oneclick.run_skipped",
+                run=entry.name,
+                error_type=type(exc).__name__,
+            )
+            continue
+        stamped.append((mtime_ns, entry.name))
+    stamped.sort(reverse=True)
+    return stamped
+
+
+def newest_run_name(results_root: Path) -> str | None:
+    """Return the NEWEST run dir's NAME on the ONE selection law — no manifest I/O.
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001 fix round 2 (refuter-confirmed
+    MINOR): the per-poll ``/results`` ``composite_index_revision`` probe needs
+    ONLY the newest run's directory name, yet reached it through
+    :func:`discover_runs`, whose per-selected-dir :class:`RunInfo` probe reads
+    + json-parses that run's ``manifest.json`` — an O(manifest) file read +
+    parse PER POLL whose parsed value (the ``suspect`` flag) the probe never
+    used. This name-only listing rides the SAME
+    :func:`_stamped_run_dirs` ``(mtime_ns, name)``-descending selection core
+    (never a second selection law) and performs ZERO manifest reads/parses
+    (bench-pinned beside the cascade one-stat pin).
+
+    Returns
+    -------
+    str | None
+        The newest run dir name, or ``None`` when no run directory exists /
+        the tree is unreadable — EXACTLY the cases :func:`discover_runs`
+        folds into its empty listing, so a name-only caller and a RunInfo
+        caller can never disagree about absence.
+    """
+    stamped = _stamped_run_dirs(results_root)
+    return stamped[0][1] if stamped else None
+
+
 def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]:
     """Discover run directories under the Ruling-4 ``sweep_runs/`` tree, newest first.
 
-    F4 (DEC-ONECLICK-PERF-CLUB-001): the dir STAT sweep runs first, the
-    newest-``limit`` selection happens on the (mtime_ns, name) stamps, and
-    only the SELECTED dirs pay the manifest PARSE — the pre-fix shape parsed
-    EVERY run's manifest and then truncated, so a churning history paid
-    O(all runs) parses per fresh listing. The stat sweep itself stays honest
-    O(run dirs) (and :func:`runs_revision` deliberately keeps its own
-    UNCAPPED manifest-token stat walk — the F5 ruling stands; this bounds
-    the PARSES, not the stats). Selection is identical to the pre-fix sort
+    F4 (DEC-ONECLICK-PERF-CLUB-001): the dir STAT sweep runs first (the
+    shared :func:`_stamped_run_dirs` core), the newest-``limit`` selection
+    happens on the (mtime_ns, name) stamps, and only the SELECTED dirs pay
+    the manifest PARSE — the pre-fix shape parsed EVERY run's manifest and
+    then truncated, so a churning history paid O(all runs) parses per fresh
+    listing. The stat sweep itself stays honest O(run dirs) (and
+    :func:`runs_revision` deliberately keeps its own UNCAPPED manifest-token
+    stat walk — the F5 ruling stands; this bounds the PARSES, not the
+    stats). Selection is identical to the pre-fix sort
     (``(dir_mtime_ns, run_id)`` descending): ``mtime_ns`` granularity means
     same-instant dirs tie-break on ``run_id``, exactly as before.
 
@@ -1067,26 +1129,8 @@ def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]
     tuple of RunInfo
         The discovered runs; empty when the tree is absent/unreadable.
     """
+    stamped = _stamped_run_dirs(results_root)
     root = runs_root(results_root)
-    try:
-        entries = list(os.scandir(root))
-    except OSError:
-        return ()
-    stamped: list[tuple[int, str]] = []
-    for entry in entries:
-        try:
-            if not entry.is_dir():
-                continue
-            mtime_ns = entry.stat().st_mtime_ns
-        except OSError as exc:
-            _LOG.warning(
-                "oneclick.run_skipped",
-                run=entry.name,
-                error_type=type(exc).__name__,
-            )
-            continue
-        stamped.append((mtime_ns, entry.name))
-    stamped.sort(reverse=True)
     return tuple(
         _probe_run_dir_known(root / name, mtime_ns) for mtime_ns, name in stamped[: max(0, limit)]
     )

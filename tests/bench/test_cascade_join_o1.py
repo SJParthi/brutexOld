@@ -171,3 +171,55 @@ class TestCompositeSingleRead:
         index = cj.load_composite_index(tmp_path / "sweeps")
         assert index.scored_rows == 1
         assert len(reads) <= 1  # one sidecar → at most one read per build
+
+
+class TestCompositeRevisionZeroManifestIo:
+    """Fix round 2 (refuter-confirmed MINOR): the ``composite_index_revision``
+    per-poll cost is dir stats ONLY — the ``TestOneStatPerPoll`` twin for the
+    composite probe. Pre-fix each poll rode ``discover_runs`` →
+    ``_probe_run_dir_known`` → ``load_manifest``: one manifest.json file read
+    + ``json.loads`` per poll whose parsed value the probe never used. This
+    pin regression-guards the path against a future re-heavying of the
+    newest-run selection (e.g. re-adding per-poll manifest parses).
+    """
+
+    def test_n_polls_zero_manifest_reads_or_parses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import polars as pl
+        from brutex.dashboard import composite_join as cj
+        from brutex.dashboard import oneclick_artifacts as oa
+
+        run = "g" * 64
+        depth = tmp_path / "sweep_runs" / run / "results-depth" / "NIFTY" / "1m"
+        depth.mkdir(parents=True)
+        pl.DataFrame(
+            {"run_id": ["a" * 64], "composite_score": pl.Series([1.0], dtype=pl.Float64)}
+        ).write_parquet(depth / "bull_k1_aaaaaaaaaaaaaaaa.aggs.parquet")
+        (tmp_path / "sweep_runs" / run / "manifest.json").write_text(
+            '{"suspect": false}', encoding="utf-8"
+        )
+        manifest_loads: list[int] = []
+        real_load = oa.load_manifest
+
+        def _load_spy(run_dir: Any) -> Any:
+            manifest_loads.append(1)
+            return real_load(run_dir)
+
+        monkeypatch.setattr(oa, "load_manifest", _load_spy)
+        parses: list[int] = []
+        real_json_loads = json.loads
+
+        def _json_spy(*args: Any, **kwargs: Any) -> Any:
+            parses.append(1)
+            return real_json_loads(*args, **kwargs)
+
+        # String-target form: patches the SAME stdlib json module object the
+        # oneclick module holds, without a static module-attr access.
+        monkeypatch.setattr("brutex.dashboard.oneclick_artifacts.json.loads", _json_spy)
+        for _ in range(10):
+            token = cj.composite_index_revision(tmp_path / "sweeps")
+            assert token is not None
+        # 10 polls → ZERO manifest reads AND zero JSON parses (dir stats only).
+        assert manifest_loads == []
+        assert parses == []

@@ -2224,7 +2224,9 @@ hostile-review pass._
   stands (run identity folds the whole Rule-4 tuple; pool context disclosed
   via meta sweep_id). (5) NEW `dashboard/composite_join.py` reads ONLY the
   (run_id, composite_score) columns of the NEWEST run's aggs sidecars
-  (discover_runs law reused; per-file skip+count; null/non-finite dropped)
+  (the ONE oneclick newest-run selection core — since fix round 2 the
+  NAME-only `newest_run_name` over the extracted `_stamped_run_dirs` law
+  `discover_runs` rides; per-file skip+count; null/non-finite dropped)
   → scored rows gain `composite_score` AND ?preset=composite ORDERS honestly
   with the DYNAMIC inert-axes disclosure (`composite_score` leaves the set
   iff the index joined non-empty) — the /results read-time half of HIGH #40;
@@ -2233,7 +2235,12 @@ hostile-review pass._
   the sweep's last sweeps-tree/audit write, so the sweeps generation alone
   provably froze an empty/partial index until the NEXT sweep — the probe's
   newest-run + results-depth dir-mtime digest folds into the payload cache
-  key and the index slot's generation; killing route regression + spy pins).
+  key and the index slot's generation; killing route regression + spy pins;
+  fix round 2, refuter-confirmed MINOR: the round-1 probe's
+  `discover_runs(limit=1)` hop hid an undisclosed per-poll manifest.json
+  read+parse the probe never consumed — the selection is now name-only,
+  ZERO manifest I/O per poll, bench-pinned beside the cascade one-stat pin,
+  both disclosures corrected).
   (6) display: `oneclick_artifacts._bridge_cascade` (invalid object → key
   dropped + NAMED partial, row kept) + the ONE server-side
   `oneclick_view.cascade_status_text` builder (no verdict prose in JS —

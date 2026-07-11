@@ -14,10 +14,13 @@ stays deferred (DEC-CASCADE-ROW-PERSIST-002).
 
 Laws:
 
-* NEWEST-run-wins: run selection reuses the ONE
-  :func:`brutex.dashboard.oneclick_artifacts.discover_runs` listing
-  (``(mtime_ns, name)`` descending — §11 COMMON, never a second selection
-  law); only THAT run's ``results-depth/**/*.aggs.parquet`` files are read.
+* NEWEST-run-wins: run selection reuses the ONE oneclick selection core via
+  :func:`brutex.dashboard.oneclick_artifacts.newest_run_name` — the same
+  ``(mtime_ns, name)``-descending law ``discover_runs`` rides (§11 COMMON,
+  never a second selection law), NAME-only so neither the loader nor the
+  per-poll freshness probe ever reads/parses a ``manifest.json`` (fix
+  round 2, bench-pinned); only THAT run's
+  ``results-depth/**/*.aggs.parquet`` files are read.
 * Column-projection reads: ONLY ``(run_id, composite_score)`` — never the
   whole sidecar schema.
 * Per-file tolerance: an unreadable/corrupt sidecar is SKIPPED + counted
@@ -50,7 +53,7 @@ import structlog
 
 from brutex.dashboard.lake_revision import ABSENT_TOKEN
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
-from brutex.dashboard.oneclick_artifacts import discover_runs, runs_root
+from brutex.dashboard.oneclick_artifacts import newest_run_name, runs_root
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from pathlib import Path
@@ -123,10 +126,9 @@ def load_composite_index(results_root: Path) -> CompositeIndex:
     """
     import polars as pl
 
-    runs = discover_runs(results_root, limit=1)
-    if not runs:
+    run_id = newest_run_name(results_root)
+    if run_id is None:
         return _empty(COMPOSITE_STATE_ABSENT)
-    run_id = runs[0].run_id
     depth_dir = runs_root(results_root) / run_id / _RESULTS_DEPTH_DIRNAME
     try:
         paths = sorted(depth_dir.glob(_AGGS_GLOB))
@@ -198,9 +200,13 @@ def composite_index_revision(results_root: Path) -> str | None:
     inter-sweep interval. This dedicated probe covers exactly what
     :func:`load_composite_index` reads:
 
-    * the NEWEST run's identity via the SAME
-      :func:`~brutex.dashboard.oneclick_artifacts.discover_runs` selection law
-      (§11 COMMON — never a second selection law); and
+    * the NEWEST run's identity via the SAME oneclick selection core
+      (:func:`~brutex.dashboard.oneclick_artifacts.newest_run_name` — the
+      ``(mtime_ns, name)``-descending law ``discover_runs`` rides; §11
+      COMMON — never a second selection law), NAME-only since fix round 2
+      (refuter-confirmed MINOR): the pre-fix ``discover_runs(limit=1)`` hop
+      also read + json-parsed the newest run's ``manifest.json`` per poll —
+      pure waste the probe never consumed, and undisclosed; and
     * a bounded directory-mtime digest of that run's ``results-depth/``
       subtree down to the ``<instrument>/<tf>/`` dirs — every aggs sidecar
       lands via the atomic ``trade_store`` tempfile + ``os.replace`` INTO its
@@ -214,23 +220,26 @@ def composite_index_revision(results_root: Path) -> str | None:
           contributes the stable ``"<run_id>|absent"`` component — its
           first-ever creation moves the token exactly once);
         * :data:`~brutex.dashboard.lake_revision.ABSENT_TOKEN` when no run
-          directory exists at all (``discover_runs`` folds an unreadable runs
-          root into the same empty listing the LOADER sees, so probe and
+          directory exists at all (``newest_run_name`` folds an unreadable
+          runs root into the same ``None`` the LOADER sees, so probe and
           loader can never disagree about absence);
         * ``None`` — "unknown, no signal" — when the depth-tree stat/scan
           fails with a non-missing-file :class:`OSError` (logged); the caller
           folds it as a probe OUTAGE (the cached payload holds — bounded
           staleness, never a fake flip).
 
-    Honest cost (Golden Rule #10): O(run dirs) stats for the newest-run
-    selection plus O(depth dirs) ``scandir``/``stat`` — bounded by
-    instruments × timeframes, NEVER by the sidecar file count — paid per
-    ``/results`` poll (the ``sweeps_revision`` envelope, disclosed).
+    Honest cost (Golden Rule #10): O(run dirs) ``scandir``/``stat`` for the
+    name-only newest-run selection — ZERO file reads, ZERO JSON parses (fix
+    round 2; the pre-fix hop paid one manifest.json read + parse per poll) —
+    plus O(depth dirs) ``scandir``/``stat`` — bounded by instruments ×
+    timeframes, NEVER by the sidecar file count — paid per ``/results`` poll
+    (the ``sweeps_revision`` envelope, disclosed; the zero-manifest-I/O law
+    is bench-pinned in ``test_cascade_join_o1.py`` beside the cascade
+    one-stat pin).
     """
-    runs = discover_runs(results_root, limit=1)
-    if not runs:
+    run_id = newest_run_name(results_root)
+    if run_id is None:
         return ABSENT_TOKEN
-    run_id = runs[0].run_id
     depth_dir = runs_root(results_root) / run_id / _RESULTS_DEPTH_DIRNAME
     try:
         st_depth = os.stat(depth_dir)

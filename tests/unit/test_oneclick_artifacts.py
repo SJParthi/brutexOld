@@ -322,6 +322,45 @@ class TestDiscoverRuns:
         assert {entry["run"] for entry in skipped} == {"r-badstat", "r-badisdir"}
 
 
+class TestNewestRunName:
+    """Fix round 2 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, refuter-confirmed
+    MINOR): the name-only newest-run listing — the same ``(mtime_ns, name)``
+    selection core ``discover_runs`` rides, with ZERO manifest reads/parses.
+    """
+
+    def test_absent_runs_tree_is_none(self, tmp_path: Path) -> None:
+        assert oc.newest_run_name(tmp_path / "sweeps") is None
+
+    def test_newest_name_matches_discover_runs_selection(self, tmp_path: Path) -> None:
+        runs = tmp_path / "sweep_runs"
+        for name, age in (("r-old", 100), ("r-new", 0)):
+            (runs / name).mkdir(parents=True)
+            stamp = 1_700_000_000 - age
+            os.utime(runs / name, (stamp, stamp))
+        assert oc.newest_run_name(tmp_path / "sweeps") == "r-new"
+        # ONE selection law: name-only listing == the RunInfo listing's head.
+        assert oc.newest_run_name(tmp_path / "sweeps") == (
+            oc.discover_runs(tmp_path / "sweeps", limit=1)[0].run_id
+        )
+
+    def test_zero_manifest_reads_even_when_manifest_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_dir = tmp_path / "sweep_runs" / "r-with-manifest"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.json").write_text('{"suspect": false}', encoding="utf-8")
+        calls: list[str] = []
+        real_load = oc.load_manifest
+
+        def _spy(target: Path) -> Any:
+            calls.append(str(target))
+            return real_load(target)
+
+        monkeypatch.setattr(oc, "load_manifest", _spy)
+        assert oc.newest_run_name(tmp_path / "sweeps") == "r-with-manifest"
+        assert calls == []
+
+
 # ── manifest loader ─────────────────────────────────────────────────────
 
 

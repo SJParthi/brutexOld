@@ -293,3 +293,42 @@ class TestCompositeIndexRevision:
         with capture_logs() as logs:
             assert composite_index_revision(tmp_path / "sweeps") is None
         assert [e for e in logs if e["event"] == "composite_join.revision_scan_failed"]
+
+
+class TestZeroManifestIo:
+    """Fix round 2 (refuter-confirmed MINOR): probe + loader are NAME-only.
+
+    Pre-fix both reached the newest run through ``discover_runs``, whose
+    per-selected-dir :class:`RunInfo` probe read + json-parsed that run's
+    ``manifest.json`` on EVERY /results poll — an undisclosed O(manifest)
+    file read + parse whose parsed value (the ``suspect`` flag) neither
+    caller ever used. The killing spy: seed a run CARRYING a manifest.json,
+    poll the probe 10x + build the index once — ZERO ``load_manifest``
+    calls (pre-fix this counted 11).
+    """
+
+    def test_probe_and_loader_never_read_or_parse_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.oneclick_artifacts as oa
+
+        results_root = tmp_path / "sweeps"
+        _seed_aggs(results_root, [{"run_id": f"{1:064x}", "composite_score": 1.0}])
+        manifest = tmp_path / "sweep_runs" / _RUN / "manifest.json"
+        manifest.write_text('{"suspect": false}', encoding="utf-8")
+        calls: list[str] = []
+        real_load = oa.load_manifest
+
+        def _spy(run_dir: Path) -> Any:
+            calls.append(str(run_dir))
+            return real_load(run_dir)
+
+        monkeypatch.setattr(oa, "load_manifest", _spy)
+        tokens = {composite_index_revision(results_root) for _ in range(10)}
+        assert len(tokens) == 1
+        assert None not in tokens
+        index = load_composite_index(results_root)
+        assert index.run_id == _RUN
+        assert index.by_run_id == {f"{1:064x}": 1.0}
+        # The whole point: the newest-run selection is name-only.
+        assert calls == []
