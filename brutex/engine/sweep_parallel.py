@@ -102,7 +102,16 @@ the flag, not a real production limitation.
   ``(instrument, tf, proximity, prior_n, fib_anchor, roll_schedule)`` key per
   worker instead of once per TUPLE, byte-identically (the ON≡OFF golden).
   A tiny per-worker bars-intern memo (capacity 2) keeps same-``(instrument,
-  tf)`` kernels sharing ONE resident bars copy (the memory bound). HONEST
+  tf)`` kernels sharing ONE resident bars copy (the memory bound) under an
+  IDENTITY-GUARDED serve law: a key's bars object is registered ONCE per
+  worker (write-once), so a resident kernel is only ever served against the
+  EXACT object it was built from; any arrival that cannot be
+  identity-reconciled with the registered object (a resident copy failing
+  the value probe, or a key re-arriving AFTER its memo entry was
+  LRU-evicted) fail-safe DISABLES the whole mechanism for the rest of the
+  worker process — see :func:`_intern_bars` for the law + its honest
+  residuals (per-worker scope; frozen telemetry under-counts the summary;
+  the probe is a detector, never the safety rail). HONEST
   envelope: default-OFF because the retained state ADDS per-worker RSS —
   MODELED worst case ~0.66–0.73 GB/worker (two ~318 MB 555k-bar CandleBar
   list copies dominate) ≈ +5.3–5.8 GB pool-wide at 8 workers — and that RSS
@@ -518,21 +527,29 @@ WORKER_KERNEL_CACHE_DEFAULT: Final[bool] = False
 #: Environment variable overriding the per-worker kernel-cache CAPACITY (a
 #: positive integer). Unset/blank keeps the grid-derived default
 #: (:func:`worker_kernel_capacity_default` — the orchestrator's own
-#: ``len(proximities) × len(fib_anchors)`` sizing law); an INVALID value
+#: ``len(proximities) × len(fib_anchors)`` sizing law, itself clamped at
+#: :data:`WORKER_KERNEL_CAPACITY_MAX`); an INVALID value
 #: (non-integer / ``< 1``) falls back to the default and is logged LOUDLY at
 #: WARNING (the :func:`resolve_stall_seconds` invalid-env loudness); a value
 #: above :data:`WORKER_KERNEL_CAPACITY_MAX` is CLAMPED to it, logged LOUDLY.
 WORKER_KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
 
-#: Upper clamp on the env-overridden per-worker kernel-cache capacity.
-#: 64 sits comfortably above any real ``proximities × fib_anchors`` product
-#: (a handful of proximities × ≤4 anchors) while keeping the LRU bound a
-#: REAL memory bound: each resident kernel retains ~30 MB-class state beyond
-#: the shared bars, so a pathological override (e.g. ``=100000000``) would
+#: Upper clamp on the per-worker kernel-cache capacity — the env override
+#: AND the grid-derived default alike (fix-round-2, refuter-2 NIT: the
+#: derived default previously bypassed the ceiling). 64 sits comfortably
+#: above any real ``proximities × fib_anchors`` product (a handful of
+#: proximities × ≤4 anchors) while keeping the LRU bound a REAL memory
+#: bound: each resident kernel retains ~30 MB-class state beyond the shared
+#: bars, and the bound multiplies by POOL SIZE here (unlike the sequential
+#: path's single process-wide cache), so a pathological override
+#: (e.g. ``=100000000``) — or a hypothetical >64-product grid — would
 #: otherwise disable eviction entirely and silently defeat the capacity law
-#: this cache ships under. Values above it are clamped with ONE loud
+#: this cache ships under. Env values above it are clamped with ONE loud
 #: ``sweep_parallel.worker_kernel_capacity.clamped`` WARNING naming the
-#: requested value (the fail-safe env convention — never a silent accept).
+#: requested value (the fail-safe env convention — never a silent accept);
+#: the derived default clamps silently (a documented law, not operator
+#: error — the named trade-off is per-worker LRU thrash on such a grid,
+#: never a correctness change).
 WORKER_KERNEL_CAPACITY_MAX: Final[int] = 64
 
 #: Capacity of the per-worker bars-INTERN memo — the tuple stream visits
@@ -540,7 +557,11 @@ WORKER_KERNEL_CAPACITY_MAX: Final[int] = 64
 #: enumeration order), so one ACTIVE key + one straggler suffice; the memo
 #: exists so every kernel sharing ``(instrument, tf)`` retains ONE resident
 #: bars copy instead of one 330 MB-class copy per kernel (the A.4 memory
-#: bound of the design; DEC-SWEEP-WORKER-KERNEL-CACHE-001).
+#: bound of the design; DEC-SWEEP-WORKER-KERNEL-CACHE-001). An LRU-evicted
+#: key that later RE-ARRIVES fail-safe-disables the whole mechanism (see
+#: :func:`_intern_bars` — the identity serve guard cannot re-verify an
+#: evicted object; under the contiguous enumeration order above the arm is
+#: unreachable, so the conservative disable costs production nothing).
 _BARS_MEMO_CAPACITY: Final[int] = 2
 
 #: Warn-once memo for the kernel-cache env-flag hygiene events (per process,
@@ -592,7 +613,7 @@ def resolve_worker_kernel_cache(env: dict[str, str] | None = None) -> bool:
 
 
 def worker_kernel_capacity_default(grid: SweepGridConfig) -> int:
-    """The grid-derived per-worker kernel-cache capacity — the orchestrator's own law.
+    """The grid-derived per-worker kernel-cache capacity — the orchestrator's own law, clamped.
 
     ``max(1, len(grid.proximities) × len(grid.fib_anchors))`` — the EXACT
     formula the sequential ``run_sweep_grid`` already sizes its
@@ -601,9 +622,19 @@ def worker_kernel_capacity_default(grid: SweepGridConfig) -> int:
     ``(proximity, fib_anchor)`` are the two INNERMOST enumeration axes, so a
     per-worker LRU smaller than their fan-out thrashes to 100% miss on the
     cycle (classic LRU cyclic-access pathology) while this capacity gets a hit
-    on every recurrence — builds ≤ distinct keys × workers, exactly. O(1).
+    on every recurrence — builds ≤ distinct keys × workers, exactly — THEN
+    clamped at :data:`WORKER_KERNEL_CAPACITY_MAX` (fix-round-2, refuter-2
+    NIT): a DELIBERATE deviation from the sequential path's unclamped sizing,
+    because the retained-kernel RSS multiplies by POOL SIZE here; every
+    capacity that reaches a worker is therefore in ``[1, 64]`` regardless of
+    source. A hypothetical >64-product grid pays per-worker LRU thrash (more
+    builds, identical bytes) — unreachable for real proximity×anchor
+    fan-outs. O(1).
     """
-    return max(1, len(grid.proximities) * len(grid.fib_anchors))
+    return min(
+        max(1, len(grid.proximities) * len(grid.fib_anchors)),
+        WORKER_KERNEL_CAPACITY_MAX,
+    )
 
 
 def resolve_worker_kernel_capacity(grid: SweepGridConfig, env: dict[str, str] | None = None) -> int:
@@ -1092,15 +1123,28 @@ _WORKER_KERNEL_CACHE: ResidentKernelCache | None = None
 #: kernels share ONE resident bars copy (each dispatch delivers a fresh pickled
 #: copy; :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel` retains bar
 #: REFERENCES, so without interning every kernel would retain its own
-#: value-identical multi-hundred-MB copy). ``None`` when the cache is off —
-#: or after a mismatch fail-safe disable (see :func:`_intern_bars`).
+#: value-identical multi-hundred-MB copy). Entries are WRITE-ONCE per worker
+#: process (the identity serve guard of :func:`_intern_bars` — a key is
+#: registered exactly once; an evicted key's revisit disables, never
+#: re-seeds). ``None`` when the cache is off — or after a fail-safe disable.
 _WORKER_BARS_MEMO: OrderedDict[tuple[str, str], Sequence[CandleBar]] | None = None
 
-#: Warn-once latch for :func:`_intern_bars`'s mismatch degrade (per worker
+#: Every ``(instrument, tf_label)`` key EVER registered in the memo by this
+#: worker process (reset by :func:`_worker_init`; strings only — no bars
+#: reference, so it pins zero bar memory). The identity serve guard's
+#: eviction ledger: a key present here but ABSENT from the memo was
+#: LRU-evicted, and a kernel built from the evicted object may still be
+#: resident — an incoming fresh copy can never BE that object, so
+#: :func:`_intern_bars` fail-safe-disables instead of re-seeding (the
+#: fix-round-2 refuter-1 A-1 fold — pre-fix the revisit re-seeded with NO
+#: comparison and a stale resident kernel was served silently).
+_WORKER_BARS_KEYS_SEEN: set[tuple[str, str]] = set()
+
+#: Warn-once latch for :func:`_intern_bars`'s fail-safe disable (per worker
 #: process — reset by :func:`_worker_init`). Belt-and-braces since the
-#: fix-round-1 mismatch disable: a mismatch kills the memo outright, so a
-#: SECOND natural mismatch per worker is structurally unreachable — the
-#: latch guards only a future re-enable path (arm pinned by a direct test).
+#: fix-round-1 disable: any disable kills the memo outright, so a SECOND
+#: natural disable per worker is structurally unreachable — the latch guards
+#: only a future re-enable path (arm pinned by a direct test).
 _WORKER_BARS_MEMO_WARNED: bool = False
 
 
@@ -1153,8 +1197,10 @@ def _worker_init(ctx: _WorkerContext) -> None:
     # flag + capacity were resolved ONCE in the parent and travel in the ctx;
     # the OFF path constructs NOTHING (byte-identical legacy results; OFF
     # adds only a few None-returning helper calls per tuple).
-    global _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO, _WORKER_BARS_MEMO_WARNED  # noqa: PLW0603
+    global _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO  # noqa: PLW0603
+    global _WORKER_BARS_KEYS_SEEN, _WORKER_BARS_MEMO_WARNED  # noqa: PLW0603
     _WORKER_BARS_MEMO_WARNED = False
+    _WORKER_BARS_KEYS_SEEN = set()
     if ctx.worker_kernel_cache:
         _WORKER_KERNEL_CACHE = ResidentKernelCache(capacity=ctx.worker_kernel_capacity)
         _WORKER_BARS_MEMO = OrderedDict()
@@ -1220,8 +1266,9 @@ def _run_tuple_in_worker(
     # OFF path: _WORKER_KERNEL_CACHE is None → the memo is None → `bars` is
     # returned UNTOUCHED and kernel_cache=None is exactly the legacy default.
     # ORDERING IS LOAD-BEARING: the cache global is read AFTER _intern_bars —
-    # a bars-memo MISMATCH disables the cache (fail-safe, see _intern_bars),
-    # and this tuple must observe that disable (never a stale-kernel serve).
+    # a bars-memo value MISMATCH or an evicted-key REVISIT disables the cache
+    # (fail-safe, see _intern_bars' identity serve guard), and this tuple
+    # must observe that disable (never a stale-kernel serve).
     bars = _intern_bars(tuple_.instrument, tuple_.tf.label, bars)
     kernel_cache = _WORKER_KERNEL_CACHE
     builds_before = kernel_cache.builds if kernel_cache is not None else 0
@@ -1268,8 +1315,34 @@ def _run_tuple_in_worker(
     )
 
 
+def _disable_worker_kernel_cache(instrument: str, tf_label: str, reason: str) -> None:
+    """Fail-safe OFF for the WHOLE per-worker mechanism — cache AND memo, warn-once.
+
+    :class:`~brutex.engine.sweep_kernel.ResidentKernelCache` exposes no
+    per-key eviction (the seam is CALL-ONLY — ``sweep_kernel.py`` belongs to
+    the kernel track), so the smallest SOUND degrade is full disable: both
+    module globals go ``None``, every resident kernel becomes unreachable,
+    and every later tuple in this worker runs the legacy byte-correct
+    per-tuple build on the bars it actually simulates. ONE
+    ``sweep_parallel.worker_bars_memo_mismatch`` WARNING per worker process,
+    carrying the machine ``reason`` (``resident_value_mismatch`` /
+    ``revisit_after_eviction``). O(1).
+    """
+    global _WORKER_BARS_MEMO_WARNED, _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO  # noqa: PLW0603
+    _WORKER_KERNEL_CACHE = None
+    _WORKER_BARS_MEMO = None
+    if not _WORKER_BARS_MEMO_WARNED:
+        _WORKER_BARS_MEMO_WARNED = True
+        _LOG.warning(
+            "sweep_parallel.worker_bars_memo_mismatch",
+            instrument=instrument,
+            tf=tf_label,
+            reason=reason,
+        )
+
+
 def _intern_bars(instrument: str, tf_label: str, bars: Sequence[CandleBar]) -> Sequence[CandleBar]:
-    """Swap a freshly-pickled bars copy for the worker's resident copy, guarded.
+    """Swap a freshly-pickled bars copy for the worker's resident copy — identity-guarded.
 
     The bars-intern memo of DEC-SWEEP-WORKER-KERNEL-CACHE-001 (the A.4 memory
     bound): every dispatch marshals a FRESH pickled bars copy, and a resident
@@ -1278,51 +1351,61 @@ def _intern_bars(instrument: str, tf_label: str, bars: Sequence[CandleBar]) -> S
     retain their own value-identical multi-hundred-MB copy. The memo keys on
     ``(instrument, tf_label)`` (tiny LRU, capacity :data:`_BARS_MEMO_CAPACITY`).
 
-    GUARD (never trust a proxy blindly): a memo hit is honored only when the
-    fresh copy matches the resident one on length + first/last bar equality;
-    on a MISMATCH the FRESH bars are used and the WHOLE per-worker mechanism
-    — the kernel cache AND this memo — is DISABLED for the rest of the worker
-    process (both module globals set ``None``), with ONE
-    ``sweep_parallel.worker_bars_memo_mismatch`` WARNING per worker process.
-    WHY the full disable (the R1 review's stale-kernel hazard): a mismatch
-    means the parent shipped value-DIFFERENT bars for a key this worker may
-    already hold kernels for, so ANY later cache hit could pair ``bar_bits``
-    built on the STALE resident bars with a trade sim running on fresh bars.
-    :class:`~brutex.engine.sweep_kernel.ResidentKernelCache` exposes no
-    per-key eviction (the seam is CALL-ONLY — ``sweep_kernel.py`` belongs to
-    the kernel track), so the smallest SOUND degrade is fail-safe OFF: every
-    resident kernel becomes unreachable and the mismatching tuple — and every
-    later one in this worker — runs the legacy byte-correct per-tuple build
-    on the bars it actually simulates. (The state is unreachable in a real
-    sweep — ``bars_for`` is deterministic per the
-    DEC-SWEEP-RESIDENT-KERNEL-001 contract — this is belt-and-braces; the
-    worker's telemetry counters freeze at the pre-mismatch snapshot, so the
-    drain-end reuse summary undercounts on an already-WARNed-suspect run.)
-    Cache OFF (memo ``None``) or an EMPTY bars sequence returns *bars*
-    untouched. O(1) per call.
+    THE IDENTITY SERVE GUARD (fix-round-2, refuter-1 A-1): a key's bars
+    object is registered EXACTLY ONCE per worker process (write-once — the
+    seen-key ledger :data:`_WORKER_BARS_KEYS_SEEN` makes re-seeding
+    structurally impossible), so a resident kernel can only ever be served
+    against the EXACT object it was built from. Any arrival that cannot be
+    identity-reconciled with the registered object fail-safe-disables the
+    whole mechanism (:func:`_disable_worker_kernel_cache`):
+
+    * a memo-RESIDENT copy failing the len + first/mid/last value probe
+      (``reason="resident_value_mismatch"`` — the parent provably shipped
+      value-different bars for a key this worker may hold kernels for); or
+    * a key RE-ARRIVING after its memo entry was LRU-evicted
+      (``reason="revisit_after_eviction"`` — a kernel built from the evicted
+      object may still be resident and an incoming fresh copy can never BE
+      that object; pre-fix this arm silently re-seeded with NO comparison
+      and a later cache hit paired stale ``bar_bits`` with a fresh-bars
+      trade sim — the A-1 executed repro). Conservative on purpose: even a
+      value-EQUAL revisit disables (identity is unverifiable once the
+      reference is dropped); unreachable under the contiguous
+      enumeration-order dispatch, so production pays nothing.
+
+    HONEST residuals (every disable arm is unreachable while ``bars_for``
+    honors the DEC-SWEEP-RESIDENT-KERNEL-001 determinism contract — this is
+    belt-and-braces): the disable is PER-WORKER (sibling workers keep their
+    own caches; cross-worker byte-safety rides that same contract); a
+    disabled worker's telemetry counters freeze at the pre-disable snapshot,
+    so the drain-end reuse summary UNDER-COUNTS on an already-WARNed-suspect
+    run; and the value probe is a best-effort corruption DETECTOR, never the
+    safety rail — a probe-equal interior mutation is substituted by the
+    registered copy SELF-CONSISTENTLY (kernel and sim share ONE object;
+    never a mixed ``bar_bits``-vs-trade-sim pairing; full value equality
+    would be O(n_bars) per tuple, deliberately not paid). Cache OFF (memo
+    ``None``) or an EMPTY bars sequence returns *bars* untouched. O(1) per
+    call.
     """
-    # The per-worker warn-once latch + the fail-safe mismatch disable both
-    # rewrite worker-process module globals (hence the lint waiver below).
-    global _WORKER_BARS_MEMO_WARNED, _WORKER_KERNEL_CACHE, _WORKER_BARS_MEMO  # noqa: PLW0603
     memo = _WORKER_BARS_MEMO
     if memo is None or not bars:
         return bars
     key = (instrument, tf_label)
     resident = memo.get(key)
     if resident is not None:
-        if len(resident) == len(bars) and resident[0] == bars[0] and resident[-1] == bars[-1]:
+        if (
+            len(resident) == len(bars)
+            and resident[0] == bars[0]
+            and resident[len(resident) // 2] == bars[len(bars) // 2]
+            and resident[-1] == bars[-1]
+        ):
             memo.move_to_end(key)
             return resident
-        _WORKER_KERNEL_CACHE = None
-        _WORKER_BARS_MEMO = None
-        if not _WORKER_BARS_MEMO_WARNED:
-            _WORKER_BARS_MEMO_WARNED = True
-            _LOG.warning(
-                "sweep_parallel.worker_bars_memo_mismatch",
-                instrument=instrument,
-                tf=tf_label,
-            )
+        _disable_worker_kernel_cache(instrument, tf_label, "resident_value_mismatch")
         return bars
+    if key in _WORKER_BARS_KEYS_SEEN:
+        _disable_worker_kernel_cache(instrument, tf_label, "revisit_after_eviction")
+        return bars
+    _WORKER_BARS_KEYS_SEEN.add(key)
     memo[key] = bars
     if len(memo) > _BARS_MEMO_CAPACITY:
         memo.popitem(last=False)
@@ -1341,6 +1424,28 @@ def _kernel_counters(
     if cache is None:
         return (None, None, None)
     return (os.getpid(), cache.builds, cache.hits)
+
+
+def _fold_kernel_snapshot(
+    stats: dict[int, tuple[int, int]],
+    pid: int,
+    builds: int | None,
+    hits: int | None,
+) -> None:
+    """Fold one stamped result's cumulative (builds, hits) snapshot per pid — element-wise MAX.
+
+    The counters are CUMULATIVE and MONOTONE per worker, but two
+    near-simultaneous completions can be POPPED out of worker-time order
+    (``done.pop()`` on the completed set is arbitrary), so a plain last-write
+    could overwrite a higher snapshot with an earlier lower one — the
+    element-wise MAX per pid equals the worker's true running total under any
+    pop order (deterministic; pinned by ``TestKernelStatsFold`` — the
+    fix-round-2 refuter-3 F3 teeth). ``or 0`` never masks a real value — a
+    stamped result always carries real ints (a no-bars tuple legitimately
+    snapshots 0/0). O(1).
+    """
+    prev_builds, prev_hits = stats.get(pid, (0, 0))
+    stats[pid] = (max(prev_builds, builds or 0), max(prev_hits, hits or 0))
 
 
 def _note_worker_kernel_built(
@@ -1668,8 +1773,9 @@ class ParallelGridDriver:
         self._worker_kernel_capacity = (
             resolve_worker_kernel_capacity(grid) if self._worker_kernel_cache else 1
         )
-        #: Per-worker-pid LAST cumulative (builds, hits) snapshot — summed into
-        #: the ONE drain-end ``sweep_parallel.kernel_reuse_summary`` INFO.
+        #: Per-worker-pid element-wise MAX cumulative (builds, hits) snapshot
+        #: (:func:`_fold_kernel_snapshot`) — summed into the ONE drain-end
+        #: ``sweep_parallel.kernel_reuse_summary`` INFO.
         self._kernel_stats: dict[int, tuple[int, int]] = {}
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
@@ -2125,18 +2231,10 @@ class ParallelGridDriver:
         dispatched = pending.pop(future)
         if result.worker_pid is not None:
             # Per-worker kernel-cache telemetry (DEC-SWEEP-WORKER-KERNEL-CACHE-001):
-            # the counters are CUMULATIVE and MONOTONE per worker, but two
-            # near-simultaneous completions can be POPPED out of worker-time
-            # order (``done.pop()`` on the completed set is arbitrary), so a
-            # plain last-write could overwrite a higher snapshot with an
-            # earlier lower one — keep the elementwise MAX per pid instead
-            # (== the worker's true running total). `or 0` never masks a real
-            # value — a stamped result always carries real ints (a no-bars
-            # tuple legitimately snapshots 0/0).
-            prev_builds, prev_hits = self._kernel_stats.get(result.worker_pid, (0, 0))
-            self._kernel_stats[result.worker_pid] = (
-                max(prev_builds, result.kernel_builds or 0),
-                max(prev_hits, result.kernel_hits or 0),
+            # per-pid element-wise MAX — pop order is not worker-time order
+            # (rationale + teeth on the helper).
+            _fold_kernel_snapshot(
+                self._kernel_stats, result.worker_pid, result.kernel_builds, result.kernel_hits
             )
         return _result_to_outcome(result, dispatched.tuple_)
 

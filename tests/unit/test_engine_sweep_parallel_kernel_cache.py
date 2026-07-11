@@ -20,15 +20,30 @@ parallel sweep threads ONE per-worker-process
   keys distinct kernels per instrument (the schedule is IN the key), bytes ≡
   sequential; a hand-built WRONG-schedule kernel still trips the
   ``run_persisted_sweep`` fail-fast THROUGH the worker path.
-* **T4 — bars-intern memo**: same-``(instrument, tf)`` dispatches share ONE
-  resident bars copy (object identity); a mismatching fresh copy degrades
-  fail-safe (WARN-once + fresh bars + the WHOLE per-worker mechanism —
-  kernel cache AND memo — disabled for the rest of the worker, so a stale
-  resident kernel is UNREACHABLE — the fix-round-1 R1 fold).
+* **T4 — bars-intern memo + the IDENTITY serve guard** (fix-round-2,
+  refuter-1 A-1/A-2): same-``(instrument, tf)`` dispatches share ONE
+  resident bars copy, registered ONCE per worker (write-once) — a resident
+  kernel is only ever served against the EXACT object it was built from.
+  Any arrival that cannot be identity-reconciled disables the WHOLE
+  per-worker mechanism (cache AND memo) fail-safe, WARN-once with a machine
+  ``reason``: a resident copy failing the len + first/mid/last value probe
+  (``resident_value_mismatch``), or a key re-arriving AFTER its memo entry
+  was LRU-evicted (``revisit_after_eviction`` — stale kernels may still be
+  resident and a fresh copy can never BE the evicted object; the A-1
+  executed repro is ported as a permanent regression). Residuals pinned
+  honestly: the disable is PER-WORKER (siblings keep their own caches;
+  cross-worker safety rides the deterministic ``bars_for`` contract); a
+  disabled worker's telemetry freezes, so the drain-end summary
+  UNDER-COUNTS; the value probe is a corruption DETECTOR, never the safety
+  rail — a probe-blind interior mutation substitutes the registered copy
+  SELF-CONSISTENTLY (never a mixed kernel-vs-sim pairing; pinned).
 * **T5 — flag hygiene**: junk env → OFF + warn-once; invalid capacity →
   grid default + loud warn; capacity above ``WORKER_KERNEL_CAPACITY_MAX``
-  → clamped + loud warn (fix-round-1 R3 fold); the OFF arm constructs NO
-  cache (spy).
+  → clamped + loud warn (fix-round-1 R3 fold; the two above-ceiling params
+  carry the revert-teeth — boundary-64 pins the silent-verbatim contract
+  and structurally passes with the clamp reverted); the grid-DERIVED
+  default clamps at the same ceiling (fix-round-2, refuter-2 NIT); the OFF
+  arm constructs NO cache (spy).
 * **T6 — memory bound**: the cache length never exceeds its capacity.
 * **SPAWN** — a REAL spawn pool (``workers=2`` → ONE EVAL worker, so the
   arithmetic is deterministic) reuses the kernel across tuples:
@@ -80,7 +95,7 @@ from brutex.observability.logging import reset_configuration
 from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.audit import read_entries as read_ingest_entries
 from brutex.strategies.types import Side
-from brutex.vocabulary.evaluator import ProximityParams
+from brutex.vocabulary import ProximityParams
 from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -98,6 +113,7 @@ def _reset_worker_state() -> Generator[None, None, None]:
     yield
     mod._WORKER_KERNEL_CACHE = None
     mod._WORKER_BARS_MEMO = None
+    mod._WORKER_BARS_KEYS_SEEN = set()
     mod._WORKER_BARS_MEMO_WARNED = False
     mod.reset_worker_kernel_flag_warnings_for_tests()
     reset_configuration()
@@ -376,6 +392,16 @@ class TestResolveWorkerKernelCapacity:
         monkeypatch.setenv(mod.WORKER_KERNEL_CAPACITY_ENV, "5")
         assert mod.resolve_worker_kernel_capacity(_grid()) == 5
 
+    def test_grid_derived_default_clamps_at_the_ceiling(self) -> None:
+        """Fix-round-2 (refuter-2 NIT): the DERIVED default rides the same
+        64 ceiling as the env override — a hypothetical 70-proximity grid can
+        no longer bypass the per-worker memory bound silently (deliberate
+        deviation from the sequential path's unclamped sizing: the RSS
+        multiplies by pool size here)."""
+        grid = _grid(proximities=[ProximityParams(i + 1, i + 1, i + 1) for i in range(70)])
+        assert mod.worker_kernel_capacity_default(grid) == mod.WORKER_KERNEL_CAPACITY_MAX == 64
+        assert mod.resolve_worker_kernel_capacity(grid, {}) == 64
+
 
 # ────────────────────────── worker init (T5 / T6) ──────────────────────────
 
@@ -434,6 +460,7 @@ class TestWorkerInitKernelCache:
 class TestInternBars:
     def _memo_on(self) -> None:
         mod._WORKER_BARS_MEMO = OrderedDict()
+        mod._WORKER_BARS_KEYS_SEEN = set()
         mod._WORKER_BARS_MEMO_WARNED = False
 
     def test_memo_off_returns_bars_untouched(self) -> None:
@@ -456,7 +483,7 @@ class TestInternBars:
 
     @pytest.mark.parametrize(
         "mutant",
-        ["shorter", "first_bar", "last_bar"],
+        ["shorter", "first_bar", "mid_bar", "last_bar"],
     )
     def test_mismatch_degrades_to_fresh_and_warns_once(self, mutant: str) -> None:
         self._memo_on()
@@ -466,6 +493,10 @@ class TestInternBars:
             fresh = first[:-1]
         elif mutant == "first_bar":
             fresh = [_bar(0, 0, 999.0, 999.5), *first[1:]]
+        elif mutant == "mid_bar":
+            # Fix-round-2 (refuter-1 A-2): the probe now sees the midpoint too.
+            mid = len(first) // 2
+            fresh = [*first[:mid], _bar(*divmod(mid, 60), 999.0, 999.5), *first[mid + 1 :]]
         else:
             fresh = [*first[:-1], _bar(3, 59, 999.0, 999.5)]
         with capture_logs() as logs:
@@ -481,6 +512,32 @@ class TestInternBars:
         assert mod._WORKER_BARS_MEMO is None
         warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
         assert len(warned) == 1  # warn-once per worker process
+        assert warned[0]["reason"] == "resident_value_mismatch"
+
+    def test_revisit_after_eviction_disables_even_value_equal(self) -> None:
+        """Fix-round-2 (refuter-1 A-1, unit arm): a key re-arriving AFTER its
+        memo entry was LRU-evicted can never be identity-reconciled with the
+        object its kernels were built from — even a value-EQUAL fresh copy
+        disables (conservative; the reference is gone, so identity is
+        unverifiable). Pre-fix this arm silently RE-SEEDED with no comparison.
+        """
+        self._memo_on()
+        mod._WORKER_KERNEL_CACHE = ResidentKernelCache(capacity=8)
+        a = list(_BARS)
+        mod._intern_bars("A", "1minute", a)
+        mod._intern_bars("B", "1minute", list(_BARS))
+        mod._intern_bars("C", "1minute", list(_BARS))  # evicts A (LRU)
+        memo = mod._WORKER_BARS_MEMO
+        assert memo is not None
+        assert ("A", "1minute") not in memo
+        with capture_logs() as logs:
+            got = mod._intern_bars("A", "1minute", list(_BARS))  # value-EQUAL revisit
+        assert got is not a  # the shipped copy is used, never a resurrected resident
+        assert mod._WORKER_BARS_MEMO is None
+        assert mod._WORKER_KERNEL_CACHE is None
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert len(warned) == 1
+        assert warned[0]["reason"] == "revisit_after_eviction"
 
     def test_mismatch_with_latched_warn_still_disables_silently(self) -> None:
         """Belt-and-braces arm: with the warn-once latch ALREADY set (only a
@@ -713,6 +770,111 @@ class TestRunTupleInWorkerKernelCache:
         reference = mod._run_tuple_in_worker(1, tuples[1], list(mutated))
         assert reference.summary == second.summary
 
+    def test_evicted_key_revisit_never_serves_a_stale_kernel(self, tmp_path: Path) -> None:
+        """Fix-round-2 regression (refuter-1 A-1, the EXECUTED repro ported).
+
+        The A-1 attack: a worker sees three ``(instrument, tf)`` keys, so the
+        capacity-2 memo EVICTS the first while its kernel stays resident in
+        the (larger) kernel cache; a later dispatch for that key carrying
+        value-DIFFERENT bars then re-seeded with NO comparison — the stale
+        kernel HIT silently (zero warns, cache ON, mixed
+        bar_bits-vs-trade-sim result). Post-fix the seen-key ledger disables
+        the whole mechanism on the revisit: the stale kernel is unreachable,
+        the tuple runs the legacy build on the bars actually shipped.
+        """
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY", "SENSEX"])
+        mod._worker_init(_worker_ctx_on(tmp_path, grid, capacity=8))
+        tuples = list(iter_sweep_tuples(grid))
+        by_inst: dict[str, list[Any]] = {}
+        for t in tuples:
+            by_inst.setdefault(t.instrument, []).append(t)
+        copy1 = list(_BARS)
+        assert mod._run_tuple_in_worker(0, by_inst["NIFTY"][0], copy1).summary is not None
+        assert mod._run_tuple_in_worker(1, by_inst["BANKNIFTY"][0], list(_BARS)).summary is not None
+        assert mod._run_tuple_in_worker(2, by_inst["SENSEX"][0], list(_BARS)).summary is not None
+        memo = mod._WORKER_BARS_MEMO
+        assert memo is not None
+        assert ("NIFTY", "1minute") not in memo  # evicted — the A-1 precondition
+        stale_cache = mod._WORKER_KERNEL_CACHE
+        assert stale_cache is not None
+        assert (stale_cache.builds, stale_cache.hits) == (3, 0)
+        # The revisit ships value-DIFFERENT bars for the evicted NIFTY key.
+        mutated = [_bar(0, 0, 999.0, 999.5), *copy1[1:]]
+        with capture_logs() as logs:
+            revisit = mod._run_tuple_in_worker(3, by_inst["NIFTY"][1], list(mutated))
+        assert revisit.summary is not None
+        # The whole mechanism disabled; the stale kernel's counters FROZEN
+        # (pre-fix a HIT registered here — hits read 1) and no telemetry.
+        assert mod._WORKER_KERNEL_CACHE is None
+        assert mod._WORKER_BARS_MEMO is None
+        assert (stale_cache.builds, stale_cache.hits) == (3, 0)
+        assert revisit.worker_pid is None
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert len(warned) == 1
+        assert warned[0]["reason"] == "revisit_after_eviction"
+        # Byte-proof: equals a fresh legacy (no-cache) reference on the SAME
+        # mutated bars — the tuple computed on what the parent shipped.
+        mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "ref"))
+        reference = mod._run_tuple_in_worker(3, by_inst["NIFTY"][1], list(mutated))
+        assert reference.summary == revisit.summary
+
+    def test_middle_bar_divergence_disables_never_substitutes(self, tmp_path: Path) -> None:
+        """Fix-round-2 regression (refuter-1 A-2, ported): a same-key dispatch
+        whose bars differ ONLY at the midpoint (len/first/last identical) is
+        caught by the widened len + first/mid/last probe → fail-safe disable,
+        and the tuple runs on the bars ACTUALLY shipped (pre-fix the resident
+        copy was silently substituted — ON ≠ OFF with zero warns)."""
+        grid = _grid()
+        mod._worker_init(_worker_ctx_on(tmp_path, grid))
+        tuples = list(iter_sweep_tuples(grid))
+        copy1 = list(_BARS)
+        assert mod._run_tuple_in_worker(0, tuples[0], copy1).summary is not None
+        mid = len(copy1) // 2
+        shipped = [*copy1[:mid], _bar(*divmod(mid, 60), 250.0, 249.0), *copy1[mid + 1 :]]
+        assert shipped[0] == copy1[0] and shipped[-1] == copy1[-1] and len(shipped) == len(copy1)
+        with capture_logs() as logs:
+            second = mod._run_tuple_in_worker(1, tuples[1], list(shipped))
+        assert second.summary is not None
+        assert mod._WORKER_KERNEL_CACHE is None
+        warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
+        assert len(warned) == 1
+        assert warned[0]["reason"] == "resident_value_mismatch"
+        mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "ref"))
+        reference = mod._run_tuple_in_worker(1, tuples[1], list(shipped))
+        assert reference.summary == second.summary
+
+    def test_probe_blind_interior_mutation_substitutes_self_consistently(
+        self, tmp_path: Path
+    ) -> None:
+        """HONEST-residual pin (disclosed, deliberate): a value-different copy
+        agreeing at len/first/mid/last passes the probe, so the REGISTERED
+        resident copy is served — the serve stays identity-EXACT (kernel and
+        sim share ONE object; never a mixed bar_bits-vs-trade-sim pairing),
+        byte-equal to a legacy run on the RESIDENT bars. The substitution
+        itself is unreachable under the deterministic ``bars_for`` contract
+        and cannot be closed by any O(1) probe (full value equality would be
+        O(n_bars) per tuple)."""
+        grid = _grid()
+        mod._worker_init(_worker_ctx_on(tmp_path, grid))
+        tuples = list(iter_sweep_tuples(grid))
+        copy1 = list(_BARS)
+        assert mod._run_tuple_in_worker(0, tuples[0], copy1).summary is not None
+        # Index 1 is neither first, mid nor last — probe-blind by design.
+        shipped = [copy1[0], _bar(0, 1, 999.0, 999.5), *copy1[2:]]
+        with capture_logs() as logs:
+            second = mod._run_tuple_in_worker(1, tuples[1], list(shipped))
+        assert second.summary is not None
+        cache = mod._WORKER_KERNEL_CACHE
+        assert cache is not None  # still enabled — the probe cannot see index 1
+        assert cache.hits == 1  # the resident kernel served (self-consistent)
+        assert [
+            e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"
+        ] == []
+        # Self-consistency proof: equals a legacy reference on the RESIDENT bars.
+        mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "ref"))
+        reference = mod._run_tuple_in_worker(1, tuples[1], list(copy1))
+        assert reference.summary == second.summary
+
     def test_bars_interned_across_same_key_dispatches(self, tmp_path: Path) -> None:
         """T4 integration: a fresh value-equal pickled copy is swapped for the
         resident copy, so the cached kernel and every later dispatch share ONE
@@ -727,6 +889,40 @@ class TestRunTupleInWorkerKernelCache:
         memo = mod._WORKER_BARS_MEMO
         assert memo is not None
         assert memo[("NIFTY", "1minute")] is first_bars  # the FIRST copy stays resident
+
+
+# ──────────── parent telemetry fold (fix-round-2, refuter-3 F3) ────────────
+
+
+class TestKernelStatsFold:
+    """Deterministic teeth for the per-pid element-wise-MAX telemetry fold.
+
+    The pop-order race fix (`_fold_kernel_snapshot`): `done.pop()` on a
+    completed-future set is arbitrary, so a worker's EARLIER (lower)
+    cumulative snapshot can be folded AFTER its later (higher) one — a plain
+    last-write would lower the frozen total. Previously pinned only
+    probabilistically (refuter-3 F3: the last-write revert survived the whole
+    suite); these unit pins fail deterministically on that revert.
+    """
+
+    def test_late_lower_snapshot_never_overwrites_an_earlier_higher_one(self) -> None:
+        stats: dict[int, tuple[int, int]] = {}
+        mod._fold_kernel_snapshot(stats, 4242, 5, 3)  # the HIGHER snapshot popped first
+        mod._fold_kernel_snapshot(stats, 4242, 2, 1)  # the earlier LOWER one pops later
+        assert stats[4242] == (5, 3)  # last-write would read (2, 1)
+
+    def test_fold_is_element_wise_not_snapshot_wise(self) -> None:
+        stats: dict[int, tuple[int, int]] = {}
+        mod._fold_kernel_snapshot(stats, 7, 5, 1)
+        mod._fold_kernel_snapshot(stats, 7, 2, 3)
+        assert stats[7] == (5, 3)  # each counter keeps its OWN max
+
+    def test_none_counters_fold_as_zero_and_never_lower(self) -> None:
+        stats: dict[int, tuple[int, int]] = {7: (4, 9)}
+        mod._fold_kernel_snapshot(stats, 7, None, None)
+        assert stats[7] == (4, 9)
+        mod._fold_kernel_snapshot(stats, 9, None, None)
+        assert stats[9] == (0, 0)
 
 
 # ─────────────── T1/T2/T3 — real-pool byte-identity goldens ───────────────
