@@ -1053,7 +1053,10 @@ def _registry_key_component(lake_root: Path) -> str:
     WORSE than the behaviour this fix replaces, and self-healing the moment
     the probe recovers (the recovered token differs from ``"unknown"``, so
     the next poll re-keys). Distinct by construction from every real token
-    (``"<mtime_ns>:<size>"``) and from the absent-file ``"absent"`` sentinel.
+    (the composite ``"<mtime_ns>:<size>+<wal component>"`` — the main file
+    plus its DuckDB ``.wal`` sibling since the hostile-review m1 widening,
+    which catches a commit landing in the WAL before any checkpoint moves
+    the main file's stat) and from the absent-file ``"absent"`` sentinel.
     """
     token = registry_revision(lake_root)
     return "unknown" if token is None else token

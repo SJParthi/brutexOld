@@ -141,6 +141,15 @@ _SWEEP_AUDIT_RELPATH: Final[tuple[str, str]] = ("audit", "sweep-all.jsonl")
 #: :data:`_SWEEPS_DIRNAME` precedent).
 _REGISTRY_FILENAME: Final[str] = "registry.duckdb"
 
+#: DuckDB's write-ahead-log sibling suffix (``<database>.wal`` — the engine's
+#: own naming law). Statted ALONGSIDE the main registry file (hostile-review
+#: m1 on DEC-MEMORY-FOOTPRINT-HARDENING-001): a COMMIT lands in the WAL,
+#: while the main file's ``mtime``/``size`` move only on CHECKPOINT
+#: (connection close / WAL threshold) — probe-verified 2026-07-11: a
+#: held-open connection's committed ``upsert_expiries`` moved the ``.wal``
+#: stat and left the main file's stat byte-identical.
+_REGISTRY_WAL_SUFFIX: Final[str] = ".wal"
+
 
 def _stat_token(target: Path, *, event: str, include_ino: bool = False) -> str | None:
     """One path's ``"<mtime_ns>:<size>"`` stat token — the shared O(1) probe core.
@@ -371,18 +380,38 @@ def registry_revision(lake_root: Path) -> str | None:
     key-build sites so a committed registry write moves the key on the next
     poll.
 
-    One ``os.stat`` of ``<lake_root>/registry.duckdb`` folded to
-    ``"<mtime_ns>:<size>"`` — inherited :func:`_stat_token` semantics
-    verbatim: a missing registry (a CLI-only-pulled lake — the graceful
-    lake-fallback path) → the stable :data:`ABSENT_TOKEN` (its first-ever
-    creation moves the token exactly once); any other :class:`OSError` → a
-    structlog WARN (``lake_revision.registry_stat_failed``) + ``None`` =
-    "unknown, no signal — make NO freshness decision".
+    TWO ``os.stat`` probes — the main file ``<lake_root>/registry.duckdb``
+    PLUS its DuckDB write-ahead-log sibling ``registry.duckdb.wal``
+    (hostile-review m1 on DEC-MEMORY-FOOTPRINT-HARDENING-001) — folded to
+    ``"<main mtime_ns>:<size>+<wal mtime_ns>:<size>"`` (the
+    :func:`_ledger_revision` base+deltas composition shape). Inherited
+    :func:`_stat_token` semantics per component: a never-created registry
+    (a CLI-only-pulled lake — the graceful lake-fallback path) → the plain
+    stable :data:`ABSENT_TOKEN` (both components absent; its first-ever
+    creation moves the token exactly once); an absent ``.wal`` beside a
+    present main file contributes the stable ``absent`` component (the
+    steady no-writes state — the sentinel never oscillates the token); any
+    other :class:`OSError` on either probe → a structlog WARN
+    (``lake_revision.registry_stat_failed`` /
+    ``…registry_wal_stat_failed``) + ``None`` = "unknown, no signal — make
+    NO freshness decision".
 
-    HONEST envelope (Golden Rule #10): DuckDB commits touch the database
-    file, so a committed ``upsert_expiry``/``upsert_contract`` moves the
-    stat; the repo-wide same-``(mtime_ns, size)`` in-place-rewrite residual
-    applies here as everywhere (a rewrite landing byte-count-equal within
+    HONEST envelope (Golden Rule #10 — the m1 precision rewording): DuckDB
+    COMMITS land in the WAL; the MAIN file's ``mtime``/``size`` move on
+    CHECKPOINT (connection close / WAL threshold), so the main stat alone
+    sees a metadata pull only because every production registry writer
+    closes its connection when done (``RegistryStore.open`` is a context
+    manager) — a COMPLETED cross-process pull always moves it. A path
+    holding the connection open across commits would have defeated the
+    main-file token until checkpoint — no such production path exists
+    today, and the ``.wal`` component closes that gap anyway: a held-open
+    commit creates/grows the WAL (probe-verified 2026-07-11 — the wal stat
+    moved while the main stat did not), and the checkpoint that later
+    REMOVES the WAL moves the composite again — correctly, a write
+    happened; a read-only open of an existing registry creates NO wal
+    (probe-verified), so idle polls never flap the token. Residual: the
+    repo-wide same-``(mtime_ns, size)`` in-place-rewrite blind spot applies
+    per component as everywhere (a rewrite landing byte-count-equal within
     one mtime granule is invisible — stated, not hidden).
 
     Parameters
@@ -394,12 +423,24 @@ def registry_revision(lake_root: Path) -> str | None:
     Returns
     -------
     str | None
-        The stat token, :data:`ABSENT_TOKEN`, or ``None`` on a probe error.
+        The composite stat token, :data:`ABSENT_TOKEN`, or ``None`` on a
+        probe error.
     """
-    return _stat_token(
+    main = _stat_token(
         lake_root / _REGISTRY_FILENAME,
         event="lake_revision.registry_stat_failed",
     )
+    if main is None:
+        return None
+    wal = _stat_token(
+        lake_root / (_REGISTRY_FILENAME + _REGISTRY_WAL_SUFFIX),
+        event="lake_revision.registry_wal_stat_failed",
+    )
+    if wal is None:
+        return None
+    if main == ABSENT_TOKEN and wal == ABSENT_TOKEN:
+        return ABSENT_TOKEN  # never-created registry — the plain stable sentinel.
+    return f"{main}+{wal}"
 
 
 def _greeks_backfill_revision(lake_root: Path) -> str | None:

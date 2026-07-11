@@ -85,9 +85,19 @@ hidden — Golden Rule #10).
   **approximation** (:func:`deep_size_bytes` — a recursive
   ``sys.getsizeof`` walk over containers/dataclass-likes, cycle-guarded,
   depth-capped), NOT exact RSS; shared sub-objects double-count across
-  entries and native (polars/duckdb) buffers under-count. The default
-  ``max_bytes=None`` keeps every pre-watermark behaviour byte-identical
-  (regression-pinned: the sizer is never even called).
+  entries and native (polars/duckdb) buffers under-count. A caller whose
+  payloads are LARGE and self-describing can pass a cheap ``size_of``
+  SIZING HINT (hostile-review M1 on DEC-MEMORY-FOOTPRINT-HARDENING-001):
+  it is consulted FIRST per insert and a non-``None`` return replaces the
+  deep walk — the reviewer measured the walk at **5.28 s** (plus a
+  transient ~100+ MB ``seen`` id-set) over the 841k-row production ledger
+  payload, a per-stamp cold-serve CPU/transient-memory regression the O(1)
+  hint removes — while ``None`` / a raising hint fall back to
+  :func:`deep_size_bytes`. The hint is itself an ESTIMATE feeding an
+  estimate; its accuracy is the caller's contract (the ledger hint is
+  pinned within 3× of the deep walk). The default ``max_bytes=None`` keeps
+  every pre-watermark behaviour byte-identical (regression-pinned: neither
+  the sizer nor the hint is ever called).
 * An opted-in instance may serve a **bounded-stale** entry while a pull runs
   (age < the adaptive floor, capped at ``adaptive_floor_cap_s``); the staleness
   window closes the moment the pull ends (probe ``False`` → recompute) and the
@@ -397,6 +407,20 @@ class MoversSnapshotCache:
         line per entry. The default ``None`` disables the watermark entirely
         — no sizing call, no accounting drift, behaviour byte-identical to
         the pre-watermark cache (regression-pinned).
+    size_of
+        Optional O(1)/cheap SIZING HINT consulted FIRST for each stored
+        payload when a watermark is active (hostile-review M1 on
+        DEC-MEMORY-FOOTPRINT-HARDENING-001 — the deep walk measured 5.28 s
+        on the 841k-row production ledger payload, recurring per stamp
+        move): a non-``None`` return (clamped ``>= 0``) is used as the
+        entry's byte size; ``None`` — an unrecognized payload shape — and
+        ANY raising hint fall back to :func:`deep_size_bytes` (a hint fault
+        must never break an insert). Ignored entirely without a watermark
+        (``max_bytes=None``); the default ``None`` keeps every watermark
+        instance on the deep walk. The hint is an ESTIMATE — the watermark
+        already tracks approximations, never exact RSS (see
+        :func:`deep_size_bytes`'s honesty envelope); a hint's accuracy
+        contract belongs to its caller.
     pull_active_probe
         Optional zero-arg in-process pull signal for the OPT-IN adaptive floor
         (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001; the production wiring reads this
@@ -446,6 +470,7 @@ class MoversSnapshotCache:
         *,
         capacity: int = DEFAULT_MOVERS_CACHE_CAPACITY,
         max_bytes: int | None = None,
+        size_of: Callable[[object], int | None] | None = None,
         pull_active_probe: Callable[[], bool | None] | None = None,
         adaptive_floor: bool = False,
         adaptive_base_floor_s: float = DEFAULT_ADAPTIVE_BASE_FLOOR_S,
@@ -458,6 +483,7 @@ class MoversSnapshotCache:
             raise ValueError(f"max_bytes must be >= 1 (or None to disable), got {max_bytes}")
         self._capacity = capacity
         self._max_bytes = max_bytes
+        self._size_of = size_of
         #: Running best-effort payload total (bytes) — 0 forever without a
         #: watermark (entries then carry size_bytes=0). Guarded by ``_lock``.
         self._total_bytes = 0
@@ -491,6 +517,36 @@ class MoversSnapshotCache:
             return self._pull_active_probe() is True
         except Exception:  # pylint: disable=broad-except — probe must never break a read
             return False
+
+    def _size_payload(self, value: object) -> int:
+        """Best-effort payload byte size for the watermark accounting — never a raise.
+
+        Hostile-review M1 (DEC-MEMORY-FOOTPRINT-HARDENING-001): without a
+        watermark, ``0`` with ZERO sizing work (the byte-identical default —
+        neither the hint nor the deep walk runs, spy-pinned). With one, the
+        optional ``size_of`` HINT is consulted FIRST — a non-``None`` return
+        (clamped ``>= 0``) short-circuits the O(payload) deep walk that the
+        reviewer measured at 5.28 s (plus a ~100+ MB transient ``seen``
+        id-set) on the 841k-row production ledger payload; ``None`` (an
+        unrecognized shape) and ANY hint fault fall back to
+        :func:`deep_size_bytes` (which itself never raises), so sizing can
+        never break an insert (Golden Rule #1's never-crash posture for
+        accounting).
+        """
+        if self._max_bytes is None:
+            return 0
+        if self._size_of is not None:
+            hinted: int | None
+            try:
+                raw = self._size_of(value)
+                # int() inside the guard: a junk non-numeric hint return is a
+                # hint fault too — fall back, never raise.
+                hinted = None if raw is None else int(raw)
+            except Exception:  # pylint: disable=broad-except — a hint fault falls back
+                hinted = None  # deep-size fallback below — never a skipped insert.
+            if hinted is not None:
+                return max(0, hinted)
+        return deep_size_bytes(value)
 
     @property
     def capacity(self) -> int:
@@ -635,12 +691,20 @@ class MoversSnapshotCache:
                 self._inflight.pop(key, None)
             event.set()  # wake waiters so exactly one takes over.
             raise
-        finished_at = self._clock()
         # Size the payload OUTSIDE the lock (the value is still thread-local
         # here) so a large deep walk never blocks a concurrent hit; skipped
         # entirely without a watermark — the default stays byte-identical
-        # (DEC-MEMORY-FOOTPRINT-HARDENING-001).
-        entry_bytes = 0 if self._max_bytes is None else deep_size_bytes(value)
+        # (DEC-MEMORY-FOOTPRINT-HARDENING-001; the hint-first seam is the
+        # hostile-review M1 fold — see `_size_payload`).
+        entry_bytes = self._size_payload(value)
+        # `finished_at` is captured AFTER sizing (hostile-review M1, honest
+        # floor accounting): `compute_duration` — the #920 adaptive floor's
+        # input — must cover compute PLUS sizing whenever the deep walk runs
+        # (the pre-fix capture point excluded a multi-second walk, so the
+        # floor under-throttled a genuinely ~7 s cold cycle to its ~2 s
+        # compute half). Lock-wait is still excluded — the lock below is
+        # taken only after this capture.
+        finished_at = self._clock()
         evicted_for_bytes = 0
         single_over = False
         total_after = 0
@@ -653,9 +717,12 @@ class MoversSnapshotCache:
                 value=value,
                 generation=generation,
                 computed_at=finished_at,
-                # The measured walk cost drives the (opt-in) floor for the next
-                # read; a non-monotonic clock's negative delta is neutralized by
-                # the floor's max(base, …) — no clamp needed (mirrors #920).
+                # The measured walk cost — compute PLUS sizing (hostile-review
+                # M1: the floor must throttle for the WHOLE cold cycle it
+                # protects against, not just its compute half) — drives the
+                # (opt-in) floor for the next read; a non-monotonic clock's
+                # negative delta is neutralized by the floor's max(base, …) —
+                # no clamp needed (mirrors #920).
                 compute_duration=finished_at - started_at,
                 size_bytes=entry_bytes,
             )

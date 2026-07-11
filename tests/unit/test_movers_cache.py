@@ -856,3 +856,112 @@ class TestByteWatermark:
         assert not any(t.is_alive() for t in threads)
         assert calls["n"] == 1  # exactly ONE compute across 8 concurrent cold misses
         assert results == [self._payload(10_000)] * 8
+
+
+class TestSizingHint:
+    """The opt-in ``size_of`` sizing-hint seam (hostile-review M1 on
+    DEC-MEMORY-FOOTPRINT-HARDENING-001): consulted FIRST under a watermark, a
+    non-``None`` return replaces the O(payload) deep walk; ``None`` / a raising
+    hint fall back to ``deep_size_bytes``; without a watermark NEITHER runs."""
+
+    def test_hint_short_circuits_the_deep_walk(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-None hint is the entry's byte size — deep_size_bytes never runs.
+
+        Fails before the M1 fix: the constructor has no ``size_of`` parameter
+        (TypeError), and behaviourally every watermarked insert paid the deep
+        walk (measured 5.28 s at the 841k-row production ledger scale).
+        """
+        import brutex.dashboard.movers_cache as mod
+
+        def _must_not_deep_size(_value: object) -> int:
+            raise AssertionError("the hint must short-circuit deep_size_bytes")
+
+        monkeypatch.setattr(mod, "deep_size_bytes", _must_not_deep_size)
+        cache = MoversSnapshotCache(capacity=4, max_bytes=1_000_000, size_of=lambda _v: 12_345)
+        assert cache.get_or_compute("k", generation=0, compute=lambda: b"payload") == b"payload"
+        assert cache.total_bytes() == 12_345  # the hint IS the tracked figure
+
+    def test_hint_none_falls_back_to_the_deep_walk(self) -> None:
+        """An unrecognized shape (hint → None) still gets the accurate walk."""
+        payload = bytes(10_000)
+        cache = MoversSnapshotCache(capacity=4, max_bytes=1_000_000, size_of=lambda _v: None)
+        cache.get_or_compute("k", generation=0, compute=lambda: payload)
+        assert cache.total_bytes() == deep_size_bytes(payload)
+
+    def test_raising_hint_falls_back_never_raises(self) -> None:
+        """A hint fault must never break an insert — deep-size fallback."""
+        payload = bytes(10_000)
+
+        def _boom(_value: object) -> int:
+            raise RuntimeError("hint blew up")
+
+        cache = MoversSnapshotCache(capacity=4, max_bytes=1_000_000, size_of=_boom)
+        assert cache.get_or_compute("k", generation=0, compute=lambda: payload) == payload
+        assert cache.total_bytes() == deep_size_bytes(payload)
+
+    def test_negative_hint_clamps_to_zero(self) -> None:
+        """A buggy negative hint can never drive the running total negative."""
+        cache = MoversSnapshotCache(capacity=4, max_bytes=1_000_000, size_of=lambda _v: -99)
+        cache.get_or_compute("k", generation=0, compute=lambda: b"payload")
+        assert cache.total_bytes() == 0
+
+    def test_no_watermark_never_consults_the_hint(self) -> None:
+        """Without ``max_bytes`` the hint is ignored entirely — the parity law."""
+
+        def _must_not_hint(_value: object) -> int:
+            raise AssertionError("size_of must not run without a watermark")
+
+        cache = MoversSnapshotCache(capacity=4, size_of=_must_not_hint)
+        assert cache.get_or_compute("k", generation=0, compute=lambda: "v") == "v"
+        assert cache.total_bytes() == 0
+
+    def test_compute_duration_includes_sizing_cost(self) -> None:
+        """Honest floor accounting (M1): ``compute_duration`` — the #920
+        adaptive floor's input — covers compute PLUS sizing.
+
+        Fails before the M1 fix: ``finished_at`` was captured BEFORE the sizer
+        ran, so a 1 s compute + 5 s sizing recorded ``compute_duration=1.0``
+        and the floor under-throttled the genuinely ~6 s cold cycle to its
+        2 s base (the reviewer's ~2 s floor for a ~7 s real cycle).
+        """
+        clock = _TickClock()
+
+        def _slow_size(_value: object) -> int:
+            clock.advance(5.0)  # the deliberately slow sizing step
+            return 100
+
+        cache = MoversSnapshotCache(
+            max_bytes=1_000_000,
+            size_of=_slow_size,
+            pull_active_probe=lambda: True,
+            adaptive_floor=True,
+            clock=clock,
+        )
+        cache.get_or_compute("k", generation=1, compute=lambda: _slow_compute(clock, 1.0, "v1"))
+        entry = cache._entries["k"]
+        assert entry.compute_duration == pytest.approx(6.0)  # compute (1 s) + sizing (5 s)
+        assert entry.computed_at == pytest.approx(6.0)  # stamped AFTER sizing
+        # Behavioural teeth: at age 4 s the floor (max(2, 6) = 6 s) serves
+        # stale under the pull — the pre-fix duration=1.0 floor (2 s) would
+        # have recomputed here.
+        clock.advance(4.0)
+
+        def _must_not_run() -> str:
+            raise AssertionError("within the compute+sizing floor — must serve stale")
+
+        assert cache.get_or_compute("k", generation=2, compute=_must_not_run) == "v1"
+
+    def test_lock_wait_stays_excluded_from_the_duration(self) -> None:
+        """The duration covers compute + sizing, NEVER lock-wait: the clock is
+        captured before the insert lock is taken (structural — the capture
+        precedes the ``with self._lock`` block), so a contended lock cannot
+        inflate the floor. Pinned via source order."""
+        import inspect
+
+        import brutex.dashboard.movers_cache as mod
+
+        src = inspect.getsource(mod.MoversSnapshotCache.get_or_compute)
+        sizing_at = src.index("entry_bytes = self._size_payload(value)")
+        finished_at = src.index("finished_at = self._clock()")
+        lock_at = src.index("with self._lock:", finished_at)
+        assert sizing_at < finished_at < lock_at

@@ -20,7 +20,10 @@ discriminate, :func:`ratio_ceiling` where flatness is the claim):
        are ≤ 60% of the VERBATIM pre-fix two-family residency (computed
        in-test from the exact values the retired design cached) — measured
        2026-07-11 (sandbox, 50k rows): two-family 60.0 MB → post-fix 30.0 MB,
-       ratio 0.500 (the records family + the small rollup dict);
+       ratio 0.500 under deep-size accounting; 32.2 MB / ratio 0.537 since
+       the M1 hostile-review sizing hint (the records family is now TRACKED
+       at the deliberately-conservative 640 B/record estimate, OVER the
+       ~600 B/record deep-walk figure — the safe direction for a byte bound);
 * M-2  REPEAT-POLL: page + records + rollup repeat polls stay O(1)-class —
        each median ≪ the cold parse (measured 2026-07-11: cold 966 ms @ 50k
        rows vs page 88 µs / records 32 µs / rollup 45 µs medians), and the
@@ -33,12 +36,20 @@ discriminate, :func:`ratio_ceiling` where flatness is the claim):
        whole-projection's slice, and the whole-rows surface equals the exact
        value the retired ``ledger-rows`` family cached.
 
-HONEST (Golden Rule #10): the tracked figures ride ``deep_size_bytes`` — the
-watermark's best-effort approximation, NOT exact RSS (the pre-fix rows family
-SHARED leaf objects with the records in one steady-state generation, so true
-RSS savings are smaller steady-state but larger across floor-staggered
-generations, where the two families held rows from DIFFERENT parses); the
-FIRST read per stamp stays O(rows) parse — never claimed O(page)-total.
+HONEST (Golden Rule #10): the tracked figures ride the watermark's
+best-effort accounting — the records family via the M1 O(1)
+``_ledger_payload_size_hint`` estimate (pinned within 3× of the deep walk),
+everything else via ``deep_size_bytes`` — NOT exact RSS (the pre-fix rows
+family SHARED leaf objects with the records in one steady-state generation,
+so true RSS savings are smaller steady-state but larger across
+floor-staggered generations, where the two families held rows from DIFFERENT
+parses); the FIRST read per stamp stays O(rows) parse — never claimed
+O(page)-total.
+
+Plus the M1 hostile-review pin (``test_cold_serve_sizing_cost_bounded_at_scale``):
+the watermarked cold serve's SIZING step is O(1) in rows — measured 0.01 ms
+best-of-3 @ 200k records post-fix vs the 1.52 s pre-fix deep walk at the same
+scale (5.28 s reviewer-measured at the 841k production shape).
 """
 
 from __future__ import annotations
@@ -69,7 +80,9 @@ _NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 #: The fix's residency budget: the post-fix tracked bytes must stay at or
 #: below this fraction of the verbatim two-family baseline. Measured 0.500 on
 #: 2026-07-11 (sandbox, 50k rows: 60.0 MB two-family → 30.0 MB post-fix — the
-#: records family plus the small spot-rollup dict); 0.60 leaves slack for
+#: records family plus the small spot-rollup dict) under deep-size
+#: accounting; 0.537 (32.2 MB) since the M1 sizing hint tracks the records
+#: family at the conservative 640 B/record estimate. 0.60 leaves slack for
 #: interpreter/layout variance while a regression that re-caches a second
 #: per-row family (~2× ⇒ ratio ~1.0) fails loudly.
 _RESIDENCY_CEILING = 0.60
@@ -122,8 +135,11 @@ def test_residency_collapse_and_repeat_polls(
 
     # M-1 baseline: the VERBATIM pre-fix two-family cached values — the records
     # family's ``(generation, records)`` and the retired rows family's whole
-    # projection — sized by the SAME deep-size accounting the byte watermark
-    # (fix 2) uses, so the pin measures exactly what the cache would retain.
+    # projection — sized by the deep-size accounting the byte watermark (fix 2)
+    # used pre-hint; the post side (`total_bytes`) now tracks the records
+    # family via the M1 hint's conservative 640 B/record estimate (slightly
+    # OVER the deep walk — the ratio moved 0.500 → 0.537, still a genuine
+    # one-family residency against the same two-family baseline).
     old_rows = tuple(ledger_record_row(r) for r in records)
     baseline = deep_size_bytes((0, records)) + deep_size_bytes(old_rows)
 
@@ -148,7 +164,8 @@ def test_residency_collapse_and_repeat_polls(
         f"resident ledger-cache bytes {post / 1e6:.1f} MB exceed "
         f"{_RESIDENCY_CEILING:.0%} of the pre-fix two-family residency "
         f"({baseline / 1e6:.1f} MB) — a second per-row family may have been "
-        f"re-cached (measured 2026-07-11: ratio 0.500 at 50k rows)."
+        f"re-cached (measured 2026-07-11: ratio 0.500 at 50k rows under "
+        f"deep-size accounting, 0.537 under the M1 sizing hint)."
     )
 
     # M-2 absolute arms: repeat polls ≪ the cold parse (measured 2026-07-11:
@@ -205,4 +222,61 @@ def test_page_poll_flat_vs_ledger_depth(tmp_path: Path, monkeypatch: pytest.Monk
         f"page-poll ratio {ratio:.2f}× (50k vs 10k ledger rows, one 200-row page) exceeds "
         f"the ceiling — the route read may have regressed to per-poll O(rows) projection. "
         f"t_10k={t_small:.1f}µs, t_50k={t_large:.1f}µs."
+    )
+
+
+def test_cold_serve_sizing_cost_bounded_at_scale() -> None:
+    """M1 (hostile-review fold): the watermarked cold serve's SIZING step is O(1).
+
+    FAILS BEFORE the fix: every cold ledger parse ran ``deep_size_bytes`` over
+    the whole ``(generation, tuple[WindowLedgerRecord, ...])`` payload —
+    reviewer-measured **5.28 s** at the documented 841k-row production scale
+    (~25M getsizeof/getattr ops through the ``__slots__`` MRO branch) plus a
+    transient ~1.7M-entry ``seen`` id-set (~100+ MB), recurring at pull cadence
+    (the stamp moves per delta flush). The ``_ledger_payload_size_hint`` makes
+    sizing O(1) in rows.
+
+    Scale honesty: 200k records stand in for the 841k production shape because
+    the deep walk is LINEAR in records (measured ~8-10 µs/record in this
+    sandbox — a walk regression at 200k lands at ~1.5-2 s, vastly over the
+    ceiling), while the hint is O(1); 200k is generatable in seconds where 841k
+    is not CI-friendly. The timed call's ``compute`` returns a PREBUILT payload
+    (O(1)), so the measured cold serve ≈ sizing + cache bookkeeping. Best-of-3
+    per the house best-of-N-MIN idiom; the 50 ms ceiling is ~30-100× the
+    post-fix cost and ~30-40× UNDER the pre-fix walk at this scale.
+    """
+    rows_n = 200_000
+    ledger = WindowLedger()
+    for i in range(rows_n):
+        ledger.record(
+            WindowKey(
+                market="groww",
+                security_id=f"SYM{i}",  # unique per row — 200k DISTINCT records
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+            ),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+        )
+    records = tuple(ledger.records())
+    assert len(records) == rows_n
+    payload = (0, records)
+    cache = db_view._make_ledger_read_cache()
+    best_s = float("inf")
+    for i in range(3):
+        t0 = time.perf_counter()
+        served = cache.get_or_compute(
+            f"ledger-records|/bench-{i}", generation=0, compute=lambda: payload
+        )
+        best_s = min(best_s, time.perf_counter() - t0)
+        assert served is payload
+    assert cache.total_bytes() > 0  # the watermark accounting genuinely ran
+    assert best_s < 0.050, (
+        f"the watermarked cold serve's sizing step took {best_s * 1e3:.1f} ms at "
+        f"{rows_n} records — the O(rows) deep walk may have regressed back into "
+        f"the ledger cache's insert path (pre-fix: ~1.5-2 s at this scale, "
+        f"5.28 s at the 841k production shape)."
     )

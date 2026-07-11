@@ -802,3 +802,89 @@ class TestDocWordingHonesty:
         assert "tests/unit/test_data_lake_read.py" in cited  # the corrected citation
         missing = [path for path in cited if not (_REPO_ROOT / path).exists()]
         assert missing == [], f"MIGRATION.md #1533 cites missing paths: {missing}"
+
+
+class TestLedgerSizingHint:
+    """The M1 hostile-review fold (DEC-MEMORY-FOOTPRINT-HARDENING-001): the
+    watermarked ledger cache sizes its records-family payload via the O(1)
+    ``_ledger_payload_size_hint``, never the O(rows) ``deep_size_bytes`` walk
+    (reviewer-measured 5.28 s + a ~100+ MB transient id-set at the 841k-row
+    production scale, recurring per stamp move)."""
+
+    def test_records_family_shape_returns_the_linear_estimate(self, tmp_path: Path) -> None:
+        """The hint recognizes ``(int, tuple[WindowLedgerRecord, ...])``."""
+        _seed(tmp_path, ["SYM0", "SYM1", "SYM2"])
+        records = tuple(load_window_ledger(tmp_path).records())
+        assert len(records) == 3
+        hinted = db_view._ledger_payload_size_hint((0, records))
+        assert hinted == db_view._LEDGER_HINT_BASE_BYTES + 3 * db_view._LEDGER_RECORD_EST_BYTES
+
+    def test_empty_records_tuple_returns_the_base_constant(self) -> None:
+        assert db_view._ledger_payload_size_hint((0, ())) == db_view._LEDGER_HINT_BASE_BYTES
+
+    def test_unrecognized_shapes_return_none(self, tmp_path: Path) -> None:
+        """Every non-records shape abstains → the cache's deep-size fallback."""
+        assert db_view._ledger_payload_size_hint({("A", "1minute"): (1, 0, 0)}) is None
+        assert db_view._ledger_payload_size_hint((0, ("not-a-record",))) is None  # wrong leaf
+        assert db_view._ledger_payload_size_hint((0, [1, 2])) is None  # wrong container
+        assert db_view._ledger_payload_size_hint(("x", ())) is None  # wrong generation slot
+        assert db_view._ledger_payload_size_hint((0, (), ())) is None  # wrong arity
+        assert db_view._ledger_payload_size_hint(b"bytes") is None
+
+    def test_cold_records_parse_never_pays_the_deep_walk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The spy pin — FAILS BEFORE the M1 fold (no hint → the cold ledger
+        parse deep-walked the whole ``(generation, records)`` payload).
+
+        The rollup dict DELIBERATELY stays on the accurate deep walk (small by
+        construction), so the spy forbids only the records-family shape.
+        """
+        import brutex.dashboard.movers_cache as mc_mod
+        from brutex.data.window_ledger import WindowLedgerRecord
+
+        _seed(tmp_path, ["SYM0", "SYM1"])
+        _install_clocked_cache(monkeypatch)
+        real_deep = mc_mod.deep_size_bytes
+
+        def _spying_deep_size(value: object) -> int:
+            if (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and isinstance(value[1], tuple)
+                and value[1]
+                and isinstance(value[1][0], WindowLedgerRecord)
+            ):
+                raise AssertionError(
+                    "deep_size_bytes ran over the records-family payload — "
+                    "the M1 sizing hint must short-circuit it"
+                )
+            return real_deep(value)
+
+        monkeypatch.setattr(mc_mod, "deep_size_bytes", _spying_deep_size)
+        records = _ledger_records_cached(tmp_path)  # the cold parse + insert
+        assert len(records) == 2
+        assert spot_window_rollup(tmp_path)  # the dict family still inserts fine
+        assert db_view._LEDGER_READ_CACHE.total_bytes() > 0  # both entries tracked
+
+    def test_hint_estimate_within_3x_of_the_deep_walk(self, tmp_path: Path) -> None:
+        """Accuracy sanity: the estimate stays within 3× of ``deep_size_bytes``
+        EITHER WAY on a small REAL records payload, so the watermark bound
+        remains meaningful (an estimate feeding an estimate — the 3× tolerance
+        is the stated contract, wide enough for string-length/layout variance,
+        tight enough that an order-of-magnitude drift fails loudly)."""
+        import brutex.dashboard.movers_cache as mc_mod
+
+        _seed(tmp_path, [f"SYM{i}" for i in range(200)])
+        records = tuple(load_window_ledger(tmp_path).records())
+        payload = (0, records)
+        hinted = db_view._ledger_payload_size_hint(payload)
+        assert hinted is not None
+        deep = mc_mod.deep_size_bytes(payload)
+        assert hinted <= 3 * deep
+        assert deep <= 3 * hinted
+
+    def test_production_cache_wiring_binds_the_hint(self) -> None:
+        """`_make_ledger_read_cache` passes the hint — a dropped kwarg fails."""
+        cache = db_view._make_ledger_read_cache()
+        assert cache._size_of is db_view._ledger_payload_size_hint

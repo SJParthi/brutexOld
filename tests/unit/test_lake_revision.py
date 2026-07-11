@@ -446,11 +446,16 @@ class TestRegistryRevision:
     """
 
     def test_present_registry_matches_stat(self, tmp_path: Path) -> None:
-        """A present registry file tokens as the exact ``mtime_ns:size`` pair."""
+        """A present registry file tokens as ``mtime_ns:size`` + the wal component.
+
+        Hostile-review m1: the token is now the ``main+wal`` composite (the
+        ``_ledger_revision`` shape); with no ``.wal`` sibling the second
+        component is the stable ``absent`` sentinel.
+        """
         target = tmp_path / "registry.duckdb"
         target.write_bytes(b"duckdb-stand-in")
         st = os.stat(target)
-        assert registry_revision(tmp_path) == f"{st.st_mtime_ns}:{st.st_size}"
+        assert registry_revision(tmp_path) == f"{st.st_mtime_ns}:{st.st_size}+absent"
 
     def test_absent_registry_returns_stable_sentinel(self, tmp_path: Path) -> None:
         """No registry (a CLI-only-pulled lake) → the stable ``absent`` sentinel."""
@@ -475,6 +480,46 @@ class TestRegistryRevision:
         assert rewritten is not None
         assert rewritten != created
 
+    def test_wal_only_write_moves_the_token(self, tmp_path: Path) -> None:
+        """A commit landing ONLY in the ``.wal`` moves the composite (m1 widening).
+
+        The stand-in shape of the probe-verified held-open-connection commit:
+        the MAIN file's stat is byte-identical across the write, yet the token
+        MUST move — a committed ``upsert_expiry`` on a held-open connection
+        lands in the WAL and the main file moves only on CHECKPOINT.
+        """
+        target = tmp_path / "registry.duckdb"
+        target.write_bytes(b"main-checkpointed")
+        main_before = os.stat(target)
+        before = registry_revision(tmp_path)
+        wal = tmp_path / "registry.duckdb.wal"
+        wal.write_bytes(b"wal-commit-1")
+        after_create = registry_revision(tmp_path)
+        assert after_create is not None
+        assert after_create != before  # the wal's appearance moved the token…
+        main_after = os.stat(target)  # …with the MAIN file provably untouched.
+        assert (main_before.st_mtime_ns, main_before.st_size) == (
+            main_after.st_mtime_ns,
+            main_after.st_size,
+        )
+        wal.write_bytes(b"wal-commit-2-longer")
+        after_grow = registry_revision(tmp_path)
+        assert after_grow is not None
+        assert after_grow != after_create  # …and every further wal commit moves it.
+        # The checkpoint later REMOVES the wal — that transition moves the
+        # token too (correctly: a write happened), back to the +absent shape.
+        wal.unlink()
+        st = os.stat(target)
+        assert registry_revision(tmp_path) == f"{st.st_mtime_ns}:{st.st_size}+absent"
+
+    def test_wal_beside_absent_main_still_composes(self, tmp_path: Path) -> None:
+        """A wal with no main file (a mid-creation race shape) composes, never
+        the plain ``absent`` sentinel — the write in flight is visible."""
+        (tmp_path / "registry.duckdb.wal").write_bytes(b"creation-ddl")
+        token = registry_revision(tmp_path)
+        assert token is not None
+        assert token.startswith("absent+")
+
     def test_unreadable_registry_returns_none_and_warns(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -492,6 +537,25 @@ class TestRegistryRevision:
         with capture_logs() as logs:
             assert registry_revision(tmp_path) is None
         assert any(entry["event"] == "lake_revision.registry_stat_failed" for entry in logs)
+
+    def test_unreadable_wal_returns_none_and_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wal-component OSError also maps to ``None`` + its OWN WARN event."""
+        (tmp_path / "registry.duckdb").write_bytes(b"v1")
+        wal = tmp_path / "registry.duckdb.wal"
+        wal.write_bytes(b"w1")
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(wal):
+                raise PermissionError(13, "denied", str(wal))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        with capture_logs() as logs:
+            assert registry_revision(tmp_path) is None
+        assert any(entry["event"] == "lake_revision.registry_wal_stat_failed" for entry in logs)
 
     def test_registry_filename_pinned_to_the_db_view_resolver(self, tmp_path: Path) -> None:
         """The not-imported filename copy cannot drift from the ONE resolver.

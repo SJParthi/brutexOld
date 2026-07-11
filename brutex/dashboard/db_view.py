@@ -5134,6 +5134,60 @@ _LEDGER_READ_FLOOR_CAP_S: Final[float] = 120.0
 _LEDGER_READ_CACHE_FRACTION: Final[float] = 1.0 / 16.0
 _LEDGER_READ_CACHE_FLOOR_BYTES: Final[int] = 1 << 30  # 1 GiB
 
+#: Per-record byte ESTIMATE for the ledger sizing hint (hostile-review M1 on
+#: DEC-MEMORY-FOOTPRINT-HARDENING-001): the fix-3 residency bench measured the
+#: resident ``ledger-records`` family at 29.8 MB @ 50k rows ≈ ~600 B/record
+#: under the SAME ``deep_size_bytes`` accounting the watermark evicts on
+#: (2026-07-11, ``tests/bench/test_ledger_cache_residency.py``); rounded
+#: conservatively UP to 640 so the hint over-states rather than under-states
+#: (the watermark then evicts EARLIER than the deep walk would — the safe
+#: direction for a byte bound). HONEST (Golden Rule #10): an estimate feeding
+#: an estimate — the watermark tracks approximations, never exact RSS; the
+#: hint-vs-deep-walk accuracy is pinned within 3× on a real records payload.
+_LEDGER_RECORD_EST_BYTES: Final[int] = 640
+
+#: Flat overhead added by the hint for a payload's outer shells (the 2-tuple /
+#: dict container + slack) — small beside even a few records.
+_LEDGER_HINT_BASE_BYTES: Final[int] = 512
+
+#: The records-family payload's arity: ``(generation, records)`` — named to
+#: avoid a PLR2004 magic number (the app.py convention).
+_LEDGER_RECORDS_PAYLOAD_ARITY: Final[int] = 2
+
+
+def _ledger_payload_size_hint(payload: object) -> int | None:
+    """O(1)-in-rows sizing hint for the ledger cache's payload families.
+
+    Hostile-review M1 (DEC-MEMORY-FOOTPRINT-HARDENING-001): the fix-2 byte
+    watermark ran :func:`~brutex.dashboard.movers_cache.deep_size_bytes` over
+    every COLD ledger parse's ``(generation, tuple[WindowLedgerRecord, ...])``
+    payload — measured **5.28 s** at the documented 841k-row production scale
+    (~25M ``getsizeof``/``getattr`` ops through the ``__slots__`` MRO branch)
+    plus a transient ~1.7M-entry ``seen`` id-set (~100+ MB), recurring at pull
+    cadence (the stamp moves per delta flush). This hint recognizes THE
+    records-family shape — a 2-tuple ``(int generation, tuple of
+    WindowLedgerRecord)``, checked on the FIRST element only (O(1); every
+    record in a payload is the same type by construction — one
+    ``load_window_ledger(...).records()`` materialization) — and returns
+    ``len(records) × _LEDGER_RECORD_EST_BYTES + _LEDGER_HINT_BASE_BYTES``.
+    Every OTHER shape returns ``None`` → the cache's deep-size fallback; the
+    only other resident family, the ``spot-rollup|`` dict, is SMALL by
+    construction (≤ spot symbols × fetch intervals cells, ~1.5k — its deep
+    walk is sub-millisecond), so it deliberately stays on the accurate walk.
+    """
+    if (
+        isinstance(payload, tuple)
+        and len(payload) == _LEDGER_RECORDS_PAYLOAD_ARITY
+        and isinstance(payload[0], int)
+        and isinstance(payload[1], tuple)
+    ):
+        from brutex.data.window_ledger import WindowLedgerRecord
+
+        records = payload[1]
+        if not records or isinstance(records[0], WindowLedgerRecord):
+            return _LEDGER_HINT_BASE_BYTES + len(records) * _LEDGER_RECORD_EST_BYTES
+    return None
+
 
 def _make_ledger_read_cache(
     *, clock: Callable[[], float] = _monotonic_clock
@@ -5143,8 +5197,11 @@ def _make_ledger_read_cache(
     Single-flight + the #920 adaptive floor + the RAM-derived byte watermark
     (DEC-MEMORY-FOOTPRINT-HARDENING-001), all REUSED from the verified
     :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` contract (no
-    third hand-rolled cache — CLAUDE.md §11 COMMON). *clock* is injectable so
-    the floor tests are deterministic (production keeps the monotonic default).
+    third hand-rolled cache — CLAUDE.md §11 COMMON), plus the M1
+    ledger-aware ``size_of`` sizing hint so a cold 841k-row parse never pays
+    the measured 5.28 s deep-size walk (see :func:`_ledger_payload_size_hint`).
+    *clock* is injectable so the floor tests are deterministic (production
+    keeps the monotonic default).
     """
     return MoversSnapshotCache(
         capacity=_LEDGER_READ_CACHE_CAPACITY,
@@ -5152,6 +5209,7 @@ def _make_ledger_read_cache(
             fraction=_LEDGER_READ_CACHE_FRACTION,
             floor_bytes=_LEDGER_READ_CACHE_FLOOR_BYTES,
         ),
+        size_of=_ledger_payload_size_hint,
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,

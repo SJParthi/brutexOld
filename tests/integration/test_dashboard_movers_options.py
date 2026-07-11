@@ -914,6 +914,52 @@ class TestRegistryContentTokenKeying:
             == "fresh"
         )
 
+    def test_held_open_connection_commit_moves_the_token_via_the_wal(self, tmp_path: Path) -> None:
+        """The m1 wal-widening REAL-DuckDB arm: a wal-ONLY write moves the token.
+
+        A commit on a HELD-OPEN connection lands in DuckDB's write-ahead log;
+        the MAIN file's ``mtime``/``size`` move only on CHECKPOINT (connection
+        close / WAL threshold) — probe-verified 2026-07-11 on this DuckDB.
+        Pre-widening, ``registry_revision`` statted the main file ONLY, so
+        this exact write class was invisible until checkpoint (fails before:
+        the pre-widening token is byte-identical across the held-open commit).
+        """
+        import os as _os
+
+        from brutex.dashboard.lake_revision import registry_revision
+        from brutex.data.registry_store import RegistryStore
+
+        now = datetime(2025, 7, 1, tzinfo=UTC)
+        target = tmp_path / "registry.duckdb"
+        # Create + checkpoint (context-manager close), so the held-open phase
+        # starts wal-less — the steady post-pull state.
+        with RegistryStore.open(target) as reg:
+            reg.upsert_expiry("NSE", "NIFTY", date(2025, 7, 7), run_id="r1", fetched_at=now)
+        before = registry_revision(tmp_path)
+        main_before = _os.stat(target)
+        cm = RegistryStore.open(target)
+        reg2 = cm.__enter__()  # the held-open connection — no checkpoint yet
+        try:
+            reg2.upsert_expiry("NSE", "NIFTY", date(2025, 7, 14), run_id="r2", fetched_at=now)
+            held = registry_revision(tmp_path)
+            main_held = _os.stat(target)
+        finally:
+            cm.__exit__(None, None, None)
+        assert held is not None
+        assert held != before  # the committed write is VISIBLE while held open…
+        # …and it is visible via the WAL component alone: the main file's stat
+        # is byte-identical across the held-open commit (the m1 evidence).
+        assert (main_before.st_mtime_ns, main_before.st_size) == (
+            main_held.st_mtime_ns,
+            main_held.st_size,
+        )
+        # The close's checkpoint removes the wal → the token moves again
+        # (correctly — a write happened) back to a `+absent`-shaped composite.
+        after_close = registry_revision(tmp_path)
+        assert after_close is not None
+        assert after_close != held
+        assert after_close.endswith("+absent")
+
 
 # ── compute_options_candidates discovery + resilience branches ────────────
 # These exercise the per-file gate branches the broad dashboard suite covered
