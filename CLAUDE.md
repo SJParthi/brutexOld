@@ -1963,8 +1963,9 @@ hostile-review pass._
   pill glow SCOPED under `.strategy-drawer.open` (they played once invisibly at load — dead on
   every real open); the collapsed winners body is delayed-`visibility:hidden` (untabbable) and
   the inner clips via `overflow:clip` so the sticky filter bar actually engages (hidden
-  fallback = the pre-fix never-sticks, stated); winners rows keyboard-operable (tabindex/role
-  + Enter/Space sharing the click path; focus restore lands on the row); the winners table +
+  fallback = the pre-fix never-sticks, stated); winners rows keyboard-operable (tabindex
+  + Enter/Space sharing the click path; focus restore lands on the row; the round-1
+  role="button" was DROPPED in fix round 5 — invalid ARIA on a table row, R6-a11y-1); the winners table +
   rowCount read gain gbPollGen-idiom stale-response guards; a run switch bumps the strategy
   panel's gen (`update({runId:null})` kills the old run's dead-fetch chain) and `update()`
   clears the painted body (`resetPanelDom` — no previous-target residue on reopen); the cold
@@ -2026,6 +2027,28 @@ hostile-review pass._
   unchanged): the sink scan's self-disclosed completeness gaps (`.src =` property form +
   non-literal setAttribute arms — LOW, corpus-clean) and the cold >900 ms first-expand
   cascade skip (P-N4 ≡ R4-claims-1/R4-journey-2, cosmetic — the table renders correctly).
+  ADVERSARIAL-REVIEW FIX ROUND 4 folded (the round-5 adjudication): prose-precision only —
+  the bx-portal-state.js module header's "ONE builder of every /strategy href" over-claim
+  scoped to the honest consolidated-surfaces wording (R5-fix3-1, NIT; ledger record in
+  MIGRATION.md #1714).
+  ADVERSARIAL-REVIEW FIX ROUND 5 folded (the round-6 a11y/claims/breaker adjudication —
+  3 reviewers × 3 independent refuters, the THIRD refuter killed by an environment
+  interruption before filing: adjudication rests on the 2/2 unanimous surviving-refuter
+  consensus, recorded honestly): [R6-a11y-1, MINOR] the winners rows' round-1
+  `role="button"` DROPPED (tabindex + Enter/Space kept byte-identical) — WAI-ARIA `button`
+  is Children-Presentational, flattening the <td> cells + the tbody's required `row`
+  children out of the accessibility tree on BOTH consuming surfaces, and markActiveRow's
+  `aria-selected` is not allowed on `button` (it IS on `row`); the one pin re-pointed
+  equal-strength to a tabindex-kept + role-never-returns negative pin. [R6-a11y-2, LOW]
+  v29's `#bxTip` (z 1200) painted BEHIND the opaque drawer (z 1300) — every in-drawer
+  `[data-explain]` hover invisible precisely while the drawer held the page's only live
+  explain targets; bumped to 1310 (above drawer 1300 + backdrop 1290, below the 2000/3000
+  modal layers; pointer-events:none so painting above is interaction-safe) + the NEW
+  `TestExplainTipZLadder` pins (the standalone pages KEEP their drawerless 1200).
+  RECORD-ONLY (round 6): R6-a11y-3 (boundary surf-button disable drops focus — NIT,
+  transient/self-recovering) and R6-breaker-1 (main drift overlap on bx-screener.js/#1406's
+  render-cap law — handled by the merge-reconcile, which ports the cap law into
+  bx-screener-panel.js). Suite 160→162; no assertion weakened.
   HONEST: the codec/pure helpers AND now the panel/portal
   terminal-state machines are EXECUTED under node (a DOM stub — no CSS/layout/browser-event
   semantics claimed); the remaining DOM wiring stays

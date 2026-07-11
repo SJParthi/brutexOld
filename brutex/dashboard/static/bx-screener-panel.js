@@ -228,12 +228,16 @@ function bxHarvestFilterOptions(rows) {
       var row = sorted[i];
       var tr = document.createElement('tr');
       tr.setAttribute('data-rank', String(row.rank));
-      // Keyboard operability (adversarial-review fold, C-M3/E-M5): rows are
-      // real tab stops activated by Enter/Space (the delegated keydown
-      // handler shares the click path), and a focused row is what the
-      // portal's close-focus-restore lands back on.
+      // Keyboard operability (adversarial-review fold, C-M3/E-M5; ARIA
+      // corrected round 5, R6-a11y-1): rows are real tab stops activated by
+      // Enter/Space (the delegated keydown handler shares the click path),
+      // and a focused row is what the portal's close-focus-restore lands
+      // back on. We deliberately do NOT set role="button" — WAI-ARIA
+      // `button` is Children-Presentational, which would flatten the <td>
+      // cells (and the tbody's required `row` children) out of the
+      // accessibility tree AND make markActiveRow's aria-selected invalid
+      // (supported on `row`, not `button`) — the universe.html precedent.
       tr.setAttribute('tabindex', '0');
-      tr.setAttribute('role', 'button');
       // Winners-cascade stagger index (inert without the portal's cascade
       // class; CSS min() caps the stagger — see bx-oneclick-panels.css).
       tr.style.setProperty('--wn-i', String(i));

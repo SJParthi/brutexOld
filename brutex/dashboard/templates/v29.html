@@ -2157,7 +2157,13 @@
   .oc-msg { font-size: 12px; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; }
   .oc-source-badge { padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 10.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .oc-disabled-note { font-size: 11px; color: var(--muted); }
-  #bxTip { position: absolute; z-index: 1200; max-width: 340px; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text); box-shadow: var(--elev-2); pointer-events: none; }
+  /* R6-a11y-2 (round 5): the tip must paint ABOVE the strategy drawer
+     (z 1300) + backdrop (z 1290) — both body-level siblings in the ROOT
+     stacking context — or every [data-explain] hover inside the open
+     drawer is invisible. 1310 sits above the drawer stack and below the
+     2000/3000 modal layers (which hold no explain targets); the tip is
+     pointer-events:none so painting above is interaction-safe. */
+  #bxTip { position: absolute; z-index: 1310; max-width: 340px; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text); box-shadow: var(--elev-2); pointer-events: none; }
   .equity-host { min-height: 120px; }
   .equity-host svg { width: 100%; height: 220px; display: block; }
   .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }

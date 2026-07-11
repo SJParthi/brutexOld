@@ -1160,12 +1160,19 @@ class TestWinnersCollapsedUntabbable:
 class TestWinnersRowKeyboardAccess:
     """C-M3/E-M5 (merged): winners rows are real tab stops activated by
     Enter/Space through the SAME onRowClick seam, and the focus-restore
-    target is the activating row (previously <body> — a restore no-op)."""
+    target is the activating row (previously <body> — a restore no-op).
+    R6-a11y-1 (round 5): the rows must NOT carry role="button" — WAI-ARIA
+    `button` is Children-Presentational (flattens the <td> cells + the
+    tbody's required `row` children out of the accessibility tree) and
+    `aria-selected` (markActiveRow) is not allowed on `button`."""
 
-    def test_rows_are_focusable_buttons(self) -> None:
+    def test_rows_are_focusable_without_role_button(self) -> None:
         sc = _js(_SCREENER_PANEL_JS)
         assert "tr.setAttribute('tabindex', '0');" in sc
-        assert "tr.setAttribute('role', 'button');" in sc
+        # Negative pin: the round-1 role="button" (invalid ARIA on a table
+        # row) must never return — refuter-confirmed R6-a11y-1.
+        assert "tr.setAttribute('role'" not in sc
+        assert 'tr.setAttribute("role"' not in sc
 
     def test_enter_and_space_share_the_click_path(self) -> None:
         sc = _js(_SCREENER_PANEL_JS)
@@ -1179,6 +1186,27 @@ class TestWinnersRowKeyboardAccess:
         js = _js(_PORTAL_JS)
         assert "state.lastFocus = document.activeElement; // focus restore target" in js
         assert "state.lastFocus.focus();" in js
+
+
+class TestExplainTipZLadder:
+    """R6-a11y-1/2 (round 5): #bxTip on the portal page must paint ABOVE the
+    strategy drawer stack — both are body-level siblings in the ROOT stacking
+    context, so z-index alone decides (1200 painted the tip BEHIND the opaque
+    z-1300 drawer, making every in-drawer [data-explain] hover invisible)."""
+
+    def test_v29_tip_sits_above_the_drawer_and_backdrop(self) -> None:
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "#bxTip { position: absolute; z-index: 1310;" in html
+        css = _js(_PANELS_CSS)
+        assert "z-index:1300;" in css  # the drawer layer this must beat
+        assert "z-index:1290;" in css  # the backdrop layer
+
+    def test_standalone_pages_keep_their_drawerless_1200(self) -> None:
+        """screener.html / strategy.html host no drawer (no 1300 layer), so
+        their 1200 stays correct — only the portal page needed the bump."""
+        for name in ("screener.html", "strategy.html"):
+            html = (_TEMPLATES / name).read_text(encoding="utf-8")
+            assert "#bxTip { position:absolute; z-index:1200;" in html
 
 
 class TestWinnersStaleResponseGuard:
