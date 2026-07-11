@@ -43,7 +43,13 @@
 #                   their (largely unused, e.g. r4/s4/ext_424) fields rides the
 #                   SAME named follow-up (MIGRATION.md #1597).
 #   bits.rs       — 0 mutants (const-only; nothing cargo-mutants can perturb).
-examine_globs = ["src/evaluator.rs", "src/spec.rs", "src/python.rs"]
+#
+# ADDED (DEC-STAGE1A-RUST-BATCH-001): src/stage1a_batch.rs — the batch Stage-1A
+# bar-bits core (structural validation + the state-bookkeeping loop around the
+# frozen evaluator/VWAP/market-structure cores). Its feature-gated pyfunction
+# wrapper in src/python.rs enters the gate automatically (python.rs already in
+# scope — the #1614-r8 wired-gate law).
+examine_globs = ["src/evaluator.rs", "src/spec.rs", "src/python.rs", "src/stage1a_batch.rs"]
 
 # python.rs compiles ONLY under `python` (lib.rs:66) and spec.rs's mask_hex only
 # under `serde`; without them those mutants build a byte-identical crate and
