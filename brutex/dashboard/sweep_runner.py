@@ -439,10 +439,27 @@ def run_sweep_from_request(  # pragma: no cover — orchestration shim over the 
     into apriori mode (different tallies + a raised max_combos ⇒ a different
     sweep_id — a byte-identity violation). The single-flight job guarantees no
     concurrent reader DURING the run.
+
+    SINGLE-FLIGHT DEPENDENCY (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md
+    #1752 review fix round 2): the "no concurrent reader DURING the run"
+    claim above is not free-standing — it is EXACTLY the guarantee of the
+    dashboard route layer launching this shim through
+    ``BackgroundPullJob.start(job_kind=JOB_KIND_SWEEP)``
+    (:class:`brutex.dashboard.pull_jobs.BackgroundPullJob` — one background
+    job per process, a second ``start`` while a job runs is REFUSED). If a
+    future caller ever invokes this function OUTSIDE that single-flight job,
+    the env snapshot-restore below becomes a read-modify-write race against
+    any concurrent ``BRUTEX_SWEEP_APRIORI`` reader/writer in the same
+    process — re-establish an equivalent mutual exclusion first.
     """
     from brutex.cli import cmd_sweep_all
     from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
 
+    # INTERLEAVE HAZARD (see SINGLE-FLIGHT DEPENDENCY above): this snapshot →
+    # cmd_sweep_all's setdefault-write → the finally-restore is safe ONLY
+    # because BackgroundPullJob.start(job_kind=JOB_KIND_SWEEP) serialises the
+    # whole span — two interleaved runs would capture each other's
+    # mid-flight value as `before` and restore a stale flag.
     before = os.environ.get(SWEEP_APRIORI_ENV)
     try:
         return cmd_sweep_all(
