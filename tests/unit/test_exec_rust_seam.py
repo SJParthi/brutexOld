@@ -213,6 +213,42 @@ def test_wheel_missing_falls_back_with_one_warning(monkeypatch: pytest.MonkeyPat
     assert events[0]["reason"] == "wheel_missing"
 
 
+# ── stale-wheel skew: LOUD named error, never a silent fallback ─────────
+
+
+def test_stale_wheel_missing_exec_symbol_raises_named_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wheel that IMPORTS fine but lacks the ``exec_*`` symbols (a wheel
+    built before ``src/exec/`` landed) raises the NAMED
+    ``StaleExecWheelError`` carrying the rebuild remediation — LOUD, never
+    a bare ``AttributeError`` and NEVER a silent Python-arm fallback
+    (review round 1, H3-NIT-2)."""
+    monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+    monkeypatch.setattr(exec_rust, "_rust", SimpleNamespace())  # no exec_* symbols
+    with pytest.raises(exec_rust.StaleExecWheelError) as excinfo:
+        exec_rust.fill_slippage(9_995, 12_005, is_long=True)
+    # EXACT message pin — kills any string-literal mutant of the message
+    # or of the resolved symbol name.
+    assert str(excinfo.value) == (
+        "fno_math wheel predates the exec module (exec_apply_slippage missing) "
+        "— rebuild the wheel: pip install ./rust/fno-math"
+    )
+    # RuntimeError subclass: OUTSIDE every narrow catch on the dispatch
+    # path, so it always propagates (loud by construction).
+    assert isinstance(excinfo.value, RuntimeError)
+
+
+def test_stale_wheel_raises_at_every_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All six wrappers resolve through the SAME ``_kernel_fn`` guard —
+    none can silently fall back (or bare-AttributeError) on a stale wheel."""
+    monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+    monkeypatch.setattr(exec_rust, "_rust", SimpleNamespace())
+    for _site, call in sorted(_in_envelope_calls().items()):
+        with pytest.raises(exec_rust.StaleExecWheelError, match="pip install"):
+            call()
+
+
 # ── envelope fallback ───────────────────────────────────────────────────
 
 _TOO_BIG = 2**63  # one past i64::MAX
@@ -405,6 +441,35 @@ def test_wrong_wire_arity_is_refused_loudly(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(exec_rust, "_rust", fake)
     with pytest.raises(TypeError):
         exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS)
+
+
+def test_short_futures_wire_falls_back_to_python_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed SHORT futures trade wire routes to the Python arm like
+    every other malformed kernel shape on this site (review round 1,
+    H3-NIT-3): the wire slicing runs INSIDE the narrow try, so
+    ``ChargeStack(*wire[:17])`` raises ``TypeError`` → one warn-once
+    ``exec_rust.kernel_fallback`` → ``None`` (the Python tail serves)."""
+    monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+    fake = SimpleNamespace(exec_futures_materialize=lambda *_a: ("trade", [1, 2, 3]))
+    monkeypatch.setattr(exec_rust, "_rust", fake)
+    with capture_logs() as logs:
+        out = exec_rust.materialize_futures_tail(
+            2_200_000,
+            2_210_000,
+            entry_volume=10,
+            exit_volume=10,
+            path_highs_paisa=[2_201_000],
+            path_lows_paisa=[2_199_000],
+            reject_stale=True,
+            **_FUTURES_ARGS,
+        )
+    assert out is None
+    events = [e for e in logs if e["event"] == "exec_rust.kernel_fallback"]
+    assert len(events) == 1
+    assert events[0]["error_type"] == "TypeError"
+    assert events[0]["site"] == "materialize_futures_tail"
 
 
 # ── ON arm: kernel == Python oracle, wrapper by wrapper ─────────────────

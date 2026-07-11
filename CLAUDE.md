@@ -2025,7 +2025,8 @@ hostile-review pass._
   Rust==Python differential properties; the DEFAULT-OFF == TODAY bomb-kernel
   byte-identity pin; a dedicated ci.yml dual-arm step (`BRUTEX_EXEC_RUST=1`
   over the 19-file covering set). GATES: `exec_rust.py` 100% line+branch
-  standalone (new ci gate) + local mutmut ZERO-survivor (90 mutants); all four
+  standalone (new ci gate) + local mutmut ZERO-survivor (84/84 at the final
+  run; 94/94 re-proven post-review-round-1); all four
   dispatch modules' per-module gates measure 100%; mutation.yml gains the
   exec_rust + calculator mutmut pairs (both locally de-survivored;
   futures_costs deferred to DEC-EXEC-COSTS-MUTMUT-001 — early survivors, never
@@ -2034,7 +2035,23 @@ hostile-review pass._
   kill surface, exercised by the Python dual-arm gates). HONEST: COLD path —
   payoff UNKNOWN-expected-small, value = one-language consistency NOT speed
   (no speedup claim; the OFF-cost bench pins the seam is free); the futures
-  arm has zero production callers today; ships INERT (default-OFF). ENGINE
+  arm has zero production callers today; ships INERT (default-OFF); the full
+  836-mutant cargo kill loop was NOT run in-session — a 74-mutant bounded
+  spot-check (0 missed) is the local evidence, the first green scheduled
+  mutation.yml 8-shard run is the completion proof (the #1597 pattern).
+  REVIEW ROUND 1 folded (5-reviewer panel, same branch pre-merge): the
+  `bench(...)` interior commit subject reworded via commit-tree (trees
+  byte-identical; conv-commits green over all 9); the calculator ternary
+  pragma narrowed to the else-literal only (the KILLABLE "long" mutant now
+  enumerated + killed, sed-proven both directions); stale-wheel skew raises
+  the NAMED `StaleExecWheelError` with the rebuild remediation at the
+  `_kernel_fn` resolve guard (never a bare AttributeError, never a silent
+  fallback); the futures wire slicing moved INSIDE the narrow try (a short
+  wire falls back to the Python arm, regression-pinned); the differential
+  n_lots domain raised to the spec 1..10_000; the `__post_init__` prose
+  honesty-corrected (TradeCostBreakdown has none — the Rust
+  `ChargeStack::validated()` check + the parity gates guard the
+  options-breakdown values). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; trading-core FROZEN
   untouched; no scope/vocab/rate/lake-schema change).
   Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +

@@ -47,7 +47,11 @@ _I64_MIN = -(2**63)
 #: rest to the Python arm — that arm is pinned in the seam unit suite).
 _OPENS = st.integers(min_value=5, max_value=10_000_000)
 _LOTS = st.integers(min_value=1, max_value=1_000)
-_N_LOTS = st.integers(min_value=1, max_value=100)
+#: The spec §5 domain (1..10_000; review round 1 H1-NIT-2 raised it from
+#: 100): worst case n_shares = 10^7, notional = 10^14 paisa, notional×rate
+#: = 2×10^20 (i128 in-kernel) → every result stays inside i64, so the
+#: per-example engaged-asserts still hold at the upper envelope.
+_N_LOTS = st.integers(min_value=1, max_value=10_000)
 #: Rates INCLUDE 0 (the cost-free arm passes zeros) up to the GST magnitude.
 _RATES = st.integers(min_value=0, max_value=2_000_000)
 _VOLUMES = st.integers(min_value=0, max_value=3)  # 0 hits the stale edge often

@@ -45,11 +45,19 @@ state).
 * the kernel call itself is caught NARROWLY —
   ``(ValueError, TypeError, OverflowError)`` → ``None`` + warn-once;
   ``MemoryError`` re-raises BARE (a global stop, never swallowed);
+* a wheel that imports but LACKS an ``exec_*`` entry (stale-wheel build
+  skew) raises the named :class:`StaleExecWheelError` with the rebuild
+  remediation — LOUD, never a silent Python-arm fallback;
 * a MALFORMED kernel result (wrong wire arity / an unknown verdict kind) is
   REFUSED loudly at :class:`ChargeStack` construction or by the caller —
-  and every served result is re-materialized through the EXISTING frozen
-  dataclasses, whose ``__post_init__`` invariants re-validate it at the
-  boundary (a violating result raises, never silently adopted).
+  never silently adopted. Served-VALUE integrity is guarded by the
+  Rust-side ``ChargeStack::validated()`` construction check plus the
+  dual-arm / golden / differential parity gates; on re-materialization the
+  frozen dataclasses that DEFINE ``__post_init__`` invariants
+  (``TradeInput`` / ``FuturesTradeInput`` / ``FuturesCostBreakdown``) still
+  run them, while ``TradeCostBreakdown`` carries NO ``__post_init__`` — the
+  options-breakdown boundary check is the Rust validation + the gates, not
+  a Python-side assert.
 
 ## Honest envelope (Golden Rule #10)
 
@@ -66,7 +74,7 @@ from __future__ import annotations
 
 import os
 from types import ModuleType
-from typing import Final
+from typing import Any, Final
 
 import structlog
 
@@ -76,6 +84,7 @@ from brutex.engine.sweep_lookahead import env_flag_tristate
 __all__ = [
     "ENV_FLAG",
     "EXEC_RUST_DEFAULT",
+    "StaleExecWheelError",
     "charge_stack_futures",
     "charge_stack_option",
     "exec_rust_enabled",
@@ -85,6 +94,18 @@ __all__ = [
     "materialize_option_tail",
     "reset_warn_memo_for_tests",
 ]
+
+
+class StaleExecWheelError(RuntimeError):
+    """The installed ``fno_math`` wheel predates the ``src/exec/`` module.
+
+    Raised (never a silent fallback) when ``BRUTEX_EXEC_RUST=1`` resolves a
+    kernel module that imports fine but lacks a required ``exec_*`` entry —
+    build skew between the Python tree and an old wheel. Remediation:
+    rebuild the wheel (``pip install ./rust/fno-math``). The CI twin is the
+    EXPECTED_BUILD.json wheel-freshness gate; this is the runtime guard.
+    """
+
 
 _LOG = structlog.get_logger(__name__)
 
@@ -173,6 +194,26 @@ def _kernel_or_none() -> ModuleType | None:
     return _rust
 
 
+def _kernel_fn(rust: ModuleType, name: str) -> Any:
+    """Resolve kernel entry *name*, or raise LOUDLY on a stale wheel.
+
+    A wheel that imports but lacks the ``exec_*`` symbols predates
+    ``src/exec/`` (stale-wheel build skew) — that is a deployment fault,
+    not a fallback condition: raise the named :class:`StaleExecWheelError`
+    with the rebuild remediation instead of the bare ``AttributeError`` a
+    direct attribute access would surface (and NEVER a silent Python-arm
+    fallback — ``RuntimeError`` is outside every narrow catch on the
+    dispatch path, so it propagates).
+    """
+    fn = getattr(rust, name, None)
+    if fn is None:
+        raise StaleExecWheelError(
+            f"fno_math wheel predates the exec module ({name} missing) "
+            "— rebuild the wheel: pip install ./rust/fno-math"
+        )
+    return fn
+
+
 def _fits_i64(*values: int) -> bool:
     """True iff every value fits the kernel's i64 envelope."""
     return all(_I64_MIN <= v <= _I64_MAX for v in values)
@@ -195,10 +236,12 @@ def _kernel_fallback(site: str, exc: BaseException) -> None:
 def _stack_from_wire(wire: list[int]) -> ChargeStack:
     """Re-wrap the pinned 17-slot kernel wire as the shared NamedTuple.
 
-    A wrong-arity wire is a kernel CONTRACT bug — the ``TypeError`` from the
-    NamedTuple constructor propagates loudly (refusal, never silent
-    adoption); the numeric fields are then re-validated by the frozen
-    breakdown dataclasses at every dispatch site.
+    A wrong-arity OPTIONS wire is a kernel CONTRACT bug — the ``TypeError``
+    from the NamedTuple constructor propagates loudly (refusal, never
+    silent adoption). Served-value integrity is the Rust-side
+    ``ChargeStack::validated()`` check + the dual-arm/golden/differential
+    gates (``TradeCostBreakdown`` has no ``__post_init__``; see the module
+    docstring's fallback law).
     """
     return ChargeStack(*wire)
 
@@ -214,7 +257,7 @@ def fill_slippage(
         _envelope_fallback("fill_slippage")
         return None
     try:
-        out: tuple[int, int, int] = rust.exec_apply_slippage(
+        out: tuple[int, int, int] = _kernel_fn(rust, "exec_apply_slippage")(
             entry_open_paisa, exit_open_paisa, is_long
         )
     except MemoryError:
@@ -236,7 +279,7 @@ def fill_futures(
         _envelope_fallback("fill_futures")
         return None
     try:
-        out: tuple[int, int, int] = rust.exec_apply_futures_fill(
+        out: tuple[int, int, int] = _kernel_fn(rust, "exec_apply_futures_fill")(
             entry_open_paisa, exit_open_paisa, is_long
         )
     except MemoryError:
@@ -286,7 +329,7 @@ def charge_stack_option(
         _envelope_fallback("charge_stack_option")
         return None
     try:
-        wire: list[int] = rust.exec_option_charge_stack(
+        wire: list[int] = _kernel_fn(rust, "exec_option_charge_stack")(
             entry_open_paisa,
             exit_open_paisa,
             is_long,
@@ -353,7 +396,7 @@ def charge_stack_futures(
         _envelope_fallback("charge_stack_futures")
         return None
     try:
-        wire: list[int] = rust.exec_futures_charge_stack(
+        wire: list[int] = _kernel_fn(rust, "exec_futures_charge_stack")(
             entry_open_paisa,
             exit_open_paisa,
             is_long,
@@ -423,7 +466,7 @@ def materialize_option_tail(
         _envelope_fallback("materialize_option_tail")
         return None
     try:
-        kind, wire = rust.exec_options_materialize(
+        kind, wire = _kernel_fn(rust, "exec_options_materialize")(
             entry_open_paisa,
             exit_open_paisa,
             entry_volume,
@@ -502,7 +545,7 @@ def materialize_futures_tail(
         _envelope_fallback("materialize_futures_tail")
         return None
     try:
-        kind, wire = rust.exec_futures_materialize(
+        kind, wire = _kernel_fn(rust, "exec_futures_materialize")(
             entry_open_paisa,
             exit_open_paisa,
             entry_volume,
@@ -523,11 +566,20 @@ def materialize_futures_tail(
             stamp_rate,
             gst_rate,
         )
+        if wire is None:
+            return (kind, None, 0, 0)
+        # Inside the narrow try DELIBERATELY (review round 1, H3-NIT-3): a
+        # malformed SHORT futures wire makes ChargeStack(*wire[:17]) raise
+        # TypeError → caught → warn-once fallback → the Python arm serves,
+        # like every other malformed kernel shape on this site.
+        return (
+            kind,
+            _stack_from_wire(wire[:_WIRE_LEN]),
+            wire[_WIRE_LEN],
+            wire[_WIRE_LEN + 1],
+        )
     except MemoryError:
         raise
     except (ValueError, TypeError, OverflowError) as exc:
         _kernel_fallback("materialize_futures_tail", exc)
         return None
-    if wire is None:
-        return (kind, None, 0, 0)
-    return (kind, _stack_from_wire(wire[:_WIRE_LEN]), wire[_WIRE_LEN], wire[_WIRE_LEN + 1])

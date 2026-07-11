@@ -457,9 +457,13 @@ def _materialize_tail_rust(
     behaviour (including any raise) from its own natural site — so ANY prep
     or kernel fallback is behaviour-neutral. A served ``trade`` verdict is
     re-materialized through the EXISTING frozen ``TradeInput`` +
-    ``TradeCostBreakdown`` dataclasses, so every validation the Python arm
-    runs still runs (the boundary re-validation law); the reject WARNs are
-    emitted HERE with the identical event names / keys / cardinality.
+    ``TradeCostBreakdown`` dataclasses — ``TradeInput.__post_init__``
+    re-validates the INPUTS byte-identically, while ``TradeCostBreakdown``
+    defines NO ``__post_init__``: breakdown-VALUE integrity is guarded by
+    the Rust-side ``ChargeStack::validated()`` construction check + the
+    dual-arm/golden/differential parity gates, not a Python-side assert;
+    the reject WARNs are emitted HERE with the identical event names /
+    keys / cardinality.
     """
     from brutex import exec_rust
 

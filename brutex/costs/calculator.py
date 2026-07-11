@@ -261,13 +261,21 @@ def _charge_stack_py(
     rounded ONCE (DEC-COST-001).
     """
     # ── Step 1: apply slippage (1-tick flat adverse) ────────────────────
+    # The "long" literal below is deliberately UN-pragma'd — it is a
+    # KILLABLE mutant (_apply_slippage branches on startswith("long"), so
+    # mutating it routes a long trade through the SHORT fill law; killed by
+    # every long-trade golden, e.g. Ex.1 net 122840).
+    # SIM108 suppressed: the mutation pragma must scope exactly ONE literal,
+    # so the two literals need distinct source lines (a ternary puts both on
+    # the pragma'd line — the review-round-1 over-suppression this fixes).
+    if is_long:  # noqa: SIM108
+        side = "long"
+    else:
+        # ONLY the else-literal is provably equivalent: any NON-long string
+        # takes the same startswith("long") == False branch as "short".
+        side = "short"  # pragma: no mutate
     buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
-        entry_open_paisa,
-        exit_open_paisa,
-        # pragma: no mutate on the else-literal: _apply_slippage branches on
-        # startswith("long") ONLY, so ANY non-long string is behaviourally
-        # identical — the literal mutant is provably equivalent.
-        "long" if is_long else "short",  # pragma: no mutate
+        entry_open_paisa, exit_open_paisa, side
     )
 
     # ── Step 3: notionals (paise) — lot size resolved by the caller ─────

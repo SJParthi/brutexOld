@@ -426,10 +426,16 @@ jobs:
           # measured CI baseline. rate_common runs LAST so a survivor there never
           # masks the 10 proven modules.
           # slice-7 exec pairs (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724):
-          # exec_rust.py (local run 2026-07-11: 90 mutants, 0 survived) +
-          # costs/calculator.py (129 mutants de-survivored locally — divisor/
-          # sign/message/basis pins + 5 documented provably-equivalent
-          # pragmas). costs/futures_costs.py is DELIBERATELY NOT paired yet:
+          # exec_rust.py (final local zero-survivor runs 2026-07-11: 84/84
+          # KILLED, then 94/94 KILLED after the review-round-1 seam
+          # hardening) + costs/calculator.py (zero-survivor re-run: 123
+          # mutants — 122 KILLED + 1 SUSPICIOUS proven killed via direct
+          # `mutmut apply` -> failing suite, a classifier timing artifact;
+          # re-proven post-round-1: 125 mutants — 124 KILLED + the same
+          # total-sign-flip SUSPICIOUS again apply-proven killed; 0 survived
+          # on every run — divisor/sign/message/basis pins + 5 documented
+          # provably-equivalent pragmas).
+          # costs/futures_costs.py is DELIBERATELY NOT paired yet:
           # its first bounded local run surfaced early survivors before the
           # zero-survivor bar could be met inside the slice budget — wiring
           # it rides DEC-EXEC-COSTS-MUTMUT-001 (the named follow-up), never
