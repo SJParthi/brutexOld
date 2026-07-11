@@ -8019,21 +8019,27 @@ def build_app(
         The response is now ONE ``LIMIT``/``OFFSET`` page with a real ``total``
         (DEC-DB-VIEWER-PAGINATE-ALL-001) so the /db viewer renders O(visible), not
         every window. Honest envelope (Golden Rule #10,
-        DEC-SUSPICION-SWEEP-FIXES-001 D3): the ledger is NOT small — a pre-planned
-        full-universe options pull holds ~841k rows (the measured shape behind
-        ``db_view.WINDOW_ROWS_CAP``), and this route previously re-PARSED the whole
-        Parquet (``load_window_ledger(...).to_rows()``) on EVERY paging click. The
-        read now rides :func:`~brutex.dashboard.db_view.window_ledger_rows_cached`
-        — the SAME mtime-keyed single parse the other ledger readers share — so a
-        paging click within one ledger generation is an O(1) cache handoff + an
-        O(page) slice/format; the FIRST read after a ledger flush still pays one
-        real O(rows) parse (true O(page) needs a write-time manifest, NOT claimed).
-        The page-slice preserves the canonical
-        :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort + derived
-        columns byte-for-byte (ONE row-shape source:
-        ``window_ledger.ledger_record_row``).
+        DEC-DB-LATENCY-HARDENING-001 — supersedes the D3 cached-Python-parse
+        cost model): the ledger is NOT small — a pre-planned full-universe
+        options pull holds ~841k rows (the measured shape behind
+        ``db_view.WINDOW_ROWS_CAP``), and the D3-era read still paid ONE full
+        ``load_window_ledger`` Python parse per ledger STAMP move (measured
+        7,177.5 ms of a 7,628 ms request at 400k rows — recurring every
+        mid-pull flush). The read now rides
+        :func:`~brutex.dashboard.db_view.query_window_ledger_page` — a DuckDB
+        ``LIMIT``/``OFFSET`` projection over the SAME delta-folded ledger scan
+        source the ``/coverage/windows`` fast paths use, with the total from
+        ONE stamp-memoised ``COUNT(*)`` — so a fresh-stamp click is one
+        columnar scan (O(total rows + delta footers), NOT the O(rows) Python
+        record fold) and a repeat click within one stamp is an O(1) cache
+        handoff + an O(page) format. A legacy-shape ledger / a persistently
+        malformed delta / no DuckDB conn degrades to the byte-identical cached
+        Python parse (``window_ledger_rows_cached``). The page preserves the
+        canonical :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort
+        + derived columns byte-for-byte (fast-equals-legacy pinned; ONE
+        row-shape source: ``window_ledger.ledger_record_row``).
         """
-        from brutex.dashboard.db_view import window_ledger_rows_cached
+        from brutex.dashboard.db_view import query_window_ledger_page
 
         columns = [
             "market",
@@ -8062,14 +8068,22 @@ def build_app(
         lake = lake_root.parent
 
         def _load() -> dict[str, Any]:
-            """Read the cached ledger rows, then slice + IST-format ONLY the page."""
+            """Read ONE DuckDB page (legacy-parse fallback), then IST-format it."""
             from brutex.data.session import format_ist_clock
 
-            all_rows = window_ledger_rows_cached(lake)
-            total = len(all_rows)
-            # Slice BEFORE formatting → only the page's rows are IST-coerced (O(page)).
-            # An offset past the end is a clean empty page (Python slice never raises).
-            page = all_rows[offset : offset + limit]
+            # DEC-DB-LATENCY-HARDENING-001: DuckDB LIMIT/OFFSET page + memoised
+            # COUNT over the delta-folded scan source (the /coverage/windows
+            # caches — distinct `wledger-*` key families, stamp-token keyed);
+            # the store connection is built + used on this threadpool worker so
+            # its RLock stays on one thread (DEC-DASHBOARD-FASTREAD-001).
+            page, total = query_window_ledger_page(
+                store.connection,
+                lake,
+                limit=limit,
+                offset=offset,
+                count_cache=_window_counts_cache,
+                page_cache=_window_page_cache,
+            )
             rows: list[list[Any]] = []
             for row in page:
                 cells: list[Any] = list(row)
