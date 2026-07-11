@@ -1387,6 +1387,54 @@ def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
     assert payload["mismatches"] == 0
 
 
+def test_r45_diffcheck_production_leg_carries_the_bound_run_stamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Golden-Rule-#3 bind (DEC-VIX-STAMP-WIRE-001): after the CLI
+    late-binds the launch stamper via ``bind_reference_stamper``, every
+    sampled production re-simulation carries it — and the stamp is
+    compare-neutral (the reference compare surface has no VIX field, so a
+    stamped production leg never latches SUSPECT)."""
+    from brutex.engine import trade_sim as trade_sim_mod
+    from brutex.engine.reference_series import TradeReferenceStamper
+    from brutex.engine.stage1a import build_bar_bits
+
+    stamper = TradeReferenceStamper.from_vix_bars(
+        [
+            CandleBar(
+                timestamp=bar.timestamp,
+                open=Decimal("14.00"),
+                high=Decimal("15.00"),
+                low=Decimal("13.00"),
+                close=Decimal("14.25"),
+                volume=0,
+                open_interest=None,
+            )
+            for bar in _BARS
+        ]
+    )
+    captured: list[object] = []
+    original = trade_sim_mod.simulate_trades
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        captured.append(kwargs.get("reference_stamper", "OMITTED"))
+        return original(*args, **kwargs)
+
+    # Patch BEFORE the core enters: _make_diffcheck from-imports
+    # simulate_trades at compose time, so the closure must capture the spy.
+    monkeypatch.setattr(trade_sim_mod, "simulate_trades", _spy)
+    grid = _grid()
+    tuple_ = next(iter_sweep_tuples(grid))
+    bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
+    with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
+        assert core.diffcheck is not None
+        core.bind_reference_stamper(stamper)
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        # Compare-neutral: production (stamped) still matches the reference.
+        assert core.suspect is False
+    assert captured == [stamper, stamper]  # both sampled masks bound the stamper
+
+
 def test_diffcheck_zero_checked_records_nothing(tmp_path: Path) -> None:
     # k=3 over the conflicting bits {0,1,2} enumerates ZERO conflict-free
     # masks — the closure spends nothing and records no DIFFCHECK_OK.

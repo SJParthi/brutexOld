@@ -136,6 +136,7 @@ from brutex.observability.stage_stamp import (
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from pathlib import Path
 
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.sweep_checkpoint import SweepCheckpoint, SweepCheckpointStore
     from brutex.engine.sweep_orchestrator import StoreQuarantine, SweepTuple
     from brutex.engine.sweep_progress import SweepProgressSnapshot
@@ -313,6 +314,10 @@ class RunCoreHandles:
     _stamps_present: set[str] = field(default_factory=set)
     _link_stamps: dict[str, StampVerdict] = field(default_factory=dict)
     _observability_warned: bool = False
+    #: The run's India-VIX stamper for the R45 production leg — late-bound by
+    #: the CLI via :meth:`bind_reference_stamper` (the stamper is built AFTER
+    #: this CM enters); ``None`` = the honest unstamped default.
+    _reference_stamper: TradeReferenceStamper | None = None
 
     # ── fail-soft plumbing (I-3) ──────────────────────────────────────────
 
@@ -836,6 +841,19 @@ class RunCoreHandles:
             }
         )
 
+    def bind_reference_stamper(self, stamper: TradeReferenceStamper | None) -> None:
+        """Late-bind the run's India-VIX stamper for the R45 production leg.
+
+        The CLI builds the launch stamper INSIDE its abort-alert wrap — after
+        this CM has already entered and composed :attr:`diffcheck` — so the
+        binding arrives late by design; the closure reads the field at CALL
+        time, so every sampled production re-simulation after this bind
+        stamps with the run's own stamper (DEC-VIX-STAMP-WIRE-001 / Golden
+        Rule #3). ``None`` keeps the honest unstamped default (an absent or
+        empty VIX lake).
+        """
+        self._reference_stamper = stamper
+
     def _make_diffcheck(self, k_per_run: int, total_tuples: int) -> Callable[..., None] | None:
         """Build the budgeted R45 per-tuple closure (``None`` when disabled)."""
         if k_per_run <= 0:
@@ -862,6 +880,12 @@ class RunCoreHandles:
                 tf_minutes=tf_minutes,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
+                # DEC-VIX-STAMP-WIRE-001 (Golden Rule #3): the production leg
+                # mirrors the run's own VIX binding — the CLI late-binds the
+                # launch stamper via bind_reference_stamper, read here at CALL
+                # time. The reference compare surface (COMPARED_TRADE_FIELDS)
+                # carries no VIX field, so the stamp is compare-neutral.
+                reference_stamper=self._reference_stamper,
             )
 
         def _production_drawdown(
