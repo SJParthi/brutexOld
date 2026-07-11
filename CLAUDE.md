@@ -115,6 +115,33 @@ delegation); Row 21 HONEST (the `sweep_run_core(log_file=)` plumbing stays UNWIR
 events are already a run_id-scoped log on the INTERNAL DISK via the mirrored `flight-recorder.jsonl`
 — follow-up DEC-SWEEP-RUN-LOG-FILE-001). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
+the DB/query-latency hardening pack, READ-side only: (1) the `/db`
+window-ledger pager rides a DuckDB LIMIT/OFFSET fast path over the #1533
+delta-folded ledger scan source (`db_view.query_window_ledger_page` —
+measured 7,321–8,778 ms cold at 400k rows → 564.8 ms; the O(rows) Python
+record fold per stamp is GONE; the byte-identical legacy parse stays the
+degrade for legacy-shape / NULL-derivable-cell / persistent-duckdb-error /
+no-conn); (2) the pre-open export rows are memoised per (basis, range,
+symbols) at the write generation (repeat click 326–574 ms / 206 DuckDB
+statements → 4.2–18.6 ms / 0 statements, bytes identical) + the IEP (open)
+reads are span-bounded (the CLOSE maps deliberately stay whole-partition —
+the #1649a hole diagnostics need the unbounded view); (3) the `/db` candles
+%CHNG baseline binds the page's own month files instead of the whole glob
+(72 files bound twice per click → 2; the #863 timestamp bounds pruned ROW
+GROUPS, this bounds the Parquet FOOTER opens too — merged-tree mechanism =
+main's #1670 `_bars_file_windows`, this pack's interim arm superseded at the
+merge-reconcile, behavior pins re-run green). HONEST: the
+window-ledger fresh-stamp click stays ONE O(total rows + delta footers)
+columnar scan (never literal O(page) — the repeat click is the O(1)
+handoff); the ONE behavior-visible class is corrupt-lake-only — a corrupt
+file provably OUTSIDE a bounded read's candidates no longer blanks it (a
+strictly-narrower degrade, named in #1719). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+healthy-lake payloads byte-identical (fast-equals-legacy pinned);
+`db_view.py` + `preopen_report.py` 100% line+branch on their ci.yml gates;
+the per-fix record lives in the §1 Active-branch blurb + MIGRATION.md
+#1719 — this header carries the one-line summary, never the story).
 Earlier: 2026-07-08 (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 —
 an explicit `/movers` bucket-anchor TIME pick now resolves to the COMPLETED bucket
 (broker-matching close) instead of a PARTIAL forming bucket. The TIME dropdown on a
@@ -2293,6 +2320,49 @@ hostile-review pass._
   the `log_file=` plumbing stays unwired at cmd_sweep_all (process-start file-routing needed; the
   material events are already a run_id log on the internal disk via the mirrored flight recorder;
   follow-up DEC-SWEEP-RUN-LOG-FILE-001).
+  Earlier: `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
+  the DB/query-latency hardening pack, READ-side only, three evidence-driven fixes off the 2026-07-11
+  profiling run (a 1,178-file real-writer lake, 400k-row ledger + 5 deltas, real routes via
+  `build_app` + `TestClient`): **(1)** the `/db` window-ledger pager — NEW
+  `db_view.query_window_ledger_page`, a DuckDB LIMIT/OFFSET projection over the SAME #1533
+  delta-folded `_ledger_scan_source` the `/coverage/windows` fast paths scan, total from ONE
+  stamp-memoised COUNT(*) (the NEW `wledger-*` key families on the injected window-payload caches);
+  measured 7,321–8,778 ms cold at 400k rows → 564.8 ms (the 7,177 ms O(rows) Python record fold per
+  stamp is GONE); a legacy-shape base / a NULL in a legacy-DERIVABLE cell / a persistent
+  `duckdb.Error` (torn-read retry-once first) / `conn=None` each degrade to the byte-identical
+  legacy cached parse (`window_ledger_rows_cached`, byte-untouched — the fenced #1533 cache
+  families were NOT restructured); **(2)** the pre-open exports — both routes memoise
+  `build_preopen_rows` on the NEW dedicated `_preopen_rows_cache` keyed
+  `(basis, [from, to], symbols-filter)` at `_summary_cache.generation` (repeat click 326–574 ms /
+  206 DuckDB statements binding 616 files → 4.2–18.6 ms / 0 statements, bytes identical; the `.zip`
+  shares the `.xlsx`'s coordinate) + the IEP (open) readers gain an additive `span=` binding only
+  the report span's month files via NEW `_existing_month_files_in_span` (±1-day pad law, domain
+  saturation, non-grammar strays conservatively kept) through `_execute_parquet_resilient`'s NEW
+  bounded `files=` arm — the CLOSE maps deliberately stay whole-partition (the #1649a contiguity
+  guards' `found=nearest_lake_session` diagnostics + the calendar back-walk depth need the
+  unbounded view); the #1649a pre-fix goldens pass UNMODIFIED; **(3)** the `/db` candles %CHNG
+  baseline — `_intraday_last_close_with_predecessor`'s two reads bind explicit file lists, so a
+  page click binds 2 baseline files instead of 72 (warm p50 30.7 → 21.1 ms; the residual is the
+  #1614 manifest revalidation sweep, out of scope). FIX-3 MECHANISM SUPERSEDED at the 2026-07-11
+  merge-reconcile (main 652301b5, PR #1386): main's DEC-DB-BASELINE-MANIFEST-ROUTE-001 (#1670)
+  landed the SAME footer-open fix in-flight with a richer mechanism (`_bars_file_windows` —
+  manifest-exact per-file bounds + month-grammar fallback + predecessor step-back, ALSO covering
+  the moneyness spot join) — the merged tree serves #1670's mechanism, this pack's interim
+  `_predecessor_candidate_files` helper was DELETED at the reconcile, and this pack's
+  behavior-level pins + bench re-ran GREEN over it unchanged; the bounded-`files=` resilient-read
+  arm CONVERGED with #1670/#1668's (main's kwarg + two-stage probe + readable-subset latch
+  adopted); fixes 1 + 2 untouched, `_existing_month_files_in_span` stays (the fix-2 consumer). SANCTIONED (corrupt lakes
+  only): a corrupt file provably OUTSIDE a bounded read's candidates no longer blanks that read —
+  correct-or-absent preserved, blast radius strictly narrower; a corrupt CANDIDATE still blanks
+  (both directions pinned). The D3 route spy tightened 1 → 0 Python parses (byte-parity half
+  unmodified). HONEST: the window-ledger fresh-stamp click is ONE O(total rows + delta footers)
+  columnar scan, never literal O(page); the export render stays O(report rows) per click; candidate
+  enumeration is an O(existing files) listing. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; no new required wire fields; `db_view.py` +
+  `preopen_report.py` 100% line+branch on their ci.yml gates (two new unit files joined the db_view
+  gate); ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline;
+  fast-equals-legacy + bounded-equals-unbounded parity pinned exhaustively; benches
+  `test_db_window_ledger_page_o1.py` + `test_db_candles_baseline_bound_o1.py`.)
   Earlier: `claude/movers-bucket-asof-fix` (**DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001,
   MIGRATION.md #1601** — an explicit `/movers` bucket-anchor TIME pick now resolves to the
   COMPLETED bucket (broker-matching close) instead of a PARTIAL forming bucket. The TIME
@@ -5561,6 +5631,15 @@ hostile-review pass._
   (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1712 — the UNKILLABLE sweep
   run core, Phase 2 of the one-click sweep program; see §1 Active branch for
   the full blurb)
+  Earlier: `claude/db-latency-hardening`
+  (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 — the DB/query-latency
+  hardening pack, READ-side only: the /db window-ledger DuckDB page fast path
+  (7.3–8.8 s cold at 400k rows → 0.56 s, zero Python parses), the pre-open
+  export rows memo (repeat click 206 DuckDB statements → 0, bytes identical)
+  + span-bounded IEP reads, and the /db candles %CHNG baseline file bound
+  (72 files bound twice per click → 2); healthy-lake payloads byte-identical;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1719 for the full blurb)
   Earlier: `claude/movers-bucket-asof-fix`
   (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 — an explicit `/movers`
   bucket-anchor TIME pick resolves to the COMPLETED bucket (broker-matching close)
