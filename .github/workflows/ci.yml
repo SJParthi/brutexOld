@@ -1234,8 +1234,9 @@ jobs:
           fi
           # 19i1a2 · brutex.engine.rust_enum — the flag-gated Rust sweep-enum
           # kernel seam (DEC-SWEEP-ENUM-RUST-001 #1738, default-OFF behind
-          # BRUTEX_SWEEP_RUST_ENUM; 151 stmts, 66 branches measured at the
-          # slice-1 head). 100% line+branch from the dedicated unit suite (the
+          # BRUTEX_SWEEP_RUST_ENUM; no size figure here on purpose — the
+          # gate enforces 100%, counts drift). 100% line+branch from the
+          # dedicated unit suite (the
           # byte-identical-leaderboard parity gate lives in
           # tests/golden/test_engine_rust_enum_parity.py).
           if compgen -G "tests/unit/test_engine_rust_enum.py" > /dev/null; then

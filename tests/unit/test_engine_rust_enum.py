@@ -11,6 +11,7 @@ surgical fakes where the branch is a defence the real kernel cannot trip.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -876,3 +877,26 @@ class TestWorkflowWiring:
     def test_rust_kernel_in_the_cargo_mutants_scope(self) -> None:
         toml = (self._ROOT / "rust/fno-math/.cargo/mutants.toml").read_text(encoding="utf-8")
         assert "src/enum_kernel.rs" in toml
+
+    def test_twin_run_dispatch_inputs_are_consumed(self) -> None:
+        """Round-1 review MINOR: every declared workflow_dispatch input must be
+        wired into the job — a dead input silently ignores the operator's
+        window override on the real-lake byte-identity merge gate.
+        """
+        wf = (self._ROOT / ".github/workflows/rust-enum-twin-run.yml").read_text(encoding="utf-8")
+        declared = re.findall(r"^      (\w+):\s*$", wf, flags=re.MULTILINE)
+        assert set(declared) >= {"twin_start", "twin_end"}
+        for name in declared:
+            assert f"${{{{ inputs.{name} }}}}" in wf, f"dispatch input {name!r} is never consumed"
+        # ...and they must land on the exact env names the script's own
+        # ${TWIN_*:-default} readers consume (rust_enum_twin_run.sh).
+        assert "TWIN_START: ${{ inputs.twin_start }}" in wf
+        assert "TWIN_END: ${{ inputs.twin_end }}" in wf
+
+    def test_coverage_gate_comment_carries_no_stale_size_figure(self) -> None:
+        """Round-1 review NIT: the pre-rework '151 stmts, 66 branches' figure
+        must never return — the gate enforces ``--cov-fail-under=100``; a
+        frozen size count in a comment only drifts.
+        """
+        ci = (self._ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        assert "151 stmts, 66 branches" not in ci

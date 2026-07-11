@@ -62,6 +62,12 @@ jobs:
           pip install ./rust/fno-math
 
       - name: Twin-run (both arms, byte compare)
+        # The dispatch inputs feed the script's own TWIN_START/TWIN_END env
+        # readers (rust_enum_twin_run.sh uses ${TWIN_*:-default}, so an empty
+        # value still falls back to the same defaults the inputs declare).
+        env:
+          TWIN_START: ${{ inputs.twin_start }}
+          TWIN_END: ${{ inputs.twin_end }}
         run: |
           . .venv/bin/activate
           bash scripts/ci/rust_enum_twin_run.sh "$BRUTEX_LAKE_ROOT" 2>&1 | tee twin_run_output.txt
