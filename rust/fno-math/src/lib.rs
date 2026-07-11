@@ -72,6 +72,15 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+// --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+/// Options/futures execution integer cores: money-law primitives, R15 fill
+/// laws, both charge stacks, and the post-I/O materialize verdict tails —
+/// exact-integer twins of the Python oracles in `brutex.costs` / the two
+/// executors; rates cross the FFI as ARGUMENTS (Python stays the sole
+/// rate/refusal authority).
+pub mod exec;
+// --- end exec (slice 7 / P8) ---
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
