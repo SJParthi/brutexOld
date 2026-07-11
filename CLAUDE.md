@@ -18,7 +18,24 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
+_Last updated: 2026-07-11 (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md #1758
+(renumbered #1724 → #1758 to the drain-steward reservation), branch
+`claude/dedup-gate-provenance-serving` — gate-scoped `/results` serving + the row/store
+gate-provenance carrier: `ResultRow.gate_provenance` (the Ruling-5 optional-column law —
+every ungated store's bytes stay byte-identical; a 0-row gated store stays
+schema-discoverable), gate-aware `(gate_coordinate, run_id)` cross-store dedup (a gated
+re-run's finalists — and its honest EMPTY set — are never first-wins-collapsed under
+stale ungated rows), the |K|-based coexistence folding rule + payload contract cases
+1/2/3, `?gate=` on `/api/v1/sweep/leaderboard` (unknown token = clean 400) + 4 additive
+payload keys + the results.html gate column/dropdown; fix round: the refuter-SURVIVED d1
+L2 cache-key INJECTION closed structurally — every user-controlled key leg
+percent-encoded (`quote`, safe='') AND `rank_by` keyed by its RESOLVED column via the
+NEW public `resolve_rank_by_param`, so a must-400 request can never alias a cached 200
+(regression + gate∘preset∘filter composition + 0-row fold-boundary pins added). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the
+frozen `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass
+UNMODIFIED; touched modules 100% line+branch.)
+Earlier: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
 ONE coordinator-confirmed fold of five member PRs in binding order: **#1330
 DEC-SWEEP-UNKILLABLE-CORE-001** (MIGRATION.md #1712 / ADR-0019 — the UNKILLABLE sweep run
 core; its single-flight mechanism `engine/sweep_singleflight.py` is the train-WINNING
@@ -2265,7 +2282,26 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
+- **Active branch:** `claude/dedup-gate-provenance-serving` (**DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+  MIGRATION.md #1758** (renumbered #1724 → #1758 to the drain-steward reservation) — gate-scoped
+  `/results` serving + the row/store gate-provenance carrier: the dedup audit's residual arms after
+  #1715 re-keyed the store ADDRESS per gate config — `ResultRow.gate_provenance` (Ruling-5 optional
+  column; ungated stores byte-identical, a 0-row gated store schema-discoverable), gate-aware
+  `(gate_coordinate, run_id)` cross-store dedup (arm-1: a gated re-run's row is never
+  first-wins-collapsed under its stale ungated twin; arm-2: a zero-survivor gated re-run honestly
+  serves the EMPTY set, never the stale ungated rows), the |K|-based coexistence folding rule +
+  payload contract cases 1/2/3, `?gate=` on `/api/v1/sweep/leaderboard` (unknown token = clean 400)
+  + 4 additive payload keys + the results.html gate column/dropdown. FIX ROUND (protocol round 1):
+  the refuter-SURVIVED d1 L2 cache-key INJECTION closed structurally — every user-controlled key
+  leg percent-encoded (`quote`, safe='') so `|`/`=` can never forge another request's key legs, AND
+  `rank_by` enters the key as its RESOLVED effective column (NEW public
+  `sweep_results_view.resolve_rank_by_param`, ONE source of truth with the rank-time fall-back) —
+  a must-400 request can never alias a cached 200; regression + gate∘preset∘filter composition +
+  the 0-row token-unrecoverable fold-boundary pins added. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the frozen
+  `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass UNMODIFIED; touched
+  modules 100% line+branch.)
+  Earlier: `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
   coordinator-confirmed fold, in binding order, of #1330 DEC-SWEEP-UNKILLABLE-CORE-001
   (MIGRATION.md #1712 / ADR-0019; its single-flight mechanism WINS all competing variants) →
   #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1714) → #1336
@@ -5685,7 +5721,14 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/t1-sweep-core`
+- **Active feature branch:** `claude/dedup-gate-provenance-serving`
+  (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md #1758 (renumbered
+  #1724 → #1758 to the drain-steward reservation) — gate-scoped `/results`
+  serving + the row/store gate-provenance carrier + the d1 L2 cache-key
+  injection fix (percent-encoded key legs + the RESOLVED `rank_by` leg via
+  the NEW public `resolve_rank_by_param`); see §1 Active branch for the full
+  blurb; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `integration/t1-sweep-core`
   (T1 SWEEP-CORE integration train — folds #1330 DEC-SWEEP-UNKILLABLE-CORE-001 (#1712) +
   #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1714) + #1336
   DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 (#1715) + #1350
