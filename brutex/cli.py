@@ -6491,7 +6491,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.observability.power_keepawake import keep_awake
 
     with keep_awake("brutex sweep-all"):
-
         # ADR-0012 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): resolve the NIFTY-futures
         # series alias ONCE up front — vendor lake dirs → per-contract ownership
         # windows + the ONE roll schedule every consumer below shares (loader cut,
@@ -6521,7 +6520,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     start=start_dt.astimezone(IST).date(),
                     end=end_dt.astimezone(IST).date(),
                 )
-                roll_schedule_by_instrument = dict.fromkeys(futures_symbols, resolution.roll_schedule)
+                roll_schedule_by_instrument = dict.fromkeys(
+                    futures_symbols, resolution.roll_schedule
+                )
 
             # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is
             # a real content fingerprint and each tuple reuses the cached bars (no
@@ -6995,7 +6996,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                                 "indicator_version": grid.indicator_version,
                                 "code_commit_sha": grid.code_commit_sha,
                                 "params": {
-                                    "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
+                                    "roll_schedule": list(
+                                        roll_schedule_by_instrument[fut_instrument]
+                                    )
                                 },
                             },
                         )
@@ -7210,7 +7213,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     sweep_id=sweep_id,
                     specs=cascade_specs,
                     bars_for=_bars_for,
-                    bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
+                    bars_context=BarsContext(
+                        exchange=exchange, segment=segment, start=start, end=end
+                    ),
                     cascade_config=cascade_config_for_sweep(sweep_id),
                     stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                     leaderboard_trials=leaderboard_trials,
