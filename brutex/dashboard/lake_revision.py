@@ -133,6 +133,14 @@ _GREEKS_REVISION_FILENAME: Final[str] = "revision.json"
 #: a lean stdlib-only probe surface).
 _SWEEP_AUDIT_RELPATH: Final[tuple[str, str]] = ("audit", "sweep-all.jsonl")
 
+#: The ``<sweeps>``-relative path of the Stage-4 cascade report
+#: (DEC-RESULTS-CASCADE-VERDICT-JOIN-001). MUST equal
+#: ``cascade_wire.report_path(<sweeps>)`` — i.e. ``CASCADE_DIRNAME`` /
+#: ``REPORT_FILENAME`` — pinned by test, not imported (the
+#: :data:`_SWEEPS_DIRNAME` precedent: the engine wire module pulls the
+#: metrics/numpy import graph; this probe stays lean stdlib-only).
+_CASCADE_REPORT_RELPATH: Final[tuple[str, str]] = ("cascade", "cascade-report.json")
+
 
 def _stat_token(target: Path, *, event: str, include_ino: bool = False) -> str | None:
     """One path's ``"<mtime_ns>:<size>"`` stat token — the shared O(1) probe core.
@@ -301,6 +309,32 @@ def sweep_results_revision(lake_root: Path) -> str | None:
     return f"{dirs}|{chain}"
 
 
+def cascade_report_revision(lake_root: Path) -> str | None:
+    """Return the Stage-4 cascade report's stat content token, or ``None``.
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001: one ``os.stat`` of
+    ``<lake_root>/sweeps/cascade/cascade-report.json``
+    (:data:`_CASCADE_REPORT_RELPATH`) folded to ``"<mtime_ns>:<size>"``.
+    A DEDICATED file token is needed because the report is atomically
+    OVERWRITTEN in place each sweep (``cascade_wire.write_report`` —
+    tmp → ``os.replace``): the rewrite moves NO directory mtime that
+    :func:`sweeps_revision` digests, so without this probe a ``/results``
+    poll could serve verdicts from the PREVIOUS sweep's report forever
+    (the ``sweep_results_revision`` audit-stat precedent).
+
+    Inherited :func:`_stat_token` semantics verbatim: a missing file → the
+    stable :data:`ABSENT_TOKEN` (its first-ever creation moves the token
+    exactly once); ``None`` — "unknown, no signal" — on any other
+    :class:`OSError`, logged (``lake_revision.cascade_report_stat_failed``).
+    The caller folds ``None`` as a probe OUTAGE (the served payload holds —
+    bounded staleness, never a fake flip).
+    """
+    return _stat_token(
+        lake_root.joinpath(_SWEEPS_DIRNAME, *_CASCADE_REPORT_RELPATH),
+        event="lake_revision.cascade_report_stat_failed",
+    )
+
+
 def rate_bridge_revision(lake_root: Path) -> str | None:
     """Return the CLI rate-bridge file's stat content token, or ``None``.
 
@@ -409,6 +443,7 @@ def lake_revision(lake_root: Path) -> str | None:
 
 __all__ = [
     "ABSENT_TOKEN",
+    "cascade_report_revision",
     "lake_revision",
     "rate_bridge_revision",
     "sweep_results_revision",
