@@ -19,6 +19,7 @@ from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_pull import (
     MAX_QUARANTINED_NAMES,
+    PHASE_MARKET_HOURS,
     PHASE_METADATA,
     PHASE_PREBUILD,
     PHASE_SPOT,
@@ -360,6 +361,154 @@ class _PrebuildSpy:
         self.called = True
         self.exclude_symbols = exclude_symbols
         return self.value
+
+
+def test_pipeline_defers_whole_chain_inside_market_hours() -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001: an active guard skips the ENTIRE vendor chain."""
+    spot = _Spy(_spot())
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+    prebuild = _PrebuildSpy(_outcome())
+
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        run_prebuild=prebuild,
+        market_closed=lambda: True,
+    )
+
+    assert report.stopped_after == PHASE_MARKET_HOURS
+    assert report.spot is None
+    assert report.metadata is None
+    assert report.historical is None
+    assert report.ok is False
+    # NO phase ran — not even spot; and the non-vendor prebuild is skipped too.
+    assert spot.called is False
+    assert meta.called is False
+    assert hist.called is False
+    assert prebuild.called is False
+    assert "market-hours" in report.note.lower()
+
+
+def test_pipeline_market_closed_false_runs_normally() -> None:
+    """market_closed returning False (guard inactive) → the pipeline runs as before."""
+    spot = _Spy(_spot())
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        market_closed=lambda: False,
+    )
+
+    assert report.stopped_after is None
+    assert spot.called is True
+
+
+def test_pipeline_skips_metadata_when_belt_closes_after_spot() -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-2: a belt that CLOSES between the spot
+    and metadata phases skips metadata + historical — spot's committed work is kept.
+
+    The nightly pull started off-hours (belt open at the pre-spot check), spot ran to
+    completion, and by the time the sequencer re-checks the belt BEFORE metadata the
+    clock has crossed 08:45 — so no metadata/historical vendor calls fire.
+    """
+    calls = {"n": 0}
+
+    def _belt() -> bool:
+        # False before spot (call 1), True before metadata (call 2+) — the clock
+        # crossed 08:45 during the spot phase.
+        calls["n"] += 1
+        return calls["n"] >= 2
+
+    spot = _Spy(_spot())
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        market_closed=_belt,
+    )
+
+    assert report.stopped_after == PHASE_MARKET_HOURS
+    assert report.spot is not None  # spot's committed work is kept
+    assert report.metadata is None
+    assert report.historical is None
+    assert report.ok is False
+    assert spot.called is True
+    assert meta.called is False  # the metadata vendor phase never fired
+    assert hist.called is False
+    assert "market-hours" in report.note.lower()
+
+
+def test_pipeline_skips_historical_when_belt_closes_after_metadata() -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-2: a belt that CLOSES between the metadata
+    and historical phases skips the F&O historical vendor phase — spot + metadata kept."""
+    calls = {"n": 0}
+
+    def _belt() -> bool:
+        # False before spot (1) and before metadata (2); True before historical (3).
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    spot = _Spy(_spot())
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        market_closed=_belt,
+    )
+
+    assert report.stopped_after == PHASE_MARKET_HOURS
+    assert report.spot is not None
+    assert report.metadata is not None  # metadata's committed work is kept
+    assert report.historical is None
+    assert report.ok is False
+    assert spot.called is True
+    assert meta.called is True
+    assert hist.called is False  # the F&O historical vendor phase never fired
+    assert "market-hours" in report.note.lower()
+
+
+def test_pipeline_halts_when_metadata_phase_crosses_market_hours() -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-2: a metadata phase whose clock CROSSES
+    08:45 mid-phase halts — its per-cell belt raises MarketHoursHalt, re-raised by
+    run_two_phase, and the sequencer catches it, keeping spot's work + resuming later.
+
+    The belt reads OPEN at every between-phase check (it opened AFTER those reads),
+    so only the metadata phase's own per-cell guard can stop it — modelled here by a
+    run_metadata that raises :class:`MarketHoursHalt`.
+    """
+    from brutex.data.errors import MarketHoursHalt
+
+    def _metadata_that_crosses() -> MetadataPullReport:
+        raise MarketHoursHalt()
+
+    spot = _Spy(_spot())
+    hist = _Spy(_composite(historical=_historical_inner()))
+
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=_metadata_that_crosses,
+        run_historical=hist,
+        market_closed=lambda: False,  # every between-phase check reads OPEN
+    )
+
+    assert report.stopped_after == PHASE_MARKET_HOURS
+    assert report.spot is not None  # spot's committed work is kept
+    assert report.metadata is None
+    assert report.historical is None
+    assert report.ok is False
+    assert hist.called is False  # the historical vendor phase never fired
+    assert "market-hours" in report.note.lower()
 
 
 def test_pipeline_stops_after_spot_failure() -> None:
@@ -1917,3 +2066,69 @@ class TestStrictGateSequencer:
             assert report.post_steps_strict_skipped is False
             assert "post-steps SKIPPED" not in report.note
         assert f"quarantined: {quarantined_name}" in report.note  # headlined either way
+
+
+# --------------------------------------------------------------------------- #
+# DEC-LEDGER-LOAD-SPACE-V1-001 — one ledger load per pipeline run
+# --------------------------------------------------------------------------- #
+
+
+class TestSharedLedgerScopeInPipeline:
+    """The fails-before pin: 2 full ledger loads per pipeline run → 1.
+
+    `run_full_pipeline` wraps the fetch phases in ONE
+    `shared_pull_ledger_scope`, so the spot phase's whole-ledger
+    materialisation is REUSED by the historical phase (pre-fix: each phase's
+    `begin_pull_ledger` re-loaded the full O(rows) ledger — two loads + two
+    co-resident copies). The scope closes BEFORE the post-steps, so the
+    prebuild sees a fresh (un-shared) begin — the lifetime-tightness pin.
+    """
+
+    def test_one_ledger_load_per_pipeline_run(
+        self, tmp_path: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pathlib import Path
+
+        import brutex.data.window_ledger_store as wls
+
+        lake = Path(str(tmp_path))
+        real = wls.load_or_migrate_window_ledger
+        loads: list[Path] = []
+
+        def _spy(lake_root: Path, **kwargs: object) -> object:
+            loads.append(lake_root)
+            return real(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(wls, "load_or_migrate_window_ledger", _spy)
+
+        phase_ledgers: list[object] = []
+        post_ledgers: list[object] = []
+
+        def run_spot() -> BulkSpotReport:
+            # The spot phase's own begin (what pull_all_spot does internally).
+            phase_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _spot()
+
+        def run_historical(prior: PriorStepsVerdict) -> CompositePullReport:
+            # The historical phase's own begin (what _run_phase does internally).
+            phase_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _composite(historical=_historical_inner())
+
+        def run_prebuild(_excluded: frozenset[str]) -> PrebuildOutcome:
+            # A post-step begin — must be OUTSIDE the scope (fresh load).
+            post_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _outcome()
+
+        report = run_full_pipeline(
+            run_spot=run_spot,
+            run_metadata=_metadata,
+            run_historical=run_historical,
+            run_prebuild=run_prebuild,
+        )
+        assert report.stopped_after is None
+        # ONE shared instance across the two fetch phases (pre-fix: distinct).
+        assert phase_ledgers[0] is phase_ledgers[1]
+        # ONE load for both phases + ONE fresh post-step load (the scope closed
+        # before the prebuild — the ledger is released, not held through it).
+        assert len(loads) == 2
+        assert post_ledgers[0] is not phase_ledgers[0]

@@ -114,9 +114,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -144,7 +144,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install pinned actionlint
         env:
           AL_VERSION: "1.7.7"
@@ -169,9 +169,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -191,7 +191,7 @@ jobs:
         # DEC-P0-050: required by pyright's strict mode which walks
         # `tests/unit/test_fno_math_bridge.py` and needs the module
         # actually importable.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -322,7 +322,7 @@ jobs:
     # only — no gate is weakened.
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
           # coverage gate can diff the PR against origin/main (the merge
@@ -330,7 +330,7 @@ jobs:
           # has no base to diff against.
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -354,7 +354,7 @@ jobs:
         # maturin (PEP 517) at install time. ubuntu-24.04's pre-installed
         # Rust may be older than the crate's `rust-version = "1.93.1"`
         # floor, so install stable explicitly.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # `pip install` triggers maturin (declared in
         # rust/fno-math/pyproject.toml's [build-system] requires) to
@@ -477,6 +477,16 @@ jobs:
               tests/unit/test_engine_*.py
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
+          fi
+          # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1671): the
+          # rank-budget worker-divisor wiring — a dedicated per-module pin at
+          # 100% line+branch over its two suites (the module also rides the
+          # whole-engine glob gate above; this line keeps the divisor seam's
+          # coverage visible on its own).
+          if compgen -G "tests/unit/test_engine_sweep_mem_budget_workers.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_mem_budget --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_mem_budget.py tests/unit/test_engine_sweep_mem_budget_workers.py
+          else
+            echo "(sweep_mem_budget worker-divisor test file not present yet — gate inactive)"
           fi
           # DEC-AUDIT-VERIFY-UNIFY-001 (MIGRATION.md #560): the unified
           # audit-chain verifier (auto-detect SHA-256 ingest vs BLAKE3
@@ -1610,6 +1620,16 @@ jobs:
           else
             echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
           fi
+          # DEC-WRITE-DEADLINE-ZOMBIE-SLIM-001 (MIGRATION.md #1672): strict gate
+          # on the durable-write freeze guard (append_with_deadline one-shot pop
+          # handoff + lock-order inversion WARN + env resolver). Injectable sink
+          # fakes, so standalone-gateable with no growwapi/network. 100%
+          # line+branch over the three suites.
+          if compgen -G "tests/unit/test_groww_write_deadline_zombie.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.write_deadline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_write_deadline.py tests/unit/test_write_deadline_lock_order.py tests/unit/test_groww_write_deadline_zombie.py
+          else
+            echo "(write_deadline zombie test file not present yet — gate inactive)"
+          fi
           # DEC-FORM-WINNER-PERSIST-001: strict gates on the durable &-underlying
           # form-winner map (symbol_form_preference — probe-evidence fold +
           # schema_meta persist/load) and the ONE shared schema_meta key/value
@@ -2046,8 +2066,30 @@ jobs:
           # log) is covered by
           # tests/unit/test_dashboard_db_candles_torn_read_retry.py, which
           # MUST also join this gate.
+          # DEC-ALIEN-SCHEMA-READ-HEAL-001: the schema-aware per-file probe
+          # (alien-schema skip + the union-conflict empty-degrade residue) is
+          # covered by tests/unit/test_dashboard_db_alien_schema.py, which
+          # MUST also join this gate.
+          # DEC-WINDOWS-STAT-GUARD-LATCH-001: the OSError-classed ledger stat
+          # guard + the readable-subset per-click latch are covered by
+          # tests/unit/test_dashboard_db_ledger_stat_guard.py, which MUST
+          # also join this gate.
+          # DEC-DB-BASELINE-MANIFEST-ROUTE-001: the %-baseline file pruning
+          # (manifest/month-grammar routing + the parity pins) is covered by
+          # tests/unit/test_dashboard_db_baseline_manifest.py, which MUST
+          # also join this gate.
+          # DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md #1719): the /db
+          # window-ledger DuckDB page fast path (query_window_ledger_page —
+          # the fast-equals-legacy parity, the legacy-shape/NULL-cell/
+          # torn-read/conn-None degrade arms, the wledger-* memo families)
+          # is covered by
+          # tests/unit/test_dashboard_db_view_window_ledger_page.py, and the
+          # span-bounded IEP reads (_existing_month_files_in_span + the
+          # _execute_parquet_resilient `files` arm + the span kwargs) by
+          # tests/unit/test_dashboard_db_span_bounded_reads.py — BOTH MUST
+          # join this gate.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py tests/unit/test_dashboard_db_baseline_manifest.py tests/unit/test_dashboard_db_view_window_ledger_page.py tests/unit/test_dashboard_db_span_bounded_reads.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
@@ -2210,6 +2252,15 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_artifacts test file not present yet — gate inactive)"
           fi
+          # DEC-CACHE-SERVE-LAST-KNOWN-001 (MIGRATION.md #1666): the COMMON
+          # keyed cache (`MoversSnapshotCache`) gains the serve-last-known
+          # probe-outage mode + the mru_prefix bookkeeping — the module ships
+          # at 100% line+branch under its two dedicated unit suites.
+          if compgen -G "tests/unit/test_movers_cache.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.movers_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_cache.py tests/unit/test_movers_cache_serve_last_known.py
+          else
+            echo "(brutex.dashboard.movers_cache test file not present yet — gate inactive)"
+          fi
           # DEC-OPERATOR-PAGE-REAL-001 (MIGRATION.md #1561): the pure oneclick
           # payload builders — run pill / chain map / funnel reconcile / the
           # R44 5-state verify truth table (no I/O, no FastAPI). 100%
@@ -2309,7 +2360,7 @@ jobs:
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-xml
           path: coverage.xml
@@ -2337,9 +2388,9 @@ jobs:
     # silent merge-green escape hatch (pinned by the discipline test).
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2355,7 +2406,7 @@ jobs:
         # engine.combo_mask → fno_math), so the browser job needs the same
         # wheel builds as the test job — verified by a real import probe
         # during the design round, NOT assumed.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -2404,7 +2455,7 @@ jobs:
         # Keyed on the RESOLVED installed playwright version (not the range
         # pin in pyproject) so a playwright upgrade invalidates the cache
         # exactly when the pinned Chromium build changes.
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/ms-playwright
           key: pw-chromium-${{ runner.os }}-${{ steps.pwver.outputs.version }}
@@ -2420,7 +2471,7 @@ jobs:
         run: pytest tests/browser -q
       - name: Upload failure artifacts (traces + screenshots + ledgers)
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: browser-failure-artifacts
           path: test-artifacts/browser/
@@ -2435,9 +2486,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2447,7 +2498,7 @@ jobs:
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load time. Every Python job that imports any
         # brutex.orchestrator.* module must install the Rust extension.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -2519,11 +2570,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0   # DEC-BENCH-ABS-BASELINE-001: baseline governance diffs vs base
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2553,7 +2604,7 @@ jobs:
         run: pip install -e ".[dev,data]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -2607,7 +2658,7 @@ jobs:
           fi
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bench-results
           path: bench-results.json
@@ -2622,9 +2673,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2637,7 +2688,7 @@ jobs:
         run: pip install -e ".[dev,data]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -2689,9 +2740,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2745,9 +2796,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2778,9 +2829,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2808,14 +2859,14 @@ jobs:
       run:
         working-directory: rust/fno-math
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt,clippy
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust/fno-math -> target
       - name: cargo fmt --check
@@ -2838,14 +2889,14 @@ jobs:
       run:
         working-directory: rust/trading-core
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt,clippy
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust/trading-core -> target
       - name: cargo fmt --check
@@ -2871,7 +2922,7 @@ jobs:
       # parity check against the same golden oracle. Isolated here (not the main
       # Python test job) so a wheel-build issue can't destabilise that pipeline.
       - name: Set up Python (binding parity check)
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build wheel + verify the Python binding is bit-identical (Phase 2a)
@@ -2922,14 +2973,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install Rust toolchain (for the kernels)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       # CRITICAL: install ONLY what `make run` installs — `.[data,ui]`,
@@ -3007,9 +3058,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3018,7 +3069,7 @@ jobs:
       - name: Install Rust toolchain (for fno_math wheel)
         # brutex.orchestrator.__init__ transitively imports brutex.orchestrator.bloom,
         # which needs the Rust-backed fno_math extension (mirrors stress-nightly).
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Install fno_math Rust extension
@@ -3071,7 +3122,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Run scanner
         run: bash scripts/ci/scan-banned-patterns.sh
 
@@ -3093,7 +3144,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Validate MIGRATION.md ledger numbering
         # MIGRATION.md entry numbers stay machine-checked unique — the
         # parallel-session collision era (30 groups reconciled 2026-06-10)
@@ -3114,7 +3165,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Run no-dhan guard
         run: bash scripts/ci/no-dhan-guard.sh
 
@@ -3127,7 +3178,7 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
       - name: Check commit messages
@@ -3145,7 +3196,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
       - name: Install gitleaks
@@ -3187,13 +3238,13 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: github/codeql-action/init@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
         with:
           languages: python
           queries: security-extended,security-and-quality
           config-file: ./.github/codeql/codeql-config.yml
-      - uses: github/codeql-action/analyze@v4
+      - uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
         with:
           category: "/language:python"
 
@@ -3207,7 +3258,7 @@ jobs:
     container:
       image: semgrep/semgrep:latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: semgrep scan
         # Use `semgrep scan` (not `semgrep ci`) so we don't need a
         # SEMGREP_APP_TOKEN — public rulesets are pulled from the
@@ -3231,9 +3282,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -3243,7 +3294,7 @@ jobs:
           output: 'trivy-results.sarif'
       - name: Upload SARIF
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: trivy-results
           path: trivy-results.sarif
@@ -3257,9 +3308,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3273,7 +3324,7 @@ jobs:
           cyclonedx-py environment --output-file sbom-python.json
       - name: Upload SBOM
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: sbom
           path: sbom-python.json
@@ -3287,9 +3338,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: typos
-        uses: crate-ci/typos@v1.48.0
+        uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.48.0
         continue-on-error: true  # report but don't block
       - name: codespell
         run: |
@@ -3306,9 +3357,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3336,9 +3387,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3360,8 +3411,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '22'
       - name: Install jscpd
@@ -3412,9 +3463,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3423,7 +3474,7 @@ jobs:
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load; mutmut runs pytest which imports orchestrator.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -3595,7 +3646,7 @@ jobs:
 
       - name: Upload mutmut results XML for analysis
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: mutmut-results-xml
           path: mutmut-results.xml
@@ -3631,7 +3682,7 @@ jobs:
     timeout-minutes: 3
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Detect PR author
         id: pr-meta
         env:
@@ -3669,7 +3720,7 @@ jobs:
       && github.event.pull_request.state != 'closed'
       && github.event.pull_request.merged != true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Detect PR author
         id: pr-meta
         env:
@@ -3709,11 +3760,11 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0  # need history to diff against base (appropriateness check)
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Validate DEC-IDs cited in PR body against MIGRATION.md
@@ -3744,11 +3795,11 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0  # need history to diff against base
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan bug-fix PR for regression test
@@ -3777,18 +3828,18 @@ jobs:
     timeout-minutes: 20
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0  # need history for merge-base against the PR base
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev,data,ui,optimize]"
       - name: Install Rust toolchain (for fno_math + trading_core wheels)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (see mutation-py job).
         run: |
@@ -3830,9 +3881,9 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan PR body for uncited external-system claims
@@ -3859,9 +3910,9 @@ jobs:
     # job scans TRACKED docs (not the PR body), so it runs on push AND PR and
     # is never legitimately skipped (safe under the ci-ok skipped==pass loop).
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Validate file:line + MIGRATION.md citations in the normative docs
@@ -3883,28 +3934,28 @@ jobs:
     steps:
       - name: Download coverage artifact
         if: always()
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: coverage-xml
           path: proof/coverage/
         continue-on-error: true
       - name: Download benchmark artifact
         if: always()
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: bench-results
           path: proof/bench/
         continue-on-error: true
       - name: Download Trivy artifact
         if: always()
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: trivy-results
           path: proof/trivy/
         continue-on-error: true
       - name: Download SBOM artifact
         if: always()
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: sbom
           path: proof/sbom/
@@ -3948,7 +3999,7 @@ jobs:
           find proof -type f -print
       - name: Upload proof bundle
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: proof-bundle
           path: proof/
