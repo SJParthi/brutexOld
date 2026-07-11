@@ -457,6 +457,52 @@ class TestBatchParityHostileMatrix:
         inside_status = unpack_greeks_provenance(bars_on[0].greeks_provenance_id or 0).status
         assert inside_status == STATUS_BELOW_INTRINSIC
 
+    def test_subnormal_close_routes_invalid_input_through_the_actual_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An `invalid_input` element through the REAL batch dispatch (refuter
+        round-4B gap): a SUBNORMAL close (1e-310) on an OTM contract passes
+        every screen (finite Decimal, > 0, floor == 0 so the band admits it)
+        and only the KERNEL rejects it — `check_positive_normal` — so the ON
+        arm's BAD_INPUT genuinely travels the batch `(None, "invalid_input:…")`
+        element, never the pre-dispatch screens. OFF ≡ ON bit/status/counter
+        equality AND a spy proves the batch was engaged for BOTH rows."""
+        parts = _parts("NSE-NIFTY-25Jan24-22000-CE")  # OTM: no-arb floor == 0
+        ts2 = _BAR_TS + timedelta(minutes=1)
+        rows = [
+            _row(_BAR_TS, close=1e-310),  # subnormal — kernel invalid_input
+            _row(ts2, close=180.0, low=175.0, high=185.0),  # solvable sibling
+        ]
+        spots = {_BAR_TS: _SPOT, ts2: _SPOT}
+        (bars_off, stats_off, _), _ = _run_both_arms(
+            rows, parts=parts, spot_by_ts=spots, monkeypatch=monkeypatch
+        )
+        monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "1")
+        reset_rust_batch_for_tests()
+        spy_calls: list[int] = []
+        real = compute_greeks_batch
+
+        def _spy(requests: Sequence[object]) -> object:
+            spy_calls.append(len(requests))
+            return real(requests)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(greeks_enrich, "compute_greeks_batch", _spy)
+        bars_on, stats_on = enrich_option_bars(
+            rows, parts=parts, spot_by_ts=spots, rate_source=_RATE, style_flag=_STYLE
+        )
+        assert spy_calls == [2]  # BOTH rows crossed the REAL batch dispatch
+        assert [_bar_key(b) for b in bars_on] == [_bar_key(b) for b in bars_off]
+        assert stats_on == stats_off
+        statuses = [
+            unpack_greeks_provenance(bar.greeks_provenance_id or 0).status for bar in bars_on
+        ]
+        assert statuses[0] == STATUS_BAD_INPUT  # the kernel reject, batch-served
+        assert statuses[1] == STATUS_OK
+        assert stats_on.nulls == 1
+        assert stats_on.solved == 1
+        assert _RUST_BATCH_STATE.engaged is True  # genuinely adopted, no autorevert
+        assert _RUST_BATCH_STATE.disabled is False
+
     def test_empty_rows_are_a_no_op_on_both_arms(self, monkeypatch: pytest.MonkeyPatch) -> None:
         (bars_off, stats_off, _), (bars_on, stats_on, _) = _run_both_arms(
             [], monkeypatch=monkeypatch

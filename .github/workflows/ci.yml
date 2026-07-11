@@ -762,11 +762,15 @@ jobs:
           else
             echo "(brutex.options.risk_free test file not present yet — gate inactive)"
           fi
-          # 12d · brutex.options.greeks (37 stmts, 4 branches, 47 tests)
+          # 12d · brutex.options.greeks
           #       DEC-GREEKS-ENGINE-PR2-001: the thin wrapper over the shared
           #       Rust Black-76 Greeks + verified Jäckel-IV kernel in
           #       trading_core — Greeks Phase 2 (needs the trading_core wheel,
-          #       installed above in this job)
+          #       installed above in this job) — plus the columnar batch face
+          #       compute_greeks_batch (DEC-GREEKS-RUST-BATCH-001). The
+          #       --cov-fail-under=100 flag is the gate; stmt/branch/test
+          #       counts live in the coverage output, not this comment (the
+          #       old "(37 stmts, 4 branches, 47 tests)" literals rotted).
           if compgen -G "tests/unit/test_options_greeks.py" > /dev/null; then
             pytest --cov=brutex.options.greeks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_greeks.py
           else

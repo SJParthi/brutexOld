@@ -2260,8 +2260,8 @@ hostile-review pass._
   (14 mutants measured; NOT weekly-mutation-gated — the per-PR `cargo test` is its gate); the
   `_RustBatchState` races-output-safe lockless clause + the ON-arm GIL-hold envelope (one
   ≤65,536-row chunk per FFI call, no release — beats unaffected, per-target) + the measured
-  ON-arm peak working set (~1.74× OFF, ~109 vs ~63 MB @ 70k rows, O(N)) disclosed in the module
-  docs + ledger; the autorevert `error` payload rides `repr(str(exc))` (house log-injection
+  ON-arm peak working set (~1.74× OFF, ~109 vs ~63 MB @ 70k rows, O(N)) LEDGERED in #1724 + the
+  impl report (the module docs carry the GIL envelope, not this figure); the autorevert `error` payload rides `repr(str(exc))` (house log-injection
   convention, pin updated); the burn-in-verifies-only-16 + ON-arm-MemoryError-surface honesty
   clauses folded into #1724. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate
