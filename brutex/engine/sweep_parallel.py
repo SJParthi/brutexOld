@@ -2059,8 +2059,10 @@ class ParallelGridDriver:
             # HONESTY: builds_total/hits_total are WORKER-SPLIT-DEPENDENT (how
             # tuples land across workers varies run-to-run for the same grid) —
             # only the sum builds+hits and the builds ≤ keys × workers bound
-            # are invariant; a downstream consumer must never treat either
-            # figure as reproducible. The summary is SKIPPED outright on a
+            # (at capacities ≥ the grid's key fan-out; an operator-shrunk
+            # capacity adds LRU-thrash rebuilds, still bounded by tuple
+            # count) are invariant; a downstream consumer must never treat
+            # either figure as reproducible. The summary is SKIPPED outright on a
             # broken-pool abort (_quarantine_broken_pool raises above, before
             # this block — the run is aborting loudly there anyway); a
             # SweepStallError / memory-quarantine abort raised inside the
@@ -2546,9 +2548,11 @@ class ParallelGridDriver:
             f"{SWEEP_WORKERS_ENV} (fewer workers cuts total concurrent memory "
             f"pressure; the per-worker budget division is in-flight PR #1386), "
             f"reduce the grid's k, or raise "
-            f"{MEM_BUDGET_ENV} — then DELETE the tuples' entries from the sidecar "
-            f"(or the whole file) and resume: the tuples are then genuinely "
-            f"recomputed."
+            f"{MEM_BUDGET_ENV}; if {WORKER_KERNEL_CACHE_ENV} is enabled, "
+            f"disabling it (=0) or lowering {WORKER_KERNEL_CAPACITY_ENV} also "
+            f"cuts per-worker RSS — then DELETE the tuples' entries from the "
+            f"sidecar (or the whole file) and resume: the tuples are then "
+            f"genuinely recomputed."
         )
 
     def _quarantine_memory_error(
@@ -2596,7 +2600,9 @@ class ParallelGridDriver:
             f"Quarantined it in the durable sidecar {sidecar}; an identical-config "
             f"resume SKIPS it (reported as tuples_quarantined_prior). Remediation: "
             f"relieve the memory pressure — reduce {SWEEP_WORKERS_ENV}, reduce the "
-            f"grid's k, or raise {MEM_BUDGET_ENV} — then DELETE the tuple's entry "
+            f"grid's k, or raise {MEM_BUDGET_ENV}; if {WORKER_KERNEL_CACHE_ENV} is "
+            f"enabled, disabling it (=0) or lowering {WORKER_KERNEL_CAPACITY_ENV} "
+            f"also cuts per-worker RSS — then DELETE the tuple's entry "
             f"from the sidecar and resume: the tuple is then genuinely recomputed."
         ) from exc
 
