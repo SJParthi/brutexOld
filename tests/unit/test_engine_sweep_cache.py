@@ -455,25 +455,78 @@ def test_resume_persisted_over_capacity_auto_grows_within_wall(tmp_path: Path) -
     """STEP-1 auto-grow (DEC-ENGINE-MISC-PACK-001): a within-wall >capacity resume OPENS.
 
     Regression flip of the old unconditional FAIL_CLOSED: persisted=5 against a
-    configured capacity of 3 now auto-grows to ``max(5, ceil(3 × 1.25)=4) = 5``,
-    every persisted digest reads Bloom-positive (the resume-dedup guarantee),
-    and EXACTLY ONE loud ``sweep_cache.bloom_auto_grow`` event names the
-    deviation from the operator knob.
+    configured capacity of 3 now auto-grows to ``max(ceil(5 × 1.25)=7,
+    ceil(3 × 1.25)=4) = 7`` — HEADROOM above persisted (C6 fix, see
+    :func:`test_resumed_over_capacity_records_more_than_one_new_tuple`) — every
+    persisted digest reads Bloom-positive (the resume-dedup guarantee), and
+    EXACTLY ONE loud ``sweep_cache.bloom_auto_grow`` event names the deviation
+    from the operator knob.
     """
     root = tmp_path / "c"
     with SweepCache.open(root, bloom_capacity=1000) as first:
         for mask in range(5):
             first.record(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW)
     with capture_logs() as logs, SweepCache.open(root, bloom_capacity=3) as resumed:
-        assert resumed._bloom.capacity == 5
+        assert resumed._bloom.capacity == 7
         for mask in range(5):
             assert resumed.seen(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
     grows = [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
     assert len(grows) == 1
     assert grows[0]["persisted"] == 5
     assert grows[0]["configured_capacity"] == 3
-    assert grows[0]["grown_capacity"] == 5
+    assert grows[0]["grown_capacity"] == 7
     assert grows[0]["m_bytes"] > 0
+
+
+def test_resumed_over_capacity_records_more_than_one_new_tuple(tmp_path: Path) -> None:
+    """C6 CONSEQUENCE: a resumed >1.25×-capacity sweep makes >1 forward progress.
+
+    The audit-confirmed C6 wedge: the old ``grown = max(persisted,
+    ceil(capacity × 1.25))`` sized the resume Bloom to EXACTLY ``persisted``
+    whenever ``persisted >= 1.25 × configured`` (zero headroom). The rebuild
+    then filled the Bloom to capacity, and the FIRST new ``record_digest``
+    tripped :class:`BloomCapacityExceeded` — a resumed sweep advanced by only
+    ONE tuple per process restart, forever, until the operator raised
+    ``--sweep-cache-bloom-capacity`` (falsifying the "within-wall >capacity
+    resume self-heals" contract). Because every data pull re-keys the whole
+    grid (a new ``data_snapshot_hash``), ``persisted`` crosses any fixed
+    capacity overnight, so this bit the operator in production.
+
+    Seed 5 digests, resume with ``bloom_capacity=3`` (5 >= 1.25 × 3 = 3.75, so
+    the zero-headroom trigger). The fix grows to ``max(ceil(5 × 1.25)=7, 4)=7``,
+    leaving room for 2 more records. Recording TWO NEW distinct digests must
+    BOTH succeed (return newly-recorded ``True``) with NO
+    :class:`BloomCapacityExceeded` — MORE THAN ONE tuple of forward progress.
+
+    FAILS before the fix (the first new record raises ``BloomCapacityExceeded``,
+    grown==persisted==5==capacity); PASSES after.
+    """
+    from brutex.orchestrator.bloom import BloomCapacityExceeded
+
+    root = tmp_path / "c"
+    with SweepCache.open(root, bloom_capacity=1000) as first:
+        for mask in range(5):
+            assert first.record(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
+    with SweepCache.open(root, bloom_capacity=3) as resumed:
+        # Every seeded digest is still deduped (resume-dedup guarantee).
+        for mask in range(5):
+            assert resumed.seen(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
+        # The wedge: the FIRST new record must not trip the Bloom cap.
+        recorded = 0
+        try:
+            for new_mask in (100, 101):
+                assert resumed.record(new_mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
+                recorded += 1
+        except BloomCapacityExceeded as exc:  # pragma: no cover — the wedge, pre-fix only
+            pytest.fail(
+                f"C6 resume wedge: only {recorded} new tuple(s) recorded before "
+                f"BloomCapacityExceeded — a resumed sweep must make >1 forward "
+                f"progress: {exc}"
+            )
+        assert recorded == 2  # MORE THAN ONE tuple of forward progress.
+        # Both new digests are genuinely persisted (dedup on immediate re-check).
+        for new_mask in (100, 101):
+            assert resumed.seen(new_mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
 
 
 def test_resume_within_capacity_never_grows_and_never_logs(tmp_path: Path) -> None:
@@ -641,21 +694,24 @@ class TestAutoGrowCapacity:
         assert not logs  # no grow, no log — byte-identical behaviour.
 
     def test_grow_takes_max_of_persisted_and_ratio(self) -> None:
-        """``grown = max(persisted, ceil(capacity × 1.25))`` — both arms.
+        """``grown = max(ceil(persisted × 1.25), ceil(capacity × 1.25))`` — both arms.
 
-        The ``max`` is the correctness clamp: a bare ``ceil(cap × 1.25)`` at
-        ``persisted=500, cap=100`` would return 125 < 500 and overflow the
-        FAIL_CLOSED Bloom gate mid-rebuild.
+        The ``ceil(persisted × 1.25)`` arm is the C6 fix: it leaves HEADROOM
+        above *persisted* so a resumed sweep can record NEW tuples (a bare
+        ``max(persisted, …)`` sized the grown Bloom to exactly *persisted* — zero
+        headroom, immediate ``BloomCapacityExceeded`` on the first new record).
+        The ``capacity``-ratio arm still floors the grow near the configured
+        knob when *persisted* only barely exceeds it.
         """
-        assert _auto_grow_capacity(100, 101, 1e-7) == 125  # ratio arm wins.
-        assert _auto_grow_capacity(100, 500, 1e-7) == 500  # persisted arm wins.
+        assert _auto_grow_capacity(100, 101, 1e-7) == 127  # persisted×1.25 arm wins.
+        assert _auto_grow_capacity(100, 500, 1e-7) == 625  # persisted×1.25 arm wins.
 
     def test_grow_emits_one_loud_event(self) -> None:
         with capture_logs() as logs:
             _auto_grow_capacity(100, 500, 1e-7)
         grows = [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
         assert len(grows) == 1
-        assert grows[0]["grown_capacity"] == 500
+        assert grows[0]["grown_capacity"] == 625
 
     def test_above_wall_fails_closed_naming_the_sharded_follow_up(self) -> None:
         """The 16 GiB wall arm stays FAIL_CLOSED — pure math, no allocation.
@@ -681,13 +737,15 @@ class TestAutoGrowCapacity:
         The wall is PINNED to the 16 GiB ``MAX_BLOOM_BYTES_FLOOR`` for this
         arithmetic: since DEC-RAM-BUDGETS-001 the live ``MAX_BLOOM_BYTES`` is
         RAM-derived (total RAM × 1/3, ``brutex/orchestrator/bloom.py``), so on
-        a 16 GB CI runner it resolves ~5.6 GB — BELOW the ~5.99 GB this
-        5-billion-digest @ 1e-2 case needs. The remedy claim under test is the
-        FPR-loosening math relative to a FIXED wall, not the machine's RAM, so
-        the pin keeps the case machine-independent (``_auto_grow_capacity``
-        reads the ceiling via its function-level ``from brutex.orchestrator
-        .bloom import MAX_BLOOM_BYTES``, so patching the bloom module attribute
-        is authoritative here).
+        a 16 GB CI runner it resolves ~5.6 GB — BELOW the ~7.49 GB the grown
+        ``ceil(5e9 × 1.25) = 6.25e9``-digest @ 1e-2 case needs (still under the
+        16 GiB floor). The remedy claim under test is the FPR-loosening math
+        relative to a FIXED wall, not the machine's RAM, so the pin keeps the
+        case machine-independent (``_auto_grow_capacity`` reads the ceiling via
+        its function-level ``from brutex.orchestrator.bloom import
+        MAX_BLOOM_BYTES``, so patching the bloom module attribute is
+        authoritative here). The asserted grown value is the C6-fix
+        ``ceil(persisted × 1.25)`` arm — headroom above persisted.
         """
         from brutex.orchestrator import bloom as bloom_mod
 
@@ -695,7 +753,7 @@ class TestAutoGrowCapacity:
             bloom_mod, "MAX_BLOOM_BYTES", bloom_mod.MAX_BLOOM_BYTES_FLOOR, raising=True
         )
         grown = _auto_grow_capacity(1000, _OVER_WALL_PERSISTED, 1e-2)
-        assert grown == _OVER_WALL_PERSISTED
+        assert grown == 6_250_000_000  # ceil(5_000_000_000 × 1.25) — headroom arm.
 
 
 class TestCapacityRefusalRemedy:
