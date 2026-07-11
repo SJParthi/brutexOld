@@ -38,7 +38,10 @@ from tests.fakes.leaderboard_preset_fixtures import (
     write_tuple_store,
 )
 
-#: The exact pre-preset payload key set (the byte-identical absent-arm pin).
+#: The exact BASE payload key set of the absent-preset arm: the pre-preset
+#: legacy shape PLUS the four ALWAYS-present additive gate-scoping keys
+#: (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) — the preset pair stays the only
+#: CONDITIONAL addition.
 _LEGACY_PAYLOAD_KEYS = {
     "available",
     "total_rows",
@@ -51,6 +54,10 @@ _LEGACY_PAYLOAD_KEYS = {
     "snapshot_hashes",
     "mixed_snapshot_eras",
     "run_id_conflicts",
+    "gate_coordinate",
+    "gate_coordinates",
+    "mixed_gate_coordinates",
+    "gate_reasons",
     "rows",
 }
 

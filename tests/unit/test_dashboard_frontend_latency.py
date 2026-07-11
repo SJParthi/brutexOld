@@ -271,10 +271,11 @@ class TestDebouncedInputs:
         assert "const FTOP_DEBOUNCE_MS = 200;" in html
         assert "fTopDebounceTimer = setTimeout(load, FTOP_DEBOUNCE_MS);" in html
         assert "fTop.onchange = load;" not in html
-        # The selects keep the immediate load (nothing to coalesce).
+        # The selects keep the immediate load (nothing to coalesce) — the
+        # array grew fGate with DEC-SWEEP-SERVING-GATE-PROVENANCE-001.
         assert (
-            "[fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });"
-            in html
+            "[fInstrument, fTf, fDirection, fGate, fRankBy]"
+            ".forEach((el) => { el.onchange = load; });" in html
         )
 
 

@@ -124,7 +124,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, fields, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import structlog
 
@@ -225,6 +225,27 @@ _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
 #: VIX-attribution imports it — never a mirrored literal — so adding a fourth
 #: field here can never silently desync the attribution's nulling/schema gates.
 VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
+
+#: Nullable Utf8 GATE-PROVENANCE column (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
+#: the canonical gate+selection identity token
+#: (:func:`brutex.engine.sweep_identity.gate_provenance_token`) the producing
+#: grid ran under, or ``None`` for an ungated default-selection run / a store
+#: written before the column existed. CONDITIONALLY emitted — the column is
+#: present ONLY in gated stores (see :meth:`ResultsStore._render_bytes`), so
+#: every ungated store's bytes stay byte-identical to the pre-column format
+#: (the frozen ``_GOLDEN_CONTENT_HASH`` lever). This is gate-scoped-DEDUP
+#: provenance for the ``/results`` read side — NOT part of the BLAKE3 run
+#: identity, never rankable, and NOT the statutory 5-door gate re-check.
+GATE_PROVENANCE_FIELD: Final[str] = "gate_provenance"
+
+#: The fields :meth:`ResultsStore.append` may DIRECTIONALLY backfill
+#: (``None`` → value) on a same-``run_id`` re-append instead of raising the
+#: run-identity conflict: the REFERENCE-ONLY VIX trio (DEC-VIX-STAMP-WIRE-001)
+#: plus the gate-provenance token (a pre-provenance store's rows load ``None``
+#: and a same-config redo may stamp them — the optional-column back-compat
+#: law's write-side twin). Any OTHER differing field keeps the strict
+#: Golden-Rule-#4 conflict raise.
+_BACKFILL_FIELDS: Final[frozenset[str]] = frozenset((*VIX_FIELDS, GATE_PROVENANCE_FIELD))
 
 #: Numeric columns a leaderboard may rank by (metrics + money + counts).
 #: The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio are
@@ -436,6 +457,16 @@ class ResultRow:
     vix_mean: float | None = None
     vix_min: float | None = None
     vix_max: float | None = None
+    #: Gate-scoped-dedup provenance (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
+    #: the canonical gate+selection token of the producing grid
+    #: (:func:`brutex.engine.sweep_identity.gate_provenance_token`), or
+    #: ``None`` = ungated / legacy (a store written before the column existed
+    #: loads ``None`` presence-tolerantly — the optional-column law). An
+    #: OPAQUE carrier string — deliberately unvalidated beyond ``str | None``;
+    #: never rankable, never in the BLAKE3 run identity, and NOT the statutory
+    #: 5-door gate re-check (that verdict is a P2 concern, disjoint from this
+    #: column).
+    gate_provenance: str | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -563,11 +594,46 @@ class ResultsStore:
     ----------
     path
         Destination Parquet file. Created (with parents) on :meth:`flush`.
+    gate_provenance
+        Optional store-level gate+selection token
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) the producing grid runs under
+        — the ``gate_provenance`` COLUMN is emitted whenever it is set, EVEN
+        AT ZERO ROWS, so a gated re-run that persists no survivors still
+        writes a schema-discoverable gated store (the arm-2 carrier; the
+        read side derives its coordinate set from that schema presence).
+        ``None`` (the default — every ungated/legacy caller) changes nothing:
+        the column then rides only on row values, so ungated stores stay
+        byte-identical to the pre-column format.
     """
 
-    def __init__(self, *, path: Path) -> None:
+    def __init__(self, *, path: Path, gate_provenance: str | None = None) -> None:
         self._path = path
         self._rows: dict[str, ResultRow] = {}
+        self._gate_provenance = gate_provenance
+        #: Set by :meth:`load` — whether the LOADED file carried the
+        #: ``gate_provenance`` column (schema presence, valid even at 0 rows);
+        #: ``None`` = this store was never loaded from disk.
+        self._gate_column_loaded: bool | None = None
+
+    @property
+    def gate_provenance_present(self) -> bool:
+        """Whether this store is GATED — i.e. carries the ``gate_provenance`` column.
+
+        The ONE schema-presence law (DEC-SWEEP-SERVING-GATE-PROVENANCE-001),
+        shared by the writer (:meth:`_render_bytes` emits the column iff this
+        is ``True``) and the dashboard's store-level gate-coordinate
+        derivation. ``True`` when the store was constructed with a
+        store-level token, OR was LOADED from a file whose schema carries the
+        column (preserved across a load → flush round trip, even at 0 rows),
+        OR any held row carries a non-``None`` token. ``False`` is the
+        ungated/legacy store — its flush stays byte-identical to the
+        pre-column format.
+        """
+        return (
+            self._gate_provenance is not None
+            or bool(self._gate_column_loaded)
+            or any(row.gate_provenance is not None for row in self._rows.values())
+        )
 
     @property
     def path(self) -> Path:
@@ -600,7 +666,16 @@ class ResultsStore:
            typed raise names that cause + remedy and the grid drivers demote
            it to a #904 tuple-skip instead of a grid abort.
 
-        Every NON-VIX field keeps the strict rule: any difference raises the
+        The nullable ``gate_provenance`` carrier follows the SAME directional
+        law (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): identical → no-op,
+        ``None`` → token backfills (a pre-provenance store's rows load
+        ``None`` and a same-config redo may stamp them), token → ``None``
+        never erases, and two DIFFERENT known tokens raise the plain
+        :class:`ResultsStoreError` (two configs at one store address is a
+        genuine anomaly — the address folds the config since
+        DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001).
+
+        Every OTHER field keeps the strict rule: any difference raises the
         plain :class:`ResultsStoreError` run-identity conflict (a genuine
         reproducibility breach — the backfill never masks it).
 
@@ -636,7 +711,7 @@ class ResultsStore:
                 for f in fields(ResultRow)
                 if getattr(existing, f.name) != getattr(row, f.name)
             )
-            if any(name not in VIX_FIELDS for name in differing):
+            if any(name not in _BACKFILL_FIELDS for name in differing):
                 _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
                 if set(differing) <= set(_NULLABLE_METRIC_FIELDS):
                     # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): the ONLY diff is
@@ -659,18 +734,19 @@ class ResultsStore:
                     f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
                     f"map to one result (Golden Rule #4) — refusing to overwrite."
                 )
-            merged = _merge_vix_backfill(existing, row)
+            merged = _merge_gate_provenance_backfill(existing, row)
+            merged = _merge_vix_backfill(merged, row)
             if merged == existing:
                 # Directional no-op: the incoming row is strictly LESS informed
-                # (it only turns known VIX values into None) — the stored row
-                # already carries the union, nothing changes.
+                # (it only turns known VIX/provenance values into None) — the
+                # stored row already carries the union, nothing changes.
                 return False
             _LOG.info(
                 "results_store.vix_backfill",
                 run_id=row.run_id,
                 backfilled_fields=tuple(
                     name
-                    for name in VIX_FIELDS
+                    for name in (*VIX_FIELDS, GATE_PROVENANCE_FIELD)
                     if getattr(existing, name) is None and getattr(merged, name) is not None
                 ),
             )
@@ -801,6 +877,14 @@ class ResultsStore:
             df = pl.read_parquet(path)
         except (pl.exceptions.PolarsError, OSError) as exc:
             raise ResultsStoreSchemaError(f"unreadable results store at {path}: {exc}") from exc
+        # Schema-presence of the CONDITIONAL gate_provenance column — recorded
+        # from the decoded frame (valid even at ZERO rows) so (a) the dashboard
+        # can derive a 0-row gated store's coordinate without a second footer
+        # read, and (b) a load → flush round trip preserves the column (the
+        # emission predicate `gate_provenance_present` folds this flag), never
+        # silently un-gating a 0-row gated store
+        # (DEC-SWEEP-SERVING-GATE-PROVENANCE-001).
+        store._gate_column_loaded = GATE_PROVENANCE_FIELD in df.columns
         try:
             for record in df.iter_rows(named=True):
                 store.append(_row_from_record(record))
@@ -854,28 +938,36 @@ class ResultsStore:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
         for name in VIX_FIELDS:
-            # The nullable REFERENCE-ONLY VIX trio — appended LAST (the
-            # optional-column back-compat template); None → Parquet null.
+            # The nullable REFERENCE-ONLY VIX trio — appended after the prices
+            # (the optional-column back-compat template); None → Parquet null.
             columns[name] = [getattr(row, name) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
         # fixed insertion order above (identity → mask limbs → money → counts →
-        # metrics → deflated → prices → the VIX trio LAST for legacy-file
-        # back-compat) for a reproducible byte stream.
-        df = pl.DataFrame(
-            columns,
-            schema={
-                **dict.fromkeys(_STRING_FIELDS, pl.Utf8),
-                **dict.fromkeys(
-                    (*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64
-                ),
-                **dict.fromkeys(
-                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *VIX_FIELDS),
-                    pl.Float64,
-                ),
-            },
-        )
+        # metrics → deflated → prices → the VIX trio → the CONDITIONAL
+        # gate_provenance column LAST) for a reproducible byte stream.
+        schema: dict[str, Any] = {
+            **dict.fromkeys(_STRING_FIELDS, pl.Utf8),
+            **dict.fromkeys((*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64),
+            **dict.fromkeys(
+                (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *VIX_FIELDS),
+                pl.Float64,
+            ),
+        }
+        if self.gate_provenance_present:
+            # CONDITIONAL emission (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): the
+            # gate_provenance column is written ONLY for a GATED store (a
+            # store-level token, a loaded gated schema, or any token-carrying
+            # row — the ONE `gate_provenance_present` law), appended LAST. An
+            # ungated store emits NO column, so its bytes — and every frozen
+            # store-bytes golden — stay byte-identical to the pre-column
+            # format. At zero rows the column still lands in the schema
+            # footer, which is exactly how the read side discovers a gated
+            # re-run that persisted no survivors (the arm-2 carrier).
+            columns[GATE_PROVENANCE_FIELD] = [row.gate_provenance for row in ordered]
+            schema[GATE_PROVENANCE_FIELD] = pl.Utf8
+        df = pl.DataFrame(columns, schema=schema)
         bio = io.BytesIO()
         df.write_parquet(
             bio,
@@ -1037,6 +1129,61 @@ def _optional_float(record: dict[str, object], name: str) -> float | None:
     return None if value is None else float(value)  # type: ignore[arg-type]
 
 
+def _optional_str(record: dict[str, object], name: str) -> str | None:
+    """Read a nullable Utf8 column with optional-column back-compat.
+
+    The string twin of :func:`_optional_float` — the SAME ``record.get``
+    presence-tolerant read law (gap-register ruling 5): a column ABSENT from
+    the file (a store written before the column existed) reads ``None``
+    exactly like a stored Parquet null — the honest unknown, never a
+    fabricated value (Golden Rule #1). ``gate_provenance`` is the first
+    consumer (DEC-SWEEP-SERVING-GATE-PROVENANCE-001), pinned by the frozen
+    pre-extension golden fixture.
+    """
+    value = record.get(name)
+    return None if value is None else str(value)
+
+
+def _merge_gate_provenance_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
+    """Union-merge the nullable ``gate_provenance`` carrier of two same-``run_id`` rows.
+
+    The directional law of :meth:`ResultsStore.append`
+    (DEC-SWEEP-SERVING-GATE-PROVENANCE-001), mirroring
+    :func:`_merge_vix_backfill`: the known (non-``None``) token wins —
+    ``None`` means *honestly unknown* (a pre-provenance store's rows, or an
+    un-threaded legacy caller), never a conflicting fact — so a
+    provenance-stamped redo backfills a legacy row and a legacy redo never
+    erases a stamp. The caller (:meth:`ResultsStore.append`) has ALREADY
+    established that every non-backfillable field is equal.
+
+    Raises
+    ------
+    ResultsStoreError
+        When the two rows carry DIFFERENT known tokens: two gate configs
+        can never legitimately share one store address (the address folds
+        the config, DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so this is a
+        genuine anomaly — refused loudly, never silently overwritten.
+    """
+    stored, arrived = existing.gate_provenance, incoming.gate_provenance
+    if stored == arrived or arrived is None:
+        return existing
+    if stored is not None:
+        _LOG.error(
+            "results_store.gate_provenance_conflict",
+            run_id=existing.run_id,
+            stored=stored,
+            incoming=arrived,
+        )
+        raise ResultsStoreError(
+            f"gate-provenance conflict for {existing.run_id}: the stored row and the "
+            f"redo carry DIFFERENT known gate_provenance tokens while every other "
+            f"column is compatible. Two gate configs can never share one store "
+            f"address (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) — refusing to "
+            f"overwrite (Golden Rule #4)."
+        )
+    return replace(existing, gate_provenance=arrived)
+
+
 def _row_from_record(record: dict[str, object]) -> ResultRow:
     """Rebuild a :class:`ResultRow` from one polars ``iter_rows(named=True)`` record.
 
@@ -1077,6 +1224,7 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         vix_mean=_optional_float(record, "vix_mean"),
         vix_min=_optional_float(record, "vix_min"),
         vix_max=_optional_float(record, "vix_max"),
+        gate_provenance=_optional_str(record, GATE_PROVENANCE_FIELD),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -1111,6 +1259,7 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 
 __all__ = [
     "CONDITION_NAME_SEP",
+    "GATE_PROVENANCE_FIELD",
     "MASK_BITS_MAX",
     "VIX_FIELDS",
     "FlushResult",

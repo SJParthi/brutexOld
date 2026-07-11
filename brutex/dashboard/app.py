@@ -7146,6 +7146,7 @@ def build_app(
         direction: str | None = Query(default=None),
         rank_by: str | None = Query(default=None),
         preset: str | None = Query(default=None),
+        gate: str | None = Query(default=None),
         top: int = Query(
             default=SWEEP_LEADERBOARD_DEFAULT_TOP_N, ge=1, le=SWEEP_LEADERBOARD_MAX_TOP_N
         ),
@@ -7187,6 +7188,20 @@ def build_app(
             operator choice must refuse loudly, never silently rank by
             something else). THIN adapter — the ranking logic lives entirely in
             ``brutex.ranking`` (this route only validates + threads the token).
+        gate
+            OPTIONAL gate coordinate to scope the served rows to
+            (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) — one of the payload's
+            ``gate_coordinates`` (``"ungated"``, a ``gate:<hash>`` config
+            tag, or the 0-row ``"gated"`` sentinel). Absent/blank applies the
+            deterministic default resolution (single coordinate → no scoping,
+            byte-identical rows; one gated + ungated → the GATED coordinate —
+            a zero-survivor gated re-run honestly serves the EMPTY set, never
+            the stale ungated rows; >1 known gated config → everything served
+            + labeled with ``mixed_gate_coordinates: true``, never a silent
+            pick). An UNKNOWN token is a clean 400 naming the available
+            coordinates (the ``preset`` precedent). Validation needs the
+            scanned coordinate set, so it runs inside the build — the raised
+            ``ValueError`` maps to the 400 at this route.
         top
             Leaderboard depth (1..500; default 50).
 
@@ -7236,16 +7251,21 @@ def build_app(
         store_path = getattr(store, "path", None)
         if not isinstance(store_path, Path):
             # No lake root wired → honest empty leaderboard (never a 500), mirroring
-            # the /api/v1/movers no-lake-root degrade.
-            empty = build_sweep_leaderboard(
-                Path("/nonexistent-lake"),
-                instrument=instrument,
-                tf=tf,
-                direction=direction,
-                rank_by=rank_by,
-                top_n=top,
-                preset=resolved_preset,
-            )
+            # the /api/v1/movers no-lake-root degrade. An EXPLICIT ?gate= token can
+            # never match the empty coordinate set → the same clean 400 as below.
+            try:
+                empty = build_sweep_leaderboard(
+                    Path("/nonexistent-lake"),
+                    instrument=instrument,
+                    tf=tf,
+                    direction=direction,
+                    rank_by=rank_by,
+                    top_n=top,
+                    preset=resolved_preset,
+                    gate=gate,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
 
@@ -7266,10 +7286,18 @@ def build_app(
             # RESOLVED preset token rides too — a preset-ranked payload must
             # never share a slot with the default ordering, and blank/absent
             # share ONE slot because both resolve to None).
+            # The |g= leg (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): the gate
+            # scope changes the served ROW SET, so an explicit ?gate= token
+            # (stripped raw — resolution needs the scan) must occupy its OWN
+            # L2 slot; absent/blank share ONE slot (the default resolution is
+            # deterministic per scan revision). Poisoning-safe by construction:
+            # two back-to-back calls with different gate params can never
+            # serve each other's payload.
             lb_key = (
                 f"sweep_leaderboard|i={(instrument or '').casefold()}"
                 f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
-                f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+                f"|r={rank_by or ''}|p={resolved_preset or ''}"
+                f"|g={(gate or '').strip()}|n={top}"
             )
 
             def _fresh() -> dict[str, Any]:
@@ -7281,6 +7309,7 @@ def build_app(
                     rank_by=rank_by,
                     top_n=top,
                     preset=resolved_preset,
+                    gate=gate,
                 ).to_dict()
 
             if rev is None:
@@ -7324,12 +7353,21 @@ def build_app(
                     top_n=top,
                     scan=scan,
                     preset=resolved_preset,
+                    gate=gate,
                 ).to_dict(),
                 mru_prefix=lb_key,
             )
 
         try:
             return JSONResponse(await _run_lake(_resolve))
+        except ValueError as exc:
+            # An UNKNOWN explicit ?gate= token (DEC-SWEEP-SERVING-GATE-
+            # PROVENANCE-001): the validation runs inside the build (it needs
+            # the scanned coordinate set, so it cannot be eager like preset's)
+            # and raises ValueError naming the available coordinates — mapped
+            # here to the same clean 400 the preset precedent uses. Nothing
+            # is cached for the refused key (the compute raised).
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ResultsStoreError as exc:
             # C3 (DEC-SWEEP-RESULTS-DEPTH-001): a typed store fault escaping the
             # per-store skip net degrades to the honest error payload — 200 with
