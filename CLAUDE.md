@@ -18,7 +18,17 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
+_Last updated: 2026-07-11 (QUAD MAX-CLUB merge vehicle, branch
+`claude/quad-dashboard-lakeinv-universe-docs` — the file-disjoint fold of FOUR PRs as ONE
+merge event off main tip 3f32b3ef: #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002
+#1699 + DEC-DASHBOARD-READ-SCREEN-001 #1724 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1717 +
+DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1718) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1740 ·
+#1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1725 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001 #1726.
+The three colliding ledger rows were renumbered off main's taken #1712/#1715 (DEC-IDs are the
+stable handles per DEC-LEDGER-RENUMBER-001). READ-side dashboard / lake-heal SPACE / docs only —
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. This header carries pointers, never round narration;
+each member's full record lives in its §1 Active-branch blurb + its MIGRATION.md entry.)
+Earlier: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
 ONE coordinator-confirmed fold of five member PRs in binding order: **#1330
 DEC-SWEEP-UNKILLABLE-CORE-001** (MIGRATION.md #1712 / ADR-0019 — the UNKILLABLE sweep run
 core; its single-flight mechanism `engine/sweep_singleflight.py` is the train-WINNING
@@ -2265,7 +2275,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
+- **Active branch:** `claude/quad-dashboard-lakeinv-universe-docs` (**QUAD MAX-CLUB merge
+  vehicle** — the file-disjoint fold of FOUR PRs as ONE merge event, assembled off main tip
+  3f32b3ef: **#1440** dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 +
+  DEC-DASHBOARD-READ-SCREEN-001 #1724 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1717 +
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1718) · **#1450** DEC-LAKE-INVARIANTS-PREINDEX-001 #1740
+  (stream the L3 lake-invariants scan + boot content token O(series)/O(dir), and stop
+  full-rescanning every boot on an unstamped sweep) · **#1288** DEC-DASHBOARD-READPATH-WEDGE-001
+  #1725 (the `universe.html` guarded-poll CLIENT belt — seven pollers routed through ONE
+  `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard) · **#1441** docs
+  club DEC-EAP-FEEDBACK-INDEX-001 #1726 (+ the Zerodha 10y feasibility record + the market
+  one-pager, docs-only). File-disjoint by construction (only `docs/MIGRATION.md` + this
+  `CLAUDE.md` are union files); the three colliding ledger rows were renumbered off main's
+  taken #1712/#1715 (DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001). READ-side
+  dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no scope/vocab/rate change. Each member's full record lives in its own
+  MIGRATION.md entry; the per-member blurbs are demoted to Earlier: below.)
+  Earlier: `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
   coordinator-confirmed fold, in binding order, of #1330 DEC-SWEEP-UNKILLABLE-CORE-001
   (MIGRATION.md #1712 / ADR-0019; its single-flight mechanism WINS all competing variants) →
   #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1714) → #1336
@@ -5685,7 +5711,15 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/t1-sweep-core`
+- **Active feature branch:** `claude/quad-dashboard-lakeinv-universe-docs`
+  (QUAD MAX-CLUB merge vehicle — the file-disjoint fold of FOUR PRs as ONE merge:
+  #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 ·
+  DEC-DASHBOARD-READ-SCREEN-001 #1724 · DEC-DB-TZ-MONEYNESS-FIXES-001 #1717 ·
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1718) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1740 ·
+  #1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1725 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001
+  #1726; READ-side dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `integration/t1-sweep-core`
   (T1 SWEEP-CORE integration train — folds #1330 DEC-SWEEP-UNKILLABLE-CORE-001 (#1712) +
   #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1714) + #1336
   DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 (#1715) + #1350
