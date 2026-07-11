@@ -45,6 +45,7 @@ from brutex.engine.sweep_verify import (
     _stores_differ_only_in_vix,
     compare_recount,
     plan_expected_stores,
+    recorded_apriori_from_audit,
     recorded_audit_facts,
     recorded_context_from_audit,
     recorded_roll_schedules_from_audit,
@@ -2558,3 +2559,97 @@ class TestCellRecountCodes:
         assert record.knobs is None
         assert record.consistent is True
         assert record.optimizer_versions == ()
+
+
+class TestRecordedAprioriFromAudit:
+    """DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1738): the tree's OWN
+    recorded exploration mode, read off the first mode-carrying START record
+    (EMIT-ON-apriori law: key absent == legacy — pre-flip trees classify
+    correctly for free; no record == None abstain)."""
+
+    @staticmethod
+    def _write_start(root: Path, chain: str, action: str, payload: dict[str, object]) -> None:
+        path = root / "audit" / chain
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with AuditWriter.open(path) as audit:
+            audit.append(action=action, subject="sweep-all", payload=payload)
+
+    def test_no_audit_files_abstains(self, tmp_path: Path) -> None:
+        assert recorded_apriori_from_audit(tmp_path) is None
+
+    def test_apriori_supervisor_start_reads_true(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        path.parent.mkdir(parents=True)
+        with SweepAuditWriter.open(path) as sup:
+            sup.append(
+                action="SUPERVISOR_START",
+                subject="sweep-all",
+                payload={"apriori": {"enabled": True, "max_mask_bars": 42}},
+            )
+        assert recorded_apriori_from_audit(tmp_path) is True
+
+    def test_start_without_key_reads_legacy_false(self, tmp_path: Path) -> None:
+        # The EMIT-ON-apriori law: absence == legacy — every pre-flip tree.
+        self._write_start(tmp_path, "sweep-all.jsonl", "GRID_SWEEP_START", {"sweep_id": "x"})
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_grid_start_with_key_reads_true(self, tmp_path: Path) -> None:
+        self._write_start(
+            tmp_path,
+            "sweep-all.jsonl",
+            "GRID_SWEEP_START",
+            {"apriori": {"enabled": True, "max_mask_bars": 7}},
+        )
+        assert recorded_apriori_from_audit(tmp_path) is True
+
+    def test_disabled_or_malformed_key_reads_false(self, tmp_path: Path) -> None:
+        # A present-but-not-enabled key is NOT an apriori tree (never a guess).
+        self._write_start(
+            tmp_path,
+            "sweep-all.jsonl",
+            "GRID_SWEEP_START",
+            {"apriori": {"enabled": False}},
+        )
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_non_mapping_key_reads_false(self, tmp_path: Path) -> None:
+        self._write_start(tmp_path, "sweep-all.jsonl", "GRID_SWEEP_START", {"apriori": "yes"})
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_per_tuple_start_lines_are_not_the_mode_family(self, tmp_path: Path) -> None:
+        # A chain holding ONLY per-tuple SWEEP_START lines carries no mode —
+        # the scan falls through to the supervisor chain.
+        self._write_start(tmp_path, "sweep-all.jsonl", "SWEEP_START", {"k": 2})
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_no_mode_record_in_either_chain_abstains(self, tmp_path: Path) -> None:
+        self._write_start(tmp_path, "sweep-all.jsonl", "SWEEP_START", {"k": 2})
+        assert recorded_apriori_from_audit(tmp_path) is None
+
+    def test_ingest_chain_wins_over_the_supervisor_chain(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        self._write_start(
+            tmp_path,
+            "sweep-all.jsonl",
+            "GRID_SWEEP_START",
+            {"apriori": {"enabled": True, "max_mask_bars": 9}},
+        )
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+        assert recorded_apriori_from_audit(tmp_path) is True
+
+    def test_unreadable_audit_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "audit" / "sweep-all.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_apriori_from_audit(tmp_path)
