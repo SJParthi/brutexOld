@@ -112,7 +112,11 @@ _SELF_CHECK_REMAINING: Final[list[int]] = [SELF_CHECK_BUILDS]
 
 #: The autorevert latch: the mismatch reason once the kernel is disabled for
 #: this process, else ``None`` (same documented exception).
-_KERNEL_DISABLED_REASON: Final[list[str | None]] = [None]
+# ``# pragma: no mutate`` (the DEC-MUTATION-RUNTIME-001 rate_limiter.py
+# precedent): mutmut's ``str | None`` → ``str & None`` ANNOTATION mutant is
+# unkillable by any behavioral test under ``from __future__ import
+# annotations`` (module-level annotations are never evaluated).
+_KERNEL_DISABLED_REASON: Final[list[str | None]] = [None]  # pragma: no mutate
 
 
 @dataclass(frozen=True, slots=True)

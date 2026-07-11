@@ -25,6 +25,7 @@ and the `collect_batch_inputs` prepass glue:
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -644,3 +645,92 @@ def test_batch_inputs_carrier_holds_the_positive_masks() -> None:
     assert inputs.fractal_k == 2
     assert inputs.prior_n == 3
     assert len(inputs.open_paisa) == 6
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Mutation-gate pins — refuter RF-α round 4, the 10 mutmut survivors
+# (each pin below kills a demonstrated gate survivor; the weekly mutation.yml
+# python loop is ZERO-survivor by law, so every one of these is load-bearing)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_env_var_name_is_the_documented_literal(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Survivor 3: every other test reaches the env through the CONSTANT
+    # (self-referential), so a typo'd constant would silently orphan the
+    # documented operator lever. Pin the literal, then drive it end-to-end
+    # via the literal name.
+    assert STAGE1A_RUST_ENV == "BRUTEX_SWEEP_RUST_STAGE1A"
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_STAGE1A", "1")  # the LITERAL name
+    assert stage1a_rust_enabled() is True
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_STAGE1A", "0")
+    assert stage1a_rust_enabled() is False
+
+
+def test_unset_env_serves_the_default_with_no_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Survivor 18 (`os.environ.get(..., "")` default junked): the unset arm
+    # must serve STAGE1A_RUST_DEFAULT with ZERO fallback events — and must
+    # KEEP serving the default once it flips ON (the one-constant
+    # DEC-STAGE1A-RUST-DEFAULT-ON-001 lever; a junked get-default would turn
+    # unset into the flag_unrecognised path and pin the arm to False).
+    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    with capture_logs() as logs:
+        assert stage1a_rust_enabled() is STAGE1A_RUST_DEFAULT
+    assert not [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
+    monkeypatch.setattr(rust_stage1a, "STAGE1A_RUST_DEFAULT", True)
+    with capture_logs() as logs:
+        assert rust_stage1a.stage1a_rust_enabled() is True
+    assert not [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
+
+
+def test_burn_in_budget_is_exactly_four_by_behavior() -> None:
+    # Survivor 7 (SELF_CHECK_BUILDS 4 → 5): the ledgered burn-in budget is
+    # pinned by the LITERAL 4 and by counting a fresh process's budget to
+    # exhaustion through the public API.
+    assert SELF_CHECK_BUILDS == 4
+    reset_self_check_for_tests()  # the fresh-process view
+    for _ in range(4):
+        assert self_check_pending() is True
+        consume_self_check_sample()
+    assert self_check_pending() is False
+
+
+def test_consume_clamps_at_zero_never_negative() -> None:
+    # Survivor 28 (`> 0` → `>= 0`): at remaining == 0 a racing extra consume
+    # must be a NO-OP (the docstring's "clamped at zero" law) — unobservable
+    # through self_check_pending alone, so the cell is read directly.
+    reset_self_check_for_tests(remaining=0)
+    consume_self_check_sample()
+    assert rust_stage1a._SELF_CHECK_REMAINING[0] == 0  # pyright: ignore[reportPrivateUsage]
+
+
+def test_logger_name_is_the_module_path_literal() -> None:
+    # Survivor 1: capture_logs is name-blind and the prod processor chain
+    # renders no logger name — pin the factory args (the house precedent:
+    # test_greeks_enrich_pass_dashboard_identity.py).
+    assert getattr(rust_stage1a._LOG, "_logger_factory_args", None) == (  # pyright: ignore[reportPrivateUsage]
+        "brutex.engine.rust_stage1a",
+    )
+
+
+def test_engaged_memo_key_is_the_namespaced_literal() -> None:
+    # Survivors 10/11 (_ENGAGED_KEY junked / None): the engaged-once key is a
+    # str namespaced apart from every warn reason; a None key would silently
+    # break the memo-set semantics.
+    assert rust_stage1a._ENGAGED_KEY == "__engaged__"  # pyright: ignore[reportPrivateUsage]
+    reset_observability_memo_for_tests()
+    with capture_logs():
+        note_engaged_once(5)
+    memo = rust_stage1a._OBSERVABILITY_MEMO  # pyright: ignore[reportPrivateUsage]
+    assert "__engaged__" in memo
+
+
+def test_batch_inputs_carrier_is_frozen_with_slots() -> None:
+    # Survivors 15/16 (@dataclass(frozen=..., slots=...) flags flipped): the
+    # carrier is IMMUTABLE (a consumer can never poke a column between the
+    # burn-in compare and the FFI call) and __dict__-free (slots).
+    inputs = _inputs_for(_two_day_feed())
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        inputs.prior_n = 9  # type: ignore[misc]  # pyright: ignore[reportAttributeAccessIssue]
+    assert not hasattr(inputs, "__dict__")
