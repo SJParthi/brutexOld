@@ -867,6 +867,18 @@ jobs:
           else
             echo "(brutex.strategies.combo test file not present yet — gate inactive)"
           fi
+          # brutex.strategies.sweep — a CURATED three-file suite (the sweep-grid
+          # unit file + the differently-stemmed ComboCache unit file + the
+          # integration sweep suite together read 100.00% line+branch; no single
+          # stem-matched file reaches 100% standalone — measured 92.35% —
+          # so the module is on COVERAGE_DISCOVERY_EXCLUDE with this static
+          # gate as its real per-module 100% teeth;
+          # DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727).
+          if compgen -G "tests/unit/test_strategies_sweep_grid.py" > /dev/null; then
+            pytest --cov=brutex.strategies.sweep --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_sweep_grid.py tests/unit/test_strategies_combo_cache.py tests/integration/test_strategies_sweep.py
+          else
+            echo "(brutex.strategies.sweep test file not present yet — gate inactive)"
+          fi
           # 16e · brutex.vocabulary.conflicts (12 stmts, 4 branches, 65 tests)
           if compgen -G "tests/unit/test_vocabulary.py" > /dev/null; then
             pytest --cov=brutex.vocabulary.conflicts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_vocabulary.py

@@ -229,6 +229,14 @@ class TestDiscoverTouchedModules:
         #     stem match, 100.00% with the pair; the static whole-engine gate runs
         #     tests/unit/test_engine_*.py together at 100%
         #     (DEC-SWEEP-RUST-TRADESIM-WIRE-001).
+        #   * brutex/strategies/sweep.py — ComboSweep/ComboCache, covered by the
+        #     curated trio test_strategies_sweep_grid.py +
+        #     test_strategies_combo_cache.py (differently-stemmed ComboCache
+        #     paths) + tests/integration/test_strategies_sweep.py; 92.35%
+        #     standalone against its stem matches, 100.00% with the trio; gated
+        #     by the dedicated static per-module gate (that exact trio) + the
+        #     whole-package floor (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+        #     MIGRATION.md #1727).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -240,6 +248,7 @@ class TestDiscoverTouchedModules:
                     "brutex/dashboard/movers_snapshot.py",
                     "brutex/config/credentials.py",
                     "brutex/engine/sweep_driver.py",
+                    "brutex/strategies/sweep.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE

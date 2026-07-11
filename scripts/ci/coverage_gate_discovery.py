@@ -207,6 +207,21 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # honest instead of coupling every credentials.py-touching PR to the discovery
         # stem-map heuristic (DEC-AWS-ONLY-CREDS-001).
         "brutex/config/credentials.py",
+        # The strategies ComboSweep/ComboCache module. Its 100% line+branch is a
+        # CURATED three-file property — test_strategies_sweep_grid.py (the grid
+        # driver) + test_strategies_combo_cache.py (the ComboCache LMDB paths,
+        # differently-stemmed) + tests/integration/test_strategies_sweep.py. The
+        # discovery gate maps only the stem matches (test_strategies_sweep*) and
+        # tops out at 92.35% STANDALONE (the ComboCache branches read 0) — the
+        # SAME multi-file-suite structural mismatch as stage1a.py /
+        # sweep_driver.py. Duplicating the combo-cache tests into a stem file
+        # would be a Golden-Rule-#11 COMMON violation. sweep.py's real 100% gate
+        # is the dedicated STATIC per-module gate in ci.yml (the exact three-file
+        # suite at --cov-fail-under=100, added with this exclusion) + the
+        # whole-package floor (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md
+        # #1727 — a docstring-only reconcile first put sweep.py under the
+        # discovery gate and exposed the latent stem-map mismatch).
+        "brutex/strategies/sweep.py",
     }
 )
 
