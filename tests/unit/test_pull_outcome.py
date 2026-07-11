@@ -22,7 +22,7 @@ from brutex.adapters.error_storm_breaker import VendorDownError
 from brutex.adapters.groww.errors import GrowwCredentialDeadError
 from brutex.adapters.groww.pull_singleflight import PullAlreadyRunningError
 from brutex.dashboard import pull_jobs
-from brutex.dashboard.pull_jobs import JOB_KIND_PULL, JOB_KIND_SWEEP, BackgroundPullJob
+from brutex.dashboard.pull_jobs import BackgroundPullJob, RetainedPullState
 from brutex.dashboard.pull_outcome import (
     MARKET_HOURS_DEFERRAL_PREFIX,
     OUTCOME_CLEAN,
@@ -41,7 +41,9 @@ from brutex.dashboard.pull_outcome import (
     TONE_WARN,
     LastPullOutcome,
     classify_last_pull_outcome,
+    classify_retained_pull_outcome,
 )
+from brutex.dashboard.pull_progress import ProgressSnapshot
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt, MarketHoursHalt
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
@@ -53,7 +55,6 @@ def _classify(
     failed: int = 0,
     stalled: bool = False,
     wedged: bool = False,
-    job_kind: str = JOB_KIND_PULL,
     verdict: dict[str, Any] | None = None,
 ) -> LastPullOutcome:
     """Call the classifier with defaults (each test overrides its own axis)."""
@@ -63,7 +64,6 @@ def _classify(
         failed=failed,
         stalled=stalled,
         wedged=wedged,
-        job_kind=job_kind,
         verdict=verdict,
     )
 
@@ -115,16 +115,6 @@ class TestRunningState:
         assert (out.outcome, out.tone) == (OUTCOME_WEDGED, TONE_BAD)
         assert "restart required" in out.headline
 
-    def test_running_sweep_with_verdict_reports_last_pull_verdict(self) -> None:
-        out = _classify(state="running", job_kind=JOB_KIND_SWEEP, verdict=_verdict("clean"))
-        assert (out.outcome, out.tone) == (OUTCOME_CLEAN, TONE_OK)
-        assert "from the last completed pull's verdict" in out.detail
-
-    def test_running_sweep_without_verdict_is_unknown_idle(self) -> None:
-        out = _classify(state="running", job_kind=JOB_KIND_SWEEP)
-        assert (out.outcome, out.tone) == (OUTCOME_UNKNOWN, TONE_IDLE)
-        assert "sweep" in out.detail
-
 
 class TestErrorState:
     """``error`` — halts / deferrals / refusals / generic failures, by recorded detail."""
@@ -173,11 +163,6 @@ class TestErrorState:
         out = _classify(state="error", detail="ValueError: boom")
         assert (out.outcome, out.tone) == (OUTCOME_ERROR, TONE_BAD)
         assert out.headline == "pull FAILED"
-
-    def test_error_from_sweep_kind_is_not_a_pull_outcome(self) -> None:
-        out = _classify(state="error", detail="ValueError: boom", job_kind=JOB_KIND_SWEEP)
-        assert (out.outcome, out.tone) == (OUTCOME_UNKNOWN, TONE_IDLE)
-        assert "sweep" in out.detail
 
 
 class TestDoneState:
@@ -228,18 +213,114 @@ class TestDoneState:
         assert "no classified verdict" in out.detail
         assert "cleanly" not in out.headline  # the over-claim word is never used here
 
-    def test_done_sweep_with_verdict_carries_provenance(self) -> None:
-        out = _classify(state="done", job_kind=JOB_KIND_SWEEP, verdict=_verdict("quota_exhausted"))
-        assert out.outcome == "verdict_quota_exhausted"
-        assert "from the last completed pull's verdict" in out.detail
+    def test_done_with_market_hours_note_is_deferred_never_green(self) -> None:
+        """Hostile-review M3: the pipeline's CAUGHT market-hours stop finishes
+        ``done`` with the deferral note as its finish detail — it must read
+        deferred even when a (spot-phase) CLEAN verdict was stamped."""
+        from brutex.dashboard.pipeline_pull import _market_hours_stop_note
 
-    def test_done_sweep_verdict_with_empty_action_detail_is_provenance_only(self) -> None:
-        out = _classify(state="done", job_kind=JOB_KIND_SWEEP, verdict=_verdict("clean", action=""))
-        assert out.detail == "from the last completed pull's verdict"
+        note = _market_hours_stop_note()
+        out = _classify(state="done", detail=note, verdict=_verdict("clean"))
+        assert (out.outcome, out.tone) == (OUTCOME_DEFERRED_MARKET_HOURS, TONE_WARN)
+        assert out.detail == note
 
-    def test_done_sweep_without_verdict_is_unknown_idle(self) -> None:
-        out = _classify(state="done", job_kind=JOB_KIND_SWEEP)
-        assert (out.outcome, out.tone) == (OUTCOME_UNKNOWN, TONE_IDLE)
+    def test_done_carries_its_own_note_when_no_verdict(self) -> None:
+        """The run's own recorded note is never discarded for a canned line."""
+        out = _classify(state="done", detail="pipeline stopped after metadata — gate failed")
+        assert (out.outcome, out.tone) == (OUTCOME_COMPLETED, TONE_OK)
+        assert out.detail == "pipeline stopped after metadata — gate failed"
+
+
+class TestIdleVerdictDetail:
+    """The idle-arm provenance detail law (the pre-pull refusal surface)."""
+
+    def test_idle_refusal_verdict_with_empty_action_reads_provenance_only(self) -> None:
+        out = _classify(verdict=_verdict("credentials_missing", action=""))
+        assert out.detail == "stamped before any pull started"
+
+
+def _snap(
+    *,
+    state: str = "done",
+    detail: str = "",
+    failed: int = 0,
+    stalled: bool = False,
+    wedged: bool = False,
+) -> ProgressSnapshot:
+    """A minimal :class:`ProgressSnapshot` for retained-state tests."""
+    return ProgressSnapshot(
+        state=state,
+        total=1,
+        completed=1,
+        failed=failed,
+        bars=0,
+        current="",
+        detail=detail,
+        updated_at=0.0,
+        stalled=stalled,
+        wedged=wedged,
+    )
+
+
+class TestRetainedCorrelation:
+    """``classify_retained_pull_outcome`` — the ONE retained-state → outcome law
+    (hostile-review M2: a verdict colours a run ONLY when their run ids match)."""
+
+    def test_no_retained_state_reads_never_run(self) -> None:
+        out = classify_retained_pull_outcome(None, verdict=None, verdict_pull_id="")
+        assert out.outcome == OUTCOME_NEVER_RUN
+        assert out.tone == TONE_IDLE
+
+    def test_no_retained_state_still_surfaces_a_prepull_refusal_verdict(self) -> None:
+        """The never-ran slot's ONE legitimate verdict writer is the pre-pull
+        credentials-refusal gate — surfaced with its provenance."""
+        out = classify_retained_pull_outcome(
+            None, verdict=_verdict("credentials_missing"), verdict_pull_id=""
+        )
+        assert out.outcome == OUTCOME_UNKNOWN or out.tone in (TONE_WARN, TONE_BAD)
+        assert "stamped before any pull started" in out.detail
+
+    def test_matching_run_id_consults_the_verdict(self) -> None:
+        retained = RetainedPullState(snapshot=_snap(), pull_id="run-1")
+        out = classify_retained_pull_outcome(
+            retained, verdict=_verdict("clean"), verdict_pull_id="run-1"
+        )
+        assert out.outcome == OUTCOME_CLEAN
+        assert out.tone == TONE_OK
+
+    def test_mismatched_run_id_drops_the_stale_verdict(self) -> None:
+        """M2 core: a verdict stamped by an EARLIER run never colours a later
+        run that recorded no verdict of its own (the metadata-only shape)."""
+        retained = RetainedPullState(snapshot=_snap(), pull_id="run-2")
+        out = classify_retained_pull_outcome(
+            retained, verdict=_verdict("clean"), verdict_pull_id="run-1"
+        )
+        assert out.outcome == OUTCOME_COMPLETED
+        assert out.outcome != OUTCOME_CLEAN
+
+    def test_runless_retained_record_correlates_with_nothing(self) -> None:
+        """A deferral/refusal record carries pull_id ``""`` — even an
+        empty-for-empty id match is REFUSED (the ``retained.pull_id and``
+        guard), so a stale verdict can never colour a run-less record."""
+        retained = RetainedPullState(
+            snapshot=_snap(
+                state="error", detail=f"{MARKET_HOURS_DEFERRAL_PREFIX} (08:45-15:35 IST)"
+            ),
+            pull_id="",
+        )
+        out = classify_retained_pull_outcome(
+            retained, verdict=_verdict("clean"), verdict_pull_id=""
+        )
+        assert out.outcome == OUTCOME_DEFERRED_MARKET_HOURS
+        assert out.tone == TONE_WARN
+
+    def test_retained_snapshot_axes_thread_through(self) -> None:
+        retained = RetainedPullState(
+            snapshot=_snap(failed=3, detail="3 unit(s) quarantined"), pull_id="run-3"
+        )
+        out = classify_retained_pull_outcome(retained, verdict=None, verdict_pull_id="")
+        assert out.outcome == OUTCOME_COMPLETED_WITH_FAILURES
+        assert out.detail == "3 unit(s) quarantined"
 
 
 class TestWireShape:
@@ -275,6 +356,20 @@ class TestDriftPins:
         assert snap.detail.startswith(MARKET_HOURS_DEFERRAL_PREFIX)
         out = _classify(state=snap.state, detail=snap.detail)
         assert out.outcome == OUTCOME_DEFERRED_MARKET_HOURS
+        # m5: the deferral is ALSO retained as the last PULL terminal (no run
+        # id — no verdict can ever correlate with it).
+        retained = job.last_pull_state()
+        assert retained is not None
+        assert retained.pull_id == ""
+        assert retained.snapshot.detail.startswith(MARKET_HOURS_DEFERRAL_PREFIX)
+
+    def test_pipeline_stop_note_matches_the_deferral_prefix(self) -> None:
+        """Hostile-review M3 drift pin: the pipeline's CAUGHT market-hours stop
+        note (which becomes the ``done`` finish detail via ``_finish_detail``)
+        must keep matching the classifier's deferral prefix."""
+        from brutex.dashboard.pipeline_pull import _market_hours_stop_note
+
+        assert _market_hours_stop_note().startswith(MARKET_HOURS_DEFERRAL_PREFIX)
 
     @pytest.mark.parametrize(
         "exc",

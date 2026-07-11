@@ -267,18 +267,31 @@ def _latest_nightly_id(nightly_dir: Path) -> str | None:
 
 
 def _read_report_json(report_file: Path) -> Mapping[str, Any] | str:
-    """Read + parse a nightly ``report.json`` (bounded); a defect returns the REASON string."""
+    """Read + parse a nightly ``report.json``; a defect returns the REASON string.
+
+    The read is BOUNDED (hostile-review m4 — the #1614 shard idiom): at most
+    :data:`MAX_REPORT_BYTES` + 1 bytes are ever read (``read(cap)`` + a
+    ONE-byte over-cap probe), so an out-of-band multi-GB file at this path
+    costs neither the read nor the memory before failing closed as oversized.
+    Parse defects — non-UTF-8, malformed JSON, AND the deep-nesting
+    ``RecursionError`` ``json.loads`` raises on a 60k-bracket bomb
+    (hostile-review M1: previously escaped this clause and 500'd the route;
+    the lake_stats_manifest #1614 fail-closed precedent) — return the named
+    reason, never raise.
+    """
     try:
-        raw = report_file.read_bytes()
+        with report_file.open("rb") as handle:
+            raw = handle.read(MAX_REPORT_BYTES)
+            over = handle.read(1)
     except FileNotFoundError:
         return "latest nightly dir has no report.json (run crashed before the report write?)"
     except OSError as exc:
         return f"report.json unreadable: {type(exc).__name__}"
-    if len(raw) > MAX_REPORT_BYTES:
-        return f"report.json oversized ({len(raw)} bytes > {MAX_REPORT_BYTES} cap) — treated as corrupt"
+    if over:
+        return f"report.json oversized (> {MAX_REPORT_BYTES} byte cap) — treated as corrupt"
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         return f"report.json corrupt: {type(exc).__name__}"
     if not isinstance(data, dict):
         return f"report.json is not a JSON object (got {type(data).__name__})"
@@ -508,8 +521,13 @@ class HealthHub:
             if degraded:
                 _LOG.warning(
                     "health_hub.lane_degraded",
+                    # ``headline`` can embed a FILESYSTEM-influenceable string
+                    # (the nightly dir name) — logged repr()'d per the house
+                    # log-injection discipline (hostile-review n6; the #1594
+                    # rounds-7/8 precedent). Wire payloads stay RAW: the
+                    # frontend binds them via textContent only.
                     lanes=[
-                        {"lane": name, "verdict": verdict, "headline": headline}
+                        {"lane": name, "verdict": verdict, "headline": repr(headline)}
                         for name, verdict, headline in degraded
                     ],
                 )

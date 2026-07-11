@@ -231,7 +231,7 @@ from brutex.dashboard.pull_jobs import (
     BackgroundPullJob,
     ProgressHook,
 )
-from brutex.dashboard.pull_outcome import LastPullOutcome, classify_last_pull_outcome
+from brutex.dashboard.pull_outcome import LastPullOutcome, classify_retained_pull_outcome
 from brutex.dashboard.rate_bridge_cache import (
     BRIDGE_SOURCE_UNWIRED,
     BridgeReadResult,
@@ -1357,11 +1357,11 @@ def build_app(
         Optional zero-arg probe returning the app's live
         :class:`~brutex.dashboard.pull_outcome.LastPullOutcome`
         (DEC-OPERATOR-HEALTH-TRUTH-001).  The production default classifies
-        THIS app's own single-flight job snapshot + last-pull-verdict holder
+        THIS app's own retained last-pull state + id-correlated verdict holder
         through the ONE :func:`~brutex.dashboard.pull_outcome.\
-classify_last_pull_outcome`; tests inject a deterministic probe (or a probe
-        over their OWN real :class:`BackgroundPullJob`) to drive every outcome
-        state through the real routes (mirrors ``pull_active_probe``).
+classify_retained_pull_outcome`; tests inject a deterministic probe (or a
+        probe over their OWN real :class:`BackgroundPullJob`) to drive every
+        outcome state through the real routes (mirrors ``pull_active_probe``).
     health_hub
         Optional :class:`~brutex.dashboard.health_hub.HealthHub` backing the
         ``GET /api/v1/health/hub`` fold (DEC-OPERATOR-HEALTH-TRUTH-001).
@@ -2900,29 +2900,48 @@ classify_last_pull_outcome`; tests inject a deterministic probe (or a probe
     # background _work closure stamps the BulkSpotReport's `.verdict.to_dict()`
     # here when a pull / retry completes; GET /pull-verdict maps it through the
     # pure banner_for() helper so /universe can SHOW the coloured banner. A
-    # one-key holder (not a module-global — CLAUDE.md §4); the write is a single
-    # atomic reference assignment on the job thread, the read is on the request
-    # thread (CPython GIL → torn-state-free). `None` until the first pull lands.
-    _last_pull_verdict: dict[str, dict[str, Any] | None] = {"verdict": None}
+    # two-key holder (not a module-global — CLAUDE.md §4); each write assigns
+    # BOTH keys on the job thread, the read is on the request thread (CPython
+    # GIL → torn-state-free for the outcome probe's purposes: a mid-stamp read
+    # at worst sees the OLD id with the NEW verdict or vice versa, and either
+    # mismatch makes the probe honestly SKIP the verdict, never mis-colour).
+    # `verdict` is None until the first pull lands; `pull_id` is the STAMPING
+    # run's correlation id (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2:
+    # the outcome probe consults the verdict ONLY when it matches the retained
+    # snapshot's run — an un-timestamped stale verdict can never colour a
+    # different run's outcome; "" = stamped outside any run, e.g. the pre-pull
+    # credentials refusal, which correlates with the never-ran slot only).
+    _last_pull_verdict: dict[str, Any] = {"verdict": None, "pull_id": ""}
+
+    def _stamp_pull_verdict(verdict: dict[str, Any]) -> None:
+        """Stamp *verdict* + the CURRENT run's correlation id into the holder.
+
+        Called from the pull routes' _work closures, which run inside the
+        job's ``pull_id_scope`` — so ``current_pull_id()`` is the run the
+        verdict describes (``""`` at the pre-pull refusal gate, by design).
+        ONE writer helper so no stamp site can forget the id half
+        (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2).
+        """
+        from brutex.observability.correlation import current_pull_id
+
+        _last_pull_verdict["verdict"] = verdict
+        _last_pull_verdict["pull_id"] = current_pull_id()
 
     def _default_pull_outcome_probe() -> LastPullOutcome:
         """The honest LAST-PULL OUTCOME of THIS app's job slot (DEC-OPERATOR-HEALTH-TRUTH-001).
 
-        Joins the two truths the app already records — the single-flight job's
-        O(1) progress snapshot (state/detail/failed/stalled/wedged + the
-        retained job kind, so a finished SWEEP is never claimed as a pull
-        outcome) and the last finished-pull verdict holder above — through the
-        ONE pure classifier. O(1), in-memory, read-only.
+        Joins the two truths the app already records — the job's RETAINED last
+        PULL-kind snapshot (``last_pull_state`` — live while a pull runs;
+        sweep-proof between runs, so a halted pull's red outcome survives a
+        later sweep — hostile-review M2/m5) and the last finished-pull verdict
+        holder above, consulted ONLY when its stamped run id matches the
+        retained snapshot's run — through the ONE pure classifier. O(1),
+        in-memory, read-only.
         """
-        snap = _pull_job.snapshot()
-        return classify_last_pull_outcome(
-            state=snap.state,
-            detail=snap.detail,
-            failed=snap.failed,
-            stalled=snap.stalled,
-            wedged=snap.wedged,
-            job_kind=_pull_job.last_job_kind,
+        return classify_retained_pull_outcome(
+            _pull_job.last_pull_state(),
             verdict=_last_pull_verdict["verdict"],
+            verdict_pull_id=_last_pull_verdict["pull_id"],
         )
 
     # Resolved probe (injection seam mirrors ``pull_active_probe``): the
@@ -2979,7 +2998,7 @@ classify_last_pull_outcome`; tests inject a deterministic probe (or a probe
         if refusal is not None:
             # Stamp the RED refusal verdict so the /universe banner shows the
             # fix text too — needs_operator semantics, not just a 503 body.
-            _last_pull_verdict["verdict"] = refusal.to_dict()
+            _stamp_pull_verdict(refusal.to_dict())
             if liveproof is not None:
                 # Mirror the SAME relayed fix text onto the persistent
                 # live-proof banner (DEC-DOCTOR-LIVE-AUTORUN-001): the banner
@@ -3175,7 +3194,7 @@ classify_last_pull_outcome`; tests inject a deterministic probe (or a probe
                 # set mid-pull can never crash a long pull).
                 market_closed=resolve_market_closed(),
             )
-            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            _stamp_pull_verdict(report.verdict.to_dict())
             return report
 
         # Initial total = symbols × the chosen fetch intervals (1d / 1m / both) — a
@@ -4609,7 +4628,7 @@ classify_last_pull_outcome`; tests inject a deterministic probe (or a probe
                     latest_date_cache=_latest_movers_date_cache,
                 )
                 if report.spot is not None:
-                    _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+                    _stamp_pull_verdict(report.spot.verdict.to_dict())
                 # Consecutive-failure health over the post-pull Greeks pass
                 # (DEC-GREEKS-ENRICH-OBSERVE-001), via the nested candle
                 # sub-report. A stopped-early / no-candle pipeline (either
@@ -4927,7 +4946,7 @@ classify_last_pull_outcome`; tests inject a deterministic probe (or a probe
                 # set mid-pull can never crash a long pull).
                 market_closed=resolve_market_closed(),
             )
-            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            _stamp_pull_verdict(report.verdict.to_dict())
             return report
 
         unit_total = len(instruments) * len(fetch_intervals)

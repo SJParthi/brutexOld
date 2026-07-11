@@ -22,10 +22,14 @@ _Last updated: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
 `/api/v1/pull/rate` payload gains the ADDITIVE `last_pull` OUTCOME block (NEW pure
-`brutex/dashboard/pull_outcome.py` classifying the job slot's RECORDED state +
-the pull-verdict holder, colours via the ONE `verdict_banner.banner_for`
-authority) so a HALTED pull (disk-full / OOM / market-hours / quota / breaker)
-renders its NAMED degraded state, a market-hours deferral its own honest state,
+`brutex/dashboard/pull_outcome.py` classifying the job slot's RETAINED pull
+terminal — `RetainedPullState`, surviving a later sweep on the shared slot —
+plus the pull-id-CORRELATED verdict holder, colours via the ONE
+`verdict_banner.banner_for` authority) so a HALTED pull (disk-full / OOM /
+market-hours mid-run OR start-gate / quota / breaker)
+renders its NAMED degraded state — even after a later sweep, and never coloured
+by an earlier run's stale verdict (the hostile-review FIX ROUND, per-finding
+record in MIGRATION.md #1747) —
 and green appears ONLY on the classified clean (the unclassified `completed`
 never claims "cleanly"); the formerly-swallowed `failing`/`local` flow states
 render honestly. (2) ONE unified HEALTH HUB — NEW `GET /api/v1/health/hub` +
@@ -2196,9 +2200,12 @@ hostile-review pass._
   only "no pull running + a fresh rate tick" (`pull_rate_view.py`) — a HALTED pull (LakeWriteHalt disk_full/OOM ·
   MarketHoursHalt · quota · vendor-down/mass-empty breaker · any worker failure) showed the SAME green. The
   `/api/v1/pull/rate` payload gains the ADDITIVE `last_pull` OUTCOME block — NEW pure `brutex/dashboard/pull_outcome.py`
-  classifies the job slot's RECORDED evidence (the `PullProgress` snapshot's state/detail/failed/stalled/wedged, the NEW
-  O(1) `BackgroundPullJob.last_job_kind` so a finished SWEEP is never claimed as a pull outcome, and the last-pull-verdict
-  holder colour-mapped through the ONE `verdict_banner.banner_for` authority — §11 COMMON, grey folds to WARN never green)
+  classifies the job slot's RECORDED evidence (the `PullProgress` snapshot's state/detail/failed/stalled/wedged via the
+  NEW `BackgroundPullJob.last_pull_state()` RETAINED PULL TERMINAL — `RetainedPullState(snapshot, pull_id)`, stamped at
+  the `_run` finally + the market-hours deferral + the singleflight refusal, so a later SWEEP resets the live tracker
+  but never the retained pull outcome; and the last-pull-verdict holder colour-mapped through the ONE
+  `verdict_banner.banner_for` authority — §11 COMMON, grey folds to WARN never green — consulted ONLY on a pull-id
+  MATCH via `classify_retained_pull_outcome`, so a stale verdict never colours a later run)
   into the stable vocabulary never_run · running · running_stalled_suspect · wedged · clean · completed (never worded
   "cleanly") · completed_with_failures · verdict_<kind> · deferred_market_hours · halted_market_hours ·
   halted_disk_full/oom/lake_write/quota/pool_broken/vendor_down/mass_empty/auth · refused_busy · error · unknown, with
@@ -2209,7 +2216,8 @@ hostile-review pass._
   PART 2 (the unified health hub): NEW `GET /api/v1/health/hub` (threadpool-offloaded) + `brutex/dashboard/health_hub.py`
   fold five lanes from DURABLE LOCAL state — pull (the Part-1 probe, never TTL-delayed) · nightly (the newest
   `<results>/sweeps/nightly/<id>/report.json` the R9 chain writes: ok→green, >30 h→WARN overdue [stated policy],
-  suspect→WARN, breaker→RED naming the blocker; corrupt/oversized[1 MiB cap]/schema-drift → NAMED `unknown`, never a
+  suspect→WARN, breaker→RED naming the blocker; corrupt/oversized[the GENUINELY bounded `read(1 MiB cap)`+1-byte
+  over-probe, #1614 idiom]/deep-nested[`RecursionError` caught]/schema-drift → NAMED `unknown`, never a
   500) · backup_deadman (the PURE `brutex.backup.deadman.evaluate_deadman` REUSED VERBATIM, READ-ONLY — never writes the
   checker sidecar, never alerts; FRESH/RUNNING→green, every alarm verdict→RED; an UNCONFIGURED box reads `not_wired`, not
   the checker's NEVER_SUCCEEDED — "never installed" ≠ "installed and silent") · doctor_daily + mutation HONESTLY NOT
@@ -2221,11 +2229,20 @@ hostile-review pass._
   `__bxHealthHubSubs`/`__bxHealthHubFailSubs` call-time fan-outs with throwing-subscriber isolation, textContent/
   createElement-only DOM (zero innerHTML sinks), skip-render on unchanged payloads, honest degraded note when bx-poll.js
   is missing. HONEST LIMITS: the pull lane covers THIS dashboard process (a CLI pull's bridge carries rate, no outcome —
-  its halt stays Telegram/exit-code visible); the verdict holder is process-local + un-timestamped (THIS run's own
-  `failed` tally outranks it; the `completed*` arms never claim "cleanly"); doctor/mutation stay `not_wired` until a
-  local artifact exists (named follow-up seam). TESTS: `pull_outcome.py` (85/38) + `health_hub.py` (175/38) BOTH 100.00%
-  line+branch on NEW ci.yml standalone gates; 17 route-integration tests drive clean · completed-with-failures ·
-  halted-disk-full/OOM/market-hours/quota · deferred · running · never-run · sweep-done through a REAL BackgroundPullJob
+  its halt stays Telegram/exit-code visible); the verdict holder is process-local + pull-id-correlated (THIS run's own
+  `failed` tally outranks it; the `completed*` arms never claim "cleanly"; a restart honestly reads never_run);
+  doctor/mutation stay `not_wired` until a local artifact exists (named follow-up seam). HOSTILE-REVIEW FIX ROUND folded
+  (same branch, pre-merge, FIX-FIRST on head 0c1d779 — per-finding record in MIGRATION.md #1747): M1 the report.json
+  nesting-bomb `RecursionError` 500 caught fail-closed; M2 the halted-pull-masked-green-after-a-sweep/stale-verdict
+  class closed STRUCTURALLY by the retained pull terminal + the pull-id correlation law (the interim `last_job_kind`
+  API removed, superseded); M3 the pipeline's CAUGHT mid-run market-hours stop now classifies via the deferral-prefixed
+  finish note (drift-pinned to `_market_hours_stop_note()`); m4 the report read made GENUINELY bounded
+  (counted-handle-pinned); m5 a post-sweep deferral retains as the pull terminal (reads deferred, never idle); n6 the
+  degrade-log headline repr()'d (#1594 discipline); n7 the ledger/blurb over-claims reconciled. TESTS:
+  `pull_outcome.py` (83/32) + `health_hub.py` (177/38) BOTH 100.00%
+  line+branch on NEW ci.yml standalone gates; 22 route-integration tests drive clean · completed-with-failures ·
+  halted-disk-full/OOM/market-hours/quota · deferred · running · never-run · sweep-done · halt-then-sweep-stays-red ·
+  stale-verdict-dropped · pipeline-mid-run-stop-deferred through a REAL BackgroundPullJob
   + the REAL routes; 16 frontend pins incl. the killed unconditional-green token + node-EXECUTED helper goldens;
   ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)

@@ -13,10 +13,11 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from brutex.backup.state import empty_backup_state, save_state
+from brutex.dashboard import health_hub
 from brutex.dashboard.health_hub import (
     DEFAULT_TTL_S,
     LANE_BACKUP,
@@ -34,6 +35,7 @@ from brutex.dashboard.health_hub import (
     VERDICT_WARN,
     HealthHub,
     LaneStatus,
+    _read_report_json,
     backup_deadman_lane,
     fold_verdict,
     nightly_lane,
@@ -251,7 +253,8 @@ class TestNightlyLane:
         assert lane.verdict == VERDICT_UNKNOWN
         assert "not a JSON object" in lane.detail
 
-    def test_oversized_report_is_unknown_never_unbounded(self, tmp_path: Path) -> None:
+    def test_over_cap_report_is_named_oversized(self, tmp_path: Path) -> None:
+        """ONE byte past the cap → the named oversized degrade (never parsed)."""
         root = tmp_path / "sweeps"
         run_dir = root / NIGHTLY_DIRNAME / "nightly-20261008T120000Z-abc123"
         run_dir.mkdir(parents=True)
@@ -259,6 +262,77 @@ class TestNightlyLane:
         lane = nightly_lane(root, now=_NOW)
         assert lane.verdict == VERDICT_UNKNOWN
         assert "oversized" in lane.detail
+
+    def test_exactly_at_cap_report_still_parses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """m4 boundary: a report of EXACTLY the cap loads whole (no off-by-one
+        truncation from the bounded read); one byte more is oversized."""
+        monkeypatch.setattr(health_hub, "MAX_REPORT_BYTES", 512)
+        root = tmp_path / "sweeps"
+        run_dir = root / NIGHTLY_DIRNAME / "nightly-20261008T120000Z-abc123"
+        run_dir.mkdir(parents=True)
+        body = dict(_report())
+        raw = json.dumps(body).encode("utf-8")
+        pad = 512 - len(raw) - len('"pad": ""') - 2  # splice a pad key to hit the cap exactly
+        body["pad"] = "p" * pad
+        raw = json.dumps(body).encode("utf-8")
+        assert len(raw) == 512
+        (run_dir / REPORT_FILENAME).write_bytes(raw)
+        lane = nightly_lane(root, now=_NOW)
+        assert lane.verdict == VERDICT_OK
+        (run_dir / REPORT_FILENAME).write_bytes(raw + b"\n")
+        lane = nightly_lane(root, now=_NOW)
+        assert lane.verdict == VERDICT_UNKNOWN
+        assert "oversized" in lane.detail
+
+    def test_report_read_is_bounded_at_cap_plus_probe_byte(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """m4 teeth: an out-of-band report FAR past the cap costs at most
+        cap + 1 read bytes — the ``read(cap)`` + ONE-byte over-probe idiom
+        (#1614), never a whole-file ``read_bytes()``.  Counted through a
+        read-counting handle so a revert to the unbounded read fails here."""
+        monkeypatch.setattr(health_hub, "MAX_REPORT_BYTES", 256)
+        big = tmp_path / "report.json"
+        big.write_bytes(b"x" * (256 + 4096))
+        bytes_read = 0
+
+        class _CountingHandle:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+
+            def __enter__(self) -> _CountingHandle:
+                return self
+
+            def __exit__(self, *exc_info: object) -> None:
+                self._inner.close()
+
+            def read(self, n: int = -1) -> bytes:
+                nonlocal bytes_read
+                data: bytes = self._inner.read(n)
+                bytes_read += len(data)
+                return data
+
+        class _CountingPath:
+            def open(self, mode: str) -> _CountingHandle:
+                return _CountingHandle(big.open(mode))
+
+        verdict = _read_report_json(cast(Path, _CountingPath()))
+        assert isinstance(verdict, str) and "oversized" in verdict
+        assert bytes_read <= 256 + 1
+
+    def test_deep_nested_report_is_unknown_never_a_crash(self, tmp_path: Path) -> None:
+        """Hostile-review M1: a 60k-bracket nesting bomb makes ``json.loads``
+        raise ``RecursionError`` — previously UNCAUGHT (it escaped the parse
+        clause and 500'd the hub route); now the named corrupt degrade."""
+        root = tmp_path / "sweeps"
+        run_dir = root / NIGHTLY_DIRNAME / "nightly-20261008T120000Z-abc123"
+        run_dir.mkdir(parents=True)
+        (run_dir / REPORT_FILENAME).write_bytes(b"[" * 60_000)
+        lane = nightly_lane(root, now=_NOW)
+        assert lane.verdict == VERDICT_UNKNOWN
+        assert "RecursionError" in lane.detail
 
     def test_report_json_as_directory_is_unknown(self, tmp_path: Path) -> None:
         """An unreadable inode (a DIRECTORY at report.json) degrades named."""
@@ -514,6 +588,35 @@ class TestHealthHubPayload:
         recovered = [e for e in logs if e["event"] == "health_hub.lanes_recovered"]
         assert len(recovered) == 1
         assert not [e for e in logs if e["event"] == "health_hub.lane_degraded"]
+
+    def test_degrade_log_headline_is_repr_escaped_for_hostile_dir_names(
+        self, tmp_path: Path
+    ) -> None:
+        """Hostile-review n6: a control-char-named nightly dir flows RAW into
+        the lane headline (``nightly report unreadable — <dir>``) — the degrade
+        LOG's ``headline`` field rides ``repr()`` so no forged log line lands
+        (the #1594 rounds-7/8 discipline); the WIRE payload stays raw
+        (textContent-rendered client-side)."""
+        import structlog
+
+        lake = tmp_path / "lake"
+        evil = "nightly-20261008T120000Z-evil\nFAKE-LOG-LINE"
+        run_dir = lake / "sweeps" / NIGHTLY_DIRNAME / evil
+        run_dir.mkdir(parents=True)
+        # A corrupt report → the UNKNOWN arm, whose headline embeds the dir name.
+        (run_dir / REPORT_FILENAME).write_text("{torn", encoding="utf-8")
+        hub = _hub(tmp_path, lake_root=lake, ttl_s=0.0)
+        with structlog.testing.capture_logs() as logs:
+            payload = hub.payload()
+        degraded = [e for e in logs if e["event"] == "health_hub.lane_degraded"]
+        assert len(degraded) == 1
+        logged = next(
+            entry["headline"] for entry in degraded[0]["lanes"] if entry["lane"] == LANE_NIGHTLY
+        )
+        assert "\n" not in logged  # repr-escaped — no raw newline forge channel
+        assert "\\n" in logged
+        # The wire payload keeps the RAW headline for the textContent renderer.
+        assert "\n" in _lane_by_name(payload, LANE_NIGHTLY)["headline"]
 
     def test_healthy_refreshes_log_nothing(self, tmp_path: Path) -> None:
         """A never-degraded hub emits ZERO degrade/recovery events."""

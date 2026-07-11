@@ -12,20 +12,26 @@ clean completion — an honesty-of-display violation (Golden Rule #1).
 This module is the pure read-side classifier that closes the gap.  It joins the
 truth sources the dashboard ALREADY records (nothing new is invented):
 
-* the :class:`~brutex.dashboard.pull_progress.ProgressSnapshot` of the app's
-  single-flight :class:`~brutex.dashboard.pull_jobs.BackgroundPullJob` — its
-  ``state`` (idle/running/done/error), its ``detail`` (a failed run records
-  ``"{type(exc).__name__}: {exc}"``; a market-hours START deferral records the
-  distinct ``"deferred — inside NSE market-hours window …"`` message), its
-  ``failed`` unit count and its ``stalled``/``wedged`` flags;
-* the job's retained :attr:`~brutex.dashboard.pull_jobs.BackgroundPullJob.\
-last_job_kind` — the shared single-flight slot ALSO runs the zero-vendor-call
-  SWEEP, whose ``done`` must never be claimed as a pull outcome;
+* the last PULL-kind run's :class:`~brutex.dashboard.pull_progress.\
+ProgressSnapshot`, sourced from
+  :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.last_pull_state`
+  (hostile-review M2 fix: the shared single-flight slot ALSO runs the
+  zero-vendor-call SWEEP, whose ``PullProgress.start`` resets the shared
+  tracker — the job now RETAINS the last pull's terminal snapshot so a halted
+  pull's red outcome survives a later sweep; a sweep's ``done``/``error`` is
+  never fed here) — its ``state`` (idle/running/done/error), its ``detail``
+  (a failed run records ``"{type(exc).__name__}: {exc}"``; a market-hours
+  START deferral — and the pipeline's CAUGHT between-phases market-hours stop,
+  whose note becomes the ``done`` finish detail — record the distinct
+  ``"deferred — inside NSE market-hours window …"`` message), its ``failed``
+  unit count and its ``stalled``/``wedged`` flags;
 * the app's last finished-pull VERDICT dict (DEC-VERDICT-BANNER-001 — the
   classified ``clean`` / ``quota_exhausted`` / ``auth_expired`` / … kinds),
-  colour-mapped through the ONE existing authority
-  :func:`brutex.dashboard.verdict_banner.banner_for` (CLAUDE.md §11 COMMON —
-  never a second colour table).
+  consulted ONLY when its stamped run id matches the retained snapshot's run
+  (hostile-review M2: the holder is un-timestamped, so an uncorrelated verdict
+  must never colour a different run's outcome), colour-mapped through the ONE
+  existing authority :func:`brutex.dashboard.verdict_banner.banner_for`
+  (CLAUDE.md §11 COMMON — never a second colour table).
 
 ## The outcome vocabulary (stable machine tokens)
 
@@ -34,7 +40,8 @@ last_job_kind` — the shared single-flight slot ALSO runs the zero-vendor-call
 deliberately NOT worded "cleanly") · ``completed_with_failures`` ·
 ``verdict_<kind>`` (a non-clean classified verdict, e.g.
 ``verdict_quota_exhausted`` / ``verdict_credentials_missing``) ·
-``deferred_market_hours`` (start-gate deferral) · ``halted_market_hours`` ·
+``deferred_market_hours`` (the START-gate deferral AND the pipeline's caught
+between-phases market-hours stop) · ``halted_market_hours`` ·
 ``halted_disk_full`` · ``halted_oom`` · ``halted_lake_write`` ·
 ``halted_quota`` · ``halted_pool_broken`` · ``halted_vendor_down`` ·
 ``halted_mass_empty`` · ``halted_auth`` · ``refused_busy`` · ``error`` ·
@@ -48,13 +55,14 @@ it 1:1 with zero re-derivation.
   fetch`` pull publishes rate numbers over the cross-process bridge but NO
   outcome — its halt is alerted on Telegram and visible in the CLI exit code,
   not here (a named limit, never a fabricated verdict).
-* The verdict holder is process-local and un-timestamped: it is stamped by the
-  pull routes' own workers, so on the normal path it belongs to the same run
-  the snapshot describes — but a route that finishes WITHOUT stamping (e.g. a
-  metadata-only pull) leaves an older pull's verdict in place.  The classifier
-  therefore prefers THIS run's own evidence (``state``/``detail``/``failed``)
-  and consults the verdict only to REFINE a finished run's colour, with the
-  ``completed``/``completed_with_failures`` arms never claiming "cleanly".
+* The verdict holder is process-local and un-timestamped, so the PROBE
+  correlates it by run id (the holder carries the stamping run's ``pull_id``;
+  the retained snapshot carries its own) and passes it here ONLY on a match —
+  a route that finishes WITHOUT stamping (e.g. a metadata-only pull) therefore
+  reads the honest ``completed``-with-its-own-note, never an older pull's
+  verdict (hostile-review M2).  THIS run's own evidence
+  (``state``/``detail``/``failed``) still outranks a correlated verdict, and
+  the ``completed``/``completed_with_failures`` arms never claim "cleanly".
 * Pure + O(1): a handful of string comparisons over already-recorded state —
   no I/O, no clock, no lake read; it changes NO pull behaviour and the
   brute-force ENGINE (NIFTY/BANKNIFTY/SENSEX) is untouched.
@@ -66,7 +74,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from brutex.dashboard.pull_jobs import JOB_KIND_PULL
+from brutex.dashboard.pull_jobs import RetainedPullState
 from brutex.dashboard.verdict_banner import banner_for
 
 #: Tone tokens — EXACTLY the operator-page heartbeat ``setSlot`` vocabulary
@@ -262,25 +270,27 @@ def classify_last_pull_outcome(
     failed: int,
     stalled: bool,
     wedged: bool,
-    job_kind: str,
     verdict: Mapping[str, Any] | None,
 ) -> LastPullOutcome:
-    """Classify the job slot's recorded state into the honest last-pull outcome.
+    """Classify the last PULL run's recorded state into the honest outcome.
 
     Parameters
     ----------
     state, detail, failed, stalled, wedged
         The corresponding :class:`~brutex.dashboard.pull_progress.ProgressSnapshot`
-        fields of the app's single-flight pull job.
-    job_kind
-        The job slot's :attr:`~brutex.dashboard.pull_jobs.BackgroundPullJob.\
-last_job_kind` — a retained ``done``/``error`` from a SWEEP run must never be
-        claimed as a pull outcome (the verdict holder, stamped only by pull
-        routes, is then the only honest source).
+        fields of the job slot's last PULL-kind run — the caller sources them
+        from :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.last_pull_state`
+        (SWEEP runs on the shared slot are already filtered out there, and a
+        never-ran slot passes ``state="idle"``), so every input here describes
+        a pull.
     verdict
         The app's last finished-pull verdict dict
-        (:meth:`~brutex.adapters.ingest_common.PullVerdict.to_dict` shape), or
-        ``None`` when no pull has stamped one.
+        (:meth:`~brutex.adapters.ingest_common.PullVerdict.to_dict` shape) —
+        the caller passes it ONLY when it was stamped by the SAME run the
+        snapshot describes (the retained run-id correlation — hostile-review
+        M2: an un-timestamped stale verdict must never colour a different
+        run's outcome), or on the never-ran slot (where the only writer is
+        the pre-pull credentials-refusal gate). ``None`` otherwise.
 
     Returns
     -------
@@ -290,17 +300,6 @@ last_job_kind` — a retained ``done``/``error`` from a SWEEP run must never be
         ``unknown``/``error``, never a green.
     """
     if state == "running":
-        if job_kind != JOB_KIND_PULL:
-            # A SWEEP is running on the shared slot — not a pull outcome at all;
-            # the pull slot honestly reports the LAST pull's verdict if one exists.
-            if verdict is not None:
-                return _from_verdict(verdict, provenance="from the last completed pull's verdict")
-            return LastPullOutcome(
-                outcome=OUTCOME_UNKNOWN,
-                tone=TONE_IDLE,
-                headline="no pull outcome recorded",
-                detail="a non-pull job (sweep) is running on this slot",
-            )
         if wedged:
             return LastPullOutcome(
                 outcome=OUTCOME_WEDGED,
@@ -319,30 +318,27 @@ last_job_kind` — a retained ``done``/``error`` from a SWEEP run must never be
             outcome=OUTCOME_RUNNING, tone=TONE_OK, headline="pull running", detail=detail
         )
     if state == "error":
-        if job_kind != JOB_KIND_PULL:
-            # A failed SWEEP must not masquerade as a failed PULL.
-            return LastPullOutcome(
-                outcome=OUTCOME_UNKNOWN,
-                tone=TONE_IDLE,
-                headline="no pull outcome recorded",
-                detail="the last job on this slot was a sweep (its failure is not a pull outcome)",
-            )
         return _from_error_detail(detail)
     if state == "done":
-        if job_kind != JOB_KIND_PULL:
-            # The retained ``done`` belongs to a SWEEP run; the only honest pull
-            # evidence left is the verdict holder (stamped by pull routes only).
-            if verdict is not None:
-                return _from_verdict(verdict, provenance="from the last completed pull's verdict")
+        if detail.startswith(MARKET_HOURS_DEFERRAL_PREFIX):
+            # The pipeline's BETWEEN-PHASES market-hours stop is CAUGHT (never
+            # raised): ``run_full_pipeline`` returns ``stopped_after=
+            # "market_hours"`` with the deferral note, so the run finishes
+            # ``done`` and its note becomes the finish detail
+            # (``pull_jobs._finish_detail``). Checked BEFORE the verdict fold —
+            # the route stamps the SPOT phase's (often clean) verdict for the
+            # /universe banner, which must never paint this deferred run green
+            # (hostile-review M3). The prefix is drift-pinned against the REAL
+            # ``pipeline_pull._market_hours_stop_note()``.
             return LastPullOutcome(
-                outcome=OUTCOME_UNKNOWN,
-                tone=TONE_IDLE,
-                headline="no pull outcome recorded",
-                detail="the last job on this slot was a sweep",
+                outcome=OUTCOME_DEFERRED_MARKET_HOURS,
+                tone=TONE_WARN,
+                headline="pull deferred — NSE market hours (08:45-15:35 IST)",
+                detail=detail,
             )
         if failed > 0:
-            # THIS run's own quarantine tally outranks the (possibly older)
-            # verdict holder — never green over recorded failures.
+            # THIS run's own quarantine tally outranks the verdict — never
+            # green over recorded failures.
             return LastPullOutcome(
                 outcome=OUTCOME_COMPLETED_WITH_FAILURES,
                 tone=TONE_WARN,
@@ -355,7 +351,10 @@ last_job_kind` — a retained ``done``/``error`` from a SWEEP run must never be
             outcome=OUTCOME_COMPLETED,
             tone=TONE_OK,
             headline="pull finished",
-            detail="completed — no classified verdict recorded for this run",
+            # Carry the run's own recorded note when one exists (e.g. a
+            # pipeline that stopped after a later phase gate) — the honest
+            # story is never discarded for a canned line.
+            detail=detail if detail else "completed — no classified verdict recorded for this run",
         )
     # ``idle`` — nothing has run on the slot this process lifetime.  A stamped
     # verdict can still exist (the pre-pull credentials REFUSAL is stamped at
@@ -368,6 +367,41 @@ last_job_kind` — a retained ``done``/``error`` from a SWEEP run must never be
         tone=TONE_IDLE,
         headline="no pull has run in this dashboard process",
         detail="",
+    )
+
+
+def classify_retained_pull_outcome(
+    retained: RetainedPullState | None,
+    *,
+    verdict: Mapping[str, Any] | None,
+    verdict_pull_id: str,
+) -> LastPullOutcome:
+    """The ONE retained-state → outcome law (the production probe's whole body).
+
+    DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2: *retained* is the job
+    slot's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.last_pull_state`
+    (``None`` = no pull ever ran/deferred on the slot); *verdict* +
+    *verdict_pull_id* are the app's last-pull-verdict holder pair. The verdict
+    is consulted ONLY when it was stamped by the SAME run the retained snapshot
+    describes (id equality over a NON-empty retained id — a run-less
+    deferral/refusal record carries ``""`` and correlates with nothing), except
+    on the never-ran slot, where the only legitimate writer is the pre-pull
+    credentials-refusal gate.  Pure + O(1); the app probe and the tests drive
+    THIS function, so the correlation law has exactly one home (CLAUDE.md §11).
+    """
+    if retained is None:
+        return classify_last_pull_outcome(
+            state="idle", detail="", failed=0, stalled=False, wedged=False, verdict=verdict
+        )
+    snap = retained.snapshot
+    correlated = verdict if (retained.pull_id and verdict_pull_id == retained.pull_id) else None
+    return classify_last_pull_outcome(
+        state=snap.state,
+        detail=snap.detail,
+        failed=snap.failed,
+        stalled=snap.stalled,
+        wedged=snap.wedged,
+        verdict=correlated,
     )
 
 
@@ -389,4 +423,5 @@ __all__ = [
     "TONE_WARN",
     "LastPullOutcome",
     "classify_last_pull_outcome",
+    "classify_retained_pull_outcome",
 ]
