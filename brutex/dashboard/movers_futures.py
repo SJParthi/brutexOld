@@ -64,6 +64,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+import structlog
+
 from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
@@ -95,10 +97,14 @@ from brutex.dashboard.movers_underlying_class import (
     fno_kind_from_underlying,
     normalize_underlying_class,
 )
-from brutex.data.fno_symbol import expiry_year_in_window
+from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
+from brutex.data.lake_keys import StockDriftMap, spot_recovery_candidates
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
+
+_LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "DEFAULT_FUTURES_INTERVAL",
@@ -143,8 +149,10 @@ _SPOT_SEGMENTS: Final[tuple[str, ...]] = SPOT_PROBE_SEGMENTS
 #: ``-PE`` suffix, so this anchor keeps options out of the futures universe.
 _FUT_SUFFIX: Final[str] = "-FUT"
 
-#: Three-letter month abbreviation → month number, for the ``DDMmmYY`` expiry
-#: token (``30Sep25`` → 2025-09-30). The single parse table (CLAUDE.md §11).
+#: Three-letter month abbreviation → month number. Exists ONLY to build the
+#: inverse :data:`_MONTH_ABBR` display table below — expiry PARSING delegates
+#: wholesale to the canonical :func:`~brutex.data.fno_symbol.parse_fno_symbol`
+#: (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001; CLAUDE.md §11 COMMON — one grammar).
 _MONTHS: Final[dict[str, int]] = {
     "Jan": 1,
     "Feb": 2,
@@ -159,9 +167,6 @@ _MONTHS: Final[dict[str, int]] = {
     "Nov": 11,
     "Dec": 12,
 }
-
-#: The two-digit year in the expiry token is in the 2000s (``25`` → 2025).
-_CENTURY: Final[int] = 2000
 
 #: Month number → three-letter abbreviation, the inverse of :data:`_MONTHS`. Used
 #: by :func:`format_contract_date` so the human ``dd-Mon-YYYY`` contract label is
@@ -194,17 +199,6 @@ def format_contract_date(value: date_cls) -> str:
     return f"{value.day:02d}-{_MONTH_ABBR[value.month]}-{value.year:04d}"
 
 
-#: The expiry token's fixed character length (``DDMmmYY`` = 2 + 3 + 2).
-_EXPIRY_TOKEN_LEN: Final[int] = 7
-
-#: The minimum hyphen-split arity of a FUT contract groww_symbol
-#: (``EXCH-UNDERLYING-DDMmmYY-FUT`` → 4 parts). NOTE (review round 1): an
-#: underlying CAN itself contain hyphens (``BAJAJ-AUTO`` — the vendor keeps the
-#: spot spelling's interior hyphen), so the parse is right-ANCHORED and joins the
-#: interior tokens back (mirroring :func:`~brutex.data.fno_symbol.parse_fno_symbol`);
-#: the prior "a stock name never hyphenates" claim here was FALSE.
-_MIN_FUT_PARTS: Final[int] = 4
-
 #: The three serial-month futures expiry TIERS → the 0-based rank of the live
 #: contract (sorted earliest-expiry-first) the tier selects: ``near`` = the
 #: front month (next to expire), ``next`` = the second serial month, ``far`` =
@@ -223,11 +217,22 @@ _DEFAULT_TIER: Final[str] = "near"
 def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
     """Parse a FUT contract groww_symbol into ``(underlying, expiry_date)`` or ``None``.
 
-    The contract groww_symbol is ``EXCH-UNDERLYING-DDMmmYY-FUT`` (hyphen-joined),
-    e.g. ``"NSE-NIFTY-30Sep25-FUT"`` → ``("NIFTY", date(2025, 9, 30))``. Returns
-    ``None`` for any non-future symbol (an option symbol ends ``-CE`` / ``-PE``,
-    so its last hyphen part is not ``FUT``) and for any junk / unparseable expiry
-    token — the caller then skips it, never raising (Golden Rule #1).
+    A thin FUT-only view over the canonical RIGHT-anchored grammar
+    :func:`~brutex.data.fno_symbol.parse_fno_symbol` — the ONE F&O symbol parser
+    (CLAUDE.md §11 COMMON; DEC-MOVERS-FUTURES-HYPHEN-PARSE-001). The contract
+    groww_symbol is ``EXCH-UNDERLYING-DDMmmYY-FUT`` (hyphen-joined) where the
+    UNDERLYING may itself carry hyphens: ``"NSE-NIFTY-30Sep25-FUT"`` →
+    ``("NIFTY", date(2025, 9, 30))`` and ``"NSE-BAJAJ-AUTO-30Sep25-FUT"`` →
+    ``("BAJAJ-AUTO", date(2025, 9, 30))`` — the underlying is every token
+    between the exchange and the expiry, joined through interior hyphens
+    (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001; the previous LEFT-anchored local
+    parse truncated ``BAJAJ-AUTO`` to ``BAJAJ``, silently dropping the spot +
+    premium columns for every hyphenated underlying). Returns ``None`` for any
+    non-future symbol (an option decodes with ``instrument_type`` ``CE``/``PE``)
+    and for any junk / unparseable expiry token, including one whose resolved
+    year falls outside the SHARED sanity window
+    (DEC-FNO-EXPIRY-YEAR-PIVOT-001) — the caller then skips it, never raising
+    (Golden Rule #1).
 
     Right-ANCHORED, mirroring the canonical
     :func:`~brutex.data.fno_symbol.parse_fno_symbol` (CLAUDE.md §11 COMMON): the
@@ -250,48 +255,10 @@ def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
         ``(underlying_symbol, expiry_date)`` when *symbol* is a well-formed
         future, else ``None``.
     """
-    parts = symbol.split("-")
-    # Need at least EXCH, UNDERLYING, expiry, FUT — and the last part must be FUT.
-    if len(parts) < _MIN_FUT_PARTS or parts[-1] != "FUT":
+    parts = parse_fno_symbol(symbol)
+    if parts is None or parts.instrument_type != FUTURE_TYPE:
         return None
-    # Right-anchored: expiry/FUT from the END, the underlying is EVERYTHING between
-    # (interior hyphens re-joined — the parse_fno_symbol idiom, review round 1).
-    underlying = "-".join(parts[1:-2])
-    expiry = _parse_expiry_token(parts[-2])
-    if not underlying or expiry is None:
-        return None
-    return underlying, expiry
-
-
-def _parse_expiry_token(token: str) -> date_cls | None:
-    """Parse a ``DDMmmYY`` expiry token (``30Sep25``) into a date, or ``None``.
-
-    The token is exactly 7 chars: a 2-digit day, a 3-letter month abbreviation
-    (title-case, in :data:`_MONTHS`), and a 2-digit year (``20YY``). Any other
-    shape, an unknown month, or an out-of-range day yields ``None`` so the
-    caller skips the malformed contract rather than raising. The resolved year
-    must also pass the SHARED :func:`~brutex.data.fno_symbol.expiry_year_in_window`
-    sanity window (DEC-FNO-EXPIRY-YEAR-PIVOT-001) — ``30Jun75`` is junk, NOT a
-    2075 expiry — so this shape-stricter twin can never diverge from the
-    canonical :func:`~brutex.data.fno_symbol.parse_expiry_token` on which
-    resolved years are accepted (CLAUDE.md §11 COMMON).
-    """
-    if len(token) != _EXPIRY_TOKEN_LEN:
-        return None
-    day_str, month_abbr, year_str = token[:2], token[2:5], token[5:]
-    if not (day_str.isdigit() and year_str.isdigit()):
-        return None
-    month = _MONTHS.get(month_abbr)
-    if month is None:
-        return None
-    year = _CENTURY + int(year_str)
-    if not expiry_year_in_window(year):
-        return None
-    try:
-        return date_cls(year, month, int(day_str))
-    except ValueError:
-        # Day out of range for the month (e.g. 31Feb) — malformed, skip honestly.
-        return None
+    return parts.underlying, parts.expiry
 
 
 def normalize_futures_tier(expiry: str | None) -> str:
@@ -1075,6 +1042,110 @@ def _underlying_spot_ltp(
     return None
 
 
+class _SpotLtpResolver:
+    """Per-candidates-compute underlying-spot resolver with the drift-recovery ladder.
+
+    The movers twin of the Greeks spot-join recovery
+    (``greeks_enrich.read_spot_join_with_recovery``, DEC-GREEKS-SPOTJOIN-STOCK-001
+    #1482): the exact-key probe (:func:`_underlying_spot_ltp`, byte-unchanged) runs
+    FIRST on every call — a resolving lake pays ZERO extra I/O and NO log — and
+    ONLY on an exact miss does the resolver walk the ONE COMMON
+    :func:`~brutex.data.lake_keys.spot_recovery_candidates` ladder (index aliases
+    both directions + the #911 ``"<EXCH>-<underlying>"``/stripped forms + the
+    APPENDED evidence-grounded ``stock_drift`` rung), probing each candidate over
+    the SAME two spot segments. Pre-fix, a spelling-drifted stock spot dir (the
+    #1482 class — vendor-folded chain underlying ``BAJAJAUTO`` vs the master's
+    on-disk ``BAJAJ-AUTO``) silently blanked spot/premium on the Futures tab and
+    read ``?`` moneyness on the Options tab even though the spot data EXISTED.
+
+    Ladder discipline (bounded per compute, never per row):
+
+    * the :func:`~brutex.data.spot_drift.load_stock_drift_map` build (master
+      vocabulary → O(spot dirs) scan → verified map) runs LAZILY at most ONCE per
+      resolver — and only after a first exact miss, so a fully-resolving lake
+      never builds it;
+    * the recovery OUTCOME is memoised per ``(exchange, underlying)`` — the
+      winning recovered key (re-probed per row, exactly like the exact key is
+      today) or the honest exhaustion (``None``, no re-walk) — so the ladder walk
+      and the ONE ``movers.spot_key_recovered`` INFO (rung-attributed via the
+      #1482 pinned prefix invariant) fire once per underlying per compute even on
+      a many-contract options chain.
+
+    Fail-soft mirrors #1482 exactly: no master / a confirmed master-read error →
+    the loader's ``None`` → the ladder minus the stock rung → today's honest
+    no-spot; a ≥2-master ambiguous fold is POISONED inside the builder (capped
+    ``spot_drift.ambiguous_master`` WARNs) and never guessed between;
+    ``MemoryError`` re-raises raw; a corrupt candidate partition raises the
+    normal movers skip-error set into the caller's per-row quarantine. NO
+    ``'%26'``→``'&'`` recovery — the stored-key encoding is UNVERIFIED and the
+    #1482 pledge stands verbatim (Golden Rule #1). Read-time recovery ONLY —
+    nothing on disk is renamed or healed.
+    """
+
+    def __init__(
+        self, lake_root: Path, *, day: date_cls, cutoff_min: int | None, source: str
+    ) -> None:
+        self._lake_root = lake_root
+        self._day = day
+        self._cutoff_min = cutoff_min
+        self._source = source
+        self._drift_loaded = False
+        self._drift: StockDriftMap | None = None
+        self._recovered: dict[tuple[str, str], str | None] = {}
+
+    def _stock_drift(self) -> StockDriftMap | None:
+        """Build the #1482 evidence-grounded map at most once, lazily (fail-soft)."""
+        if not self._drift_loaded:
+            self._drift_loaded = True
+            self._drift = load_stock_drift_map(self._lake_root)
+        return self._drift
+
+    def _probe(self, *, exchange: str, underlying: str) -> Decimal | None:
+        """One spot probe under one key — the exact-key reader, byte-unchanged."""
+        return _underlying_spot_ltp(
+            self._lake_root,
+            exchange=exchange,
+            underlying=underlying,
+            day=self._day,
+            cutoff_min=self._cutoff_min,
+        )
+
+    def ltp(self, *, exchange: str, underlying: str) -> Decimal | None:
+        """The underlying's spot LTP — exact key first, then the recovery ladder."""
+        exact = self._probe(exchange=exchange, underlying=underlying)
+        if exact is not None:
+            return exact
+        memo_key = (exchange, underlying)
+        if memo_key in self._recovered:
+            recovered_key = self._recovered[memo_key]
+            if recovered_key is None:
+                return None
+            return self._probe(exchange=exchange, underlying=recovered_key)
+        drift = self._stock_drift()
+        candidates = spot_recovery_candidates(underlying, exchange, stock_drift=drift)
+        alias_count = len(candidates)
+        if drift:
+            # The extra 2-arg call runs only on the already-cold exhausted-primary
+            # path with a truthy map — pure string ops, O(1)-bounded (the #1482
+            # rung-attribution idiom, byte-for-byte).
+            alias_count = len(spot_recovery_candidates(underlying, exchange))
+        for idx, candidate in enumerate(candidates):
+            value = self._probe(exchange=exchange, underlying=candidate)
+            if value is not None:
+                self._recovered[memo_key] = candidate
+                _LOG.info(
+                    "movers.spot_key_recovered",
+                    source=self._source,
+                    exchange=exchange,
+                    underlying=underlying,
+                    recovered_key=candidate,
+                    rung="stock_drift" if idx >= alias_count else "alias_ladder",
+                )
+                return value
+        self._recovered[memo_key] = None
+        return None
+
+
 def _discover_futures(
     lake_root: Path,
     *,
@@ -1214,6 +1285,11 @@ def compute_futures_candidates(
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
     expected_session_for = make_expected_session_resolver(day)
+    # ONE per-compute spot resolver (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3
+    # fold-in): exact-key probes stay byte-identical; a drifted stock spot dir
+    # (the #1482 class) recovers via the COMMON ladder, walked once per
+    # underlying. The candidates cache memoises the whole result per coordinate.
+    spot_resolver = _SpotLtpResolver(lake_root, day=day, cutoff_min=cutoff_min, source="futures")
     # The spot→F&O index alias map for the class lookup, resolved ONCE per compute
     # call (an env parse + dict copy) and threaded into every per-candidate
     # `fno_kind_from_underlying` — the lookup stays O(1)/candidate (review round 1).
@@ -1249,9 +1325,7 @@ def compute_futures_candidates(
             oi_baseline = resolve_prev_oi(
                 lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
             )
-            spot_ltp = _underlying_spot_ltp(
-                lake_root, exchange=exchange, underlying=underlying, day=day, cutoff_min=cutoff_min
-            )
+            spot_ltp = spot_resolver.ltp(exchange=exchange, underlying=underlying)
         except skip_errors as exc:
             # A corrupt / unreadable Parquet for ONE future must not 500 the screen —
             # skip it (logged + counted), never fabricate (DEC-MOVERS-CORRUPT-SKIP-001).
