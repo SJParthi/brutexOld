@@ -182,6 +182,11 @@ def _dual_arm(bars: list[CandleBar], **kwargs: Any) -> tuple[list[int], list[int
     # kernel_refused after the call) would compare Python-to-Python.
     fell_back = [e for e in on_logs if e.get("event") == "rust_stage1a.fallback"]
     assert not fell_back, f"the ON arm was called yet FELL BACK — vacuous parity: {fell_back}"
+    # Refuter RF1 belt: a pending-burn-in mismatch ships the ORACLE list and
+    # logs kernel_autoreverted (not fallback) — assert it too, so the harness
+    # stays non-vacuous even if the remaining=0 reset above ever drifts.
+    reverted = [e for e in on_logs if e.get("event") == "rust_stage1a.kernel_autoreverted"]
+    assert not reverted, f"the ON arm AUTOREVERTED — oracle-substituted parity: {reverted}"
     return off, on
 
 
