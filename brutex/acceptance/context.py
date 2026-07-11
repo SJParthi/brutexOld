@@ -10,6 +10,7 @@ retry-once TOCTOU law (§4 of the design): moved inputs retry ONCE, moved again
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import os
 import time
@@ -39,7 +40,7 @@ _ENV_UNSET: Final = object()
 
 
 class StoreUnavailable(RuntimeError):
-    """instruments.duckdb could not be opened READ-ONLY (locked / unreadable).
+    """instruments.duckdb could not be snapshotted READ-ONLY (locked / unreadable).
 
     The acceptance path NEVER opens the instrument master read-write
     (review round 1 M1): a plain ``InstrumentStore.open`` runs migration DDL
@@ -50,24 +51,48 @@ class StoreUnavailable(RuntimeError):
 
 
 def open_instrument_store_readonly(path: Path) -> Any:
-    """Open the instrument master STRICTLY read-only (no DDL, no migration).
+    """Snapshot the instrument master into an IN-MEMORY read view (no DDL, no writes).
 
-    Connects via ``duckdb.connect(path, read_only=True)`` and wraps the handle
-    in the production :class:`~brutex.data.instrument_store.InstrumentStore`
+    Attaches the file READ-ONLY for one short-lived copy (every table verbatim
+    into an in-memory DuckDB), DETACHes, and wraps the memory connection in
+    the production :class:`~brutex.data.instrument_store.InstrumentStore`
     shape WITHOUT going through ``InstrumentStore.open`` (whose idempotent
     schema apply DROPs older-schema tables — a verifier must observe, never
-    heal). Lock contention / an unreadable file raises
+    heal). The file handle is NOT held afterwards (review round 2 fix 6): an
+    in-process production path that opens its OWN connection to the same file
+    (``spot_drift.load_stock_drift_map`` → ``InstrumentStore.open`` — the
+    #1482/#1646 movers drift-recovery ladder) no longer hits DuckDB's
+    same-file "different configuration" refusal, so leg A stays the REAL
+    production wire. Lock contention / an unreadable file raises
     :class:`StoreUnavailable` (⇒ named ABSTAIN upstream).
     """
     import duckdb
 
     from brutex.data.instrument_store import InstrumentStore
 
+    mem = duckdb.connect()  # in-memory — the FILE is touched only inside the try
     try:
-        conn = duckdb.connect(str(path), read_only=True)
+        quoted = str(path).replace("'", "''")
+        mem.execute(f"ATTACH '{quoted}' AS src (READ_ONLY)")
+        tables = [
+            str(row[0])
+            for row in mem.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_catalog = 'src' AND table_schema = 'main' "
+                "ORDER BY table_name"
+            ).fetchall()
+        ]
+        for table in tables:
+            ident = '"' + table.replace('"', '""') + '"'
+            # identifiers double-quote-escaped from information_schema output;
+            # the source is a READ_ONLY attach of the operator's own master.
+            mem.execute(f"CREATE TABLE {ident} AS SELECT * FROM src.{ident}")  # noqa: S608
+        mem.execute("DETACH src")
     except (duckdb.Error, OSError) as exc:
-        raise StoreUnavailable(f"read-only open of {path.name} refused: {exc}") from exc
-    return InstrumentStore(conn=conn, path=path)
+        with contextlib.suppress(Exception):
+            mem.close()
+        raise StoreUnavailable(f"read-only snapshot of {path.name} refused: {exc}") from exc
+    return InstrumentStore(conn=mem, path=path)
 
 
 def stat_token(path: Path) -> str:
@@ -154,6 +179,15 @@ class AcceptanceContext:
         """How many real ledger loads happened (the single-load spy hook)."""
         return self._ledger_loads
 
+    def drop_ledger_memo(self) -> None:
+        """Forget the memoised ledger so the NEXT :meth:`ledger` re-reads disk.
+
+        The pull check's TOCTOU retry hook (review round 2 fix 4): without
+        this the retried body re-served the pre-move in-memory snapshot while
+        stamping ``retried: True`` — a re-read that never happened.
+        """
+        self._ledger = None
+
     def spot_datasets(self) -> list[tuple[str, str, str]]:
         """The ONE per-run spot-dataset enumeration (memoised — never re-walked)."""
         if self._spot_datasets is None:
@@ -214,32 +248,38 @@ class AcceptanceContext:
         return TestClient(app, base_url="http://localhost")
 
     def close(self) -> None:
-        """Release run-scoped resources: client, read-only store, env override.
+        """Release run-scoped resources: client, snapshot store, env override.
 
         Idempotent; called from ``run_acceptance``'s ``finally`` so an
         in-process caller (the F1 nightly chain) never inherits a mutated
-        ``BRUTEX_LAKE_ROOT`` or a lingering read-only DuckDB handle.
+        ``BRUTEX_LAKE_ROOT`` or a lingering DuckDB handle. The env restore
+        runs in a ``finally`` chain so even a ``BaseException`` out of a
+        ``close()`` (e.g. KeyboardInterrupt) cannot skip it (round 2 NIT).
         """
-        client, self._client = self._client, None
-        if client is not None and hasattr(client, "close"):
+        try:
+            client, self._client = self._client, None
+            if client is not None and hasattr(client, "close"):
+                try:
+                    client.close()
+                except Exception as exc:
+                    _LOG.warning("acceptance.client_close_failed", error=str(exc))
+        finally:
             try:
-                client.close()
-            except Exception as exc:
-                _LOG.warning("acceptance.client_close_failed", error=str(exc))
-        store, self._store = self._store, None
-        if store is not None and hasattr(store, "close"):
-            try:
-                store.close()
-            except Exception as exc:
-                _LOG.warning("acceptance.store_close_failed", error=str(exc))
-        if self._env_lake_root_set:
-            self._env_lake_root_set = False
-            prev = self._env_lake_root_prev
-            self._env_lake_root_prev = _ENV_UNSET
-            if prev is _ENV_UNSET:
-                os.environ.pop("BRUTEX_LAKE_ROOT", None)
-            else:
-                os.environ["BRUTEX_LAKE_ROOT"] = str(prev)
+                store, self._store = self._store, None
+                if store is not None and hasattr(store, "close"):
+                    try:
+                        store.close()
+                    except Exception as exc:
+                        _LOG.warning("acceptance.store_close_failed", error=str(exc))
+            finally:
+                if self._env_lake_root_set:
+                    self._env_lake_root_set = False
+                    prev = self._env_lake_root_prev
+                    self._env_lake_root_prev = _ENV_UNSET
+                    if prev is _ENV_UNSET:
+                        os.environ.pop("BRUTEX_LAKE_ROOT", None)
+                    else:
+                        os.environ["BRUTEX_LAKE_ROOT"] = str(prev)
 
     # ── pull-activity probe (observed, never fought) ───────────────────
     def pull_active(self) -> bool:
@@ -259,15 +299,23 @@ class AcceptanceContext:
         self,
         paths_fn: Callable[[], Sequence[Path]],
         compute: Callable[[], Any],
+        *,
+        on_retry: Callable[[], None] | None = None,
     ) -> tuple[Any, dict[str, Any], bool]:
         """Run *compute* under the stat-token fingerprint + retry-once law.
 
         Returns ``(result, {"moved", "retried", "movers"}, ok)`` — ``ok=False``
         means the inputs moved on BOTH attempts and the caller must ABSTAIN
         (``input_moved_during_check``), never PASS over a torn read.
+        *on_retry* (if given) runs once, BEFORE the second attempt only — the
+        hook a check uses to drop memoised state so the retry genuinely
+        re-reads its inputs (review round 2 fix 4: pull's retried body had
+        re-served the cached ledger snapshot).
         """
         moved_paths: list[str] = []
         for attempt in (0, 1):
+            if attempt and on_retry is not None:
+                on_retry()
             paths = list(paths_fn())
             before = fingerprint_paths(paths)
             result = compute()

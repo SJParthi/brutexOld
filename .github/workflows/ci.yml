@@ -2341,14 +2341,14 @@ jobs:
             pytest --cov=brutex.acceptance.report --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_report.py
             pytest --cov=brutex.acceptance.selftest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_selftest.py tests/integration/test_acceptance_selftest.py
             pytest --cov=brutex.acceptance.run --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_run.py
-            pytest --cov=brutex.acceptance.checks.unique --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_check_unique.py
-            pytest --cov=brutex.acceptance.checks.tf --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_check_tf.py
-            pytest --cov=brutex.acceptance.checks.pull --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_check_pull.py
-            pytest --cov=brutex.acceptance.checks.rate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_check_rate.py
-            pytest --cov=brutex.acceptance.checks.movers --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_check_movers.py
-            pytest --cov=brutex.acceptance.checks.sanity --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_check_sanity.py
-            pytest --cov=brutex.acceptance.checks.latency --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_check_latency.py
-            pytest --cov=brutex.acceptance.checks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_run.py tests/unit/test_acceptance_check_unique.py tests/unit/test_acceptance_check_tf.py tests/unit/test_acceptance_check_pull.py tests/unit/test_acceptance_check_rate.py tests/unit/test_acceptance_check_movers.py tests/unit/test_acceptance_check_sanity.py tests/unit/test_acceptance_check_latency.py
+            pytest --cov=brutex.acceptance.checks.unique --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_unique.py
+            pytest --cov=brutex.acceptance.checks.tf --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_tf.py
+            pytest --cov=brutex.acceptance.checks.pull --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_pull.py
+            pytest --cov=brutex.acceptance.checks.rate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_rate.py
+            pytest --cov=brutex.acceptance.checks.movers --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_movers.py
+            pytest --cov=brutex.acceptance.checks.sanity --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_sanity.py
+            pytest --cov=brutex.acceptance.checks.latency --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_latency.py
+            pytest --cov=brutex.acceptance.checks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_run.py tests/unit/test_acceptance_checks_unique.py tests/unit/test_acceptance_checks_tf.py tests/unit/test_acceptance_checks_pull.py tests/unit/test_acceptance_checks_rate.py tests/unit/test_acceptance_checks_movers.py tests/unit/test_acceptance_checks_sanity.py tests/unit/test_acceptance_checks_latency.py
           else
             echo "(brutex.acceptance test files not present yet — gate inactive)"
           fi

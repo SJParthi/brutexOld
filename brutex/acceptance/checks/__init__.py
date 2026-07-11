@@ -31,16 +31,19 @@ def run_fingerprinted_check(
     sub_id: str,
     paths_fn: Callable[[], Sequence[Path]],
     body: Callable[[], CheckResult],
+    on_retry: Callable[[], None] | None = None,
 ) -> CheckResult:
     """Run one check body under the §12.7 stat-fingerprint retry-once TOCTOU law.
 
     The check's ACTUAL sampled input files are stat-tokened before AND after
-    the compute (O(sampled files) stats); a move retries the WHOLE body ONCE;
-    a second move ⇒ the check ABSTAINS ``input_moved_during_check`` naming the
-    movers — never a PASS over a torn read (review round 1 MAJOR-1: the law
-    existed but had ZERO production callers).
+    the compute (O(sampled files) stats); a move retries the WHOLE body ONCE
+    (*on_retry* fires first so the check can drop memoised state — the retry
+    genuinely re-reads, review round 2 fix 4); a second move ⇒ the check
+    ABSTAINS ``input_moved_during_check`` naming the movers — never a PASS
+    over a torn read (review round 1 MAJOR-1: the law existed but had ZERO
+    production callers).
     """
-    result, fingerprint, ok = ctx.run_fingerprinted(paths_fn, body)
+    result, fingerprint, ok = ctx.run_fingerprinted(paths_fn, body, on_retry=on_retry)
     if not ok:
         sub = make_subcheck(
             sub_id,

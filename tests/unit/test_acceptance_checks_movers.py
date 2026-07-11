@@ -389,6 +389,137 @@ class TestOptionsLeg:
         )
         assert options.verdict is Verdict.FAIL
 
+    def test_zero_and_zero_padded_depths_stay_off_grammar(self, tmp_path: Path) -> None:
+        # Round-2 NIT: production _format_label can never emit "ITM -0" /
+        # "OTM +0" (the ATM band IS offset 0) nor zero-padded depths — the
+        # tightened grammar refuses the production-unreachable slack.
+        lake = make_twin(tmp_path)
+        real = _real_client(lake)
+        rows = [
+            {"symbol": "Z0", "moneyness": "ITM -0", "iv": None, "oi": 1},
+            {"symbol": "ZP", "moneyness": "ITM -007", "iv": None, "oi": 1},
+            {"symbol": "O0", "moneyness": "OTM +0", "iv": None, "oi": 1},
+        ]
+        options = _sub(
+            movers.run(make_ctx(lake, client_factory=lambda: _FnoClient(real, [], rows))),
+            "movers.options",
+        )
+        assert options.verdict is Verdict.FAIL
+        assert len(options.evidence["bad_labels"]) == 3
+
+
+class _OptionsRaisingClient:
+    """Proxy that HARD-FAILS the test if the options route is ever hit."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def get(self, path: str, params: dict | None = None) -> Any:
+        if path == "/api/v1/movers" and (params or {}).get("asset") == "options":
+            raise AssertionError("options route must NOT run under a drifted registry")
+        return self._real.get(path, params=params)
+
+
+class TestRegistrySchemaGuard:
+    """Round-2 NEW-1 (security refuter): the registry RW-open heal class."""
+
+    @staticmethod
+    def _make_registry(lake: Path, *, version: str | None = None) -> Path:
+        from brutex.data.registry_store import RegistryStore
+
+        path = lake / "registry.duckdb"
+        store = RegistryStore.open(path)
+        if version is not None:
+            store._conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                [version],
+            )
+        store.close()
+        return path
+
+    def test_version_bumped_registry_abstains_file_byte_identical(self, tmp_path: Path) -> None:
+        # The latent DROP+RECREATE: a registry stamped at an OLDER schema
+        # version would be dropped by the route's RegistryStore.open — the
+        # verifier must ABSTAIN before the route runs, bytes untouched.
+        import hashlib
+
+        lake = make_twin(tmp_path)
+        path = self._make_registry(lake, version="0")
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        real = _real_client(lake)
+        check = movers.run(make_ctx(lake, client_factory=lambda: _OptionsRaisingClient(real)))
+        options = _sub(check, "movers.options")
+        assert options.verdict is Verdict.ABSTAIN
+        assert options.abstain_reason is AbstainReason.REGISTRY_SCHEMA_DRIFT
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+    def test_matching_registry_proceeds_with_disclosure(self, tmp_path: Path) -> None:
+        from brutex.data.registry_store import REGISTRY_SCHEMA_VERSION
+
+        lake = make_twin(tmp_path)
+        self._make_registry(lake)
+        real = _real_client(lake)
+        rows = [{"symbol": "M", "moneyness": "ATM", "iv": None, "oi": 1}]
+        options = _sub(
+            movers.run(make_ctx(lake, client_factory=lambda: _FnoClient(real, [], rows))),
+            "movers.options",
+        )
+        assert options.verdict is Verdict.PASS
+        assert options.evidence["registry_schema_version"] == str(REGISTRY_SCHEMA_VERSION)
+
+    def test_absent_registry_real_route_creates_nothing(self, tmp_path: Path) -> None:
+        # Empirical proof the route tolerates absence WITHOUT creating the
+        # file (load_registry_expiries returns None before any open) — the
+        # licence for proceeding on "absent" instead of abstaining.
+        lake = make_twin(tmp_path)
+        _write_fno_contract(lake, "NSE-NIFTY-30Jul26-24000-CE", day=DAY2)
+        ctx = make_ctx(lake, client_factory=lambda: _real_client(lake))
+        check = movers.run(ctx)
+        assert not (lake / "registry.duckdb").exists()
+        options = _sub(check, "movers.options")
+        assert options.verdict is not Verdict.ERROR
+
+    def test_probe_states(self, tmp_path: Path) -> None:
+        import duckdb
+
+        lake = make_twin(tmp_path)
+        # absent
+        state, _ = movers.registry_schema_probe(lake / "registry.duckdb")
+        assert state == "absent"
+        # match
+        path = self._make_registry(lake)
+        state, evidence = movers.registry_schema_probe(path)
+        assert state == "match" and evidence["registry_schema_version"] is not None
+        # drift (older stamp)
+        conn = duckdb.connect(str(path))
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '0')"
+        )
+        conn.close()
+        state, _ = movers.registry_schema_probe(path)
+        assert state == "drift"
+        # drift (no schema_meta table at all — an open would restamp = write)
+        bare = lake / "bare.duckdb"
+        conn = duckdb.connect(str(bare))
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.close()
+        state, _ = movers.registry_schema_probe(bare)
+        assert state == "drift"
+        # drift (schema_meta exists but no schema_version row)
+        rowless = lake / "rowless.duckdb"
+        conn = duckdb.connect(str(rowless))
+        conn.execute("CREATE TABLE schema_meta (key VARCHAR, value VARCHAR)")
+        conn.close()
+        state, evidence = movers.registry_schema_probe(rowless)
+        assert state == "drift" and evidence["registry_schema_version"] is None
+        # unreadable (a concurrent RW holder in-process)
+        holder = duckdb.connect(str(path))
+        try:
+            state, _ = movers.registry_schema_probe(path)
+            assert state == "unreadable"
+        finally:
+            holder.close()
+
 
 class TestStoreUnavailableAbstain:
     def test_non_200_spot_route_abstains_named(self, tmp_path: Path) -> None:

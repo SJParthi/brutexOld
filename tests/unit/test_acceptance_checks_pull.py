@@ -293,6 +293,19 @@ class TestPullCheck:
         check = pull.run(ctx)
         assert _sub(check, "pull.replan_zero").verdict is Verdict.PASS
 
+    def test_fno_window_not_yet_open_returns_none(self) -> None:
+        # DEC-FNO-FAR-EXPIRY-WINDOW-001 belt on the oracle seam: a contract
+        # whose default window has not OPENED inside the given envelope plans
+        # NOTHING. (End-to-end such a row is classified explicit_dates_window
+        # first — round 2 — so the seam's None arm is pinned directly here.)
+        from datetime import date
+
+        resolved = pull._fno_window(
+            "NSE-NIFTY-24Dec26-24000-CE", start=date(2026, 7, 1), end=date(2026, 7, 2)
+        )
+        assert resolved is None
+        assert pull._fno_window("UNPARSABLE", start=date(2026, 7, 1), end=date(2026, 7, 2)) is None
+
     def test_merge_covered_spans_law(self) -> None:
         from datetime import date
 
@@ -320,6 +333,186 @@ class TestPullCheck:
             return subs
 
         assert _strip(pull.run(make_ctx(lake))) == _strip(pull.run(make_ctx(lake)))
+
+
+class TestNonDefaultWindowShapes:
+    """Round-2 review folds (refuter 2A MAJORs [B]+[C]): correct-or-abstain."""
+
+    def test_explicit_dates_fno_row_never_false_fails(self, tmp_path: Path) -> None:
+        # [B] production's explicit-dates OVERRIDE writes a ledger row over
+        # the verbatim envelope (2025-03-01 → 2025-07-15, wider than the
+        # 30d default window for expiry 2025-06-26). The old oracle re-derived
+        # the DEFAULT window and false-FAILed newly_fetchable=1 on a
+        # legitimately covered lake.
+        lake = make_twin(tmp_path)
+        row = _row(
+            market="groww-option",
+            security_id="NSE-NIFTY-26Jun25-24000-CE",
+            window_start="2025-03-01",
+            window_end="2025-07-15",
+            bars=0,
+            bars_net_new=0,
+            in_pull_fetches=0,
+        )
+        _save(lake, [row])
+        check = pull.run(make_ctx(lake))
+        replan = _sub(check, "pull.replan_zero")
+        assert replan.verdict is not Verdict.FAIL
+        assert replan.evidence["newly_fetchable"] == 0
+        assert replan.evidence["non_default_shape_series"] == 1
+        assert any(
+            "explicit_dates_window" in s for s in replan.evidence["non_default_shape_samples"]
+        )
+        # The ONLY series is non-default → the named sub-level abstain.
+        assert replan.verdict is Verdict.ABSTAIN
+        assert replan.abstain_reason is AbstainReason.NON_DEFAULT_WINDOW_SHAPE
+
+    def test_overlapping_spot_ranges_never_false_fail(self, tmp_path: Path) -> None:
+        # [C] two OVERLAPPING explicit operator ranges with different tile
+        # anchors (2024-01-05→03-01 + 2024-02-10→04-01) — the merged-span
+        # re-tiling from 01-05 minted 2 phantom keys → false FAIL.
+        lake = make_twin(tmp_path)
+        rows = [
+            _row(window_start=ws, window_end=we, bars=0, bars_net_new=0, in_pull_fetches=0)
+            for ws, we in (
+                ("2024-01-05", "2024-02-04"),
+                ("2024-02-04", "2024-03-01"),
+                ("2024-02-10", "2024-03-11"),
+                ("2024-03-11", "2024-04-01"),
+            )
+        ]
+        _save(lake, rows)
+        check = pull.run(make_ctx(lake))
+        replan = _sub(check, "pull.replan_zero")
+        assert replan.verdict is not Verdict.FAIL
+        assert replan.evidence["newly_fetchable"] == 0
+        assert replan.evidence["non_default_shape_series"] == 1
+        assert any("overlapping_ranges" in s for s in replan.evidence["non_default_shape_samples"])
+        assert replan.abstain_reason is AbstainReason.NON_DEFAULT_WINDOW_SHAPE
+
+    def test_default_law_series_beside_non_default_still_passes(self, tmp_path: Path) -> None:
+        # A default-law series keeps its hard verified PASS while the odd
+        # series is abstain-routed + counted (never a whole-check abstain).
+        lake = make_twin(tmp_path)
+        explicit = _row(
+            market="groww-option",
+            security_id="NSE-NIFTY-26Jun25-24000-CE",
+            window_start="2025-03-01",
+            window_end="2025-07-15",
+            bars=0,
+            bars_net_new=0,
+            in_pull_fetches=0,
+        )
+        _save(lake, [_row(), explicit])
+        check = pull.run(make_ctx(lake))
+        replan = _sub(check, "pull.replan_zero")
+        assert replan.verdict is Verdict.PASS
+        assert replan.evidence["newly_fetchable"] == 0
+        assert replan.evidence["non_default_shape_series"] == 1
+        assert replan.evidence["series_replanned"] == 1
+
+    def test_genuine_out_of_coverage_key_still_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The double-fetch tooth stays intact: a planner minting a key
+        # OUTSIDE the covered spans (a genuine "production would fetch again"
+        # defect) is a hard FAIL — the round-2 abstain routing never
+        # swallows it.
+        import brutex.data.window_ledger_store as store_mod
+        from brutex.data.fetch_coverage import WindowKey
+
+        lake = make_twin(tmp_path)
+        _save(lake, [_row()])
+        real_plan = store_mod.plan_windows
+
+        def _drifted(ledger, **kwargs):  # type: ignore[no-untyped-def]
+            count = real_plan(ledger, **kwargs)
+            inst = next(iter(kwargs["instruments"]))
+            ledger.plan(
+                WindowKey(
+                    market=kwargs["market"],
+                    security_id=inst.symbol_name,
+                    interval=kwargs["intervals"][0],
+                    start=DAY1 - timedelta(days=40),
+                    end=DAY1 - timedelta(days=10),
+                ),
+                now=kwargs["now"],
+            )
+            return count + 1
+
+        monkeypatch.setattr(store_mod, "plan_windows", _drifted)
+        check = pull.run(make_ctx(lake))
+        replan = _sub(check, "pull.replan_zero")
+        assert replan.verdict is Verdict.FAIL
+        assert replan.evidence["newly_fetchable"] >= 1
+
+
+class TestPullRetryRereads:
+    def test_toctou_retry_rereads_ledger_from_disk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Round-2 fix 4 (refuter 2A MINOR "pull retry is void"): a mid-check
+        # ledger flush must make the RETRY re-read disk — the pre-fix retry
+        # re-served the memoised snapshot while stamping retried:True, so a
+        # violation landing mid-check read a stale PASS.
+        lake = make_twin(tmp_path)
+        _save(lake, [_row()])
+        ctx = make_ctx(lake)
+        calls: list[int] = []
+        real_body = pull._run_body
+
+        def _flaky_body(ctx_, *, rss):  # type: ignore[no-untyped-def]
+            if not calls:
+                calls.append(1)
+                # A concurrent writer lands a violating row DURING the body —
+                # the fingerprint moves, forcing the retry. (attempts/newer
+                # stamp so the save-time merge prefers the new row.)
+                _save(
+                    lake,
+                    [
+                        _row(
+                            bars=3,
+                            bars_net_new=7,
+                            attempts=2,
+                            last_attempt_at=f"{DAY2.isoformat()}T19:00:00+00:00",
+                        )
+                    ],
+                )
+            return real_body(ctx_, rss=rss)
+
+        monkeypatch.setattr(pull, "_run_body", _flaky_body)
+        check = pull.run(ctx)
+        assert check.input_fingerprint.get("retried") is True
+        law = _sub(check, "pull.net_new_law")
+        assert law.verdict is Verdict.FAIL  # the RE-READ ledger, not the memo
+        assert any("bars_net_new > bars" in v for v in law.evidence["violations"])
+
+    def test_ledger_vanishing_between_attempts_abstains(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger_store import ledger_path
+
+        lake = make_twin(tmp_path)
+        _save(lake, [_row()])
+        ctx = make_ctx(lake)
+        calls: list[int] = []
+        real_body = pull._run_body
+
+        def _deleting_body(ctx_, *, rss):  # type: ignore[no-untyped-def]
+            if not calls:
+                calls.append(1)
+                ledger_path(lake).unlink()
+            return real_body(ctx_, rss=rss)
+
+        monkeypatch.setattr(pull, "_run_body", _deleting_body)
+        check = pull.run(ctx)
+        # The retry re-reads a now-absent ledger → the honest NO_LEDGER
+        # abstain (or the moved-twice abstain), never a crash on the dropped
+        # memo.
+        assert check.sub_checks[0].abstain_reason in {
+            AbstainReason.NO_LEDGER,
+            AbstainReason.INPUT_MOVED_DURING_CHECK,
+        }
 
 
 class TestPullEdges:

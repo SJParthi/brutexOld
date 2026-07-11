@@ -51,11 +51,14 @@ HTTP_OK = 200
 
 #: Options moneyness label grammar — the FULL production vocabulary of
 #: ``moneyness._format_label`` (DEC-FNO-MONEYNESS-LABEL-001): graded
-#: ``"ITM -N"``/``"OTM +N"`` (sign tracks the bucket), ``"ATM"``, the no-grid
-#: bare ``"ITM"``/``"OTM"``, the spot-unavailable ``"?"`` and the non-option
-#: ``"—"`` — the honest sentinels are IN-grammar (review round 1 MAJOR-3: a
-#: correct sparse lake serves ``"?"`` and must never redden the nightly).
-MONEYNESS_RE = re.compile(r"^(ATM|ITM|OTM|\?|—|ITM -\d+|OTM \+\d+)$")
+#: ``"ITM -N"``/``"OTM +N"`` (sign tracks the bucket; N >= 1, never
+#: zero-padded — the ATM band IS offset 0, so ``"ITM -0"``/``"ITM -007"``
+#: are production-unreachable and stay OFF-grammar, round 2 NIT), ``"ATM"``,
+#: the no-grid bare ``"ITM"``/``"OTM"``, the spot-unavailable ``"?"`` and the
+#: non-option ``"—"`` — the honest sentinels are IN-grammar (review round 1
+#: MAJOR-3: a correct sparse lake serves ``"?"`` and must never redden the
+#: nightly).
+MONEYNESS_RE = re.compile(r"^(ATM|ITM|OTM|\?|—|ITM -[1-9]\d*|OTM \+[1-9]\d*)$")
 
 
 def _repro(ctx: AcceptanceContext) -> str:
@@ -443,8 +446,75 @@ def _futures_sub(ctx: AcceptanceContext, *, day: date, day_str: str) -> Any:
     )
 
 
+def registry_schema_probe(path: Any) -> tuple[str, dict[str, Any]]:
+    """Read-only ``registry.duckdb`` schema probe BEFORE the options route runs.
+
+    The options movers route calls ``load_registry_expiries`` →
+    ``RegistryStore.open`` — a write-CAPABLE open whose schema-version bump
+    would DROP+RECREATE the real registry cache mid-verification (review
+    round 2 NEW-1). Returns one of:
+
+    - ``"absent"`` — no file; the route provably tolerates absence WITHOUT
+      creating it (``load_registry_expiries`` returns ``None`` before any
+      open — regression-pinned), so the check proceeds;
+    - ``"match"`` — stored ``schema_version`` == the code's
+      ``REGISTRY_SCHEMA_VERSION``; the route's RW open is a no-net-bytes
+      re-stamp (refuter-verified) — proceed, residual disclosed in limits;
+    - ``"drift"`` — stored version differs (or ``schema_meta`` unreadable):
+      the route's open WOULD drop/restamp ⇒ the caller ABSTAINS
+      ``registry_schema_drift`` so the latent heal can never fire under the
+      verifier;
+    - ``"unreadable"`` — a concurrent RW holder etc.; the route's own open
+      fails the same way and degrades to the lake-partition set with no
+      write — proceed.
+    """
+    import duckdb
+
+    from brutex.data.registry_store import REGISTRY_SCHEMA_VERSION
+
+    if not path.exists():
+        return "absent", {"registry": "absent"}
+    try:
+        conn = duckdb.connect(str(path), read_only=True)
+    except (duckdb.Error, OSError) as exc:
+        return "unreadable", {"registry": "unreadable", "error": str(exc)}
+    try:
+        try:
+            row = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+        except duckdb.Error as exc:
+            return "drift", {"registry": "schema_meta unreadable", "error": str(exc)}
+    finally:
+        conn.close()
+    stored = None if row is None else str(row[0])
+    evidence = {
+        "registry_schema_version": stored,
+        "expected_schema_version": str(REGISTRY_SCHEMA_VERSION),
+    }
+    if stored == str(REGISTRY_SCHEMA_VERSION):
+        return "match", evidence
+    return "drift", evidence
+
+
 def _options_sub(ctx: AcceptanceContext, *, day_str: str) -> Any:
     """Options near/all: moneyness label grammar + iv/delta presence only."""
+    state, probe_evidence = registry_schema_probe(ctx.lake_root / "registry.duckdb")
+    if state == "drift":
+        # NEVER let the route's RW open drop/restamp a drifted registry cache
+        # under the verifier (round 2 NEW-1 — the heal-during-verify class).
+        return make_subcheck(
+            "movers.options",
+            Verdict.ABSTAIN,
+            units_checked=0,
+            evidence={
+                "reason": "registry.duckdb schema version drifted — the serving "
+                "path's open would drop/restamp it; observe-only refuses",
+                **probe_evidence,
+            },
+            abstain_reason=AbstainReason.REGISTRY_SCHEMA_DRIFT,
+            repro=_repro(ctx),
+        )
     response = ctx.client().get(
         "/api/v1/movers",
         params={"asset": "options", "interval": "1minute", "date": day_str, "top_n": ctx.top_n},
@@ -479,7 +549,14 @@ def _options_sub(ctx: AcceptanceContext, *, day_str: str) -> Any:
             "rows_served": len(rows),
             "bad_labels": bad_labels[:MISMATCH_CAP],
             "missing_overlay_keys": missing_overlay_keys[:MISMATCH_CAP],
+            **probe_evidence,
         },
-        limits=["iv/delta compared for presence/nullability only (stored overlay)"],
+        limits=[
+            "iv/delta compared for presence/nullability only (stored overlay)",
+            "the movers check exercises the REAL serving path, which opens "
+            "registry.duckdb exactly as the production dashboard does "
+            "(schema-matched open = no net bytes; a drifted schema ABSTAINS "
+            "before the route runs)",
+        ],
         repro=_repro(ctx),
     )

@@ -374,6 +374,12 @@ def write_report_files(
     errors = validate_report_dict(report)
     if errors:
         raise ReportWriteError(f"report failed schema self-validation: {errors[:5]}")
+    if out_dir is None and acceptance_dir(lake_root).is_symlink():
+        # House .quarantine precedent (round 2 NIT): never write the evidence
+        # tree through an operator-plantable link — refuse loudly (SUSPECT).
+        raise ReportWriteError(
+            f"{acceptance_dir(lake_root)} is a symlink — refusing to write through it"
+        )
     run_dir = (out_dir or acceptance_dir(lake_root) / str(report["run_id"])).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(report, indent=1, sort_keys=True, allow_nan=False)

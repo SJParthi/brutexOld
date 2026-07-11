@@ -173,6 +173,16 @@ class TestWriteFiles:
             write_report_files(report, lake_root=tmp_path)
         assert not (tmp_path / "acceptance" / "LATEST").exists()
 
+    def test_symlinked_acceptance_dir_refused(self, tmp_path: Path) -> None:
+        # Round-2 NIT (house .quarantine precedent): the evidence tree is
+        # never written through an operator-plantable link.
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (tmp_path / "acceptance").symlink_to(target)
+        with pytest.raises(ReportWriteError, match="symlink"):
+            write_report_files(_report_dict(), lake_root=tmp_path)
+        assert list(target.iterdir()) == []
+
     def test_out_dir_override(self, tmp_path: Path) -> None:
         out = tmp_path / "elsewhere"
         path, _sha = write_report_files(_report_dict(), lake_root=tmp_path, out_dir=out)

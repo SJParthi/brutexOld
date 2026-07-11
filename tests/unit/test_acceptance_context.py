@@ -189,6 +189,26 @@ class TestReadOnlyStore:
         finally:
             holder.close()
 
+    def test_snapshot_store_leaves_drift_ladder_live(self, tmp_path: Path) -> None:
+        # Round-2 fix 6 (refuter 2A MINOR): with the acceptance client BUILT
+        # (store snapshot open), the production spot-drift ladder
+        # (#1482/#1646) opens its OWN connection to instruments.duckdb
+        # in-process — the previously-HELD read-only file handle hit DuckDB's
+        # same-file "different configuration" refusal (master_error → ladder
+        # silently degraded → leg A was not the production wire). The
+        # snapshot holds NO file handle, so the ladder must work.
+        pytest.importorskip("fastapi")
+        from brutex.data.instrument_store import InstrumentStore
+        from brutex.data.spot_drift import load_stock_drift_map
+
+        InstrumentStore.open(tmp_path / "instruments.duckdb").close()
+        ctx = _ctx(tmp_path)
+        try:
+            ctx.client()  # builds the app over the SNAPSHOT store
+            assert load_stock_drift_map(tmp_path) is not None
+        finally:
+            ctx.close()
+
     def test_client_factory_degrades_to_no_store_on_contention(self, tmp_path: Path) -> None:
         pytest.importorskip("fastapi")
         import duckdb
@@ -350,6 +370,46 @@ class TestFingerprintedCompute:
         _result, info, ok = ctx.run_fingerprinted(lambda: next(sequences), lambda: 1)
         assert ok is False
         assert str(extra) in info["movers"]
+
+    def test_on_retry_fires_once_before_second_attempt_only(self, tmp_path: Path) -> None:
+        # Round-2 fix 4: the hook drops memoised state BEFORE the retry —
+        # never on a clean run, exactly once on a moved run.
+        f = tmp_path / "input.txt"
+        f.write_text("v1", encoding="utf-8")
+        ctx = _ctx(tmp_path)
+        fired: list[int] = []
+        _result, _info, ok = ctx.run_fingerprinted(
+            lambda: [f], lambda: 1, on_retry=lambda: fired.append(-1)
+        )
+        assert ok is True and fired == []  # clean run — never fired
+        state = {"calls": 0}
+
+        def compute() -> int:
+            state["calls"] += 1
+            if state["calls"] == 1:
+                f.write_text("v2", encoding="utf-8")
+            return state["calls"]
+
+        fired.clear()
+        result, _info, ok = ctx.run_fingerprinted(
+            lambda: [f], compute, on_retry=lambda: fired.append(state["calls"])
+        )
+        assert ok is True and result == 2
+        assert fired == [1]  # once, after attempt 0, before attempt 1
+
+    def test_drop_ledger_memo_forces_reread(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        save_window_ledger(WindowLedger.from_rows([]), tmp_path)
+        ctx = _ctx(tmp_path)
+        assert ctx.ledger() is not None
+        assert ctx.ledger_loads == 1
+        ctx.ledger()
+        assert ctx.ledger_loads == 1  # memoised
+        ctx.drop_ledger_memo()
+        assert ctx.ledger() is not None
+        assert ctx.ledger_loads == 2  # a genuine disk re-read
 
 
 class TestJournalProbeEdges:

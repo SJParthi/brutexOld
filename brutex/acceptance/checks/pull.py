@@ -10,7 +10,15 @@ operator ranges — DEC-UNIVERSE-PULL-DATERANGE-001 — never false-FAIL the
 by-design gap between them), and the F&O re-plan threads the SAME
 expiry-capped ``contract_windows`` production derives
 (:func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window`),
-so the oracle's planning keys match production's. Explicitly NOT
+so the oracle's planning keys match production's. Review round 2 fold: the
+hard replan==0 law binds DEFAULT-law series ONLY — a series whose settled
+windows are NOT producible by a single-anchor default-law tiling
+(explicit-dates F&O rows, overlapping-anchor ranges, or a re-tiling mismatch
+fully inside covered spans) is routed to the named
+``non_default_window_shape`` abstain, never a phantom ``newly_fetchable``
+FAIL; a replanned key ESCAPING the covered spans still hard-FAILs, and a
+TOCTOU retry re-reads the ledger from disk (``drop_ledger_memo``).
+Explicitly NOT
 ``brutex fetch --dry-run`` (a synthetic adapter into an isolated temp lake —
 proves nothing about THIS lake). Plus the keep-first counter laws and the
 silent-loss detector (a SUCCESS row whose backing month files are ALL gone).
@@ -85,6 +93,52 @@ def merge_covered_spans(spans: list[tuple[date, date]]) -> list[tuple[date, date
         else:
             merged.append((ws, we))
     return merged
+
+
+def _fno_default_envelope(security_id: str) -> tuple[date, date] | None:
+    """The widest window the DEFAULT F&O law can ever derive for one contract.
+
+    ``[expiry − lookback, expiry + 1)`` (options 30d / futures 60d) — any
+    envelope clamp only NARROWS it. A settled row OUTSIDE this envelope can
+    only come from production's documented explicit-dates OVERRIDE
+    (``_resolve_minute_windows`` explicit_dates=True — §6 "explicit operator
+    dates override either default"), so the single-anchor default-law replan
+    is the WRONG oracle for that series (review round 2 MAJOR [B]).
+    ``None`` = unparsable symbol (production plans nothing).
+    """
+    from brutex.adapters.groww.contract_bounds import (
+        DEFAULT_FUTURES_LOOKBACK_DAYS,
+        DEFAULT_OPTION_LOOKBACK_DAYS,
+    )
+    from brutex.data.fno_symbol import parse_fno_symbol
+
+    parts = parse_fno_symbol(security_id)
+    if parts is None:
+        return None
+    lookback = (
+        DEFAULT_OPTION_LOOKBACK_DAYS
+        if parts.instrument_type in {"CE", "PE"}
+        else DEFAULT_FUTURES_LOOKBACK_DAYS
+    )
+    return (parts.expiry - timedelta(days=lookback), parts.expiry + timedelta(days=1))
+
+
+def _overlapping_rows(windows: list[tuple[date, date]]) -> bool:
+    """True when any two of one series' windows STRICTLY overlap (touch is fine).
+
+    Two overlapping explicit operator ranges with different tile anchors
+    (DEC-UNIVERSE-PULL-DATERANGE-001 permits them) merge into a span no
+    single-anchor default-law tiling can reproduce (review round 2 MAJOR [C]).
+    """
+    ordered = sorted(windows)
+    return any(ordered[i + 1][0] < ordered[i][1] for i in range(len(ordered) - 1))
+
+
+def _key_subsumed(key: tuple[str, str, str, str, str], spans: list[tuple[date, date]]) -> bool:
+    """True when a replanned key's span lies fully inside ONE covered span."""
+    ws = date.fromisoformat(key[3])
+    we = date.fromisoformat(key[4])
+    return any(start <= ws and we <= end for start, end in spans)
 
 
 def _fno_window(
@@ -235,6 +289,9 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         sub_id="pull.replan_zero",
         paths_fn=lambda: _ledger_paths(ctx),
         body=lambda: _run_body(ctx, rss=(rss_before, rss_after)),
+        # A retry must genuinely re-read the moved ledger, not re-serve the
+        # memoised snapshot (review round 2 fix 4).
+        on_retry=ctx.drop_ledger_memo,
     )
 
 
@@ -245,6 +302,10 @@ def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> 
 
     rss_before, rss_after = rss
     ledger = ctx.ledger()
+    if ledger is None:
+        # A TOCTOU retry re-reads disk (drop_ledger_memo) — the file may have
+        # vanished between attempts; observe, never crash.
+        return _abstain_check(ctx, AbstainReason.NO_LEDGER)
     records = ledger.records()
     now = ctx.now_utc()
 
@@ -260,8 +321,28 @@ def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> 
     spans_by_series = {
         series: merge_covered_spans(spans) for series, spans in windows_by_series.items()
     }
+    # Correct-or-abstain shape classification (review round 2 MAJORs [B]+[C],
+    # ONE shared root: the oracle assumed every covered span came from ONE
+    # single-anchor default-law pull). A series whose settled windows are NOT
+    # producible by that law is routed to ABSTAIN(non_default_window_shape) —
+    # counted + named — instead of a phantom newly_fetchable FAIL; the hard
+    # replan==0 law binds ONLY the default-law series.
+    non_default: dict[tuple[str, str, str], str] = {}
+    for series, windows in windows_by_series.items():
+        market, security_id, _interval = series
+        if _overlapping_rows(windows):
+            non_default[series] = "overlapping_ranges"
+            continue
+        if market.endswith(("-option", "-future")):
+            envelope = _fno_default_envelope(security_id)
+            if envelope is not None and any(
+                ws < envelope[0] or we > envelope[1] for ws, we in windows
+            ):
+                non_default[series] = "explicit_dates_window"
     spans_replanned = 0
     for (market, security_id, interval), spans in sorted(spans_by_series.items()):
+        if (market, security_id, interval) in non_default:
+            continue
         for start, end in spans:
             spans_replanned += 1
             _replan_series(
@@ -277,9 +358,25 @@ def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> 
     after_main = {_row_key(r) for r in copy.records()}
     new_keys = sorted(after_main - before_keys)
     max_end = max((date.fromisoformat(r.window_end) for r in records), default=None)
-    newly_fetchable = [k for k in new_keys if date.fromisoformat(k[4]) <= (max_end or date.min)]
+    # Pass 1: a replanned key whose span is ALREADY fully covered is a
+    # re-tiling mismatch (a multi-anchor adjacency, or planner re-tiling
+    # drift — indistinguishable in ledger evidence) — route its series to the
+    # named abstain, never a false double-fetch FAIL. A key ESCAPING the
+    # covered spans stays the hard FAIL below.
+    for key in new_keys:
+        series = (key[0], key[1], key[2])
+        if series not in non_default and _key_subsumed(key, spans_by_series.get(series, [])):
+            non_default[series] = "retiling_mismatch"
+    # Pass 2: the hard replan==0 law over the default-law series only.
+    newly_fetchable = [
+        k
+        for k in new_keys
+        if (k[0], k[1], k[2]) not in non_default
+        and date.fromisoformat(k[4]) <= (max_end or date.min)
+    ]
+    routed_keys = sum(1 for k in new_keys if (k[0], k[1], k[2]) in non_default)
     open_by_design = sum(1 for r in records if r.status not in SETTLED_STATUSES) + (
-        len(new_keys) - len(newly_fetchable)
+        len(new_keys) - len(newly_fetchable) - routed_keys
     )
     # Anti-vacuous tooth: a trading session newer than the max settled end MUST
     # be plannable by SOME still-plannable series — a planner lobotomized to
@@ -299,6 +396,8 @@ def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> 
             spans_by_series.items(),
             key=lambda item: (item[0][0].endswith(("-option", "-future")), item[0]),
         ):
+            if (market, security_id, interval) in non_default:
+                continue  # abstain-routed shape — its tail probe would mint phantoms
             covered_end = max(end for _start, end in spans)
             cap = _tail_cap(market, security_id, start=spans[0][0], run_end=run_end)
             if cap is not None and cap > covered_end:
@@ -323,22 +422,35 @@ def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> 
                 if {_row_key(r) for r in copy.records()} - after_main:
                     tail_check = "planned"
                     break
-    replan_verdict = (
-        Verdict.FAIL if newly_fetchable or tail_check == "planner_vacuous" else Verdict.PASS
-    )
+    replan_reason = None
+    if newly_fetchable or tail_check == "planner_vacuous":
+        replan_verdict = Verdict.FAIL
+    elif non_default and len(non_default) == len(spans_by_series):
+        # EVERY series has a non-default-law coverage shape — nothing the
+        # single-anchor oracle can verify (correct-or-abstain, round 2).
+        replan_verdict = Verdict.ABSTAIN
+        replan_reason = AbstainReason.NON_DEFAULT_WINDOW_SHAPE
+    else:
+        replan_verdict = Verdict.PASS
     progress = ledger.progress_counts()
     replan_sub = make_subcheck(
         "pull.replan_zero",
         replan_verdict,
         units_checked=len(records),
+        abstain_reason=replan_reason,
         evidence={
             "newly_fetchable": len(newly_fetchable),
             "newly_fetchable_keys": ["|".join(k) for k in newly_fetchable[:KEY_CAP]],
             "open_by_design": open_by_design,
+            "non_default_shape_series": len(non_default),
+            "non_default_shape_samples": [
+                f"{'|'.join(series)}: {reason}"
+                for series, reason in sorted(non_default.items())[:KEY_CAP]
+            ],
             "tail_check": tail_check,
             "tail_eligible_series": eligible_total,
             "tail_series_probed": tail_probed,
-            "series_replanned": len(spans_by_series),
+            "series_replanned": len(spans_by_series) - len(non_default),
             "spans_replanned": spans_replanned,
             # Ledger progress counters: trending EVIDENCE only (the former
             # decorative always-PASS progress_snapshot sub-check is deleted).
@@ -358,6 +470,14 @@ def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> 
             "re-plan runs per MERGED covered span: a deleted ledger row that "
             "splits a span is invisible here (partition presence + census own "
             "file-level loss)",
+            "the hard replan==0 law binds DEFAULT-law series only: explicit-"
+            "dates F&O rows / overlapping-anchor ranges / re-tiling mismatches "
+            "fully inside covered spans read non_default_window_shape (planner "
+            "re-tiling drift is indistinguishable from multi-anchor coverage "
+            "in ledger evidence); a replanned key ESCAPING the covered spans "
+            "still hard-FAILs",
+            "the vacuous-FAIL tail path rebuilds an O(records) key set per "
+            "probed series (O(eligible x records) worst case, FAIL-path only)",
         ],
         repro=_repro(ctx),
     )

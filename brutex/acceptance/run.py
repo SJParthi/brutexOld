@@ -291,6 +291,14 @@ def _run_audited(
     # ── coverage ledger accumulation (visibility aid) ──────────────────
     population = ctx.spot_datasets()
     population_keys = [sampling.dataset_key(c) for c in population]
+    # F&O contracts JOIN the ledger population (round 2 fix 8 — the sampled
+    # contract rotation is now visible to oldest_unsampled), CAPPED because a
+    # mature options lake holds ~10^5 contract dirs and the ledger is a small
+    # JSON visibility aid (truncation disclosed below).
+    fno_all = ctx.fno_contracts()
+    fno_keys = [f"NSE/FNO/{c}" for c in sorted(fno_all)[: sampling.FNO_LEDGER_POPULATION_CAP]]
+    fno_truncated = max(0, len(fno_all) - sampling.FNO_LEDGER_POPULATION_CAP)
+    population_keys.extend(fno_keys)
     ledger_path = sampling.coverage_ledger_path(cfg.lake_root)
     examined_keys = sorted(
         {key for check in checks for key in check.coverage.selection if "/" in key}
@@ -301,12 +309,17 @@ def _run_audited(
             check_id="run",
             dataset_keys=examined_keys,
             run_date=ctx.run_date(),
+            # Prune-on-save (round 2 fix 7): keys absent from the CURRENT
+            # dataset population (expired contracts, deleted datasets) no
+            # longer accumulate forever.
+            population_keys=population_keys,
         )
     ledger_summary = sampling.coverage_ledger_summary(
         sampling.load_coverage_ledger(ledger_path),
         population_keys=population_keys,
         run_date=ctx.run_date(),
     )
+    ledger_summary["fno_population_truncated"] = fno_truncated
 
     report: dict[str, Any] = {
         "schema": SCHEMA_VERSION,

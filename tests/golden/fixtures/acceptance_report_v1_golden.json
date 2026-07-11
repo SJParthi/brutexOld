@@ -126,16 +126,19 @@
       "cells": [
        {
         "key": "NSE/INDEX/NIFTY",
+        "muhurat_dates": [],
         "muhurat_days_skipped": 0,
         "state": "equal"
        },
        {
         "key": "NSE/INDEX/BANKNIFTY",
+        "muhurat_dates": [],
         "muhurat_days_skipped": 0,
         "state": "equal"
        },
        {
         "key": "NSE/INDEX/INDIAVIX",
+        "muhurat_dates": [],
         "muhurat_days_skipped": 0,
         "state": "equal"
        }
@@ -145,13 +148,16 @@
       "equal": 3,
       "failures": 0,
       "muhurat_days_skipped": 0,
+      "muhurat_days_unverified": [],
+      "muhurat_days_unverified_total": 0,
       "skipped": 0,
       "units_checked": 3
      },
      "id": "tf.daily",
      "limits": [
       "forming sessions excluded from BOTH sides (cutoff law)",
-      "Muhurat sessions skipped PER-DAY on both sides (counted \u2014 never a whole-history abstain)",
+      "Muhurat sessions skipped PER-DAY on both sides (one count per distinct IST date \u2014 never a whole-history abstain)",
+      "stored 1day bars on Muhurat session dates are NOT verified \u2014 a corrupt or fabricated Muhurat-date daily bar is invisible to this check (the skipped dates are named in muhurat_days_unverified)",
       "1day compare bounded to the last 6 months (--full lifts)"
      ],
      "repro": "brutex verify-acceptance --checks tf --seed 2026-07-10",
@@ -341,6 +347,7 @@
  ],
  "coverage_ledger": {
   "datasets_sampled_window_pct": 100.0,
+  "fno_population_truncated": 0,
   "oldest_unsampled": null
  },
  "deltas": null,

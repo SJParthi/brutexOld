@@ -36,6 +36,16 @@ LEDGER_WINDOW_NIGHTS: Final[int] = 14
 
 COVERAGE_LEDGER_FILENAME: Final[str] = "coverage_ledger.json"
 
+#: Bounded coverage-ledger read (round 2 fix 7): the ledger is a heuristic
+#: visibility aid, never evidence — an oversized/corrupt file starts fresh
+#: with a WARN instead of an unbounded whole-file read into memory.
+COVERAGE_LEDGER_MAX_BYTES: Final[int] = 16 * 1024 * 1024
+
+#: F&O contract keys tracked in the coverage-ledger POPULATION are capped —
+#: a mature options lake holds ~10^5 contract dirs and the ledger is a small
+#: JSON visibility aid, not a census (truncation disclosed in the summary).
+FNO_LEDGER_POPULATION_CAP: Final[int] = 5000
+
 
 def dataset_key(coord: tuple[str, str, str]) -> str:
     """Canonical string key for an ``(exchange, segment, symbol)`` coordinate."""
@@ -149,6 +159,20 @@ def _rotation_rank(seed: str, key: str) -> str:
     return hashlib.sha256(f"{seed}\x1f{key}".encode()).hexdigest()
 
 
+def sample_fno_contracts(contracts: Sequence[str], *, seed: str, sample_n: int) -> list[str]:
+    """The seed-ROTATED F&O contract fill (round 2 fix 8).
+
+    The lexicographic head-``N`` was seed-INVARIANT — the same 6 contracts
+    every night, so a poisoned contract outside the fixed head was invisible
+    to unique/tf forever. Same rotation law as :func:`sample_datasets`:
+    ``sorted(contracts, key=sha256(seed ‖ 'NSE/FNO/' + name))[:N]``.
+    """
+    if sample_n >= len(contracts):
+        return sorted(contracts)
+    picked = sorted(contracts, key=lambda c: _rotation_rank(seed, f"NSE/FNO/{c}"))[:sample_n]
+    return sorted(picked)
+
+
 @dataclass(frozen=True)
 class SamplePlan:
     """The resolved scope of one check: forced engine set + the seeded fill."""
@@ -217,10 +241,20 @@ def coverage_ledger_path(lake_root: Path) -> Path:
 def load_coverage_ledger(path: Path) -> dict[str, dict[str, str]]:
     """Load the ``{check_id: {dataset_key: last_sampled_iso_date}}`` ledger.
 
-    Corrupt / missing ⇒ empty dict (the ledger is an accumulation aid, never
-    a verdict input — losing it only resets the visibility counters).
+    Corrupt / missing / oversized ⇒ empty dict (the ledger is an accumulation
+    aid, never a verdict input — losing it only resets the visibility
+    counters). The read is BOUNDED at :data:`COVERAGE_LEDGER_MAX_BYTES`
+    (round 2 fix 7 — never an unbounded whole-file read).
     """
     try:
+        if path.stat().st_size > COVERAGE_LEDGER_MAX_BYTES:
+            _LOG.warning(
+                "acceptance.coverage_ledger_oversized",
+                path=str(path),
+                size=path.stat().st_size,
+                cap=COVERAGE_LEDGER_MAX_BYTES,
+            )
+            return {}
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         # RecursionError: a deep-nested JSON bomb must not crash the run (MN5).
@@ -240,13 +274,33 @@ def update_coverage_ledger(
     check_id: str,
     dataset_keys: Iterable[str],
     run_date: date,
+    population_keys: Iterable[str] | None = None,
 ) -> None:
-    """Record this run's sampled cells (atomic replace; best-effort, warn-only)."""
+    """Record this run's sampled cells (atomic replace; best-effort, warn-only).
+
+    When *population_keys* is given, stored keys ABSENT from the current
+    population are PRUNED on save (round 2 fix 7 — expired contracts /
+    deleted datasets no longer accumulate forever). A symlinked
+    ``<lake>/acceptance`` dir refuses the write loudly (house ``.quarantine``
+    precedent — never write through an operator-plantable link).
+    """
+    if path.parent.is_symlink():
+        _LOG.warning("acceptance.coverage_ledger_symlink_refused", path=str(path.parent))
+        return
     ledger = load_coverage_ledger(path)
     cells = ledger.setdefault(check_id, {})
     stamp = run_date.isoformat()
-    for key in dataset_keys:
+    examined = list(dataset_keys)
+    for key in examined:
         cells[key] = stamp
+    if population_keys is not None:
+        # This run's own examined keys always survive the prune.
+        keep = set(population_keys) | set(examined)
+        ledger = {
+            cid: {k: v for k, v in cid_cells.items() if k in keep}
+            for cid, cid_cells in ledger.items()
+        }
+        ledger = {cid: cid_cells for cid, cid_cells in ledger.items() if cid_cells}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_simple(

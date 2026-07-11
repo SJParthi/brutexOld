@@ -127,6 +127,27 @@ class TestTfCheck:
         assert cell["state"] == "equal"
         assert cell["muhurat_days_skipped"] >= 1
 
+    def test_muhurat_day_counts_once_and_is_named_unverified(self, tmp_path: Path) -> None:
+        # Round-2 folds: (NIT) one real Muhurat day present on BOTH sides
+        # counted 2 pre-fix (expected-side + stored-side increments) — now ONE
+        # count per distinct IST date; (MINOR) the skipped dates surface as
+        # muhurat_days_unverified — the honest "1day bars on Muhurat dates
+        # are NOT verified" disclosure.
+        lake = tmp_path / "lake"
+        from brutex.acceptance.selftest import build_twin_lake
+
+        build_twin_lake(lake, days=(date(2025, 10, 21), date(2025, 10, 22)), symbols=("NIFTY",))
+        check = tf.run(make_ctx(lake, months=12))
+        daily = _sub(check, "tf.daily")
+        cell = next(c for c in daily.evidence["cells"] if c["key"] == "NSE/INDEX/NIFTY")
+        # ONE Muhurat date on both sides → exactly 1, never the double count.
+        assert cell["muhurat_days_skipped"] == 1
+        assert cell["muhurat_dates"] == ["2025-10-21"]
+        assert daily.evidence["muhurat_days_skipped"] == 1
+        assert daily.evidence["muhurat_days_unverified"] == ["2025-10-21"]
+        assert daily.evidence["muhurat_days_unverified_total"] == 1
+        assert any("NOT verified" in limit for limit in daily.limits)
+
     def test_muhurat_only_symbol_abstains_daily(self, tmp_path: Path) -> None:
         # Only when EVERY comparable day is Muhurat does the cell abstain.
         lake = tmp_path / "lake"

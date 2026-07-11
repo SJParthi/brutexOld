@@ -31,6 +31,7 @@ from brutex.acceptance.sampling import (
     month_bounded_files,
     recent_months,
     sample_datasets,
+    sample_fno_contracts,
 )
 
 CHECK_ID = "unique"
@@ -80,7 +81,13 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 
     plan = sample_datasets(ctx.spot_datasets(), seed=ctx.seed, sample_n=ctx.sample_n, full=ctx.full)
     contracts_all = ctx.fno_contracts()
-    contracts = contracts_all if ctx.full else contracts_all[:FNO_SAMPLE_N]
+    # Seed-ROTATED contract fill (round 2 fix 8) — the lexicographic head-6
+    # never rotated, so a poisoned contract outside it was invisible forever.
+    contracts = (
+        contracts_all
+        if ctx.full
+        else sample_fno_contracts(contracts_all, seed=ctx.seed, sample_n=FNO_SAMPLE_N)
+    )
     months = None if ctx.full else set(recent_months(ctx.run_date(), ctx.months))
 
     def _paths() -> list[Path]:

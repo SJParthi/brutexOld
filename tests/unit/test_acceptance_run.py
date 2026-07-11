@@ -291,6 +291,39 @@ class TestCoverageLedgerAccumulation:
         cells = json.loads(ledger_path.read_text(encoding="utf-8"))["run"]
         assert "NSE/INDEX/NIFTY" in cells
         assert report["coverage_ledger"]["datasets_sampled_window_pct"] == 100.0
+        # Round-2 fix 8: the F&O contract population joins the ledger's
+        # visibility space (truncation disclosed; the twin has few contracts).
+        assert report["coverage_ledger"]["fno_population_truncated"] == 0
+
+    def test_fno_contracts_visible_to_oldest_unsampled(self, tmp_path: Path) -> None:
+        # Round-2 fix 8 (refuter 2C MINOR): a never-censused contract dir must
+        # be VISIBLE to the coverage ledger's oldest_unsampled headline —
+        # pre-fix the population was spot-only, so ~10^5 contract dirs could
+        # never surface there.
+        from brutex.acceptance import sampling as sampling_mod
+        from brutex.acceptance.selftest import _twin_bars
+        from brutex.data.parquet_writer import ParquetWriter
+
+        from tests.fakes.acceptance_twin import DAY2
+
+        lake = make_twin(tmp_path)
+        ParquetWriter(lake_root=lake).write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-30Jul26-24000-CE",
+            interval="1minute",
+            bars=_twin_bars(DAY2, base=200.0),
+        )
+        _code, report = _run(_cfg(lake, checks=("unique",)))
+        summary = report["coverage_ledger"]
+        ledger = sampling_mod.load_coverage_ledger(sampling_mod.coverage_ledger_path(lake))
+        examined = {k for cells in ledger.values() for k in cells}
+        # The (single) contract is examined this run OR named oldest_unsampled
+        # — either way it is IN the visibility space now.
+        assert (
+            "NSE/FNO/NSE-NIFTY-30Jul26-24000-CE" in examined
+            or summary["oldest_unsampled"] == "NSE/FNO/NSE-NIFTY-30Jul26-24000-CE"
+        )
 
 
 class TestPerfTimerInjection:

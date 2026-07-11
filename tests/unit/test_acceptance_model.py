@@ -80,6 +80,11 @@ class TestSchemaTokens:
             "no_instrument_store",
             "out_of_calendar_coverage",
             "time_budget_exhausted",
+            # Round-2 review folds (MIGRATION.md #1756): the registry
+            # schema-drift refusal (fix 2) + the non-default-law replan
+            # shape routing (fix 3) — extensions are reviewed acts.
+            "registry_schema_drift",
+            "non_default_window_shape",
         }
 
 

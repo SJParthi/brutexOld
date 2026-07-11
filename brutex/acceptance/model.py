@@ -89,6 +89,8 @@ class AbstainReason(StrEnum):
     NO_INSTRUMENT_STORE = "no_instrument_store"
     OUT_OF_CALENDAR_COVERAGE = "out_of_calendar_coverage"
     TIME_BUDGET_EXHAUSTED = "time_budget_exhausted"
+    REGISTRY_SCHEMA_DRIFT = "registry_schema_drift"
+    NON_DEFAULT_WINDOW_SHAPE = "non_default_window_shape"
 
 
 #: Abstain reasons EXEMPT from the ``--abstain-budget`` + streak laws: standing

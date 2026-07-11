@@ -153,6 +153,71 @@ class TestCoverageLedger:
         )  # must not raise — the ledger is a visibility aid only
 
 
+class TestCoverageLedgerRound2:
+    def test_oversized_ledger_starts_fresh_with_warn(self, tmp_path: Path) -> None:
+        # Round-2 fix 7: the read is BOUNDED — an oversized file is a fresh
+        # start (heuristic aid, never evidence), not an unbounded read.
+        path = tmp_path / "coverage_ledger.json"
+        path.write_text("x" * (sampling.COVERAGE_LEDGER_MAX_BYTES + 1), encoding="utf-8")
+        assert sampling.load_coverage_ledger(path) == {}
+
+    def test_prune_on_save_drops_out_of_population_keys(self, tmp_path: Path) -> None:
+        # Round-2 fix 7: expired contracts / deleted datasets no longer
+        # accumulate forever — keys absent from the CURRENT population are
+        # pruned on save; this run's own examined keys always survive.
+        path = tmp_path / "coverage_ledger.json"
+        update_coverage_ledger(
+            path,
+            check_id="run",
+            dataset_keys=["NSE/FNO/EXPIRED-OLD", "NSE/INDEX/NIFTY"],
+            run_date=date(2026, 7, 1),
+        )
+        update_coverage_ledger(
+            path,
+            check_id="run",
+            dataset_keys=["NSE/CASH/NEWLY-EXAMINED"],
+            run_date=date(2026, 7, 10),
+            population_keys=["NSE/INDEX/NIFTY"],
+        )
+        ledger = load_coverage_ledger(path)
+        assert "NSE/FNO/EXPIRED-OLD" not in ledger["run"]
+        assert ledger["run"]["NSE/INDEX/NIFTY"] == "2026-07-01"
+        assert ledger["run"]["NSE/CASH/NEWLY-EXAMINED"] == "2026-07-10"
+
+    def test_symlinked_acceptance_dir_refused(self, tmp_path: Path) -> None:
+        # House .quarantine precedent (round-2 NIT): never write the ledger
+        # through an operator-plantable link.
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        link = tmp_path / "acceptance"
+        link.symlink_to(target)
+        update_coverage_ledger(
+            link / "coverage_ledger.json",
+            check_id="run",
+            dataset_keys=["a"],
+            run_date=date(2026, 7, 10),
+        )
+        assert not (target / "coverage_ledger.json").exists()
+
+
+class TestFnoContractRotation:
+    def test_sample_rotates_with_seed(self) -> None:
+        # Round-2 fix 8 (refuter 2C MINOR): the lexicographic head-6 was
+        # seed-INVARIANT — the fill must rotate like the spot sampler.
+        contracts = [f"NSE-NIFTY-30Jul26-{k}-CE" for k in range(23000, 23400, 10)]
+        a = sampling.sample_fno_contracts(contracts, seed="2026-07-11", sample_n=6)
+        b = sampling.sample_fno_contracts(contracts, seed="2026-07-12", sample_n=6)
+        assert len(a) == len(b) == 6
+        assert a != b  # rotation — different nights sample different contracts
+        # Deterministic per seed (any night reproducible via --seed).
+        assert a == sampling.sample_fno_contracts(contracts, seed="2026-07-11", sample_n=6)
+        assert a != contracts[:6]  # never the fixed lexicographic head
+
+    def test_small_population_returns_all_sorted(self) -> None:
+        contracts = ["B", "A"]
+        assert sampling.sample_fno_contracts(contracts, seed="s", sample_n=6) == ["A", "B"]
+
+
 class TestRecentMonths:
     def test_year_boundary(self) -> None:
         from datetime import date
