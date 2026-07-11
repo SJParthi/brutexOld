@@ -2002,7 +2002,42 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
+- **Active branch:** `claude/rust-exec-costs-slice7` (**DEC-EXEC-RUST-CORE-001,
+  MIGRATION.md #1724** — slice 7 / P8 of the Rust conversion program: the
+  options/futures execution + costs INTEGER CORES gain a Rust twin in
+  `rust/fno-math/src/exec/` (money law · both fill laws · both charge stacks ·
+  the post-I/O materialize tails + MAE/MFE — pure `Result<_,String>` cores,
+  zero floats/dates/strings/I/O), dispatched behind the NEW default-OFF
+  `BRUTEX_EXEC_RUST` tristate seam `brutex/exec_rust.py` at the FOUR sites
+  (`compute_trade_cost` / `compute_futures_trade_cost` / `materialize_trade` /
+  `materialize_futures_trade`) with the verbatim Python bodies kept as the
+  permanent oracles (deletion = DEC-EXEC-PY-BODY-DELETE-001; the flip =
+  DEC-EXEC-RUST-FLIP-001; Stage-2 tables/f64/codegen port =
+  DEC-EXEC-RUST-STAGE2-001). Rates/regime tables/refusal raises/leg selection/
+  orchestration/logging STAY Python (rates cross as ARGUMENTS — a rate change
+  never rebuilds the wheel). PARITY (the one-paisa-drift-fails law): the frozen
+  522-case cross-language golden corpus (`exec_costs_golden_vectors.json` +
+  regen-refused generator — money boundary vectors ±0.005-class ties/negatives/
+  zero/i64-extremes as strings, fills, both stacks across every VERIFIED regime
+  boundary date on the valid side + tie-provoking notionals, materialize
+  verdict edges) consumed by BOTH languages (`exec_golden.rs` cargo-side +
+  `test_exec_rust_golden.py` engaged-asserted seam arm); 8 hypothesis
+  Rust==Python differential properties; the DEFAULT-OFF == TODAY bomb-kernel
+  byte-identity pin; a dedicated ci.yml dual-arm step (`BRUTEX_EXEC_RUST=1`
+  over the 19-file covering set). GATES: `exec_rust.py` 100% line+branch
+  standalone (new ci gate) + local mutmut ZERO-survivor (90 mutants); all four
+  dispatch modules' per-module gates measure 100%; mutation.yml gains the
+  exec_rust + calculator mutmut pairs (both locally de-survivored;
+  futures_costs deferred to DEC-EXEC-COSTS-MUTMUT-001 — early survivors, never
+  a silently-red weekly gate) + the fno-math cargo-mutants
+  scope 599→836 (matrix 6→8 shards; `exec/ffi.rs` documented OUT — no in-crate
+  kill surface, exercised by the Python dual-arm gates). HONEST: COLD path —
+  payoff UNKNOWN-expected-small, value = one-language consistency NOT speed
+  (no speedup claim; the OFF-cost bench pins the seam is free); the futures
+  arm has zero production callers today; ships INERT (default-OFF). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; trading-core FROZEN
+  untouched; no scope/vocab/rate/lake-schema change).
+  Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
   DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702** — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone: the ONE pinned series alias `NSE-NIFTY-FUT` (symbol_id 4; retired shapes get a
   did-you-mean refusal), the vendor-truth roll resolver (`brutex/data/futures_series.py` — interior holes refuse
@@ -5162,7 +5197,16 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/magical-cray-g6agaw`
+- **Active feature branch:** `claude/rust-exec-costs-slice7`
+  (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724 — slice 7 / P8 of the Rust
+  conversion program: the options/futures execution + costs integer cores in
+  `rust/fno-math/src/exec/` behind the default-OFF `BRUTEX_EXEC_RUST` seam,
+  Python bodies kept as the permanent oracles; 522-case cross-language golden
+  corpus + hypothesis differentials + the DEFAULT-OFF == TODAY pin; cold path,
+  payoff UNKNOWN-expected-small — consistency not speed; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; see §1 Active branch for the full
+  blurb)
+  Earlier: `claude/magical-cray-g6agaw`
   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
   DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1710 — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone; see §1 Active branch for the full blurb)
