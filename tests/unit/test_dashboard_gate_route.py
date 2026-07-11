@@ -24,7 +24,13 @@ pytest.importorskip("polars", reason="the leaderboard reads per-tuple Parquet st
 
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.summary_cache import SummaryCache
-from brutex.dashboard.sweep_results_view import GATE_COORDINATE_UNGATED, gate_coordinate_of
+from brutex.dashboard.sweep_results_view import (
+    GATE_COORDINATE_UNGATED,
+    UnknownGateCoordinateError,
+    _fold_gate_coordinates,
+    _resolve_gate_scope,
+    gate_coordinate_of,
+)
 from brutex.data.instrument_store import InstrumentStore
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.sweep_identity import gate_provenance_token
@@ -403,3 +409,62 @@ class TestResultsTemplateGateControls:
         # textContent-only DOM for the new dropdown (CodeQL XSS): the builder
         # never assembles option HTML strings.
         assert "opt.textContent = String(c);" in template
+
+
+class TestUnknownGateTypedAndSanitised:
+    """The typed-unknown-gate 400 (round-3 MINOR: broad ``except ValueError``).
+
+    The route wrapped the whole threadpool build in ``except ValueError -> 400``,
+    which (a) mislabelled ANY unexpected server-side ``ValueError`` as a client
+    400 and (b) echoed the raw ``?gate=`` token unsanitised/unbounded. The fix
+    raises the typed :class:`UnknownGateCoordinateError` (carrying the token) and
+    the route reflects only a control-char-stripped, length-bounded slice; a
+    genuine ValueError now propagates to the framework 500.
+    """
+
+    def test_resolve_gate_scope_raises_typed_error(self) -> None:
+        """The resolver raises the typed subclass, carrying the raw token."""
+        folded, mixed = _fold_gate_coordinates(("ungated",))
+        with pytest.raises(UnknownGateCoordinateError) as excinfo:
+            _resolve_gate_scope("gate:nope", folded, mixed)
+        assert excinfo.value.coordinate == "gate:nope"
+        # Still a ValueError so existing ``except ValueError`` callers stay OK.
+        assert isinstance(excinfo.value, ValueError)
+
+    def test_unknown_gate_detail_is_bounded_and_stripped(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """A 500-char / control-char hostile token → BOUNDED, control-free detail."""
+        _write_sweeps(store.path.parent, "u.parquet", [_row(1)])
+        hostile = "x" * 500 + "\n\r\t\x00\x01<script>"
+        resp = client.get("/api/v1/sweep/leaderboard", params={"gate": hostile})
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "unknown gate coordinate" in detail
+        # The reflected token is truncated to the 64-char cap (+ a "…" marker).
+        assert len(detail) <= len("unknown gate coordinate: ") + 65
+        # Control characters are stripped from the reflected token.
+        reflected = detail.split("unknown gate coordinate: ", 1)[1]
+        assert "\n" not in reflected
+        assert "\r" not in reflected
+        assert "\t" not in reflected
+        assert "\x00" not in reflected
+        assert "\x01" not in reflected
+        assert all(ch.isprintable() for ch in reflected.rstrip("…"))
+
+    def test_genuine_valueerror_is_500_not_400(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bare ValueError deep in the build now yields a 500, NOT a mislabel 400."""
+        from brutex.dashboard import app as app_module
+
+        _write_sweeps(store.path.parent, "u.parquet", [_row(1)])
+
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("unexpected server-side bug")
+
+        monkeypatch.setattr(app_module, "build_sweep_leaderboard", _boom)
+        app = build_app(DashboardState(), instrument_store=store, summary_cache=SummaryCache())
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.get("/api/v1/sweep/leaderboard")
+        assert resp.status_code == 500

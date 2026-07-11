@@ -257,6 +257,7 @@ from brutex.dashboard.sweep_results_view import (
 )
 from brutex.dashboard.sweep_results_view import (
     SweepScan,
+    UnknownGateCoordinateError,
     build_sweep_leaderboard,
     load_sweep_scan,
     resolve_preset_param,
@@ -1062,6 +1063,28 @@ _SERVER_ERROR_FLOOR: Final[int] = 500
 
 #: 403 detail returned for a browser-initiated cross-site state change.
 _CROSS_ORIGIN_DETAIL: Final = "cross-origin request blocked"
+
+#: Cap for a reflected user token in a 400 detail — bounds an 8000-char hostile
+#: ``?gate=`` token to a sane length (info-leak / log-spam guard).
+_GATE_DETAIL_MAX_LEN: Final[int] = 64
+
+
+def _sanitize_gate_token(token: str) -> str:
+    """Bound + strip a user ``?gate=`` token for safe reflection in a 400 detail.
+
+    Control characters (``ord < 0x20`` plus DEL) are dropped so a token cannot
+    smuggle newlines/escape sequences into a log line or error body, and the
+    result is truncated to :data:`_GATE_DETAIL_MAX_LEN` (with a trailing ``…``
+    marker when it overflows) so an 8000-char hostile token cannot spam the
+    wire. The full raw token is never reflected — only this bounded, printable
+    form (the ``store_error_payload`` sibling suppresses ``str(exc)`` entirely;
+    the gate 400 must still name the offending coordinate, so it reflects this
+    sanitised slice rather than nothing).
+    """
+    cleaned = "".join(ch for ch in token if ch.isprintable())
+    if len(cleaned) > _GATE_DETAIL_MAX_LEN:
+        return cleaned[:_GATE_DETAIL_MAX_LEN] + "…"
+    return cleaned
 
 
 def _trusted_host_patterns(allowed_hosts: Sequence[str] | None) -> list[str]:
@@ -7289,8 +7312,15 @@ def build_app(
                     preset=resolved_preset,
                     gate=gate,
                 )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except UnknownGateCoordinateError as exc:
+                # An explicit ?gate= token can never match the empty coordinate
+                # set → the SAME sanitised, bounded 400 as the wired-store arm
+                # below (a genuine unexpected ValueError now surfaces as a 500,
+                # not a mislabelled client 400).
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown gate coordinate: {_sanitize_gate_token(exc.coordinate)}",
+                ) from exc
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
 
@@ -7394,14 +7424,23 @@ def build_app(
 
         try:
             return JSONResponse(await _run_lake(_resolve))
-        except ValueError as exc:
+        except UnknownGateCoordinateError as exc:
             # An UNKNOWN explicit ?gate= token (DEC-SWEEP-SERVING-GATE-
             # PROVENANCE-001): the validation runs inside the build (it needs
             # the scanned coordinate set, so it cannot be eager like preset's)
-            # and raises ValueError naming the available coordinates — mapped
-            # here to the same clean 400 the preset precedent uses. Nothing
-            # is cached for the refused key (the compute raised).
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            # and raises the TYPED UnknownGateCoordinateError carrying the
+            # offending token — mapped here to a clean 400 whose detail is
+            # SANITISED (control chars stripped) and LENGTH-BOUNDED, never the
+            # raw user string (info-leak / log-spam guard), mirroring the
+            # store_error_payload sibling's no-raw-str discipline. A genuine
+            # unexpected ValueError deep in the build is NO LONGER caught here —
+            # it propagates to the framework's 500, so a real server bug is
+            # never mislabelled a client 400. Nothing is cached for the refused
+            # key (the compute raised).
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown gate coordinate: {_sanitize_gate_token(exc.coordinate)}",
+            ) from exc
         except ResultsStoreError as exc:
             # C3 (DEC-SWEEP-RESULTS-DEPTH-001): a typed store fault escaping the
             # per-store skip net degrades to the honest error payload — 200 with

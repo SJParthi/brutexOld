@@ -1019,6 +1019,23 @@ def _fold_gate_coordinates(raw: tuple[str, ...]) -> tuple[tuple[str, ...], bool]
     return tuple(sorted(folded)), len(known) >= _MIXED_KNOWN_CONFIG_MIN
 
 
+class UnknownGateCoordinateError(ValueError):
+    """An explicit ``?gate=`` token that names no folded coordinate.
+
+    Subclasses :class:`ValueError` so every existing ``except ValueError``
+    caller (and the historic route catch) stays behaviourally compatible, but
+    carries the offending :attr:`coordinate` token as an attribute so the route
+    can build a SANITISED, LENGTH-BOUNDED 400 detail rather than echoing
+    arbitrary client input (the raw token can be a 500-char / control-char
+    string — an info-leak / log-spam vector if reflected verbatim).
+    """
+
+    def __init__(self, coordinate: str, message: str) -> None:
+        super().__init__(message)
+        #: The raw offending gate token (unsanitised — the route bounds/strips it).
+        self.coordinate = coordinate
+
+
 def _resolve_gate_scope(
     gate: str | None, folded: tuple[str, ...], mixed: bool
 ) -> tuple[str | None, str | None]:
@@ -1047,8 +1064,9 @@ def _resolve_gate_scope(
     if token:
         if token not in folded:
             available = ", ".join(folded) or "(none)"
-            raise ValueError(
-                f"unknown gate coordinate {token!r}; available coordinates: {available}"
+            raise UnknownGateCoordinateError(
+                token,
+                f"unknown gate coordinate {token!r}; available coordinates: {available}",
             )
         return token, token
     if len(folded) <= 1:
