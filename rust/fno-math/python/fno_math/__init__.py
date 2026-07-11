@@ -74,6 +74,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "count_supermasks_u64s_nthreads",
     "popcount_bytes",
     "sweep_drawdown_stats",
+    "sweep_enum_conflict_free",
 )
 
 
@@ -122,6 +123,7 @@ from ._fno_math import (  # noqa: E402
     count_supermasks_u64s_nthreads,
     popcount_bytes,
     sweep_drawdown_stats,
+    sweep_enum_conflict_free,
 )
 
 #: Crate version of the INSTALLED compiled kernel — derived at import from the
@@ -153,4 +155,5 @@ __all__ = [
     "count_supermasks_u64s_nthreads",
     "popcount_bytes",
     "sweep_drawdown_stats",
+    "sweep_enum_conflict_free",
 ]

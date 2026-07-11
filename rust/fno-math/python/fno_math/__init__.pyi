@@ -127,6 +127,26 @@ def sweep_drawdown_stats(
     """
     ...
 
+def sweep_enum_conflict_free(
+    bits: list[int],
+    k: int,
+    conflict_pairs: list[tuple[int, int]],
+    max_masks: int,
+) -> tuple[list[int], int, int]:
+    """Fused k-of-bits enumeration + conflict-pair prune (DEC-SWEEP-ENUM-RUST-001).
+
+    Returns `(survivors, enumerated, conflict_pruned)`: the conflict-free u128
+    masks in the EXACT `iter_masks_k_of_bits` lexicographic order (combinations
+    over `sorted(set(bits))` — NOT numeric-ascending), the total combination
+    count `C(len(set(bits)), k)`, and the pruned tally
+    (`enumerated == len(survivors) + conflict_pruned`). `conflict_pairs` is
+    `sorted(brutex.vocabulary.CONFLICT_PAIRS)` passed AS DATA — never re-minted
+    in Rust. Raises `ValueError` on any input outside the validated envelope
+    (positions >= 128, k > n_unique, malformed pairs, count overflow, count >
+    `max_masks`) and `MemoryError` when the survivor buffer cannot be reserved.
+    """
+    ...
+
 class ResidentBars:
     """Resident bar buffer — holds `bar_bits` Rust-side across batch calls.
 

@@ -72,6 +72,14 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+/// DEC-SWEEP-ENUM-RUST-001 (#1738): sweep-enumeration kernel — the fused
+/// k-of-bits enumeration (`iter_masks_k_of_bits`) + conflict-pair prune
+/// (`has_conflict`), emitting survivors in the exact
+/// `itertools.combinations` lexicographic order the sweep's durable bytes
+/// depend on. Default-OFF behind `BRUTEX_SWEEP_RUST_ENUM` (Python wrapper
+/// `brutex/engine/rust_enum.py`).
+pub mod enum_kernel;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -141,6 +149,7 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(enum_kernel::sweep_enum_conflict_free, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())
 }

@@ -5,18 +5,32 @@
 # parent dirs — the empirically-INERT repo-root .cargo/mutants.toml was deleted).
 #
 # Scope = the ENGINE-critical surfaces:
-#   src/metrics.rs   — fused per-mask equity fold + drawdown scan
-#                      (DEC-SWEEP-RUST-METRICS-001)
-#   src/trade_sim.rs — resident Stage-2 trade-sim kernel
-#                      (DEC-SWEEP-RUST-TRADESIM-001)
-#   src/python.rs    — PyO3 bridge (popcount/supermask counting the sweep calls;
-#                      pyo3 is unconditional in this crate — no feature flag needed)
-#   src/lib.rs       — decl surface + the #1258 SOURCE_DIGEST stamp + the
-#                      below_parallel_threshold dispatch predicate extracted by
-#                      DEC-MUTATION-RUNTIME-003 (kept IN scope so the dispatch
-#                      boundary itself stays mutation-gated)
-# 599 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
-# dir on the post-merge HEAD: metrics 358 + trade_sim 167 + python 65 + lib 9).
+#   src/metrics.rs     — fused per-mask equity fold + drawdown scan
+#                        (DEC-SWEEP-RUST-METRICS-001)
+#   src/trade_sim.rs   — resident Stage-2 trade-sim kernel
+#                        (DEC-SWEEP-RUST-TRADESIM-001)
+#   src/python.rs      — PyO3 bridge (popcount/supermask counting the sweep calls;
+#                        pyo3 is unconditional in this crate — no feature flag needed)
+#   src/lib.rs         — decl surface + the #1258 SOURCE_DIGEST stamp + the
+#                        below_parallel_threshold dispatch predicate extracted by
+#                        DEC-MUTATION-RUNTIME-003 (kept IN scope so the dispatch
+#                        boundary itself stays mutation-gated)
+#   src/enum_kernel.rs — fused k-of-bits enumeration + conflict-pair prune
+#                        (DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738)
+# 699 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from this
+# dir on the DEC-SWEEP-ENUM-RUST-001 slice-1 tree: metrics 358 + trade_sim 167 +
+# python 65 + lib 9 + enum_kernel 100 — after the survivor-killing reshape
+# pass: the pairs-to-bits prefilter was removed and the disjoint-bit `|`s
+# rewritten as exact `+`, deleting the provably-equivalent `|`->`^` mutant
+# class structurally; the remaining enum_kernel mutants ran to ZERO missed
+# locally, 2026-07-11). The +100 (+16.7%) growth is NOT small by the #1597
+# dial (the u128 precedent's +7.7% took +1 shard when the worst +20%-band end
+# hit ~102 min): at 6 shards ceil(699/6) = 117/shard reproduces the SAME
+# ~102-min worst end, so the matrix took the pre-decided +1-shard dial AGAIN
+# (6 -> 7; ceil(699/7) = 100/shard restores the proven ~100-mutant budget —
+# arithmetic in mutation.yml's run-step comment).
+# Pre-slice-1 history: 599 mutants measured 2026-07-08 (metrics 358 +
+# trade_sim 167 + python 65 + lib 9).
 # Measurement history, kept honest (convergence round 1 — the counts here must
 # describe the SHIPPED tree, Golden Rule #1): the below_parallel_threshold
 # extraction + .max() reshapes brought the pre-extraction 576 down to 556
@@ -35,4 +49,4 @@
 #                 path; its known June/July survivors are enumerated in
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
-examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs"]
+examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs", "src/enum_kernel.rs"]
