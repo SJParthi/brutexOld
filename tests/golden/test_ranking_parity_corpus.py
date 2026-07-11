@@ -56,6 +56,7 @@ from brutex.ranking import (
 from brutex.ranking.rust_ranking import RANKING_RUST_ENV, reset_ranking_rust_for_tests
 
 from tests.fakes.metrics_fixtures import make_result_metrics
+from tests.fakes.pow_identity import pow_identity_holds
 from tests.golden.generate_ranking_parity_corpus import CORPUS_PATH
 
 _LOG = structlog.get_logger("tests.ranking_parity_corpus")
@@ -230,20 +231,47 @@ def test_direct_kernel_census_can_observe_a_kernel_divergence(
     oracle, so a genuinely divergent (b*) kernel is REPORTED as ``0`` — a
     two-arm wire comparison could never show this (``run_with_parity``
     ships the oracle value on any mismatch, making ON-vs-OFF wire bits
-    equal by construction). Pinned with a last-ULP perturbation of the
-    real kernel: the census must flip 1 → 0.
+    equal by construction).
+
+    Host-independence (hostile-review round 10, R10.1): the RAW kernel's
+    bit agreement is a (b*) libm surface the design declares
+    HOST-DEPENDENT — this pool's only variant term column is the sharpe
+    z-score whose std is ``sqrt(2/3)`` (Python libm ``pow`` vs Rust
+    ``f64::sqrt``), and the shipped probe documents THIS container as a
+    non-identity host — so hard-asserting real-kernel agreement
+    unconditionally was a designed-red that passed only by per-value
+    coincidence. The census MACHINERY is instead pinned with kernel
+    stand-ins that are agree/disagree BY CONSTRUCTION on every host: one
+    returning the Python oracle's exact bits (census must read ``1``) and
+    its last-ULP perturbation (census must flip to ``0``). The REAL
+    kernel's agreement stays a hard assertion on identity hosts (the
+    M4-Pro merge-precondition probe target), per the pow-probe gating
+    idiom of the golden legs.
     """
     candidates = [
         (1, make_result_metrics(sharpe_ratio=1.0)),
         (2, make_result_metrics(sharpe_ratio=2.0)),
         (3, make_result_metrics(sharpe_ratio=3.0)),
     ]
+    if pow_identity_holds():
+        # Identity host (the M4-Pro merge target): the REAL kernel must
+        # bit-agree — hard, no coincidence involved.
+        assert _direct_kernel_census(candidates, None) == {"composite_kernel_bit_agree": 1}
+
+    def _oracle_bits(term_columns: list[list[float]], dsr_contrib: list[float]) -> list[float]:
+        # A kernel returning the Python oracle's exact bits: agreement by
+        # construction, on EVERY host — isolates the census machinery from
+        # the host-libm arm.
+        return list(composite_scores(tuple(term_columns), dsr_contrib))
+
+    monkeypatch.setattr(fno_math, "ranking_composite_scores", _oracle_bits)
     assert _direct_kernel_census(candidates, None) == {"composite_kernel_bit_agree": 1}
 
-    real_kernel = fno_math.ranking_composite_scores
-
     def _one_ulp_off(term_columns: list[list[float]], dsr_contrib: list[float]) -> list[float]:
-        return [math.nextafter(v, math.inf) for v in real_kernel(term_columns, dsr_contrib)]
+        # One ULP off the ORACLE bits: bit-different by construction for
+        # the pool's finite composites (perturbing the real kernel instead
+        # could — on a hostile host — land back ON the oracle bits).
+        return [math.nextafter(v, math.inf) for v in _oracle_bits(term_columns, dsr_contrib)]
 
     monkeypatch.setattr(fno_math, "ranking_composite_scores", _one_ulp_off)
     assert _direct_kernel_census(candidates, None) == {"composite_kernel_bit_agree": 0}
