@@ -35,4 +35,21 @@
 #                 path; its known June/July survivors are enumerated in
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
-examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs"]
+# Slice-4 PR-1 (feat(ranking): Rust ranking conversion): src/ranking.rs joins
+# the scope — the rank-time gates / z-scores / composite / rank-order kernels
+# are ENGINE-critical (they feed the persisted leaderboard when
+# BRUTEX_RANKING_RUST is ON). Re-measured 2026-07-11 with ranking.rs in scope:
+# `cargo mutants --list | wc -l` from this dir = 897 (599 prior + 298 from
+# ranking.rs; a 7-tuple wrapper return type was measured to explode the
+# value-enumeration to 6,847 ranking mutants and was reshaped to
+# Vec<Vec<f64>> — see ranking_composite_term_inputs). +49.8% growth is NOT
+# small, so the fno-math matrix takes the #1597 pre-decided shard move
+# (6 → 7 in .github/workflows/mutation.yml); ranking.rs mutants are cheap
+# (sub-second in-file tests, no proptest-heavy kill path).
+examine_globs = [
+    "src/metrics.rs",
+    "src/trade_sim.rs",
+    "src/python.rs",
+    "src/lib.rs",
+    "src/ranking.rs",
+]

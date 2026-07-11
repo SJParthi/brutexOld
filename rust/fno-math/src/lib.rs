@@ -72,6 +72,14 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+/// Slice-4 PR-1 (`feat(ranking): Rust ranking conversion`): the Rust twins
+/// of `brutex.ranking`'s rank-time math — gates + gate reasons, z-scores,
+/// composite term inputs/fold, the DSR z-term, the rank-order index
+/// permutation, batched overfit verdicts, and the correctly-rounded
+/// i64/i64 division fast path. Pure rlib-style cores + thin `#[pyfunction]`
+/// wrappers; default-OFF behind `BRUTEX_RANKING_RUST` on the Python side.
+pub mod ranking;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -142,5 +150,21 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
+    // ── slice-4 ranking.rs registrations (feat(ranking): Rust ranking
+    //    conversion) — a comment-fenced per-slice block per the slice-4 /
+    //    slice-6 separate-registration agreement: slice 6 adds its own
+    //    stats block AFTER this one; never interleave slices inside a
+    //    block (lib.rs is a sequenced shared file — first merger wins,
+    //    the other rebases; the fences make the rebase mechanical). ──
+    m.add_function(wrap_pyfunction!(ranking::ranking_composite_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_composite_term_inputs, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_cr_div_i64, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_dsr_z_contributions, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_gate_reasons, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_overfit_verdicts, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_passes_gates, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_rank_order, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_zscores, m)?)?;
+    // ── end slice-4 ranking.rs registrations ──
     Ok(())
 }

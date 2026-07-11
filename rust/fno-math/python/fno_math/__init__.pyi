@@ -32,6 +32,15 @@ __all__ = [
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "popcount_bytes",
+    "ranking_composite_scores",
+    "ranking_composite_term_inputs",
+    "ranking_cr_div_i64",
+    "ranking_dsr_z_contributions",
+    "ranking_gate_reasons",
+    "ranking_overfit_verdicts",
+    "ranking_passes_gates",
+    "ranking_rank_order",
+    "ranking_zscores",
 ]
 
 __version__: str
@@ -110,6 +119,105 @@ def count_supermasks_u64s_nthreads(
 
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
+    ...
+
+def ranking_passes_gates(
+    total_trades: list[int],
+    profit_factor: list[float | None],
+    max_drawdown_pct: list[float],
+    win_rate: list[float],
+    win_loss_ratio: list[float | None],
+    max_consecutive_losses: list[int],
+) -> list[bool]:
+    """Batched `brutex.ranking.passes_gates` twin (slice-4 PR-1).
+
+    One verdict per candidate, positionally aligned. `None` metric values
+    cross as `None` (never NaN-encoded). Raises `ValueError` on unequal
+    column lengths.
+    """
+    ...
+
+def ranking_gate_reasons(
+    total_trades: list[int],
+    profit_factor: list[float | None],
+    max_drawdown_pct: list[float],
+    win_rate: list[float],
+    win_loss_ratio: list[float | None],
+    max_consecutive_losses: list[int],
+) -> list[list[str]]:
+    """Batched `brutex.ranking.gate_reasons` twin — the exact wire tokens.
+
+    Raises `ValueError` on unequal column lengths.
+    """
+    ...
+
+def ranking_zscores(values: list[float]) -> list[float]:
+    """`brutex.ranking._zscores` twin — population z-scores clamped [-3, +3].
+
+    Class (b*): always run under the Python-side per-call differential.
+    Raises `ValueError` on an empty input (Python raises ZeroDivisionError).
+    """
+    ...
+
+def ranking_composite_term_inputs(
+    sharpe_ratio: list[float | None],
+    sortino_ratio: list[float | None],
+    calmar_ratio: list[float | None],
+    profit_factor: list[float | None],
+    recovery_factor: list[float | None],
+    win_rate: list[float],
+    win_loss_ratio: list[float | None],
+    avg_mfe_paisa: list[int],
+    avg_mae_paisa: list[int],
+) -> list[tuple[float, float, float, float, float, float, float]]:
+    """Batched `brutex.ranking.composite_term_inputs` twin (7 columns each).
+
+    Raises `ValueError` on unequal column lengths or a paisa magnitude
+    beyond the 2**53 correctly-rounded-division fast-path envelope.
+    """
+    ...
+
+def ranking_composite_scores(
+    term_columns: list[list[float]],
+    dsr_contrib: list[float],
+) -> list[float]:
+    """`brutex.ranking.composite_scores` twin — z-normalise + weighted fold.
+
+    Raises `ValueError` unless exactly 7 term columns, each at least as
+    long as `dsr_contrib` and non-empty.
+    """
+    ...
+
+def ranking_dsr_z_contributions(
+    dsr_by_survivor: list[float],
+    weight: float,
+) -> list[float]:
+    """ACTIVE-arm `brutex.ranking.dsr_z_contributions` twin (z-scores × weight).
+
+    Raises `ValueError` on an empty input.
+    """
+    ...
+
+def ranking_rank_order(composites: list[float], masks: list[int]) -> list[int]:
+    """`rank_combos` total-order sort twin — the INDEX PERMUTATION over
+    `(-composite_score, mask)` (score DESC, unique mask ASC tie-break;
+    `-0.0 == +0.0`).
+
+    Raises `ValueError` on a length mismatch or a non-finite composite.
+    """
+    ...
+
+def ranking_overfit_verdicts(dsrs: list[float | None], dsr_min: float) -> list[bool]:
+    """Batched `brutex.ranking.overfit.passes_overfit_gate` twin
+    (`dsr is not None and dsr >= dsr_min`, boundary inclusive)."""
+    ...
+
+def ranking_cr_div_i64(numerator: int, denominator: int) -> float:
+    """Correctly-rounded i64/i64 → f64 division — the M1 FAST path.
+
+    Raises `ValueError` on a zero denominator or an operand magnitude
+    beyond 2**53 (the exact-cast envelope; the slow path is PR-2).
+    """
     ...
 
 def sweep_drawdown_stats(
