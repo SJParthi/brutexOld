@@ -18,7 +18,21 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
+_Last updated: 2026-07-11 (DEC-RUST-DATALAKE-IO-DECLINE-001, MIGRATION.md #1726 —
+slice 8 of the Rust-first conversion program (the data-lake I/O layer: 16 `brutex/data/`
+modules + `brutex/feed/resampler.py`) is ASSESSED AND DECLINED, DOCS-ONLY: all 17 modules
+KEEP-PYTHON, the defensible conversion subset is EMPTY — the lake's parquet bytes are
+ALREADY produced by Rust (polars' native zstd encoder, `use_pyarrow=False`) or C++
+(pyarrow, no Rust twin), expected payoff ≈ 0 (IO-bound glue over native engines; the two
+Python hotspots that ever mattered were already vectorized in-place, #1023/#1313), and a
+hand-rewritten byte-producer would break the exact-bytes guarantee run-reproducibility
+depends on. Assessment record = ADR-0019 (`docs/adr/0019-datalake-rust-conversion-declined.md`)
+with the per-module ruling table, the MEASURED/MODELED/UNKNOWN honest-benefit table, FIVE
+surfaced operator flags (incl. the NAMED-NOT-FILED DEC-LAKE-EXACT-PIN-001 lockstep route —
+refusal recommended — and the `feed/resampler.py` deletion-vs-retention DEC) and the 3
+reopening conditions. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate
+change; zero code ships.)
+Earlier: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
 DEC-STAGE1A-ROLL-RESET-001 + the round-1–8 review-fix packs DEC-FUTURES-LAUNCH-REVIEW-FIXES-001…-008,
 MIGRATION.md #1700–#1709 + #1710 — the ADR-0012 NIFTY-futures sweep LAUNCH
 capstone (PR-5): the futures track is addressed by ONE frozen series alias **`NSE-NIFTY-FUT`**
@@ -2002,7 +2016,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
+- **Active branch:** `claude/rust-datalake-io-slice8` (**DEC-RUST-DATALAKE-IO-DECLINE-001,
+  MIGRATION.md #1726** — slice 8 of the Rust-first conversion program (the data-lake I/O
+  layer: 16 `brutex/data/` modules + `brutex/feed/resampler.py`, 17 total) ASSESSED AND
+  DECLINED, DOCS-ONLY: all 17 KEEP-PYTHON, the defensible conversion subset is EMPTY.
+  Grounds (ADR-0019): the byte-parity wall (the parquet bytes are ALREADY polars'
+  Rust zstd encoder / pyarrow's C++ encoder; range pins + no lockfile ⇒ no independent
+  Rust producer can be robustly bit-identical, and `window_ledger_store`'s own docstring
+  disclaims byte parity); no Python hot loop to win (the two that mattered were already
+  vectorized in-place — DEC-LAKE-WRITE-VECTORIZE-001 #1023 MEASURED 1.78×,
+  DEC-PREBUILD-GIL-VECTORIZE-001 #1313 — the residue is statx/fsync/encoder-bound);
+  the parity-feasible remainder (`lake_stats_manifest` + `partition` + `window_ledger`)
+  fails the honest-benefit test (zero-to-negative value, re-creates the twin-drift
+  hazard #1548 eliminated); and the risk side is uniquely heavy (exception-taxonomy
+  verdict flips, live flock/TOCTOU interop, `raw_hash`/run-identity adjacency). FIVE
+  operator flags surfaced, none executed — incl. the NAMED-NOT-FILED
+  DEC-LAKE-EXACT-PIN-001 lockstep route (refusal recommended), the `lake_stats_manifest`
+  if-ever-forced first candidate (frozen `render_shard` byte golden as the
+  cross-language pin), and the `feed/resampler.py` deletion-vs-retention DEC. Umbrella
+  DEC-RUST-FIRST-MANDATE-001 (ledger #1713) is in flight on the Slice-1 PR, NOT on main
+  at this HEAD. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; zero code ships.)
+  Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
   DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702** — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone: the ONE pinned series alias `NSE-NIFTY-FUT` (symbol_id 4; retired shapes get a
   did-you-mean refusal), the vendor-truth roll resolver (`brutex/data/futures_series.py` — interior holes refuse
@@ -5162,7 +5196,13 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/magical-cray-g6agaw`
+- **Active feature branch:** `claude/rust-datalake-io-slice8`
+  (DEC-RUST-DATALAKE-IO-DECLINE-001, MIGRATION.md #1726 — slice 8 of the
+  Rust-first conversion program, the data-lake I/O layer, ASSESSED AND
+  DECLINED docs-only: all 17 scoped modules KEEP-PYTHON, assessment record
+  ADR-0019; five operator flags surfaced, none executed; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/magical-cray-g6agaw`
   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
   DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1710 — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone; see §1 Active branch for the full blurb)
