@@ -22,9 +22,9 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.models import CandleBar
+from brutex.engine.snapshot_hash import data_snapshot_hash
 from brutex.engine.stage3_wire import (
     _data_snapshot_hash_v1,
-    data_snapshot_hash,
     train_slice_bars,
 )
 
