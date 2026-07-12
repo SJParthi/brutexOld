@@ -31,12 +31,15 @@ from brutex.metrics import (
     compute_metrics,
 )
 from brutex.metrics.compute import (
+    TradeFolds,
     _accumulate_moments,
     _consecutive_runs,
     _drawdown_stats,
     _excess_kurtosis,
+    _fold_trades,
     _percentile,
     _skewness,
+    combine_metrics_from_folds,
     compute_metrics_from_scalars,
     with_stage4_statistics,
 )
@@ -1382,3 +1385,80 @@ def test_compute_metrics_from_scalars_default_benchmark_is_zero() -> None:
     )
     assert via_curve == via_scalars
     assert via_scalars.information_ratio == via_scalars.sharpe_ratio
+
+
+# ── combine_metrics_from_folds n_trades guard (Slice-0 review fold) ──
+
+
+def _zero_trade_folds(n_trades: int) -> TradeFolds:
+    """Build a contract-violating :class:`TradeFolds` with the given count."""
+    return TradeFolds(
+        n_trades=n_trades,
+        net_pnl_paisa=0,
+        gross_profit_paisa=0,
+        gross_loss_abs_paisa=0,
+        winners=0,
+        losers=0,
+        sum_mfe_paisa=0,
+        sum_mae_paisa=0,
+        sum_holding_bars=0,
+        max_holding_bars=0,
+        largest_loss_paisa=0,
+        max_consecutive_losses=0,
+        max_consecutive_wins=0,
+        moments=Moments(n=0, mean=0.0, m2=0.0, m3=0.0, m4=0.0),
+        downside_sum_sq=0.0,
+        p95=0.0,
+        p5=0.0,
+    )
+
+
+class TestCombineFoldsGuard:
+    """The public combine entry fails LOUD on contract misuse.
+
+    DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 round-1 review fold:
+    ``combine_metrics_from_folds`` is public API (the Rust-core parity
+    seam), so a zero-trade ``TradeFolds`` — a documented contract
+    violation (the zero-trade row is ``_empty_metrics``, the caller's
+    arm) — must raise a typed :class:`ValueError`, never an untyped
+    ``ZeroDivisionError`` from deep inside the body.
+    """
+
+    def test_zero_trades_raises_typed_valueerror(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            combine_metrics_from_folds(
+                _zero_trade_folds(0),
+                total_bars=10,
+                benchmark_return_pct=0.0,
+                start_equity_paisa=1_000_000,
+                span_years=1.0,
+                drawdown=(0, 0.0, 0, 0.0),
+            )
+        assert str(exc.value) == (
+            "combine_metrics_from_folds: folds.n_trades must be >= 1, got 0 — "
+            "the zero-trade row is _empty_metrics, the caller's arm"
+        )
+
+    def test_negative_trades_raises_typed_valueerror(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1, got -3"):
+            combine_metrics_from_folds(
+                _zero_trade_folds(-3),
+                total_bars=10,
+                benchmark_return_pct=0.0,
+                start_equity_paisa=1_000_000,
+                span_years=1.0,
+                drawdown=(0, 0.0, 0, 0.0),
+            )
+
+    def test_boundary_one_trade_passes_guard(self) -> None:
+        """``n_trades == 1`` is VALID — kills a ``< 1`` → ``<= 1`` flip."""
+        row = combine_metrics_from_folds(
+            _fold_trades([_trade(500, mfe=600, mae=100, holding=3)], 1_000_000),
+            total_bars=10,
+            benchmark_return_pct=0.0,
+            start_equity_paisa=1_000_000,
+            span_years=1.0,
+            drawdown=(100, 0.01, 2, 0.005),
+        )
+        assert row.total_trades == 1
+        assert row.net_pnl_paisa == 500
