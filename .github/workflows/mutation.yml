@@ -135,12 +135,17 @@ jobs:
     # the added runner file costs ~+0.25 s/mutant LOCAL — baseline
     # 0.88 s/144 tests -> 1.13 s/177 — bounded ~+1-3 min on this pass at CI
     # pace, inside the margin below);
-    # compute.py = 354; remaining 8 loop modules = 932 (state 58 + retry 77 +
+    # compute.py = 377 (re-measured 2026-07-10 on the
+    # DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 Slice-0 tree — the fold/combine
+    # decomposition grew the -003-era 354: origin/main measures 355, +18
+    # from the decomposition, +4 from the n_trades guard; +23 x ~2.3 s
+    # ~= +53 s, absorbed by the margin below); remaining 8 loop modules =
+    # 932 (state 58 + retry 77 +
     # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
     # parser 33 + spec 91).
     # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
     # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
-    # Nominal: (284 + 354 + 932) x ~2.3 s ~= 60 min; + rate_common 369
+    # Nominal: (284 + 377 + 932) x ~2.3 s ~= 61 min; + rate_common 369
     # (post-round-3: the 9 dropped slot pragmas return 9 mutants to the gate)
     # at an ASSUMED 5-7 s CI baseline (local 2.5-3.4 s x an assumed 2x
     # shared-GHA factor — the rehearsal never reached rate_common, so its CI
@@ -150,8 +155,8 @@ jobs:
     # MIN of the two preflight-measured baselines, capped 30 s -> ~1-3.5 min
     # across the admitted regime); + the TWO ~2-10 s preflight baseline runs
     # (~4-20 s total; two samples + min per fixer round 4 R4-2).
-    # Total ~= 95-107 min nominal at that band -> an HONEST 13-25 min margin
-    # under 120 (>= ~34 min if rate_common paces like its siblings — and the
+    # Total ~= 96-108 min nominal at that band -> an HONEST 12-24 min margin
+    # under 120 (>= ~33 min if rate_common paces like its siblings — and the
     # measured-baseline wrap sizing makes a sibling-pace baseline a
     # first-class admitted regime, NOT a preflight red). A ~20%
     # shared-runner bad day on the worst end CROSSES the 120-min kill —
@@ -161,7 +166,7 @@ jobs:
     # edit that needs no new machinery. Admitted-regime honesty (R4-3): the
     # preflight's [1200, 20000] ms band is CLASSIFIER arithmetic, not a
     # budget guarantee — a rate_common baseline >= ~9.5-10 s (369 x ~10 s
-    # ~= 61 min on top of the ~60 min loop-module nominal) already crosses
+    # ~= 61 min on top of the ~61 min loop-module nominal) already crosses
     # the 120-min kill from INSIDE the admitted band; the failure is LOUD
     # (budget kill -> cancelled -> cause-aware issue) and the same
     # >100-min split dial is the remedy.
@@ -441,6 +446,20 @@ jobs:
           # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
           # measured CI baseline. rate_common runs LAST so a survivor there never
           # masks the 10 proven modules.
+          # RECORDED DECISION (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 fixer round 1):
+          # the compute.py pair deliberately stays the single unit file — the
+          # Slice-0 byte-parity golden (tests/golden/test_compute_fold_combine_parity.py,
+          # measured ~4.7 s) and the C23 hypothesis differential gate
+          # (tests/property/test_compute_fold_combine_differential.py) are NOT
+          # added: 377 mutants x an extra ~4.7 s+ per mutant ~= +29 min+,
+          # which provably crosses the 13-25 min margin under the 120-min kill
+          # documented in the budget comment above (and the pair grammar +
+          # `pytest "$tf"` preflight are single-file). Mitigation: the
+          # fold/combine seam's mutants are killable by the pair suite itself —
+          # 6 hand-applied seam mutants + the n_trades-guard mutants all die
+          # against tests/unit/test_metrics_compute.py alone (spot-verified;
+          # MIGRATION.md #1685) — and the golden/differential suites still run
+          # on every push via ci.yml's normal test tiers.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
