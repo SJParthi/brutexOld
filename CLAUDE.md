@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
+_Last updated: 2026-07-12 (DEC-MAPPING-INTEGRITY-FORM-KEY-001 +
+DEC-MOVERS-STORED-FRESHNESS-001 + DEC-FNO-UNDERLYING-EMPTY-GUARD-001,
+MIGRATION.md #1751–#1753 — the dashboard underlying-key truth pack: the
+/universe mapping-integrity compare keyed through the COMMON F&O
+underlying-forms resolver via an injected plain-data `key_forms` map
+(hyphenated names' attempted-and-zero silent-vanish alarm live; writer
+byte-untouched; default-None byte-identical), the /movers stored-first
+intraday read gains the DAY-scoped grid-aware freshness guard (stale
+prebuilt TF ⇒ the existing 1m-resample fallback + one capped
+`movers.stored_stale_fallback` WARN; fresh lakes byte-identical, pinned;
+daily arm = named follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and
+`primary_fno_underlying` made total for the blank-symbol degenerate
+(IndexError → inert self-key; kind-map rows blank-skipped + counted).
+READ-side dashboard only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md
+#1751–#1753.)
+Earlier: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
 the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
 the ranking composite JOIN the display surfaces: the top100 artifact gains the
 per-entry `cascade` object + root `cascade_join` meta behind a HARD writer-side
@@ -2306,7 +2322,62 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
+- **Active branch:** `claude/dashboard-read-honesty-pack` (**DEC-MAPPING-INTEGRITY-FORM-KEY-001 +
+  DEC-MOVERS-STORED-FRESHNESS-001 + DEC-FNO-UNDERLYING-EMPTY-GUARD-001, MIGRATION.md
+  #1751–#1753** — the dashboard underlying-key truth pack, three READ-side fixes as ONE
+  change set (the #1664–#1665 one-branch-multi-DEC shape). **(#1751, R2)** the /universe
+  mapping-integrity trust panel keys its eligible↔coverage compare through the COMMON F&O
+  underlying-forms resolver: the coverage WRITER keys cells on the PRIMARY F&O form
+  (`metadata_pull._resolve_underlying_forms` — `BAJAJ-AUTO` rows land under `BAJAJAUTO`,
+  MIGRATION.md #974) while the eligible set is SPOT-spelled, so the exact-key compare at
+  mapping_integrity.py read a fully-covered hyphenated name `not_attempted` forever and
+  its attempted-and-ZERO silent-vanish alarm (the M&M class) was structurally DEAD.
+  `reconcile_mapping_integrity(key_forms=)` — kw-only appended-last plain-data map (the
+  #1482 injection template; default `None` = exact-key byte-identical, all 20 prior unit
+  pins pass unmodified) — unions covered years + matches attempts across the ordered
+  forms superset (primary + normalized + raw, the #1128 legacy-key-era law, never
+  primary-only); display + whitelist stay the SPOT spelling; the empty-forms degenerate
+  degrades to the exact raw key via `or (symbol,)`; the map is built ONCE per cached
+  compute in app.py (zero new imports/reads; nav-latency/outage plumbing untouched); the
+  writer is byte-untouched; CSV golden byte-unmodified; route-executed fail-before
+  regressions + the end-to-end REAL-writer belt (the fake-SDK harness → the route reads
+  green). **(#1752, R7)** the /movers spot stored-first intraday read gains the FOURTH
+  member of its decision family — a DAY-scoped GRID-AWARE freshness guard: stored bars
+  are bucket-OPEN stamped, so fresh ⇔ `stored_max_open_min + minutes > base_day_max_min`
+  on the UNCUT day frames (the naive `>=` compare false-stales every fresh TF lake; the
+  CUT-domain compare is REFUTED BY ARITHMETIC — at the :351 pin's aligned 09:19 cutoff
+  the poison reads 555+5=560 > 559 = fresh, only the DAY domain 560 ≤ 564 catches it);
+  interval=1minute is the identity arm (zero extra I/O, read-spy-pinned); base-absent
+  fail-opens to serve-stored; STALE ⇒ the EXISTING `_read_session_bars` fallback (the
+  byte-equality reference path — only provenance flips into `resampled_reads`, no new
+  payload field) + ONE capped `movers.stored_stale_fallback` WARN (a `_StoredStaleWarnState`
+  mirroring the #1539 idiom, cap 20, (symbol, interval) dedupe, separate state). The
+  test_movers_stored_read.py:351 stale-serve pin is FLIPPED deliberately ((1,0)→(0,1),
+  snapshots==reference, one WARN — the bugfix-reversion-check proof); the FULL fresh-lake
+  equality/provenance pin family passes UNMODIFIED. HONEST: +1 month-bounded 1m read per
+  stored-served TF>1minute candidate (2→3; stale 4; candidate-cache-memoised — the
+  "near-zero I/O" shared-frame restructure is the named follow-up
+  DEC-MOVERS-1M-FRAME-SHARE-001); the live-edge partial-last-bucket sliver
+  (≤ minutes−1 min) passes the guard, self-heals via latest-wins + prefer_resample; the
+  DAILY arm + the stale default-DATE (movers_warm) stay OPEN — named follow-up
+  DEC-MOVERS-DAILY-FRESHNESS-001, an explicit partial delivery of the team memory's
+  two-arm scope. **(#1753, BUG-3)** `primary_fno_underlying` made TOTAL for str input
+  (guarantee-audit): the literal `""` returned IndexError — falsifying its own "Never
+  empty" docstring — and ONE blank-symbol EQ row (parser-retained in the universe)
+  poisoned EVERY whole-map consumer; now `forms[0] if forms else spot_symbol` (`""` →
+  itself, an inert key; `fno_underlying_forms("")` deliberately stays `()` so
+  forms-iterating consumers issue ZERO vendor calls; whitespace-only unchanged;
+  non-empty byte-identical, structural + pinned) and `build_underlying_kind_map` skips
+  blank/whitespace rows BEFORE resolving with ONE aggregate
+  `movers.underlying_kind_blank_symbol_skipped` WARN per build (≤5 exch:security_id
+  samples; no broad except — the isolation is the pre-check). ALL THREE: READ-side
+  dashboard only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+  no lake/schema/scope/vocab/rate change; healthy/fresh lakes byte-identical (pinned);
+  `mapping_integrity.py` + `fno_underlying.py` + `movers_underlying_class.py` 100%
+  line+branch on their stem-matched suites, `movers_snapshot.py` 100% on the movers
+  family (its documented discovery-gate exclusion stands); ruff/ruff-format clean,
+  `mypy --strict` clean, pyright errors at the pre-change baseline.)
+  Earlier: `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
   the cascade-verdict → display join: the Stage-4 verdicts + per-candidate CPCV
   pass rate + the ranking composite reach top100.json, /results, /screener,
   /strategy and the operator card. (1) `metrics/cascade.py` RECORDS the
@@ -5867,7 +5938,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/results-cascade-verdict-join`
+- **Active feature branch:** `claude/dashboard-read-honesty-pack`
+  (DEC-MAPPING-INTEGRITY-FORM-KEY-001 + DEC-MOVERS-STORED-FRESHNESS-001 +
+  DEC-FNO-UNDERLYING-EMPTY-GUARD-001, MIGRATION.md #1751–#1753 — the dashboard
+  underlying-key truth pack: the /universe mapping-integrity compare keyed
+  through the COMMON F&O underlying-forms resolver via the injected plain-data
+  `key_forms` map (writer byte-untouched; default-None byte-identical; the
+  hyphenated/aliased silent-vanish alarm live), the /movers stored-first
+  intraday read freshness-guarded DAY-scoped + grid-aware (stale prebuilt TF ⇒
+  the existing 1m-resample fallback + one capped
+  `movers.stored_stale_fallback` WARN; the :351 stale-serve pin deliberately
+  FLIPPED; daily arm = named follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and
+  `primary_fno_underlying` made total for the blank-symbol degenerate
+  (IndexError → inert self-key; kind-map blank rows skipped + counted);
+  READ-side dashboard only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line)
+  Earlier: `claude/results-cascade-verdict-join`
   (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
   cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
   composite join the display surfaces: the ONE `engine/cascade_join.py` law
