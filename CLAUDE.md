@@ -35,7 +35,8 @@ Python; the untouched loop serves every fallback; the seam buckets
 enumerated/pruned/evaluated/minhits-dropped EXACTLY as the Python arm).
 MEASURED (shared x86 sandbox over SYNTHETIC bars, NOT the §8 M4 Pro): the
 C(60,5) segment 2.66 µs → 56.8 ns/mask (46.9×; the n_bars=0 FFI floor —
-≈1.3–1.5× higher effective at deep windows); 8/8 sub-grid twin cells
+deep windows measured 109.2 ns ≈1.9×, of which ≈1.3–1.5× is same-run
+range-shrinkage inflation); 8/8 sub-grid twin cells
 (2 TFs × k∈{2,5} × top∈{20,1000}) store-hash BYTE-IDENTICAL at 0.90–1.07×
 end-to-end — SEGMENT-level only, NO whole-sweep claim; the REAL-lake
 twin-run (`scripts/ci/rust_enum_twin_run.sh` / the M4-Pro dispatch job) is
@@ -2339,8 +2340,9 @@ hostile-review pass._
   byte-UNMODIFIED flag-OFF. PROPERTIES: kept-list equality INCLUDING min_hits; ranged-vs-monolithic +
   split-at-any-rank; dual-knob ≥5 shapes; strict-`>=` ≡ `count_supermasks` BOTH widths. MEASURED
   (2026-07-11, SHARED x86 SANDBOX over SYNTHETIC bars — NOT the §8 M4 Pro): the C(60,5) segment 2.66 µs →
-  56.8 ns/mask (46.9×) steady-state at the n_bars=0 FFI floor (≈1.3–1.5× higher effective at deep windows
-  via min-hits-blind range shrinkage — the round-5 fold; combo_counts.md §3.2 rows 2/2a); fused-count
+  56.8 ns/mask (46.9×) steady-state at the n_bars=0 FFI floor (deep windows measured 109.2 ns ≈1.9× — of
+  which ≈1.3–1.5× is same-run min-hits-blind range shrinkage, the remainder run-to-run sandbox variance;
+  the round-5 fold + the round-6 attribution correction; combo_counts.md §3.2 rows 2/2a); fused-count
   coefficient 0.077 ns/(mask·bar) @k=3 / 0.125 @k=5; the
   8-cell sub-grid twin (2 TFs incl. a 93,750-bar 1-minute-shaped tuple × k∈{2,5} × top∈{20, 1000}) ALL
   store-hash BYTE-IDENTICAL at 0.90–1.07× end-to-end (the honest claim is byte-identity + no regression —
@@ -2381,7 +2383,17 @@ hostile-review pass._
   substrate depths; combo_counts.md §3.2 row 2a — same-run 72.8 ns/51.0× @ 0 bars vs 109.2 ns/34.0× @
   555k zero-bars, ≈1.3–1.5× via min-hits-blind range shrinkage; §4 caveat 2 no longer confines n_bars
   sensitivity to the count term; 4 doc pins); the fno-math shard-dial narrative corrected to the real
-  6 → 8 (below); per-fix record in MIGRATION.md #1738. MUTATION: enum_kernel 782 raw →
+  6 → 8 (below); per-fix record in MIGRATION.md #1738. REVIEW ROUND 6 fold (TWO MINORs): the round-5
+  ×1.3–1.5 deep-window band ATTRIBUTION corrected — it is the WITHIN-same-run inflation (109.2/72.8 = 1.50),
+  never a multiplier on the separate-run 56.8 headline (109.2/56.8 = 1.92 is cross-run, bundling ~1.28×
+  run-to-run sandbox variance; applying ×1.3–1.5 to 56.8 understated the doc's OWN measured deep rate by
+  ~22–32%): combo_counts.md row 2a relabeled + the §3.4 note now budgets deep 1-minute grids ×≈1.9
+  (≈ 10.3 s for B k≤5) with the misapplication refused by NEW `TestDeepWindowFactorAttributionPin`, this
+  blurb + the header + MIGRATION #1738's headline decomposed to match; and the round-5 shard-dial correction
+  COMPLETED at its missed third site — `rust/fno-math/.cargo/mutants.toml` still carried the phantom
+  "ceil(803/7) / 6->7 / 7 -> 8" narrative verbatim (the round-5 pin never read that file), now the real
+  6 → 8 vs main's 6-shard baseline with the pin EXTENDED to refuse the phantom tokens there; per-fix record
+  in MIGRATION.md #1738. MUTATION: enum_kernel 782 raw →
   204 after the exclude_re dropping ONLY the 578 provably-UNVIABLE whole-fn `-> PyResult` constructor
   guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the shard
   matrix dialed 6 → 8 vs main's #1597 6-shard config (ceil(803/8)=101/shard restores the ~100-mutant
