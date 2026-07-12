@@ -80,6 +80,10 @@
   #flash { margin: 12px 0; font-size: 13px; min-height: 18px; }
   #pollNote { color: var(--muted); font-size: 11px; margin-top: 8px; }
 </style>
+<!-- The ONE shared poll-discipline core (DEC-FRONTEND-LATENCY-HARDENING-001,
+     MIGRATION.md #1720): hidden guard, one-in-flight chain, 10 s fetch abort,
+     capped 3 s→30 s backoff, visibilitychange catch-up. -->
+<script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 </head>
@@ -215,7 +219,7 @@
         }
       })
       .catch(function (err) { flash("Launch request failed: " + err, true); })
-      .then(function () { launching = false; poll(); });
+      .then(function () { launching = false; repoll(); });
   }
 
   function renderCards(state) {
@@ -271,27 +275,68 @@
     renderActive(state.active);
   }
 
-  function poll() {
+  /* Self-recovering scheduler (DEC-FRONTEND-LATENCY-HARDENING-001,
+     MIGRATION.md #1720): the state poll rides the ONE shared BXPoll
+     discipline core (bx-poll.js — hidden-tab guard BEFORE any fetch,
+     one-in-flight chain, 10 s fetch abort so a wedged read can never hang the
+     chain, capped 3 s→30 s failure backoff, visibilitychange catch-up)
+     instead of a bare fixed setInterval + un-timed fetch; the visible-tab
+     cadence is unchanged (POLL_MS 2500) and the render/pollNote semantics are
+     preserved (the error detail rides lastPollErr into the same STALE note).
+     A missing bx-poll.js degrades to the legacy guarded interval — the page
+     never goes pollerless. */
+  var poller = null;
+  var lastPollErr = null;
+  function repoll() { if (poller) { poller.pollNow(); } else { legacyPoll(); } }
+
+  function onState(state) {
+    failures = 0;
+    document.getElementById("pollNote").textContent = "";
+    render(state);
+  }
+  function onPollFail(count) {
+    failures = count;
+    document.getElementById("pollNote").textContent =
+      "poll failed ×" + failures + (lastPollErr ? " (" + lastPollErr + ")" : "") +
+      " — retrying; state may be STALE";
+  }
+
+  function legacyPoll() {
     fetch("/api/v1/launch/state")
       .then(function (resp) {
         if (!resp.ok) { throw new Error("HTTP " + resp.status); }
         return resp.json();
       })
-      .then(function (state) {
-        failures = 0;
-        document.getElementById("pollNote").textContent = "";
-        render(state);
-      })
-      .catch(function (err) {
-        failures += 1;
-        document.getElementById("pollNote").textContent =
-          "poll failed ×" + failures + " (" + err + ") — retrying; state may be STALE";
-      });
+      .then(onState)
+      .catch(function (err) { lastPollErr = err; onPollFail(failures + 1); });
   }
 
-  poll();
-  window.setInterval(function () { if (!document.hidden) { poll(); } }, POLL_MS);
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) { poll(); } });
+  function startPolling() {
+    if (window.BXPoll) {
+      poller = window.BXPoll.createPoller({
+        url: "/api/v1/launch/state",
+        pollMs: POLL_MS,
+        fetchJson: function (url, timeoutMs) {
+          return window.BXPoll.fetchJson(url, timeoutMs).catch(function (err) {
+            lastPollErr = err;
+            throw err;
+          });
+        },
+        onData: onState,
+        onFail: onPollFail
+      });
+      poller.start();
+    } else {
+      legacyPoll();
+      window.setInterval(function () { if (!document.hidden) { legacyPoll(); } }, POLL_MS);
+      document.addEventListener("visibilitychange", function () { if (!document.hidden) { legacyPoll(); } });
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startPolling);
+  } else {
+    startPolling();
+  }
   var ackBox = document.getElementById("ackSla");
   if (ackBox) {
     ackBox.addEventListener("change", function () { if (lastState) { render(lastState); } });

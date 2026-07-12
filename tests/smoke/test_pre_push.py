@@ -38,13 +38,15 @@ DEC-PHASE1-SMOKE-AND-SKELETONS-001 (MIGRATION entry #251).
 from __future__ import annotations
 
 import importlib
-import re
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+_CONV_CHECKER = REPO_ROOT / "scripts" / "ci" / "check-conventional-commits.sh"
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -130,13 +132,33 @@ class TestLintFormat:
 # ────────────────────────────────────────────────────────────────────
 
 
-CONVENTIONAL_COMMIT_REGEX = re.compile(
-    r"^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_/-]+\))?!?: .+"
-)
+def _subject_is_conventional(subject: str) -> bool:
+    """Delegate to the ONE shell validator (scripts/ci/check-conventional-commits.sh).
+
+    Writes the subject as the first line of a temp file and runs the checker in
+    --msg-file mode: exit 0 => valid (or a Merge* subject), nonzero => invalid.
+    This is the single source of truth (Golden Rule #11 COMMON) — no second regex.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+        fh.write(subject + "\n")
+        msg_path = fh.name
+    try:
+        result = subprocess.run(
+            ["bash", str(_CONV_CHECKER), "--msg-file", msg_path],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    finally:
+        os.unlink(msg_path)
+    return result.returncode == 0
 
 
 class TestConventionalCommit:
     def test_head_commit_subject_matches(self) -> None:
+        if not _CONV_CHECKER.exists():
+            pytest.skip("conventional-commits checker not present")
         result = _run(["git", "log", "-1", "--format=%s"])
         if result.returncode != 0:
             pytest.skip(f"git log failed: {result.stderr}")
@@ -151,9 +173,42 @@ class TestConventionalCommit:
         # prefix is the robust signal: GitHub writes "Merge <sha> into <sha>".
         if subject.startswith("Merge "):
             pytest.skip("HEAD is a merge commit — exempt from Conventional Commits")
-        assert CONVENTIONAL_COMMIT_REGEX.match(subject), (
-            f"HEAD commit subject violates Conventional Commits: {subject!r}"
+        assert _subject_is_conventional(subject), (
+            "HEAD subject not Conventional-Commits compliant per the shared "
+            f"shell validator: {subject!r}"
         )
+
+    @pytest.mark.skipif(
+        not _CONV_CHECKER.exists(), reason="conventional-commits checker not present"
+    )
+    @pytest.mark.parametrize(
+        ("subject", "expected"),
+        [
+            # VALID — comma multi-scope is accepted (parity with the reference
+            # parser used by commitlint + Release Please); this is the exact
+            # drift class that red-ed main on the #1380 comma-scope squash.
+            ("fix(dashboard,test): make it hermetic", True),
+            ("feat(a,b,c): multi scope", True),
+            ("fix(options): single scope", True),
+            ("chore: no scope", True),
+            ("feat(engine)!: breaking bang", True),
+            ("refactor(a/b-c_d): charset ok", True),
+            # INVALID — empty/compound/malformed forms stay rejected.
+            ("fix(): empty scope", False),
+            ("fix(options,): trailing empty segment", False),
+            ("fix(,calendars): leading empty segment", False),
+            ("ci+chore: compound type", False),
+            ("nope: bad type", False),
+            ("fix scope no colon", False),
+            ("fix(UPPER): uppercase scope", False),
+        ],
+    )
+    def test_msg_file_delegation_policy(self, subject: str, expected: bool) -> None:
+        """The delegation itself has HEAD-independent teeth: comma multi-scope
+        is accepted and empty/compound/malformed forms are rejected, all through
+        the shared ``--msg-file`` validator (Golden Rule #11 COMMON, no 2nd regex).
+        """
+        assert _subject_is_conventional(subject) is expected
 
 
 # ────────────────────────────────────────────────────────────────────
