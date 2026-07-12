@@ -27,9 +27,12 @@ deadline — a dead box is still silent on-box (the #1596 posture). A
 even with zero publishable entries — run.py step K, pinned), so the
 deadman reads OK for it; the journal-LESS exits past the session gate are
 the PRE-staging ones — market-hours deferral, lock refusal, gate-absent,
-a pull halt — which read MISSED once past grace (each already fired its
-own CRITICAL/refusal alert, so MISSED is corroboration, never the only
-signal).
+a pull halt — which read MISSED once past grace. They SPLIT on alerting
+(round-4 polish honesty): lock refusal / gate-absent / pull halt each
+fired their own CRITICAL/refusal alert, so for those MISSED is
+corroboration — but a MID-DAY (08:45–15:35 IST) vendor-calling fire's
+step-E ``deferred_market_hours`` exit 0 is SILENT (no alert, no journal),
+so for that mis-schedule this deadman is the ONLY signal.
 """
 
 from __future__ import annotations

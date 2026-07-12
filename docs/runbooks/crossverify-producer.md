@@ -70,9 +70,14 @@
    > module absent` and pages CRITICAL — a paging loop, not a producer.
    >
    > **`--at` must be POST-CLOSE** (after 15:30 IST, probe-decided per
-   > step 3). A pre-open/mid-day fire resolves the NOT-YET-TRADED day: the
-   > gate withholds everything → `withheld_partial`/`blocked` exit 2 →
-   > CRITICAL on every single fire.
+   > step 3). A PRE-OPEN (<08:45 IST) fire resolves the NOT-YET-TRADED
+   > day: it pulls, the gate withholds everything →
+   > `withheld_partial`/`blocked` exit 2 → CRITICAL on every fire. A
+   > MID-DAY (08:45–15:35 IST) fire never reaches the vendor: the step-E
+   > market-hours gate defers — `deferred_market_hours` exit 0, NO alert,
+   > NO journal — a SILENT mis-schedule, backstopped only by the
+   > trading-day-aware journal-mtime deadman (`brutex crossverify status`
+   > reads MISSED once past grace).
 
    ```bash
    brutex crossverify install --at HH:MM --lake-root /data/lake
@@ -152,8 +157,11 @@ pull excludes options; nothing to enrich.
   a best-effort CRITICAL push). Honest limit: a dead box is silent on-box
   (the #1596 posture). A `nothing_to_do` day DOES write its (empty-entries)
   journal, so the dead-man reads OK for it; the journal-less exits are the
-  pre-staging ones (deferral / lock refusal / gate absent / pull halt),
-  each of which already fired its own alert.
+  pre-staging ones — lock refusal / gate absent / pull halt each fired
+  their own CRITICAL/refusal alert, but a MID-DAY (08:45–15:35 IST)
+  vendor-calling fire's `deferred_market_hours` exit 0 is SILENT (no
+  alert, no journal) — for that mis-schedule this dead-man is the ONLY
+  signal.
 - Locks: the producer holds the pull account→lake→lease trio ONLY through
   staging; the S3 publish (and the recovery scan) never hold the PULL
   locks, so the 01:30 nightly can never meet a producer-held pull flock
