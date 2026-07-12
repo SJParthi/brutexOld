@@ -658,6 +658,34 @@ class TestSessionAwareForcedExit:
         assert trades[0].pnl_paisa == 60  # forced at the 16:50 bar OPEN 100.60
         assert trades[0].holding_bars == 3  # 15:25, 16:49, 16:50
 
+    def test_truncated_lake_extended_day_carries_overnight_to_next_1520(self) -> None:
+        # Review round-4 documenting pin (DEC-EXTENDED-SESSION-OUTAGE-001):
+        # TODAY'S pre-re-pull lake shape — the pre-fix ingest filter kept
+        # 2021-02-24 bars only through 15:29, so NO bar at/after the 16:50
+        # forced boundary exists that day, `_manage_position` has no day-roll
+        # close, and the position deterministically carries OVERNIGHT into
+        # 2021-02-25, exiting at latest THAT day's 15:20 forced boundary. A
+        # defensible mechanical consequence of the sanctioned 16:50 delta —
+        # pinned here as a conscious fact (remediation: the named targeted
+        # re-pull materializes the 15:30-16:59 bars and restores the same-day
+        # 16:50 exit). Pre-fix (merge-base) this scenario force-exited on the
+        # first 02-24 bar >= 15:20 instead — the pin discriminates.
+        next_day = date(2021, 2, 25)  # a regular Thursday
+        bars = [
+            _bar(15, 17, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # signal
+            _bar(15, 18, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # fill
+            _bar(15, 29, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # lake ends
+            _bar(9, 15, "100", "100", "100", "100", day=next_day),  # carried overnight
+            _bar(15, 20, "100.40", "101", "100", "100.60", day=next_day),  # forced
+            _bar(15, 21, "200", "200", "200", "200", day=next_day),  # never reached
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].entry_ts == _ts(15, 18, day=_EXTENDED_OUTAGE)
+        assert trades[0].exit_ts == _ts(15, 20, day=next_day)  # the NEXT day's 15:20
+        assert trades[0].pnl_paisa == 40  # forced at the 02-25 15:20 bar OPEN 100.40
+        assert trades[0].holding_bars == 4  # 15:18, 15:29, 09:15, 15:20
+
     def test_extended_outage_neighbor_day_still_exits_at_1520(self) -> None:
         # The delta is ONE date: the identical scenario on the EVE (2021-02-23,
         # a regular Tuesday) still force-exits at 15:20 — byte-identical law.

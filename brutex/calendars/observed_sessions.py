@@ -119,6 +119,7 @@ _LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "MAX_FLAGS_PER_MONTH",
+    "MAX_OVERLAY_BYTES",
     "MAX_OVERLAY_DAYS_PER_YEAR",
     "MIN_CLEAN_SUCCESS_WINDOWS",
     "OBSERVED_LABEL",
@@ -156,6 +157,13 @@ MAX_OVERLAY_DAYS_PER_YEAR: Final[int] = 8
 #: Minimum clean-``SUCCESS`` 1-minute ledger windows covering the day, PER engine
 #: index (see the module docstring for why ≥2 is unsatisfiable).
 MIN_CLEAN_SUCCESS_WINDOWS: Final[int] = 1
+#: Bounded sidecar read (review round 4 — the DEC-LAKE-STATS-MANIFEST-001 #1614
+#: bounded-shard-read precedent): the overlay contract is TINY (at most
+#: :data:`MAX_OVERLAY_DAYS_PER_YEAR` entries per calendar year), so 1 MiB is
+#: ~1000× any honest sidecar. An oversized file is junk — fail closed to the
+#: empty overlay, never read whole (a multi-GB plant must not be slurped into
+#: memory by a dashboard page / pull / sweep launch).
+MAX_OVERLAY_BYTES: Final[int] = 1 << 20
 
 #: The corroboration bar: ALL engine indices must carry bars somewhere in the
 #: month for a zero-bar day to be admissible (len(``ENGINE_INDEX_COORDS``) — an
@@ -288,26 +296,50 @@ def _valid_entry_day(entry: Any) -> date | None:
     return day
 
 
+def _bounded_sidecar_read(path: Path) -> bytes:
+    """Read at most :data:`MAX_OVERLAY_BYTES` + 1 bytes of the sidecar.
+
+    The one-byte over-cap probe (the #1614 shape) lets the caller distinguish
+    "exactly at cap" (parse it) from "over cap" (reject it) without ever
+    reading an out-of-band multi-GB plant whole. ``OSError`` propagates to the
+    caller's belt.
+    """
+    with path.open("rb") as handle:
+        return handle.read(MAX_OVERLAY_BYTES + 1)
+
+
 def load_observed_holidays(lake_root: Path) -> frozenset[date]:
     """Read the overlay sidecar into a frozenset of overlaid dates. NEVER raises.
 
     A missing file is an empty overlay (the steady state — no drift detected). A
-    malformed / unreadable / wrong-version / mislabeled sidecar logs ONE
-    :data:`OVERLAY_LOAD_FAILED_EVENT` WARNING and degrades to the empty overlay —
-    an unreadable overlay must never break a dashboard page or a pull; the
-    consumer simply falls back to the plain derived calendar.
+    malformed / unreadable / wrong-version / mislabeled / oversized sidecar logs
+    ONE :data:`OVERLAY_LOAD_FAILED_EVENT` WARNING and degrades to the empty
+    overlay — an unreadable overlay must never break a dashboard page, a pull,
+    or a sweep launch; the consumer simply falls back to the plain derived
+    calendar. Review round 4 (the #1558-r2/#1614-r1 precedent class): the read
+    is BOUNDED at :data:`MAX_OVERLAY_BYTES` and the parse arm also folds a
+    nesting-bomb ``RecursionError`` + an invalid-UTF-8 ``UnicodeDecodeError``
+    into the same WARN + empty-overlay degrade (both previously ESCAPED,
+    falsifying this docstring's never-raises claim).
     """
     path = overlay_path(lake_root)
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = _bounded_sidecar_read(path)
     except FileNotFoundError:
         return frozenset()
     except OSError as exc:
         _LOG.warning(OVERLAY_LOAD_FAILED_EVENT, path=str(path), error=str(exc))
         return frozenset()
+    if len(raw) > MAX_OVERLAY_BYTES:
+        _LOG.warning(
+            OVERLAY_LOAD_FAILED_EVENT,
+            path=str(path),
+            error=f"oversized sidecar (> {MAX_OVERLAY_BYTES} bytes) rejected",
+        )
+        return frozenset()
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         _LOG.warning(OVERLAY_LOAD_FAILED_EVENT, path=str(path), error=str(exc))
         return frozenset()
     if not isinstance(payload, dict) or payload.get("version") != OBSERVED_OVERLAY_VERSION:
@@ -499,10 +531,18 @@ def _gather_evidence(
 
 
 def _read_sidecar_entries(path: Path) -> list[dict[str, Any]]:
-    """Read the sidecar's raw entry dicts for the merge (tolerant; invalid -> [])."""
+    """Read the sidecar's raw entry dicts for the merge (tolerant; invalid -> []).
+
+    Rides the SAME bounded read + widened parse belt as the loader (review
+    round 4) — a nesting-bomb / invalid-UTF-8 / oversized sidecar reads as the
+    empty entry list, never a crash of the manual detect run.
+    """
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = _bounded_sidecar_read(path)
+        if len(raw) > MAX_OVERLAY_BYTES:
+            return []
+        payload = json.loads(raw)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return []
     if not isinstance(payload, dict) or payload.get("version") != OBSERVED_OVERLAY_VERSION:
         return []

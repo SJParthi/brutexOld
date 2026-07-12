@@ -304,16 +304,38 @@ class TestDeficiencyLaw:
 
     def test_off_session_strays_and_duplicates_never_inflate_density(self) -> None:
         # A hollow Wednesday (one real bar) + pre-open/post-close strays +
-        # duplicate timestamps still reads observed == 1.
+        # duplicate timestamps still reads observed == 1. The 15:30:00 stray is
+        # the RIGHT-edge discriminator (review round-4 mutant kill): under the
+        # half-open [open, close) session it is post-close, but an `<` -> `<=`
+        # mutant of the in-session predicate lands it in the out-of-grid bucket
+        # slot == expected and inflates observed to 2.
         one_bar = [_minute_ts(_WED, 9, 15)]
         strays = [
             _minute_ts(_WED, 9, 0),  # pre-open
+            _minute_ts(_WED, 15, 30),  # exactly AT close — post-close (half-open)
             _minute_ts(_WED, 15, 45),  # post-close
             _minute_ts(_WED, 9, 15),  # duplicate of the real bar
         ]
         verdict = classify_session_density(_bracketed(one_bar + strays), today_ist=_FAR_FUTURE)
         assert len(verdict.flags) == 1
         assert verdict.flags[0].observed == 1
+
+    def test_at_close_stray_on_extended_day_never_inflates_density(self) -> None:
+        # The extended-day twin of the right-edge kill (review round-4): on the
+        # 2021-02-24 extended session (close 17:00) a 17:00:00 stamp is
+        # post-close — a hollow known-irregular day with one 09:15 bar plus a
+        # 17:00:00 stray still reads observed == 1 (never 2).
+        ext = date(2021, 2, 24)
+        bars = [
+            *_session_minutes(date(2021, 2, 23)),
+            _minute_ts(ext, 9, 15),
+            _minute_ts(ext, 17, 0),
+            *_session_minutes(date(2021, 2, 25)),
+        ]
+        verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert len(verdict.known_irregular) == 1
+        assert verdict.known_irregular[0].observed == 1
 
     def test_env_knobs_reach_the_law(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A 45-min hole passes under an env-loosened fraction (0.5).

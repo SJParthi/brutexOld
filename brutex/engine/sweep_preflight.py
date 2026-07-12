@@ -261,7 +261,10 @@ def preflight_session_density(
     (:func:`~brutex.data.session_density.classify_session_density` — CLAUDE.md
     §11: no second copy of the deficiency law) over the bars ALREADY loaded
     for the sweep, so this arm costs zero extra lake I/O — O(loaded slice
-    bars) total. Only the fetched ``1minute`` slices are judged (a derived
+    bars + days in each slice's covered span) total (the classifier's own
+    documented span-walk term; a sparse multi-year slice is walk-dominated —
+    review round-4 wording honesty). Only the fetched ``1minute`` slices are
+    judged (a derived
     TF's density follows its 1-minute base by construction; judging it would
     double-report every hole). Empty slices are skipped (the zero-bar
     :func:`preflight_slices` refusal owns those). WARN-only by decree — the

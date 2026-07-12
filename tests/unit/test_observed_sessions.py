@@ -33,6 +33,7 @@ from brutex.calendars import observed_sessions as obs
 from brutex.calendars.nse import HolidayDataUnavailableError, is_trading_day
 from brutex.calendars.observed_sessions import (
     MAX_FLAGS_PER_MONTH,
+    MAX_OVERLAY_BYTES,
     MAX_OVERLAY_DAYS_PER_YEAR,
     OBSERVED_LABEL,
     OBSERVED_OVERLAY_VERSION,
@@ -338,6 +339,56 @@ class TestLoadObservedHolidays:
         with capture_logs() as logs:
             assert load_observed_holidays(tmp_path) == frozenset()
         assert len(_events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)) == 1
+
+    def test_load_nesting_bomb_warns_empty_never_raises(self, tmp_path: Path) -> None:
+        # Review round 4 (fails-before: RecursionError ESCAPED all three catch
+        # clauses — the #1558-r2 SweepCheckpointStore nesting-bomb class): a
+        # '['*100k sidecar makes json.loads raise RecursionError; the loader
+        # must degrade to the empty overlay with ONE WARN, never a raw crash of
+        # the sweep launch / pull / dashboard page consuming it.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset()
+        assert len(_events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)) == 1
+
+    def test_load_invalid_utf8_warns_empty_never_raises(self, tmp_path: Path) -> None:
+        # Review round 4 (fails-before: UnicodeDecodeError — a ValueError, not
+        # an OSError — ESCAPED the read arm's catch on the old read_text path).
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xff\xfe{")
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset()
+        assert len(_events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)) == 1
+
+    def test_load_oversized_sidecar_warns_empty(self, tmp_path: Path) -> None:
+        # Review round 4 (the #1614 bounded-read precedent): one byte over the
+        # 1 MiB cap is rejected fail-closed — WARN + empty overlay — without
+        # ever reading the plant whole (the read stops at cap + 1 bytes).
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b" " * (MAX_OVERLAY_BYTES + 1))
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset()
+        events = _events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)
+        assert len(events) == 1
+        assert "oversized" in str(events[0].get("error"))
+
+    def test_load_exactly_at_cap_parses(self, tmp_path: Path) -> None:
+        # The boundary law: EXACTLY MAX_OVERLAY_BYTES parses normally (kills a
+        # `>` -> `>=` cap mutant) — JSON tolerates trailing whitespace padding.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = json.dumps(
+            {"version": OBSERVED_OVERLAY_VERSION, "entries": [self._entry("2026-05-12")]}
+        ).encode("utf-8")
+        path.write_bytes(body + b" " * (MAX_OVERLAY_BYTES - len(body)))
+        assert path.stat().st_size == MAX_OVERLAY_BYTES
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset({_DRIFT_DAY})
+        assert _events(logs, obs.OVERLAY_LOAD_FAILED_EVENT) == []
 
 
 class TestWindowCovers:
@@ -700,6 +751,22 @@ class TestReadSidecarEntries:
             encoding="utf-8",
         )
         assert obs._read_sidecar_entries(path) == [good]
+
+    def test_nesting_bomb_reads_empty_never_raises(self, tmp_path: Path) -> None:
+        # Review round 4: the merge-side reader rides the SAME widened belt —
+        # a nesting-bomb sidecar reads as the tolerant empty entry list instead
+        # of crashing the manual detect run with a raw RecursionError.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        assert obs._read_sidecar_entries(path) == []
+
+    def test_oversized_sidecar_reads_empty(self, tmp_path: Path) -> None:
+        # Review round 4: the merge-side reader shares the bounded-read law.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b" " * (MAX_OVERLAY_BYTES + 1))
+        assert obs._read_sidecar_entries(path) == []
 
     def test_compact_iso_entry_filtered(self, tmp_path: Path) -> None:
         # The merge-side reader applies the SAME canonical-form-only rule
