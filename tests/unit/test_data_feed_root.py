@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`brutex.data.feed_root` (DEC-FEED-LAKE-ROOT-001, #1751).
+"""Unit tests for :mod:`brutex.data.feed_root` (DEC-FEED-LAKE-ROOT-001, #1755).
 
 100% line + branch. Covers the feed-id grammar + reserved matrix, the
 identity-default lake-root law (the mutant that adds a component on the default

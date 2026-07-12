@@ -532,7 +532,7 @@ jobs:
           else
             echo "(brutex.audit_verify test file not present yet — gate inactive)"
           fi
-          # DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1751): the feed-root
+          # DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1755): the feed-root
           # nesting-law leaf ships at 100% line+branch — the identity-default
           # law + grammar/reserved refusal + path-structural attribution.
           if compgen -G "tests/unit/test_data_feed_root.py" > /dev/null; then
@@ -1111,6 +1111,16 @@ jobs:
             echo "(brutex.observability.watchdog test file not present yet — gate inactive)"
           fi
           # DEC-MONITOR-LOOP-001 (2026-05-25, MIGRATION entry #242):
+          # ratchet brutex.observability.loop_watchdog (the event-loop
+          # liveness watchdog — heartbeat task + monitor daemon + the pure
+          # check_once state machine; DEC-DASHBOARD-PULL-CONTENTION-
+          # RESILIENCE-001 G5). 100% line+branch on its dedicated suite.
+          if compgen -G "tests/unit/test_observability_loop_watchdog.py" > /dev/null; then
+            pytest --cov=brutex.observability.loop_watchdog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_loop_watchdog.py
+          else
+            echo "(brutex.observability.loop_watchdog test file not present yet — gate inactive)"
+          fi
+
           # ratchet brutex.observability.monitor (daemon-thread poller
           # for SLA + Watchdog + L3 replay oracle) into the strict
           # per-module 100% gate. 26 unit tests cover construction
@@ -2405,7 +2415,7 @@ jobs:
           # probe-outage mode + the mru_prefix bookkeeping — the module ships
           # at 100% line+branch under its two dedicated unit suites.
           if compgen -G "tests/unit/test_movers_cache.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.movers_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_cache.py tests/unit/test_movers_cache_serve_last_known.py
+            pytest --cov=brutex.dashboard.movers_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_cache.py tests/unit/test_movers_cache_serve_last_known.py tests/unit/test_movers_cache_swr.py
           else
             echo "(brutex.dashboard.movers_cache test file not present yet — gate inactive)"
           fi
