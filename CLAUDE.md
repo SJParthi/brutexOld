@@ -2307,7 +2307,7 @@ hostile-review pass._
   claim is mechanical); `--json` emits a minimal JSON error object on the early-SUSPECT paths;
   the pyright `base.update` annotation fix.
   447 tests; every module re-measured 100.00%
-  line+branch on the ci.yml-exact gates; full battery 17/17 detected, 0 false FAILs on the clean twin;
+  line+branch on the ci.yml-exact gates; full battery 20/20 detected, 0 false FAILs on the clean twin;
   ruff/ruff-format clean; `mypy --strict` clean (the one pre-existing env-specific cma stub note aside, 0 new);
   pyright 0 errors on the new package (HONEST baseline correction, round-4 C-F1: the earlier
   "net −12 on the touched test files" compared against this branch's OWN round-1 interim state,
