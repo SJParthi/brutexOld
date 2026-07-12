@@ -2354,7 +2354,9 @@ hostile-review pass._
   stuck bench run; remediation: push a fresh head SHA, or a new DEC — the
   full record lives in #1751's HONEST envelope); every REQUIRED check still
   blocks —
-  redteam-pinned (NEW `TestM4proNonblocking`, 8 tests — incl. the round-1
+  redteam-pinned (NEW `TestM4proNonblocking`, 9 tests — incl. the round-4
+  TIMED_OUT warn-path pin `test_timed_out_m4pro_warns_but_does_not_block`
+  (the one round-4 cosmetic NIT, closed mutant-verified) and the round-1
   review fold's source pin that the hardcoded set is EXACTLY
   {m4pro-absolute-throughput} with the env-default override idiom absent,
   round-3-HARDENED with the line-start assignment census + the append

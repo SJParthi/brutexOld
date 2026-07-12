@@ -529,6 +529,34 @@ class TestM4proNonblocking:
         )
         assert "Non-blocking check(s) in a failed state" in result.stdout
 
+    def test_timed_out_m4pro_warns_but_does_not_block(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """A TIMED_OUT m4pro check is a failed-state conclusion → warn, no block.
+
+        Round-4 NIT closure (mutant-verified): without this fixture, dropping
+        'TIMED_OUT' from the WARN-block tuple passed the whole suite — blocking
+        behavior is unaffected either way (the FAILED_CHECKS tuple keeps it
+        non-blocking via the union), so only the WARN line's coverage of the
+        TIMED_OUT conclusion had no teeth.
+        """
+        rollup = self._green_rollup()
+        rollup["statusCheckRollup"].append(
+            {"name": "m4pro-absolute-throughput", "conclusion": "TIMED_OUT", "status": "COMPLETED"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 0, (
+            "a TIMED_OUT non-blocking m4pro check must not block a green rollup; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "Non-blocking check(s) in a failed state" in result.stdout, (
+            f"expected the WARN-only line naming the timed-out m4pro check; got: {result.stdout!r}"
+        )
+        assert "m4pro-absolute-throughput" in result.stdout
+
     def test_m4pro_does_not_count_toward_min_checks_floor(
         self,
         fake_gh_returning,  # type: ignore[no-untyped-def]
