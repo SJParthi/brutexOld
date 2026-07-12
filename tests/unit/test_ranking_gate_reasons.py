@@ -10,7 +10,10 @@ in ``tests/property/test_ranking_gate_reasons_property.py``).
 
 from __future__ import annotations
 
+import ast
+import inspect
 import math
+from pathlib import Path
 
 import pytest
 from brutex.metrics.compute import ResultMetrics
@@ -214,6 +217,64 @@ class TestNonFiniteFailClosed:
         m = make_result_metrics(profit_factor=None, win_loss_ratio=None)
         assert GATE_NON_FINITE_INPUT not in gate_reasons(m)
         _assert_twin_parity(m)
+
+
+class TestTwinWlrProjectionStructuralParity:
+    """Structural twin-parity pins for the door-4 ``None`` → 0.0 projection.
+
+    Mutation-gate hardening (DEC-RANKING-MUTATION-ZERO-SURVIVOR-001,
+    MIGRATION.md #1750): mutmut's ``else 0.0`` → ``else 1.0`` fallback mutant
+    in ``gate_reasons`` is BEHAVIOURALLY unobservable at today's threshold —
+    ``wlr`` feeds ONLY the ``wlr < _MIN_WIN_LOSS_RATIO`` (2.0) comparison, so
+    every sub-2.0 fallback yields the identical door verdict (the SAME
+    provable equivalence MIGRATION.md #615 documented for ``passes_gates``'
+    twin line, which carries a ``# pragma: no mutate`` for exactly this
+    reason). That hardening slice is TEST-ONLY (no source edit, so no new
+    pragma), and the fallback value IS a documented wire contract — "``None``
+    ratio counts as ``0.0``, exactly like :func:`passes_gates`" (the
+    GATE_WIN_RATE_WLR docstring) — so the contract is pinned STRUCTURALLY
+    instead: the twins' ``wlr`` projection expressions must be AST-identical
+    and the shared fallback literal must be exactly ``0.0``. mutmut mutates
+    the source file in place, so these pins re-read the live module source
+    and FAIL under the fallback mutant (and under any future twin drift)
+    without excluding a single mutant from the mutation surface.
+    """
+
+    @staticmethod
+    def _wlr_projection(func_name: str) -> ast.expr:
+        """The ``wlr = …`` projection expression inside ``func_name``'s body."""
+        source = Path(inspect.getfile(gate_reasons)).read_text(encoding="utf-8")
+        module = ast.parse(source)
+        func = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == func_name
+        )
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "wlr"
+            ):
+                return node.value
+        raise AssertionError(f"no `wlr = ...` assignment found in {func_name}")
+
+    def test_wlr_projection_is_ast_identical_between_twins(self) -> None:
+        """The twins share ONE projection expression (the §11 COMMON law)."""
+        assert ast.dump(self._wlr_projection("gate_reasons")) == ast.dump(
+            self._wlr_projection("passes_gates")
+        )
+
+    def test_wlr_projection_fallback_literal_is_exactly_zero(self) -> None:
+        """``None`` projects to the documented ``0.0`` in BOTH twins."""
+        for func_name in ("gate_reasons", "passes_gates"):
+            projection = self._wlr_projection(func_name)
+            assert isinstance(projection, ast.IfExp), func_name
+            fallback = projection.orelse
+            assert isinstance(fallback, ast.Constant), func_name
+            assert isinstance(fallback.value, float), func_name
+            assert fallback.value == 0.0, func_name
 
 
 class TestDeterminism:
