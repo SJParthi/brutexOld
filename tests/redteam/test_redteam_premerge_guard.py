@@ -377,6 +377,181 @@ class TestIgnoreCheckNames:
         )
 
 
+class TestM4proNonblocking:
+    """DEC-PREMERGE-M4PRO-NONBLOCK-001: the hardcoded NONBLOCKING_CHECK_NAMES
+    set (`m4pro-absolute-throughput` — the bench-m4pro.yml self-hosted job,
+    NOT in ci.yml's `ci-ok` needs list / the required "CI OK (aggregate
+    gate)" context; MIGRATION.md #382 + #1534) is UNIONED with the caller's
+    IGNORE_CHECK_NAMES at all three scan sites, so an offline-runner
+    pending-forever m4pro check can never block a merge — while every
+    REQUIRED check still gates fully and a failed m4pro is surfaced as a
+    WARN-only line that never affects the exit code."""
+
+    def _green_rollup(self, count: int = 25) -> dict[str, Any]:
+        """A rollup of `count` green required-style checks (clears the floor)."""
+        return {
+            "statusCheckRollup": [
+                {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
+                for i in range(count)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+
+    def test_pending_m4pro_with_required_green_is_merge_ready(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """FAILS-BEFORE case: a pending m4pro check must NOT block a green PR.
+
+        The self-hosted M4-Pro runner is offline, so `m4pro-absolute-
+        throughput` sits QUEUED forever on any PR touching a bench trigger
+        path — pre-fix, the fail-closed pending scan refused the merge
+        indefinitely even though the check is NON-required.
+        """
+        rollup = self._green_rollup()
+        rollup["statusCheckRollup"].append(
+            {"name": "m4pro-absolute-throughput", "conclusion": None, "status": "QUEUED"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 0, (
+            "a pending NON-required m4pro check must not block a green rollup; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "all CI checks GREEN" in result.stdout
+
+    def test_pending_ci_ok_aggregate_still_blocks(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """The REQUIRED aggregate gate pending must still block (fail-closed)."""
+        rollup = self._green_rollup()
+        rollup["statusCheckRollup"].append(
+            {"name": "CI OK (aggregate gate)", "conclusion": None, "status": "IN_PROGRESS"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 1, (
+            "a pending REQUIRED check must still block; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r}"
+        )
+        assert "PENDING checks" in result.stdout
+        assert "CI OK (aggregate gate)" in result.stdout
+
+    def test_failed_required_check_still_blocks(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """A FAILED required-style check must still block (never weakened)."""
+        rollup = self._green_rollup()
+        rollup["statusCheckRollup"].append(
+            {"name": "CI OK (aggregate gate)", "conclusion": "FAILURE", "status": "COMPLETED"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 1, (
+            "a FAILED required check must still block; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r}"
+        )
+        assert "MERGE BLOCKED" in result.stdout or "MERGE BLOCKED" in result.stderr
+        assert "FAILED" in result.stdout or "FAILED" in result.stderr
+
+    def test_failed_m4pro_warns_but_does_not_block(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """A FAILED m4pro check must warn loudly but never affect the exit code."""
+        rollup = self._green_rollup()
+        rollup["statusCheckRollup"].append(
+            {"name": "m4pro-absolute-throughput", "conclusion": "FAILURE", "status": "COMPLETED"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 0, (
+            "a FAILED non-blocking m4pro check must not block a green rollup; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "Non-blocking check(s) in a failed state" in result.stdout, (
+            f"expected the WARN-only line naming the failed m4pro check; got: {result.stdout!r}"
+        )
+        assert "m4pro-absolute-throughput" in result.stdout
+
+    def test_caller_ignore_env_does_not_clobber_nonblocking(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """The auto-merge.yml caller shape: IGNORE_CHECK_NAMES is caller-SET
+        to "Auto-merge on green CI", so a mere env DEFAULT for the m4pro
+        exclusion would be clobbered. This pins the UNION: both the caller's
+        ignored self-check AND the hardcoded non-blocking m4pro check are
+        excluded from the pending scan in the same run."""
+        rollup = self._green_rollup()
+        rollup["statusCheckRollup"].append(
+            {"name": "Auto-merge on green CI", "conclusion": None, "status": "IN_PROGRESS"}
+        )
+        rollup["statusCheckRollup"].append(
+            {"name": "m4pro-absolute-throughput", "conclusion": None, "status": "QUEUED"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {"IGNORE_CHECK_NAMES": "Auto-merge on green CI"},
+            extra_path=fake_bin,
+        )
+        assert result.returncode == 0, (
+            "the caller-set IGNORE_CHECK_NAMES must UNION with (never replace) "
+            "the hardcoded non-blocking set; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    def test_cancelled_m4pro_does_not_block(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """A CANCELLED m4pro check is a failed-state conclusion → warn, no block."""
+        rollup = self._green_rollup()
+        rollup["statusCheckRollup"].append(
+            {"name": "m4pro-absolute-throughput", "conclusion": "CANCELLED", "status": "COMPLETED"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 0, (
+            "a CANCELLED non-blocking m4pro check must not block; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "Non-blocking check(s) in a failed state" in result.stdout
+
+    def test_m4pro_does_not_count_toward_min_checks_floor(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """The excluded m4pro entry must NOT inflate the rollup count.
+
+        19 real green checks + the excluded m4pro check = 20 raw entries,
+        but after the union-exclusion only 19 real checks remain — below the
+        EXPECTED_MIN_CHECKS floor of 20, so the gate must still block
+        (the exact TestIgnoreCheckNames count-floor law, unioned in).
+        """
+        rollup = self._green_rollup(count=19)
+        rollup["statusCheckRollup"].append(
+            {"name": "m4pro-absolute-throughput", "conclusion": None, "status": "QUEUED"}
+        )
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 7, (
+            "with the non-blocking check excluded, only 19 real checks remain "
+            f"(< 20 floor) so the rollup is incomplete and must block; got {result.returncode}"
+        )
+
+
 # ────────────────────────────────────────────────────────────────────────
 # DEC-P0-008 (PR #30): OPERATOR_OVERRIDE rate-limit (Z+ L7 COOLDOWN)
 # ────────────────────────────────────────────────────────────────────────

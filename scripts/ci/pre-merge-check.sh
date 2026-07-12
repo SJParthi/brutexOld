@@ -38,6 +38,27 @@ EXPECTED_MIN_CHECKS="${EXPECTED_MIN_CHECKS:-20}"
 # CI check still gates fully. The match is by EXACT name.
 IGNORE_CHECK_NAMES="${IGNORE_CHECK_NAMES:-}"
 
+# DEC-PREMERGE-M4PRO-NONBLOCK-001: check-run names that are NEVER allowed to
+# block a merge. `m4pro-absolute-throughput` (the bench-m4pro.yml job id —
+# the job has no `name:` field, so the rollup name IS the job id) runs on
+# the self-hosted M4-Pro runner; when that runner is offline the check sits
+# QUEUED/pending forever and this gate's fail-closed pending scan refused
+# every touching PR indefinitely. It is genuinely NON-required: it is NOT
+# in ci.yml's `ci-ok` aggregate-gate `needs:` list and the branch-protection
+# required context is "CI OK (aggregate gate)" only (MIGRATION.md #382,
+# DEC-M4PRO-PR-TRIGGER-001: "m4pro-* is NOT in the required CI OK (aggregate
+# gate) set"; MIGRATION.md #1534, DEC-BENCH-ABS-BASELINE-001: "bench-m4pro
+# stays a NON-required, non-PR check … a regression is caught post-merge …
+# NOT as a merge blocker"). A bench regression is therefore caught
+# POST-merge on the self-hosted runner (red run + auto-filed issue), never
+# at this gate. This constant is deliberately HARDCODED — NOT env-overridable
+# like IGNORE_CHECK_NAMES — so broadening the non-blocking set requires a
+# code change + a new DEC, never a caller env tweak; and it is UNIONED with
+# (never replaced by) the caller's IGNORE_CHECK_NAMES at all three scan
+# sites, so auto-merge.yml's caller-SET IGNORE_CHECK_NAMES ("Auto-merge on
+# green CI") cannot clobber it. The match is by EXACT name.
+NONBLOCKING_CHECK_NAMES="m4pro-absolute-throughput"
+
 # OPERATOR_OVERRIDE requires a non-empty reason (Agent 5 MED finding):
 # default of "no reason provided" was useless for audit. Enforce.
 if [[ "$OVERRIDE_FLAG" == "true" ]] && [[ -z "${OPERATOR_OVERRIDE_REASON:-}" ]]; then
@@ -104,10 +125,14 @@ fi
 # name is in IGNORE_CHECK_NAMES (default none) before counting / scanning, so
 # the auto-merge path can exclude its own structurally-pending self-check
 # without weakening the gate for any real CI check.
-ROLLUP_COUNT=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" python3 -c "
+# DEC-PREMERGE-M4PRO-NONBLOCK-001: the hardcoded NONBLOCKING_CHECK_NAMES set
+# is UNIONED in at every scan site, so it holds regardless of the caller's
+# IGNORE_CHECK_NAMES value.
+ROLLUP_COUNT=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" NONBLOCKING_CHECK_NAMES="$NONBLOCKING_CHECK_NAMES" python3 -c "
 import json, os, sys
 data = json.load(sys.stdin)
 ignore = {n.strip() for n in os.environ.get('IGNORE_CHECK_NAMES', '').split(',') if n.strip()}
+ignore |= {n.strip() for n in os.environ.get('NONBLOCKING_CHECK_NAMES', '').split(',') if n.strip()}
 rollup = [c for c in data.get('statusCheckRollup', []) if c.get('name', '?') not in ignore]
 print(len(rollup))
 ")
@@ -129,15 +154,37 @@ if [[ "$ROLLUP_COUNT" -lt "$EXPECTED_MIN_CHECKS" ]]; then
     fi
 fi
 
-FAILED_CHECKS=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" python3 -c "
+FAILED_CHECKS=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" NONBLOCKING_CHECK_NAMES="$NONBLOCKING_CHECK_NAMES" python3 -c "
 import json, os, sys
 data = json.load(sys.stdin)
 ignore = {n.strip() for n in os.environ.get('IGNORE_CHECK_NAMES', '').split(',') if n.strip()}
+ignore |= {n.strip() for n in os.environ.get('NONBLOCKING_CHECK_NAMES', '').split(',') if n.strip()}
 rollup = [c for c in data.get('statusCheckRollup', []) if c.get('name', '?') not in ignore]
 failed = [c.get('name', '?') for c in rollup
           if c.get('conclusion') in ('FAILURE', 'CANCELLED', 'TIMED_OUT')]
 print('\n'.join(failed))
 ")
+
+# DEC-PREMERGE-M4PRO-NONBLOCK-001: WARN-ONLY visibility for a NONBLOCKING
+# check that sits in a failed state. It NEVER affects the exit code — a
+# non-required bench regression is caught post-merge on the self-hosted
+# runner (DEC-BENCH-ABS-BASELINE-001), but the operator should still SEE it
+# at merge time. A pending/absent non-blocking check is silently skipped
+# (that is what ignoring means).
+NONBLOCKING_FAILED=$(echo "$STATUS_JSON" | NONBLOCKING_CHECK_NAMES="$NONBLOCKING_CHECK_NAMES" python3 -c "
+import json, os, sys
+data = json.load(sys.stdin)
+nonblocking = {n.strip() for n in os.environ.get('NONBLOCKING_CHECK_NAMES', '').split(',') if n.strip()}
+failed = [c.get('name', '?') for c in data.get('statusCheckRollup', [])
+          if c.get('name', '?') in nonblocking
+          and c.get('conclusion') in ('FAILURE', 'CANCELLED', 'TIMED_OUT')]
+print('\n'.join(failed))
+" || true)
+
+if [[ -n "$NONBLOCKING_FAILED" ]]; then
+    echo "⚠️  Non-blocking check(s) in a failed state (never block merge — DEC-PREMERGE-M4PRO-NONBLOCK-001):"
+    echo "$NONBLOCKING_FAILED" | sed 's/^/  - /'
+fi
 
 if [[ -n "$FAILED_CHECKS" ]]; then
     echo "===================================================================="
@@ -259,10 +306,11 @@ print(n)
 fi
 
 # Check pending checks too — don't merge while CI is still running
-PENDING_CHECKS=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" python3 -c "
+PENDING_CHECKS=$(echo "$STATUS_JSON" | IGNORE_CHECK_NAMES="$IGNORE_CHECK_NAMES" NONBLOCKING_CHECK_NAMES="$NONBLOCKING_CHECK_NAMES" python3 -c "
 import json, os, sys
 data = json.load(sys.stdin)
 ignore = {n.strip() for n in os.environ.get('IGNORE_CHECK_NAMES', '').split(',') if n.strip()}
+ignore |= {n.strip() for n in os.environ.get('NONBLOCKING_CHECK_NAMES', '').split(',') if n.strip()}
 rollup = [c for c in data.get('statusCheckRollup', []) if c.get('name', '?') not in ignore]
 pending = [c.get('name', '?') for c in rollup
            if c.get('status') in ('IN_PROGRESS', 'QUEUED', 'PENDING')]

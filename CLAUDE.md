@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
+_Last updated: 2026-07-12 (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1751 —
+the pre-merge gate treats the NON-required self-hosted `m4pro-absolute-throughput`
+bench check as NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
+`scripts/ci/pre-merge-check.sh` is UNIONED with the caller's `IGNORE_CHECK_NAMES`
+at all three rollup scan sites (count · failed · pending) — so the offline
+self-hosted runner's pending-forever check can never refuse a merge and
+auto-merge.yml's caller-SET `IGNORE_CHECK_NAMES` cannot clobber the exemption —
+while a FAILED m4pro is surfaced as a WARN-only line that never affects the
+exit code and every REQUIRED check still blocks fully (redteam-pinned incl.
+the pending-`CI OK (aggregate gate)`-still-blocks + failed-required cases;
+fails-before-proven against the baseline script). The check is genuinely
+NON-required: not in ci.yml's `ci-ok` needs; MIGRATION.md #382 + #1534 — a
+bench regression is caught POST-merge on the self-hosted runner, never a
+merge blocker. CI-gate script + redteam tests + docs only; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1751.)
+Earlier: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
 the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
 the ranking composite JOIN the display surfaces: the top100 artifact gains the
 per-entry `cascade` object + root `cascade_join` meta behind a HARD writer-side
@@ -2306,7 +2322,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
+- **Active branch:** `claude/premerge-m4pro-nonblock` (**DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1751** —
+  the pre-merge gate treats the non-required self-hosted
+  `m4pro-absolute-throughput` check as NON-BLOCKING: `scripts/ci/pre-merge-check.sh`
+  gains a HARDCODED (deliberately NOT env-overridable — broadening the set
+  requires a code change + a new DEC) `NONBLOCKING_CHECK_NAMES` constant
+  UNIONED with the caller's `IGNORE_CHECK_NAMES` at all three rollup scan
+  sites (count · failed · pending), so the offline M4-Pro runner's
+  pending-forever check can never refuse a merge AND auto-merge.yml's
+  caller-SET `IGNORE_CHECK_NAMES` ("Auto-merge on green CI") cannot clobber
+  the exemption; a FAILED/CANCELLED m4pro is surfaced as a WARN-only line
+  that never affects the exit code; every REQUIRED check still blocks —
+  redteam-pinned (NEW `TestM4proNonblocking`, 7 tests, fails-before-proven
+  5/7 against the baseline script incl. THE pending-m4pro case; the
+  pending-`CI OK (aggregate gate)`-still-blocks + failed-required-still-blocks
+  pins guard the unchanged fail-closed posture; the excluded entry never
+  inflates the EXPECTED_MIN_CHECKS floor). SAFE because the check is
+  genuinely NON-required (not in ci.yml's `ci-ok` needs; MIGRATION.md #382
+  DEC-M4PRO-PR-TRIGGER-001 + #1534 DEC-BENCH-ABS-BASELINE-001 — a bench
+  regression is caught POST-merge on the self-hosted runner, never a merge
+  blocker, unchanged here). CI-gate script + redteam tests + docs only;
+  ZERO brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no scope/vocab/rate change.)
+  Earlier: `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
   the cascade-verdict → display join: the Stage-4 verdicts + per-candidate CPCV
   pass rate + the ranking composite reach top100.json, /results, /screener,
   /strategy and the operator card. (1) `metrics/cascade.py` RECORDS the
@@ -5867,7 +5905,19 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/results-cascade-verdict-join`
+- **Active feature branch:** `claude/premerge-m4pro-nonblock`
+  (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1751 — the pre-merge gate
+  treats the non-required self-hosted `m4pro-absolute-throughput` check as
+  NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
+  `scripts/ci/pre-merge-check.sh`, UNIONED with the caller's
+  `IGNORE_CHECK_NAMES` at all three rollup scan sites so auto-merge.yml's
+  caller-SET value cannot clobber it; a FAILED m4pro warns, never blocks;
+  every REQUIRED check still blocks — redteam-pinned + fails-before-proven;
+  safe per MIGRATION.md #382 + #1534 (not in ci-ok needs; bench regressions
+  caught post-merge on the self-hosted runner); CI-gate script + redteam
+  tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line)
+  Earlier: `claude/results-cascade-verdict-join`
   (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
   cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
   composite join the display surfaces: the ONE `engine/cascade_join.py` law
