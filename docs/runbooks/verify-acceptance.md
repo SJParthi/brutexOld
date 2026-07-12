@@ -16,9 +16,19 @@
 > refresh the `<lake_root>/.manifest/` discovery caches exactly as the
 > production dashboard does (a benign self-healing rebuild, results-safe —
 > round-3 disclosure, named in the movers/latency limits too). ZERO vendor
-> calls, ever (AST-pinned) — the pull lock is never taken. A symlinked
-> `<lake>/acceptance` dir refuses the WHOLE run (SUSPECT) before any write —
-> audit chain included.
+> calls, ever (AST-pinned — the package-wide pin in
+> `tests/unit/test_acceptance_independent_fence.py` refuses any
+> `brutex.adapters.*` import beyond the sanctioned planning/constants
+> surfaces and any client-construction token; round-4 C-F2) — the pull lock
+> is never taken. A symlinked `<lake>/acceptance` dir — or a symlinked
+> `acceptance/audit` child dir / `acceptance.jsonl` chain file (round-4
+> A-F1) — refuses the WHOLE run (SUSPECT) before any write — audit chain
+> included. ONE run per lake at a time: the acceptance single-flight flock
+> (`<lake>/.locks/acceptance_singleflight.lock`, the house pull/nightly
+> `_flock_singleflight` shape; round-4 B4-1) refuses a SECOND concurrent
+> run loudly — SUSPECT exit 2 naming the holder — because overlapping runs
+> would interleave appends into the single-writer audit hash chain and
+> corrupt it permanently.
 
 ## 1. The one command
 
@@ -73,14 +83,29 @@ FAILs on the clean twin. Any miss ⇒ `TEETH_FAILED`, exit 2, and every
 real-lake verdict is WITHHELD ("nothing below is trustworthy").
 
 ```bash
-brutex verify-acceptance --self-test-only   # the FULL 15-poison battery + table
+brutex verify-acceptance --self-test-only   # the FULL 17-poison battery + table
 brutex verify-acceptance --self-test        # full battery, then the real run
 brutex verify-acceptance --no-self-test     # skip (report carries TEETH_SKIPPED)
 ```
 
 The full battery also runs in CI on every merge
 (`tests/integration/test_acceptance_selftest.py`), including the
-comparator-inversion tooth.
+comparator-inversion tooth. Round-4 (B4-3) additions: the battery twin
+carries one NON-engine CASH symbol so `unique.census` and `unique.engine`
+each have a tooth of their own (`census_nonengine_dup` /
+`engine_oldmonth_dup` — an always-PASS sabotage of either leg now flips the
+battery), and the pull poisons detect through their REAL comparators
+(`net_new_gt_bars`/`counter_invariant` no longer ride the fixed B4-2
+presence false positive — a net_new_law sabotage flips the battery,
+test-pinned). Scope honesty: the movers teeth (smoke S3 + battery
+`movers_cell`/`prevclose_hole_unstamped`) drive the comparator SEAM
+directly, never the composed `movers.run` wiring — the designated killer
+for a comparator-discard wiring sabotage is the unit gate
+(`tests/unit/test_acceptance_checks_movers.py::TestMoversRealWire::`
+`test_tamper_tooth_volume_cell`, which drives the composed check against a
+mutated real wire). `latency` budget-compare and `rate.constants` carry NO
+battery poison BY DESIGN (a latency "poison" would be a wall-clock flake;
+the constants pin is itself the tooth — a drifted constant fails it).
 
 ## 4. Exit codes (cron-native)
 
@@ -88,7 +113,7 @@ comparator-inversion tooth.
 |---|---|---|
 | 0 | clean (teeth proven or explicitly skipped+recorded) | green |
 | 1 | usage error (bad flags, missing lake root) | red |
-| 2 | SUSPECT — verifier internal error / TEETH_FAILED / report-write failure | red |
+| 2 | SUSPECT — verifier internal error / TEETH_FAILED / report-write failure / evidence-tree symlink refusal / a SECOND concurrent run refused by the single-flight lock (B4-1) | red |
 | 3 | ≥1 FAIL finding, verifier healthy | red |
 | 4 | inconclusive — non-structural abstains > `--abstain-budget` (3), an abstain streak ≥3, or time-truncated | amber |
 
@@ -121,7 +146,12 @@ chain and pass `brutex audit verify`. Off-box anchoring (the backup lane's
 immutable store) is what defeats restatement, not this file.
 
 Run-over-run deltas + consecutive-ABSTAIN streaks are carried in the report
-chain (previous report via LATEST) — no separate state file. `report.txt`
+chain (previous report via LATEST) — no separate state file. Streaks update
+ONLY for sub-checks that actually RAN: a `--checks` subset run or a
+TEETH_FAILED run carries every absent sub-check's `(verdict, streak)` cell
+forward verbatim in the report's `streak_carry` block, so an interleaved
+subset run can never reset another check's streak and suppress the
+streak-≥3 ⇒ exit-4 law (round-4 B4-4). `report.txt`
 renders ABSTAINs FIRST, every check's + sub-check's honest-envelope `limits`
 lines, the routed `non_default_window_shape` series count and the
 Muhurat-unverified dates (round 3 — the honest envelope is readable without
@@ -141,9 +171,13 @@ the table restamped to exit 2, process exit 2.
 ```
 
 While a pull looks active (journal heartbeat / pull lease) the data checks
-ABSTAIN `pull_in_progress` (`--force-during-pull` overrides); movers/latency
-still run, stamped `pull_active` (#1751 owns /db-during-pull fixes — this
-tool observes, never remediates).
+(unique/tf/pull/sanity) ABSTAIN `pull_in_progress` (`--force-during-pull`
+overrides); rate + movers + latency still run, stamped `pull_active`
+(round-4 B4-6 — rate reads only persisted evidence, so it runs too; #1751
+owns /db-during-pull fixes — this tool observes, never remediates). A cron
+firing while a manual run is still in flight is REFUSED by the
+single-flight lock (exit 2, red — overlap means the schedule needs
+attention, never a silent chain fork).
 
 ## 7. Useful flags
 
@@ -162,7 +196,12 @@ tool observes, never remediates).
 stdout carries EXACTLY the human table (or the `--json` summary) — every log
 line rides STDERR at INFO by default (`BRUTEX_LOG_LEVEL` overrides, junk
 fails loud; the #1630 seam — round-3 fix), so `brutex verify-acceptance
---json | jq .` works. `--sample` must be ≥ 0 (usage error otherwise).
+--json | jq .` works — INCLUDING the early-SUSPECT paths (symlink / lock
+refusal, audit-open failure), which emit a minimal `{"error": …, "run_id":
+…}` JSON object instead of zero bytes (round-4 B4-5). `--sample` must be
+≥ 0 (usage error otherwise). `--sample` governs the SPOT dataset rotation
+only — the F&O contract fill is a FIXED seed-rotated 6 contracts/run
+(`FNO_SAMPLE_N`; `--full` lifts both — round-4 A NIT disclosure).
 
 ## 8. Triage notes
 

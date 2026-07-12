@@ -25,7 +25,7 @@ incremental-pull re-plan idempotence · disk-provable rate evidence · movers pa
 the ONE AST-FENCED independent recompute · stored-data sanity · on-box latency probes) over the
 REAL lake, PASS/FAIL/ABSTAIN(named-reason) with mandatory evidence blocks + required coverage{}
 disclosure, a GATING <10 s teeth smoke (3 planted poisons on a real-writer twin — a verifier that
-cannot demonstrate detection withholds ALL real-lake verdicts, exit 2) + the CI-mandatory 15-poison
+cannot demonstrate detection withholds ALL real-lake verdicts, exit 2) + the CI-mandatory 17-poison
 full battery, the frozen `brutex-acceptance-report-v1` machine+human report under
 `<lake>/acceptance/<run_id>/` (atomic LATEST pointer + SweepAuditWriter hash chain + run-over-run
 deltas/abstain streaks carried in the report chain), verify-family exits 0/1/2/3/4 (precedence
@@ -2215,7 +2215,7 @@ hostile-review pass._
   Three structural laws: one-verdict-one-evidence-block (empty evidence REFUSED at the model), no-verdict-without-work
   (`units_checked == 0` ⇒ forced ABSTAIN(nothing_to_check) in the constructor — the #935/#1014 dormant-feature trap
   closed), and teeth-before-trust (the always-on smoke plants 3 poisons in a real-writer twin lake and requires the
-  COMPOSED checks to catch each; TEETH_FAILED ⇒ exit 2 with real-lake verdicts WITHHELD; the 15-poison full battery is
+  COMPOSED checks to catch each; TEETH_FAILED ⇒ exit 2 with real-lake verdicts WITHHELD; the 17-poison full battery is
   CI-mandatory per merge with a comparator-INVERSION tooth). Compose-never-reimplement: the census fold, the
   sweep-preflight TF seam + the NEW 1day compare composition, the REAL `plan_windows`/`plan_contract_windows` re-plan
   on a pinned-clock copy (anti-vacuous planner tail tooth included; explicitly NOT `brutex fetch --dry-run`),
@@ -2285,10 +2285,35 @@ hostile-review pass._
   CLI AND core; report.txt renders every limits line + the routed non_default_window_shape count +
   the Muhurat-unverified dates (the ABSTAIN-prominence law extended); the open_by_design fold's
   future-dated-phantom scope + the never-planned-window merged-span twin are named in limits.
-  415+ tests; every module re-measured 100.00%
-  line+branch on the ci.yml-exact gates; full battery 15/15 detected, 0 false FAILs on the clean twin;
+  HOSTILE-REVIEW ROUND 4 folded (same branch, pre-merge — every CONFIRMED finding fixed with a
+  fails-before regression): the cross-process single-flight flock for the WHOLE run
+  (`<lake>/.locks/acceptance_singleflight.lock`, the house `_flock_singleflight` shape — two
+  CONCURRENT runs previously corrupted the audit hash chain PERMANENTLY; the second run now
+  refuses SUSPECT exit 2 naming the holder); the `pull.partition_presence` half-open-span fix
+  (the old `we − 1day` end fed `[d, d)` for a production 1-day window — a HEALTHY lake read
+  exit 3, and battery poisons 6-8 rode the false positive: a net_new_law sabotage SURVIVED
+  TEETH_PROVEN, measured — the fixed span makes those teeth real again, sabotage-flip
+  battery-pinned); the symlink refusal extended to the fixed audit CHILD paths
+  (`acceptance/audit` + the chain file — the `sym_inner` write-through is dead); TWO per-leg
+  unique battery teeth on a non-engine CASH twin symbol (`census_nonengine_dup` +
+  `engine_oldmonth_dup` — an always-PASS sabotage of either leg now flips the battery) + the
+  movers comparator-seam teeth scope disclosed (the composed-wiring killer is the unit gate's
+  `TestMoversRealWire::test_tamper_tooth_volume_cell`); the `streak_carry` report block (a
+  subset/TEETH_FAILED run carries absent sub-checks' streaks forward VERBATIM — the measured
+  3→1 streak reset that suppressed the exit-4 law is dead); the package-wide zero-vendor-call
+  AST pin now EXISTS (sanctioned planning/constants imports only — the runbook's "AST-pinned"
+  claim is mechanical); `--json` emits a minimal JSON error object on the early-SUSPECT paths;
+  the pyright `base.update` annotation fix.
+  447 tests; every module re-measured 100.00%
+  line+branch on the ci.yml-exact gates; full battery 17/17 detected, 0 false FAILs on the clean twin;
   ruff/ruff-format clean; `mypy --strict` clean (the one pre-existing env-specific cma stub note aside, 0 new);
-  pyright 0 errors on the new package (net −12 on the touched test files). ENGINE UNCHANGED —
+  pyright 0 errors on the new package (HONEST baseline correction, round-4 C-F1: the earlier
+  "net −12 on the touched test files" compared against this branch's OWN round-1 interim state,
+  not origin/main — every error in a new file is new; after the round-4 `base: dict[str, object]`
+  annotation fix the FULL `pyright brutex tests` run measures 0 errors at this head under
+  pyright 1.1.411, so the branch adds 0 vs origin/main — the round-4 refuter's 1-error main
+  reading at test_window_ledger.py:990 did not reproduce at the fixed head, and that file is
+  byte-untouched by this branch). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
   change; the per-item record lives in MIGRATION.md #1756.)
   Earlier: `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
@@ -5637,7 +5662,7 @@ hostile-review pass._
 - **Active feature branch:** `claude/verify-acceptance`
   (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756 — the operator acceptance verifier
   `brutex verify-acceptance`: 7 composed checks over the real lake with PASS/FAIL/ABSTAIN(named)
-  verdicts + evidence blocks, the gating teeth smoke + CI 15-poison battery, the frozen
+  verdicts + evidence blocks, the gating teeth smoke + CI 17-poison battery, the frozen
   `brutex-acceptance-report-v1` report + hash-chained audit trail, verify-family exits 0/1/2/3/4;
   hostile-review round 1 folded pre-merge (TOCTOU law wired · per-day Muhurat · full moneyness
   grammar · expiry-capped covered-span replan · read-only instruments.duckdb · bounded evidence
@@ -5652,6 +5677,13 @@ hostile-review pass._
   disclosed (registry + .manifest/) · engine set made code-true (INDIAVIX + NSE-NIFTY-*-FUT dirs
   full-history) · off-chain --out · loud SUSPECT on a failed report write · report.txt renders
   limits/routed/Muhurat — per-round record in MIGRATION.md #1756);
+  hostile-review round 4 folded pre-merge (whole-run single-flight flock — concurrent runs no
+  longer corrupt the audit hash chain · the pull.partition_presence half-open-span fix (healthy
+  1-day windows read exit 3; battery poisons 6-8 made real teeth again) · symlink refusal
+  extended to the audit child paths · per-leg unique battery teeth on a non-engine twin symbol ·
+  the streak_carry block (subset/TEETH_FAILED runs never reset streaks) · the package-wide
+  zero-vendor-call AST pin · --json on early-SUSPECT paths · the pyright baseline honesty
+  correction — per-round record in MIGRATION.md #1756);
   additive `brutex/acceptance/` package only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line)
   Earlier: `claude/frontend-latency-hardening-r2`
