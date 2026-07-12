@@ -2247,8 +2247,16 @@ hostile-review pass._
   crate's defaults are a frozen SNAPSHOT (new bump-ritual step re-derives them);
   NO per-write runtime witness on the options path (`raw_hash=None` by design —
   scope lock); mutation coverage NOT claimed (neither module in mutation.yml's
-  mutmut paths). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
-  REFERENCE_ONLY; no scope/vocab/rate change.)
+  mutmut paths). ADVERSARIAL-REVIEW FIX ROUND folded (2026-07-11, same branch,
+  pre-merge — 5 hostile lenses, all SHIP; the per-item record lives in the
+  MIGRATION draft PR-2 segment): the two PR-2 thread-fuzz concurrency arms
+  (two-profile shared latch · past-cap novel shapes) + the narrowed facade
+  docstring claim, the crate doc-comments' "untruncated" statistics gloss
+  corrected to the observed 64-byte truncation default (the crate no longer
+  contradicts golden pin (d)), the golden module's sentinel nickname
+  reconciled, the lane's deliberately-excluded heal-trigger note, and the
+  morsel-env guard tightened to SET-ness. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope/vocab/rate change.)
   Earlier: `claude/rust-datalake-io-slice8` (**DEC-RUST-DATALAKE-IO-ROADMAP-001,
   MIGRATION.md #1726** — slice 8 of the Rust-first conversion program (the data-lake I/O
   layer: 16 `brutex/data/` modules + `brutex/feed/resampler.py`, 17 total): the panel
