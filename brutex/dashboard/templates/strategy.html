@@ -96,6 +96,9 @@
   .plain-eng { display:none; }
   body.share-mode .jargon { display:none; }
   body.share-mode .plain-eng { display:inline; }
+  /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: a cascade-FAILED strategy stays
+     rendered (annotation never hides) but its verdict badge reads RED. */
+  .cascade-fail { color:var(--red); font-weight:700; }
   /* Block-level Beginner/Pro twins (the deep-stats grid) — same law. */
   .jargon-block { display:block; }
   .plain-eng-block { display:none; }
@@ -141,7 +144,8 @@
     <div class="note">run <code id="stRunId">—</code> ·
       instrument <span id="stInstr" data-explain="instrument">—</span> · TF <span id="stTf">—</span> ·
       direction <span id="stDir">—</span> · SL/TP arm <span id="stArm">—</span> ·
-      mask <code id="stMask">—</code> · family <span id="stFamily">—</span></div>
+      mask <code id="stMask">—</code> · family <span id="stFamily">—</span> ·
+      cascade <span id="stCascade" data-explain="cascade_status">—</span></div>
   </section>
 
   <section aria-label="Candle chart">
@@ -227,6 +231,10 @@
         <div class="story-cell"><div class="k">Minute-path max DD</div><div class="v" id="stMinuteDd" data-explain="max_dd_minute_path_paisa">—</div></div>
         <div class="story-cell"><div class="k">Exit mix</div><div class="v" id="stExitMix" data-explain="exit_mix" style="font-size:13px">—</div></div>
         <div class="story-cell"><div class="k">Worst 5 days</div><div class="v" id="stWorst5" data-explain="worst5_days" style="font-size:13px">—</div></div>
+        <!-- DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the joined Stage-4 verdict
+             line — server-built status_text + the verdict's own detail /
+             survivor rank / provisional caveat (mechanical joins only). -->
+        <div class="story-cell"><div class="k">Cascade validation</div><div class="v" id="stCascadeDeep" data-explain="cascade_status" style="font-size:13px">—</div></div>
       </div>
     </div>
   </section>
@@ -644,6 +652,25 @@
         var reg = row.regime && typeof row.regime === 'object' ? row.regime : {};
         byId('stTrendSplit').textContent = window.BXOneclick.trendSplitText(reg.by_trend, money);
         byId('stRegimeWonder').textContent = window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis);
+        /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the joined cascade verdict.
+           status_text is SERVER-built (never composed here); the deep line
+           appends the verdict's own detail/rank/provisional caveat via
+           mechanical joins; a FAIL paints the red identity-strip badge. */
+        var casc = row.cascade && typeof row.cascade === 'object' ? row.cascade : null;
+        var cascText = casc && casc.status_text ? String(casc.status_text) : '—';
+        var stCasc = byId('stCascade');
+        stCasc.textContent = cascText;
+        stCasc.title = casc && casc.detail ? String(casc.detail) : '';
+        stCasc.classList.toggle('cascade-fail', !!(casc && casc.status === 'fail'));
+        var cascDeep = [cascText];
+        if (casc && casc.detail) { cascDeep.push(String(casc.detail)); }
+        if (casc && casc.survivor_rank !== undefined && casc.survivor_rank !== null) {
+          cascDeep.push('survivor rank ' + String(casc.survivor_rank));
+        }
+        if (casc && casc.provisional === true) {
+          cascDeep.push('provisional — DSR deflated against the pool-N fallback');
+        }
+        byId('stCascadeDeep').textContent = cascDeep.join(' · ');
         state.interval = tfToInterval(row.tf);
         loadTrades();
         loadEquity();

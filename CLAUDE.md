@@ -58,6 +58,24 @@ measured 1.29×). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 scope/vocab/rate change; every frozen golden byte-identical, none
 regenerated; touched modules 100% line+branch; the full record lives in
 the §1 Active-branch blurb + MIGRATION.md #1731.)
+Earlier: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
+the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
+the ranking composite JOIN the display surfaces: the top100 artifact gains the
+per-entry `cascade` object + root `cascade_join` meta behind a HARD writer-side
+sweep_id gate (the in-memory report threaded from `cmd_sweep_all` — never a
+stale disk re-read), /results·/screener·/strategy·operator render the verdict
+red-flagged on a FAIL (ranked, never hidden), the shipped-dark `cpcv_pass_pct`
+column fills with the REAL stage-3 rate (captured recording-only in
+`metrics/cascade.py` BEFORE the threshold compare; RAW fraction in artifacts,
+×100 minted only at the display projections), and `/results`' ?preset=composite
+axis activates honestly off the newest run's aggs sidecars (the read-time half
+of HIGH #40 — the persist half stays DEC-CASCADE-ROW-PERSIST-002). ONE join law
+(`engine/cascade_join.py`, structural-fail-closed + per-item-tolerant, dup ids
+excluded EVERY copy) feeds BOTH consumers; a no-report lake's /results payload
+is BYTE-IDENTICAL (pinned); READ-time + artifact-level only — nothing persisted
+on ResultRow (the ResultsStore-not-touched ruling). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch blurb
++ MIGRATION.md #1749.)
 Earlier: 2026-07-11 (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md
 #1743 — the trade-sim OPEN-position session-boundary guard: an open position
 never survives an IST session-date change — the first bar of a new session
@@ -2383,6 +2401,79 @@ hostile-review pass._
   its NEW dedicated standalone ci.yml gate (112/26 at 100.00%), the `brutex.ranking` PACKAGE gate 243 tests (380/100
   at 100.00% incl. `rust_ranking.py` 95/24); fno-math cargo 624+4+1 green dev AND release, fmt/clippy `-D warnings`
   clean; P-06 + suffix-independence UNMODIFIED; ruff/ruff-format clean; `mypy --strict` clean; pyright 0 new.)
+  Earlier: `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
+  the cascade-verdict → display join: the Stage-4 verdicts + per-candidate CPCV
+  pass rate + the ranking composite reach top100.json, /results, /screener,
+  /strategy and the operator card. (1) `metrics/cascade.py` RECORDS the
+  already-computed stage-3 CPCV rate (captured BEFORE the threshold compare via
+  ONE line + ONE final `dataclasses.replace` stamp — provably recording-only:
+  determinism + field-preservation pins, six hand-applied mutants killed;
+  `None` for never-reached-#3/ValueError, the FAILING rate on a CPCV reject,
+  the stage-3 rate on every later reject + pass); `cascade_wire` serialises it
+  additively at REPORT_VERSION 1 (the pool_pbo precedent) and `write_report`
+  is HARDENED to `atomic_write_simple` (bytes identical — the auto==manual
+  golden re-runs; the /results poller reads the file concurrently now).
+  (2) NEW `engine/cascade_join.py` — the ONE flattener/validator BOTH
+  consumers share (structural fail-closed on root/version-pun/future-version/
+  sweep_id/groups; per-item skip+count; junk numerics NULLED never clamped;
+  unknown FUTURE stage tokens kept verbatim; duplicate candidate_ids exclude
+  EVERY copy into `ambiguous_ids`; survivor-rank inconsistencies counted).
+  (3) `build_top100(cascade_join=)` + the HARD sweep_id gate at the writer
+  (the cascade dir is one-per-root, overwritten per sweep — a stale report
+  reads `sweep_id_mismatch` + ONE WARN, entries stay not_validated); every
+  entry gains the ALWAYS-EMITTED `cascade` object (pass/provisional_pass —
+  a pool-N DSR pass never reads bare PASS — /fail with verbatim stage/
+  not_validated with named reason) + `metrics.cpcv_pass_pct` (rate×100.0
+  EXACT, only-when-measured); `ENTRY_REQUIRED_KEYS` deliberately NOT extended
+  (old artifacts + the fixture corpus stay loadable); the top100 byte golden
+  RE-LOCKED with the diff pinned ADDITIVE-ONLY vs the frozen PRE-change
+  fixture; R13 annotation-never-reranks (a cascade-FAILED rank-1 stays rank-1,
+  red-flagged — integration-proven via a REAL run_stage4_cascade chain).
+  (4) /results: NEW `lake_revision.cascade_report_revision` file-stat token
+  folded into the leaderboard cache key ("outage" holds the served payload);
+  `load_cascade_join_file` (16 MiB cap; absent/unreadable/malformed/oversized
+  named degrades; single-entry memo per token — ONE parse + ONE WARN per
+  revision, bench-pinned) + EMIT-ON-PRESENT row keys/meta/`cascade_flagged`;
+  the `absent` state emits ZERO new keys (no-report payload BYTE-IDENTICAL,
+  json-equality-pinned view + route); the run_id-exact no-sweep-gate ruling
+  stands (run identity folds the whole Rule-4 tuple; pool context disclosed
+  via meta sweep_id). (5) NEW `dashboard/composite_join.py` reads ONLY the
+  (run_id, composite_score) columns of the NEWEST run's aggs sidecars
+  (the ONE oneclick newest-run selection core — since fix round 2 the
+  NAME-only `newest_run_name` over the extracted `_stamped_run_dirs` law
+  `discover_runs` rides; per-file skip+count; null/non-finite dropped)
+  → scored rows gain `composite_score` AND ?preset=composite ORDERS honestly
+  with the DYNAMIC inert-axes disclosure (`composite_score` leaves the set
+  iff the index joined non-empty) — the /results read-time half of HIGH #40;
+  the index caches once per DEDICATED `composite_index_revision` token (fix
+  round 1, refuter-confirmed MAJOR: the aggs land under `sweep_runs/` AFTER
+  the sweep's last sweeps-tree/audit write, so the sweeps generation alone
+  provably froze an empty/partial index until the NEXT sweep — the probe's
+  newest-run + results-depth dir-mtime digest folds into the payload cache
+  key and the index slot's generation; killing route regression + spy pins;
+  fix round 2, refuter-confirmed MINOR: the round-1 probe's
+  `discover_runs(limit=1)` hop hid an undisclosed per-poll manifest.json
+  read+parse the probe never consumed — the selection is now name-only,
+  ZERO manifest I/O per poll, bench-pinned beside the cascade one-stat pin,
+  both disclosures corrected).
+  (6) display: `oneclick_artifacts._bridge_cascade` (invalid object → key
+  dropped + NAMED partial, row kept) + the ONE server-side
+  `oneclick_view.cascade_status_text` builder (no verdict prose in JS —
+  killed-token-pinned); /screener Cascade column; operator `r1_cascade` +
+  `.oc-cascade-fail`; /strategy `stCascade` + Deep-stats line; /results
+  badge/CPCV %/Composite columns + header meta ("?" for null counts, never a
+  fabricated 0) + flagged chip; BX_EXPLAIN lines. HONEST: read-time +
+  artifact-level ONLY — nothing persisted on ResultRow (ResultsStore
+  untouched, its pre-extension golden re-runs; persistence/history retention
+  across the one-report-per-root overwrite = DEC-CASCADE-ROW-PERSIST-002);
+  other filter numerics = DEC-CASCADE-FILTER-NUMERICS-002; mutation.yml's
+  proven-pair loop deliberately NOT extended (hand-kill evidence ledgered
+  instead); composite read is O(aggs files) once per generation, the report
+  parse O(report) once per token — disclosed, never O(1) claims. TWO new
+  ci.yml 100% gates (cascade_join · composite_join); every touched gated
+  module 100.00% line+branch; ruff/ruff-format/`mypy --strict` clean, pyright
+  0 errors; node --check clean. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no lake/schema/scope/vocab/rate change.)
   Earlier: `claude/tradesim-open-session-guard` (**DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743** —
   the trade-sim OPEN-position session-boundary guard, the asymmetric twin of the
   R2-OC-2 pending-entry gate: pre-fix, a position left open because its
@@ -5886,6 +5977,22 @@ hostile-review pass._
   (consistency, not speed); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line — see §1 + MIGRATION.md #1731 for the
   full blurb)
+  Earlier: `claude/results-cascade-verdict-join`
+  (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
+  cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
+  composite join the display surfaces: the ONE `engine/cascade_join.py` law
+  feeds the top100 writer (in-memory report, HARD sweep_id gate, per-entry
+  `cascade` object + `metrics.cpcv_pass_pct` only-when-measured, root
+  `cascade_join` meta, ENTRY_REQUIRED_KEYS not extended) AND the /results
+  read-time loader (dedicated `cascade_report_revision` stat token, 16 MiB
+  cap, single-entry memo, EMIT-ON-PRESENT row keys + meta — a no-report
+  lake's payload is byte-identical, pinned); a cascade-FAILED strategy is
+  red-flagged on every screen, ranked never hidden; NEW
+  `dashboard/composite_join.py` activates ?preset=composite honestly off
+  the newest run's aggs sidecars (the read-time half of HIGH #40); nothing
+  persisted on ResultRow — DEC-CASCADE-ROW-PERSIST-002 is the named
+  follow-up; READ-side + artifact-level; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
   Earlier: `claude/tradesim-open-session-guard`
   (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743 — the trade-sim
   OPEN-position session-boundary guard: an open position never survives an IST
