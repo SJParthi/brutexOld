@@ -2359,8 +2359,8 @@ hostile-review pass._
 - **Active branch:** `claude/lake-limiter-equity-launch` (**DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757** —
   renumbered #1751 → #1752 → #1757 across the 2026-07-12 merge-reconciles
   (main took #1751 for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, PR #1488;
-  #1752–#1756 are the coordinator's reserved post-#1488 drain block for PRs
-  #1486/#1487/#1485/#1482/Dhan-spot) —
+  #1752–#1756 are the coordinator's reserved post-#1488 drain block — PRs
+  #1486/#1487/#1485/#1482 + one further reserved slot) —
   the R3-MAJOR lake-limiter completion: GET /api/v1/oneclick/equity (pre-fix
   app.py:7815, now :7928 — the #1665 merge-seam straggler, the ONLY oneclick
   route still on the bare default pool) joins its six siblings on
@@ -6037,7 +6037,7 @@ hostile-review pass._
   #1751 → #1752 → #1757 across the 2026-07-12 merge-reconciles: main took
   #1751 for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (PR #1488) and
   #1752–#1756 are the coordinator's reserved post-#1488 drain block for PRs
-  #1486/#1487/#1485/#1482/Dhan-spot — the lake-limiter
+  #1486/#1487/#1485/#1482 + one further reserved slot — the lake-limiter
   completion for the two straggler route families: GET /api/v1/oneclick/equity
   joins its six siblings on `await _run_lake(_resolve)` and the THREE
   /api/v1/launch/* offloads ride the NEW kw-only `run_lake=` injection seam on
