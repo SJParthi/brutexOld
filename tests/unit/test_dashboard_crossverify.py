@@ -185,6 +185,35 @@ class TestRunRoute:
         assert resp.status_code == 400
         assert "BRUTEX_CROSSVERIFY" in resp.json()["detail"]
 
+    def test_junk_market_hours_env_is_an_eager_400_for_vendor_calling_runs(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Round-2 S3d: the market-hours guard env the runner's seams resolve
+        # is validated EAGERLY in the route (the CLI's eager default_seams
+        # validation, mirrored) — junk → 400, never a job-thread error.
+        monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "banana")
+        with _client(store, monkeypatch, tmp_path, lambda config: _report()) as client:
+            resp = client.post("/api/v1/crossverify/run")
+        assert resp.status_code == 400
+        assert "BRUTEX_MARKET_HOURS_GUARD" in resp.json()["detail"]
+
+    def test_junk_market_hours_env_never_blocks_a_dry_run(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A dry-run makes no vendor calls — the seam threads None, so the
+        # route mirrors that gate and starts the job (seam parity).
+        monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "banana")
+
+        def runner(config: CrossverifyConfig) -> CrossverifyReport:
+            return _report(verdict="staged_only", detail="dry-run")
+
+        with _client(store, monkeypatch, tmp_path, runner) as client:
+            resp = client.post("/api/v1/crossverify/run?dry_run=true")
+            assert resp.status_code == 200
+            assert resp.json()["started"] is True
+            snap = _wait_terminal(client)
+        assert snap["state"] == "done"
+
     def test_second_click_is_refused_by_the_in_process_single_flight(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

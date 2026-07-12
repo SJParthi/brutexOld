@@ -22,11 +22,14 @@ WITHOUT writing a journal (run.py step B), so a naive daily expectation
 would false-MISS every Monday morning and the day after Diwali. Honest
 limits (Golden Rule #10): the journal lands near run END (staging, after
 the pull + export legs), so the grace must cover the whole 4 h hard
-deadline — a dead box is still silent on-box (the #1596 posture); a
-crossverify run that legitimately skipped staging (``nothing_to_do`` with
-zero publishable files) writes no journal either and reads MISSED — the
-operator checks ``brutex crossverify status`` output against the Telegram
-summary for that (disclosed, not papered over).
+deadline — a dead box is still silent on-box (the #1596 posture). A
+``nothing_to_do`` run DOES write its journal (the staging step saves it
+even with zero publishable entries — run.py step K, pinned), so the
+deadman reads OK for it; the journal-LESS exits past the session gate are
+the PRE-staging ones — market-hours deferral, lock refusal, gate-absent,
+a pull halt — which read MISSED once past grace (each already fired its
+own CRITICAL/refusal alert, so MISSED is corroboration, never the only
+signal).
 """
 
 from __future__ import annotations

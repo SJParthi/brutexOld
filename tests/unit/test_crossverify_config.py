@@ -30,6 +30,7 @@ from brutex.crossverify.config import (
     ENV_REGION,
     ENV_SETTLE_RETRY_DELAY_S,
     ENV_SETTLE_RETRY_ROUNDS,
+    MAX_WINDOW_DAYS,
     resolve_crossverify_config,
 )
 
@@ -154,6 +155,23 @@ class TestJunkFailsLoud:
     def test_slash_edged_string(self, bad: str) -> None:
         with pytest.raises(ValueError, match="must not start or end with"):
             resolve_crossverify_config(lake_root=_LAKE, env={ENV_PREFIX: bad}, day=_DAY)
+
+    @pytest.mark.parametrize("var", [ENV_PULL_LOOKBACK_DAYS, ENV_CATCHUP_DAYS])
+    def test_junk_huge_day_count_fails_at_config_time(self, var: str) -> None:
+        # Round-2 S3a: a junk-huge day count fails LOUDLY here — never an
+        # OverflowError deep inside date arithmetic mid-run.
+        with pytest.raises(ValueError, match=f"must be <= {MAX_WINDOW_DAYS}"):
+            resolve_crossverify_config(
+                lake_root=_LAKE, env={var: str(MAX_WINDOW_DAYS + 1)}, day=_DAY
+            )
+        with pytest.raises(ValueError, match="must be <="):
+            resolve_crossverify_config(lake_root=_LAKE, env={var: "99999999999999"}, day=_DAY)
+
+    @pytest.mark.parametrize("var", [ENV_PULL_LOOKBACK_DAYS, ENV_CATCHUP_DAYS])
+    def test_day_count_maximum_boundary_accepted(self, var: str) -> None:
+        cfg = resolve_crossverify_config(lake_root=_LAKE, env={var: str(MAX_WINDOW_DAYS)}, day=_DAY)
+        assert MAX_WINDOW_DAYS == 3660
+        assert MAX_WINDOW_DAYS in (cfg.pull_lookback_days, cfg.catchup_days)
 
 
 class TestDayResolution:

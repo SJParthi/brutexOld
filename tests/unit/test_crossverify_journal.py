@@ -181,6 +181,36 @@ class TestSaveLoadRoundTrip:
         path.write_text(body, encoding="utf-8")
         assert load_journal(tmp_path, _DAY) is None  # + one WARN (re-render converges)
 
+    def test_invalid_utf8_bytes_load_none_with_warn(self, tmp_path: Path) -> None:
+        # Round-2 M1 (refuter-confirmed MAJOR): pre-fix the read sat OUTSIDE
+        # the corruption-tolerant path, so invalid-UTF-8 BYTES (bit rot / a
+        # torn write) raised UnicodeDecodeError uncaught — crashing the run
+        # at both call sites and wedging every future run via the recovery
+        # scan. Now: None + ONE crossverify.journal_corrupt WARN.
+        import structlog.testing
+
+        path = journal_path(tmp_path, _DAY)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xff\xfe{")
+        with structlog.testing.capture_logs() as logs:
+            assert load_journal(tmp_path, _DAY) is None
+        corrupt = [e for e in logs if e["event"] == "crossverify.journal_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["error_type"] == "UnicodeDecodeError"
+        assert corrupt[0]["path"] == str(path)
+
+    def test_directory_at_journal_path_loads_none_with_warn(self, tmp_path: Path) -> None:
+        # The OSError arm beyond plain absence: a DIRECTORY planted at the
+        # journal path (IsADirectoryError) degrades, never a crash.
+        import structlog.testing
+
+        journal_path(tmp_path, _DAY).mkdir(parents=True)
+        with structlog.testing.capture_logs() as logs:
+            assert load_journal(tmp_path, _DAY) is None
+        corrupt = [e for e in logs if e["event"] == "crossverify.journal_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["error_type"] == "IsADirectoryError"
+
 
 class TestScanPendingJournals:
     def test_empty_lake_scans_nothing(self, tmp_path: Path) -> None:
@@ -214,6 +244,24 @@ class TestScanPendingJournals:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{corrupt", encoding="utf-8")
         assert scan_pending_journals(tmp_path, today=_DAY, lookback_days=5) == []
+
+    def test_invalid_utf8_prior_skipped_never_raises(self, tmp_path: Path) -> None:
+        # Round-2 M1: ONE bit-rotted prior-day journal in the catchup window
+        # must never kill the scan (pre-fix: UnicodeDecodeError propagated,
+        # wedging EVERY later run before it reached its own day). A healthy
+        # pending sibling is still found.
+        import structlog.testing
+
+        rotten = journal_path(tmp_path, _DAY.replace(day=9))
+        rotten.parent.mkdir(parents=True, exist_ok=True)
+        rotten.write_bytes(b"\xff\xfe{")
+        healthy = DayJournal(day=_DAY.replace(day=8), run_id="cv", entries={})
+        healthy.mark_staged("p/IDX_I/NIFTY.csv", "s", 1)
+        healthy.save(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            scanned = scan_pending_journals(tmp_path, today=_DAY, lookback_days=5)
+        assert [j.day.day for j in scanned] == [8]  # the rotten day skipped
+        assert any(e["event"] == "crossverify.journal_corrupt" for e in logs)
 
     def test_lookback_zero_scans_nothing(self, tmp_path: Path) -> None:
         journal = DayJournal(day=_DAY.replace(day=9), run_id="cv", entries={})

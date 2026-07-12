@@ -186,6 +186,71 @@ class TestPublishStaged:
         assert outcome.failed_count == 1
         assert outcome.failed_keys == ("p/IDX_I/GONE.csv",)
 
+    def test_corrupted_staged_bytes_never_published_stay_pending(self, tmp_path: Path) -> None:
+        # Round-2 M2 (refuter-confirmed MAJOR): pre-fix the staged bytes were
+        # PUT without verifying against the journal entry's recorded
+        # sha256/size — on the cross-day recovery path a bit-rotted/tampered
+        # staged file was published VERBATIM to production S3 and marked
+        # published. Now: WARN + counted failed + stays pending + staging
+        # kept (the staged_bytes_missing law — a same-day re-render heals).
+        import structlog.testing
+
+        journal = _journal()
+        _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"good\n")
+        _stage(tmp_path, journal, "p/IDX_I/BANKNIFTY.csv", b"fine\n")
+        rotted = staging_path_for_key(tmp_path, _DAY, "p/IDX_I/NIFTY.csv")
+        rotted.write_bytes(b"TAMPERED\n")  # bit-rot AFTER journaling
+        client = FakeS3Client()
+        with structlog.testing.capture_logs() as logs:
+            outcome = publish_staged(
+                client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path
+            )
+        assert outcome.published == 1  # the good sibling still publishes
+        assert outcome.failed_count == 1
+        assert outcome.failed_keys == ("p/IDX_I/NIFTY.csv",)
+        assert "p/IDX_I/NIFTY.csv" not in client.objects  # tampered bytes never PUT
+        assert client.objects["p/IDX_I/BANKNIFTY.csv"] == b"fine\n"
+        assert journal.pending_keys() == ("p/IDX_I/NIFTY.csv",)  # stays pending
+        assert rotted.read_bytes() == b"TAMPERED\n"  # staging kept (forensic + heal)
+        corrupt = [e for e in logs if e["event"] == "crossverify.staged_bytes_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["key"] == repr("p/IDX_I/NIFTY.csv")
+
+    def test_size_mismatch_alone_counts_failed(self, tmp_path: Path) -> None:
+        # The size half of the M2 verify: a journal entry whose recorded
+        # size disagrees with the staged bytes (a torn journal write) also
+        # refuses the PUT — never a publish on inconsistent evidence.
+        import hashlib
+
+        from brutex.crossverify.journal import JournalEntry
+
+        journal = _journal()
+        _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"good\n")
+        good_sha = hashlib.sha256(b"good\n").hexdigest()
+        journal.entries["p/IDX_I/NIFTY.csv"] = JournalEntry(
+            key="p/IDX_I/NIFTY.csv", sha256=good_sha, size=999, published=False
+        )
+        client = FakeS3Client()
+        outcome = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
+        assert outcome.published == 0
+        assert outcome.failed_count == 1
+        assert "p/IDX_I/NIFTY.csv" not in client.objects
+
+    def test_corrupt_then_restage_heals_and_publishes(self, tmp_path: Path) -> None:
+        # The heal law: after a corrupt refusal, re-staging the correct bytes
+        # (the same-day re-render) publishes them — convergent.
+        journal = _journal()
+        _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"good\n")
+        staging_path_for_key(tmp_path, _DAY, "p/IDX_I/NIFTY.csv").write_bytes(b"rot\n")
+        client = FakeS3Client()
+        first = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
+        assert first.failed_count == 1
+        _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"good\n")  # the re-render
+        second = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
+        assert second.published == 1
+        assert client.objects["p/IDX_I/NIFTY.csv"] == b"good\n"
+        assert journal.pending_keys() == ()
+
     def test_journal_saved_every_25_published(self, tmp_path: Path) -> None:
         journal = _journal()
         for i in range(JOURNAL_SAVE_EVERY + 1):  # 26 keys → one mid-run save + final

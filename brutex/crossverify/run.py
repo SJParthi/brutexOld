@@ -23,10 +23,11 @@ binding, S3 factory, alert helpers), each dependency injectable.
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import structlog
@@ -47,6 +48,7 @@ from brutex.crossverify.gate_seam import (
 )
 from brutex.crossverify.journal import (
     DayJournal,
+    journal_path,
     load_journal,
     scan_pending_journals,
     staging_dir,
@@ -66,7 +68,8 @@ from brutex.crossverify.s3_publish import (
     build_real_s3_client,
     publish_staged,
 )
-from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
+from brutex.data.errors import LakeWriteHalt, MarketHoursHalt, PartitionLockTimeout
+from brutex.data.partition_lock import partition_write_lock
 from brutex.data.session import IST
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only imports
@@ -296,48 +299,118 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
     # weekend/holiday run must still republish a PRIOR trading day's pending
     # keys — recovery needs no vendor pull, no session, and NO pull locks
     # (publish is pure network + journal/staging sidecar writes, exactly like
-    # steps M/N which also run lock-free).
+    # steps M/N which also run lock-free). Each prior day's
+    # journal-reload → publish → save → cleanup runs under that day's
+    # cross-process journal flock (round-2 hostile review S2a — the COMMON
+    # partition_write_lock on the day's journal path), so a concurrent run's
+    # step-N/step-D rmtree can never race THIS read into a spurious
+    # publish_failed, and two recoveries of one day serialise. Lock-order
+    # law: a day-journal flock is a LEAF — nothing (in particular never the
+    # account/lake/lease pull locks) is acquired while it is held, and step D
+    # releases each day's flock before step F takes the pull trio.
     if config.publish and not config.dry_run:
+        aborted_recovery = False
         for prior in scan_pending_journals(
             config.lake_root, today=config.day, lookback_days=config.catchup_days
         ):
             try:
-                outcome = publish_staged(
-                    client=_client(),
-                    bucket=config.bucket,
-                    journal=prior,
-                    lake_root=config.lake_root,
-                    sleeper=seams.sleeper,
+                with partition_write_lock(
+                    config.lake_root, journal_path(config.lake_root, prior.day)
+                ):
+                    # Re-load UNDER the lock — a peer may have recovered the
+                    # day between the scan and our acquire (stale ⇒ skip).
+                    current = load_journal(config.lake_root, prior.day)
+                    if current is None or not current.pending_keys():
+                        continue
+                    try:
+                        outcome = publish_staged(
+                            client=_client(),
+                            bucket=config.bucket,
+                            journal=current,
+                            lake_root=config.lake_root,
+                            sleeper=seams.sleeper,
+                        )
+                    except S3BackendUnavailable as exc:
+                        state.publish_failed += len(current.pending_keys())
+                        return _finish(_report("publish_failed", 2, detail=str(exc)))
+                    state.recovered_prior += outcome.published
+                    state.publish_failed += outcome.failed_count
+                    _LOG.info(
+                        "crossverify.recovery_scan",
+                        run_id=run_id,
+                        prior_day=prior.day.isoformat(),
+                        recovered=outcome.published,
+                        still_failing=outcome.failed_count,
+                    )
+                    if outcome.aborted_nonretryable:
+                        # The step-M abort law, mirrored (round-2 S3e): a
+                        # broken grant/bucket fails every later day
+                        # identically — stop scanning; the untouched days'
+                        # keys stay pending for the next run.
+                        _LOG.error(
+                            "crossverify.recovery_aborted_nonretryable",
+                            run_id=run_id,
+                            prior_day=prior.day.isoformat(),
+                            note="whole recovery scan stopped — later prior days left pending",
+                        )
+                        aborted_recovery = True
+                        break
+                    if not current.pending_keys():
+                        # The recovered day is fully published — its staged
+                        # bytes served their purpose (the step-N cleanup,
+                        # applied to the PRIOR day so staging never
+                        # accumulates unbounded). A still-pending
+                        # (failed-again) day's staging is KEPT.
+                        shutil.rmtree(staging_dir(config.lake_root, prior.day), ignore_errors=True)
+            except PartitionLockTimeout:
+                # A peer holds this day's lock past the bound — it is
+                # actively recovering/publishing the day; skip it this run
+                # (the next scan re-finds anything still pending).
+                _LOG.warning(
+                    "crossverify.recovery_day_contended",
+                    run_id=run_id,
+                    prior_day=prior.day.isoformat(),
+                    note="a peer holds the day-journal lock — skipped this run",
                 )
-            except S3BackendUnavailable as exc:
-                state.publish_failed += len(prior.pending_keys())
-                return _finish(_report("publish_failed", 2, detail=str(exc)))
-            state.recovered_prior += outcome.published
-            state.publish_failed += outcome.failed_count
-            _LOG.info(
-                "crossverify.recovery_scan",
-                run_id=run_id,
-                prior_day=prior.day.isoformat(),
-                recovered=outcome.published,
-                still_failing=outcome.failed_count,
-            )
-            if not prior.pending_keys():
-                # The recovered day is fully published — its staged bytes
-                # served their purpose (the step-N cleanup, applied to the
-                # PRIOR day so staging never accumulates unbounded). A
-                # still-pending (failed-again) day's staging is KEPT.
-                import shutil
+                continue
+        # Orphaned staging (round-2 S2b): a staging dir whose journal was
+        # wiped / loads corrupt-None is INVISIBLE to the pending scan — name
+        # it loudly, leave the bytes in place (remediation: `brutex
+        # crossverify run --day <day>` re-runs the day idempotently).
+        if not aborted_recovery:
+            for offset in range(config.catchup_days, 0, -1):
+                orphan_day = config.day - timedelta(days=offset)
+                orphan = staging_dir(config.lake_root, orphan_day)
+                if orphan.is_dir() and load_journal(config.lake_root, orphan_day) is None:
+                    _LOG.warning(
+                        "crossverify.staging_orphaned",
+                        run_id=run_id,
+                        day=orphan_day.isoformat(),
+                        path=str(orphan),
+                        remediation=(
+                            f"brutex crossverify run --day {orphan_day.isoformat()} "
+                            "re-runs the day idempotently"
+                        ),
+                    )
 
-                shutil.rmtree(staging_dir(config.lake_root, prior.day), ignore_errors=True)
+    def _early_ok(
+        verdict: Verdict, *, detail: str = "", log_event: str | None = None
+    ) -> CrossverifyReport:
+        """An exit-0 early return — honest about recovery soft-failures.
 
-    def _skip_day(verdict: Verdict, log_event: str) -> CrossverifyReport:
-        """A non-export day's early return — honest about recovery failures."""
+        Round-2 hostile review S1: EVERY would-be-green early return (the
+        non-trading/Muhurat skips AND the three market-hours deferral arms)
+        upgrades to ``publish_failed`` exit 2 when the step-D recovery scan
+        left prior keys still failing — a cron-green exit must never mask a
+        recovery failure.
+        """
         if state.publish_failed > 0:
             return _finish(
                 _report("publish_failed", 2, detail="recovery scan left prior keys still failing")
             )
-        _LOG.info(log_event, run_id=run_id, day=config.day.isoformat())
-        return _report(verdict, 0)
+        if log_event is not None:
+            _LOG.info(log_event, run_id=run_id, day=config.day.isoformat())
+        return _report(verdict, 0, detail=detail)
 
     # ── B: day + session gate (never fabricates a session) ────────────────
     from brutex.calendars.nse import HolidayDataUnavailableError, SessionType
@@ -347,10 +420,10 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
     except HolidayDataUnavailableError as exc:
         return _refused(f"calendar coverage exhausted for {config.day.isoformat()}: {exc}", 2)
     if session is None:
-        return _skip_day("skipped_non_trading", "crossverify.skipped_non_trading")
+        return _early_ok("skipped_non_trading", log_event="crossverify.skipped_non_trading")
     if session.session_type is SessionType.MUHURAT:
         # Coordinator ruling 2: Muhurat = whole-run skip, NO files, one INFO.
-        return _skip_day("skipped_muhurat", "crossverify.skipped_muhurat")
+        return _early_ok("skipped_muhurat", log_event="crossverify.skipped_muhurat")
 
     # ── C: gate presence — FAIL-CLOSED ─────────────────────────────────────
     try:
@@ -360,8 +433,11 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
 
     # ── E: market-hours START gate (vendor-calling runs only; NEVER exempt) —
     if not (config.dry_run or config.skip_pull) and seams.market_hours_blocked():
-        _LOG.info("crossverify.deferred_market_hours", run_id=run_id)
-        return _report("deferred_market_hours", 0, detail="market-hours window — deferred")
+        return _early_ok(
+            "deferred_market_hours",
+            detail="market-hours window — deferred",
+            log_event="crossverify.deferred_market_hours",
+        )
 
     journal = load_journal(config.lake_root, config.day)
     if journal is None:
@@ -409,7 +485,7 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             except MarketHoursHalt as exc:
                 # Defensive belt — the leg normally folds this into `halted`.
                 _LOG.warning("crossverify.pull_deferred_market_hours", detail=str(exc))
-                return _report("deferred_market_hours", 0, detail=str(exc))
+                return _early_ok("deferred_market_hours", detail=str(exc))
             except Exception as exc:
                 from brutex.dashboard.pull_jobs import is_pull_halt
 
@@ -425,9 +501,8 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                     return _suspect(f"pull halt: {type(exc).__name__}: {exc}")
                 raise
             if pull_report.halted:
-                return _report(
+                return _early_ok(
                     "deferred_market_hours",
-                    0,
                     detail=f"pull halted: {pull_report.halt_reason}",
                 )
         if _over_deadline():
@@ -500,72 +575,99 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             from brutex.data.atomic_io import atomic_write_via
 
             try:
-                for staged, (identity, body, sha) in enumerate(publishable, start=1):
-                    dest = staging_path(config.lake_root, config.day, identity)
-                    dest.parent.mkdir(parents=True, exist_ok=True)
+                # The stage+journal span runs under today's day-journal flock
+                # (round-2 S2a): two same-day runs serialise their staging
+                # writes + journal saves instead of last-writer-wins racing.
+                # Acquired strictly AFTER the pull trio (step F) and released
+                # at the end of this block — a day-journal flock is a LEAF:
+                # never held while acquiring the pull locks.
+                with partition_write_lock(
+                    config.lake_root, journal_path(config.lake_root, config.day)
+                ):
+                    for staged, (identity, body, sha) in enumerate(publishable, start=1):
+                        dest = staging_path(config.lake_root, config.day, identity)
+                        dest.parent.mkdir(parents=True, exist_ok=True)
 
-                    def _write(tmp: Path, data: bytes = body) -> None:
-                        tmp.write_bytes(data)
+                        def _write(tmp: Path, data: bytes = body) -> None:
+                            tmp.write_bytes(data)
 
-                    atomic_write_via(dest, _write)
-                    journal.mark_staged(
-                        s3_key(prefix=config.key_prefix, day=config.day, identity=identity),
-                        sha,
-                        len(body),
-                    )
-                    if staged % JOURNAL_SAVE_EVERY == 0:
-                        journal.save(config.lake_root)
-                journal.withheld = {
-                    symbol: e.reason
-                    for symbol, e in sorted(exports.items())
-                    if e.disposition == "withheld"
-                }
-                journal.save(config.lake_root)
+                        atomic_write_via(dest, _write)
+                        journal.mark_staged(
+                            s3_key(prefix=config.key_prefix, day=config.day, identity=identity),
+                            sha,
+                            len(body),
+                        )
+                        if staged % JOURNAL_SAVE_EVERY == 0:
+                            journal.save(config.lake_root)
+                    journal.withheld = {
+                        symbol: e.reason
+                        for symbol, e in sorted(exports.items())
+                        if e.disposition == "withheld"
+                    }
+                    journal.save(config.lake_root)
             except LakeWriteHalt as exc:
                 seams.emit_pull_halt(exc)
                 return _suspect(f"staging halt: {exc}")
+            except PartitionLockTimeout:
+                return _refused(
+                    "today's journal/staging lock held by a peer past the bound — "
+                    "a concurrent same-day run is active; deferring (no preemption)",
+                    1,
+                )
 
     # ── L: locks released (ExitStack closed) — publish is pure network ─────
     if _over_deadline():
         return _suspect("hard deadline exceeded before publish")
 
-    # ── M: publish (frozen staged bytes) ────────────────────────────────────
+    # ── M: publish (frozen staged bytes) — under today's day-journal flock
+    # (round-2 S2a): the staged-bytes read → PUT → journal save → step-N
+    # staging cleanup are one exclusive span, so a peer's rmtree can never
+    # race THIS run's read into a spurious publish_failed. Acquired only
+    # AFTER the pull trio released (step L) — never held across a pull-lock
+    # acquire.
     if not config.dry_run and config.publish and journal.entries:
         try:
-            outcome = publish_staged(
-                client=_client(),
-                bucket=config.bucket,
-                journal=journal,
-                lake_root=config.lake_root,
-                sleeper=seams.sleeper,
-            )
-        except S3BackendUnavailable as exc:
-            state.publish_failed += len(journal.pending_keys())
-            return _finish(_report("publish_failed", 2, detail=str(exc)))
-        state.published = outcome.published
-        state.skipped_already = outcome.skipped_already
-        state.publish_failed += outcome.failed_count
-        if outcome.aborted_nonretryable:
-            return _finish(
-                _report(
-                    "publish_failed",
-                    2,
-                    detail="nonretryable S3 error — whole publish aborted "
-                    f"(failed keys: {', '.join(outcome.failed_keys)})",
-                )
+            with partition_write_lock(config.lake_root, journal_path(config.lake_root, config.day)):
+                try:
+                    outcome = publish_staged(
+                        client=_client(),
+                        bucket=config.bucket,
+                        journal=journal,
+                        lake_root=config.lake_root,
+                        sleeper=seams.sleeper,
+                    )
+                except S3BackendUnavailable as exc:
+                    state.publish_failed += len(journal.pending_keys())
+                    return _finish(_report("publish_failed", 2, detail=str(exc)))
+                state.published = outcome.published
+                state.skipped_already = outcome.skipped_already
+                state.publish_failed += outcome.failed_count
+                if outcome.aborted_nonretryable:
+                    return _finish(
+                        _report(
+                            "publish_failed",
+                            2,
+                            detail="nonretryable S3 error — whole publish aborted "
+                            f"(failed keys: {', '.join(outcome.failed_keys)})",
+                        )
+                    )
+                if not journal.pending_keys():
+                    # The step-N staging cleanup, INSIDE the day lock: a full
+                    # publish means the staging bytes served their purpose;
+                    # the journal is retained as the durable done-record.
+                    shutil.rmtree(staging_dir(config.lake_root, config.day), ignore_errors=True)
+        except PartitionLockTimeout:
+            return _refused(
+                "today's journal/staging lock held by a peer past the bound — "
+                "a concurrent same-day run is active; deferring (no preemption)",
+                1,
             )
 
-    # ── N: cleanup + final verdict ──────────────────────────────────────────
+    # ── N: final verdict ────────────────────────────────────────────────────
     blocked = sum(1 for e in exports.values() if e.disposition == "blocked")
     withheld = sum(1 for e in exports.values() if e.disposition == "withheld")
     if state.publish_failed > 0:
         return _finish(_report("publish_failed", 2))
-    if not config.dry_run and config.publish and journal.entries and not journal.pending_keys():
-        # Full publish — the staging bytes served their purpose; the journal
-        # is retained as the durable done-record.
-        import shutil
-
-        shutil.rmtree(staging_dir(config.lake_root, config.day), ignore_errors=True)
     if blocked > 0:
         return _finish(_report("blocked", 2))
     if withheld > 0:

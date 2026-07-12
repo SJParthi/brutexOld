@@ -161,12 +161,27 @@ def load_journal(lake_root: Path, day: date) -> DayJournal | None:
     """Load one day's journal; absent / corrupt → ``None`` (+ one WARN on corrupt).
 
     A corrupt journal is NOT an error state — the deterministic re-render
-    converges, so the honest degrade is a fresh start for that day.
+    converges, so the honest degrade is a fresh start for that day. The
+    READ itself rides the same corruption-tolerant path (round-2 hostile
+    review M1): invalid-UTF-8 bytes (bit rot / a torn write) and any
+    ``OSError`` beyond plain absence (a directory planted at the journal
+    path, EIO, …) load as ``None`` + one WARN — pre-fix an invalid-UTF-8
+    journal raised ``UnicodeDecodeError`` uncaught, crashing the run at
+    BOTH call sites and, via the recovery scan, wedging EVERY future run
+    until the corrupt prior-day file aged out of the catchup window.
     """
     path = journal_path(lake_root, day)
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_bytes().decode("utf-8")
     except FileNotFoundError:
+        return None
+    except (UnicodeDecodeError, OSError) as exc:
+        _LOG.warning(
+            "crossverify.journal_corrupt",
+            path=str(path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         return None
     try:
         payload = json.loads(raw)

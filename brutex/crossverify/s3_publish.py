@@ -24,6 +24,7 @@ re-puts identical bytes on the next run, which converges.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol
@@ -196,8 +197,14 @@ def publish_staged(
     failed (+ WARN, stays pending); a MALFORMED journal key (the
     :func:`staging_path_for_key` validation — traversal / control chars /
     non-``.csv``) likewise counts failed + WARNs, never a join and never a
-    crash. A nonretryable error aborts the WHOLE publish immediately with
-    the remaining pending keys counted failed. O(pending keys).
+    crash. The staged bytes are VERIFIED against the journal entry's
+    recorded ``sha256`` + ``size`` BEFORE the PUT (round-2 hostile review
+    M2 — on the cross-day recovery path a bit-rotted/tampered staged file
+    must never reach production S3): a mismatch counts failed + WARNs and
+    stays pending (the ``staged_bytes_missing`` law — a same-day re-render
+    re-stages the correct bytes and heals). A nonretryable error aborts the
+    WHOLE publish immediately with the remaining pending keys counted
+    failed. O(pending keys).
     """
     pending = journal.pending_keys()
     skipped_already = len(journal.entries) - len(pending)
@@ -225,6 +232,20 @@ def publish_staged(
                 key=repr(key),  # embeds the vendor-derived symbol — repr()'d (#907)
                 path=str(staged),
                 error_type=type(exc).__name__,
+            )
+            failed.append(key)
+            continue
+        entry = journal.entries[key]
+        actual_sha = hashlib.sha256(body).hexdigest()
+        if actual_sha != entry.sha256 or len(body) != entry.size:
+            _LOG.warning(
+                "crossverify.staged_bytes_corrupt",
+                key=repr(key),  # embeds the vendor-derived symbol — repr()'d (#907)
+                path=str(staged),
+                expected_sha=entry.sha256[:12],
+                actual_sha=actual_sha[:12],
+                expected_size=entry.size,
+                actual_size=len(body),
             )
             failed.append(key)
             continue

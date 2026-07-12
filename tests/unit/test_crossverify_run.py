@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import os
+import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -11,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import structlog.testing
 from brutex.calendars.nse import HolidayDataUnavailableError, SessionType, TradingSession
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity, s3_key
 from brutex.crossverify.config import CrossverifyConfig
@@ -18,6 +22,7 @@ from brutex.crossverify.day_export import SymbolExport
 from brutex.crossverify.gate_seam import CompletenessGateUnavailable
 from brutex.crossverify.journal import (
     DayJournal,
+    journal_path,
     load_journal,
     staging_dir,
     staging_path,
@@ -38,6 +43,7 @@ from brutex.crossverify.run import (
 from brutex.crossverify.s3_publish import S3BackendUnavailable
 from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
 from brutex.data.models import CandleBar
+from brutex.data.partition_lock import partition_lock_path
 
 from tests.fakes.fake_completeness_gate import FakeVerdict, ScriptedClassifier
 from tests.fakes.fake_s3_client import FakeS3Client
@@ -484,6 +490,12 @@ class TestExportPublishFlow:
         assert (report.verdict, report.exit_code) == ("nothing_to_do", 0)
         assert report.nothing == 2
         assert h.client.puts == []
+        # The deadman-evidence law (round-2 S3b): a nothing_to_do run STILL
+        # writes its (empty-entries) journal at step K, so `crossverify
+        # status` reads OK for it — the schedule.py docstring's claim.
+        journal = load_journal(tmp_path, _DAY)
+        assert journal is not None
+        assert journal.entries == {}
 
     def test_publish_disabled_stages_only(self, tmp_path: Path) -> None:
         h = _harness(tmp_path, publish=False)
@@ -680,18 +692,52 @@ class TestDeadline:
         assert h.client.puts == []  # nothing published past the wall
 
 
+def _stage_prior_pending(lake: Path, offset_days: int, key_tail: str) -> str:
+    """Stage + journal one pending key for ``_DAY - offset_days`` (module-shared)."""
+    prior_day = _DAY - timedelta(days=offset_days)
+    journal = DayJournal(day=prior_day, run_id="cv-prior")
+    key = f"crossverify/groww/{prior_day.isoformat()}/{key_tail}"
+    dest = staging_path_for_key(lake, prior_day, key)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    body = b"symbol,timestamp_ist,open,high,low,close,volume,oi\nX,...\n"
+    dest.write_bytes(body)
+    journal.mark_staged(key, hashlib.sha256(body).hexdigest(), len(body))
+    journal.save(lake)
+    return key
+
+
+def _day_lock_held_by_peer(lake: Path, day: date) -> bool:
+    """True iff someone else currently holds *day*'s journal flock (probe fd)."""
+    lock_path = partition_lock_path(lake, journal_path(lake, day))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _hold_day_lock(lake: Path, day: date) -> Any:
+    """Hold *day*'s journal flock from the test (a peer-run stand-in)."""
+    lock_path = partition_lock_path(lake, journal_path(lake, day))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 class TestRecoveryScan:
     def _stage_prior(self, lake: Path, offset_days: int, key_tail: str) -> str:
-        prior_day = _DAY - timedelta(days=offset_days)
-        journal = DayJournal(day=prior_day, run_id="cv-prior")
-        key = f"crossverify/groww/{prior_day.isoformat()}/{key_tail}"
-        dest = staging_path_for_key(lake, prior_day, key)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        body = b"symbol,timestamp_ist,open,high,low,close,volume,oi\nX,...\n"
-        dest.write_bytes(body)
-        journal.mark_staged(key, hashlib.sha256(body).hexdigest(), len(body))
-        journal.save(lake)
-        return key
+        return _stage_prior_pending(lake, offset_days, key_tail)
 
     def test_prior_pending_republished_without_regate(self, tmp_path: Path) -> None:
         key = self._stage_prior(tmp_path, 2, "IDX_I/NIFTY.csv")
@@ -777,6 +823,340 @@ class TestRecoveryScan:
         assert (report.verdict, report.exit_code) == ("refused", 1)
         assert report.recovered_prior == 1
         assert key in h.client.objects
+
+    def test_invalid_utf8_prior_journal_never_wedges_the_run(self, tmp_path: Path) -> None:
+        # Round-2 M1 (refuter-confirmed MAJOR), the end-to-end arm: ONE
+        # bit-rotted (invalid-UTF-8) prior-day journal in the catchup window
+        # crashed EVERY later run pre-fix (UnicodeDecodeError out of the
+        # step-D recovery scan, before the run reached its own day). Now the
+        # corrupt journal loads as None + WARN and the run completes.
+        rotten = journal_path(tmp_path, _DAY - timedelta(days=1))
+        rotten.parent.mkdir(parents=True, exist_ok=True)
+        rotten.write_bytes(b"\xff\xfe{")
+        h = _harness(tmp_path)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert report.published == 3
+
+    def test_corrupted_prior_staged_bytes_not_published_on_recovery(self, tmp_path: Path) -> None:
+        # Round-2 M2 (refuter-confirmed MAJOR), the recovery arm: a
+        # bit-rotted staged file pre-fix was published VERBATIM to
+        # production S3 and marked published. Now: refused (sha/size verify),
+        # counted failed → publish_failed exit 2, stays pending, staging kept.
+        prior_day = _DAY - timedelta(days=1)
+        key = self._stage_prior(tmp_path, 1, "IDX_I/NIFTY.csv")
+        rotted = staging_path_for_key(tmp_path, prior_day, key)
+        rotted.write_bytes(b"TAMPERED\n")
+        h = _harness(tmp_path)
+        report = h.run()
+        assert key not in h.client.objects  # tampered bytes never reached S3
+        assert report.recovered_prior == 0
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        recovered = load_journal(tmp_path, prior_day)
+        assert recovered is not None
+        assert recovered.pending_keys() == (key,)  # stays pending
+        assert rotted.exists()  # staging kept for forensics/heal
+        assert len(h.client.objects) == 3  # today's own keys still published
+
+    def test_same_day_rerun_reheals_corrupted_staged_bytes(self, tmp_path: Path) -> None:
+        # The M2 heal law end-to-end: run 1 leaves a key pending (S3
+        # throttle), the staged file bit-rots, run 2 (same day) re-renders +
+        # re-stages the CORRECT bytes and publishes them.
+        nifty_key = s3_key(prefix="crossverify/groww", day=_DAY, identity=_NIFTY)
+        failing = FakeS3Client(fail_times={nifty_key: 99})
+        h1 = _harness(tmp_path, s3_factory=lambda: failing)
+        assert h1.run().verdict == "publish_failed"
+        dest = staging_path(tmp_path, _DAY, _NIFTY)
+        good = dest.read_bytes()
+        dest.write_bytes(b"BITROT")
+        h2 = _harness(tmp_path)
+        report = h2.run()
+        assert report.verdict == "published"
+        assert h2.client.objects[nifty_key] == good  # re-rendered, healed, correct
+        journal = load_journal(tmp_path, _DAY)
+        assert journal is not None
+        assert journal.entries[nifty_key].sha256 == hashlib.sha256(good).hexdigest()
+
+    def test_recovery_abort_stops_scanning_later_days(self, tmp_path: Path) -> None:
+        # Round-2 S3e: a NONRETRYABLE recovery outcome (broken grant/bucket)
+        # stops the prior-day scan — the step-M abort law mirrored; later
+        # days' keys stay pending untouched, never a per-day retry storm.
+        old_key = _stage_prior_pending(tmp_path, 3, "IDX_I/NIFTY.csv")
+        new_key = _stage_prior_pending(tmp_path, 1, "IDX_I/BANKNIFTY.csv")
+        client = FakeS3Client(nonretryable=frozenset({old_key}))
+        h = _harness(tmp_path, s3_factory=lambda: client)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        attempted = [key for _bucket, key, _ct in client.puts]
+        assert old_key in attempted
+        assert new_key not in attempted  # the scan stopped at the abort
+        newer = load_journal(tmp_path, _DAY - timedelta(days=1))
+        assert newer is not None
+        assert newer.pending_keys() == (new_key,)  # untouched, still pending
+
+    def test_stale_scan_entry_reloaded_under_lock_skips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Round-2 S2a: the per-day journal is RE-loaded under the day flock —
+        # a peer that recovered the day between the scan and our acquire
+        # (simulated: the reload returns None) is skipped, never re-published.
+        prior_day = _DAY - timedelta(days=1)
+        key = self._stage_prior(tmp_path, 1, "IDX_I/NIFTY.csv")
+        from brutex.crossverify import run as run_module
+
+        real_load = run_module.load_journal
+
+        def _peer_wiped(lake_root: Path, day: date) -> Any:
+            if day == prior_day:
+                return None  # the peer's wipe/recovery landed first
+            return real_load(lake_root, day)
+
+        monkeypatch.setattr(run_module, "load_journal", _peer_wiped)
+        h = _harness(tmp_path)
+        report = h.run()
+        assert report.recovered_prior == 0
+        assert key not in h.client.objects  # never re-published
+        assert report.verdict == "published"  # today unaffected
+
+    def test_orphaned_staging_with_no_journal_warns_and_keeps_bytes(self, tmp_path: Path) -> None:
+        # Round-2 S2b: a staging dir whose journal is WIPED is invisible to
+        # the pending scan — ONE loud WARN names it; bytes left in place
+        # (remediation: `brutex crossverify run --day <day>`).
+        prior_day = _DAY - timedelta(days=2)
+        orphan = staging_dir(tmp_path, prior_day) / "IDX_I"
+        orphan.mkdir(parents=True)
+        (orphan / "NIFTY.csv").write_bytes(b"frozen\n")
+        h = _harness(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert report.verdict == "published"
+        events = [e for e in logs if e["event"] == "crossverify.staging_orphaned"]
+        assert len(events) == 1
+        assert events[0]["day"] == prior_day.isoformat()
+        assert events[0]["path"] == str(staging_dir(tmp_path, prior_day))
+        assert "--day" in str(events[0]["remediation"])
+        assert (orphan / "NIFTY.csv").read_bytes() == b"frozen\n"  # left in place
+
+    def test_orphaned_staging_with_corrupt_journal_warns(self, tmp_path: Path) -> None:
+        # The corrupt-journal (loads-None) orphan shape reads identically.
+        prior_day = _DAY - timedelta(days=2)
+        orphan = staging_dir(tmp_path, prior_day) / "IDX_I"
+        orphan.mkdir(parents=True)
+        (orphan / "NIFTY.csv").write_bytes(b"frozen\n")
+        rotten = journal_path(tmp_path, prior_day)
+        rotten.write_bytes(b"\xff\xfe{")
+        h = _harness(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert report.verdict == "published"
+        assert any(e["event"] == "crossverify.staging_orphaned" for e in logs)
+        assert (orphan / "NIFTY.csv").exists()
+
+
+class TestDeferralRecoveryHonesty:
+    """Round-2 S1: the three ``deferred_market_hours`` exit-0 returns must
+    not mask a step-D recovery soft-failure as cron-green — every early
+    return rides the same publish_failed-upgrade law ``_skip_day`` had."""
+
+    def _failing_recovery_client(self, tmp_path: Path) -> FakeS3Client:
+        key = _stage_prior_pending(tmp_path, 1, "IDX_I/NIFTY.csv")
+        return FakeS3Client(nonretryable=frozenset({key}))
+
+    def test_market_hours_start_gate_defer_upgrades_to_publish_failed(self, tmp_path: Path) -> None:
+        client = self._failing_recovery_client(tmp_path)
+        h = _harness(tmp_path, market_hours_blocked=True, s3_factory=lambda: client)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        assert "recovery scan left prior keys still failing" in report.detail
+
+    def test_market_hours_halt_defer_upgrades_to_publish_failed(self, tmp_path: Path) -> None:
+        client = self._failing_recovery_client(tmp_path)
+
+        def _pull() -> PullLegReport:
+            raise MarketHoursHalt("window reached")
+
+        h = _harness(tmp_path, run_pull=_pull, s3_factory=lambda: client)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+
+    def test_halted_pull_report_defer_upgrades_to_publish_failed(self, tmp_path: Path) -> None:
+        client = self._failing_recovery_client(tmp_path)
+
+        def _pull() -> PullLegReport:
+            return replace(_clean_pull(), halted=True, halt_reason="market_hours")
+
+        h = _harness(tmp_path, run_pull=_pull, s3_factory=lambda: client)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+
+    def test_clean_recovery_keeps_all_three_deferrals_green(self, tmp_path: Path) -> None:
+        # The other arm: with NO recovery failure the deferral verdicts stay
+        # the honest exit-0 they always were.
+        _stage_prior_pending(tmp_path, 1, "IDX_I/NIFTY.csv")
+        h = _harness(tmp_path, market_hours_blocked=True)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("deferred_market_hours", 0)
+        assert report.recovered_prior == 1
+
+
+class TestDayJournalLockSerialization:
+    """Round-2 S2a: the per-day journal+staging+publish critical sections
+    ride the COMMON cross-process ``partition_write_lock`` on the day's
+    journal path — killing the rmtree-vs-read race and the concurrent
+    same-day journal last-writer-wins."""
+
+    def test_today_publish_span_holds_day_journal_flock(self, tmp_path: Path) -> None:
+        probes: list[bool] = []
+
+        class _Probing(FakeS3Client):
+            def put_object(self, **kwargs: Any) -> None:
+                probes.append(_day_lock_held_by_peer(tmp_path, _DAY))
+                super().put_object(**kwargs)
+
+        h = _harness(tmp_path, s3_factory=_Probing)
+        assert h.run().verdict == "published"
+        assert len(probes) == 3
+        assert all(probes)  # every PUT ran with today's day lock HELD
+
+    def test_recovery_span_holds_prior_day_journal_flock(self, tmp_path: Path) -> None:
+        prior_day = _DAY - timedelta(days=2)
+        key = _stage_prior_pending(tmp_path, 2, "IDX_I/NIFTY.csv")
+        probes: list[bool] = []
+
+        class _Probing(FakeS3Client):
+            def put_object(self, **kwargs: Any) -> None:
+                if kwargs["key"] == key:
+                    probes.append(_day_lock_held_by_peer(tmp_path, prior_day))
+                super().put_object(**kwargs)
+
+        h = _harness(tmp_path, s3_factory=_Probing)
+        assert h.run().verdict == "published"
+        assert probes == [True]  # the recovery PUT ran under the prior day's lock
+
+    def test_staging_saves_run_under_day_journal_flock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        held: list[bool] = []
+        original_save = DayJournal.save
+
+        def _spy(self: DayJournal, lake_root: Path) -> None:
+            held.append(_day_lock_held_by_peer(lake_root, self.day))
+            original_save(self, lake_root)
+
+        monkeypatch.setattr(DayJournal, "save", _spy)
+        h = _harness(tmp_path, publish=False)  # staged_only — saves happen in step K only
+        assert h.run().verdict == "staged_only"
+        assert held and all(held)  # every step-K journal save under the lock
+
+    def test_contended_today_lock_refuses_honestly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A peer holds today's day lock past the bound (env-shrunk): the
+        # staging span refuses LOUDLY (exit 1, no preemption) — never wedges.
+        monkeypatch.setenv("BRUTEX_PARTITION_LOCK_TIMEOUT_S", "0.05")
+        h = _harness(tmp_path)
+        with _hold_day_lock(tmp_path, _DAY):
+            report = h.run()
+        assert (report.verdict, report.exit_code) == ("refused", 1)
+        assert "concurrent same-day run" in h.alerter.refusals[0]
+        assert h.client.puts == []
+
+    def test_contended_publish_span_refuses_honestly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The step-M arm: the lock is FREE through staging (step K) and
+        # grabbed by the "peer" the moment the journal file exists — the
+        # first now_ist() call after step K is step L's deadline check, at
+        # which point step K's flock is already released, so the blocking
+        # grab below acquires instantly and step M's bounded acquire refuses.
+        monkeypatch.setenv("BRUTEX_PARTITION_LOCK_TIMEOUT_S", "0.05")
+        journal_file = journal_path(tmp_path, _DAY)
+        holder_fd: list[int] = []
+        base = _Clock()
+
+        def _grab_after_staging() -> datetime:
+            if not holder_fd and journal_file.exists():
+                lock_path = partition_lock_path(tmp_path, journal_file)
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                holder_fd.append(fd)
+            return base()
+
+        h = _harness(tmp_path, clock=_grab_after_staging)  # type: ignore[arg-type]
+        try:
+            report = h.run()
+        finally:
+            for fd in holder_fd:
+                os.close(fd)
+        assert holder_fd  # the peer grab genuinely happened
+        assert (report.verdict, report.exit_code) == ("refused", 1)
+        assert h.client.puts == []  # publish never ran
+        journal = load_journal(tmp_path, _DAY)
+        assert journal is not None
+        assert len(journal.pending_keys()) == 3  # staged, publish deferred
+
+    def test_contended_prior_day_lock_skips_recovery_run_continues(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Step D's arm: a peer actively holding a PRIOR day's lock means that
+        # day is being recovered — skip it this run (WARN, not failed) and
+        # continue to our own day.
+        monkeypatch.setenv("BRUTEX_PARTITION_LOCK_TIMEOUT_S", "0.05")
+        prior_day = _DAY - timedelta(days=2)
+        key = _stage_prior_pending(tmp_path, 2, "IDX_I/NIFTY.csv")
+        h = _harness(tmp_path)
+        with _hold_day_lock(tmp_path, prior_day), structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert report.recovered_prior == 0
+        assert report.publish_failed == 0  # skipped, never counted failed
+        assert key not in h.client.objects
+        assert any(e["event"] == "crossverify.recovery_day_contended" for e in logs)
+        prior = load_journal(tmp_path, prior_day)
+        assert prior is not None
+        assert prior.pending_keys() == (key,)  # untouched for the next scan
+
+    def test_concurrent_same_day_runs_serialize_and_converge(self, tmp_path: Path) -> None:
+        # Two full same-day runs racing on ONE lake: both complete green,
+        # neither reads a spurious publish_failed off the other's cleanup,
+        # and the S3 objects + durable journal converge to the correct bytes.
+        client = FakeS3Client()
+        barrier = threading.Barrier(2, timeout=10.0)
+        reports: list[CrossverifyReport] = []
+        errors: list[BaseException] = []
+        lock = threading.Lock()
+
+        def _go() -> None:
+            h = _harness(tmp_path, s3_factory=lambda: client)
+            barrier.wait()
+            try:
+                report = h.run()
+            except BaseException as exc:
+                with lock:
+                    errors.append(exc)
+                return
+            with lock:
+                reports.append(report)
+
+        threads = [threading.Thread(target=_go) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30.0)
+        assert errors == []
+        assert len(reports) == 2
+        assert all(r.exit_code == 0 for r in reports)
+        assert all(r.verdict == "published" for r in reports)
+        expected_keys = {
+            s3_key(prefix="crossverify/groww", day=_DAY, identity=identity) for identity in _TARGETS
+        }
+        assert set(client.objects) == expected_keys
+        journal = load_journal(tmp_path, _DAY)
+        assert journal is not None
+        assert journal.pending_keys() == ()  # converged: everything published
+        for key, entry in journal.entries.items():
+            assert hashlib.sha256(client.objects[key]).hexdigest() == entry.sha256
 
 
 class TestSummaryLaw:

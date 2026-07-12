@@ -52,6 +52,11 @@ DEFAULT_SETTLE_RETRY_ROUNDS: Final[int] = 1
 DEFAULT_SETTLE_RETRY_DELAY_S: Final[float] = 600.0
 DEFAULT_CATCHUP_DAYS: Final[int] = 5
 
+#: Upper bound on the day-count knobs (~10 years). A junk-huge env value now
+#: fails LOUDLY at config time instead of surfacing as an ``OverflowError``
+#: deep inside date arithmetic mid-run (round-2 hostile review S3a).
+MAX_WINDOW_DAYS: Final[int] = 3660
+
 
 @dataclass(frozen=True, slots=True)
 class CrossverifyConfig:
@@ -90,8 +95,10 @@ def _resolve_switch(mapping: Mapping[str, str], name: str) -> bool:
     )
 
 
-def _resolve_int(mapping: Mapping[str, str], name: str, default: int, *, minimum: int) -> int:
-    """Fail-loud non-negative integer env value."""
+def _resolve_int(
+    mapping: Mapping[str, str], name: str, default: int, *, minimum: int, maximum: int | None = None
+) -> int:
+    """Fail-loud bounded integer env value (junk / out-of-bounds RAISES)."""
     raw = mapping.get(name, "")
     token = raw.strip()
     if not token:
@@ -102,6 +109,8 @@ def _resolve_int(mapping: Mapping[str, str], name: str, default: int, *, minimum
         raise ValueError(f"{name}={raw!r} is not an integer") from exc
     if value < minimum:
         raise ValueError(f"{name}={raw!r} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name}={raw!r} must be <= {maximum}")
     return value
 
 
@@ -171,7 +180,11 @@ def resolve_crossverify_config(
         enabled=_resolve_switch(mapping, ENV_KILL_SWITCH),
         publish=publish_env and not no_publish,
         pull_lookback_days=_resolve_int(
-            mapping, ENV_PULL_LOOKBACK_DAYS, DEFAULT_PULL_LOOKBACK_DAYS, minimum=0
+            mapping,
+            ENV_PULL_LOOKBACK_DAYS,
+            DEFAULT_PULL_LOOKBACK_DAYS,
+            minimum=0,
+            maximum=MAX_WINDOW_DAYS,
         ),
         lock_wait_s=_resolve_float(mapping, ENV_LOCK_WAIT_S, DEFAULT_LOCK_WAIT_S, minimum=0.0),
         lock_retry_s=_resolve_float(mapping, ENV_LOCK_RETRY_S, DEFAULT_LOCK_RETRY_S, minimum=0.1),
@@ -182,7 +195,9 @@ def resolve_crossverify_config(
         settle_retry_delay_s=_resolve_float(
             mapping, ENV_SETTLE_RETRY_DELAY_S, DEFAULT_SETTLE_RETRY_DELAY_S, minimum=0.0
         ),
-        catchup_days=_resolve_int(mapping, ENV_CATCHUP_DAYS, DEFAULT_CATCHUP_DAYS, minimum=0),
+        catchup_days=_resolve_int(
+            mapping, ENV_CATCHUP_DAYS, DEFAULT_CATCHUP_DAYS, minimum=0, maximum=MAX_WINDOW_DAYS
+        ),
         dry_run=dry_run,
         skip_pull=skip_pull,
     )
@@ -211,6 +226,7 @@ __all__ = [
     "ENV_REGION",
     "ENV_SETTLE_RETRY_DELAY_S",
     "ENV_SETTLE_RETRY_ROUNDS",
+    "MAX_WINDOW_DAYS",
     "CrossverifyConfig",
     "resolve_crossverify_config",
 ]

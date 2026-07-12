@@ -5108,8 +5108,10 @@ def build_app(
         ``SessionRateController`` (one account rate budget — §2 Rule 6),
         launched on a dedicated background job (returns at once; poll
         ``/api/v1/crossverify/progress``). Config junk
-        (``BRUTEX_CROSSVERIFY_*``) is resolved EAGERLY → 400, never a
-        job-thread error (the greeks-backfill posture).
+        (``BRUTEX_CROSSVERIFY_*`` AND — for vendor-calling runs — the
+        market-hours guard env the runner's seams resolve) is validated
+        EAGERLY → 400, never a job-thread error (the greeks-backfill
+        posture; the CLI's eager ``default_seams`` validation, mirrored).
 
         Lock semantics (the phase-A handoff law): the job starts with
         ``cross_process_lock=False`` because the runner's own
@@ -5147,6 +5149,14 @@ def build_app(
                 skip_pull=skip_pull,
                 no_publish=no_publish,
             )
+            if not dry_run:
+                # Eager fail-loud VALIDATION only (junk market-hours env →
+                # 400 here, the CLI parity) — the runner's default_seams
+                # re-resolves the predicate at bind; a dry-run threads None
+                # (no vendor calls to gate), mirroring the seam's own gate.
+                from brutex.calendars.market_hours import resolve_market_closed
+
+                resolve_market_closed()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _LOG.info(

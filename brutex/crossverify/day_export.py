@@ -187,14 +187,27 @@ def _export_rows(bars: list[CandleBar]) -> list[ExportRow]:
 
 
 def _decide(
-    *, instrument_class: str, reason: str, incomplete: bool
+    *, instrument_class: str, reason: str, incomplete: bool, covers_today: bool
 ) -> Literal["publish", "withheld", "blocked", "nothing"]:
     """The §4.3 per-class decision table — branch on ``reason``, never on
     ``incomplete`` alone (decision 5). Unknown FUTURE tokens: ``incomplete``
     ⇒ withheld verbatim; else nothing + one WARN (never publish on an unknown
-    state)."""
+    state). Defense-in-depth belt (round-2 hostile review S4): a publish
+    additionally requires ``covers_today AND not incomplete`` — a
+    contract-violating ``complete`` verdict (the gate promising completeness
+    while flagging no-coverage / incompleteness) is WITHHELD + WARNed, never
+    trusted (the caller names it ``gate_contract_violation``)."""
     if reason == _REASON_COMPLETE:
-        return "publish"
+        if covers_today and not incomplete:
+            return "publish"
+        _LOG.warning(
+            "crossverify.gate_contract_violation",
+            instrument_class=instrument_class,
+            covers_today=covers_today,
+            incomplete=incomplete,
+            action="withheld (a 'complete' verdict must cover today and not be incomplete)",
+        )
+        return "withheld"
     if reason == "no_today_bars":
         # A brute-force index missing its day is a pull FAILURE (BLOCKED);
         # an illiquid stock / not-yet-traded contract is honest nothing.
@@ -271,9 +284,13 @@ def export_symbol(
         instrument_class=identity.instrument_class,
         reason=verdict.reason,
         incomplete=verdict.incomplete,
+        covers_today=verdict.covers_today,
     )
     if disposition != "publish":
-        return _no_bytes(disposition, verdict.reason)
+        # The S4 belt tripped on a lying "complete" verdict — name the
+        # violation, never echo "complete" on a withheld record.
+        reason = "gate_contract_violation" if verdict.reason == _REASON_COMPLETE else verdict.reason
+        return _no_bytes(disposition, reason)
     rows = _export_rows(bars)
     try:
         if verdict.distinct_minutes is not None and len(rows) != verdict.distinct_minutes:

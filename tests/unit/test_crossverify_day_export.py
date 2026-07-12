@@ -292,32 +292,47 @@ class TestCorruptStoredRowIsolation:
 
 class TestDecide:
     @pytest.mark.parametrize(
-        ("instrument_class", "reason", "incomplete", "expected"),
+        ("instrument_class", "reason", "incomplete", "covers_today", "expected"),
         [
-            ("index_spot", "complete", False, "publish"),
-            ("cash_spot", "complete", False, "publish"),
-            ("fut", "complete", False, "publish"),
-            ("index_spot", "no_today_bars", False, "blocked"),
-            ("cash_spot", "no_today_bars", False, "nothing"),
-            ("fut", "no_today_bars", False, "nothing"),
-            ("index_spot", "non_trading", False, "nothing"),
-            ("index_spot", "abstain_coverage", False, "withheld"),
-            ("index_spot", "count_short", True, "withheld"),
-            ("index_spot", "count_excess", True, "withheld"),
-            ("index_spot", "last_bar_incomplete", True, "withheld"),
-            ("cash_spot", "volume_all_zero", True, "withheld"),
-            ("fut", "oi_null_settling", True, "withheld"),
-            ("fut", "volume_all_zero", True, "withheld"),
+            ("index_spot", "complete", False, True, "publish"),
+            ("cash_spot", "complete", False, True, "publish"),
+            ("fut", "complete", False, True, "publish"),
+            # Round-2 S4 defense-in-depth: a contract-violating "complete"
+            # verdict (no today-coverage, or flagged incomplete) is WITHHELD.
+            ("index_spot", "complete", False, False, "withheld"),
+            ("cash_spot", "complete", True, True, "withheld"),
+            ("fut", "complete", True, False, "withheld"),
+            ("index_spot", "no_today_bars", False, True, "blocked"),
+            ("cash_spot", "no_today_bars", False, True, "nothing"),
+            ("fut", "no_today_bars", False, True, "nothing"),
+            ("index_spot", "non_trading", False, False, "nothing"),
+            ("index_spot", "abstain_coverage", False, True, "withheld"),
+            ("index_spot", "count_short", True, True, "withheld"),
+            ("index_spot", "count_excess", True, True, "withheld"),
+            ("index_spot", "last_bar_incomplete", True, True, "withheld"),
+            ("cash_spot", "volume_all_zero", True, True, "withheld"),
+            ("fut", "oi_null_settling", True, True, "withheld"),
+            ("fut", "volume_all_zero", True, True, "withheld"),
             # Forward-compat arms — never publish on an unknown state.
-            ("fut", "some_future_reason", True, "withheld"),
-            ("fut", "some_future_reason", False, "nothing"),
+            ("fut", "some_future_reason", True, True, "withheld"),
+            ("fut", "some_future_reason", False, True, "nothing"),
         ],
     )
     def test_decision_table(
-        self, instrument_class: str, reason: str, incomplete: bool, expected: str
+        self,
+        instrument_class: str,
+        reason: str,
+        incomplete: bool,
+        covers_today: bool,
+        expected: str,
     ) -> None:
         assert (
-            _decide(instrument_class=instrument_class, reason=reason, incomplete=incomplete)
+            _decide(
+                instrument_class=instrument_class,
+                reason=reason,
+                incomplete=incomplete,
+                covers_today=covers_today,
+            )
             == expected
         )
 
@@ -413,6 +428,46 @@ class TestExportSymbol:
                 reader=_buggy_reader,
                 classifier=ScriptedClassifier(),
             )
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            FakeVerdict(reason="complete", covers_today=False, incomplete=False),
+            FakeVerdict(reason="complete", covers_today=True, incomplete=True),
+        ],
+    )
+    def test_contract_violating_complete_verdict_withheld_named(self, verdict: FakeVerdict) -> None:
+        # Round-2 S4: `covers_today` consulted as a defense-in-depth belt —
+        # a gate promising "complete" while flagging no-coverage /
+        # incompleteness is WITHHELD under the NAMED reason (never a publish,
+        # never a confusing "complete" on a withheld record).
+        export = export_symbol(
+            identity=_identity(),
+            day=_DAY,
+            session=_SESSION,
+            reader=_static_reader([_bar(9, 15)]),
+            classifier=ScriptedClassifier(default=verdict),
+        )
+        assert export.disposition == "withheld"
+        assert export.reason == "gate_contract_violation"
+        assert export.csv_bytes is None
+        assert export.sha256 is None
+
+    def test_covering_complete_verdict_still_publishes(self) -> None:
+        # The other S4 arm: the honest complete verdict (covers_today=True,
+        # incomplete=False) publishes exactly as before the belt.
+        export = export_symbol(
+            identity=_identity(),
+            day=_DAY,
+            session=_SESSION,
+            reader=_static_reader([_bar(9, 15)]),
+            classifier=ScriptedClassifier(
+                default=FakeVerdict(reason="complete", covers_today=True, distinct_minutes=1)
+            ),
+        )
+        assert export.disposition == "publish"
+        assert export.reason == "complete"
+        assert export.csv_bytes is not None
 
     def test_distinct_minutes_belt_refuses_mismatch(self) -> None:
         export = export_symbol(
