@@ -11,6 +11,20 @@
 # unambiguous PASS/FAIL line plus both hash manifests formatted for pasting
 # into the PR body.
 #
+# ENGAGEMENT GATE (review round 2, DEC-SWEEP-ENUM-RUST-001): byte-identity
+# alone is VACUOUS when the ON arm silently served the Python spine — a
+# stale/absent wheel degrades with one warn-once fallback, and a shadow
+# burn-in mismatch SHIPS THE PYTHON RESULT then latches the width off
+# (kernel_autoreverted), so both arms match bytes and `cmp` alone would print
+# a PASS that proves nothing about the kernel. Each arm's output is therefore
+# teed to a log and, before any PASS, the ON arm's log MUST contain
+# `sweep_rust_enum.engaged` and MUST NOT contain any masking/divergence
+# marker (`sweep_rust_enum.fallback` — covers wheel_missing / wheel_stale /
+# enum_total_mismatch / kernel_error / every other Python-served reason —
+# `sweep_rust_enum.kernel_autoreverted`, `sweep_rust_enum.kernel_result_refused`).
+# BRUTEX_LOG_LEVEL is pinned to INFO on both arms so the INFO-level engaged
+# event is always visible to the gate regardless of the operator's shell env.
+#
 # SAFETY (by construction):
 #   * READ-ONLY on the lake: results + the catalog DuckDB both go under a
 #     fresh scratch dir this script creates (--results-root + --catalog);
@@ -30,6 +44,9 @@
 # Optional env overrides: TWIN_SYMBOLS TWIN_START TWIN_END TWIN_INTERVALS
 #   TWIN_DIRECTIONS TWIN_K TWIN_TOP TWIN_PYTHON
 set -eu
+# pipefail (bash >= 3.0, macOS 3.2 OK): run_arm pipes the CLI through `tee`
+# for the engagement-gate logs — a failing sweep must still abort the script.
+set -o pipefail
 
 LAKE_ROOT="${1:-${BRUTEX_LAKE_ROOT:-}}"
 if [ -z "$LAKE_ROOT" ]; then
@@ -66,10 +83,13 @@ echo "sub-grid: symbols=$TWIN_SYMBOLS window=$TWIN_START..$TWIN_END intervals=$T
 
 run_arm() {
   # $1 = arm name (off|on), $2 = flag value (0|1)
+  # Output (stdout+stderr, where structlog writes) is teed to $SCRATCH/$1.log
+  # so the engagement gate below can inspect the ON arm's kernel events.
   arm_root="$SCRATCH/$1"
+  arm_log="$SCRATCH/$1.log"
   mkdir -p "$arm_root"
   echo "── arm $1 (BRUTEX_SWEEP_RUST_ENUM=$2) ──"
-  env BRUTEX_SWEEP_RUST_ENUM="$2" BRUTEX_RESULTS_DEPTH=0 \
+  env BRUTEX_SWEEP_RUST_ENUM="$2" BRUTEX_RESULTS_DEPTH=0 BRUTEX_LOG_LEVEL=INFO \
     "$PYTHON" -m brutex sweep-all \
     --symbols "$TWIN_SYMBOLS" \
     --start "$TWIN_START" --end "$TWIN_END" \
@@ -79,7 +99,7 @@ run_arm() {
     --top "$TWIN_TOP" \
     --lake-root "$LAKE_ROOT" \
     --results-root "$arm_root/results" \
-    --catalog "$arm_root/catalog.duckdb"
+    --catalog "$arm_root/catalog.duckdb" 2>&1 | tee "$arm_log"
 }
 
 hash_manifest() {
@@ -121,6 +141,34 @@ if [ ! -s "$OFF_MANIFEST" ]; then
   echo "TWIN-RUN FAIL: the OFF arm produced ZERO artifacts — the sub-grid did not run" >&2
   exit 1
 fi
+
+# ── ENGAGEMENT GATE (must clear BEFORE any PASS can print) ──
+# A byte-identical twin proves kernel-vs-Python equivalence ONLY if the
+# kernel genuinely served the ON arm. Two reachable masked-PASS paths
+# otherwise: (1) a stale/absent wheel → warn-once fallback → every tuple
+# Python-served; (2) a shadow-burn-in mismatch → the wrapper ships the
+# Python result and autoreverts the width → all later tuples Python-served.
+ON_LOG="$SCRATCH/on.log"
+if ! grep -q 'sweep_rust_enum\.engaged' "$ON_LOG"; then
+  echo "TWIN-RUN FAIL: the ON arm never logged sweep_rust_enum.engaged —" >&2
+  echo "  the kernel did not serve (stale/absent wheel or a sticky fallback);" >&2
+  echo "  byte-identity under full Python fallback proves nothing. Rebuild the" >&2
+  echo "  wheel (maturin develop --release in rust/fno-math) and re-run." >&2
+  echo "  ON-arm kernel events (log kept at $ON_LOG):" >&2
+  grep -n 'sweep_rust_enum\.' "$ON_LOG" >&2 || echo "  (none logged)" >&2
+  exit 1
+fi
+BAD_MARKERS='sweep_rust_enum\.(fallback|kernel_autoreverted|kernel_result_refused)'
+if grep -E -q "$BAD_MARKERS" "$ON_LOG"; then
+  echo "TWIN-RUN FAIL: the ON arm logged a kernel fallback/divergence marker —" >&2
+  echo "  those tuples were Python-served, so a byte-identical compare would be" >&2
+  echo "  MASKED (an autoreverted shadow mismatch is a REAL kernel bug even" >&2
+  echo "  though the shipped bytes match). Offending lines (log at $ON_LOG):" >&2
+  grep -E -n "$BAD_MARKERS" "$ON_LOG" >&2
+  exit 1
+fi
+echo "engagement gate: ON arm logged sweep_rust_enum.engaged with zero fallback/autorevert/refusal markers"
+
 if cmp -s "$OFF_MANIFEST" "$ON_MANIFEST"; then
   echo "TWIN-RUN PASS: BRUTEX_SWEEP_RUST_ENUM=0 and =1 produced BYTE-IDENTICAL artifacts"
   echo "  ($(wc -l < "$OFF_MANIFEST" | tr -d ' ') files compared; scratch kept at $SCRATCH)"
