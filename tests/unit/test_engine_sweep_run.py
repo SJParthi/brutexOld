@@ -3691,3 +3691,92 @@ class TestHitCountMemo:
             )
         assert capped.store_content_hash == off.store_content_hash
         assert len(memo) <= 2  # insert-drop beyond the (patched) cap
+
+
+# ────── R45 executed-population handoff (round 3, MIGRATION.md #1752) ──────
+
+
+class TestOnMaskPopulation:
+    """``on_mask_population`` — the apriori arm hands its already-materialised
+    candidate list to the caller (the R45 diffcheck's sample population), so
+    the spot-check samples the EXECUTED work instead of re-walking the raw
+    C(n, k) enumeration the extinction auto-raise unbounds (the round-3
+    BLOCKER). Never fired on the legacy arm; fail-soft by the I-3 law."""
+
+    def _run(
+        self,
+        tmp_path: Path,
+        tag: str,
+        cfg: SweepRunConfig,
+        capture: Callable[[Sequence[int]], None],
+    ) -> SweepRunSummary:
+        store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+        with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+            return run_persisted_sweep(
+                _trending_bars(),
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                on_mask_population=capture,
+            )
+
+    def test_apriori_arm_fires_once_with_the_executed_candidate_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+        captured: list[Sequence[int]] = []
+        summary = self._run(tmp_path, "on", cfg, captured.append)
+        assert len(captured) == 1
+        # The capture IS the enumeration source: every enumerated mask came
+        # from it, and at min_hits=0 the frontier keeps the full canonical walk
+        # minus the generator's own conflict prune (the frozen module drops
+        # conflicted masks at candidate generation, unlike the raw walk).
+        from brutex.engine.combo_mask import iter_masks_k_of_bits
+        from brutex.vocabulary.conflicts import has_conflict
+
+        assert summary.enumerated == len(captured[0])
+        expected = [m for m in iter_masks_k_of_bits([0, 1, 2, 3, 4], 2) if not has_conflict(m)]
+        assert list(captured[0]) == expected
+
+    def test_extinct_tuple_hands_an_empty_population(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The tri-state's third arm: an EXTINCT tuple captures an EMPTY list
+        (a real population — the diffcheck's honest counted skip), never
+        nothing."""
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=10_000)
+        captured: list[Sequence[int]] = []
+        summary = self._run(tmp_path, "extinct", cfg, captured.append)
+        assert summary.enumerated == 0
+        assert len(captured) == 1
+        assert list(captured[0]) == []
+
+    def test_legacy_arm_never_fires(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The legacy ``mask_source`` is a LAZY generator — materialising it
+        for a capture would re-create the very cost round 3 closes."""
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+        captured: list[Sequence[int]] = []
+        summary = self._run(tmp_path, "legacy", cfg, captured.append)
+        assert summary.enumerated == 10  # C(5, 2) — the sweep itself ran fine
+        assert captured == []
+
+    def test_raising_capture_warns_and_never_kills_the_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+
+        def _dead_capture(population: Sequence[int]) -> None:
+            raise RuntimeError("capture down")
+
+        with capture_logs() as logs:
+            summary = self._run(tmp_path, "dead", cfg, _dead_capture)
+        assert summary.enumerated == 8  # the sweep completed regardless
+        warns = [e for e in logs if e["event"] == "sweep_run.mask_population_capture_failed"]
+        assert len(warns) == 1
+        assert warns[0]["log_level"] == "warning"
+        assert warns[0]["error_type"] == "RuntimeError"

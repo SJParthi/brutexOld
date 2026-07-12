@@ -28,6 +28,7 @@ round-1 review fixes over a REAL tiny Parquet lake (the
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -518,3 +519,32 @@ def test_triple_plus_mode_invariant_divergence_stays_rc3_corrupt(
     assert rc == EXIT_VERIFY_FINDINGS
     assert " recount_divergence:" in out  # the verdict-grade code, colon-anchored
     assert "recount_mode_divergence:" not in out
+
+
+# ── round 3: the R45 diffcheck samples the EXECUTED population ──
+
+
+def test_extinct_tuple_diffcheck_completes_in_bounded_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 BLOCKER regression (MIGRATION.md #1752): an explicit ``--k 6``
+    over ALL 60 conditions on this 8-bar lake (extinct at level 1 — 8 bars
+    can never reach MIN_TRADES=30 hits) with the R45 diffcheck DEFAULT-ON
+    completes in seconds. Pre-fix ``run_for_tuple`` materialised the raw
+    conflict-pruned C(60,6)=50,063,860-mask walk — 126.4 s measured in this
+    container (k=7 ≈ 45 min, k=8 ≈ 5 h + a ~20 GB list → OOM) — which the
+    extinction-mode ``effective_max_combos`` auto-raise unbounds and the
+    per-level breaker cannot see (0 candidates ⇒ 0 breaker work). Post-fix
+    the diffcheck samples the EXECUTED (empty) candidate population and
+    skips: measured 0.8 s, == the diffcheck-OFF baseline."""
+    monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+    monkeypatch.delenv("BRUTEX_SWEEP_DIFFCHECK", raising=False)  # default ON
+    lake_root, catalog_path = _persist(tmp_path)
+    t0 = time.monotonic()
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps", k="6", conditions=None)
+    wall = time.monotonic() - t0
+    assert rc == EXIT_OK
+    assert wall < 60.0, (
+        f"extinct k=6 tuple took {wall:.1f}s with the diffcheck ON — "
+        "the raw C(60,6) walk is back (round-3 BLOCKER regression)"
+    )

@@ -1447,6 +1447,47 @@ def test_diffcheck_zero_checked_records_nothing(tmp_path: Path) -> None:
     assert not [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
 
 
+def test_r45_diffcheck_closure_forwards_the_executed_population(tmp_path: Path) -> None:
+    """Round 3 (MIGRATION.md #1752): the closure forwards ``mask_population=``
+    verbatim to the hook — an injected 1-mask population checks exactly 1
+    (the raw k=1 walk over the grid bits would offer 3)."""
+    from brutex.engine.stage1a import build_bar_bits
+
+    grid = _grid()
+    tuple_ = next(iter_sweep_tuples(grid))
+    bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
+    with _core(tmp_path, grid, diffcheck_k=4) as (core, _s):
+        assert core.diffcheck is not None
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[0b100])
+        run_id = core.run_id
+    ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
+    assert len(ok_rows) == 1
+    payload = cast("dict[str, Any]", ok_rows[0]["payload"])
+    assert payload["checked"] == 1  # the population, not the 3-mask raw walk
+    assert payload["mismatches"] == 0
+
+
+def test_r45_diffcheck_closure_empty_population_skips_and_spends_no_budget(
+    tmp_path: Path,
+) -> None:
+    """An EXTINCT population is a counted skip that consumes NO K budget —
+    the very next (legacy-population) call still has the full budget."""
+    from brutex.engine.stage1a import build_bar_bits
+
+    grid = _grid()
+    tuple_ = next(iter_sweep_tuples(grid))
+    bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
+    with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
+        assert core.diffcheck is not None
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[])
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        run_id = core.run_id
+    ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
+    assert len(ok_rows) == 1  # the skip recorded nothing; the second call ran
+    payload = cast("dict[str, Any]", ok_rows[0]["payload"])
+    assert payload["checked"] == 2  # the FULL budget survived the skip
+
+
 def test_on_tuple_without_inner_still_records(tmp_path: Path) -> None:
     grid = _grid()
     tuple_ = next(iter_sweep_tuples(grid))
