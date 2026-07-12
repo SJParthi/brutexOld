@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
+_Last updated: 2026-07-12 (the 4-item LOCK-DISCIPLINE + BLOOM-BOUNDARY FIX PACK,
+MIGRATION.md #1751–#1753 + the BUG-6 test-only rider —
+DEC-RATE-SLEEP-OUTSIDE-LOCK-001 (#1751: the `AdaptiveTokenBucket.acquire()` retry sleep no
+longer runs while holding the bucket lock — the retry sleep now runs with the lock RELEASED
+(release/try/finally re-acquire inside the pinned loop — the governor's wake→re-test posture,
+every existing pragma/pin proof intact), so `set_rate`/`current_rps` and, transitively, the
+whole `RateController` are never parked up to `1/current_rps` behind a sleeper; a
+LATENCY/liveness fix, NO throughput claim — pacing decisions + every cap byte-identical) +
+DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001 (#1752: `brutex doctor --live --rate-probe` takes the
+pull single-flight locks — account FIRST then lake-root, holder_note
+`doctor:rate-probe:<run_id>` — HELD through the whole ≤480-call/≤60 s probe; contention = a
+NAMED zero-vendor-call refusal echoing the holder; DETECTION/serialisation at the account on
+ONE host — the cross-host lease is deliberately not entered and TickVault's lock-free share of
+the account stays the accepted envelope; no rate-cap change) +
+DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001 (#1753: the SweepCache resume identity arm narrows `<=` to
+`<` so a persisted==bloom_capacity resume rides the #1714 grow arm (25% headroom + 16 GiB
+wall) instead of aborting the run once on the first new record; identity-neutral — the Bloom
+is never in run identity; disclosed delta: a wall-adjacent exact-boundary zero-new-record
+replay now refuses AT OPEN, the consistent FAIL_CLOSED posture) + the BUG-6 test-only rider
+(the per-minute governor's fail-open loop cap pinned production-unreachable under any
+advancing clock — no DEC, the #1351 tests-only exemption). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch blurb +
+MIGRATION.md #1751–#1753 — this header carries the one-line summary, never the story.)
+Earlier: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
 the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
 the ranking composite JOIN the display surfaces: the top100 artifact gains the
 per-entry `cascade` object + root `cascade_join` meta behind a HARD writer-side
@@ -2306,7 +2329,50 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
+- **Active branch:** `claude/concurrency-fix-pack` (**DEC-RATE-SLEEP-OUTSIDE-LOCK-001 +
+  DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001 + DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001, MIGRATION.md
+  #1751–#1753 + the BUG-6 test-only rider** — the 4-item lock-discipline + Bloom-boundary fix
+  pack: (1) #1751 — the `AdaptiveTokenBucket.acquire()` retry-loop sleep now runs with the
+  bucket lock RELEASED — release/try/finally re-acquire inside the pinned loop (the governor's
+  wake→re-test posture, DEC-GROWW-GOVERNOR-ATOMIC-001; every existing pragma/pin proof intact;
+  the `_ACQUIRE_LOOP_CAP` fail-OPEN posture kept), closing the measured up-to-`1/current_rps`
+  freeze of `set_rate`/`current_rps`/`available_tokens`/`recent_429_count` AND the transitive
+  whole-`RateController` freeze (its `on_*` hooks call `set_rate` under the controller lock);
+  rate_common's "(no I/O / sleep)" docstring claims become TRUE; HONEST: a latency/liveness
+  fix — pacing decisions, the AIMD ladder, every cap and the P-18 wait-accounting
+  reconciliation are byte-identical, NO throughput claim; `rate_limiter.py` 100% line+branch on
+  its ci.yml standalone gate + the weekly zero-survivor mutmut pair. (2) #1752 — `brutex doctor
+  --live --rate-probe` (stage 13's ≤480-call/≤60 s probe at the FULL production 8 r/s /
+  500-per-min controller) now acquires `account_pull_singleflight_lock` FIRST then
+  `pull_singleflight_lock` with holder_note `doctor:rate-probe:<run_id>` — the fixed order
+  law — HELD through the entire probe traffic (never probe-and-release); contention = the NEW
+  `rate.pull_lock_held` NAMED WARN refusal (zero vendor calls, holder-note echoed,
+  golden-catalog-pinned; `LakeWriteHalt` at lock creation = the NEW `rate.lock_halt` stage
+  FAIL), closing the ~960 req/min ≫ 500/min account-cap breach a probe beside a pull could
+  compose (governors never share state across controllers); the autorun budget-split precedent
+  was evaluated and REJECTED for this shape (a 16/min slice = a 30-min probe that no longer
+  measures the 8 r/s ladder, and a shared minute contaminates the measurement); no new KitDeps
+  seam — the account lock's own `lock_dir` test kwarg threaded from `deps.home`, mirror-pinned
+  to `default_account_lock_dir`; HONEST: same-host detection/serialisation at the account — the
+  cross-host lease is deliberately NOT entered for a ≤60 s diagnostic and TickVault's lock-free
+  account share stays the accepted envelope; no fetch/rate/pool/governor value change (§2
+  Rule 6 intact). (3) #1753 — the SweepCache resume Bloom identity arm narrows `persisted <=
+  capacity` to `<` (ONE char), so the exact boundary rides the EXISTING #1714 grow arm (25%
+  headroom, 16 GiB wall refusal, one loud `sweep_cache.bloom_auto_grow`) instead of the first
+  genuinely-new `record_digest` raising an unhandled `BloomCapacityExceeded` (no handler exists
+  in brutex/) and aborting the run once; IDENTITY-NEUTRAL (the Bloom is an L1 prefilter, never
+  in run identity — `combo_digest` byte-untouched); disclosed FAIL_CLOSED delta: a
+  wall-adjacent exact-boundary zero-new-record replay now refuses AT OPEN (pinned); sweep_cache
+  is NOT in the mutmut loop, so the `<`→`<=` revert mutant was hand-applied + verified killed
+  (ledgered). (4) the BUG-6 test-only rider (no DEC — the #1351 tests-only exemption):
+  `TestGovernorLoopCapClockSafety` pins the per-minute governor's `_GOVERNOR_LOOP_CAP`
+  fail-open as production-UNREACHABLE under any advancing clock (35 admissions at cap 10 —
+  the rolling-60 s law holds on every admission) and bounded/terminating under the pathological
+  frozen-clock + no-op-sleep shape; governor code + every VALUE byte-untouched. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/lake-schema change; touched
+  modules 100% line+branch on their gates; ruff/ruff-format/`mypy --strict` clean, pyright at
+  the pre-change baseline.)
+  Earlier: `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
   the cascade-verdict → display join: the Stage-4 verdicts + per-candidate CPCV
   pass rate + the ranking composite reach top100.json, /results, /screener,
   /strategy and the operator card. (1) `metrics/cascade.py` RECORDS the
@@ -5867,7 +5933,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/results-cascade-verdict-join`
+- **Active feature branch:** `claude/concurrency-fix-pack`
+  (DEC-RATE-SLEEP-OUTSIDE-LOCK-001 + DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001 +
+  DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001, MIGRATION.md #1751–#1753 — the 4-item
+  lock-discipline + Bloom-boundary fix pack incl. the BUG-6 test-only
+  governor-cap pins: the rate-bucket retry sleep released from the lock —
+  release/try/finally re-acquire inside the pinned loop, every existing
+  pragma/pin proof intact (latency fix, no throughput claim); the doctor
+  --rate-probe serialised behind the pull single-flight locks
+  (account-then-lake, held through the traffic, named zero-call refusal;
+  same-host detection at the account, lease not entered); the SweepCache
+  persisted==capacity Bloom boundary auto-grows via the #1714 arm instead of
+  a one-abort wedge (identity-neutral; wall-adjacent replay now refuses at
+  open — FAIL_CLOSED, pinned); the BUG-6 rider pins the governor loop-cap
+  fail-open production-unreachable under any advancing clock (tests only, no
+  DEC). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #1751–#1753 for the full blurb)
+  Earlier: `claude/results-cascade-verdict-join`
   (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
   cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
   composite join the display surfaces: the ONE `engine/cascade_join.py` law
