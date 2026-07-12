@@ -104,6 +104,19 @@ class TestDetectExtremeDailyRanges:
     def test_empty_frame_is_a_no_op(self) -> None:
         assert detect_extreme_daily_ranges(_frame([]), before=_FAR_FUTURE) == ()
 
+    def test_multiple_flagged_ascending_by_session_date(self) -> None:
+        # Determinism pin (the open-substitution twin of
+        # test_multiple_substituted_ascending_by_date): polars group_by is
+        # UNORDERED, so the .sort("_ist_date") is load-bearing — feed the
+        # flagged days in strictly DESCENDING input order and require
+        # ascending session_date output (the WARN emission order + WHICH 20
+        # of >20 unknown days get per-day lines both ride the tuple order).
+        days = [date(2024, 1, 31) - timedelta(days=i) for i in range(30)]
+        out = detect_extreme_daily_ranges(
+            _frame([_day_row(d, 110.0, 100.0) for d in days]), before=_FAR_FUTURE
+        )
+        assert [d.session_date for d in out] == sorted(days)
+
     def test_non_positive_low_is_skipped_defensively(self) -> None:
         # A non-positive low cannot be ratioed (and cannot enter a price-sane
         # lake) — skipped, never a ZeroDivisionError, siblings still judged.

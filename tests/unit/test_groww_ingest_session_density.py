@@ -126,6 +126,7 @@ def _run(
     interval: str = "1minute",
     detect_completeness_gaps: bool = True,
     ledger: WindowLedger | None = None,
+    observed_holidays: frozenset[date] = frozenset(),
 ) -> WindowLedger:
     led = ledger if ledger is not None else WindowLedger()
     ingest_spot(
@@ -137,6 +138,7 @@ def _run(
         end=date(2024, 1, 8),
         ledger=led,
         detect_completeness_gaps=detect_completeness_gaps,
+        observed_holidays=observed_holidays,
     )
     return led
 
@@ -172,6 +174,20 @@ class TestSpotSessionDensityWiring:
         # density is not session-shaped even if a master ever flags it IDX.
         with capture_logs() as logs:
             _run(instrument=_inst("GIFTNIFTY"))
+        assert [e for e in logs if e["event"] == SESSION_DENSITY_LOW_EVENT] == []
+
+    def test_observed_overlay_threads_through_the_spot_tail(self) -> None:
+        # `observed_holidays` must reach the census (the spot twin of the F&O
+        # pin `test_observed_overlay_threads_through_the_real_tail`): with Wed
+        # 2024-01-03 overlaid as an observed holiday the hole is a NON-session
+        # (abstain), so no event fires — a regression dropping `observed=` at
+        # the spot window-tail call site would flag it as a missing session
+        # and fail here.
+        with capture_logs() as logs:
+            _run(
+                instrument=_inst(),
+                observed_holidays=frozenset({date(2024, 1, 3)}),
+            )
         assert [e for e in logs if e["event"] == SESSION_DENSITY_LOW_EVENT] == []
 
     def test_ledger_record_shape_identical_census_on_and_off(
