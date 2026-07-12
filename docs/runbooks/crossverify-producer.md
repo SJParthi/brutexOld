@@ -64,6 +64,16 @@
 
 5. **Install the LaunchAgent (macOS; `--at` REQUIRED):**
 
+   > **HARD GATE — do NOT install until the completeness-gate PR (#1751,
+   > `brutex/data/today_completeness.py`) has landed.** The producer is
+   > FAIL-CLOSED without it: every scheduled fire exits 1 `refused … gate
+   > module absent` and pages CRITICAL — a paging loop, not a producer.
+   >
+   > **`--at` must be POST-CLOSE** (after 15:30 IST, probe-decided per
+   > step 3). A pre-open/mid-day fire resolves the NOT-YET-TRADED day: the
+   > gate withholds everything → `withheld_partial`/`blocked` exit 2 →
+   > CRITICAL on every single fire.
+
    ```bash
    brutex crossverify install --at HH:MM --lake-root /data/lake
    ```
@@ -124,7 +134,10 @@ pull excludes options; nothing to enrich.
 | `withheld_partial` exit 2 | The gate withheld incomplete files (settling OI / short index / render refusal) | TickVault sees honest absence. Re-pull later and re-run `--day YYYY-MM-DD` (manual backfill — auto re-gate is the named follow-up DEC-CROSSVERIFY-BACKFILL-001) |
 | `blocked` exit 2 | A brute-force INDEX has NO bars for the day — a pull failure | Investigate the pull (vendor outage / halt); re-run the day once healed |
 | `refused … gate module absent` | The sibling completeness gate (#1751) is not merged/installed | The producer is FAIL-CLOSED by design — never publishes ungated |
-| Corrupt journal WARN | `.crossverify/<day>.json` unreadable | Self-heals: the run re-renders + re-puts identical bytes (convergent) |
+| Corrupt journal WARN | `.crossverify/<day>.json` unreadable (junk JSON, invalid UTF-8, a directory) | Self-heals: the run re-renders + re-puts identical bytes (convergent); a corrupt PRIOR-day journal never blocks later runs |
+| `crossverify.staging_orphaned` WARN | A staging dir exists for a day whose journal is wiped/corrupt — invisible to the pending scan | Bytes are left in place; `brutex crossverify run --day YYYY-MM-DD` re-runs that day idempotently |
+| `crossverify.staged_bytes_corrupt` WARN | A staged file's bytes no longer match the journal's recorded sha256/size (bit rot / tamper) | Never published; stays pending. A same-day re-run re-renders + heals; a prior day needs `--day YYYY-MM-DD` |
+| `refused … concurrent same-day run` | A peer producer run holds the day's journal lock past the bound | Nothing lost — let the peer finish; re-run if it died (the flock dies with its process) |
 | dead-man `MISSED` on `status` | The Mac slept through the fire | Run the printed `pmset` scheduled wake; re-run the missed day manually |
 
 ## 3. Ops surface
@@ -137,11 +150,18 @@ pull excludes options; nothing to enrich.
 - Status + dead-man: `brutex crossverify status` (plist presence, launchctl
   listing, newest journal, trading-day-aware dead-man verdict; MISSED fires
   a best-effort CRITICAL push). Honest limit: a dead box is silent on-box
-  (the #1596 posture); a `nothing_to_do` day writes no journal and reads
-  MISSED — check the Telegram summary.
+  (the #1596 posture). A `nothing_to_do` day DOES write its (empty-entries)
+  journal, so the dead-man reads OK for it; the journal-less exits are the
+  pre-staging ones (deferral / lock refusal / gate absent / pull halt),
+  each of which already fired its own alert.
 - Locks: the producer holds the pull account→lake→lease trio ONLY through
-  staging; the S3 publish (and the recovery scan) run lock-free, so the
-  01:30 nightly can never meet a producer-held flock during publish.
+  staging; the S3 publish (and the recovery scan) never hold the PULL
+  locks, so the 01:30 nightly can never meet a producer-held pull flock
+  during publish. Per-DAY journal+staging+publish sections additionally
+  serialise on a day-journal flock (`<lake>/.locks/…`, the COMMON
+  partition-lock sidecar) so two concurrent runs converge instead of racing
+  the staging cleanup — that flock is a leaf, never held while acquiring
+  the pull locks.
 
 ## 4. Honest limits
 

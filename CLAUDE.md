@@ -2399,7 +2399,24 @@ hostile-review pass._
   journal key can never traverse outside the staging tree), the recovery scan moved BEFORE the session gate (a
   weekend run still republishes prior pending keys; recovered staging cleaned, failed-again staging kept +
   `publish_failed` exit 2), repr()'d vendor-derived log fields (#907), the step-boundary-deadline / box-IST /
-  IAM-guardrail / legacy-bar runbook honesty notes, and the intentional double-CRITICAL-on-halt comment. ENGINE
+  IAM-guardrail / legacy-bar runbook honesty notes, and the intentional double-CRITICAL-on-halt comment.
+  ROUND-2 HOSTILE-REVIEW FIX PACK folded (same branch, pre-open — the per-finding record lives in MIGRATION.md
+  #1753): the two refuter-confirmed MAJORs killed with stash-verified fail-before tests — (M1) `load_journal`
+  reads bytes+decode INSIDE the corruption-tolerant path (an invalid-UTF-8 / directory-shaped journal loads
+  None + one WARN; pre-fix it raised uncaught and ONE bit-rotted prior-day journal wedged EVERY later run via
+  the recovery scan) and (M2) `publish_staged` VERIFIES each staged file against the journal's recorded
+  sha256+size BEFORE the PUT (a bit-rotted/tampered staged file on the recovery path was previously published
+  VERBATIM to production S3; now WARN + failed + pending + staging kept — a same-day re-render heals) — plus the
+  S1 deferral honesty law (ALL exit-0 early returns ride ONE `_early_ok` upgrade: a recovery soft-failure is
+  `publish_failed` exit 2, never cron-green), the S2a per-day journal flock (the COMMON `partition_write_lock`
+  on the day's journal path serialises step-D recovery / stage+journal / publish+cleanup spans — the day flock
+  is a LEAF, never held while acquiring the pull trio; contended = prior-day skip / today honest refused exit
+  1; flock-held probes + a two-thread convergence test), the S2b `staging_orphaned` WARN (wiped/corrupt-journal
+  staging named + left in place), the S3e recovery abort law (nonretryable stops the prior-day scan), the S3a
+  `MAX_WINDOW_DAYS=3660` config bound, the S3b `nothing_to_do`-writes-its-journal deadman honesty correction
+  (schedule.py/runbook/#1753 + an in-test pin), the S3d eager market-hours-env 400 on the dashboard route (CLI
+  parity; dry-run exempt), and the S4 `covers_today` defense-in-depth belt (`gate_contract_violation` withheld,
+  never a publish on a lying "complete"). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean,
   `mypy --strict` clean, pyright 0 new; `node --check` clean on the touched template's inline scripts.)
   Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
