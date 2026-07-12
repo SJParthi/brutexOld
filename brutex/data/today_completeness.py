@@ -36,6 +36,10 @@ Per-class criteria (the binding table — DEC-PULL-TODAY-COMPLETENESS-GATE-001):
   close-edge law :func:`~brutex.calendars.nse.session_last_bar_complete` (volume
   and OI carry ZERO signal on an index: ``drop_volume`` forces 0, OI is always
   ``None``). Indices print every session minute, so the count demand is safe.
+  HONEST: a circuit-breaker trading-HALT day (market-wide halt → genuinely
+  fewer session minutes) would count-demote a genuinely-complete day —
+  self-healing (streak-exempt, and the next non-covers-today pull is inert so
+  the day's bars land), disclosed (round-2 review).
 * ``CASH_SPOT`` — shape only: INCOMPLETE iff bars exist AND every one has
   ``volume == 0`` (the #837 still-settling ``volume=None`` → stored ``0``
   shape). Count/last-bar deliberately NOT demanded — an illiquid microcap whose

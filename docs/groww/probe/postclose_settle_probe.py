@@ -231,7 +231,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from brutex.adapters.groww.token_cache import CachedToken, current_session
         from brutex.adapters.groww.token_store_aws import build_readonly_token_store_with
         from brutex.adapters.rate_common import RateController
-        from brutex.calendars.market_hours import guard_active_default, pull_allowed_default
+        from brutex.calendars.market_hours import guard_active_default
         from brutex.calendars.nse import get_session, has_muhurat_session, now_ist
         from brutex.adapters.groww.auth import GrowwCredentials
         from brutex.config.credentials_aws import load_groww_aws_credentials
@@ -247,7 +247,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     # TickVault's live feed on the shared account. The block is HALF-OPEN, so
     # the first runbook slot (15:35:00 sharp) is ALLOWED; weekends/holidays are
     # allowed at any hour. The check runs BEFORE any client build / vendor call.
-    if guard_active_default() and not pull_allowed_default():
+    # guard_active_default() FOLDS the in-window check itself (it returns
+    # enabled-AND-blocked — round-2 reviewer-A NIT-1, the redundant second
+    # pull_allowed_default() call dropped); a junk BRUTEX_MARKET_HOURS_GUARD
+    # env stays fail-loud but reads a clean one-liner, never a raw traceback
+    # (NIT-2).
+    try:
+        market_blocked = guard_active_default()
+    except ValueError as exc:
+        print(f"CANNOT START: invalid BRUTEX_MARKET_HOURS_GUARD value — {exc}", file=sys.stderr)
+        return 2
+    if market_blocked:
         print(
             "CANNOT START: inside the NSE market-hours block [08:45, 15:35) IST on a "
             "trading day — the shared Groww account belongs to TickVault's live feed "

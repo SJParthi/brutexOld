@@ -2370,8 +2370,12 @@ hostile-review pass._
   (pre-fix stored partial days need the runbook remediation — mechanised audit
   = DEC-LAKE-AUDIT-SETTLING-ROWS-001); the shape checks are parsed-bar
   INFERENCE of the destroyed 6-element row (false positives cost one bounded
-  streak-exempt deferral, measured by the probe); a `nightly_summary` deferral
-  line = DEC-TODAY-GATE-NIGHTLY-SURFACE-001. (4) The #1752 probe
+  streak-exempt deferral, measured by the probe); a PROGRESSIVELY-settling
+  mixed CASH day passes the all-bars zero-volume rule and keep-first freezes
+  its forming minutes — a disclosed residual, conditional on unverified
+  per-minute CASH settlement behavior, probe-measurable via the per-CASH
+  `raw_null_volume`/`rows_len6` fields (#1751 (b)); a `nightly_summary`
+  deferral line = DEC-TODAY-GATE-NIGHTLY-SURFACE-001. (4) The #1752 probe
   (`docs/groww/probe/postclose_settle_probe.py` + runbook): the doctor-kit
   mint-BLOCKED read-only SSM paced client probes NIFTY/BANKNIFTY/SENSEX + 10
   seed-fixed F&O-eligible CASH stocks + the front-month NIFTY FUT at
