@@ -2419,6 +2419,15 @@ hostile-review pass._
   filter-input debounce ported verbatim (the latency-suite pin re-pointed to the
   panel); the v29 winners Show-all copy updated to main's bounded wording (T-N2 parity
   held on both surfaces). Entry renumbered #1714→#1755 (drain-lane-steward-assigned).
+  ADVERSARIAL-LOOP COMPLETION (rounds 6-8): round 6 = the two a11y fixes above (folded
+  in 09ca7685 on the 2/3-refuter consensus; the third refuter environment-killed before
+  filing); round 7 CLEAN — zero findings, incl. the merge-integrity audit of the
+  origin/main 3f32b3ef merge-up; round 8 CLEAN — the loop exited on two consecutive
+  clean rounds. Final record-only register (round 8, 3/3 confirmed record-only):
+  R8-skeptic-1 cascade-comment precision NIT · R8-suites-1 stale scratch-doc suite
+  count (the suite is greener than the doc claimed) · R8-suites-2 pre-existing
+  main-side harness env-sensitivity. Independent workspace-health PASS on bc68ed01 —
+  15/15 gates green (the full record lives in MIGRATION.md #1755).
   HONEST: the codec/pure helpers AND now the panel/portal
   terminal-state machines are EXECUTED under node (a DOM stub — no CSS/layout/browser-event
   semantics claimed); the remaining DOM wiring stays
