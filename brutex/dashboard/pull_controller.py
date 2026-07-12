@@ -1795,6 +1795,20 @@ def pull_all_spot(
         # as "the overnight pull died mid-run". Never raises (an unwritable journal
         # must never break a pull — the swallow lives inside the journal module).
         record_pull_start(lake_root, pull_id=pid, dry_run=dry_run)
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): the env kill switch is resolved ONCE per pull, fail-loud on
+        # junk at pull start (the ``resolve_market_closed`` posture, never
+        # mid-run) and BEFORE any thread-owning resource is built — a junk env
+        # must fail CLEAN, never orphan the fetch pipeline / write consumer /
+        # volume keepalive their draining ``finally`` has not yet armed (the
+        # round-1 R3-MAJOR-1 leak repro). A dry-run short-circuits to ``False``
+        # WITHOUT touching the env (the ``detect_completeness_gaps`` gating
+        # pattern — the synthetic adapter's first-day-only bars would false-red
+        # a today-covering window). NOTE: this bulk spot phase never armed
+        # ``detect_completeness_gaps`` (the #1031 demotions stay dead here —
+        # the named follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001); the TODAY
+        # gate rides its OWN parameter and IS wired here.
+        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # The coverage reconcile band-aids (lake-reconcile / EMPTY-terminal /
         # FAILED-repull) are RETIRED (DEC-WINDOW-LEDGER-001, Stage d): the unified
         # ledger is the SOLE skip authority, so its own per-window record + the
@@ -1929,17 +1943,6 @@ def pull_all_spot(
         # raises ``MarketHoursHalt`` (a global stop) — caught below, the committed work
         # kept + the pull deferred to the next out-of-hours run.
         _market_closed = None if dry_run else market_closed
-        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
-        # GATE-001): the env kill switch is resolved ONCE per pull, fail-loud on
-        # junk at pull start (the ``resolve_market_closed`` posture, never
-        # mid-run); a dry-run short-circuits to ``False`` WITHOUT touching the
-        # env (the ``detect_completeness_gaps`` gating pattern — the synthetic
-        # adapter's first-day-only bars would false-red a today-covering
-        # window). NOTE: this bulk spot phase never armed
-        # ``detect_completeness_gaps`` (the #1031 demotions stay dead here —
-        # the named follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001); the TODAY
-        # gate rides its OWN parameter and IS wired here.
-        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # Lazy vendor-depth-floor learner (DEC-VENDOR-FLOOR-LAZY-PROBE-001): ONE
         # per-pull instance over the PACED replica of THIS pull's adapter. The live
         # pool factory hands every leaf a no-op pace (`build_live_pool` without a
@@ -3009,6 +3012,15 @@ def pull_candles(
         inherited_pull_id_scope(pull_id) as pid,
         open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
     ):
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): resolved ONCE per pull, fail-loud on junk at pull start (the
+        # ``resolve_market_closed`` posture, never mid-run) and BEFORE any
+        # thread-owning resource is built — a junk env must fail CLEAN, never
+        # orphan the fetch pipeline / write consumer their draining ``finally``
+        # has not yet armed (the round-1 R3-MAJOR-1 leak repro). A dry-run
+        # short-circuits to ``False`` WITHOUT touching the env (the
+        # ``detect_completeness_gaps`` gating pattern).
+        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
         # Stage d) — the ledger's per-window record + the cold-start
         # `reconcile_ledger_with_lake` below are the sole skip source (the
@@ -3135,11 +3147,6 @@ def pull_candles(
         # A dry-run threads the empty overlay (the ``detect_completeness_gaps`` gating
         # pattern); ``load_observed_holidays`` never raises (missing/corrupt -> empty).
         _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
-        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
-        # GATE-001): resolved ONCE per pull, fail-loud on junk at pull start; a
-        # dry-run short-circuits to ``False`` WITHOUT touching the env (the
-        # ``detect_completeness_gaps`` gating pattern).
-        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)

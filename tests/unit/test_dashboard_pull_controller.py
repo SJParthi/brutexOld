@@ -3942,15 +3942,33 @@ class TestTodayCompletenessGateArming:
         assert captured
         assert all(flag is True for flag in captured)
 
+    #: Thread-name families owned by the pull's thread-owning resources — a junk
+    #: kill-switch raise must never orphan any of these (round-1 R3-MAJOR-1: the
+    #: pre-hoist ordering leaked groww-fetch-consumer-0..3 + groww-fetch-watchdog
+    #: + volume-keepalive per attempt, the keepalive fsync-ing the lake forever).
+    _LEAKABLE_THREAD_PREFIXES = ("groww-fetch-consumer", "groww-fetch-watchdog", "volume-keepalive")
+
+    def _leaked_pull_threads(self, before: set[str]) -> set[str]:
+        import threading
+
+        after = {t.name for t in threading.enumerate()}
+        return {name for name in after - before if name.startswith(self._LEAKABLE_THREAD_PREFIXES)}
+
     def test_pull_all_spot_live_junk_env_fails_loud_at_pull_start(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A LIVE pull with a junk kill-switch value fails LOUD at pull start
         # (the resolve_market_closed posture) — never a silent coercion, never
-        # a mid-run crash.
+        # a mid-run crash — and CLEAN: the resolve is hoisted ABOVE the
+        # thread-owning resource builds, so the raise leaks ZERO pipeline /
+        # consumer / keepalive threads (name-set delta, not absolute counts —
+        # the suite process owns unrelated threads).
+        import threading
+
         from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
 
         monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        before = {t.name for t in threading.enumerate()}
         with pytest.raises(ValueError, match=TODAY_COMPLETENESS_GATE_ENV):
             pull_all_spot(
                 [_index("13")],
@@ -3959,6 +3977,30 @@ class TestTodayCompletenessGateArming:
                 now=_BULK_NOW,
                 adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
             )
+        assert self._leaked_pull_threads(before) == set()
+
+    def test_pull_candles_live_junk_env_fails_loud_and_leaks_no_threads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The single-symbol twin of the bulk no-leak pin (round-1 R3-MAJOR-1):
+        # pull_candles resolves the kill switch BEFORE building its fetch
+        # pipeline / write consumer, so a junk env raises with zero orphans.
+        import threading
+
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        before = {t.name for t in threading.enumerate()}
+        with pytest.raises(ValueError, match=TODAY_COMPLETENESS_GATE_ENV):
+            pull_candles(
+                _index(),
+                lake_root=tmp_path,
+                dry_run=False,
+                from_date="2021-01-04",
+                to_date="2021-01-08",
+                adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+            )
+        assert self._leaked_pull_threads(before) == set()
 
     def test_pull_candles_kill_switch_off_threads_false(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

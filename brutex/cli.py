@@ -5050,6 +5050,17 @@ def cmd_fetch(
         # path. The pull OWNS their lifetime + MUST drain them in the `finally` below BEFORE
         # `end_pull_ledger` (settle-after-durable), so every queued window is processed +
         # ledger-recorded first.
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): resolved ONCE, fail-loud on junk at pull start (the
+        # existing loud CLI failure), never mid-run — and BEFORE the
+        # thread-owning write consumer / fetch pipeline are built, mirroring
+        # the dashboard sites (round-1 R3-MAJOR-1 uniformity hoist; the CLI's
+        # threads are daemons + one-shot, so this is hygiene, not a live
+        # leak). ``--dry-run`` / ``--inspect`` short-circuit to ``False``
+        # WITHOUT touching the env (the ``detect_completeness_gaps`` pattern).
+        from brutex.data.today_completeness import resolve_today_completeness_enabled
+
+        today_gate = (not (dry_run or inspect)) and resolve_today_completeness_enabled()
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
         fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
         # Vendor-down error-storm breaker + dead-credential StillStale escalation
@@ -5076,14 +5087,6 @@ def cmd_fetch(
         # only the clock), `None` for `--dry-run`/`--inspect` (a synthetic adapter / no
         # persistence makes ZERO vendor calls, so those are exempt like the start gate).
         market_closed = None if (dry_run or inspect) else resolve_market_closed()
-        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
-        # GATE-001): resolved ONCE here beside ``market_closed`` — junk env fails
-        # loud at pull start (the existing loud CLI failure), never mid-run; a
-        # ``--dry-run`` / ``--inspect`` short-circuits to ``False`` WITHOUT
-        # touching the env (the ``detect_completeness_gaps`` gating pattern).
-        from brutex.data.today_completeness import resolve_today_completeness_enabled
-
-        today_gate = (not (dry_run or inspect)) and resolve_today_completeness_enabled()
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
