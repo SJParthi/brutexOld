@@ -178,6 +178,31 @@ TODAY_GATE_ERROR_EVENT: Final[str] = "ingest.window.today_gate_error"
 #: suppressed summary).
 _EVENT_CAP_PER_PULL: Final[int] = 20
 
+#: Event field names :func:`observe_today_completeness` stamps EXPLICITLY —
+#: filtered out of the caller-supplied ``fields`` mapping so a caller passing
+#: e.g. ``symbol`` (both tails' series field dicts carry it) can never collide
+#: into a duplicate-kwarg ``TypeError`` inside the fail-open wrapper.
+_WRAPPER_OWNED_EVENT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "symbol",
+        "interval",
+        "pull_id",
+        "session_date",
+        "instrument_class",
+        "reason",
+        "expected_minutes",
+        "distinct_minutes",
+        "last_bar_ist",
+        "oi_null_count",
+        "zero_volume_count",
+        "withheld_bars",
+        "demoted",
+        "suppressed_count",
+        "total_incomplete",
+        "error",
+    }
+)
+
 #: The sole fetched granularity the gate judges (CLAUDE.md §2 Rule 3 — 1-minute
 #: is the ONLY vendor-fetched interval; the derived ``1day`` follows it).
 _ONE_MINUTE: Final[str] = "1minute"
@@ -456,7 +481,11 @@ def observe_today_completeness(
         return None
     if window_end != clamp_today + timedelta(days=1):
         return None
-    extra = dict(fields) if fields is not None else {}
+    # The caller's per-window field dict (window bounds + series coordinates) —
+    # keys this wrapper stamps EXPLICITLY on its events are dropped so a caller
+    # passing e.g. ``symbol``/``interval`` in *fields* (the tails' series field
+    # dicts do) can never collide into a duplicate-kwarg TypeError.
+    extra = {k: v for k, v in (fields or {}).items() if k not in _WRAPPER_OWNED_EVENT_KEYS}
     pull_key = pull_id or ""
     try:
         if raw_count == 0:
