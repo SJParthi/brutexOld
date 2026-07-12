@@ -2373,8 +2373,10 @@ hostile-review pass._
   `tests/unit/test_migration_1738_commit_attribution_pin.py` (correction-present + mislabel-stays-phantom
   + the-call-lives-in-combo_digest source-truth anchor). MUTATION: enum_kernel 782 raw →
   204 after the exclude_re dropping ONLY the 578 provably-UNVIABLE whole-fn `-> PyResult` constructor
-  guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the #1597
-  dial taken AGAIN (7 → 8 shards, ceil(803/8)=101). HONEST: SEGMENT-level lever, NO whole-sweep claim; no
+  guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the shard
+  matrix dialed 6 → 8 vs main's #1597 6-shard config (ceil(803/8)=101/shard restores the ~100-mutant
+  budget; the first-published "7 → 8" narration was a merge-reconcile artifact — fno-math was never 7
+  shards on main, corrected round 5). HONEST: SEGMENT-level lever, NO whole-sweep claim; no
   O-class change; no GIL release; recorded deltas — module naming stays `rust_enum.py`/`enum_kernel.rs`
   (Slice 2 owns the `sweep_core` unification), bar_bits-only pyclasses (the 7-column core is Slice-2
   fold-arm machinery), the stall-budget guard lands with Slice 2, the F1 golden asserts the OFF≡ON

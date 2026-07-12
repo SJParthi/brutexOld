@@ -944,6 +944,32 @@ class TestWorkflowWiring:
         assert "TWIN_START: ${{ inputs.twin_start }}" in wf
         assert "TWIN_END: ${{ inputs.twin_end }}" in wf
 
+    def test_fno_math_shard_dial_narrated_against_mains_6_shard_baseline(self) -> None:
+        """Round-5 review MINOR: the shipped fno-math shard dial vs main is
+        6 -> 8 — fno-math was NEVER 7 shards on main (the 7-shard matrix is
+        the SEPARATE trading-core job's); the first-published "7->8 taken
+        AGAIN" comment was a merge-reconcile artifact from the branch's
+        pre-rework local 7-shard config. The committed comment AND the
+        ledger must narrate the real baseline (Golden Rule #10 — the
+        recorded rationale must match the shipped diff).
+        """
+        wf = (self._ROOT / ".github/workflows/mutation.yml").read_text(encoding="utf-8")
+        # The applied dial itself (unchanged by this correction).
+        assert "--shard ${{ matrix.shard }}/8" in wf
+        assert "ceil(803/8)=101" in wf
+        # The honest baseline narration + the real 6-shard per-shard figure.
+        assert "6->8 vs main's" in wf
+        assert "ceil(803/6)=134" in wf
+        # The phantom 7-shard fno-math waypoints must never return.
+        assert "7->8" not in wf
+        assert "ceil(803/7)" not in wf
+        # ...and the ledger entry #1738 must carry the same correction.
+        ledger = (self._ROOT / "docs/MIGRATION.md").read_text(encoding="utf-8")
+        entry = re.search(r"^1738\. .*$", ledger, flags=re.MULTILINE)
+        assert entry is not None, "MIGRATION.md entry #1738 not found"
+        assert "6 → 8" in entry.group(0)
+        assert "7 → 8 shards" not in entry.group(0)
+
     def test_twin_run_actions_are_sha_pinned(self) -> None:
         """Round-5 review MINOR: every ``uses:`` in the twin-run workflow must
         be SHA-pinned (the repo convention — 63/33/19 pinned sibling refs).

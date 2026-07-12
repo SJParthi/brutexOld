@@ -700,13 +700,16 @@ jobs:
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-          #   wall-clock parallelism = this 8-way shard matrix (7->8 = the #1597
-          #   pre-decided +1-shard dial taken AGAIN for the rework's 803
-          #   re-measure: at 7 shards ceil(803/7)=115 mutants/shard x 29-40 s
-          #   ~= 56-77 min nominal, ~92-102 min at +20% on the worst end — the
-          #   SAME margin condition that took the 5->6 and 6->7 dials; at 8
-          #   shards ceil(803/8)=101/shard restores the proven ~100-mutant
-          #   budget: ~= 49-67 min nominal, ~81 at +20% -> >= 39 min margin).
+          #   wall-clock parallelism = this 8-way shard matrix (6->8 vs main's
+          #   #1597 6-shard fno-math config — fno-math was never 7 shards on
+          #   main; the 7-shard matrix is the SEPARATE trading-core job's. At
+          #   6 shards the rework's 803-mutant re-measure reads
+          #   ceil(803/6)=134 mutants/shard x 29-40 s ~= 65-89 min nominal,
+          #   ~107 min at +20% on the worst end — a ~13 min margin against
+          #   the 120-min cap, past the margin condition that took #1597's
+          #   5->6 dial; 8 shards restores the proven ~100-mutant budget:
+          #   ceil(803/8)=101/shard ~= 49-67 min nominal, ~81 at +20%
+          #   -> >= 39 min margin).
           cargo mutants \
             --in-place \
             --shard ${{ matrix.shard }}/8 \
