@@ -11,7 +11,9 @@ surgical fakes where the branch is a defence the real kernel cannot trip.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -900,3 +902,134 @@ class TestWorkflowWiring:
         """
         ci = (self._ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         assert "151 stmts, 66 branches" not in ci
+
+    def test_work_cells_comment_labels_0257_carried_not_measured(self) -> None:
+        """Round-2 review NIT: 0.257 ns/(mask·bar) is the design pack's CARRIED
+        batch-FFI ``count_supermasks`` constant (combo_counts.md §3.2), never a
+        measurement of this branch — the branch's measured fused rates are
+        0.077/0.125. The work-cells knob comment must keep that provenance
+        (Golden Rule #10: measured-vs-carried is exactly the distinction the
+        honesty discipline turns on).
+        """
+        src = (self._ROOT / "brutex/engine/rust_enum.py").read_text(encoding="utf-8")
+        assert "0.257" in src, "the work-cells sizing rationale went missing — repin"
+        assert "measured 0.257" not in src
+        assert "carried 0.257" in src
+
+
+class TestTwinRunEngagementGate:
+    """Round-2 review MINOR: the real-data twin-run MERGE GATE must refuse a
+    vacuous/masked PASS.
+
+    Byte-identity alone is trivially true whenever the ON arm silently served
+    the Python spine — a stale/absent wheel falls back with one warn-once
+    (``wheel_missing``/``wheel_stale``), and a shadow-burn-in mismatch SHIPS
+    THE PYTHON RESULT then latches the width off (``kernel_autoreverted``) —
+    so the pre-fix ``cmp``-only verdict could print PASS while proving nothing
+    about the kernel (or while the kernel had a REAL caught bug). These tests
+    drive the actual script with a stub CLI that writes byte-identical
+    artifacts on both arms and emits controlled kernel events on the ON arm.
+    """
+
+    _ROOT = Path(__file__).resolve().parents[2]
+    _SCRIPT = _ROOT / "scripts/ci/rust_enum_twin_run.sh"
+
+    #: The stub "python" the script invokes as ``$PYTHON -m brutex sweep-all``:
+    #: writes ONE identical artifact under --results-root on both arms, and on
+    #: the ON arm prints $STUB_ON_ARM_LOG to stderr (where structlog writes).
+    _STUB = """#!/usr/bin/env bash
+results=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--results-root" ]; then results="$a"; fi
+  prev="$a"
+done
+mkdir -p "$results"
+printf 'twin-artifact\\n' > "$results/store.parquet"
+if [ "${BRUTEX_SWEEP_RUST_ENUM:-}" = "1" ] && [ -n "${STUB_ON_ARM_LOG:-}" ]; then
+  printf '%s\\n' "$STUB_ON_ARM_LOG" >&2
+fi
+exit 0
+"""
+
+    def _run(self, tmp_path: Path, on_arm_log: str) -> subprocess.CompletedProcess[str]:
+        stub = tmp_path / "stub-python"
+        stub.write_text(self._STUB, encoding="utf-8")
+        stub.chmod(0o755)
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        env = dict(os.environ)
+        env.pop("BRUTEX_SWEEP_RUST_ENUM", None)  # the script owns both arms
+        env["TWIN_PYTHON"] = str(stub)
+        env["STUB_ON_ARM_LOG"] = on_arm_log
+        env["TMPDIR"] = str(tmp_path)  # scratch stays inside the test tmp dir
+        # cwd=tmp_path so the script's relative .venv/bin/python probe misses
+        # and TWIN_PYTHON is honoured.
+        return subprocess.run(  # fixed repo script; stub inputs only
+            ["bash", str(self._SCRIPT), str(lake)],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+
+    def test_pass_requires_engaged_and_clean_markers(self, tmp_path: Path) -> None:
+        """The healthy arm — engaged logged, no markers — still PASSes."""
+        proc = self._run(tmp_path, "2026-07-12 [info] sweep_rust_enum.engaged width=u64")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "TWIN-RUN PASS" in proc.stdout
+        assert "engagement gate" in proc.stdout
+
+    def test_vacuous_pass_refused_when_kernel_never_engaged(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE: identical bytes + zero engaged event (the stale/absent
+        wheel shape — every tuple Python-served) must be a loud FAIL, never a
+        PASS that proves nothing.
+        """
+        proc = self._run(tmp_path, "")
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "TWIN-RUN PASS" not in proc.stdout
+        assert "never logged sweep_rust_enum.engaged" in proc.stderr
+
+    def test_masked_autorevert_refused_even_with_identical_bytes(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE: a shadow-burn-in mismatch ships the Python result
+        (bytes match!) and logs kernel_autoreverted — a REAL kernel bug the
+        pre-fix cmp-only gate could never fail on.
+        """
+        proc = self._run(
+            tmp_path,
+            "sweep_rust_enum.engaged width=u64\n"
+            "sweep_rust_enum.kernel_autoreverted width=u64 rank=0",
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "TWIN-RUN PASS" not in proc.stdout
+        assert "fallback/divergence marker" in proc.stderr
+        assert "kernel_autoreverted" in proc.stderr
+
+    def test_wheel_fallback_reason_refused(self, tmp_path: Path) -> None:
+        """A warn-once ``sweep_rust_enum.fallback`` (reason=wheel_stale et al.)
+        alongside a later engaged event still fails the marker gate — those
+        tuples were Python-served, so the compare is partially masked.
+        """
+        proc = self._run(
+            tmp_path,
+            "sweep_rust_enum.fallback reason=wheel_stale missing=ResidentSweepEnum\n"
+            "sweep_rust_enum.engaged width=u64",
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "fallback/divergence marker" in proc.stderr
+        assert "wheel_stale" in proc.stderr
+
+    def test_advisory_shadow_floor_event_does_not_trip_the_gate(self, tmp_path: Path) -> None:
+        """``enum_shadow_floor_unmet`` is ADVISORY (a small k=2 tuple cannot
+        reach the 2^16-mask shadow floor) and fires on the pinned sub-grid —
+        it must never fail the engagement gate.
+        """
+        proc = self._run(
+            tmp_path,
+            "sweep_rust_enum.enum_shadow_floor_unmet width=u64 shadowed=1770\n"
+            "sweep_rust_enum.engaged width=u64",
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "TWIN-RUN PASS" in proc.stdout
