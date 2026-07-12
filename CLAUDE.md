@@ -2363,9 +2363,10 @@ hostile-review pass._
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `feed_rust.py` 100.00% standalone,
   `replay.py` 100.00% under its `test_feed_replay*` discovery set, `bad_tick.py` 100.00%; ruff/ruff-format clean,
   `mypy --strict` clean (435 files on the merged tree), pyright 0 errors at the pre-change baseline; cargo fmt/clippy `-D warnings`/
-  test green. Review-hardened: hostile round 1 (4/4 SHIP; the MINOR + NIT fix pack folded) + refuter rounds 2-4
-  (R2b/R4b doc-only MINORs folded; R3b's main-timeline claim refuted as a stale-ref measurement) — the per-round
-  record lives in MIGRATION.md #1741.)
+  test green. Review-hardened: hostile round 1 (4/4 SHIP; the MINOR + NIT fix pack folded) + refuter rounds 2-6
+  (R2b/R4b doc-only MINORs folded; R3b's main-timeline claim refuted as a stale-ref measurement; R5 3/3 CLEAN;
+  R6a's surviving warn-drain boundary mutant killed by a dedicated dual-arm regression + the NEW feed/replay.py
+  weekly mutmut pair) — the per-round record lives in MIGRATION.md #1741.)
   Earlier: `claude/tradesim-open-session-guard` (**DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743** —
   the trade-sim OPEN-position session-boundary guard, the asymmetric twin of the
   R2-OC-2 pending-entry gate: pre-fix, a position left open because its

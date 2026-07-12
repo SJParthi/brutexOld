@@ -13,9 +13,9 @@ Proves, end to end through the REAL public entry point:
 * the kill-switch interplay (``BRUTEX_BAD_TICK_SCREEN=off`` + flag ON →
   ``ts_us=[]``, spike kept, no warn, ON ≡ OFF);
 * the emit_at_row replay-law ordering end to end, with ``capture_logs``
-  full-sequence equality against the OFF arm for the three interleaving
+  full-sequence equality against the OFF arm for the four interleaving
   shapes (positivity-at-boundary, warned-session-then-constructor-raise,
-  clean multi-session finish);
+  clean multi-session finish, last-kept-row warn before a positivity stop);
 * the structural bit-identity pin that the ONLY ``Decimal(`` / price-``str(``
   materialization sites in replay.py live inside ``_build_bar``.
 """
@@ -473,6 +473,40 @@ class TestOrderingLaws:
             "2024-01-02",
             "2024-01-03",
         ]
+
+    def test_boundary_warn_on_last_kept_row_fires_before_positivity_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R6a regression (MIGRATION #1741 REFUTER ROUND 6): the warn-drain
+        boundary mutant ``<= i -> < i`` in ``_bars_from_scan``.
+
+        Kernel shape: ``kept=[0, 2]``, ``warns=[(2, 0, 1, 0, 1)]``,
+        ``stop=(3, 0)`` — session 1's owed bad-tick warn anchors on kept
+        row 2 (session 2's first row = the LAST kept row) and row 3 fails
+        positivity, so the trailing drain after the stop-raise is
+        unreachable.  The warn MUST fire from the in-loop drain (``<= i``)
+        before the raise; under the mutant it is silently dropped and the
+        full-sequence parity below fails.  Kill-proof recorded in the
+        impl-log: mutant applied by hand -> this test FAILS; restored ->
+        PASSES.
+        """
+        pytest.importorskip("brutex_feed", reason="wheel required for the ordering pins")
+        rows: list[Row] = [
+            (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
+            (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
+            # Session 2's first row: KEPT — session 1's owed warn anchors
+            # HERE, on what turns out to be the LAST kept row...
+            (_BASE + timedelta(days=1), 6000.0, 6010.0, 5990.0, 6005.0, 10, None),
+            # ...because the very next row fails POSITIVITY (open <= 0).
+            (_BASE + timedelta(days=1, minutes=1), -5.0, 6010.0, 5990.0, 6005.0, 10, None),
+        ]
+        off_logs, on_logs, off_msg, on_msg = self._sequences(_table(rows), monkeypatch, ValueError)
+        assert off_msg == on_msg
+        assert "non-positive price" in on_msg
+        assert off_logs == on_logs  # FULL sequence: the WARN, THEN the raise
+        warns = _bad_tick_events(on_logs)
+        assert len(warns) == 1
+        assert warns[0]["session"] == "2024-01-02"
 
     def test_source_none_parity(self, monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.importorskip("brutex_feed", reason="wheel required for the source-None pin")
