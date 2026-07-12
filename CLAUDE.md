@@ -25,7 +25,8 @@ single-flight wait gains a TOTAL env-tunable budget (`BRUTEX_SUMMARY_COLD_WAIT_S
 already-in-flight waiters pay the budget per wedged owner (sequentially
 exactly ONE; every later cold poll fails fast), a blown budget raises the typed
 `SummaryColdWaitTimeout` the five summary routes map to an honest 503
-`summary_scan_pending` (never a raw 500, never a fabricated empty payload;
+(four JSON routes `summary_scan_pending`; scoreboard.csv text/plain — never
+a raw 500, never a fabricated empty payload;
 zero new threads — the waiter's own `Event.wait`, no scan takeover, warm/dirty
 paths byte-identical) — and the read-side lake METADATA sweeps (the
 stats-manifest consult + /db TOCTOU re-stat + `_bars_file_windows` +
@@ -6056,7 +6057,8 @@ hostile-review pass._
   (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1774 — bounded cold lake
   I/O on the dashboard read path: the SummaryCache cold single-flight wait
   gains a TOTAL budget + per-owner-Event fail-fast latch with the honest 503
-  `summary_scan_pending` degrade on the five summary routes (BUG-1), and the
+  degrade on the five summary routes (four JSON `summary_scan_pending`;
+  scoreboard.csv text/plain) (BUG-1), and the
   read-side lake metadata sweeps — the stats-manifest consult, the /db TOCTOU
   re-stat, `_bars_file_windows`, `lake_revision`'s generation probe — ride the
   ONE new breach-armed `StatSweepGate` leaf (`brutex/data/stat_deadline.py`)
