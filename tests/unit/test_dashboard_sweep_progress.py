@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,52 @@ def _running_snapshot() -> dict[str, object]:
     progress.start(enumerated=100)
     progress.advance(current="NIFTY/1minute/bull")
     return progress.snapshot().to_dict()
+
+
+@contextmanager
+def _entered_run_core(results_root: Path, progress_path: Path) -> Generator[None, None, None]:
+    """Enter the REAL run core so its G4 launch baseline lands at *progress_path*.
+
+    The scoped-review round-2 harness: no faked payload — the on-disk bridge
+    file is exactly what ``RunCoreHandles._reset_progress_at_launch`` writes at
+    core ENTER, before any per-tuple ``publish_progress`` tick.
+    """
+    from typing import Any, cast
+
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+    from brutex.engine.sweep_run_core import sweep_run_core
+    from brutex.notifications.sweep_alerts import SweepAlerter
+    from brutex.observability.run_tripwires import TripwireConfig
+    from brutex.strategies.types import Side
+
+    class _SpyAlerter:
+        def __getattr__(self, name: str) -> Any:
+            return lambda *a, **k: None
+
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY],
+        k_values=[1],
+        condition_bits=[0, 1, 2],
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        mode="A",
+        data_snapshot_hash="snap0001",
+        indicator_version="ind-v1",
+        code_commit_sha="deadbeef",
+    )
+    with sweep_run_core(
+        results_root=results_root,
+        grid=grid,
+        alerter=cast("SweepAlerter", _SpyAlerter()),
+        entry_label="unit test",
+        tripwire_config=TripwireConfig(),
+        diffcheck_k=0,
+        progress_path=progress_path,
+    ):
+        yield
 
 
 class TestSweepProgressState:
@@ -127,6 +174,25 @@ class TestSweepProgressState:
         state = DashboardState()
         state.sweep_progress_path = tmp_path / "absent.json"
         assert state.sweep_progress_view()["state"] == "idle"
+
+    def test_fresh_run_core_launch_baseline_reads_running(self, tmp_path: Path) -> None:
+        """The REAL run-core launch baseline serves ``running: true`` pre-first-slot.
+
+        Fails-before (scoped-review round 2, the SUSTAINED MAJOR): the G4
+        ``_reset_progress_at_launch`` baseline carried ``wall_time_utc`` but NO
+        ``wall_time`` decay stamp, and ``progress_bridge_stale`` reads a
+        running claim with a missing stamp as DEAD evidence — so for the whole
+        first-tuple window (HOURS on a heavy k=5 tuple, before the first
+        APPLIED slot publishes) this view read idle and the v29 Stop button
+        never showed while the sweep was live.
+        """
+        progress_path = tmp_path / "progress" / "sweep-progress.json"
+        with _entered_run_core(tmp_path, progress_path):
+            state = DashboardState()
+            state.sweep_progress_path = progress_path
+            view = state.sweep_progress_view()
+            assert view["running"] is True
+            assert view["state"] == "running"
 
 
 class TestSweepProgressRoute:

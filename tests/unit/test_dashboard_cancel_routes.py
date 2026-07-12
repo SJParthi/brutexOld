@@ -369,6 +369,101 @@ def test_sweep_cancel_bridge_visible_cli_sweep(
     assert captured["source"] == "route-bridge"
 
 
+def test_sweep_cancel_bridge_accepts_a_fresh_run_core_launch_baseline(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third arm acks the REAL run-core G4 LAUNCH baseline (pre-first-slot).
+
+    Scoped-review round 2 (fails-before — the SUSTAINED MAJOR): main's #1445
+    ``_reset_progress_at_launch`` wrote ``wall_time_utc`` but NO ``wall_time``
+    decay stamp, and ``progress_bridge_stale`` treats a running claim with a
+    missing stamp as DEAD evidence — so for the whole first-tuple window
+    (HOURS on a heavy k=5 tuple, before the first APPLIED slot publishes) the
+    bridge arm refused with ``{"cancelling": false}`` while a default-root
+    sidecar WOULD cancel that live run. No faked payload here: the on-disk
+    bridge is exactly what the run core writes at ENTER.
+    """
+    from typing import cast
+
+    from brutex.dashboard.sweep_runner import default_results_root, sweep_progress_file
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+    from brutex.engine.sweep_run_core import sweep_run_core
+    from brutex.notifications.sweep_alerts import SweepAlerter
+    from brutex.observability.run_tripwires import TripwireConfig
+    from brutex.strategies.types import Side
+
+    monkeypatch.setattr("brutex.dashboard.launch_button.read_launch_state", lambda _lake: None)
+    lake = store.path.parent  # type: ignore[union-attr]
+    root = default_results_root(lake)
+
+    class _SpyAlerter:
+        def __getattr__(self, name: str) -> Any:
+            return lambda *a, **k: None
+
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY],
+        k_values=[1],
+        condition_bits=[0, 1, 2],
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        mode="A",
+        data_snapshot_hash="snap0001",
+        indicator_version="ind-v1",
+        code_commit_sha="deadbeef",
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "brutex.engine.sweep_cancel.request_cancel",
+        lambda cancel_root, *, source: (
+            captured.update(root=cancel_root, source=source) or cancel_root
+        ),
+    )
+    with sweep_run_core(
+        results_root=root,
+        grid=grid,
+        alerter=cast("SweepAlerter", _SpyAlerter()),
+        entry_label="unit test",
+        tripwire_config=TripwireConfig(),
+        diffcheck_k=0,
+        progress_path=sweep_progress_file(root),
+    ):
+        # NO on_progress tick has fired — the launch baseline is the only file.
+        resp = client.post("/api/v1/sweep/cancel")
+    assert resp.status_code == 200
+    assert resp.json() == {"cancelling": True, "target": "bridge"}
+    assert captured["root"] == lake / "sweeps"  # the root the CLI run probes
+    assert captured["source"] == "route-bridge"
+
+
+def test_v29_stop_attach_block_lives_inside_render_sweep_progress(client: TestClient) -> None:
+    """The relocated cancel-UI stopAttach block rides main's renderSweepProgress.
+
+    Scoped-review round 2 (record honesty, the fold-1 v29.html join): main's
+    DEC-FRONTEND-LATENCY-HARDENING-001 deleted the always-on sweep-progress
+    poller that hosted the DEC-JOB-COOPERATIVE-CANCEL-001 attach-case Stop
+    block, so the fold RELOCATED it into main's ``renderSweepProgress``
+    renderer (an ADAPTIVE join — never verbatim). This substring pin (the
+    repo's no-headless-JS envelope) fixes the relocation: the block must sit
+    INSIDE ``renderSweepProgress``, BEFORE the idle-return, so an idle
+    snapshot re-hides the button and un-wedges a disabled one on the shared
+    BXPoll subscription — a drift back to a standalone poller (or a move
+    after the idle-return) fails loudly.
+    """
+    html = client.get("/").text
+    render_start = html.index("function renderSweepProgress(sp)")
+    render_body = html[render_start:]
+    stop_at = render_body.index("const stopAttach = document.getElementById('stop-sweep');")
+    idle_return_at = render_body.index("if (!sp || sp.state === 'idle') return;")
+    assert stop_at < idle_return_at  # attach block BEFORE the idle-return
+    attach_block = render_body[stop_at:idle_return_at]
+    assert "stopAttach.hidden = !sp.running;" in attach_block
+    assert "stopAttach.disabled = false;" in attach_block
+    assert "stopAttach.textContent = '⏹ Stop';" in attach_block
+
+
 def test_sweep_cancel_stale_bridge_is_honest_false(
     client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
