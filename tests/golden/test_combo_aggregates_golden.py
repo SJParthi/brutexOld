@@ -98,8 +98,15 @@ _LENS = SessionLens(
 )
 
 #: Locked digests (sha256 hex). Regeneration is a deliberate, ledgered act.
-_GOLDEN_AGG_CANONICAL_SHA256 = "ef921b8a71070cee8640b35bde3b3b3dfe2b714b08a8060ac4d00f478acbaa53"
-_GOLDEN_AGGS_PARQUET_SHA256 = "63d823e9b5f446f412df19af01e680f1f993342663f48872b7b92a5c913fff4e"
+#: Re-locked 2026-07-11 for DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md
+#: #1743) — SCHEMA-ADDITIVE ONLY: the exit-reason vocabulary gained
+#: ``session_gap``, so the canonical record + the aggs parquet schema gained
+#: the ``exits_session_gap`` counter column (audited: value 0 on BOTH fixture
+#: combos — the single-session Fixture-A feed has no session-tail hole, so
+#: every trade VALUE, every other counter and both write-twice identities are
+#: byte-unchanged; the only diff vs the prior lock is the new zero-count key).
+_GOLDEN_AGG_CANONICAL_SHA256 = "ddc35b28a3cd24884a7b0ea86db5507afa76730d05cd3e3e214227e230d9bfcc"
+_GOLDEN_AGGS_PARQUET_SHA256 = "ddd2cfc6d59f911b213b175963b62f519d2be5c921572471619008629597e6fc"
 
 
 def _row(run_id: str, mask: int, pnls: list[int]) -> ResultRow:

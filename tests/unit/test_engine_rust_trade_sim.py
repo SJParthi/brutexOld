@@ -30,9 +30,11 @@ from brutex.engine.reference_series import TradeReferenceStamper
 # OHLC invariant (see TestEnvelopeGuardSeamPerColumn).
 from brutex.engine.rust_trade_sim import (
     _MAX_KERNEL_PRICE_PAISA,  # pyright: ignore[reportPrivateUsage]
+    _TAIL_HOLE_WARN_CAP,  # pyright: ignore[reportPrivateUsage]
     _U128_MASK,  # pyright: ignore[reportPrivateUsage]
     ResidentTradeSim,
     _construction_fallback_reason,  # pyright: ignore[reportPrivateUsage]
+    _warn_session_tail_holes,  # pyright: ignore[reportPrivateUsage]
 )
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.trade_sim import (
@@ -1570,3 +1572,161 @@ class TestReferenceStamperSeam:
             assert trade.vix_at_exit == stamper.vix.level_at(trade.exit_ts)
             assert trade.vix_at_entry is not None
             assert trade.vix_at_exit is not None
+
+
+class TestSessionTailHoleWarn:
+    """The mask-independent session-tail-hole WARN (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
+
+    ``_derive_kernel_inputs`` ends with ONE capped sweep naming every
+    NON-final session whose stored bars never reach a forced-exit bar — the
+    exact shape the walker's (A2) ``session_gap`` guard fires on. Once per
+    derivation (never per mask, never inside ``_close`` — the
+    DEC-SWEEP-LOG-VOLUME-GUARD-001 posture), capped at
+    ``_TAIL_HOLE_WARN_CAP`` with ONE suppressed summary past it (the house
+    preopen capped-warn pattern).
+    """
+
+    @staticmethod
+    def _tail_hole_events(logs: list[EventDict]) -> list[EventDict]:
+        return [e for e in logs if e["event"] == "trade_sim.session_tail_hole"]
+
+    def test_construction_warns_once_for_a_non_final_forced_less_session(self) -> None:
+        # Day-1 (2024-01-02) ends at 11:12 — a session-tail hole; day-2 is the
+        # final session (exempt however it ends).
+        bars = [
+            _bar(11, 10, "100", "101", "99", "100"),
+            _bar(11, 11, "100", "101", "99", "100"),
+            _bar(11, 12, "100", "101", "99", "100"),
+            _next_day_bar(9, 15, "600", "601", "599", "600"),
+        ]
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        holes = self._tail_hole_events(logs)
+        assert len(holes) == 1
+        assert holes[0]["session"] == "2024-01-02"
+        assert holes[0]["bars"] == 3
+        assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
+    def test_silent_for_a_healthy_window_and_for_the_final_session(self) -> None:
+        # (a) day-1 REACHES its forced-exit bar (15:20) → not a hole; (b) the
+        # final session (day-2, ends 09:16) is exempt however truncated.
+        bars = [
+            _bar(15, 19, "100", "101", "99", "100"),
+            _bar(15, 20, "100", "101", "99", "100"),  # forced bar — session complete
+            _next_day_bar(9, 15, "600", "601", "599", "600"),
+            _next_day_bar(9, 16, "600", "601", "599", "600"),
+        ]
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert self._tail_hole_events(logs) == []
+
+    def test_single_session_window_never_warns(self) -> None:
+        # A one-session window IS the final session — the ordinary
+        # end-of-window shape end_of_data already names; zero WARNs.
+        bars = _feed()
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert self._tail_hole_events(logs) == []
+
+    def test_cap_20_plus_one_suppressed_summary(self) -> None:
+        # Direct-call teeth on the pure helper (the house private-import
+        # pattern): 22 hole sessions + a final session → exactly 20 WARNs +
+        # ONE suppressed summary carrying the TRUE total.
+        session_days: list[int] = []
+        forced: list[bool] = []
+        for ordinal in range(738522, 738522 + 23):  # 23 sessions, 2 bars each
+            session_days.extend([ordinal, ordinal])
+            forced.extend([False, False])
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        holes = self._tail_hole_events(logs)
+        assert len(holes) == _TAIL_HOLE_WARN_CAP == 20
+        suppressed = [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"]
+        assert len(suppressed) == 1
+        assert suppressed[0]["total"] == 22  # the final (23rd) session is exempt
+        assert suppressed[0]["shown"] == _TAIL_HOLE_WARN_CAP
+
+    def test_exactly_at_cap_20_warns_all_with_no_suppressed_summary(self) -> None:
+        # Boundary teeth on the strict `>` cap compare (refuter round 3 CM9):
+        # EXACTLY _TAIL_HOLE_WARN_CAP hole sessions (20 holes + the exempt
+        # final session) emit ALL 20 per-session WARNs and ZERO suppressed
+        # summaries — nothing was suppressed, so a summary event here would
+        # fabricate suppression. A `>` → `>=` mutant at the cap compare fires
+        # the summary at exactly-the-cap and fails this test.
+        session_days: list[int] = []
+        forced: list[bool] = []
+        for ordinal in range(738522, 738522 + 21):  # 20 holes + 1 exempt final
+            session_days.extend([ordinal, ordinal])
+            forced.extend([False, False])
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        holes = self._tail_hole_events(logs)
+        assert len(holes) == _TAIL_HOLE_WARN_CAP == 20
+        assert [e["session"] for e in holes] == [
+            date.fromordinal(o).isoformat() for o in range(738522, 738522 + 20)
+        ]
+        assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
+    def test_forced_bearing_interior_session_is_not_a_hole(self) -> None:
+        # Direct call: an interior session carrying ANY forced bar is healthy;
+        # its forced-less interior sibling still warns (the run split logic).
+        session_days = [1, 1, 2, 2, 3]
+        forced = [False, True, False, False, False]
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        holes = self._tail_hole_events(logs)
+        assert [(e["session"], e["bars"]) for e in holes] == [(date.fromordinal(2).isoformat(), 2)]
+
+    def test_single_forced_bar_interior_session_is_not_a_hole(self) -> None:
+        # Direct call (refuter round 5 MR3b, slice-START mutant killer): an
+        # interior session whose ONLY stored bar IS a forced-exit bar — e.g. a
+        # lake hole leaving just the 15:20 bar — is healthy, NOT a hole.
+        # Because forced flags are a monotone suffix within a session, the
+        # single-bar forced-only run is the ONE shape that discriminates the
+        # slice start: a `forced[run_start:i]` → `forced[run_start+1:i]`
+        # mutant scans the EMPTY slice here and fabricates a false
+        # session_tail_hole WARN (bars=1). The forced-bearing sibling test
+        # above puts its forced bar SECOND, so only this shape kills it.
+        session_days = [738522, 738523, 738523]
+        forced = [True, False, False]
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        assert self._tail_hole_events(logs) == []
+        assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
+    def test_session_days_derive_from_the_ist_session_date_not_the_utc_date(self) -> None:
+        """``session_days`` ordinals derive from the bar's IST session date,
+        never its UTC calendar date (refuter round 5 MD2, directed mutant pin
+        — the Rust-path derivation mirror of the walker's
+        ``test_entry_day_is_the_ist_session_date_not_the_utc_date``).
+
+        The ``bar.timestamp.date()`` (UTC-date) mutant at the
+        ``session_days.append`` in ``_derive_kernel_inputs`` survived the
+        suite because the mismatch is domain-bounded — no NSE session bar
+        exists before 05:30 IST post-ingest-filter, so IST and UTC dates
+        always agree on real lake bars. The derivation's DOCUMENTED semantics
+        are the IST session date ("mirrors the walker's gate bit-for-bit"),
+        so this pins that law beyond the NSE trading window
+        (defense-in-depth; the domain never produces such bars): two bars in
+        ONE IST session 2024-01-02 straddle UTC midnight (IST 01:00 = UTC
+        2024-01-01 19:30; IST 06:00 = UTC 2024-01-02 00:30) — under the
+        mutant the IST session SPLITS into two kernel sessions (a phantom
+        boundary the kernel's (A2) guard would session_gap-close across) and
+        a false ``trade_sim.session_tail_hole`` WARN fires naming the UTC
+        date 2024-01-01.
+        """
+        bars = [
+            _bar(1, 0, "100", "101", "99", "100"),  # IST 01:00 = UTC 2024-01-01T19:30
+            _bar(6, 0, "100", "101", "99", "100"),  # IST 06:00 = UTC 2024-01-02T00:30
+        ]
+        # The fixture genuinely straddles UTC midnight within one IST session.
+        assert [b.timestamp.astimezone(UTC).date().isoformat() for b in bars] == [
+            "2024-01-01",
+            "2024-01-02",
+        ]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, [0, 0], tf_minutes=1)
+            derived = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        session_days = derived[5]
+        assert session_days == [_DAY.toordinal()] * 2  # ONE IST session (2024-01-02)
+        assert self._tail_hole_events(logs) == []

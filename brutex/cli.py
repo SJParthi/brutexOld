@@ -1428,6 +1428,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sweep_all.add_argument(
+        "--detach",
+        action="store_true",
+        dest="detach",
+        help=(
+            "Re-exec this exact sweep-all as a DETACHED session leader "
+            "(survives terminal/dashboard death — DEC-SWEEP-UNKILLABLE-CORE-001 R7) "
+            "and return immediately; progress/exit-status/Telegram are child-owned"
+        ),
+    )
+    sweep_all.add_argument(
         "--acknowledge-sla-overrun",
         action="store_true",
         dest="acknowledge_sla_overrun",
@@ -6461,6 +6471,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     sweep_cache_bloom_capacity: int | None = None,
     allow_out_of_scope: bool = False,
     acknowledge_sla_overrun: bool = False,
+    detach: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -6494,12 +6505,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         count_sweep_tuples,
         make_store_for,
     )
-    from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
+    from brutex.engine.sweep_progress import SweepProgress
     from brutex.engine.sweep_run import SweepRunSummary
     from brutex.engine.sweep_supervisor import (
         SweepGuards,
         grid_identity,
-        publish_progress,
         run_supervised_grid,
     )
     from brutex.engine.sweep_watchdog import SweepWatchdog
@@ -6511,6 +6521,24 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
     out_root = results_root if results_root is not None else resolved_lake / "sweeps"
+
+    # R7 detached survival (DEC-SWEEP-UNKILLABLE-CORE-001): re-exec this exact
+    # invocation as its own session leader and return — the child owns the run
+    # (progress + exit-status + Telegram) and survives this process's death.
+    # The env sentinel (NOT a sys.argv string match) gates re-detach: the
+    # spawned child carries BRUTEX_SWEEP_DETACHED=1, so any surviving
+    # ``--detach`` abbreviation (argparse's default allow_abbrev matches
+    # ``--det`` → detach=True) is IGNORED in the child and the real sweep runs
+    # instead of forking another detached generation (fork-bomb guard,
+    # hostile-review round 3, #1712).
+    from brutex.engine.sweep_detach import running_as_detached_child, spawn_detached_sweep
+
+    if detach and not running_as_detached_child():
+        handle = spawn_detached_sweep(
+            [a for a in sys.argv[1:] if a != "--detach"], results_root=out_root
+        )
+        print(f"[brutex] sweep-all detached — pid={handle.pid} (results: {out_root})")
+        return EXIT_OK
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): refuse
@@ -6591,6 +6619,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # Phase-2 run-core knobs (DEC-SWEEP-UNKILLABLE-CORE-001): resolve every
+    # env-driven config EAGERLY — a typo'd tripwire/diffcheck/stall knob is a
+    # clean user-config error at launch, never a mid-run traceback (the same
+    # law as the cache knobs above; the stall policy's `workers` arg is
+    # validation-only, deliberately never used to lower the bound).
+    from brutex.engine.sweep_diffcheck import resolve_diffcheck_k
+    from brutex.engine.sweep_run_core import sweep_run_core
+    from brutex.engine.sweep_singleflight import lake_read_guard
+    from brutex.engine.sweep_stall_policy import resolve_stall_policy
+    from brutex.observability.run_tripwires import TripwireConfig
+
+    try:
+        tripwire_config = TripwireConfig.from_env()
+        diffcheck_k = resolve_diffcheck_k()
+        stall_policy = resolve_stall_policy(per_tuple_estimate_s=None, workers=1)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 1 of 2 ──
     # Resolve the run-end results-depth kill switch EAGERLY: a junk
     # BRUTEX_RESULTS_DEPTH is a clean pre-sweep user-config error, never a
@@ -6599,6 +6646,19 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
     try:
         results_depth_enabled = resolve_results_depth_enabled()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the kill
+    # switch EAGERLY too — a junk BRUTEX_SWEEP_RESUME_STORE_GUARD is a clean
+    # pre-sweep user-config error, never a mid-launch traceback (both sweep
+    # drivers re-resolve the same switch at their own entry; this eager pass
+    # only front-loads the failure).
+    from brutex.engine.tuple_complete import resume_store_guard_enabled
+
+    try:
+        resume_store_guard_enabled()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -6655,8 +6715,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # heals nothing here, so suppressing the L1 classification on an
         # unchanged file is sound; the SHARED heal/census callers keep the
         # default stat_cache=False.
+        # G10 (DEC-SWEEP-UNKILLABLE-CORE-001): hold the SHARED lake read-guard
+        # across the PRELOAD ONLY — a concurrent pull/heal (EX holder) refuses
+        # this launch loudly; once the bars are in memory the guard is released.
         slices: dict[tuple[str, str], list[Any]] = {}
-        with Catalog.open(catalog) as cat:
+        with lake_read_guard(resolved_lake), Catalog.open(catalog) as cat:
             for symbol in symbol_list:
                 for interval in interval_list:
                     slices[(symbol, interval)] = load_sweep_slice(
@@ -6933,9 +6996,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             f"(evaluated={summary.evaluated})"
         )
 
-    def _on_progress(snap: SweepProgressSnapshot) -> None:
-        publish_progress(progress_path, snap)
-
     print(
         f"[brutex] sweep-all: {grid.instruments} × {[tf.label for tf in grid.timeframes]} × "
         f"{[d.value for d in grid.directions]} × k={list(grid.k_values)} → "
@@ -6948,12 +7008,28 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.notifications.sweep_alerts import SweepAlerter
 
     alerter = SweepAlerter()
-    watchdog = SweepWatchdog(on_hung=alerter.watchdog_hung_callback())
+    # G2 (DEC-SWEEP-UNKILLABLE-CORE-001): the stall policy resolved at launch
+    # (default == the exact 300 s identity; env/scaling only ever RAISES it)
+    # governs BOTH the inter-tuple watchdog and the parallel driver below.
+    watchdog = SweepWatchdog(
+        timeout_seconds=stall_policy.timeout_seconds,
+        on_hung=alerter.watchdog_hung_callback(),
+    )
     checkpoint = SweepCheckpointStore(
         path=checkpoint_path,
         sweep_id=grid_identity(grid),
         total_combos=count_sweep_tuples(grid),
     )
+    # Multi-core worker resolution hoisted above the run-core wrap so the
+    # RUN_START record carries the real worker budget (observability only).
+    from brutex.engine.sweep_parallel import (
+        refuse_parallel_on_legacy_path,
+        resolve_sweep_workers,
+        run_parallel_grid,
+    )
+
+    workers = resolve_sweep_workers(tuple_count=count_sweep_tuples(grid))
+    refuse_parallel_on_legacy_path(workers, digest_path=True)
     # Sweep-abort Telegram alert (R2-SL-F8 / R2-CC-G4) — the sweep twin of
     # cmd_fetch's DEC-TELEGRAM-PULL-HALT-001 pattern (_one_fetch_pass): any
     # abort propagating out of the launch/grid/stage-3/options-sim/cascade
@@ -6962,7 +7038,35 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # CLI still exits non-zero). KeyboardInterrupt/SystemExit are
     # BaseException, so an operator Ctrl-C never alerts; the clean path fires
     # only alerter.sweep_complete below (never both).
-    with sweep_abort_alert(_emit_pull_halt_alert):
+    # The unkillable run core (DEC-SWEEP-UNKILLABLE-CORE-001): ONE composite CM
+    # (G6 single-flight flock BEFORE any chain writer opens · exit-status ·
+    # keep-awake · flight recorder · tripwires · manifest · G12 checkpoint
+    # pre-load · progress reset) wraps the UNTOUCHED body; every hook is
+    # fail-soft and results stay byte-identical (the I-1 proof test).
+    with (
+        sweep_run_core(
+            results_root=out_root,
+            grid=grid,
+            alerter=alerter,
+            entry_label="brutex sweep-all",
+            total_tuples=count_sweep_tuples(grid),
+            workers=workers,
+            progress_path=progress_path,
+            checkpoint_store=checkpoint,
+            cli_chain_path=audit_path,
+            selection_extra={
+                "start": start,
+                "end": end,
+                "exchange": exchange,
+                "segment": segment,
+            },
+            inner_on_tuple=_on_tuple,
+            tripwire_config=tripwire_config,
+            diffcheck_k=diffcheck_k,
+        ) as core,
+        sweep_abort_alert(_emit_pull_halt_alert),
+    ):
+        core.stage("sweep")
         # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
         # launch from the lake's NSE/INDEX/INDIAVIX partitions over the swept
         # window, then handed to every observable trade surface below (grid
@@ -6982,6 +7086,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             end=_parse_dt(end),
             catalog_path=catalog,
         )
+        # Golden Rule #3: the R45 diffcheck's production re-simulations stamp
+        # with this SAME launch stamper — late-bound because the run-core CM
+        # entered (and composed the diffcheck closure) BEFORE the stamper
+        # existed; the closure reads the bind at call time.
+        core.bind_reference_stamper(reference_stamper)
         with (
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
@@ -7058,15 +7167,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # tuple digest → ``bypass_dedup`` is always True); ``workers > 1``
             # on the legacy no-digest path is HARD-REFUSED (this path is always
             # the digest path, so the guard is a belt-and-braces flag check,
-            # not a real limit).
-            from brutex.engine.sweep_parallel import (
-                refuse_parallel_on_legacy_path,
-                resolve_sweep_workers,
-                run_parallel_grid,
-            )
-
-            workers = resolve_sweep_workers(tuple_count=count_sweep_tuples(grid))
-            refuse_parallel_on_legacy_path(workers, digest_path=True)
+            # not a real limit). Resolution hoisted above the run-core wrap.
             if workers > 1:
                 print(f"[brutex] sweep-all: parallel mode — {workers} workers (digest path)")
                 result = run_parallel_grid(
@@ -7076,6 +7177,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     ingest_audit=ingest_audit,
                     guards=guards,
                     workers=workers,
+                    stall_seconds=stall_policy.timeout_seconds,
+                    on_progress=core.on_progress,
+                    # MAJOR round-2 fix: wire the parent-side per-tuple hook so
+                    # TUPLE_DONE flight records + the R39 NaN/absurd SUSPECT
+                    # tripwire also run in the DEFAULT multi-core mode (the
+                    # applied summary is parent-side, so no spawn-boundary
+                    # closure). G1 store-quarantine runs IN-WORKER (a corrupt
+                    # store is quarantined + retried there so the grid never
+                    # aborts) and its QUARANTINE flight records replay here.
+                    # R45 diffcheck stays a sequential-only sampling assurance
+                    # (its stateful K budget + SUSPECT-latch mismatch callback
+                    # cannot cross the spawn boundary — named follow-up
+                    # DEC-SWEEP-DIFFCHECK-PARALLEL-001; the audit-replay
+                    # determinism lane still covers parallel runs).
+                    on_tuple=core.on_tuple,
+                    on_quarantine=core.record_worker_quarantine,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
                 )
@@ -7087,12 +7204,16 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     dedup=dedup,
                     ingest_audit=ingest_audit,
                     guards=guards,
-                    on_tuple=_on_tuple,
-                    on_progress=_on_progress,
+                    on_tuple=core.on_tuple,
+                    on_progress=core.on_progress,
                     watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+                    diffcheck=core.diffcheck,
+                    store_quarantine=core.store_quarantine,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
                 )
+            core.grid_done(result)
+            core.stage("stage3")
             # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
             # Runs INSIDE the open audit with-block on this single thread (review
             # F10): the per-mask STAGE_3_REFINE_* triples land on the SAME ingest
@@ -7102,20 +7223,26 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # lockbox-excluded train slice only (ADR-0007 condition 7 + A1).
             from brutex.engine.stage3_wire import run_stage3_pass
 
-            stage3_report = run_stage3_pass(
-                grid,
-                results_root=out_root,
-                bars_for=_bars_for,
-                audit=ingest_audit,
-                exchange=exchange,
-                segment=segment,
-                start=start,
-                end=end,
-                roll_schedule_by_instrument=roll_schedule_by_instrument,
-                # The launch's already-built stamper (never a second lake
-                # read); resolved lazily by the pass so a stage3-disabled
-                # grid pays nothing extra.
-                stamper_for=lambda: reference_stamper,
+            # D-4 (DEC-SWEEP-UNKILLABLE-CORE-001): the run core stamps every
+            # refined CELL store (run-id + train-snapshot bound), validates
+            # them before the cascade consumes, and on an invalid cell
+            # discards + re-runs the idempotent pass ONCE (then hard error).
+            stage3_report = core.run_stage3(
+                lambda: run_stage3_pass(
+                    grid,
+                    results_root=out_root,
+                    bars_for=_bars_for,
+                    audit=ingest_audit,
+                    exchange=exchange,
+                    segment=segment,
+                    start=start,
+                    end=end,
+                    roll_schedule_by_instrument=roll_schedule_by_instrument,
+                    # The launch's already-built stamper (never a second lake
+                    # read); resolved lazily by the pass so a stage3-disabled
+                    # grid pays nothing extra.
+                    stamper_for=lambda: reference_stamper,
+                )
             )
         # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
         # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
@@ -7201,12 +7328,19 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # re-scores a non-prev-day survivor against its own Fib levels
         # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
         # pragma-free, unit-tested helper (review MAJOR 2).
+        core.stage("cascade")
         cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
 
         # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
         # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
         # manifest records stage-3 enablement + the refined-cell list.
         cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
+
+        # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the IN-MEMORY report is threaded
+        # into the results-depth adapter below (None when the cascade had no
+        # specs — the depth pass then writes the honest not_validated/no_report
+        # entries; no disk re-read, so a stale on-disk report can never leak in).
+        cascade_report = None
 
         if cascade_specs:
             # Freeze the per-leaderboard trial statistics into the manifest
@@ -7246,11 +7380,19 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 # literal-None), so the launch stamper deliberately does NOT
                 # ride into Stage-4.
             )
+            core.cascade_done(cascade_report)
             print(
                 f"[brutex] cascade — pools={len(cascade_report.groups)} "
                 f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
                 f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
             )
+        else:
+            # No cascade specs (an all-no-bars grid or every combo below
+            # min_hits) — a legitimate degenerate-but-CLEAN run. Vacuously
+            # satisfy the R39 ``artifacts`` prerequisite so the clean run is
+            # never false-flagged SUSPECT (DEC-SWEEP-UNKILLABLE-CORE-001).
+            core.mark_cascade_absent()
+
         # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
         # The ONE run-end results-depth block — trade capture → aggregates →
         # sidecar trio → baselines → the global top-100 artifact — strictly
@@ -7295,6 +7437,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval="1minute",
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
+                cascade_report=cascade_report,
             )
         else:
             print(
@@ -7305,7 +7448,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError — or any stage-3 cell
         # skipped on a VIX-trio conflict — makes the exit non-zero.
-        return sweep_all_exit_code(result.tuples_failed + stage3_report.cells_conflicted)
+        core.stage("artifacts")
+        exit_code = sweep_all_exit_code(result.tuples_failed + stage3_report.cells_conflicted)
+        core.set_exit_code(exit_code)
+        return exit_code
 
 
 def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sleep + lake I/O); the scheduler CORE is 100%-tested in brutex.engine.sweep_scheduler
@@ -7346,11 +7492,20 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
     from brutex.engine.sweep_scheduler import (
         IST_OFFSET_SECONDS,
         CheckpointView,
+        CycleFailureTracker,
         Schedule,
         SchedulerError,
         cycle_audit_payload,
+        daemon_init_guard,
         plan_cycle,
     )
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
+    # G13 alerter-first (DEC-SWEEP-UNKILLABLE-CORE-001 / D-5): the alerter
+    # exists BEFORE any other init so an init failure can reach the phone;
+    # the 100%-tested escalation kernel lives in brutex.engine.sweep_scheduler.
+    alerter = SweepAlerter()
+    tracker = CycleFailureTracker()
 
     tz_offset_seconds = (
         tz_offset_minutes * 60 if tz_offset_minutes is not None else IST_OFFSET_SECONDS
@@ -7361,12 +7516,13 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
         print(f"[brutex] sweep-daemon schedule error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
-    resolved_lake = _resolve_lake_root(sweep_kwargs.get("lake_root"))
-    results_root = sweep_kwargs.get("results_root")
-    out_root = results_root if results_root is not None else resolved_lake / "sweeps"
-    checkpoint_path = out_root / "checkpoint" / "sweep-all.json"
-    daemon_audit_path = out_root / "audit" / "sweep-daemon.jsonl"
-    daemon_audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with daemon_init_guard(alerter):
+        resolved_lake = _resolve_lake_root(sweep_kwargs.get("lake_root"))
+        results_root = sweep_kwargs.get("results_root")
+        out_root = results_root if results_root is not None else resolved_lake / "sweeps"
+        checkpoint_path = out_root / "checkpoint" / "sweep-all.json"
+        daemon_audit_path = out_root / "audit" / "sweep-daemon.jsonl"
+        daemon_audit_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _checkpoint_view() -> CheckpointView:
         """Best-effort read of the shared sweep checkpoint for the audit decision.
@@ -7426,6 +7582,12 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
                 subject=f"sweep-daemon:cycle-{cycle}",
                 payload={"cycle_index": cycle, "exit_code": exit_code, "fire_at": plan.fire_at},
             )
+            # G13 escalation kernel: a streak of failed cycles fires ONE
+            # CRITICAL push at the threshold edge; a clean cycle resets it.
+            if exit_code == EXIT_OK:
+                tracker.record_success()
+            elif tracker.record_failure():
+                alerter.sweep_halted(run_id="", reason="daemon_cycle_failures")
             last_fire = plan.fire_at
             cycle += 1
             if once or (max_cycles is not None and cycle >= max_cycles):
@@ -8169,6 +8331,54 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     with contextlib.suppress(CascadeWireError):
         stage3 = load_manifest(out_root).stage3
 
+    # Gate-folded store addresses (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001
+    # merge re-derivation over DEC-STAGE3-RECOUNT-001): `_tuple_digest` now
+    # folds the ACTIVE gate config into every tuple/cell store ADDRESS, so a
+    # stage-3-enabled tree's expected paths are derivable ONLY from a grid
+    # carrying the tree's RECORDED Stage-3 knobs. Resolve them exactly as the
+    # recount tier does — the tree's OWN audit first (condition B1), the
+    # operator --stage3-* flags as the audit-less fallback (condition B8) —
+    # and fold them into the verify grid so `plan_expected_stores` + the
+    # shadow re-sweep address the SAME files the launcher wrote. A gate-less
+    # tree emits NO fragment (default-elision), so its verify grid — and every
+    # pre-fold verdict — is byte-identical to before. HONEST residual: an
+    # overfit-gated tree (--dsr-min at launch) has no recorded-knob channel
+    # here yet, so its identity pairing still reads grid_mismatch — re-verify
+    # with a matching config (the #1336 remediation wording).
+    if stage3 is not None and stage3.enabled:
+        import dataclasses as _dc
+
+        from brutex.engine.sweep_verify import recorded_stage3_from_audit
+
+        _addr_audit = recorded_stage3_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        _addr_knobs = _addr_audit.knobs if _addr_audit.consistent else None
+        if _addr_knobs is not None:
+            grid = _dc.replace(
+                grid,
+                stage3_enable=True,
+                stage3_top_k=_addr_knobs.stage3_top_k,
+                stage3_max_fevals=_addr_knobs.max_fevals,
+                stage3_max_restarts=_addr_knobs.max_restarts,
+            )
+        elif stage3_enable:
+            _flag_fold: dict[str, Any] = {"stage3_enable": True}
+            for _key, _value in (
+                ("stage3_top_k", stage3_top_k),
+                ("stage3_max_fevals", stage3_fevals),
+                ("stage3_max_restarts", stage3_restarts),
+            ):
+                if _value is not None:
+                    _flag_fold[_key] = _value
+            grid = _dc.replace(grid, **_flag_fold)
+        else:
+            print(
+                "[brutex] sweep-verify: the tree records an ENABLED stage-3 pass but "
+                "its audit carries no consistent knobs and no --stage3-* flags were "
+                "given — the gate-folded store addresses cannot be re-derived "
+                "(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so identity pairing may "
+                "honestly read grid_mismatch"
+            )
+
     current_sha = _resolve_code_commit_sha()
     current_indicator = _indicator_version()
     vocabulary_trusted = code_sha == current_sha and indicator == current_indicator
@@ -8633,12 +8843,45 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
         print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
-    # C6 best-effort guard: a fresh "running" progress snapshot refuses. A
-    # snapshot older than this is a crashed sweep's leftover, not a live one.
-    progress_fresh_seconds = 600.0
-    progress = read_progress(out_root / "progress" / "sweep-progress.json")
-    fresh = (time.time() - float(progress.get("updated_at") or 0.0)) < progress_fresh_seconds
-    sweep_running = bool(progress.get("running")) and fresh
+    # C6 guard (G4, DEC-SWEEP-UNKILLABLE-CORE-001): judge liveness on the
+    # WALL-clock heartbeat + writer pid via the pure verdict — the prior
+    # `time.time() - updated_at` compared a MONOTONIC stamp to the wall clock
+    # (sweep_progress.py stamps time.monotonic()), so "fresh" was ~always
+    # False and a LIVE run's stores were quarantinable. FAIL-CLOSED: a legacy
+    # payload without wall/pid evidence (UNKNOWN) REFUSES the heal — never
+    # quarantine on doubt; a MISSING progress file has no run to protect. STALE
+    # ALSO refuses (DEC-SWEEP-UNKILLABLE-CORE-001, hostile-review round 1): STALE
+    # is only ever reached when the writer PID is ALIVE (a dead pid returns
+    # NOT_RUNNING before the staleness arm), so a stale-heartbeat verdict means a
+    # genuinely LIVE-but-slow run — a >600s lake preload, one very-large tuple,
+    # or the post-grid stage3/cascade phase. Quarantining a live run's
+    # stores/checkpoint/dedup is the exact corruption the C6 guard exists to
+    # prevent ("a LIVE run is never quarantinable"), so STALE joins the refuse
+    # set — heal-able is reserved for NOT_RUNNING (dead pid / clean terminal).
+    from brutex.engine.sweep_liveness import (
+        RunVerdict,
+        exit_status_running,
+        progress_verdict,
+    )
+
+    progress_path = out_root / "progress" / "sweep-progress.json"
+    progress = read_progress(progress_path)
+    if progress_path.exists():
+        verdict = progress_verdict(progress, now_wall=time.time())
+        sweep_running = verdict in (RunVerdict.RUNNING, RunVerdict.UNKNOWN, RunVerdict.STALE)
+    else:
+        sweep_running = False
+    # C6 resume-startup residual (round-4 hostile-review fix): the progress
+    # file LAGS a resuming run — on a crash-resume it still shows the PRIOR
+    # attempt's DEAD pid until `_reset_progress_at_launch` rewrites it, which
+    # runs AFTER the checkpoint preload. So a `progress_verdict`-only guard
+    # reads NOT_RUNNING in the enter→preload→reset window and a concurrent
+    # `--execute` heal could quarantine the resuming run's stores/checkpoint.
+    # The fresh `exit-status.json` (state=running + LIVE pid, written FIRST at
+    # run-core enter under the G6 flock, and already enriched into `progress`
+    # by `read_progress`) does NOT lag — treat the run as live when it says so.
+    if not sweep_running and exit_status_running(progress):
+        sweep_running = True
 
     try:
         assessment = assess_heal(
@@ -9408,6 +9651,7 @@ def _run_results_depth_adapter(
     vix_bars: Sequence[Any] | None,
     margin_entry_date: date,
     pass_runner: Callable[..., Any] | None = None,
+    cascade_report: Any | None = None,
 ) -> bool:
     """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
 
@@ -9426,14 +9670,37 @@ def _run_results_depth_adapter(
 
     ``pass_runner`` is an injection seam for tests; ``None`` runs the real
     :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
+
+    ``cascade_report`` is the IN-MEMORY :class:`CascadeWireReport` the sweep's
+    Stage-4 cascade just produced (DEC-RESULTS-CASCADE-VERDICT-JOIN-001), or
+    ``None`` when the cascade was skipped. It is flattened HERE — inside the
+    fence — via the ONE :func:`brutex.engine.cascade_join.build_cascade_join`
+    law; a :class:`~brutex.engine.cascade_join.CascadeJoinError` is a
+    production-unreachable belt (our own serialization feeds it) that logs
+    ``cli.results_depth.cascade_join_failed`` and threads ``None`` — the pass
+    still runs, the sweep never fails.
     """
     import structlog
 
+    from brutex.engine.cascade_join import CascadeJoinError, build_cascade_join
+    from brutex.engine.cascade_wire import wire_report_to_dict
     from brutex.engine.margin_history import margin_roi_payload
     from brutex.engine.results_depth_pass import run_results_depth_pass
     from brutex.ranking.phrases import reason_payload
 
     runner = run_results_depth_pass if pass_runner is None else pass_runner
+
+    cascade_join = None
+    if cascade_report is not None:
+        try:
+            cascade_join = build_cascade_join(wire_report_to_dict(cascade_report))
+        except CascadeJoinError as exc:
+            structlog.get_logger("brutex.cli").warning(
+                "cli.results_depth.cascade_join_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                note="depth pass runs without the cascade join — entries read not_validated",
+            )
 
     def _margin_roi(candidate: Any) -> dict[str, object]:
         # lots=1 here is a margin-SIZING hypothetical for the refusal-only
@@ -9460,6 +9727,7 @@ def _run_results_depth_adapter(
             vix_bars=vix_bars,
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
+            cascade_join=cascade_join,
         )
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -9503,12 +9771,17 @@ def main(argv: list[str] | None = None) -> int:
     A :class:`CliUserError` raised by any command or shared helper below is
     converted to the standard one-line ``[brutex] <message>`` on stderr +
     :data:`EXIT_USER_ERROR` — the CLI's last-resort user-error net
-    (DEC-CLI-USER-ERROR-HYGIENE-001). Anything else still propagates raw: a
+    (DEC-CLI-USER-ERROR-HYGIENE-001). The two DEC-SWEEP-UNKILLABLE-CORE-001
+    launch refusals (G6 peer-sweep single-flight, G10 lake busy under a
+    pull/heal) ride the same clean-refusal net — an operator race is a loud
+    one-liner, never a traceback. Anything else still propagates raw: a
     genuine code bug must traceback, never be papered over (Golden Rule #10).
     """
+    from brutex.engine.sweep_singleflight import LakeBusyError, SweepAlreadyRunningError
+
     try:
         return _dispatch(argv)
-    except CliUserError as exc:
+    except (CliUserError, LakeBusyError, SweepAlreadyRunningError) as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
@@ -9725,6 +9998,7 @@ def _dispatch(argv: list[str] | None) -> int:
             sweep_cache_bloom_capacity=args.sweep_cache_bloom_capacity,
             allow_out_of_scope=args.allow_out_of_scope,
             acknowledge_sla_overrun=args.acknowledge_sla_overrun,
+            detach=args.detach,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
