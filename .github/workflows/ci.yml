@@ -532,6 +532,37 @@ jobs:
           else
             echo "(brutex.dashboard.constituents_cache test files not present yet — gate inactive)"
           fi
+          # DEC-AWS-SSM-SEAM-COMMON-001 (MIGRATION.md #1754): the COMMON AWS-SSM
+          # + secret-scrub seams shared by the Groww + Dhan auth stacks, each at
+          # 100% line+branch.
+          if compgen -G "tests/unit/test_secret_scrub.py" > /dev/null; then
+            pytest --cov=brutex.adapters.aws_client --cov=brutex.adapters.secret_scrub --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_aws_client.py tests/unit/test_secret_scrub.py
+          else
+            echo "(brutex.adapters.aws_client/secret_scrub test files not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-AUTH-001 (MIGRATION.md #1755): the DhanHQ v2 auth adapter
+          # (AUTH ONLY) — every module ships at 100% line+branch.
+          if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
+            pytest \
+              --cov=brutex.adapters.dhan.constants \
+              --cov=brutex.adapters.dhan.errors \
+              --cov=brutex.adapters.dhan.auth \
+              --cov=brutex.adapters.dhan.token_store_aws \
+              --cov=brutex.adapters.dhan.token_lifecycle \
+              --cov=brutex.adapters.dhan.auth_audit \
+              --cov=brutex.adapters.dhan.reauth \
+              --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_dhan_constants.py \
+              tests/unit/test_dhan_errors.py \
+              tests/unit/test_dhan_auth.py \
+              tests/unit/test_dhan_token_store_aws.py \
+              tests/unit/test_dhan_token_lifecycle.py \
+              tests/unit/test_dhan_auth_audit.py \
+              tests/unit/test_dhan_reauth.py \
+              tests/unit/test_dhan_credentials_aws.py
+          else
+            echo "(brutex.adapters.dhan test files not present yet — gate inactive)"
+          fi
           # DEC-LAKE-RECONCILE-001 (MIGRATION.md #463): the lake-reconcile module
           # ships at 100% line+branch (its sole DuckDB-connect surface is
           # # pragma: no cover; the pure reconcile + the composition are tested,
