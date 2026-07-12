@@ -34,6 +34,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 from brutex import feed_rust
+from brutex.data.bad_tick import bad_tick_screen_enabled
 from brutex.feed import replay
 from brutex.feed.replay import arrow_table_to_bars
 from brutex.feed_rust import FEED_RUST_ENV, FEED_RUST_FALLBACK_EVENT, reset_for_tests
@@ -407,13 +408,46 @@ class TestOrderingLaws:
         monkeypatch: pytest.MonkeyPatch,
         exc_type: type[BaseException],
     ) -> tuple[Sequence[Any], Sequence[Any], str, str]:
+        """Drive OFF then ON over *table*, raising *exc_type* in both arms.
+
+        R8 diagnosability hardening (MIGRATION #1741 REFUTER ROUND 8 — the
+        R7c one-time anomaly closed unreproducible-unknown): the only state
+        consistent with that symptom is the ON arm's bad-tick screen reading
+        DISABLED, so each arm asserts the screen is enabled immediately
+        before running, and the ON arm spies the kernel (the
+        TestKernelEngagement idiom) to assert it was consulted exactly once
+        with ``screen_enabled=True`` and returned the ``(kept, warns, stop)``
+        shape — a recurrence now self-diagnoses as "screen disabled in the
+        ON arm" instead of reading as "logs differ".
+        """
         monkeypatch.delenv(FEED_RUST_ENV, raising=False)
+        assert bad_tick_screen_enabled() is True
         with capture_logs() as off_logs, pytest.raises(exc_type) as off_exc:
             arrow_table_to_bars(table, source=_SOURCE)
         reset_for_tests()
         monkeypatch.setenv(FEED_RUST_ENV, "1")
+        assert bad_tick_screen_enabled() is True
+        real = feed_rust.resolve_feed_kernel()
+        assert real is not None, "wheel required for the ordering pins"
+        calls: list[tuple[Any, ...]] = []
+        results: list[Any] = []
+
+        def _spy(*args: Any) -> Any:
+            calls.append(args)
+            out = real(*args)
+            results.append(out)
+            return out
+
+        monkeypatch.setattr(replay, "resolve_feed_kernel", lambda: _spy)
         with capture_logs() as on_logs, pytest.raises(exc_type) as on_exc:
             arrow_table_to_bars(table, source=_SOURCE)
+        assert len(calls) == 1, "the ON arm must have consulted the kernel exactly once"
+        assert calls[0][5] is True, "the ON arm's kernel must see screen_enabled=True"
+        assert results[0] is not None, "in-envelope 2024 timestamps must never abstain"
+        kept, warns, stop = results[0]  # the (kept, warns, stop) shape law
+        assert isinstance(kept, list)
+        assert isinstance(warns, list)
+        assert stop is None or isinstance(stop, tuple)
         return off_logs, on_logs, str(off_exc.value), str(on_exc.value)
 
     def test_positivity_at_boundary_row_suppresses_flush_and_finish(

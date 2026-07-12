@@ -2381,10 +2381,12 @@ hostile-review pass._
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `feed_rust.py` 100.00% standalone,
   `replay.py` 100.00% under its `test_feed_replay*` discovery set, `bad_tick.py` 100.00%; ruff/ruff-format clean,
   `mypy --strict` clean (435 files on the merged tree), pyright 0 errors at the pre-change baseline; cargo fmt/clippy `-D warnings`/
-  test green. Review-hardened: hostile round 1 (4/4 SHIP; the MINOR + NIT fix pack folded) + refuter rounds 2-6
-  (R2b/R4b doc-only MINORs folded; R3b's main-timeline claim refuted as a stale-ref measurement; R5 3/3 CLEAN;
-  R6a's surviving warn-drain boundary mutant killed by a dedicated dual-arm regression + the NEW feed/replay.py
-  weekly mutmut pair) — the per-round record lives in MIGRATION.md #1741.)
+  test green. Review-hardened: hostile round 1 (4/4 SHIP; the MINOR + NIT fix pack folded) + refuter rounds 2-8,
+  protocol COMPLETE on two consecutive clean rounds (R2b/R4b doc-only MINORs folded; R3b's main-timeline claim
+  refuted as a stale-ref measurement; R5 3/3 CLEAN; R6a's surviving warn-drain boundary mutant killed by a
+  dedicated dual-arm regression + the NEW feed/replay.py weekly mutmut pair; R7/R8 3/3 CLEAN — the R7c one-time
+  anomaly closed unreproducible-unknown with test-only diagnosability hardening) — the per-round record lives in
+  MIGRATION.md #1741.)
   Earlier: `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
   the cascade-verdict → display join: the Stage-4 verdicts + per-candidate CPCV
   pass rate + the ranking composite reach top100.json, /results, /screener,
