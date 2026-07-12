@@ -725,7 +725,10 @@ def _default_alerter() -> CrossverifyAlerter:
     """
 
     class _Adapter:
+        """Duck-typed :class:`CrossverifyAlerter` over the ``emit_*`` module helpers."""
+
         def _emit(self, helper_name: str, **kwargs: Any) -> bool:
+            """Fire ONE named ``sweep_alerts`` helper; absent/raising → WARN + False."""
             try:
                 import importlib
 
@@ -749,9 +752,11 @@ def _default_alerter() -> CrossverifyAlerter:
                 return False
 
         def crossverify_summary(self, *, run_id: str, report: CrossverifyReport) -> bool:
+            """The exactly-once end-of-run summary; returns True iff attempted."""
             return self._emit("emit_crossverify_summary_alert", run_id=run_id, report=report)
 
         def crossverify_refused(self, *, run_id: str, reason: str) -> bool:
+            """A CRITICAL refusal (lock exhaustion / gate absent / calendar abstain)."""
             return self._emit("emit_crossverify_refused_alert", run_id=run_id, reason=reason)
 
     return _Adapter()

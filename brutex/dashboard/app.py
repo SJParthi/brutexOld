@@ -4918,6 +4918,7 @@ def build_app(
         # synchronous DuckDB reads that sat ON the event loop); the ValueError → 400
         # mapping stays OUTSIDE the offload (the #1622 api_universe_instruments idiom).
         def _resolve_targets() -> tuple[list[Instrument], str]:
+            """Resolve the retry selection on the threadpool worker (DuckDB reads)."""
             return resolve_pull_targets(
                 symbols=symbols,
                 symbol=symbol,
