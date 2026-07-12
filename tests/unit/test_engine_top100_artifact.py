@@ -963,7 +963,8 @@ class TestCascadeJoinAtWriter:
             out = {k: v for k, v in entry.items() if k != "cascade"}
             metrics = dict(cast("dict[str, object]", out["metrics"]))
             exits = dict(cast("dict[str, object]", metrics["exits"]))
-            assert exits.pop("session_gap") == 0  # the #1743 zero-count delta
+            session_gap_count = exits.pop("session_gap")
+            assert session_gap_count == 0  # the #1743 zero-count delta
             metrics["exits"] = exits
             out["metrics"] = metrics
             return out
