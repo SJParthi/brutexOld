@@ -72,6 +72,11 @@ from brutex.dashboard.completeness import (
     per_symbol_completeness,
     scoreboard_to_csv,
 )
+from brutex.dashboard.composite_join import (
+    CompositeIndex,
+    composite_index_revision,
+    load_composite_index,
+)
 from brutex.dashboard.composite_pull import (
     CompositePullReport,
     # The ONE index/stock classification-map builder the six-step F&O order keys on
@@ -140,7 +145,11 @@ from brutex.dashboard.lake_census_holder import (
     FIRST_SCAN_PER_FILE_BUDGET_S,
     LakeCensusHolder,
 )
-from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
+from brutex.dashboard.lake_revision import (
+    cascade_report_revision,
+    lake_revision,
+    sweep_results_revision,
+)
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -256,8 +265,10 @@ from brutex.dashboard.sweep_results_view import (
     MAX_TOP_N as SWEEP_LEADERBOARD_MAX_TOP_N,
 )
 from brutex.dashboard.sweep_results_view import (
+    SWEEPS_DIRNAME,
     SweepScan,
     build_sweep_leaderboard,
+    load_cascade_join_file,
     load_sweep_scan,
     resolve_preset_param,
     store_error_payload,
@@ -7253,11 +7264,39 @@ def build_app(
             """Cache-or-compute the projected leaderboard on a threadpool worker.
 
             Runs OFF the event loop: the ``sweep_results_revision`` probe is
-            O(dirs)+O(1-stat) per poll, and the ``compute=`` closures perform
-            the real ``<lake>/sweeps`` scan / rank ONLY on a miss
+            O(dirs)+O(1-stat) per poll, the ``composite_index_revision``
+            probe adds O(run dirs + results-depth dirs) ``scandir``/``stat``
+            per poll — NAME-only, zero manifest reads/parses (disclosed —
+            fix round 1; the per-poll manifest.json read+parse the
+            ``discover_runs`` hop hid was removed in fix round 2,
+            bench-pinned) — and the ``compute=`` closures perform the real
+            ``<lake>/sweeps`` scan / rank ONLY on a miss
             (DEC-LEDGER-DELTA-O-PAGE-001).
             """
             rev = sweep_results_revision(lake_root)
+            # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the cascade report is
+            # atomically OVERWRITTEN in place per sweep — the rewrite moves NO
+            # directory mtime the sweeps digest sees, so its DEDICATED file
+            # stat token folds into the CACHE KEY (a rewrite mints a new key →
+            # recompute; the sweep_scan itself stays generation-keyed). A
+            # probe OUTAGE (None) folds the literal "outage" segment: the
+            # cached decorated payload keeps serving for the outage's duration
+            # (bounded staleness, WARNed inside the probe; recovery on the
+            # next successful stat — the r1 MINOR-1 doctrine).
+            casc_rev = cascade_report_revision(lake_root)
+            sweeps_root = lake_root / SWEEPS_DIRNAME
+            # Fix round 1 (refuter-confirmed MAJOR): the aggs sidecars feeding
+            # the composite index live under the sweep_runs/ SIBLING tree,
+            # which sweep_results_revision NEVER stats — and cmd_sweep_all's
+            # depth pass lands them AFTER the sweep's last store flush / audit
+            # append, so keying the index on the sweeps generation alone
+            # provably froze an EMPTY/PARTIAL index (a poll landing
+            # mid-depth-pass) until the NEXT sweep. The DEDICATED probe folds
+            # into the payload cache key AND drives the composite-index slot's
+            # generation below; a probe OUTAGE (None) folds the literal
+            # "outage" segment — the cached payload holds (the casc_rev
+            # doctrine above).
+            comp_rev = composite_index_revision(sweeps_root)
             # The STABLE (revision-free) filter key. Casefold the filter
             # axes: build_sweep_leaderboard's _matches filters them
             # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
@@ -7270,6 +7309,7 @@ def build_app(
                 f"sweep_leaderboard|i={(instrument or '').casefold()}"
                 f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
                 f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+                f"|casc={casc_rev or 'outage'}|comp={comp_rev or 'outage'}"
             )
 
             def _fresh() -> dict[str, Any]:
@@ -7281,6 +7321,8 @@ def build_app(
                     rank_by=rank_by,
                     top_n=top,
                     preset=resolved_preset,
+                    cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
+                    composite=load_composite_index(sweeps_root),
                 ).to_dict()
 
             if rev is None:
@@ -7309,9 +7351,28 @@ def build_app(
                 generation=gen,
                 compute=lambda: load_sweep_scan(lake_root),
             )
+            # Level 1b (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, fix round 1):
+            # ONE composite-index read per `composite_index_revision` token —
+            # the slot's generation rides the ONE `revision_generation` digest
+            # bridge over the DEDICATED probe, NOT the sweeps generation. The
+            # pre-fix comment's sufficiency claim ("aggs writes move
+            # sweep_results_revision") was FALSE: the depth pass writes the
+            # aggs AFTER the sweep's last store flush / audit append into the
+            # sweep_runs/ sibling tree the sweeps token never stats, so `gen`
+            # alone froze an empty/partial index until the NEXT sweep
+            # (refuter-reproduced; now killed by the route regression). Any
+            # aggs write moves a results-depth dir mtime → new token →
+            # recompute; a sweeps-only move (store flush) leaves the cached
+            # index untouched.
+            composite_index: CompositeIndex = _sweep_leaderboard_cache.get_or_compute(
+                "composite_index",
+                generation=revision_generation(comp_rev or "outage"),
+                compute=lambda: load_composite_index(sweeps_root),
+            )
             # Level 2: the ranked payload per stable filter key (same token
             # generation; `mru_prefix` records the last-known pointer the
-            # probe-outage arm above serves).
+            # probe-outage arm above serves; the cascade join parses ONCE per
+            # report token via the loader's own single-entry memo).
             return _sweep_leaderboard_cache.get_or_compute(
                 lb_key,
                 generation=gen,
@@ -7324,6 +7385,8 @@ def build_app(
                     top_n=top,
                     scan=scan,
                     preset=resolved_preset,
+                    cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
+                    composite=composite_index,
                 ).to_dict(),
                 mru_prefix=lb_key,
             )
