@@ -52,8 +52,9 @@ Cost honesty (Golden Rule #10)
 O(kept bars in the window) + O(days in the covered span) per window at the
 ingest tail, with ZERO additional lake I/O — the bars are already in memory
 when the census runs; the sweep-preflight note is O(already-loaded slice
-bars). The #1614 lake stats manifest is deliberately NOT consumed — its
-per-month-file granularity cannot answer per-session counts.
+bars + days in each slice's covered span). The #1614 lake stats manifest is
+deliberately NOT consumed — its per-month-file granularity cannot answer
+per-session counts.
 
 Everything here is pure modulo the documented fail-soft env reads (the kill
 switch inside :func:`session_density_census_enabled` — never the classifier —
