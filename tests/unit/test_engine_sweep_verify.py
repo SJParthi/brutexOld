@@ -2831,7 +2831,7 @@ class TestRecordedAprioriFromAudit:
         """Review fix round 1 m4: ONE streaming ``iter_entries`` pass per present
         chain — never a materialised ``read_entries`` list, never a second
         pass (the last-wins fold happens in-stream)."""
-        import brutex.orchestrator.audit as audit_mod
+        from brutex.orchestrator import audit as audit_mod
 
         self._write_start(tmp_path, "sweep-all.jsonl", "SWEEP_START", {"k": 2})
         from brutex.engine.sweep_audit import SweepAuditWriter
@@ -3116,7 +3116,7 @@ class TestModeCensusFieldsSingleSource:
         assert MODE_CENSUS_FIELDS == ("n_conflict_pruned", "n_enumerated", "n_minhits_dropped")
 
     def test_exported_in_all(self) -> None:
-        import brutex.engine.trial_stats as trial_stats_mod
+        from brutex.engine import trial_stats as trial_stats_mod
 
         assert "MODE_CENSUS_FIELDS" in trial_stats_mod.__all__
 

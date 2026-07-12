@@ -334,7 +334,7 @@ def test_explicit_k_no_recount_verify_survives_a_corrupt_supervisor_chain(
 
 
 def _capture_watchdog_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    import brutex.engine.sweep_watchdog as watchdog_mod
+    from brutex.engine import sweep_watchdog as watchdog_mod
 
     captured: list[float] = []
     real = watchdog_mod.SweepWatchdog

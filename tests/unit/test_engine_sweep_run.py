@@ -3667,7 +3667,7 @@ class TestHitCountMemo:
         """Past HIT_MEMO_MAX_ENTRIES the memo stops retaining (insert-drop; the
         overlay serves the computed values) — counts still byte-identical."""
         pytest.importorskip("polars")
-        import brutex.engine.sweep_run as sweep_run_mod
+        from brutex.engine import sweep_run as sweep_run_mod
 
         monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
         monkeypatch.setattr(sweep_run_mod, "HIT_MEMO_MAX_ENTRIES", 2)
