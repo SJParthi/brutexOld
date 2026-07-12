@@ -35,6 +35,11 @@ wheel is built by maturin and installed in every CI job that imports
   per bar so the per-bar compute runs in Rust (the bit-identical
   backtest==live path; ``DEC-STAGE1A-WIRE-VWAP-BOS-001`` / ``DEC-NIFTY-INDICATORS-001``
   / ``DEC-NIFTY-BOS-CHOCH-001``).
+* ``stage1a_bar_bits_batch`` — the batch Stage-1A bar-bits kernel
+  (``DEC-STAGE1A-RUST-BATCH-001``): one call per ``(instrument, tf)`` build over
+  prepass-resolved columns/day-tables, returning one u128 mask per bar. The
+  default-OFF ``BRUTEX_SWEEP_RUST_STAGE1A`` seam in
+  ``brutex.engine.rust_stage1a`` is its ONE production consumer.
 
 Wheel-source freshness handshake (R2-CC-G1)
 -------------------------------------------
@@ -111,6 +116,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "resolve_near_month",
     "seconds_of_day",
     "spec_canonical_bytes",
+    "stage1a_bar_bits_batch",
     "total_conditions",
     "version",
     "weekday_from_ordinal",
@@ -175,6 +181,7 @@ from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     resolve_near_month,
     seconds_of_day,
     spec_canonical_bytes,
+    stage1a_bar_bits_batch,
     total_conditions,
     version,
     weekday_from_ordinal,
@@ -224,6 +231,7 @@ __all__ = [
     "resolve_near_month",
     "seconds_of_day",
     "spec_canonical_bytes",
+    "stage1a_bar_bits_batch",
     "total_conditions",
     "version",
     "weekday_from_ordinal",
