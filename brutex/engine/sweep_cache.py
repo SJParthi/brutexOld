@@ -99,7 +99,7 @@ class SweepCacheCapacityError(SweepCacheError):
 
     Since the STEP-1 bounded auto-grow (DEC-ENGINE-MISC-PACK-001), a resume whose
     persisted digest count exceeds the configured ``bloom_capacity`` is first
-    RESIZED via :func:`_auto_grow_capacity` — ``max(persisted,
+    RESIZED via :func:`_auto_grow_capacity` — ``max(ceil(persisted × 1.25),
     ceil(capacity × 1.25))`` — provided the grown bit array still fits the
     :data:`brutex.orchestrator.bloom.MAX_BLOOM_BYTES` 16 GiB hardware-envelope
     wall (CLAUDE.md §8). This error is therefore raised by
@@ -209,10 +209,15 @@ def _auto_grow_capacity(configured_capacity: int, persisted: int, fpr_target: fl
 
     * ``persisted <= configured_capacity`` → the configured capacity,
       byte-identical behaviour (no grow, no log);
-    * otherwise → ``grown = max(persisted, ceil(configured_capacity × 1.25))``
-      (the ``max`` is required for correctness: a bare ``ceil(cap × 1.25)`` can
-      still be < *persisted* and would overflow the FAIL_CLOSED Bloom gate
-      mid-rebuild), IFF the grown sizing fits the
+    * otherwise → ``grown = max(ceil(persisted × 1.25),
+      ceil(configured_capacity × 1.25))`` — the ``ceil(persisted × 1.25)`` arm
+      leaves HEADROOM ABOVE *persisted* (25%) so the resume rebuild fills the
+      Bloom to *persisted* insertions with room to spare and the FIRST new
+      ``record_digest`` does NOT trip :class:`BloomCapacityExceeded` (the C6
+      resume-wedge fix; a bare ``max(persisted, …)`` sized the grown Bloom to
+      EXACTLY *persisted*, so once ``persisted >= 1.25 × capacity`` a resumed
+      sweep made only ONE tuple of forward progress per process restart). IFF
+      the grown sizing fits the
       :data:`brutex.orchestrator.bloom.MAX_BLOOM_BYTES` 16 GiB wall
       (:func:`brutex.orchestrator.bloom._compute_m_bytes` — the pure sizing
       helper exposed for exactly this audit). A grow is LOUD: one
@@ -255,7 +260,7 @@ def _auto_grow_capacity(configured_capacity: int, persisted: int, fpr_target: fl
     # module must stay importable without it (same rationale as the resolvers).
     from brutex.orchestrator.bloom import MAX_BLOOM_BYTES, _compute_m_bytes
 
-    grown = max(persisted, math.ceil(configured_capacity * 1.25))
+    grown = max(math.ceil(persisted * 1.25), math.ceil(configured_capacity * 1.25))
     m_bytes = _compute_m_bytes(grown, fpr_target)
     if m_bytes > MAX_BLOOM_BYTES:
         raise SweepCacheCapacityError(
@@ -466,8 +471,10 @@ class SweepCache:
         is opened FIRST and the Bloom capacity is pre-sized from its persisted
         count via :func:`_auto_grow_capacity` — a resume holding MORE digests
         than the configured ``bloom_capacity`` auto-grows to
-        ``max(persisted, ceil(capacity × 1.25))`` (one loud
-        ``sweep_cache.bloom_auto_grow`` event) instead of refusing, provided
+        ``max(ceil(persisted × 1.25), ceil(capacity × 1.25))`` (one loud
+        ``sweep_cache.bloom_auto_grow`` event) — HEADROOM above *persisted* so
+        the resumed sweep can record NEW tuples, not just rebuild — instead of
+        refusing, provided
         the grown bit array fits the 16 GiB
         :data:`~brutex.orchestrator.bloom.MAX_BLOOM_BYTES` wall; above the wall
         the FAIL_CLOSED refusal stays, naming the sharded / mmap'd Bloom

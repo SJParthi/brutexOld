@@ -47,6 +47,7 @@ from brutex.engine.results_store import (
     ResultRow,
     ResultsStore,
     ResultsStoreError,
+    ResultsStoreGateConflictError,
     ResultsStoreSchemaError,
 )
 from brutex.strategies.combo import combo_hash
@@ -281,6 +282,42 @@ class TestAppendAndLookup:
         with pytest.raises(ResultsStoreError, match="run-identity conflict") as exc:
             store.append(_row(run_id=_rid(1), sharpe_ratio=9.9))
         assert "sharpe_ratio" in str(exc.value)
+
+    def test_append_gate_only_conflict_none_vs_float_raises_typed(self) -> None:
+        """C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a diff in ONLY the nullable
+        gate metric (gate on vs off) is a config-change conflict, not corruption."""
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(run_id=_rid(1), deflated_sharpe=None))
+        with pytest.raises(ResultsStoreGateConflictError, match="gate-config change") as exc:
+            store.append(_row(run_id=_rid(1), deflated_sharpe=0.97))
+        assert "deflated_sharpe" in str(exc.value)
+        assert "DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001" in str(exc.value)
+
+    def test_append_gate_only_conflict_float_vs_float_raises_typed(self) -> None:
+        """C5: two DIFFERENT overfit configs (float vs float DSR) also classify typed."""
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(run_id=_rid(1), deflated_sharpe=0.80))
+        with pytest.raises(ResultsStoreGateConflictError):
+            store.append(_row(run_id=_rid(1), deflated_sharpe=0.97))
+
+    def test_append_mixed_conflict_stays_generic(self) -> None:
+        """C5: a conflict touching ANY non-nullable field (sharpe_ratio) stays the
+        generic ResultsStoreError, NOT the gate subclass (subset test excludes it)."""
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(run_id=_rid(1), sharpe_ratio=1.5, deflated_sharpe=0.80))
+        with pytest.raises(ResultsStoreError) as exc:
+            store.append(_row(run_id=_rid(1), sharpe_ratio=9.9, deflated_sharpe=0.97))
+        assert not isinstance(exc.value, ResultsStoreGateConflictError)
+        assert "sharpe_ratio" in str(exc.value)
+
+    def test_append_identical_gate_metric_row_is_noop(self) -> None:
+        """C5 guard is only reached on a real diff — an identical row stays a no-op."""
+        store = ResultsStore(path=Path("unused.parquet"))
+        row = _row(run_id=_rid(1), deflated_sharpe=0.97)
+        first_append = store.append(row)
+        assert first_append is True
+        second_append = store.append(row)
+        assert second_append is False
 
     def test_get_hit_and_miss(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))
