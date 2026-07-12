@@ -965,6 +965,436 @@ class TestCrossSessionPendingEntryDrop:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Open-position session-boundary close (DEC-TRADESIM-OPEN-SESSION-GUARD-001)
+#
+# The OPEN-position twin of R2-OC-2: pre-fix, a position left open because its
+# session's stored bars ended BEFORE any forced-exit-window bar (a session-tail
+# data hole) silently survived the overnight gap and closed against the NEXT
+# session's prices — a pending next-open exit filled at the next session's
+# open, SL/TP triggered against the gap, or the next day's 15:20 bar forced it
+# out — folding the whole overnight move into pnl AND the gap bar's range into
+# MFE/MAE (executed repro: +30000/+50000 paisa fabricated per trade on a +₹500
+# gap). Now the first bar of the new session closes the position retroactively
+# at the PRIOR session's last stored bar (the finish() idiom) under the
+# ``session_gap`` reason. Fixtures mirror the executed repro: day D =
+# 2024-01-02 bars 11:10-11:14 (tail hole — nothing at/after 15:20), day D+1 =
+# 2024-01-03 opening ₹600 (+₹500 overnight gap).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _gap_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
+    """A day-D+1 (2024-01-03) bar — the far side of the overnight gap."""
+    return _bar(hh, mm, o, h, lo, c, day=_NEXT_DAY)
+
+
+class TestOpenPositionSessionGapClose:
+    """An open position never survives an IST session-date change."""
+
+    def _day_d_hold(self) -> list[CandleBar]:
+        """Signal @11:10 → entry @11:11 open ₹100; flat hold through 11:14."""
+        return [
+            _bar(11, 10, "100", "100", "100", "100"),  # signal
+            _bar(11, 11, "100", "100", "100", "100"),  # entry @ open 100.00
+            _bar(11, 12, "100", "100", "100", "100"),
+            _bar(11, 13, "100", "100", "100", "100"),
+            _bar(11, 14, "100", "100", "100", "100"),  # day-D's LAST stored bar
+        ]
+
+    def test_v1_gap_bar_tp_hit_becomes_session_gap_close(self) -> None:
+        # V1 (executed repro): the gap bar's range "hits" the ₹300 TP level —
+        # pre-fix a take_profit fill at 400.00 on day D+1 (+30000 paisa
+        # fabricated). Now: session_gap close at day-D's 11:14 close, pnl 0,
+        # and the gap bar's range NEVER enters MFE/MAE.
+        bars = [*self._day_d_hold(), _gap_bar(9, 15, "600", "601", "599", "600")]
+        signals = [True, False, False, False, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            take_profit_paisa=30_000,
+            detail_sink=sink,
+        )
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=0,
+                mfe_paisa=0,
+                mae_paisa=0,
+                holding_bars=4,
+                entry_ts=_ts(11, 11),
+                exit_ts=_ts(11, 14),  # day-D's last stored bar — never day D+1
+                direction=Side.BUY,
+            )
+        ]
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+        assert sink[0].exit_fill_paisa == 10_000  # day-D 11:14 CLOSE
+
+    def test_v1b_next_day_forced_bar_becomes_session_gap_close(self) -> None:
+        # V1b: pre-fix the position rode all of day D+1 to its 15:20 forced
+        # bar (+50000 paisa fabricated). The guard fires at day D+1's FIRST
+        # bar — the forced flag never gets a say (never forced_1520 on D+1).
+        bars = [
+            *self._day_d_hold(),
+            _gap_bar(9, 15, "600", "601", "599", "600"),
+            _gap_bar(15, 20, "600", "601", "599", "600"),  # D+1's forced bar
+        ]
+        signals = [True] + [False] * 6
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(11, 14)
+        assert trades[0].pnl_paisa == 0
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+
+    def test_v1b_boundary_bar_itself_forced_still_session_gap(self) -> None:
+        # Edge pin (§8.6): day D+1's FIRST stored bar is itself ≥ 15:20 — the
+        # guard fires before the forced branch can, so the close is still the
+        # session_gap close at day-D's last bar, never a forced fill at 600.
+        bars = [*self._day_d_hold(), _gap_bar(15, 20, "600", "601", "599", "600")]
+        signals = [True] + [False] * 5
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(11, 14)
+        assert trades[0].pnl_paisa == 0
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+
+    def test_v2_pending_next_open_exit_is_subsumed(self) -> None:
+        # V2: a NEXT_OPEN stop scheduled on day-D's LAST stored bar pre-fix
+        # filled at day D+1's 09:15 open (+50000 paisa fabricated). Now the
+        # boundary close SUBSUMES the pending exit: fill = day-D's last CLOSE.
+        # This pins the flat-walker TRADE SHAPE only (exactly one trade,
+        # priced on day D) — with no day-D+1 entry there is no position a
+        # stale pending could bite, so the CLEAR's killing teeth live in
+        # test_cross_session_stale_pending_exit_never_reaches_a_new_position.
+        bars = [
+            _bar(11, 10, "100", "101", "99", "100"),  # signal
+            _bar(11, 11, "104", "104", "103.50", "104"),  # entry @ open 104.00
+            # low 100.00 hits the −400 stop (level 100.00) → NEXT_OPEN pending.
+            _bar(11, 12, "101", "104.50", "100", "101"),  # day-D's LAST stored bar
+            _gap_bar(9, 15, "600", "601", "599", "600"),
+            _gap_bar(9, 16, "600", "601", "599", "600"),
+        ]
+        signals = [True] + [False] * 4
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=400,
+            detail_sink=sink,
+            policy=FillPolicy(stop_loss=LevelFill.NEXT_OPEN),
+        )
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=10_100 - 10_400,  # day-D 11:12 CLOSE 101.00 − entry 104.00
+                mfe_paisa=50,  # high 104.50 on 11:12
+                mae_paisa=400,  # low 100.00 on 11:12
+                holding_bars=2,
+                entry_ts=_ts(11, 11),
+                exit_ts=_ts(11, 12),
+                direction=Side.BUY,
+            )
+        ]
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+
+    def test_v3_pending_signal_exit_is_subsumed(self) -> None:
+        # V3: a Mode-B SIGNAL exit armed on day-D's last stored bar pre-fix
+        # filled at day D+1's open. Same subsumption as V2.
+        bars = [*self._day_d_hold(), _gap_bar(9, 15, "600", "601", "599", "600")]
+        entry = [True] + [False] * 5
+        exits = [False, False, False, False, True, False]  # signal on 11:14
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(
+            bars,
+            entry,
+            direction=Side.BUY,
+            tf_minutes=1,
+            exit_signals=exits,
+            detail_sink=sink,
+        )
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(11, 14)
+        assert trades[0].pnl_paisa == 0
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+
+    def test_cross_session_stale_pending_exit_never_reaches_a_new_position(self) -> None:
+        """The (A2) pending-exit CLEAR has teeth (the Rust directed test's Python twin).
+
+        After the boundary close, a NEW day-D+1 position must ride normally to
+        end of data — under a mutant that drops the ``self._pending_exit =
+        None`` clear in the (A2) guard, the stale day-D NEXT_OPEN stop pending
+        would close the new position instantly at its first managed bar's open
+        (its own ENTRY bar, managed same-push) with the stale ``stop_loss``
+        reason. Day-D+1 lows stay ABOVE the second trade's own stop level
+        (entry 605.00 − 4.00 = 601.00), so only a stale pending exit could
+        close it before the end of data. ONE killer test covers BOTH pending
+        kinds: the NEXT_OPEN SL/TP pending and the Mode-B SIGNAL pending share
+        the ONE ``_pending_exit`` slot, so the single (A2) clear subsumes both
+        (V2/V3 pin each shape's boundary-close fill; this test pins the CLEAR
+        itself).
+        """
+        bars = [
+            _bar(11, 10, "100", "101", "99", "100"),  # signal
+            _bar(11, 11, "104", "104", "103.50", "104"),  # entry @ open 104.00
+            # low 100.00 hits the −400 stop (level 100.00) → NEXT_OPEN pending
+            # armed on day-D's LAST stored bar.
+            _bar(11, 12, "101", "104.50", "100", "101"),
+            _gap_bar(9, 15, "600", "601", "599", "600"),  # boundary → session_gap
+            _gap_bar(9, 16, "600", "601", "599", "600"),  # signal → earliest re-arm
+            _gap_bar(9, 17, "605", "606", "604", "605"),  # NEW entry @ open 605.00
+            _gap_bar(9, 18, "607", "608", "606", "607.50"),  # rides → EOD close
+        ]
+        signals = [True, False, False, False, True, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=400,
+            detail_sink=sink,
+            policy=FillPolicy(stop_loss=LevelFill.NEXT_OPEN),
+        )
+        assert len(trades) == 2
+        assert trades[0].exit_ts == _ts(11, 12)  # the V2-shape session_gap close
+        assert trades[0].pnl_paisa == 10_100 - 10_400
+        # The NEW position rides to end of data — never an instant
+        # stale-pending close at its first managed bar (which would read
+        # exit_ts == entry_ts with the stale ``stop_loss`` reason).
+        assert trades[1].entry_ts == _ts(9, 17, day=_NEXT_DAY)
+        assert trades[1].exit_ts == _ts(9, 18, day=_NEXT_DAY)
+        assert trades[1].pnl_paisa == 60_750 - 60_500  # EOD close 607.50 − entry 605.00
+        assert trades[1].holding_bars == 2
+        assert [d.exit_reason for d in sink] == ["session_gap", "end_of_data"]
+
+    def test_sell_direction_symmetric_session_gap_close(self) -> None:
+        # SELL variant of V1 (§8.9): a short pre-fix would have "profited" the
+        # inverse gap; the boundary close is direction-aware through _close.
+        bars = [*self._day_d_hold(), _gap_bar(9, 15, "600", "601", "599", "600")]
+        signals = [True] + [False] * 5
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.SELL, tf_minutes=1, detail_sink=sink)
+        assert len(trades) == 1
+        assert trades[0].direction is Side.SELL
+        assert trades[0].pnl_paisa == 0  # entry 100.00 − day-D close 100.00
+        assert trades[0].exit_ts == _ts(11, 14)
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+
+    def test_boundary_bar_never_arms_earliest_rearm_next_bar(self) -> None:
+        # §2.2 pinned law: the boundary bar EMITS the close, so step (C)'s
+        # `closed is None` gate suppresses arming ON it. A signal on the
+        # boundary bar produces nothing; the earliest re-arm is bar i+1 and
+        # the earliest new fill is bar i+2 (same-session, unforced).
+        bars = [
+            *self._day_d_hold(),
+            _gap_bar(9, 15, "600", "601", "599", "600"),  # boundary (i) — signal ignored
+            _gap_bar(9, 16, "600", "601", "599", "600"),  # i+1 — earliest re-arm
+            _gap_bar(9, 17, "605", "606", "604", "605"),  # i+2 — earliest new fill
+            _gap_bar(9, 18, "607", "608", "606", "607.50"),
+        ]
+        signals = [True, False, False, False, False, True, True, False, False]
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+        assert len(trades) == 2
+        assert trades[0].exit_ts == _ts(11, 14)  # the session_gap close
+        assert trades[1].entry_ts == _ts(9, 17, day=_NEXT_DAY)  # fill at i+2, never i/i+1
+        assert trades[1].pnl_paisa == 60_750 - 60_500  # EOD close 607.50 − entry 605.00
+
+    def test_multi_session_hole_fires_once_same_fill(self) -> None:
+        # §8.1: the compare is date INEQUALITY, not adjacency — a k → k+2
+        # step (day-D → Friday, skipping Wednesday+Thursday... here Tue → Fri)
+        # fires the guard exactly once with the identical fill.
+        bars = [
+            _bar(11, 10, "100", "100", "100", "100", day=_DAY),
+            _bar(11, 11, "100", "100", "100", "100", day=_DAY),
+            _bar(11, 12, "100", "100.30", "99.90", "100.10", day=_DAY),
+            _bar(9, 15, "600", "601", "599", "600", day=_FRIDAY),  # 3 calendar days later
+        ]
+        signals = [True, False, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=10,  # 11:12 close 100.10 − entry 100.00
+                mfe_paisa=30,
+                mae_paisa=10,
+                holding_bars=2,
+                entry_ts=_ts(11, 11),
+                exit_ts=_ts(11, 12),
+                direction=Side.BUY,
+            )
+        ]
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+
+    def test_entry_on_sessions_last_stored_bar_degenerate_close(self) -> None:
+        # §8.7: entry fills ON day-D's last stored bar → holding_bars == 1 and
+        # pnl = that bar's close − its open (the degenerate one-bar close).
+        bars = [
+            _bar(11, 13, "100", "100", "100", "100"),  # signal
+            _bar(11, 14, "100.20", "100.60", "100.10", "100.45"),  # entry AND last stored bar
+            _gap_bar(9, 15, "600", "601", "599", "600"),
+        ]
+        signals = [True, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=25,  # close 100.45 − open 100.20
+                mfe_paisa=40,  # high 100.60 folded by the same-push manage
+                mae_paisa=10,  # low 100.10
+                holding_bars=1,
+                entry_ts=_ts(11, 14),
+                exit_ts=_ts(11, 14),
+                direction=Side.BUY,
+            )
+        ]
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+
+    def test_streaming_push_emits_the_boundary_close_on_the_boundary_bar(self) -> None:
+        # Streaming twin: push() returns the session_gap trade ON the boundary
+        # bar (emitted there, priced at day-D's last stored bar); finish() then
+        # has nothing left.
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        for bar in self._day_d_hold():
+            assert walker.push(bar, entry_signal=bar.timestamp == _ts(11, 10)) is None
+        closed = walker.push(_gap_bar(9, 15, "600", "601", "599", "600"), entry_signal=False)
+        assert closed is not None
+        assert closed.exit_ts == _ts(11, 14)
+        assert closed.pnl_paisa == 0
+        assert walker.finish() is None
+
+    def test_entry_day_is_the_ist_session_date_not_the_utc_date(self) -> None:
+        """The (A) fill stamps ``entry_day_ist`` from the IST session date, never
+        the UTC calendar date (refuter round 4, directed mutant pin).
+
+        The ``bar.timestamp.date()`` (UTC-date) mutant at the ``_open_position``
+        call survived the suite because the mismatch is domain-bounded — no NSE
+        session bar exists before 05:30 IST post-ingest-filter, so IST and UTC
+        dates always agree on real lake bars. The guard's DOCUMENTED semantics
+        are the IST session date, so this pins that law beyond the NSE trading
+        window (defense-in-depth; the domain never produces such bars): an
+        entry fill at IST 2024-01-02 01:00 is UTC 2024-01-01 19:30 — under the
+        mutant ``entry_day_ist`` reads 2024-01-01 and the (A2) guard
+        phantom-session_gap-closes the just-opened position on its OWN entry
+        bar; the correct IST stamp HOLDS through the later same-IST-session bar
+        (IST 05:00 = UTC 2024-01-01 23:30) to the honest end_of_data finish.
+        """
+        bars = [
+            _flat(0, 55),  # signal — IST date 2024-01-02, UTC date 2024-01-01
+            _flat(1, 0),  # entry fill @ open — UTC date still 2024-01-01
+            _flat(5, 0),  # same IST session date — the position must HOLD
+        ]
+        signals = [True, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=0,
+                mfe_paisa=0,
+                mae_paisa=0,
+                holding_bars=2,
+                entry_ts=_ts(1, 0),
+                exit_ts=_ts(5, 0),
+                direction=Side.BUY,
+            )
+        ]
+        assert [d.exit_reason for d in sink] == ["end_of_data"]
+
+    def test_backward_session_date_change_still_closes_session_gap(self) -> None:
+        """The (A2) compare is an EQUALITY law: ANY IST session-date CHANGE
+        closes the open position — either direction, not only forward (the
+        Python defense-in-depth twin of the Rust r8 M14 ``!=``→``>`` mutant
+        killer ``cross_session_backward_session_ordinal_still_closes_boundary``).
+
+        ``push()`` derives each bar's session date from that bar's OWN
+        timestamp and enforces no monotonicity ("chronologically ordered" is a
+        documented input contract, not a checked one — verified before adding
+        this test), so a backward-dated bar IS API-reachable; production sweep
+        feeds are chronological (Catalog/ReplayFeed sorted), hence
+        LOW/defense-in-depth. Under a ``day_ist > pos.entry_day_ist`` mutant
+        the earlier-dated bar folds into the open position and it rides to a
+        wrong end_of_data finish at the backward bar's close instead of the
+        session_gap boundary close.
+        """
+        bars = [
+            _bar(11, 10, "100", "100", "100", "100", day=_NEXT_DAY),  # signal
+            _bar(11, 11, "100", "102", "99", "101", day=_NEXT_DAY),  # entry @ open 100.00
+            _bar(11, 12, "100", "101", "99", "100", day=_DAY),  # EARLIER IST date
+        ]
+        signals = [True, False, False]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=100,  # 11:11 close 101.00 − entry 100.00
+                mfe_paisa=200,  # high 102.00 folded by the same-push manage
+                mae_paisa=100,  # low 99.00
+                holding_bars=1,
+                entry_ts=_ts(11, 11, day=_NEXT_DAY),
+                exit_ts=_ts(11, 11, day=_NEXT_DAY),  # never the backward bar
+                direction=Side.BUY,
+            )
+        ]
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+        assert sink[0].exit_fill_paisa == 10_100  # day-D+1 11:11 CLOSE
+
+
+class TestSessionGapFinishEquivalence:
+    """The finish()-equivalence pin (suffix independence by construction).
+
+    The SAME day-D prefix closed by (a) the (A2) boundary guard when the feed
+    continues into day D+1 vs (b) ``finish()`` when the feed truncates at
+    day-D's last stored bar emits a bit-equal ``ClosedTrade`` AND exit index;
+    ONLY ``TradeDetail.exit_reason`` differs (``session_gap`` vs
+    ``end_of_data``) — DEC-TRADESIM-OPEN-SESSION-GUARD-001 §5.2. VIX stamps
+    ride the same (entry_ts, exit_ts) pair in both worlds, so they are
+    deterministic and identical too (§8.10).
+    """
+
+    def _prefix(self) -> list[CandleBar]:
+        return [
+            _bar(11, 10, "100", "101", "99", "100"),  # signal
+            _bar(11, 11, "100.50", "102", "100", "101"),  # entry @ 100.50
+            _bar(11, 12, "101", "103", "100.25", "102"),  # day-D's last stored bar
+        ]
+
+    def test_boundary_close_bit_equals_finish_close(self) -> None:
+        from brutex.engine.reference_series import TradeReferenceStamper
+
+        prefix = self._prefix()
+        vix = [_vix_bar(11, 10, "15.10"), _vix_bar(11, 11, "15.20"), _vix_bar(11, 12, "15.30")]
+        stamper = TradeReferenceStamper.from_vix_bars(vix)
+        continued = [*prefix, _gap_bar(9, 15, "600", "601", "599", "600")]
+
+        sink_full: list[ts_mod.TradeDetail] = []
+        full_trades, full_idx = ts_mod.simulate_trades_with_exit_indices(
+            continued,
+            [True, False, False, False],
+            direction=Side.BUY,
+            tf_minutes=1,
+            reference_stamper=stamper,
+            detail_sink=sink_full,
+        )
+        sink_trunc: list[ts_mod.TradeDetail] = []
+        trunc_trades, trunc_idx = ts_mod.simulate_trades_with_exit_indices(
+            prefix,
+            [True, False, False],
+            direction=Side.BUY,
+            tf_minutes=1,
+            reference_stamper=stamper,
+            detail_sink=sink_trunc,
+        )
+        assert full_trades == trunc_trades  # bit-equal ClosedTrade (VIX stamps included)
+        assert full_idx == trunc_idx == [2]  # same TRUE exit index
+        assert [d.exit_reason for d in sink_full] == ["session_gap"]
+        assert [d.exit_reason for d in sink_trunc] == ["end_of_data"]
+        assert sink_full[0].exit_fill_paisa == sink_trunc[0].exit_fill_paisa == 10_200
+        assert full_trades[0].vix_at_exit == Decimal("15.30")
+
+
+# ────────────────────────────────────────────────────────────────────────
 # India VIX reference stamp (DEC-VIX-TRADE-STAMP-001)
 # ────────────────────────────────────────────────────────────────────────
 

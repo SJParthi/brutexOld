@@ -37,8 +37,17 @@ SL/TP touch on the bar's ``[low, high]`` in int paisa with the pessimistic
 same-bar SL-first tie-break and exact-level (``AT_LEVEL``) fills — the
 production sweep's locked DEFAULT policy (``SweepRunConfig`` carries no
 policy field); MFE/MAE fold per in-position bar (forced bars fold
-``(open, open)`` only); a position still open at end of data closes at the
-LAST bar's CLOSE. P&L is the per-unit directional move in int64 paisa —
+``(open, open)`` only); an open position never survives an IST
+session-date change (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md
+#1743) — on the FIRST bar whose IST session date differs (pure ``!=``,
+either direction) from the position's entry-session date it closes
+retroactively at the PRIOR session's last managed bar (that bar's CLOSE /
+timestamp / index; NO excursion fold from the boundary bar) under
+``session_gap``, and the boundary bar never arms an entry (earliest
+re-arm ``i+1``, earliest fill ``i+2``); a position still open at end of
+data closes at the LAST bar's CLOSE — for the same prefix, bit-identical
+to the ``session_gap`` record modulo the reason label (the truncation
+equivalence). P&L is the per-unit directional move in int64 paisa —
 NO costs of any kind (Track-1 spot is signal-only; CLAUDE.md §7).
 
 ## Determinism (design D-11)
@@ -155,8 +164,10 @@ class RefTrade:
         ``exit_idx − entry_idx + 1``.
     exit_reason
         Why the position closed (``stop_loss`` / ``take_profit`` /
-        ``forced_1520`` / ``end_of_data``) — reference-side diagnostic only
-        (the production ``ClosedTrade`` carries no reason field).
+        ``forced_1520`` / ``session_gap`` / ``end_of_data``) —
+        reference-side diagnostic only (the production ``ClosedTrade``
+        carries no reason field; the numeric compare surface is
+        reason-free).
     """
 
     entry_idx: int
@@ -179,6 +190,7 @@ class _RefPosition:
     entry_idx: int
     entry_paisa: int
     entry_ts: datetime
+    entry_day: date
     sl_level: int | None
     tp_level: int | None
     mfe: int
@@ -309,93 +321,129 @@ def reference_simulate(
     pending_day: date | None = None
 
     for i, bar in enumerate(bars):
-        # Forced-exit resolution only when a position or pending entry needs
-        # it (mirrors production: the idle path never touches the calendar,
-        # so an out-of-coverage date on a flat stretch cannot raise).
+        # Session/forced resolution only when a position or pending entry
+        # needs it (the pre-existing calendar-idle law: the idle path never
+        # touches the calendar, so an out-of-coverage date on a flat stretch
+        # cannot raise). The whole (A)/(A2)/(B) ladder lives inside this arm
+        # — each guard requires a position or a pending entry — so the arm's
+        # non-Optional ``day`` local is the (A)/(A2) session key; the
+        # Optional ``bar_day`` mirror survives solely for step (C)'s
+        # reuse-or-resolve fallback expression.
+        bar_day: date | None = None
+        closed: RefTrade | None = None
         if pos is not None or pending:
             ts_ist = bar.timestamp.astimezone(IST)
-            bar_day: date | None = ts_ist.date()
+            day = ts_ist.date()
+            bar_day = day
             open_seconds = ts_ist.hour * 3600 + ts_ist.minute * 60 + ts_ist.second
-            forced = open_seconds + tf_minutes * 60 > _forced_boundary(ts_ist.date(), fe_cache)
-        else:
-            bar_day = None
-            forced = False
+            forced = open_seconds + tf_minutes * 60 > _forced_boundary(day, fe_cache)
 
-        # (A) Fill a pending entry at THIS bar's open — same IST session
-        # date only (overnight-gap fills DROP) and never on a forced bar.
-        if pos is None and pending:
-            pending = False
-            same_session = bar_day == pending_day
-            pending_day = None
-            if not forced and same_session:
-                entry_paisa = _to_paisa(bar.open)
-                if buy:
-                    sl_level = None if sl_paisa is None else entry_paisa - sl_paisa
-                    tp_level = None if tp_paisa is None else entry_paisa + tp_paisa
-                else:
-                    sl_level = None if sl_paisa is None else entry_paisa + sl_paisa
-                    tp_level = None if tp_paisa is None else entry_paisa - tp_paisa
-                pos = _RefPosition(
-                    entry_idx=i,
-                    entry_paisa=entry_paisa,
-                    entry_ts=bar.timestamp,
-                    sl_level=sl_level,
-                    tp_level=tp_level,
-                    mfe=0,
-                    mae=0,
-                    last_idx=i,
-                    last_close=bar.close,
-                    last_ts=bar.timestamp,
-                )
+            # (A) Fill a pending entry at THIS bar's open — same IST session
+            # date only (overnight-gap fills DROP, R2-OC-2 — unchanged) and
+            # never on a forced bar. (A) clears the pending flag before
+            # opening and step (C) arms only while flat, so (A) and (A2) can
+            # never both run on one bar (oracle-law §3(c) state invariant).
+            if pos is None and pending:
+                pending = False
+                same_session = day == pending_day
+                pending_day = None
+                if not forced and same_session:
+                    entry_paisa = _to_paisa(bar.open)
+                    if buy:
+                        sl_level = None if sl_paisa is None else entry_paisa - sl_paisa
+                        tp_level = None if tp_paisa is None else entry_paisa + tp_paisa
+                    else:
+                        sl_level = None if sl_paisa is None else entry_paisa + sl_paisa
+                        tp_level = None if tp_paisa is None else entry_paisa - tp_paisa
+                    pos = _RefPosition(
+                        entry_idx=i,
+                        entry_paisa=entry_paisa,
+                        entry_ts=bar.timestamp,
+                        # The IST SESSION date the fill resolved (never the
+                        # UTC date) — the (A2) session key, oracle-law §3(a).
+                        entry_day=day,
+                        sl_level=sl_level,
+                        tp_level=tp_level,
+                        mfe=0,
+                        mae=0,
+                        last_idx=i,
+                        last_close=bar.close,
+                        last_ts=bar.timestamp,
+                    )
 
-        # (B) Manage the open position on this bar (the entry bar included).
-        closed: RefTrade | None = None
-        if pos is not None:
-            pos.last_idx = i
-            pos.last_close = bar.close
-            pos.last_ts = bar.timestamp
-            if forced:
-                open_paisa = _to_paisa(bar.open)
-                _fold_excursion(pos, open_paisa, open_paisa, buy=buy)
+            if pos is not None and day != pos.entry_day:
+                # (A2) Session-boundary close (DEC-TRADESIM-OPEN-SESSION-
+                # GUARD-001, MIGRATION.md #1743 — re-derived from the ledger
+                # + design spec, oracle-law derivation §1/§2): an open
+                # position never survives an IST session-date change. On the
+                # FIRST bar whose session date differs (pure ``!=``, either
+                # direction — fires at most once even across a multi-session
+                # hole) close retroactively at the PRIOR session's last
+                # MANAGED bar — its CLOSE / timestamp / index, read BEFORE
+                # this bar touches ``last_*`` — with NO excursion fold from
+                # this boundary bar, whose forced flag is then irrelevant
+                # (the oracle is flat for the rest of this iteration). The
+                # DEFAULT policy carries no pending next-open exit slot, so
+                # there is nothing further to subsume; ``closed`` non-None
+                # makes step (C) skip arming on the boundary bar (earliest
+                # re-arm ``i+1``, earliest new fill ``i+2``).
                 closed = _close_position(
                     pos,
-                    exit_paisa=open_paisa,
-                    exit_ts=bar.timestamp,
-                    exit_idx=i,
-                    reason="forced_1520",
+                    exit_paisa=_to_paisa(pos.last_close),
+                    exit_ts=pos.last_ts,
+                    exit_idx=pos.last_idx,
+                    reason="session_gap",
                     buy=buy,
                 )
                 pos = None
-            else:
-                high_paisa = _to_paisa(bar.high)
-                low_paisa = _to_paisa(bar.low)
-                _fold_excursion(pos, high_paisa, low_paisa, buy=buy)
-                sl = pos.sl_level
-                tp = pos.tp_level
-                sl_hit = sl is not None and (low_paisa <= sl if buy else high_paisa >= sl)
-                tp_hit = tp is not None and (high_paisa >= tp if buy else low_paisa <= tp)
-                # Pessimistic same-bar tie: the stop fills first (SL_FIRST).
-                if sl_hit:
+
+            # (B) Manage the open position on this bar (entry bar included).
+            elif pos is not None:
+                pos.last_idx = i
+                pos.last_close = bar.close
+                pos.last_ts = bar.timestamp
+                if forced:
+                    open_paisa = _to_paisa(bar.open)
+                    _fold_excursion(pos, open_paisa, open_paisa, buy=buy)
                     closed = _close_position(
                         pos,
-                        # sl is narrowed non-None by sl_hit's construction.
-                        exit_paisa=sl if sl is not None else 0,
+                        exit_paisa=open_paisa,
                         exit_ts=bar.timestamp,
                         exit_idx=i,
-                        reason="stop_loss",
+                        reason="forced_1520",
                         buy=buy,
                     )
                     pos = None
-                elif tp_hit:
-                    closed = _close_position(
-                        pos,
-                        exit_paisa=tp if tp is not None else 0,
-                        exit_ts=bar.timestamp,
-                        exit_idx=i,
-                        reason="take_profit",
-                        buy=buy,
-                    )
-                    pos = None
+                else:
+                    high_paisa = _to_paisa(bar.high)
+                    low_paisa = _to_paisa(bar.low)
+                    _fold_excursion(pos, high_paisa, low_paisa, buy=buy)
+                    sl = pos.sl_level
+                    tp = pos.tp_level
+                    sl_hit = sl is not None and (low_paisa <= sl if buy else high_paisa >= sl)
+                    tp_hit = tp is not None and (high_paisa >= tp if buy else low_paisa <= tp)
+                    # Pessimistic same-bar tie: the stop fills first (SL_FIRST).
+                    if sl_hit:
+                        closed = _close_position(
+                            pos,
+                            # sl is narrowed non-None by sl_hit's construction.
+                            exit_paisa=sl if sl is not None else 0,
+                            exit_ts=bar.timestamp,
+                            exit_idx=i,
+                            reason="stop_loss",
+                            buy=buy,
+                        )
+                        pos = None
+                    elif tp_hit:
+                        closed = _close_position(
+                            pos,
+                            exit_paisa=tp if tp is not None else 0,
+                            exit_ts=bar.timestamp,
+                            exit_idx=i,
+                            reason="take_profit",
+                            buy=buy,
+                        )
+                        pos = None
         if closed is not None:
             trades.append(closed)
 
