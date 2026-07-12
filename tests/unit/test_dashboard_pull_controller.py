@@ -3942,6 +3942,24 @@ class TestTodayCompletenessGateArming:
         assert captured
         assert all(flag is True for flag in captured)
 
+    def test_pull_all_spot_live_junk_env_fails_loud_at_pull_start(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A LIVE pull with a junk kill-switch value fails LOUD at pull start
+        # (the resolve_market_closed posture) — never a silent coercion, never
+        # a mid-run crash.
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        with pytest.raises(ValueError, match=TODAY_COMPLETENESS_GATE_ENV):
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+
     def test_pull_candles_kill_switch_off_threads_false(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
