@@ -45,7 +45,7 @@ class AcceptanceModelError(ValueError):
 class Verdict(StrEnum):
     """The 4-valued machine verdict vocabulary (sample-ness lives in coverage)."""
 
-    PASS = "PASS"  # noqa: S105 — a verdict token, not a credential
+    PASS = "PASS"  # noqa: S105  # nosec B105 — a verdict token, not a credential
     FAIL = "FAIL"
     ABSTAIN = "ABSTAIN"
     ERROR = "ERROR"
@@ -54,8 +54,8 @@ class Verdict(StrEnum):
 class OverallVerdict(StrEnum):
     """Whole-run verdict token for the report headline."""
 
-    PASS = "PASS"  # noqa: S105 — a verdict token, not a credential
-    PASS_WITH_ABSTAINS = "PASS_WITH_ABSTAINS"  # noqa: S105 — verdict token
+    PASS = "PASS"  # noqa: S105  # nosec B105 — a verdict token, not a credential
+    PASS_WITH_ABSTAINS = "PASS_WITH_ABSTAINS"  # noqa: S105  # nosec B105 — verdict token
     FAIL = "FAIL"
     SUSPECT = "SUSPECT"
 
@@ -444,7 +444,7 @@ def rollup_overall(
 
 def totals_for(checks: Sequence[CheckResult]) -> dict[str, int]:
     """Sub-check verdict tallies for the report ``totals`` block."""
-    totals = {"pass": 0, "fail": 0, "abstain": 0, "error": 0}
+    totals = {"pass": 0, "fail": 0, "abstain": 0, "error": 0}  # nosec B105 — verdict tally keys, not a credential
     for check in checks:
         for sub in check.sub_checks:
             totals[str(sub.verdict).lower()] += 1

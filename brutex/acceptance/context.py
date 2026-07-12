@@ -86,7 +86,7 @@ def open_instrument_store_readonly(path: Path) -> Any:
             ident = '"' + table.replace('"', '""') + '"'
             # identifiers double-quote-escaped from information_schema output;
             # the source is a READ_ONLY attach of the operator's own master.
-            mem.execute(f"CREATE TABLE {ident} AS SELECT * FROM src.{ident}")  # noqa: S608
+            mem.execute(f"CREATE TABLE {ident} AS SELECT * FROM src.{ident}")  # noqa: S608  # nosec B608 — ident is double-quote-escaped from src's own information_schema catalog (READ_ONLY attach); SQL identifiers cannot be parameterized
         mem.execute("DETACH src")
     except (duckdb.Error, OSError) as exc:
         with contextlib.suppress(Exception):
