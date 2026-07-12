@@ -804,6 +804,37 @@ class TestReadIntradayBarsFreshnessGuard:
         assert from_stored is False
         assert [e for e in logs if e["event"] == "movers.stored_stale_fallback"] == []
 
+    def test_read_intraday_bars_stale_with_warn_state_logs_once(self, tmp_path: Path) -> None:
+        """The threaded ``stale_warn_state`` arm: the stale fallback emits ONE WARN.
+
+        Drives the guard's warn call site directly (the ``compute_spot_candidates``
+        threading rides the same state) — the event carries the HH:MM day-max pair
+        via the COMMON ``minute_to_hhmm`` formatter.
+        """
+        import structlog.testing
+        from brutex.dashboard.movers_snapshot import _read_intraday_bars, _StoredStaleWarnState
+
+        _seed_guard_lake(tmp_path)
+        state = _StoredStaleWarnState()
+        with structlog.testing.capture_logs() as logs:
+            _, from_stored = _read_intraday_bars(
+                tmp_path,
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="5minute",
+                day=_GUARD_DAY,
+                minutes=5,
+                cutoff_min=None,
+                stale_warn_state=state,
+            )
+        assert from_stored is False
+        [event] = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert event["symbol"] == "NIFTY" and event["interval"] == "5minute"
+        assert event["stored_max_ist"] == "09:15"  # the poison bucket's open
+        assert event["base_max_ist"] == "09:24"  # the fresh base's last minute
+        assert state.emitted == 1
+
 
 class TestStoredStaleWarner:
     def test_stored_stale_warn_capped_deduped_suppressed(self) -> None:
