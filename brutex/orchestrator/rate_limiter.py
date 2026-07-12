@@ -126,7 +126,7 @@ _LEGACY_HARD_CAP_RPS: Final[float] = 5.0
 #: fail-OPEN, the same posture as ``_GOVERNOR_LOOP_CAP`` /
 #: ``_SMOOTH_LOOP_CAP`` in ``brutex/adapters/rate_common.py``.
 #:
-#: RATE-SAFETY RELEVANCE (round-2 refuter, MIGRATION.md #1751): each cap trip
+#: RATE-SAFETY RELEVANCE (round-2 refuter, MIGRATION.md #1759): each cap trip
 #: force-grants ONE token WITHOUT a matching refill (a "phantom" issue that
 #: momentarily exceeds the configured SOFT per-second rate), and the trip is
 #: production-REACHABLE under sustained contention at demand > rate — so
@@ -347,7 +347,7 @@ class AdaptiveTokenBucket:
                         # OPEN like _GOVERNOR_LOOP_CAP/_SMOOTH_LOOP_CAP.
                         self._tokens = 1.0
                         # Observe-only accounting (round-2 refuter fold,
-                        # MIGRATION.md #1751): the force-granted token has NO
+                        # MIGRATION.md #1759): the force-granted token has NO
                         # matching refill — a "phantom" issue past the SOFT
                         # per-second rate — so every trip is counted
                         # (acquire_fail_open_count()). The module is
@@ -531,7 +531,7 @@ class AdaptiveTokenBucket:
         consecutive times and force-granted rather than starve — production-
         reachable under sustained contention at demand > rate since
         DEC-RATE-SLEEP-OUTSIDE-LOCK-001 (quantified envelope in MIGRATION.md
-        #1751). Observe-only; the HARD 500/min governor is unaffected.
+        #1759). Observe-only; the HARD 500/min governor is unaffected.
         """
         with self._lock:
             return self._acquire_fail_opens

@@ -1,6 +1,6 @@
 """Real-clock contention stress for ``AdaptiveTokenBucket`` (DEC-RATE-SLEEP-OUTSIDE-LOCK-001).
 
-Adapted from the round-2 adversarial refuter's harness (MIGRATION.md #1751 —
+Adapted from the round-2 adversarial refuter's harness (MIGRATION.md #1759 —
 the quantified fail-open envelope): post-fix the retry sleep runs with the
 bucket lock RELEASED, so under sustained demand > rate a woken sleeper can
 lose its refilled token to peers ``_ACQUIRE_LOOP_CAP`` consecutive times and
