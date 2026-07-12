@@ -1985,13 +1985,20 @@ class TestDemotedSettleReasons:
         from brutex.data.interior_gap_detect import INTERIOR_GAP
         from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
         from brutex.data.session import ALL_FILTERED
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
 
-        # The three detector tags PLUS "DEGRADED" — record()'s defensive
+        # The four detector tags PLUS "DEGRADED" — record()'s defensive
         # fallback for a degraded=True call with no reason (latent: both
         # production spines always pass a concrete tag). Enumerated so a
         # reason-less demotion settle can never fall through to the
         # "vendor confirmed no trades" label (wiring-review fold, PR #1158).
-        expected = frozenset({ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"})
+        # TODAY_INCOMPLETE (DEC-PULL-TODAY-COMPLETENESS-GATE-001) is a member
+        # DEFENSIVELY: its demotion is streak-EXEMPT, so a SKIPPED settle
+        # carrying it is structurally unreachable — but were it ever stamped,
+        # the label must never read "vendor confirmed no trades".
+        expected = frozenset(
+            {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, TODAY_INCOMPLETE, "DEGRADED"}
+        )
         assert expected == DEMOTED_SETTLE_REASONS
 
     def test_reasonless_degraded_record_stamps_a_demoted_reason(self) -> None:

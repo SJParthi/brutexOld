@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
+from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from hypothesis import HealthCheck
 from hypothesis import settings as _hyp_settings
@@ -61,6 +62,19 @@ _hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 # test_cli_retry_storm.py / test_nightly_pipeline_binding.py) — so this
 # default disables ONLY the ambient real-clock read, never the tested law.
 os.environ.setdefault(MARKET_HOURS_GUARD_ENV, "0")
+
+# DEC-PULL-TODAY-COMPLETENESS-GATE-001 test hermeticity (the #1692 philosophy —
+# hermetic against the WALL CLOCK): the gate's four production arm sites resolve
+# the REAL ``os.environ`` (``resolve_today_completeness_enabled``) and the gate
+# then judges real-clock-clamped windows, so a production-wrapper test that
+# fabricates a today-ending window and runs at/after 15:30 IST on a trading day
+# would wall-clock-flake. The suite therefore runs under the DOCUMENTED operator
+# kill switch (``setdefault`` so an explicit outer choice wins). The gate's OWN
+# tests stay fully armed on both arms — they inject ``env=`` mappings + explicit
+# ``clamp_today`` dates / ``now_ist`` clocks (test_today_completeness.py, the
+# gate tests in test_groww_ingest.py / test_groww_option_ingest.py) — so this
+# default disables ONLY the ambient real-environ read, never the tested law.
+os.environ.setdefault(TODAY_COMPLETENESS_GATE_ENV, "0")
 
 
 @pytest.fixture

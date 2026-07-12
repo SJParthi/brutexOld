@@ -120,6 +120,7 @@ from brutex.dashboard.pull_census import emit_written_settled_census
 from brutex.data.errors import MarketHoursHalt
 from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.sink import BarSink, NullBarSink
+from brutex.data.today_completeness import resolve_today_completeness_enabled
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
@@ -1928,6 +1929,17 @@ def pull_all_spot(
         # raises ``MarketHoursHalt`` (a global stop) — caught below, the committed work
         # kept + the pull deferred to the next out-of-hours run.
         _market_closed = None if dry_run else market_closed
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): the env kill switch is resolved ONCE per pull, fail-loud on
+        # junk at pull start (the ``resolve_market_closed`` posture, never
+        # mid-run); a dry-run short-circuits to ``False`` WITHOUT touching the
+        # env (the ``detect_completeness_gaps`` gating pattern — the synthetic
+        # adapter's first-day-only bars would false-red a today-covering
+        # window). NOTE: this bulk spot phase never armed
+        # ``detect_completeness_gaps`` (the #1031 demotions stay dead here —
+        # the named follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001); the TODAY
+        # gate rides its OWN parameter and IS wired here.
+        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # Lazy vendor-depth-floor learner (DEC-VENDOR-FLOOR-LAZY-PROBE-001): ONE
         # per-pull instance over the PACED replica of THIS pull's adapter. The live
         # pool factory hands every leaf a no-op pace (`build_live_pool` without a
@@ -2126,6 +2138,9 @@ def pull_all_spot(
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
@@ -3120,6 +3135,11 @@ def pull_candles(
         # A dry-run threads the empty overlay (the ``detect_completeness_gaps`` gating
         # pattern); ``load_observed_holidays`` never raises (missing/corrupt -> empty).
         _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): resolved ONCE per pull, fail-loud on junk at pull start; a
+        # dry-run short-circuits to ``False`` WITHOUT touching the env (the
+        # ``detect_completeness_gaps`` gating pattern).
+        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -3185,6 +3205,9 @@ def pull_candles(
                     # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
                     # false-red on the synthetic adapter's first-day-only bars.
                     detect_completeness_gaps=True,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,

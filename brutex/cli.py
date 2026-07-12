@@ -5076,6 +5076,14 @@ def cmd_fetch(
         # only the clock), `None` for `--dry-run`/`--inspect` (a synthetic adapter / no
         # persistence makes ZERO vendor calls, so those are exempt like the start gate).
         market_closed = None if (dry_run or inspect) else resolve_market_closed()
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): resolved ONCE here beside ``market_closed`` — junk env fails
+        # loud at pull start (the existing loud CLI failure), never mid-run; a
+        # ``--dry-run`` / ``--inspect`` short-circuits to ``False`` WITHOUT
+        # touching the env (the ``detect_completeness_gaps`` gating pattern).
+        from brutex.data.today_completeness import resolve_today_completeness_enabled
+
+        today_gate = (not (dry_run or inspect)) and resolve_today_completeness_enabled()
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -5103,6 +5111,9 @@ def cmd_fetch(
                     # land on the window's first day) leaves it OFF so it never false-reds
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=today_gate,
                     observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
                     # Learned-floor clamp + in-pull depth learner
