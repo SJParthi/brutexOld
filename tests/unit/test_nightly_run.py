@@ -3,8 +3,10 @@
 (DEC-SWEEP-NIGHTLY-AUTOMATION-001).
 
 Lock acquisition ORDER (nightly → account → lake), the account release after
-PREBUILD with the lake lock held through SWEEP, CredentialsError → account
-skip + WARN, pull-halt → `emit_pull_halt_alert` then FAILED, report + bundle
+PREBUILD with the lake lock EX → SH transitioned at the SWEEP leg (the
+whole-leg shared read-guard still refuses a pull's EX —
+DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001, MIGRATION.md #1772), CredentialsError →
+account skip + WARN, pull-halt → `emit_pull_halt_alert` then FAILED, report + bundle
 written in a ``finally`` even on a raise, the Telegram-disabled arm, dry-run
 takes NO locks + mutates nothing (tree oracle), skip levers, the T2/T4/T5
 tripwires, and the R6 commit-re-key honesty note.
@@ -305,9 +307,15 @@ def test_lock_order_nightly_account_lake_and_hold_spans(
     monkeypatch.setattr(ps, "pull_singleflight_lock", rec_pull)
 
     def probing_sweep(**kwargs: Any) -> int:
-        # By the SWEEP leg the ACCOUNT lock is released; the LAKE lock is held.
+        # By the SWEEP leg the ACCOUNT lock is released and the LAKE lock has
+        # transitioned EX → SH (DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001, MIGRATION.md
+        # #1772 — supersedes the #1612 "EX held through the sweep" MECHANISM pin
+        # this assert used to be). The law's INTENT still holds for the whole
+        # leg: a pull's raw EX acquire is REFUSED by the held shared read-guard.
         assert "account-released" in order
-        assert "lake-released" not in order
+        assert "lake-released" in order  # the EX→SH transition happened
+        with pytest.raises(ps.PullAlreadyRunningError), real_pull(lake):
+            pass  # pragma: no cover — the EX acquire must be refused mid-leg
         _write_sweep_completion(results, _COHERENT)
         return 0
 

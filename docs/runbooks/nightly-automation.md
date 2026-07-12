@@ -188,13 +188,22 @@ reconciles via `reconcile_ledger_with_lake` / `seed_lake_success`
 |---|---|---|---|
 | `nightly_singleflight.lock` (holder note `nightly:<id>`) | 1 | end of chain | REFUSED `nightly_already_running` |
 | account pull lock (`~/.brutex/locks/pull_account*.flock`) | 2 | released after PREBUILD (no vendor calls during the sweep) | REFUSED `pull_in_flight` |
-| `pull_singleflight.lock` (holder note `nightly:<id>`) | 3 | **held through SWEEP** | REFUSED `pull_in_flight` — never queued |
+| `pull_singleflight.lock` (holder note `nightly:<id>`) | 3 | **EX through PULL+PREBUILD, then EX → SH for the whole SWEEP leg** (DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001, MIGRATION.md #1772) | REFUSED `pull_in_flight` — never queued |
 | sweep-liveness probe (NOT a lock) | 4 | n/a | REFUSED `sweep_alive(<evidence>)` |
 
-Holding the LAKE pull lock through the sweep leg is the R4/G10 sweep-vs-pull
-exclusion made mechanical (no sweep-level flock exists): a manual pull
-attempted mid-nightly is refused with `(holder: nightly:<id>)` — correct,
-because its bars would re-key the data under the sweep's feet.
+The R4/G10 sweep-vs-pull exclusion stays mechanical for the WHOLE sweep leg,
+now delivered by a SHARED hold: the original "EX held through SWEEP" law was
+written pre-G10 ("no sweep-level flock exists"); once `cmd_sweep_all` grew its
+own G10 `lake_read_guard` `LOCK_SH|LOCK_NB` on the same lock file, the
+nightly's held EX self-conflicted with that second-fd SH and the SWEEP link
+died with `LakeBusyError` every night. The nightly now releases its EX at the
+SWEEP link and holds the G10 shared read-guard for the entire leg — a manual
+pull attempted mid-nightly is still refused with `(holder: nightly:<id>)`
+(the note bytes survive the transition) — correct, because its bars would
+re-key the data under the sweep's feet; `cmd_sweep_all`'s own SH composes. A
+peer pull landing in the few-syscall release→reacquire window makes the leg
+REFUSE loudly (`pull_in_flight`, log `nightly.sweep_lock_downgrade_lost_race`)
+— fail-safe, next nightly retries; never a silent exclusion gap.
 try-acquire-and-release was rejected as a TOCTOU. A missing AWS credential
 skips the account lock with one loud `nightly.account_lock_skipped` WARN.
 A long nightly crossing 06:00 IST is safe — the token re-mint self-heals

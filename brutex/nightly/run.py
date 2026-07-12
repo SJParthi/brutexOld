@@ -11,12 +11,26 @@ taken FIRST (pre-chain; contention ⇒ refusal report + ``nightly_refused`` +
 ``EXIT_USER_ERROR``, no chain); the COLLISION link then acquires the ACCOUNT
 pull lock (released after PREBUILD — no vendor calls happen during the sweep,
 so it never starves a different-lake pull on the same account) and the LAKE
-pull lock (held through the SWEEP link — the R4/G10 sweep-vs-pull exclusion:
-no sweep-level flock exists, so holding the lake pull lock is the only
-mechanical delivery; a manual pull attempted mid-nightly reads
-``(holder: nightly:<id>)``), then runs the sweep-liveness heuristic.
-try-acquire-and-release was REJECTED as a TOCTOU (the headless spines take no
-lock internally).
+pull lock EX (held through PULL + PREBUILD — the writer legs), then runs the
+sweep-liveness heuristic. try-acquire-and-release was REJECTED as a TOCTOU
+(the headless spines take no lock internally).
+
+Sweep-leg lock posture (DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001, MIGRATION.md
+#1772 — supersedes the MECHANISM of the #1612 "LAKE lock held through the
+SWEEP link" clause while preserving its INTENT): at the start of the SWEEP
+link the lake pull lock transitions EX → SHARED — the EX is released and the
+G10 :func:`~brutex.engine.sweep_singleflight.lake_read_guard` SH is taken for
+the WHOLE leg. The #1612 law was written PRE-G10 ("no sweep-level flock
+exists"); once cmd_sweep_all grew its own G10 ``LOCK_SH | LOCK_NB`` on the
+SAME lock file (#1712/#1445), the nightly's held EX made that second-fd SH
+acquire fail → the SWEEP link died every night with ``LakeBusyError`` (the
+#1770 self-conflict class, nightly surface). The whole-leg SH delivers the
+SAME exclusion (a pull/heal's ``EX|NB`` is refused for the entire leg, still
+reading ``(holder: nightly:<id>)`` — the note bytes survive the transition)
+while composing with cmd_sweep_all's own SH. The release→reacquire window is
+a few syscalls wide and every peer is non-blocking; a peer EX landing inside
+it makes OUR ``SH|NB`` fail → the leg REFUSES loudly (fail-safe; never a
+silent exclusion gap — either the SH is held or the leg refuses).
 
 ``--dry-run`` is the documented post-install smoke: probes + inventory + plan
 + report ONLY — takes NO locks and mutates NOTHING (the report is RETURNED for
@@ -330,6 +344,14 @@ def _run_locked(
     extra_tripwires: list[Tripwire] = []
     account_stack = ExitStack()
     locks.callback(account_stack.close)  # backstop: released even if PULL never runs
+    # The lake pull EX flock's own stack (DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001,
+    # MIGRATION.md #1772): held through PULL + PREBUILD (the writer legs), then
+    # closed by the SWEEP link's EX → SH transition so ``cmd_sweep_all``'s own
+    # G10 shared read-guard can never conflict with our writer hold. Its
+    # backstop callback is registered inside ``collision_fn`` at the exact
+    # point the lock used to enter ``locks`` directly, so the release order on
+    # an aborted chain is byte-identical (a skip_sweep run keeps EX to the end).
+    lake_pull_lock_stack = ExitStack()
     inventory_bytes = 0
     snapshot_id: str | None = None
     absent_artifacts: tuple[str, ...] = ()
@@ -392,7 +414,11 @@ def _run_locked(
                 return LinkResult(status=LinkStatus.REFUSED, detail=f"pull_in_flight: {exc}")
             locks_taken += 1
         try:
-            locks.enter_context(
+            # Registered HERE (not at _run_locked top) so the backstop close
+            # sits at the exact LIFO slot the direct ``locks.enter_context``
+            # used to occupy — an aborted chain releases in the same order.
+            locks.callback(lake_pull_lock_stack.close)
+            lake_pull_lock_stack.enter_context(
                 pull_singleflight_lock(plan.lake_root, holder_note=f"nightly:{nightly_id}")
             )
         except PullAlreadyRunningError as exc:
@@ -508,7 +534,9 @@ def _run_locked(
             raise
         finally:
             # The ACCOUNT lock releases after PULL+PREBUILD — no vendor calls
-            # happen during the sweep (spec §7.2); the LAKE lock stays held.
+            # happen during the sweep (spec §7.2); the LAKE lock stays EX-held
+            # until the SWEEP link's EX → SH transition
+            # (DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001).
             account_stack.close()
             pipeline.close()
         result, t3 = decompose_pipeline_report(
@@ -519,49 +547,78 @@ def _run_locked(
 
     def sweep_fn() -> LinkResult:
         if plan.skip_sweep:
+            # No EX → SH transition on a skipped leg: the EX posture stays
+            # byte-identical to #1612 until the chain ends (nothing sweeps).
             return LinkResult(status=LinkStatus.SKIPPED, detail="operator --skip-sweep")
         nonlocal absent_artifacts
-        run_sweep = _resolve_run_sweep(seams)
-        since = seams.now()
-        # The counts live in the SUPERVISOR audit chain (SweepGuards.audit →
-        # sweep-all-supervisor.jsonl) — NEVER the ingest sweep-all.jsonl,
-        # which carries no completion payload (review round 2, finding 1).
-        # That chain is APPEND-across-runs, so the read is freshness-gated on
-        # the pre-sweep `since` (the same guard the contract probe already
-        # rode): a refused/aborted/crashed sweep writes no NEW completion and
-        # must read honest-None, never a PRIOR night's tally presented as
-        # tonight's (review round 3, findings 1+2).
-        audit_path = sweep_supervisor_audit_path(plan.results_root)
-        had_prior_audit = audit_path.exists()
-        code = int(run_sweep(**dict(plan.sweep_kwargs)))
-        counts = read_sweep_tail_counts(audit_path, since_utc=since)
-        probe = probe_contract_artifacts(plan.results_root, since_utc=since)
-        absent_artifacts = probe.absent
-        if "run_manifest" in probe.found:
-            with contextlib.suppress(OSError, ValueError, TypeError, KeyError):
-                manifest = json.loads(Path(probe.paths["run_manifest"]).read_text(encoding="utf-8"))
-                dedup = manifest["dedup_skips"]
-                if isinstance(dedup, int) and counts is not None:
-                    counts = {**counts, "skipped_dedup_manifest": dedup}
-        if counts is None:
-            extra_notes.append(
-                "sweep counts unknown — no fresh SUPERVISOR_COMPLETE payload for "
-                "THIS run readable (a prior run's tail tally is never reported "
-                "as tonight's)"
+        from brutex.engine.sweep_singleflight import LakeBusyError, lake_read_guard
+
+        # EX → SH transition (DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001, MIGRATION.md
+        # #1772): release our pull-WRITER EX (the writer legs are done), then
+        # hold the G10 SHARED read-guard for the WHOLE leg — a pull/heal's
+        # EX|NB stays refused for the entire sweep (the #1612 law's intent,
+        # still reading "(holder: nightly:<id>)" — release does not clear the
+        # note bytes), while cmd_sweep_all's own second-fd SH composes instead
+        # of dying against our EX (the #1770 self-conflict class). A peer EX
+        # stealing the few-syscall release→reacquire window makes OUR SH|NB
+        # raise LakeBusyError → the leg REFUSES loudly below (fail-safe; the
+        # sweep body never runs beside a live pull, silently or otherwise).
+        lake_pull_lock_stack.close()
+        leg_read_guard = ExitStack()
+        try:
+            leg_read_guard.enter_context(lake_read_guard(plan.lake_root))
+        except LakeBusyError as exc:
+            logger.warning(
+                "nightly.sweep_lock_downgrade_lost_race",
+                nightly_id=nightly_id,
+                error=str(exc),
             )
-        else:
-            _check_sweep_counts(code, counts)
-            if (
-                had_prior_audit
-                and counts.get("skipped_cache") == 0
-                and counts.get("tuples_total", 0) > 0
-            ):
+            return LinkResult(status=LinkStatus.REFUSED, detail=f"pull_in_flight: {exc}")
+        logger.info("nightly.sweep_lock_downgraded", nightly_id=nightly_id, mode="EX->SH")
+        with leg_read_guard:
+            run_sweep = _resolve_run_sweep(seams)
+            since = seams.now()
+            # The counts live in the SUPERVISOR audit chain (SweepGuards.audit →
+            # sweep-all-supervisor.jsonl) — NEVER the ingest sweep-all.jsonl,
+            # which carries no completion payload (review round 2, finding 1).
+            # That chain is APPEND-across-runs, so the read is freshness-gated on
+            # the pre-sweep `since` (the same guard the contract probe already
+            # rode): a refused/aborted/crashed sweep writes no NEW completion and
+            # must read honest-None, never a PRIOR night's tally presented as
+            # tonight's (review round 3, findings 1+2).
+            audit_path = sweep_supervisor_audit_path(plan.results_root)
+            had_prior_audit = audit_path.exists()
+            code = int(run_sweep(**dict(plan.sweep_kwargs)))
+            counts = read_sweep_tail_counts(audit_path, since_utc=since)
+            probe = probe_contract_artifacts(plan.results_root, since_utc=since)
+            absent_artifacts = probe.absent
+            if "run_manifest" in probe.found:
+                with contextlib.suppress(OSError, ValueError, TypeError, KeyError):
+                    manifest = json.loads(
+                        Path(probe.paths["run_manifest"]).read_text(encoding="utf-8")
+                    )
+                    dedup = manifest["dedup_skips"]
+                    if isinstance(dedup, int) and counts is not None:
+                        counts = {**counts, "skipped_dedup_manifest": dedup}
+            if counts is None:
                 extra_notes.append(
-                    "skipped_cache == 0 with a prior sweep audit present — possible "
-                    "commit re-key (expected after a deploy; the tuple identity "
-                    "folds code_commit_sha)"
+                    "sweep counts unknown — no fresh SUPERVISOR_COMPLETE payload for "
+                    "THIS run readable (a prior run's tail tally is never reported "
+                    "as tonight's)"
                 )
-        return sweep_link_result(code, audit_path=audit_path, counts=counts)
+            else:
+                _check_sweep_counts(code, counts)
+                if (
+                    had_prior_audit
+                    and counts.get("skipped_cache") == 0
+                    and counts.get("tuples_total", 0) > 0
+                ):
+                    extra_notes.append(
+                        "skipped_cache == 0 with a prior sweep audit present — possible "
+                        "commit re-key (expected after a deploy; the tuple identity "
+                        "folds code_commit_sha)"
+                    )
+            return sweep_link_result(code, audit_path=audit_path, counts=counts)
 
     def _check_sweep_counts(code: int, counts: Mapping[str, int]) -> None:
         """T5 sweep_counts_incoherent — only when the payload is readable."""
