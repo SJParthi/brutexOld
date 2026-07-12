@@ -109,3 +109,69 @@ def test_read_sees_committed_snapshot_during_open_write_txn(store: InstrumentSto
     # After rollback the reader still sees the original committed two rows.
     with store.connection as conn:
         assert conn.execute("SELECT count(*) FROM instruments").fetchone()[0] == 2
+
+
+def test_cursor_returns_a_fresh_view_over_the_same_read_discipline(
+    store: InstrumentStore,
+) -> None:
+    """`_LockedReadConn.cursor()` (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    round 1): a NEW view instance — its own hold state — over the SAME read
+    cursor + read lock, readable exactly like the parent."""
+    view = store.connection
+    child = view.cursor()
+    assert child is not view
+    assert type(child) is type(view)
+    # Same underlying read connection + read lock — never a second engine conn.
+    assert child._conn is view._conn
+    assert child._lock is view._lock
+    assert child.execute("SELECT count(*) FROM instruments").fetchone()[0] == 2
+    # The parent stays fully usable after the child's read (independent holds).
+    assert view.execute("SELECT count(*) FROM instruments").fetchone()[0] == 2
+
+
+def test_cursor_view_isolates_hold_state_across_threads(store: InstrumentStore) -> None:
+    """THE round-1 SWR-revalidator BLOCKER regression: a second thread rides
+    `view.cursor()` — a FRESH view with its OWN hold flag — while the first
+    thread's view HOLDS the read lock mid-statement (a description-only /
+    not-yet-fetched read). Sharing the ONE view corrupted `_held` cross-thread:
+    the second thread's `execute()` released the first thread's live hold (a
+    non-owner ``RLock.release`` RuntimeError) and the first thread then leaked
+    its acquisition — every later dashboard read deadlocked. FAILS-BEFORE:
+    without `cursor()` this dies on AttributeError in the revalidator thread."""
+    view = store.connection
+    view.execute("SELECT count(*) FROM instruments")  # holds the read lock — no fetch yet
+    errors: list[Exception] = []
+    finished = threading.Event()
+
+    def _revalidator() -> None:
+        try:
+            row = view.cursor().execute("SELECT count(*) FROM instruments").fetchone()
+            assert row[0] == 2
+        except Exception as exc:  # the oracle collects every failure
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    reval = threading.Thread(target=_revalidator, daemon=True)
+    reval.start()
+    # The fresh view must WAIT on the read lock — never corrupt the holder.
+    assert not finished.wait(timeout=0.3), (
+        f"revalidator finished against a HELD lock: {errors[0]!r}" if errors else "no wait"
+    )
+    assert view.fetchone()[0] == 2  # the holder completes + releases
+    assert finished.wait(timeout=5.0)
+    reval.join(timeout=5.0)
+    assert not errors, f"cursor() view corrupted the shared hold: {errors[0]!r}"
+    # The read lock is FREE afterwards: a fresh view completes within a bound
+    # (a leaked hold — the pre-fix corruption — parks this probe forever).
+    done = threading.Event()
+
+    def _probe() -> None:
+        with store.connection as conn:
+            assert conn.execute("SELECT 42").fetchone() == (42,)
+        done.set()
+
+    probe = threading.Thread(target=_probe, daemon=True)
+    probe.start()
+    assert done.wait(timeout=5.0), "store read lock leaked — later reads deadlock"
+    probe.join(timeout=5.0)

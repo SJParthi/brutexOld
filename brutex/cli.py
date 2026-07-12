@@ -3508,6 +3508,28 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         pull_intent_store = PullIntentStore(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("pull_intent.build_failed", error=str(exc))
+    # Event-loop liveness watchdog (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    # G5): default ON behind the fail-loud BRUTEX_LOOP_WATCHDOG kill switch —
+    # the env parse is DELIBERATELY outside the best-effort guard (a junk value
+    # aborts startup with a clean one-liner, the resolve_* house convention:
+    # a typo must never SILENTLY disable the watchdog), while the construction
+    # itself is best-effort (a fault logs and the dashboard still binds).
+    from brutex.observability.loop_watchdog import LoopWatchdog, resolve_loop_watchdog_enabled
+
+    try:
+        loop_watchdog_enabled = resolve_loop_watchdog_enabled()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    loop_watchdog: Any = None
+    if loop_watchdog_enabled:
+        try:
+            from brutex.notifications.sweep_alerts import SweepAlerter
+            from brutex.observability.metrics import get_registry
+
+            loop_watchdog = LoopWatchdog(alerter=SweepAlerter(), registry=get_registry())
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+            _log.warning("loop_watchdog.build_failed", error=str(exc))
     app = build_app(
         state,
         instrument_store=store,
@@ -3515,6 +3537,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         liveproof=liveproof,
         allowed_hosts=allowed_hosts,
         pull_intent_store=pull_intent_store,
+        loop_watchdog=loop_watchdog,
     )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
@@ -7205,6 +7228,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # manifest records stage-3 enablement + the refined-cell list.
         cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
 
+        # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the IN-MEMORY report is threaded
+        # into the results-depth adapter below (None when the cascade had no
+        # specs — the depth pass then writes the honest not_validated/no_report
+        # entries; no disk re-read, so a stale on-disk report can never leak in).
+        cascade_report = None
+
         if cascade_specs:
             # Freeze the per-leaderboard trial statistics into the manifest
             # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
@@ -7300,6 +7329,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval="1minute",
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
+                cascade_report=cascade_report,
             )
         else:
             print(
@@ -9377,6 +9407,7 @@ def _run_results_depth_adapter(
     vix_bars: Sequence[Any] | None,
     margin_entry_date: date,
     pass_runner: Callable[..., Any] | None = None,
+    cascade_report: Any | None = None,
 ) -> bool:
     """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
 
@@ -9395,14 +9426,37 @@ def _run_results_depth_adapter(
 
     ``pass_runner`` is an injection seam for tests; ``None`` runs the real
     :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
+
+    ``cascade_report`` is the IN-MEMORY :class:`CascadeWireReport` the sweep's
+    Stage-4 cascade just produced (DEC-RESULTS-CASCADE-VERDICT-JOIN-001), or
+    ``None`` when the cascade was skipped. It is flattened HERE — inside the
+    fence — via the ONE :func:`brutex.engine.cascade_join.build_cascade_join`
+    law; a :class:`~brutex.engine.cascade_join.CascadeJoinError` is a
+    production-unreachable belt (our own serialization feeds it) that logs
+    ``cli.results_depth.cascade_join_failed`` and threads ``None`` — the pass
+    still runs, the sweep never fails.
     """
     import structlog
 
+    from brutex.engine.cascade_join import CascadeJoinError, build_cascade_join
+    from brutex.engine.cascade_wire import wire_report_to_dict
     from brutex.engine.margin_history import margin_roi_payload
     from brutex.engine.results_depth_pass import run_results_depth_pass
     from brutex.ranking.phrases import reason_payload
 
     runner = run_results_depth_pass if pass_runner is None else pass_runner
+
+    cascade_join = None
+    if cascade_report is not None:
+        try:
+            cascade_join = build_cascade_join(wire_report_to_dict(cascade_report))
+        except CascadeJoinError as exc:
+            structlog.get_logger("brutex.cli").warning(
+                "cli.results_depth.cascade_join_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                note="depth pass runs without the cascade join — entries read not_validated",
+            )
 
     def _margin_roi(candidate: Any) -> dict[str, object]:
         # lots=1 here is a margin-SIZING hypothetical for the refusal-only
@@ -9429,6 +9483,7 @@ def _run_results_depth_adapter(
             vix_bars=vix_bars,
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
+            cascade_join=cascade_join,
         )
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise

@@ -188,14 +188,21 @@ class TestAbsoluteFrozenValues:
         assert oracle == []  # Python oracle: NO overnight trade
         assert kernel == [oracle]  # byte-identical verdicts
 
-    def test_cross_session_day1_trade_is_untouched_exact_values(self) -> None:
+    def test_cross_session_day1_trade_closes_at_day1_last_bar_exact_values(self) -> None:
         # The anti-shared-drift twin for the SAME two-session shape: a mid-day
-        # day-1 signal still yields exactly its day-1 trade (hand-computed) on
-        # both sides — the drop rule removes ONLY the overnight fill.
+        # day-1 signal yields exactly its day-1 trade (hand-computed) on both
+        # sides. RE-PINNED for DEC-TRADESIM-OPEN-SESSION-GUARD-001 (renamed
+        # from test_cross_session_day1_trade_is_untouched_exact_values): the
+        # pre-fix pin froze the BUG — "the walker holds through the gap … end
+        # of data → close at close[4]=119.50" (pnl 1900 = the +19 overnight
+        # gap folded in, mfe 2000 from day-2 highs). The open-position session
+        # guard now closes at day-1's LAST stored bar (the finish() idiom)
+        # the moment day-2's first bar arrives — the gap never enters
+        # pnl/mfe/mae on EITHER side.
         bars = [
             _bar(11, 0, "100", "101", "99", "100"),  # signal (bit0), well before 15:20
             _bar(11, 1, "100.50", "102", "100", "101"),  # entry @ open 100.50
-            _bar(11, 2, "101", "103", "100.25", "102"),  # in-session ride
+            _bar(11, 2, "101", "103", "100.25", "102"),  # day-1's LAST stored bar
             _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),
             _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
         ]
@@ -207,17 +214,16 @@ class TestAbsoluteFrozenValues:
             bars, mask_to_entry_signals(bits, 1), direction=Side.BUY, tf_minutes=1
         )
         # Entry open[1]=100.50=10050p. bar1 (102,100): fav=150, adv=50. bar2
-        # (103,100.25): fav=250, adv=25. Position is OPEN at the session step —
-        # the walker holds through the gap (exit-side semantics unchanged) —
-        # bar3 (120,118): fav=1950, adv=0; bar4 (120.50,119): fav=2000. End of
-        # data → close at close[4]=119.50=11950p.
+        # (103,100.25): fav=250, adv=25 → mfe 250, mae 50. bar3 is day 2 →
+        # session_gap close at close[2]=102.00=10200p, exit_ts=bars[2].ts,
+        # holding 2 — the boundary bar folds NO excursion.
         expected = ClosedTrade(
-            pnl_paisa=1900,
-            mfe_paisa=2000,
+            pnl_paisa=150,
+            mfe_paisa=250,
             mae_paisa=50,
-            holding_bars=4,
+            holding_bars=2,
             entry_ts=bars[1].timestamp,
-            exit_ts=bars[4].timestamp,
+            exit_ts=bars[2].timestamp,
             direction=Side.BUY,
         )
         assert oracle == [expected]

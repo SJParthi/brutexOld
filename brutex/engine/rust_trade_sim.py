@@ -100,6 +100,7 @@ appears ONLY on tuples served by the Python fallback arm. The per-TUPLE signals
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Final
 
@@ -138,7 +139,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     # numpy-load-once guard).
     from brutex.metrics.types import ClosedTrade
 
-__all__ = ["ResidentTradeSim"]
+__all__ = ["PriceColumns", "ResidentTradeSim", "derive_price_columns"]
 
 _LOG = structlog.get_logger("brutex.engine.rust_trade_sim")
 
@@ -155,6 +156,142 @@ _MAX_KERNEL_PRICE_PAISA: Final[int] = (2**63 - 1) // 8
 #: Beyond it (or below zero) the value cannot reach EITHER compiled kernel and
 #: the seam routes to the pure-Python oracle.
 _U128_MASK: Final[int] = (1 << MAX_VOCAB_BITS) - 1
+
+#: Cap on ``trade_sim.session_tail_hole`` WARNs per kernel-input derivation
+#: (DEC-TRADESIM-OPEN-SESSION-GUARD-001) — everything past the cap rolls into
+#: ONE ``trade_sim.session_tail_hole_suppressed`` summary (the house
+#: preopen.prev_close_noncontiguous capped-warn precedent). Mask-independent
+#: by construction: the detection runs ONCE per tuple at derivation, never
+#: per mask and never inside the walker's ``_close`` (the
+#: DEC-SWEEP-LOG-VOLUME-GUARD-001 #1630 posture).
+_TAIL_HOLE_WARN_CAP: Final[int] = 20
+
+
+def _warn_session_tail_holes(forced: Sequence[bool], session_days: Sequence[int]) -> None:
+    """WARN once per session-tail data hole in the window (capped, mask-independent).
+
+    A *session-tail hole* is a maximal run of consecutive bars sharing one
+    session ordinal that (i) is NOT the window's final session and (ii)
+    contains NO bar with ``forced=True`` — exactly the shape on which the
+    walker's (A2) open-position session guard fires a ``session_gap`` close
+    (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the session's stored bars ended
+    before any forced-exit-window bar, so a position opened in it can only
+    close retroactively at its last stored bar. The FINAL session is exempt —
+    an incomplete final session is the ordinary end-of-window shape the
+    ``end_of_data`` close already names honestly.
+
+    Emits at most :data:`_TAIL_HOLE_WARN_CAP` ``trade_sim.session_tail_hole``
+    WARNs (fields: ``session`` — the ISO date from the ordinal — and ``bars``,
+    the session's stored-bar count) plus ONE
+    ``trade_sim.session_tail_hole_suppressed`` summary carrying the total when
+    the cap is exceeded. One O(N_bars) pass, paid at the already-O(N_bars)
+    derivation. The pure-Python re-sim paths (capture / cascade / robustness /
+    CLI) deliberately get no WARN — the ``exits_session_gap`` aggregate
+    counter is their persistent signal; data-hole ALERTING stays owned by the
+    #1031 detectors.
+    """
+    holes: list[tuple[int, int]] = []
+    run_start = 0
+    n = len(session_days)
+    for i in range(1, n + 1):
+        if i < n and session_days[i] == session_days[run_start]:
+            continue
+        # A maximal run [run_start, i) just ended. The FINAL run (i == n) is
+        # exempt; a prior run with no forced bar is a session-tail hole.
+        if i < n and not any(forced[run_start:i]):
+            holes.append((session_days[run_start], i - run_start))
+        run_start = i
+    for ordinal, bar_count in holes[:_TAIL_HOLE_WARN_CAP]:
+        _LOG.warning(
+            "trade_sim.session_tail_hole",
+            session=date.fromordinal(ordinal).isoformat(),
+            bars=bar_count,
+        )
+    if len(holes) > _TAIL_HOLE_WARN_CAP:
+        _LOG.warning(
+            "trade_sim.session_tail_hole_suppressed",
+            total=len(holes),
+            shown=_TAIL_HOLE_WARN_CAP,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PriceColumns:
+    """The tf-independent per-bar kernel input columns for ONE bar window.
+
+    The four OHLC paisa columns (the flagged 4×-Decimal-snap-per-bar cost of
+    ``_derive_kernel_inputs``) plus the per-bar IST-date ``session_days``
+    ordinals — everything in the resident kernel's input set that is a pure
+    function of the BARS alone (the ``forced`` flags depend on ``tf_minutes``
+    and stay per-instance). Derived once per kernel lifetime by
+    :func:`derive_price_columns` and shareable across every
+    :class:`ResidentTradeSim` built over the same window
+    (DEC-STAGE1A-RUST-BATCH-001, the W2 rider). The columns are immutable
+    ``tuple``\\s — the SAME object is shared by the kernel and every sim built
+    from it, so a mutable list here would let one consumer corrupt every
+    sibling in place (review LOW-2 hardening; PyO3 ``Vec`` extraction accepts
+    any sequence, so the FFI edge is unchanged).
+
+    Raises
+    ------
+    ValueError
+        If the five columns do not share one length (a malformed hand-built
+        instance — :func:`derive_price_columns` always produces consistent
+        columns).
+    """
+
+    open_paisa: tuple[int, ...]
+    high_paisa: tuple[int, ...]
+    low_paisa: tuple[int, ...]
+    close_paisa: tuple[int, ...]
+    session_days: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        n = len(self.open_paisa)
+        for name, column in (
+            ("high_paisa", self.high_paisa),
+            ("low_paisa", self.low_paisa),
+            ("close_paisa", self.close_paisa),
+            ("session_days", self.session_days),
+        ):
+            if len(column) != n:
+                raise ValueError(
+                    f"PriceColumns: {name} length {len(column)} != open_paisa length {n}"
+                )
+
+    @property
+    def n_bars(self) -> int:
+        """Number of bars the columns cover."""
+        return len(self.open_paisa)
+
+
+def derive_price_columns(bars: Sequence[CandleBar]) -> PriceColumns:
+    """Derive the tf-independent kernel input columns from *bars* (pure).
+
+    The four ``_price_to_paisa`` comprehensions + the per-bar IST-date
+    ordinals extracted from ``ResidentTradeSim._derive_kernel_inputs`` (the
+    SAME canonical seams, byte-identical output — golden-pinned) so a caller
+    holding a :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel` can pay
+    them ONCE per bar window instead of once per tuple. Bar ``i``'s values
+    derive from bar ``i``'s own fields (P-06: no look-ahead).
+
+    Parameters
+    ----------
+    bars
+        Chronologically ordered bars for one ``(instrument, interval)``.
+
+    Returns
+    -------
+    PriceColumns
+        The five per-bar columns, positionally aligned with *bars*.
+    """
+    return PriceColumns(
+        open_paisa=tuple(_price_to_paisa(bar.open) for bar in bars),
+        high_paisa=tuple(_price_to_paisa(bar.high) for bar in bars),
+        low_paisa=tuple(_price_to_paisa(bar.low) for bar in bars),
+        close_paisa=tuple(_price_to_paisa(bar.close) for bar in bars),
+        session_days=tuple(bar.timestamp.astimezone(IST).date().toordinal() for bar in bars),
+    )
 
 
 def _construction_fallback_reason(
@@ -320,6 +457,8 @@ class ResidentTradeSim:
         "_bar_bits",
         "_bars",
         "_call_fallback_warned",
+        "_kernel_inputs",
+        "_precomputed_columns",
         "_reference_stamper",
         "_rust",
         "_rust_is_wide",
@@ -336,6 +475,7 @@ class ResidentTradeSim:
         *,
         tf_minutes: int,
         reference_stamper: TradeReferenceStamper | None = None,
+        precomputed_columns: PriceColumns | None = None,
     ) -> None:
         if not bars:
             raise ValueError("ResidentTradeSim: bars must be non-empty")
@@ -345,10 +485,35 @@ class ResidentTradeSim:
             )
         if tf_minutes < 1:
             raise ValueError(f"ResidentTradeSim: tf_minutes must be >= 1, got {tf_minutes}")
+        if precomputed_columns is not None and precomputed_columns.n_bars != len(bars):
+            # The W2 rider's injection seam (DEC-STAGE1A-RUST-BATCH-001):
+            # a mismatched column set is a caller bug — refuse it naming both
+            # lengths, never a silently misaligned kernel window.
+            raise ValueError(
+                f"ResidentTradeSim: precomputed_columns cover {precomputed_columns.n_bars} "
+                f"bars != bars length {len(bars)}"
+            )
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._bar_bits: list[int] = list(bar_bits)
         self._tf_minutes = tf_minutes
         self._reference_stamper = reference_stamper
+        # The G-4 unconditional memo: `_derive_kernel_inputs` is a pure
+        # function of the immutable `_bars` + `_tf_minutes` (its docstring
+        # law), so its 6-tuple is derived at most ONCE per instance — the
+        # duplicate O(N_bars) Decimal pass the lazy u128 promotion used to pay
+        # is gone even flag-OFF (no observable output change; spy-pinned).
+        self._kernel_inputs: (
+            tuple[
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[bool, ...],
+                tuple[int, ...],
+            ]
+            | None
+        ) = None
+        self._precomputed_columns = precomputed_columns
         # Exit-index certification (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): the
         # window's timestamps strictly increase ⇒ index↔timestamp is a
         # bijection ⇒ a trade's TRUE exit index provably equals the metrics
@@ -392,14 +557,31 @@ class ResidentTradeSim:
             try:
                 import fno_math
 
+                # Fresh list copies at the FFI edge only: the memoised columns
+                # are SHARED immutable tuples (review LOW-2), while the
+                # fno_math stub's typed contract declares list columns (PyO3
+                # itself accepts any sequence). One O(N) copy per construction
+                # — the constructor's own Vec marshal is already O(N).
                 if wide:
                     self._rust = fno_math.ResidentSweepSimU128(
-                        open_p, high_p, low_p, close_p, forced, session_days, self._bar_bits
+                        list(open_p),
+                        list(high_p),
+                        list(low_p),
+                        list(close_p),
+                        list(forced),
+                        list(session_days),
+                        self._bar_bits,
                     )
                     self._rust_is_wide = True
                 else:
                     self._rust = fno_math.ResidentSweepSim(
-                        open_p, high_p, low_p, close_p, forced, session_days, self._bar_bits
+                        list(open_p),
+                        list(high_p),
+                        list(low_p),
+                        list(close_p),
+                        list(forced),
+                        list(session_days),
+                        self._bar_bits,
                     )
             except (ImportError, AttributeError):
                 reason = "wheel_missing"
@@ -421,7 +603,14 @@ class ResidentTradeSim:
 
     def _derive_kernel_inputs(
         self,
-    ) -> tuple[list[int], list[int], list[int], list[int], list[bool], list[int]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[bool, ...],
+        tuple[int, ...],
+    ]:
         """Derive the resident kernel's per-bar input columns from the bars.
 
         Returns ``(open_p, high_p, low_p, close_p, forced, session_days)`` —
@@ -453,10 +642,52 @@ class ResidentTradeSim:
         uses — threaded to the kernel so a pending entry armed on a session's
         last stored bar is DROPPED at the next session's open instead of
         filling ~18h stale across the overnight gap (R2-OC-2; mirrors the
-        walker's ``_pending_entry_day`` gate bit-for-bit). Bar ``i``'s session
-        derives from bar ``i``'s own timestamp — knowable at bar ``i`` (P-06:
-        no look-ahead).
+        walker's ``_pending_entry_day`` gate bit-for-bit) AND so an open
+        position never survives a session-date change (the ``session_gap``
+        close, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the same ordinals feed
+        the kernel's open-position guard, zero new FFI inputs). Bar ``i``'s
+        session derives from bar ``i``'s own timestamp — knowable at bar ``i``
+        (P-06: no look-ahead).
+
+        Observability (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the forced/
+        session loop ends with ONE mask-independent capped sweep over its
+        derived columns — :func:`_warn_session_tail_holes` — naming every
+        non-final session whose stored bars never reach a forced-exit bar
+        (the exact shape the guard will fire on), so a session-tail data
+        hole is loud once per derivation, never once per mask. Under the
+        memo (below) a memo HIT RE-EMITS the sweep from the memoised
+        ``forced``/``session_days`` columns — a pure function of them, so
+        the warn frequency and payloads match the non-memo derivation's
+        per-call emission 1:1 (main-parity: the u128 promotion's second
+        call warns exactly as its second full derivation used to).
+
+        Since DEC-STAGE1A-RUST-BATCH-001 (the W2 rider): the tf-independent
+        columns come from the injected ``precomputed_columns`` when a kernel
+        holder supplied them (byte-identical by construction — the SAME
+        :func:`derive_price_columns` produced them, golden-pinned) else from
+        one local :func:`derive_price_columns` call, and the assembled
+        6-tuple is MEMOISED on the instance (pure — the G-4 law), so the u128
+        promotion's second derivation is a dict-free O(1) handoff. Every
+        column in the memo is an immutable ``tuple`` — the price columns are
+        SHARED across every sim built from one kernel, so no consumer can
+        corrupt a sibling in place (review LOW-2 hardening). The forced/
+        session loop (with the tail-hole sweep at its end, per the
+        session-guard order above) runs BEFORE the local price-column
+        derivation — the pre-rider statement order — so a multi-pathology
+        window (an out-of-coverage weekday PLUS an over-precision price, both
+        constructible from validated ``CandleBar``\\s) still raises the class
+        contract's ``HolidayDataUnavailableError``, never
+        ``decimal.InvalidOperation`` (refuter RF2 C-1; regression-pinned) —
+        and the tail-hole WARNs land before a price-derivation raise, exactly
+        as the non-memo derivation ordered them.
         """
+        if self._kernel_inputs is not None:
+            # Memo HIT: re-emit the session-tail-hole sweep from the memoised
+            # forced/session_days columns (docstring — main-parity warn
+            # frequency: every call warns, exactly as every non-memo
+            # derivation did).
+            _warn_session_tail_holes(self._kernel_inputs[4], self._kernel_inputs[5])
+            return self._kernel_inputs
         forced: list[bool] = []
         session_days: list[int] = []
         cache_date: date | None = None
@@ -472,11 +703,19 @@ class ResidentTradeSim:
                 )
             forced.append(is_forced_exit_bar(ts_ist.time(), self._tf_minutes, cache_seconds))
             session_days.append(bar_day.toordinal())
-        open_p = [_price_to_paisa(bar.open) for bar in self._bars]
-        high_p = [_price_to_paisa(bar.high) for bar in self._bars]
-        low_p = [_price_to_paisa(bar.low) for bar in self._bars]
-        close_p = [_price_to_paisa(bar.close) for bar in self._bars]
-        return open_p, high_p, low_p, close_p, forced, session_days
+        _warn_session_tail_holes(forced, session_days)
+        columns = self._precomputed_columns
+        if columns is None:
+            columns = derive_price_columns(self._bars)
+        self._kernel_inputs = (
+            columns.open_paisa,
+            columns.high_paisa,
+            columns.low_paisa,
+            columns.close_paisa,
+            tuple(forced),
+            columns.session_days,
+        )
+        return self._kernel_inputs
 
     def _promote_wide_kernel(self) -> object | None:
         """Build (at most once) the u128 sibling kernel for >64-bit mask batches.
@@ -484,8 +723,12 @@ class ResidentTradeSim:
         DEC-TRADE-SIM-U128-KERNEL-001: a mask in ``(U64_MASK, _U128_MASK]``
         over a u64-resident window promotes the WHOLE batch to
         ``fno_math.ResidentSweepSimU128`` — built lazily HERE from the same
-        :meth:`_derive_kernel_inputs` columns (one more ``O(N_bars)``
-        derivation + FFI copy, paid once per instance, announced with ONE
+        :meth:`_derive_kernel_inputs` columns (a memo handoff since the
+        DEC-STAGE1A-RUST-BATCH-001 G-4 memo — the historical second
+        ``O(N_bars)`` DECIMAL derivation is gone; the hit still pays the
+        ``O(N_bars)`` session-tail-hole RE-EMIT sweep for main-parity warn
+        frequency, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — plus the FFI copy,
+        paid once per instance, announced with ONE
         ``rust_trade_sim.wide_kernel_promoted`` INFO) and memoised, so the
         chunked sweep's subsequent wide batches are pure kernel calls. Returns
         ``None`` when the installed wheel predates the class (memoised via
@@ -507,8 +750,16 @@ class ResidentTradeSim:
             self._wide_unavailable = True
             return None
         open_p, high_p, low_p, close_p, forced, session_days = self._derive_kernel_inputs()
+        # Fresh list copies at the FFI edge — the memo stays immutable tuples
+        # (review LOW-2; the construction-site comment has the full rationale).
         self._rust_wide = kernel_cls(
-            open_p, high_p, low_p, close_p, forced, session_days, self._bar_bits
+            list(open_p),
+            list(high_p),
+            list(low_p),
+            list(close_p),
+            list(forced),
+            list(session_days),
+            self._bar_bits,
         )
         _LOG.info(
             "rust_trade_sim.wide_kernel_promoted",

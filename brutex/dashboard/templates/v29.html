@@ -2156,6 +2156,10 @@
   .oc-chain-amber { color: var(--yellow); border-color: var(--yellow); }
   .oc-chain-red { color: var(--red); border-color: var(--red); }
   .oc-chain-pending { opacity: 0.7; }
+  /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the rank-1 cascade verdict badge —
+     a cascade-FAILED winner stays rank-1 (annotation never reranks) but can
+     NEVER read silently green: the fail state paints the red badge. */
+  .oc-cascade-fail { color: var(--red); font-weight: 800; }
   #ocTimeline { max-height: 260px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.7; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 10px 12px; }
   .oc-event-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
   .oc-verify-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
@@ -2488,7 +2492,7 @@
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2v6.5L3 12l6 3.5V22h6v-6.5l6-3.5-6-3.5V2H9z"/></svg><span class="jargon">REAL OR FLUKE?</span><span class="plain-eng" style="display:none">PROOF</span></div>
         <div class="big" data-oc="r1_dsr" data-explain="dsr">—</div>
-        <div class="sub"><span class="jargon">DSR · CPCV <span data-oc="r1_cpcv">—</span>% pass</span><span class="plain-eng" style="display:none">Statistical verification from the stored run</span></div>
+        <div class="sub"><span class="jargon">DSR · CPCV <span data-oc="r1_cpcv">—</span>% pass · cascade <span data-oc="r1_cascade" data-explain="cascade_status">—</span></span><span class="plain-eng" style="display:none">Statistical verification from the stored run</span></div>
       </div>
     </div>
 
@@ -2544,6 +2548,10 @@
             <tr><td>Sharpe (full precision)</td><td data-oc="r1_sharpe">—</td></tr>
             <tr><td>DSR</td><td data-oc="r1_dsr">—</td></tr>
             <tr><td>CPCV pass %</td><td data-oc="r1_cpcv">—</td></tr>
+            <!-- DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade
+                 verdict joined onto the winner (server-built status_text;
+                 "—" until a cascade-joined artifact lands). -->
+            <tr><td>Cascade verdict</td><td data-oc="r1_cascade" data-explain="cascade_status">—</td></tr>
             <tr><td>Max drawdown</td><td data-oc="r1_max_dd">—</td></tr>
             <tr><td>VIX band</td><td data-oc="r1_vix_band">no VIX band</td></tr>
             <!-- Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime

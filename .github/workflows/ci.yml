@@ -503,6 +503,15 @@ jobs:
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
+          # DEC-STAGE1A-RUST-BATCH-001: the batch Rust Stage-1A seam (flag /
+          # burn-in / autorevert / observability leaf) — 100% line+branch
+          # STANDALONE under its dedicated unit file (the module also rides
+          # the whole-engine glob gate above).
+          if compgen -G "tests/unit/test_engine_rust_stage1a.py" > /dev/null; then
+            pytest --cov=brutex.engine.rust_stage1a --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_rust_stage1a.py
+          else
+            echo "(brutex.engine.rust_stage1a test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1671): the
           # rank-budget worker-divisor wiring — a dedicated per-module pin at
           # 100% line+branch over its two suites (the module also rides the
@@ -988,6 +997,16 @@ jobs:
             echo "(brutex.observability.watchdog test file not present yet — gate inactive)"
           fi
           # DEC-MONITOR-LOOP-001 (2026-05-25, MIGRATION entry #242):
+          # ratchet brutex.observability.loop_watchdog (the event-loop
+          # liveness watchdog — heartbeat task + monitor daemon + the pure
+          # check_once state machine; DEC-DASHBOARD-PULL-CONTENTION-
+          # RESILIENCE-001 G5). 100% line+branch on its dedicated suite.
+          if compgen -G "tests/unit/test_observability_loop_watchdog.py" > /dev/null; then
+            pytest --cov=brutex.observability.loop_watchdog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_loop_watchdog.py
+          else
+            echo "(brutex.observability.loop_watchdog test file not present yet — gate inactive)"
+          fi
+
           # ratchet brutex.observability.monitor (daemon-thread poller
           # for SLA + Watchdog + L3 replay oracle) into the strict
           # per-module 100% gate. 26 unit tests cover construction
@@ -2282,7 +2301,7 @@ jobs:
           # probe-outage mode + the mru_prefix bookkeeping — the module ships
           # at 100% line+branch under its two dedicated unit suites.
           if compgen -G "tests/unit/test_movers_cache.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.movers_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_cache.py tests/unit/test_movers_cache_serve_last_known.py
+            pytest --cov=brutex.dashboard.movers_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_cache.py tests/unit/test_movers_cache_serve_last_known.py tests/unit/test_movers_cache_swr.py
           else
             echo "(brutex.dashboard.movers_cache test file not present yet — gate inactive)"
           fi
@@ -2458,6 +2477,22 @@ jobs:
             pytest --cov=brutex.engine.results_depth_pass --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_depth_pass.py
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
+          fi
+          # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (MIGRATION.md #1749): the ONE
+          # pure cascade-report → display-join law (flattener/validator shared
+          # by the top-100 writer and the /results loader) + the read-time
+          # aggs-composite index behind /results' ?preset=composite activation
+          # — both NEW modules ship at 100% line+branch from their own suites
+          # (the #1561 two-new-static-gates precedent).
+          if compgen -G "tests/unit/test_engine_cascade_join.py" > /dev/null; then
+            pytest --cov=brutex.engine.cascade_join --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_cascade_join.py
+          else
+            echo "(brutex.engine.cascade_join test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dashboard_composite_join.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.composite_join --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_composite_join.py
+          else
+            echo "(brutex.dashboard.composite_join test file not present yet — gate inactive)"
           fi
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
