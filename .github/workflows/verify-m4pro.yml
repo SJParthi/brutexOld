@@ -136,7 +136,7 @@ jobs:
       - name: Full test suite (unit + integration + property + golden + bench)
         run: |
           . .venv/bin/activate
-          pytest -q -p no:cacheprovider
+          pytest -q -rA -p no:cacheprovider
 
       - name: Runtime health (brutex doctor)
         run: |
