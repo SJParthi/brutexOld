@@ -33,9 +33,13 @@ killed — it dies with the process (the #999 stance,
 blocked longer than one deadline once the latch is set; while the volume
 stays wedged, later sweeps on that key fail fast with ZERO new threads; when
 the volume recovers the zombie returns, the latch self-clears, and sweeps
-resume" — NOT "the zombie thread is terminated". At most ONE abandoned daemon
-exists per gate per key per outage (the latch blocks every later spawn),
-plus at most one extra per release-then-rewedge oscillation.
+resume" — NOT "the zombie thread is terminated". The abandoned-daemon count
+per gate per key per outage is at most the sweeps already IN FLIGHT during
+the one deadline window in which the breach lands (the latch arms only on
+the FIRST breach, so each concurrent pre-breach flight leaves its own
+zombie; sequentially exactly ONE), plus at most one extra per
+release-then-rewedge oscillation — ZERO new threads spawn while latched,
+and every zombie self-clears when its sweep returns.
 
 Healthy-path cost: one short-lived daemon thread spawn + join per guarded
 sweep (~50-150 µs) on top of the sweep's own ms-scale metadata syscalls —

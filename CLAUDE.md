@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1774 —
+_Last updated: 2026-07-12 (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1761 —
 bounded cold lake I/O on the dashboard read path: the SummaryCache COLD
 single-flight wait gains a TOTAL env-tunable budget (`BRUTEX_SUMMARY_COLD_WAIT_S`
 60 s, fail-safe) + a per-owner-Event fail-fast latch — at most the
@@ -41,7 +41,7 @@ unchanged (parity-pinned); write-side hooks byte-untouched (already under the
 90 s spine guard); the movers_cache sibling wait is the named follow-up
 DEC-DASHBOARD-COLD-IO-DEADLINE-002 (behind PR #1488). READ-side dashboard +
 ONE data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item
-record lives in the §1 Active-branch blurb + MIGRATION.md #1774.)
+record lives in the §1 Active-branch blurb + MIGRATION.md #1761.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -2358,7 +2358,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dashboard-cold-io-deadline` (**DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1774** —
+- **Active branch:** `claude/dashboard-cold-io-deadline` (**DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1761** —
   bounded cold lake I/O on the dashboard read path (guarantee-audit BUG-1 + BUG-2 — the audit report is
   NOT in-repo, stated honestly; BUG-1 is equally the #1648 honest-limits named follow-up). **BUG-1:**
   `SummaryCache.get_or_refresh`'s COLD cross-thread arm no longer parks waiters in an UNBOUNDED
@@ -2417,8 +2417,9 @@ hostile-review pass._
   resolvers). WRITE hooks byte-untouched (already under the 90 s `GROWW_WRITE_DEADLINE_S` spine guard;
   guarding the shared `_load_shard_with_clause` would add a surprise thread inside the pull's
   partition-locked section). HONEST: bounds the WAITERS + the SWEEPS, never the wedged syscall
-  (abandoned daemons unkillable, #999; ≤ ~3 per outage, zero per poll while latched; the wedged BUG-1
-  owner still pins one thread + one token; the legacy DuckDB scan the degrades fall back to — and
+  (abandoned daemons unkillable, #999; at most the sweeps already in flight during one deadline
+  window — sequentially exactly one — zero NEW threads while latched, all self-clearing on the
+  volume's release; the wedged BUG-1 owner still pins one thread + one token; the legacy DuckDB scan the degrades fall back to — and
   `query_candles`' pre-existing early `base.is_dir()` guard stat — stay UNBOUNDED on a truly dead
   volume, the 32-token limiter remains that containment); healthy-path payloads, clause logs, stat
   COUNTS + bytes pinned unchanged (the whole pre-existing byte-equality/fallback/TOCTOU/seed suites
@@ -2426,7 +2427,7 @@ hostile-review pass._
   stat-spy law test-pinned); the five wedge regressions (W1/W2 summary_cache · W3 lake_stats_manifest ·
   W4 through the REAL `query_candles` in the db_view 21-file gate — zero ci.yml edits · W5
   lake_revision) are join/SIGALRM-watchdog-bounded and EXECUTED failing at the merge-base with their
-  GENUINE hang shapes; seven hand-applied mutants killed (evidence in #1774); NEW
+  GENUINE hang shapes; seven hand-applied mutants killed (evidence in #1761); NEW
   `tests/unit/test_stat_deadline.py` (+ the mutation.yml proven-pair line, wiring test-pinned) + NEW
   `tests/unit/test_dashboard_cold_degrade_routes.py`; `stat_deadline.py` + `summary_cache.py` +
   `lake_stats_manifest.py` 100.00% line+branch on their gates. NAMED follow-up
@@ -6054,7 +6055,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/dashboard-cold-io-deadline`
-  (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1774 — bounded cold lake
+  (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1761 — bounded cold lake
   I/O on the dashboard read path: the SummaryCache cold single-flight wait
   gains a TOTAL budget + per-owner-Event fail-fast latch with the honest 503
   degrade on the five summary routes (four JSON `summary_scan_pending`;
@@ -6069,7 +6070,7 @@ hostile-review pass._
   unchanged; the movers_cache sibling wait is the named follow-up
   DEC-DASHBOARD-COLD-IO-DEADLINE-002; READ-side dashboard + one data leaf —
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1774 for the full blurb)
+  see §1 + MIGRATION.md #1761 for the full blurb)
   Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on
