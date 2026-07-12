@@ -414,6 +414,65 @@ class TestExportSymbol:
         assert export.reason == "read_error"
         assert export.csv_bytes is None
 
+    def test_classifier_type_error_withholds_gate_signature_drift(self) -> None:
+        # Round-3 X3 (refuter R2-2): a signature-drifted gate module's
+        # classify raises TypeError from the call — fail-closed PER SYMBOL:
+        # withheld under the NAMED reason + one WARN naming the symbol,
+        # never an escaping crash that kills the whole ~750-symbol run.
+        import structlog.testing
+
+        def _drifted(**kwargs: object) -> FakeVerdict:
+            raise TypeError("classify_today_completeness() got an unexpected keyword 'bars_today'")
+
+        with structlog.testing.capture_logs() as logs:
+            export = export_symbol(
+                identity=_identity(),
+                day=_DAY,
+                session=_SESSION,
+                reader=_static_reader([_bar(9, 15)]),
+                classifier=_drifted,  # type: ignore[arg-type]
+            )
+        assert export.disposition == "withheld"
+        assert export.reason == "gate_signature_drift"
+        assert export.csv_bytes is None
+        assert export.sha256 is None
+        events = [e for e in logs if e["event"] == "crossverify.gate_signature_drift"]
+        assert len(events) == 1
+        assert events[0]["symbol"] == repr("NIFTY")
+
+    def test_signature_drifted_real_shaped_module_withholds_not_crashes(self) -> None:
+        # The end-to-end X3 shape: bind_production_classifier over a module
+        # whose classify SIGNATURE drifted (renamed kwarg) — the adapter's
+        # classify call raises TypeError and export_symbol withholds the
+        # symbol as gate_signature_drift instead of crashing mid-run.
+        import enum
+        import types
+
+        from brutex.crossverify.gate_seam import bind_production_classifier
+
+        class _Cls(enum.Enum):
+            INDEX_SPOT = "index_spot"
+            CASH_SPOT = "cash_spot"
+            FUT = "fut"
+
+        module = types.ModuleType("drifted_gate")
+
+        def classify_today_completeness(*, bars: object, **rest: object) -> object:
+            raise AssertionError("unreachable — the kwarg mismatch raises first")
+
+        module.classify_today_completeness = classify_today_completeness  # type: ignore[attr-defined]
+        module.InstrumentClass = _Cls  # type: ignore[attr-defined]
+        classifier = bind_production_classifier(lambda _name: module)
+        export = export_symbol(
+            identity=_identity(),
+            day=_DAY,
+            session=_SESSION,
+            reader=_static_reader([_bar(9, 15)]),
+            classifier=classifier,
+        )
+        assert export.disposition == "withheld"
+        assert export.reason == "gate_signature_drift"
+
     def test_genuine_code_bug_propagates(self) -> None:
         def _buggy_reader(
             *, exchange: str, segment: str, symbol: str, day: date

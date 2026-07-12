@@ -211,6 +211,71 @@ class TestSaveLoadRoundTrip:
         assert len(corrupt) == 1
         assert corrupt[0]["error_type"] == "IsADirectoryError"
 
+    def test_file_at_crossverify_dir_loads_none_with_warn(self, tmp_path: Path) -> None:
+        # The STAT-side OSError arm: a FILE planted where the `.crossverify`
+        # DIRECTORY belongs makes the size probe raise NotADirectoryError —
+        # the same WARN-and-None degrade, never a crash.
+        import structlog.testing
+
+        (tmp_path / ".crossverify").write_bytes(b"not a dir")
+        with structlog.testing.capture_logs() as logs:
+            assert load_journal(tmp_path, _DAY) is None
+        corrupt = [e for e in logs if e["event"] == "crossverify.journal_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["error_type"] == "NotADirectoryError"
+
+    @pytest.mark.parametrize(
+        ("body", "error_type"),
+        [
+            (
+                # json.loads accepts the bareword Infinity → int(float("inf"))
+                # raises OverflowError at the size coercion — NOT a
+                # ValueError/TypeError, so pre-fix it escaped load_journal
+                # raw AND wedged the recovery scan (executed repro).
+                '{"version": 1, "day": "2026-07-10", "run_id": "x", "entries": '
+                '{"k": {"sha256": "s", "size": Infinity, "published": false}}, "withheld": {}}',
+                "OverflowError",
+            ),
+            (
+                # A deeply-nested valid-JSON payload blows the parser stack
+                # (RecursionError) well under the size cap — same escape.
+                "[" * 200_000 + "]" * 200_000,
+                "RecursionError",
+            ),
+        ],
+    )
+    def test_parser_escape_classes_load_none_with_warn(
+        self, tmp_path: Path, body: str, error_type: str
+    ) -> None:
+        # Round-3 X2 (the SweepCheckpointStore corruption-mapping precedent):
+        # every corruption class maps to WARN + None — never a raw
+        # OverflowError/RecursionError escaping the tolerant path.
+        import structlog.testing
+
+        path = journal_path(tmp_path, _DAY)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        with structlog.testing.capture_logs() as logs:
+            assert load_journal(tmp_path, _DAY) is None
+        corrupt = [e for e in logs if e["event"] == "crossverify.journal_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["error_type"] == error_type
+
+    def test_oversized_journal_refused_before_read(self, tmp_path: Path) -> None:
+        # The size-cap half of the precedent: an over-cap planted file is
+        # REFUSED at the stat — never an unbounded read (MemoryError class).
+        import structlog.testing
+        from brutex.crossverify.journal import MAX_JOURNAL_BYTES
+
+        path = journal_path(tmp_path, _DAY)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * (MAX_JOURNAL_BYTES + 1))
+        with structlog.testing.capture_logs() as logs:
+            assert load_journal(tmp_path, _DAY) is None
+        corrupt = [e for e in logs if e["event"] == "crossverify.journal_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["error_type"] == "OversizedJournal"
+
 
 class TestScanPendingJournals:
     def test_empty_lake_scans_nothing(self, tmp_path: Path) -> None:
@@ -261,6 +326,32 @@ class TestScanPendingJournals:
         with structlog.testing.capture_logs() as logs:
             scanned = scan_pending_journals(tmp_path, today=_DAY, lookback_days=5)
         assert [j.day.day for j in scanned] == [8]  # the rotten day skipped
+        assert any(e["event"] == "crossverify.journal_corrupt" for e in logs)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            '{"version": 1, "day": "2026-07-08", "run_id": "x", "entries": '
+            '{"k": {"sha256": "s", "size": Infinity, "published": false}}, "withheld": {}}',
+            "[" * 200_000 + "]" * 200_000,
+        ],
+    )
+    def test_parser_escape_prior_skipped_never_raises(self, tmp_path: Path, body: str) -> None:
+        # Round-3 X2, the recovery-scan arm: ONE Infinity-size / deeply-nested
+        # prior-day journal in the catchup window must never kill the scan
+        # (pre-fix: OverflowError / RecursionError propagated, wedging every
+        # later run). A healthy pending sibling is still found.
+        import structlog.testing
+
+        rotten = journal_path(tmp_path, _DAY.replace(day=9))
+        rotten.parent.mkdir(parents=True, exist_ok=True)
+        rotten.write_text(body, encoding="utf-8")
+        healthy = DayJournal(day=_DAY.replace(day=8), run_id="cv", entries={})
+        healthy.mark_staged("p/IDX_I/NIFTY.csv", "s", 1)
+        healthy.save(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            scanned = scan_pending_journals(tmp_path, today=_DAY, lookback_days=5)
+        assert [j.day.day for j in scanned] == [8]  # the poisoned day skipped
         assert any(e["event"] == "crossverify.journal_corrupt" for e in logs)
 
     def test_lookback_zero_scans_nothing(self, tmp_path: Path) -> None:

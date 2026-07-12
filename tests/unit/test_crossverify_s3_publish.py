@@ -216,6 +216,31 @@ class TestPublishStaged:
         assert len(corrupt) == 1
         assert corrupt[0]["key"] == repr("p/IDX_I/NIFTY.csv")
 
+    def test_same_size_different_bytes_tamper_refused(self, tmp_path: Path) -> None:
+        # Round-3 X4 (surviving mutant): the sha256 operand of the M2 verify
+        # had NO killing test — every prior corrupt fixture ALSO changed the
+        # length, so dropping `actual_sha != entry.sha256` survived the whole
+        # suite. A SAME-LENGTH different-bytes tamper (b"good\n" → b"badd\n",
+        # both 5 bytes) is caught ONLY by the sha operand.
+        import structlog.testing
+
+        journal = _journal()
+        _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"good\n")
+        staging_path_for_key(tmp_path, _DAY, "p/IDX_I/NIFTY.csv").write_bytes(b"badd\n")
+        client = FakeS3Client()
+        with structlog.testing.capture_logs() as logs:
+            outcome = publish_staged(
+                client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path
+            )
+        assert outcome.published == 0
+        assert outcome.failed_count == 1
+        assert outcome.failed_keys == ("p/IDX_I/NIFTY.csv",)
+        assert "p/IDX_I/NIFTY.csv" not in client.objects  # tampered bytes never PUT
+        assert journal.pending_keys() == ("p/IDX_I/NIFTY.csv",)  # stays pending
+        corrupt = [e for e in logs if e["event"] == "crossverify.staged_bytes_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["expected_size"] == corrupt[0]["actual_size"] == 5
+
     def test_size_mismatch_alone_counts_failed(self, tmp_path: Path) -> None:
         # The size half of the M2 verify: a journal entry whose recorded
         # size disagrees with the staged bytes (a torn journal write) also

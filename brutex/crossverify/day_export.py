@@ -242,7 +242,9 @@ def export_symbol(
     (``row_count == verdict.distinct_minutes``; for ``index_spot`` also
     ``== verdict.expected_minutes``). Every other path yields ``csv_bytes=None``
     with an honest reason. Never raises for a per-symbol data problem —
-    read/render failures fold into the withheld record.
+    read/render failures fold into the withheld record, and a
+    signature-drifted gate module's classify ``TypeError`` withholds the
+    symbol as ``gate_signature_drift`` (round-3 X3), never a mid-run crash.
     """
 
     def _no_bytes(
@@ -274,12 +276,27 @@ def export_symbol(
             error=str(exc),
         )
         return _no_bytes("withheld", "read_error")
-    verdict = classifier(
-        bars_today=bars,
-        clamp_today=day,
-        window_end=day,
-        instrument_class=identity.instrument_class,
-    )
+    try:
+        verdict = classifier(
+            bars_today=bars,
+            clamp_today=day,
+            window_end=day,
+            instrument_class=identity.instrument_class,
+        )
+    except TypeError as exc:
+        # Round-3 X3 (refuter R2-2): a signature-drifted sibling gate module
+        # (a renamed/added classify kwarg the #1751 hostile review may land)
+        # raises TypeError from the classify call — fail-closed PER SYMBOL:
+        # withheld under a NAMED reason, never an escaping crash that kills
+        # the whole ~750-symbol run mid-flight.
+        _LOG.warning(
+            "crossverify.gate_signature_drift",
+            symbol=repr(identity.canonical_symbol),  # vendor-derived — repr()'d (#907)
+            day=day.isoformat(),
+            error=str(exc),
+            remediation="re-align gate_seam.bind_production_classifier with the gate signature",
+        )
+        return _no_bytes("withheld", "gate_signature_drift")
     disposition = _decide(
         instrument_class=identity.instrument_class,
         reason=verdict.reason,

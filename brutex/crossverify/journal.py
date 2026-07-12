@@ -41,6 +41,14 @@ CROSSVERIFY_DIRNAME: Final[str] = ".crossverify"
 #: Journal schema version (forward-compat: an unknown version loads as corrupt).
 JOURNAL_VERSION: Final[int] = 1
 
+#: Sanity cap on the journal file size :func:`load_journal` will read —
+#: the ``SweepCheckpointStore`` / stats-manifest precedent (round-3 hostile
+#: review X2): a real journal is ~150 KiB at the full ~760-target universe
+#: (one ~160-byte entry per key), so 16 MiB leaves ~100× headroom while a
+#: planted multi-GiB file is REFUSED before the read (never an unbounded
+#: ``read_bytes`` → ``MemoryError``, never a parse of attacker-scale bytes).
+MAX_JOURNAL_BYTES: Final[int] = 1 << 24
+
 #: A staged file mirrors the S3 key's last two components (segment/file).
 _KEY_TAIL_COMPONENTS: Final[int] = 2
 
@@ -168,14 +176,45 @@ def load_journal(lake_root: Path, day: date) -> DayJournal | None:
     path, EIO, …) load as ``None`` + one WARN — pre-fix an invalid-UTF-8
     journal raised ``UnicodeDecodeError`` uncaught, crashing the run at
     BOTH call sites and, via the recovery scan, wedging EVERY future run
-    until the corrupt prior-day file aged out of the catchup window.
+    until the corrupt prior-day file aged out of the catchup window. The
+    PARSE rides the same degrade for the two classes stdlib ``json`` lets
+    escape a ValueError/TypeError guard (round-3 hostile review X2, the
+    ``SweepCheckpointStore`` corruption-mapping precedent): ``json.loads``
+    accepts the bareword ``Infinity`` so ``int(float("inf"))`` in a ``size``
+    field raises ``OverflowError``, and a pathologically NESTED payload
+    raises ``RecursionError`` — both previously escaped ``load_journal``
+    raw AND wedged the recovery scan; an over-:data:`MAX_JOURNAL_BYTES`
+    file is refused BEFORE the read (the same precedent's size cap).
     """
     path = journal_path(lake_root, day)
     try:
-        raw = path.read_bytes().decode("utf-8")
+        size = path.stat().st_size
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        _LOG.warning(
+            "crossverify.journal_corrupt",
+            path=str(path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
+    if size > MAX_JOURNAL_BYTES:
+        _LOG.warning(
+            "crossverify.journal_corrupt",
+            path=str(path),
+            error_type="OversizedJournal",
+            error=(
+                f"{size} bytes exceeds the {MAX_JOURNAL_BYTES}-byte sanity cap "
+                "for a small-JSON day journal — refusing to read it (corruption/tampering)"
+            ),
+        )
+        return None
+    try:
+        raw = path.read_bytes().decode("utf-8")
     except (UnicodeDecodeError, OSError) as exc:
+        # A file raced away between the stat and the read folds in here too
+        # (FileNotFoundError IS an OSError) — one WARN, honest degrade.
         _LOG.warning(
             "crossverify.journal_corrupt",
             path=str(path),
@@ -200,7 +239,12 @@ def load_journal(lake_root: Path, day: date) -> DayJournal | None:
                 published=bool(entry["published"]),
             )
         withheld = {str(k): str(v) for k, v in payload["withheld"].items()}
-    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError, RecursionError) as exc:
+        # OverflowError: `int(float("inf"))` — json accepts the bareword
+        # Infinity in a numeric field (subclasses ArithmeticError, NOT
+        # ValueError). RecursionError: a deeply-nested valid-JSON payload
+        # blows the parser stack well under the size cap. Both are journal
+        # corruption, same contract as malformed JSON (round-3 X2).
         _LOG.warning(
             "crossverify.journal_corrupt",
             path=str(path),
@@ -229,6 +273,7 @@ def scan_pending_journals(lake_root: Path, *, today: date, lookback_days: int) -
 __all__ = [
     "CROSSVERIFY_DIRNAME",
     "JOURNAL_VERSION",
+    "MAX_JOURNAL_BYTES",
     "DayJournal",
     "JournalEntry",
     "journal_path",

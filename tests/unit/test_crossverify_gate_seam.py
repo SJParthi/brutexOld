@@ -123,6 +123,18 @@ class TestBindProductionClassifier:
         with pytest.raises(CompletenessGateUnavailable, match="fail-closed"):
             bind_production_classifier(importer)
 
+    @pytest.mark.parametrize("missing", ["classify_today_completeness", "InstrumentClass"])
+    def test_missing_attribute_is_fail_closed_naming_it(self, missing: str) -> None:
+        # Round-3 X3 (refuter R2-2): a PARTIAL/renamed sibling module — the
+        # import succeeds but a required attribute is gone — previously
+        # escaped the fail-closed exit-1+CRITICAL law as a raw
+        # AttributeError. Now: the SAME CompletenessGateUnavailable refusal,
+        # its message NAMING the missing attribute.
+        gate = _fake_gate_module([])
+        delattr(gate, missing)
+        with pytest.raises(CompletenessGateUnavailable, match=missing):
+            bind_production_classifier(lambda _name: gate)
+
     def test_default_importer_state_matches_tree(self) -> None:
         # Honest either way: with the sibling module absent this is the
         # fail-closed arm through the REAL importlib; once #1751 merges the

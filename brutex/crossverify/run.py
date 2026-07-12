@@ -624,38 +624,70 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
     # staging cleanup are one exclusive span, so a peer's rmtree can never
     # race THIS run's read into a spurious publish_failed. Acquired only
     # AFTER the pull trio released (step L) — never held across a pull-lock
-    # acquire.
+    # acquire. The journal is RE-LOADED under the flock (round-3 X1, the
+    # step-D law applied to today — refuter-confirmed MAJOR): two same-day
+    # runs interleaved K_A,K_B,M_A,M_B leave run B's IN-MEMORY journal
+    # stale after A publishes + rmtrees today's staging — publishing from
+    # it read EVERY key as staged_bytes_missing → a FALSE publish_failed
+    # exit 2 + CRITICAL while S3 was complete. Now the span acts only on
+    # the durable journal: no pending keys ⇒ converge (zero puts, the
+    # published entries counted skipped_already — the normal exit law).
     if not config.dry_run and config.publish and journal.entries:
         try:
             with partition_write_lock(config.lake_root, journal_path(config.lake_root, config.day)):
-                try:
-                    outcome = publish_staged(
-                        client=_client(),
-                        bucket=config.bucket,
-                        journal=journal,
-                        lake_root=config.lake_root,
-                        sleeper=seams.sleeper,
+                current = load_journal(config.lake_root, config.day)
+                if current is None or not current.pending_keys():
+                    # Converged: a clean idempotent re-run or a concurrent
+                    # same-day peer already published every journaled key
+                    # (or the journal vanished/corrupted since step K —
+                    # nothing attributable left to publish this run; the
+                    # staged bytes stay in place, the orphan-staging law).
+                    state.skipped_already = 0 if current is None else len(current.entries)
+                    _LOG.info(
+                        "crossverify.publish_converged",
+                        run_id=run_id,
+                        day=config.day.isoformat(),
+                        journal_present=current is not None,
+                        entries=state.skipped_already,
+                        note=(
+                            "no pending keys under the day flock — already published "
+                            "(a clean re-run or a concurrent same-day peer); zero puts"
+                        ),
                     )
-                except S3BackendUnavailable as exc:
-                    state.publish_failed += len(journal.pending_keys())
-                    return _finish(_report("publish_failed", 2, detail=str(exc)))
-                state.published = outcome.published
-                state.skipped_already = outcome.skipped_already
-                state.publish_failed += outcome.failed_count
-                if outcome.aborted_nonretryable:
-                    return _finish(
-                        _report(
-                            "publish_failed",
-                            2,
-                            detail="nonretryable S3 error — whole publish aborted "
-                            f"(failed keys: {', '.join(outcome.failed_keys)})",
+                    if current is not None:
+                        # The step-N cleanup, idempotent — a peer that
+                        # finished the publish usually already removed it.
+                        shutil.rmtree(staging_dir(config.lake_root, config.day), ignore_errors=True)
+                else:
+                    current.run_id = run_id  # the latest run owns the journal
+                    try:
+                        outcome = publish_staged(
+                            client=_client(),
+                            bucket=config.bucket,
+                            journal=current,
+                            lake_root=config.lake_root,
+                            sleeper=seams.sleeper,
                         )
-                    )
-                if not journal.pending_keys():
-                    # The step-N staging cleanup, INSIDE the day lock: a full
-                    # publish means the staging bytes served their purpose;
-                    # the journal is retained as the durable done-record.
-                    shutil.rmtree(staging_dir(config.lake_root, config.day), ignore_errors=True)
+                    except S3BackendUnavailable as exc:
+                        state.publish_failed += len(current.pending_keys())
+                        return _finish(_report("publish_failed", 2, detail=str(exc)))
+                    state.published = outcome.published
+                    state.skipped_already = outcome.skipped_already
+                    state.publish_failed += outcome.failed_count
+                    if outcome.aborted_nonretryable:
+                        return _finish(
+                            _report(
+                                "publish_failed",
+                                2,
+                                detail="nonretryable S3 error — whole publish aborted "
+                                f"(failed keys: {', '.join(outcome.failed_keys)})",
+                            )
+                        )
+                    if not current.pending_keys():
+                        # The step-N staging cleanup, INSIDE the day lock: a
+                        # full publish means the staging bytes served their
+                        # purpose; the journal stays the durable done-record.
+                        shutil.rmtree(staging_dir(config.lake_root, config.day), ignore_errors=True)
         except PartitionLockTimeout:
             return _refused(
                 "today's journal/staging lock held by a peer past the bound — "

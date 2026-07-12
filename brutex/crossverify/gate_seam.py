@@ -93,13 +93,23 @@ def bind_production_classifier(
     """
     try:
         module = importer(GATE_MODULE)
+        classify = module.classify_today_completeness
+        instrument_class_enum = module.InstrumentClass
     except ImportError as exc:
         raise CompletenessGateUnavailable(
             f"the today-completeness gate module ({GATE_MODULE}, MIGRATION.md #1751) "
             "is not importable — refusing to publish without the gate (fail-closed)"
         ) from exc
-    classify = module.classify_today_completeness
-    instrument_class_enum = module.InstrumentClass
+    except AttributeError as exc:
+        # Round-3 X3 (refuter R2-2): a PARTIAL/renamed sibling module — the
+        # module imports but a required attribute is gone — previously
+        # raised a raw AttributeError past the fail-closed exit-1+CRITICAL
+        # law. Fold it into the same refusal, NAMING the missing attribute.
+        raise CompletenessGateUnavailable(
+            f"the today-completeness gate module ({GATE_MODULE}, MIGRATION.md #1751) "
+            f"is present but missing a required attribute — refusing to publish "
+            f"without the gate (fail-closed): {exc}"
+        ) from exc
 
     def _classifier(
         *,

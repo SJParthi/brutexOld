@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import shutil
 import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
@@ -40,7 +41,7 @@ from brutex.crossverify.run import (
     default_seams,
     run_crossverify,
 )
-from brutex.crossverify.s3_publish import S3BackendUnavailable
+from brutex.crossverify.s3_publish import S3BackendUnavailable, publish_staged
 from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
 from brutex.data.models import CandleBar
 from brutex.data.partition_lock import partition_lock_path
@@ -1117,10 +1118,97 @@ class TestDayJournalLockSerialization:
         assert prior is not None
         assert prior.pending_keys() == (key,)  # untouched for the next scan
 
+    def test_peer_publish_between_staging_and_publish_converges(self, tmp_path: Path) -> None:
+        # Round-3 X1 (refuter-confirmed MAJOR), the DETERMINISTIC
+        # K_A,K_B,M_A,M_B interleave collapsed onto run B's timeline: the
+        # "peer" (run A's step M — publish every staged key + rmtree today's
+        # staging) is injected at run B's step L, the first now_ist() call
+        # after B's step-K journal save (the established S2a hook point) —
+        # strictly AFTER B staged+journaled and BEFORE B's publish span
+        # acquires the day flock. Pre-fix, B published from its STALE
+        # in-memory journal: every staged read hit the peer-rmtree'd tree →
+        # staged_bytes_missing ×3 → a FALSE publish_failed exit 2 + CRITICAL
+        # while S3 held every byte. Post-fix, step M re-loads the journal
+        # UNDER the flock and converges: zero puts, skipped_already == 3,
+        # published exit 0. (The threaded sibling below stays as the real
+        # two-process belt; THIS test forces the losing order every run.)
+        peer_client = FakeS3Client()
+        peer_acted: list[int] = []
+        base = _Clock()
+
+        def _peer_step_m_at_our_step_l() -> datetime:
+            if not peer_acted and journal_path(tmp_path, _DAY).exists():
+                peer = load_journal(tmp_path, _DAY)
+                assert peer is not None
+                assert len(peer.pending_keys()) == 3
+                outcome = publish_staged(
+                    client=peer_client,
+                    bucket="tv-prod-cold",
+                    journal=peer,
+                    lake_root=tmp_path,
+                    sleeper=lambda _s: None,
+                )
+                assert outcome.published == 3
+                shutil.rmtree(staging_dir(tmp_path, _DAY))
+                peer_acted.append(1)
+            return base()
+
+        h = _harness(tmp_path, clock=_peer_step_m_at_our_step_l)  # type: ignore[arg-type]
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert peer_acted == [1]  # the peer interleave genuinely happened
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert report.publish_failed == 0  # NEVER the false CRITICAL
+        assert report.published == 0  # zero puts from this run
+        assert report.skipped_already == 3  # the peer's objects counted honestly
+        assert h.client.puts == []  # this run's own client never PUT
+        assert len(peer_client.objects) == 3  # S3 complete via the peer
+        converged = [e for e in logs if e["event"] == "crossverify.publish_converged"]
+        assert len(converged) == 1
+        assert converged[0]["journal_present"] is True
+        journal = load_journal(tmp_path, _DAY)
+        assert journal is not None
+        assert journal.pending_keys() == ()
+        assert not staging_dir(tmp_path, _DAY).exists()  # step-N cleanup held
+        assert len(h.alerter.summaries) == 1  # ONE summary, INFO-class verdict
+
+    def test_journal_wiped_between_staging_and_publish_converges(self, tmp_path: Path) -> None:
+        # The X1 None arm: today's journal VANISHES (wipe / corrupt-loads-
+        # None) between step K and step M. Publishing from the stale
+        # in-memory object would act on unattributable state — the span
+        # converges instead: zero puts, staged bytes LEFT IN PLACE (the
+        # orphan-staging law), exit follows the normal law (nothing_to_do
+        # exit 0 — never a false CRITICAL; the next `--day` run re-renders
+        # deterministically and publishes).
+        wiped: list[int] = []
+        base = _Clock()
+
+        def _wipe_at_step_l() -> datetime:
+            journal_file = journal_path(tmp_path, _DAY)
+            if not wiped and journal_file.exists():
+                journal_file.unlink()
+                wiped.append(1)
+            return base()
+
+        h = _harness(tmp_path, clock=_wipe_at_step_l)  # type: ignore[arg-type]
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert wiped == [1]
+        assert (report.verdict, report.exit_code) == ("nothing_to_do", 0)
+        assert report.publish_failed == 0
+        assert h.client.puts == []  # nothing published off the stale object
+        converged = [e for e in logs if e["event"] == "crossverify.publish_converged"]
+        assert len(converged) == 1
+        assert converged[0]["journal_present"] is False
+        # Staged bytes left in place — the orphan-staging remediation path.
+        assert staging_path(tmp_path, _DAY, _NIFTY).exists()
+
     def test_concurrent_same_day_runs_serialize_and_converge(self, tmp_path: Path) -> None:
         # Two full same-day runs racing on ONE lake: both complete green,
         # neither reads a spurious publish_failed off the other's cleanup,
         # and the S3 objects + durable journal converge to the correct bytes.
+        # (Timing-dependent by nature — the deterministic interleave law is
+        # test_peer_publish_between_staging_and_publish_converges above.)
         client = FakeS3Client()
         barrier = threading.Barrier(2, timeout=10.0)
         reports: list[CrossverifyReport] = []
