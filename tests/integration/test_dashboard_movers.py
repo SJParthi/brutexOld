@@ -690,8 +690,16 @@ class TestMoversApi:
         partition was served (``stored_reads == 1``) even when it predated the
         fresh 1-minute data, so this test's pull-active arm FAILED. Now the
         route passes ``prefer_resample=_pull_live()``: pull running → the
-        1-minute resample serves (fresh, ``resampled_reads == 1``); idle →
-        stored-first byte-identical."""
+        1-minute resample serves (fresh, ``resampled_reads == 1``) WITHOUT ever
+        opening the stored partition (zero stale warns — the threading proof).
+
+        IDLE arm FLIPPED (DEC-MOVERS-STORED-FRESHNESS-001, REFUTER ROUND 1): the
+        idle read still goes stored-FIRST (it opens the stored partition — hence
+        the ONE stale WARN, which the pull-active arm never emits), but the
+        VERIFY-EQUALITY freshness guard refuses the value-poisoned partition and
+        serves the fresh resample. Pre-guard this arm pinned the stale ₹99,999
+        close being served ("mid-pull is the only switch window" — no longer
+        true: the freshness guard is the second switch)."""
         # Fresh 1-minute session 09:15–09:19 + a STALE stored 5minute partition
         # whose poisoned close the resample can never produce.
         writer = ParquetWriter(lake_root=tmp_path)
@@ -718,22 +726,28 @@ class TestMoversApi:
             "date": "2024-06-13",
             "time": "09:19",
         }
-        # A pull IS running (injected probe) → the always-fresh resample serves.
+        # A pull IS running (injected probe) → the always-fresh resample serves,
+        # and the stored partition is never even opened (no stale warn).
         pulling = TestClient(
             build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: True)
         )
-        body = pulling.get("/api/v1/movers", params=params).json()
+        with capture_logs() as pull_logs:
+            body = pulling.get("/api/v1/movers", params=params).json()
         assert (body["stored_reads"], body["resampled_reads"]) == (0, 1)
         # No prior-day 1day baseline → the row ranks under volume (no % change).
         assert body["volume"][0]["ltp"] == "₹22,040.00"  # the FRESH close
-        # No pull → the stored-first read is byte-identical to before (the
-        # stale stored close is served — mid-pull is the only switch window).
+        assert [e for e in pull_logs if e["event"] == "movers.stored_stale_fallback"] == []
+        # No pull → the read goes stored-FIRST, opens the stale partition, and
+        # the freshness guard refuses it: fresh values + ONE stale WARN
+        # (REFUTER ROUND 1 flip — this arm previously served ₹99,999.00).
         idle = TestClient(
             build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: False)
         )
-        body2 = idle.get("/api/v1/movers", params=params).json()
-        assert (body2["stored_reads"], body2["resampled_reads"]) == (1, 0)
-        assert body2["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+        with capture_logs() as idle_logs:
+            body2 = idle.get("/api/v1/movers", params=params).json()
+        assert (body2["stored_reads"], body2["resampled_reads"]) == (0, 1)
+        assert body2["volume"][0]["ltp"] == "₹22,040.00"  # never the stale bar
+        assert len([e for e in idle_logs if e["event"] == "movers.stored_stale_fallback"]) == 1
 
     def test_raising_pull_probe_is_swallowed_to_idle_read(
         self, store: InstrumentStore, tmp_path: Path
@@ -742,10 +756,16 @@ class TestMoversApi:
         an injected pull-active probe that RAISES is swallowed to ``False``
         (the documented "a raising probe is swallowed" except-arm), so the
         movers read serves the byte-identical IDLE stored-first path — a 200
-        with ``stored_reads == 1``, never a 500, never a resample switch."""
-        # Same lake shape as the pin above: fresh 1-minute session + a stale
-        # aligned stored 5minute partition whose poisoned close identifies
-        # which read path served the row.
+        with ``stored_reads == 1``, never a 500, never a resample switch.
+
+        Reworked for DEC-MOVERS-STORED-FRESHNESS-001 (REFUTER ROUND 1): the
+        stored 5minute partition is now a REAL prebuild (fresh — the freshness
+        guard verifies it against the base and serves it), because the previous
+        hand-poisoned stale partition is refused by the guard on EVERY idle read
+        and could no longer discriminate the swallowed-probe path. A True probe
+        would flip the provenance to ``resampled_reads == 1``, so ``(1, 0)``
+        still proves the raise was swallowed to ``False``."""
+        # Fresh 1-minute session + the REAL prebuilt (fresh) 5minute partition.
         writer = ParquetWriter(lake_root=tmp_path)
         writer.write(
             exchange=_EXCHANGE,
@@ -757,13 +777,20 @@ class TestMoversApi:
                 for i in range(5)
             ],
         )
-        writer.write(
+        from brutex.data.timeframe_materialize import (
+            PrebuildKind,
+            materialize_lake_timeframes,
+        )
+
+        result = materialize_lake_timeframes(
+            lake_root=tmp_path,
             exchange=_EXCHANGE,
             segment=_SEGMENT,
             symbol="NIFTY",
-            interval="5minute",
-            bars=[_min_bar(hour=9, minute=15, close="99999", volume=1)],
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
         )
+        assert result.total_bars > 0
 
         def _wedged_probe() -> bool:
             raise RuntimeError("pull-job probe wedged")
@@ -782,10 +809,10 @@ class TestMoversApi:
         )
         assert resp.status_code == 200  # the probe error never breaks the read
         body = resp.json()
-        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves,
-        # byte-identical to the idle arm of the pin above.
+        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves the
+        # verified-fresh prebuilt partition (a True probe would read (0, 1)).
         assert (body["stored_reads"], body["resampled_reads"]) == (1, 0)
-        assert body["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+        assert body["volume"][0]["ltp"] == "₹22,040.00"  # the prebuilt bucket close
 
     def test_no_date_defaults_to_latest_available_day(
         self, store: InstrumentStore, tmp_path: Path

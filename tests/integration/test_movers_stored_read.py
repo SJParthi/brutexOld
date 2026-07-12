@@ -355,10 +355,10 @@ class TestPreferResampleUnderPull:
         Historically (DEC-MOVERS-GATE-PREBUILD-SCOPE-001) the aligned stored
         partition ALWAYS won, so the default arm pinned the POISONED stale close
         being served and ``prefer_resample`` was the only escape. The stored-first
-        read is now freshness-guarded: the poison (one 09:15 bucket, max-open 555;
-        555 + 5 = 560 ≤ 564 = the base's 09:24 day-max) reads STALE by the
-        day-scoped grid-aware predicate, so the DEFAULT read falls back to the
-        fresh 1-minute resample byte-identically with ONE
+        read is now freshness-guarded: the poison (one 09:15 bucket, close 99999)
+        is NOT the resample of the day's 1-minute base, so the VERIFY-EQUALITY
+        guard reads it STALE and the DEFAULT read falls back to the fresh
+        1-minute resample byte-identically with ONE
         ``movers.stored_stale_fallback`` WARNING. ``prefer_resample`` remains the
         mid-pull belt (its arm below is byte-unchanged). This flip is the
         bugfix-reversion-check satisfier: it fails with the guard reverted, by
@@ -428,6 +428,177 @@ class TestPreferResampleUnderPull:
             cutoff_min=9 * 60 + 19,
         )
         assert default_from_stored is True
+
+
+# ── REFUTER ROUND 1: the interior-hole re-pull + dual-exchange warn ────────
+# (DEC-MOVERS-STORED-FRESHNESS-001 — ports of the executed round-1 repro scripts
+# attack_a1_hole_heal.py / attack_a1b_cutoff_ltp.py / attack_a2_a3_warn.py, all
+# through PRODUCTION writers only.)
+
+
+def _seed_hole_heal_lake(lake: Path) -> None:
+    """The #1031 interior-hole re-pull producer chain, production writers only.
+
+    1. A HOLEY 1-minute pull lands: 09:15 + 09:25..09:29 (vendor hole
+       09:16..09:24 — the #1031 interior-gap class, stored legitimately).
+    2. The REAL pipeline prebuild materialises the stored TF partitions FROM the
+       holey base (5minute buckets 09:15 [one minute] + 09:25 [five minutes]).
+    3. The hole is RE-PULLED (the #1031 self-heal — e.g. a CLI ``brutex fetch``,
+       which never derives TFs). The 1-minute base is now complete 09:15..09:29;
+       the stored 5minute partition is STALE with the divergence in the MIDDLE of
+       the day (bucket 09:15 wrong OHLCV, bucket 09:20 MISSING) while its day-MAX
+       still reads ahead of the base (565 + 5 = 570 > 569) — the shape that
+       refuted the round-1 day-max predicate.
+    """
+    writer = ParquetWriter(lake_root=lake)
+    holey = [_bar(day=_DAY, hour=9, minute=15, close="20000", volume=100)] + [
+        _bar(day=_DAY, hour=9, minute=25 + i, close=str(20100 + i * 10), volume=200 + i)
+        for i in range(5)
+    ]
+    writer.write(exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=holey)
+    result = materialize_lake_timeframes(
+        lake_root=lake, exchange="NSE", segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT
+    )
+    assert result.total_bars > 0  # the prebuild really wrote the stale-to-be TFs.
+    heal = [
+        _bar(day=_DAY, hour=9, minute=16 + i, close=str(20010 + i * 10), volume=110 + i)
+        for i in range(9)
+    ]
+    writer.write(exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=heal)
+
+
+class TestInteriorHoleHealFreshness:
+    def test_whole_day_serves_fresh_resample_with_one_warn(self, tmp_path: Path) -> None:
+        """attack_a1 port: the hole-heal lake serves FRESH values + exactly ONE WARN.
+
+        Fails pre-fix (the round-1 day-max guard): ``from_stored=True`` with stale
+        volume 1110 beside the fresh 1m-sourced turnover (reference volume 2136)
+        and ZERO warns.
+        """
+        from brutex.dashboard.movers_snapshot import _read_intraday_bars, _read_session_bars
+
+        _seed_hole_heal_lake(tmp_path)
+        bars, from_stored = _read_intraday_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="5minute",
+            day=_DAY,
+            minutes=5,
+            cutoff_min=None,
+        )
+        reference = _read_session_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            day=_DAY,
+            minutes=5,
+            cutoff_min=None,
+        )
+        assert from_stored is False
+        assert bars == reference
+        assert len(bars) == 3  # 09:15 + 09:20 + 09:25 — the healed truth.
+        # The full compute path: fresh values, honest provenance, ONE warn.
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time=""
+            )
+            ref_cands = compute_spot_candidates(
+                lake_root=tmp_path,
+                interval="5minute",
+                date=_DAY.isoformat(),
+                time="",
+                prefer_resample=True,
+            )
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 1)
+        assert cands.snapshots == ref_cands.snapshots
+        snap = cands.snapshots[0]
+        assert snap.volume == 100 + sum(110 + i for i in range(9)) + sum(
+            200 + i for i in range(5)
+        )  # 2136 — never the stale 1110.
+        stale_events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert len(stale_events) == 1
+        assert (stale_events[0]["exchange"], stale_events[0]["symbol"]) == ("NSE", "NIFTY")
+
+    def test_aligned_cutoff_serves_fresh_ltp_with_warn(self, tmp_path: Path) -> None:
+        """attack_a1b port: at the bucket-final ALIGNED 09:19 cutoff the LTP is FRESH.
+
+        Fails pre-fix: the served LTP itself was stale (₹20,000 — the truncated
+        09:15 bucket's pre-heal close — vs the fresh ₹20,040), silently,
+        ``stored_reads=1``, zero warns.
+        """
+        _seed_hole_heal_lake(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            served = compute_spot_candidates(
+                lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
+            )
+            reference = compute_spot_candidates(
+                lake_root=tmp_path,
+                interval="5minute",
+                date=_DAY.isoformat(),
+                time="09:19",
+                prefer_resample=True,
+            )
+        assert (served.stored_reads, served.resampled_reads) == (0, 1)
+        assert served.snapshots == reference.snapshots
+        assert served.snapshots[0].ltp == Decimal("20040")  # 09:19's healed close.
+        stale_events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert len(stale_events) == 1
+
+
+class TestDualExchangeStaleWarns:
+    def test_dual_exchange_stale_symbol_both_exchanges_warned(self, tmp_path: Path) -> None:
+        """attack_a2 port (REFUTER ROUND 1 defect 2): NSE + BSE stale ⇒ TWO warns.
+
+        The same symbol carries a stale stored 5minute partition on BOTH exchanges;
+        one ``compute_spot_candidates(exchange=None)`` build falls back on both.
+        Pre-fix the ``(symbol, interval)`` dedupe key emitted ONE warn — the second
+        exchange's stale lake partition was never named.
+        """
+        for exchange in ("NSE", "BSE"):
+            writer = ParquetWriter(lake_root=tmp_path)
+            writer.write(
+                exchange=exchange,
+                segment="INDEX",
+                symbol="RELIANCE",
+                interval="1minute",
+                bars=_session(_DAY, 20000)[:5],
+            )
+            materialize_lake_timeframes(
+                lake_root=tmp_path,
+                exchange=exchange,
+                segment="INDEX",
+                symbol="RELIANCE",
+                kind=PrebuildKind.SPOT,
+            )
+            # The base grows AFTER the prebuild — the stored TFs are now stale.
+            writer.write(
+                exchange=exchange,
+                segment="INDEX",
+                symbol="RELIANCE",
+                interval="1minute",
+                bars=[
+                    _bar(day=_DAY, hour=9, minute=20 + i, close=str(21000 + i), volume=300 + i)
+                    for i in range(5)
+                ],
+            )
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path,
+                interval="5minute",
+                date=_DAY.isoformat(),
+                time="",
+                exchange=None,
+            )
+        assert len(cands.snapshots) == 2
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 2)
+        warns = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert sorted((e["exchange"], e["symbol"]) for e in warns) == [
+            ("BSE", "RELIANCE"),
+            ("NSE", "RELIANCE"),
+        ]
 
 
 # ── read_stored_day_frame edges ───────────────────────────────────────────

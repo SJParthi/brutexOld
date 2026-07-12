@@ -591,27 +591,64 @@ def _seed_guard_lake(lake: Path, *, base: bool = True, poison_5m: bool = True) -
 
 class TestStoredDayIsFresh:
     def test_stored_day_is_fresh_truth_table(self) -> None:
-        """The pure day-scoped grid-aware predicate, boundary-exact.
+        """The pure VERIFY-EQUALITY predicate: fresh ⇔ stored ≡ resample(base).
 
-        Frames carry REAL UTC stamps (the 15:29 IST row is minute 929 — the Int8
-        overflow canary through ``_ist_minute_of_day_expr``: 15*60 wraps negative
-        without the Int32 cast).
+        REFUTER ROUND 1 folded: the round-1 day-MAX predicate was a TAIL check —
+        the executed interior-hole-heal shape (stored max-open 565, base max 569:
+        565 + 5 = 570 > 569) read FRESH while the stored frame diverged in the
+        MIDDLE of the day. Equality catches every divergence class, exercised
+        row-by-row here.
         """
         from brutex.dashboard.movers_snapshot import _max_ist_minute, _stored_day_is_fresh
+        from brutex.data.tf_resampler import resample_1m_to_tf
 
-        # Fresh boundary: base == open + m − 1 (the bucket's own last minute).
-        stored = _ist_frame([555, 560])
-        assert _stored_day_is_fresh(stored, minutes=5, base_max_min=564) is True
-        # Stale: the poison shape (max-open 555, base 564): 560 ≤ 564.
-        assert _stored_day_is_fresh(_ist_frame([555]), minutes=5, base_max_min=564) is False
-        # Stale boundary: base == open + m (560 + 5 = 565 > 565 is False) — kills
-        # a `>` → `>=` mutant.
-        assert _stored_day_is_fresh(_ist_frame([555, 560]), minutes=5, base_max_min=565) is False
+        full_base = _ist_frame(
+            list(range(555, 565)), closes=[str(20000 + i * 10) for i in range(10)]
+        )
+        fresh_stored = resample_1m_to_tf(full_base, 5)
+        # Fresh: the stored frame IS the resample of the base (the prebuild law).
+        assert _stored_day_is_fresh(fresh_stored, minutes=5, base_day=full_base) is True
+        # Stale TAIL: stored prebuilt from a 5-minute PREFIX of the base (the :351
+        # poison family) — the base has since grown past it.
+        prefix_stored = resample_1m_to_tf(full_base.head(5), 5)
+        assert _stored_day_is_fresh(prefix_stored, minutes=5, base_day=full_base) is False
+        # INTERIOR-HOLE heal (REFUTER ROUND 1, attack_a1): stored prebuilt over a
+        # holey base (09:15 + 09:25..09:29), the hole later re-pulled. The day-MAX
+        # compare read this FRESH (565 + 5 = 570 > 569); equality reads STALE.
+        holey_minutes = [555, *range(565, 570)]
+        holey_base = _ist_frame(holey_minutes, closes=[str(20000 + m) for m in holey_minutes])
+        healed_minutes = list(range(555, 570))
+        healed_base = _ist_frame(healed_minutes, closes=[str(20000 + m) for m in healed_minutes])
+        hole_stored = resample_1m_to_tf(holey_base, 5)
+        assert _stored_day_is_fresh(hole_stored, minutes=5, base_day=holey_base) is True
+        assert _stored_day_is_fresh(hole_stored, minutes=5, base_day=healed_base) is False
+        # REVERSE staleness (review R7-M2, attack_a3 — now CAUGHT): the base was
+        # TRUNCATED after the prebuild (lake-heal row removal, recall not run);
+        # the round-1 tail check read stored-ahead-of-base as fresh.
+        assert _stored_day_is_fresh(fresh_stored, minutes=5, base_day=full_base.head(5)) is False
+        # VALUE drift (attack C2 family — a hand-edited stored value): timestamps
+        # complete, ONE close poisoned ⇒ stale (the round-1 "undetectable by a ts
+        # guard" class is now detected).
+        import polars as pl
+
+        poisoned = fresh_stored.with_columns(
+            pl.when(pl.arange(0, pl.len()) == 0)
+            .then(pl.lit(99999.0))
+            .otherwise(pl.col("close"))
+            .alias("close")
+        )
+        assert _stored_day_is_fresh(poisoned, minutes=5, base_day=full_base) is False
         # No 1-minute evidence → fail-open fresh (falling back would DROP the row).
-        assert _stored_day_is_fresh(_ist_frame([555]), minutes=5, base_max_min=None) is True
-        # The Int8 canary: a 15:29 IST stamp reads minute 929, not a wrapped Int8.
+        assert _stored_day_is_fresh(fresh_stored, minutes=5, base_day=None) is True
+        # The Int8 canary: a 15:29 IST stamp reads minute 929, not a wrapped Int8
+        # (`_max_ist_minute` feeds the stale WARN's forensic HH:MM fields).
         assert _max_ist_minute(_ist_frame([555, 929])) == 929
-        assert _stored_day_is_fresh(_ist_frame([925]), minutes=5, base_max_min=929) is True
+        # Late-session equality: 15:25–15:29 base, stored = its resample → fresh.
+        late_base = _ist_frame(list(range(925, 930)), closes=["21000"] * 5)
+        assert (
+            _stored_day_is_fresh(resample_1m_to_tf(late_base, 5), minutes=5, base_day=late_base)
+            is True
+        )
 
 
 class TestReadIntradayBarsFreshnessGuard:
@@ -647,12 +684,13 @@ class TestReadIntradayBarsFreshnessGuard:
         assert bars and bars[-1].close != Decimal("99999")
 
     def test_read_intraday_bars_fresh_stored_served_bucket_open_stamp(self, tmp_path: Path) -> None:
-        """The naive-predicate canary at unit level: a REAL prebuilt partition is FRESH.
+        """The false-stale canary at unit level: a REAL prebuilt partition is FRESH.
 
         Stored buckets are bucket-OPEN stamped (max-open 09:20 = 560 < the base's
-        09:24 = 564), so a naive ``stored_max >= base_max`` compare would
-        false-stale this genuinely fresh lake; the grid-aware ``+ minutes`` reads
-        560 + 5 = 565 > 564 = fresh. Keep-green pre AND post fix.
+        09:24 = 564), so a naive ``stored_max >= base_max`` timestamp compare would
+        false-stale this genuinely fresh lake; the VERIFY-EQUALITY guard reads the
+        prebuilt frame ≡ the resample of the base (the prebuild wrote it with the
+        SAME resampler) = fresh. Keep-green pre AND post fix.
         """
         from brutex.dashboard.movers_snapshot import _read_intraday_bars
         from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_timeframes
@@ -724,7 +762,7 @@ class TestReadIntradayBarsFreshnessGuard:
 
         monkeypatch.setattr(movers_snapshot, "_read_cut_1m_frame", _counting_read)
         # interval=1minute: the stored 1minute partition IS the base — identity,
-        # served from stored with ZERO guard reads.
+        # served from stored with ZERO guard reads (no base read, no resample).
         bars, from_stored = movers_snapshot._read_intraday_bars(
             tmp_path,
             exchange="NSE",
@@ -754,9 +792,11 @@ class TestReadIntradayBarsFreshnessGuard:
     def test_read_intraday_bars_stale_aligned_cutoff_day_scoped(self, tmp_path: Path) -> None:
         """The verdict-2 tripwire: the :351 shape at the ALIGNED 09:19 cutoff is STALE.
 
-        Under a CUT-domain predicate the poison reads fresh (bars ≤ 09:19 keep only
-        the 09:15 open: 555 + 5 = 560 > 559) and this test FAILS; only the
-        DAY-scoped compare (560 ≤ 564 — the base runs to 09:24) catches it.
+        Under a CUT-domain day-max compare the poison read fresh at this cutoff
+        (bars ≤ 09:19 keep only the 09:15 open: 555 + 5 = 560 > 559) and this test
+        FAILS; the guard verifies the UNCUT day frames (stored ≢ the whole-day
+        resample of the base, which runs to 09:24), so the aligned-cutoff stored
+        serve is refused and the cut resample truth is served.
         """
         from brutex.dashboard.movers_snapshot import _read_intraday_bars, _read_session_bars
 
@@ -838,7 +878,7 @@ class TestReadIntradayBarsFreshnessGuard:
 
 class TestStoredStaleWarner:
     def test_stored_stale_warn_capped_deduped_suppressed(self) -> None:
-        """Cap 20 / (symbol, interval) dedupe / ONE suppressed summary / reset seam."""
+        """Cap 20 / (exchange, symbol, interval) dedupe / ONE suppressed summary / reset."""
         import structlog.testing
         from brutex.dashboard.movers_snapshot import (
             _STORED_STALE_WARN_CAP,
@@ -848,10 +888,10 @@ class TestStoredStaleWarner:
 
         state = _StoredStaleWarnState()
 
-        def _warn(symbol: str, interval: str = "5minute") -> None:
+        def _warn(symbol: str, interval: str = "5minute", exchange: str = "NSE") -> None:
             warn_stored_stale_fallback(
                 state,
-                exchange="NSE",
+                exchange=exchange,
                 segment="INDEX",
                 symbol=symbol,
                 interval=interval,
@@ -882,6 +922,40 @@ class TestStoredStaleWarner:
         with structlog.testing.capture_logs() as logs2:
             _warn("SYM0")
         assert [e for e in logs2 if e["event"] == "movers.stored_stale_fallback"] != []
+
+    def test_stored_stale_warn_dual_exchange_both_named(self) -> None:
+        """REFUTER ROUND 1 defect 2 (attack_a2): a dual-listed stale symbol warns TWICE.
+
+        The round-1 dedupe key was ``(symbol, interval)``, so the SECOND exchange's
+        stale partition was never named — the #1649a dual-listing class. The key now
+        carries the exchange: NSE + BSE each emit their own
+        ``movers.stored_stale_fallback``. Fails pre-fix (one event).
+        """
+        import structlog.testing
+        from brutex.dashboard.movers_snapshot import (
+            _StoredStaleWarnState,
+            warn_stored_stale_fallback,
+        )
+
+        state = _StoredStaleWarnState()
+        with structlog.testing.capture_logs() as logs:
+            for exchange in ("NSE", "BSE"):
+                warn_stored_stale_fallback(
+                    state,
+                    exchange=exchange,
+                    segment="INDEX",
+                    symbol="RELIANCE",
+                    interval="5minute",
+                    snapshot_day=_GUARD_DAY,
+                    stored_max_ist="09:15",
+                    base_max_ist="09:24",
+                )
+        events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert [(e["exchange"], e["symbol"]) for e in events] == [
+            ("NSE", "RELIANCE"),
+            ("BSE", "RELIANCE"),
+        ]
+        assert state.emitted == 2
 
     def test_stored_stale_warn_cap_literal_pinned(self) -> None:
         """The cap LITERAL is the contract — a 20→21 mutant must die HERE.
