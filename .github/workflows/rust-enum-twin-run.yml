@@ -2,10 +2,15 @@
 #
 # The design-of-record's Slice-1 REAL-DATA twin gate (§7.2 venue law): the
 # same pinned sub-grid runs BRUTEX_SWEEP_RUST_ENUM=0 then =1 against the REAL
-# lake on the operator's self-hosted M4 Pro and every persisted artifact must
-# byte-match. Dispatch-only (the lake exists only on the operator box); the
-# PASS/FAIL line + both hash manifests upload as an artifact for pasting into
-# the PR body. Operator terminal fallback (identical semantics):
+# lake on the operator's self-hosted M4 Pro; PASS requires BOTH that every
+# persisted artifact byte-matches AND that the script's ENGAGEMENT gate
+# clears (the ON arm's log must show `sweep_rust_enum.engaged` with zero
+# fallback/autorevert/refusal markers — a stale-wheel or shadow-autoreverted
+# arm is Python-served and its byte-identity proves nothing about the
+# kernel; review round 2, script header for the full law). Dispatch-only
+# (the lake exists only on the operator box); the PASS/FAIL line + both hash
+# manifests upload as an artifact for pasting into the PR body. Operator
+# terminal fallback (identical semantics):
 #
 #   git fetch origin claude/rust-sweep-enum-slice1 \
 #     && git checkout claude/rust-sweep-enum-slice1 \

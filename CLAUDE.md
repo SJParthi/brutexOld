@@ -2393,7 +2393,11 @@ hostile-review pass._
   COMPLETED at its missed third site — `rust/fno-math/.cargo/mutants.toml` still carried the phantom
   "ceil(803/7) / 6->7 / 7 -> 8" narrative verbatim (the round-5 pin never read that file), now the real
   6 → 8 vs main's 6-shard baseline with the pin EXTENDED to refuse the phantom tokens there; per-fix record
-  in MIGRATION.md #1738. MUTATION: enum_kernel 782 raw →
+  in MIGRATION.md #1738. CONSISTENCY SWEEP fold (2026-07-12): every ≥2-surface figure re-derived + verified
+  agreeing across kernel/wrapper/workflows/script/harness/combo_counts/ledger/blurbs/PR-body/test-docstrings;
+  two residues fixed — the twin-run WORKFLOW header now states PASS = byte-identity AND the round-2
+  engagement gate (the one surface that law never reached), and #1738's `enum_kernel.rs` size corrected
+  "~1.4k" → the measured ~1.5k (1,492) lines; per-claim table in MIGRATION.md #1738. MUTATION: enum_kernel 782 raw →
   204 after the exclude_re dropping ONLY the 578 provably-UNVIABLE whole-fn `-> PyResult` constructor
   guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the shard
   matrix dialed 6 → 8 vs main's #1597 6-shard config (ceil(803/8)=101/shard restores the ~100-mutant
