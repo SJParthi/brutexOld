@@ -71,8 +71,19 @@ use pyo3::prelude::*;
 /// constant (`brutex.engine.rust_metrics.MAX_EXACT_EQUITY_PAISA`).
 pub const MAX_EXACT_EQUITY_PAISA: i64 = 1 << 52;
 
-/// Pure core of [`sweep_drawdown_stats`] — `Result<_, String>` (NO `PyErr`) so
-/// the no-libpython `cargo test` link exercises every branch (the
+/// Reusable scatter buffer for [`drawdown_stats_into`] — the Slice-2 scratch
+/// seam (DEC-SWEEP-CORE-RUST-001, design §2.1): `fold_block` reuses ONE
+/// allocation across a whole chunk instead of paying a fresh
+/// `vec![0i64; n_bars]` per mask. Allocation-reuse ONLY — the buffer is
+/// cleared + zero-resized per call, so the fold order (and therefore every
+/// output bit) is identical to the allocating path by construction.
+#[derive(Default)]
+pub(crate) struct DrawdownScratch {
+    realized: Vec<i64>,
+}
+
+/// Scratch-buffer core of [`sweep_drawdown_stats`] — `Result<_, String>` (NO
+/// `PyErr`) so the no-libpython `cargo test` link exercises every branch (the
 /// [`crate::python::add_u64`] split). Validates the FFI boundary with
 /// `checked_*` arithmetic, then runs the provably-overflow-free fused fold.
 ///
@@ -81,10 +92,13 @@ pub const MAX_EXACT_EQUITY_PAISA: i64 = 1 << 52;
 /// curve `brutex.engine.sweep_driver.build_equity_curve` materialises —
 /// WITHOUT materialising it. Returns
 /// `(max_dd_paisa, max_dd_pct·100, max_dd_duration_bars, ulcer_index·100)`.
-pub fn drawdown_stats_checked(
+/// [`drawdown_stats_checked`] is the thin allocating delegate (its tests,
+/// goldens and mutation census stand on this body unmodified).
+pub(crate) fn drawdown_stats_into(
     n_bars: usize,
     start_equity_paisa: i64,
     exits: &[(usize, i64)],
+    scratch: &mut DrawdownScratch,
 ) -> Result<(i64, f64, i64, f64), String> {
     if n_bars == 0 {
         return Err("sweep_drawdown_stats: n_bars must be >= 1".to_string());
@@ -119,7 +133,11 @@ pub fn drawdown_stats_checked(
 
     // Scatter the per-exit P&L onto its bar (integer addition — order-free;
     // partial sums are bounded by Σ|pnl| ≤ 2⁵², so the += cannot overflow).
-    let mut realized = vec![0i64; n_bars];
+    // The scratch buffer is cleared + zero-resized (allocation reuse only —
+    // every slot reads 0 before the scatter, exactly as a fresh vec would).
+    let realized = &mut scratch.realized;
+    realized.clear();
+    realized.resize(n_bars, 0);
     for &(idx, pnl) in exits {
         realized[idx] += pnl;
     }
@@ -145,7 +163,7 @@ pub fn drawdown_stats_checked(
     // tie-equivalent `>`→`>=` cargo-mutants class structurally
     // (DEC-MUTATION-RUNTIME-003; proven bitwise by the two-pass-oracle
     // proptest below + the Python↔Rust byte-parity suites).
-    for &delta in &realized {
+    for &delta in realized.iter() {
         running += delta;
         let value = running;
         peak = peak.max(value);
@@ -170,6 +188,21 @@ pub fn drawdown_stats_checked(
     // n_bars < 2⁵³ in any real window ⇒ the usize→f64 conversion is exact.
     let ulcer = (sum_sq_pct / (n_bars as f64)).sqrt();
     Ok((max_dd_paisa, max_dd_pct * 100.0, max_dd_bars, ulcer * 100.0))
+}
+
+/// Pure allocating core of [`sweep_drawdown_stats`] — a THIN delegate onto
+/// [`drawdown_stats_into`] with a fresh per-call scratch (the pre-Slice-2
+/// surface, byte-identical by construction: the scratch path zero-fills the
+/// same buffer the old `vec![0i64; n_bars]` allocated). Every existing test,
+/// golden and mutation-census entry stands on this name unmodified
+/// (DEC-SWEEP-CORE-RUST-001 R1).
+pub fn drawdown_stats_checked(
+    n_bars: usize,
+    start_equity_paisa: i64,
+    exits: &[(usize, i64)],
+) -> Result<(i64, f64, i64, f64), String> {
+    let mut scratch = DrawdownScratch::default();
+    drawdown_stats_into(n_bars, start_equity_paisa, exits, &mut scratch)
 }
 
 /// Fused per-mask equity fold + drawdown scan over `(exit_bar_idx, pnl_paisa)`
