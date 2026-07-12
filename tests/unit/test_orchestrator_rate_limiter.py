@@ -1512,12 +1512,28 @@ class TestNoSleepUnderLock:
         completes while the worker is parked (itself the fix), the first
         post-wake retry wait is exactly ``(1.0 - 0) / 0.5 = 2.0`` s
         (``set_rate`` drained to 0 tokens; the frozen clock refills 0).
+
+        The ``set_rate`` probe runs on a join-bounded daemon thread (the
+        sibling ``test_retry_sleep_releases_the_lock`` shape) so against
+        reverted code it FAILS the completed-flag assert deterministically
+        instead of deadlocking the suite — the CI bugfix-reversion gate runs
+        every shipped test against the reverted tree on a bounded budget.
         """
         bucket, gate, t, _results = _parked_bucket(lambda: 1000.0)
-        bucket.set_rate(0.5)  # completes while parked — the fix itself
-        gate.release.set()  # wake; re-check under the re-acquired lock
+        done = threading.Event()
+
+        def probe() -> None:
+            bucket.set_rate(0.5)  # completes while parked — the fix itself
+            done.set()
+
+        threading.Thread(target=probe, daemon=True).start()
+        completed = done.wait(0.5)
+        gate.release.set()  # unblock either way — no hung test on failure
         t.join(timeout=5.0)
-        assert not t.is_alive()
+        assert not t.is_alive()  # frozen clock ⇒ the cap force-grant terminates it
+        assert completed, "set_rate() blocked behind the retry-loop sleep"
+        # The set_rate completed BEFORE the wake (asserted above), so the
+        # first post-wake retry wait reads the NEW rate under the lock.
         assert gate.durations[2] == 2.0
 
     def test_frozen_clock_cap_sleep_count_and_wait_exact(self) -> None:

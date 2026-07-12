@@ -1822,9 +1822,13 @@ class TestRateProbePullExclusion:
 
         Pre-fix it would have propagated RAW out of the CLI — it is a
         ``BruteXError``, not an ``OSError``, so ``run_live_doctor``'s loop
-        would not catch it. Zero vendor calls are issued.
+        would not catch it. Zero vendor calls are issued. The halt is ALSO
+        transcript-recorded (``rate.lock_halt``), mirroring the WARN arm's
+        ``rate.lock_refused`` event — evidence symmetry.
         """
         deps, ctx, box = prepare_client(tmp_path, rate_probe=True)
+        events: list[str] = []
+        ctx.transcript = dl.Transcript(events.append, now_utc=deps.now_utc)
         calls = {"n": 0}
 
         def counting(kwargs: dict[str, object]) -> Mapping[str, object]:
@@ -1843,6 +1847,9 @@ class TestRateProbePullExclusion:
             "rate.lock_halt", detail="lake write halted: disk_full"
         )
         assert calls["n"] == 0
+        assert len(events) == 1  # the halt leaves transcript evidence
+        assert '"event": "rate.lock_halt"' in events[0]
+        assert '"detail": "lake write halted: disk_full"' in events[0]
 
     def test_missing_creds_skips(self, tmp_path: Path) -> None:
         """Guard totality: a ctx with a client but no creds skips honestly."""

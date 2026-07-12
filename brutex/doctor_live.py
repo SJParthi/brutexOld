@@ -2377,6 +2377,7 @@ def stage_rate(deps: KitDeps, ctx: KitContext) -> StageOutcome:
             lines=(render_diagnostic("rate.pull_lock_held", detail=str(exc)),),
         )
     except LakeWriteHalt as exc:
+        ctx.transcript.event("rate.lock_halt", detail=str(exc))
         return StageOutcome(
             stage=13,
             name="rate",
