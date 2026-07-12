@@ -2,7 +2,7 @@
 
 **Decision ID:** `DEC-DHAN-AUTH-001` (MIGRATION.md entry #1755)
 **Date:** 2026-07-12
-**Status:** ACCEPTED — operator directive (2026-07-12 re-admission).
+**Status:** ACCEPTED (Dhan re-admitted as a **feed track**) — **PRODUCTION CUTOVER GATED** on the operator's Dhan↔TickVault account-exclusivity confirmation (pending as of this ADR).
 **Author:** Claude Code (operator-directed)
 **Supersedes:** **ADR-0009 §5 (in part)** — the ADR-0009 "delete-Dhan-last" cutover
 removed the Dhan adapter package in the J4 PR series and installed the
@@ -12,12 +12,25 @@ removed the Dhan adapter package in the J4 PR series and installed the
 guard is retired (`DEC-DHAN-GUARD-RETIRE-001`, #1753), and a new AUTH adapter is
 built. ADR-0009's Groww migration itself stands — this ADR does NOT revert to
 Dhan, it ADDS Dhan beside Groww.
-**Operator directive (governance provenance, Golden Rule #1):** the operator
-re-admitted Dhan on **2026-07-12**. This ADR records that decision as the sole
-authority for re-admission; no vendor claim below is derived from anything but
-the operator directive + the Phase-0 first-party evidence
-(`scratchpad/phase0-dhan-auth.md`, verified against the official `dhan-oss/DhanHQ-py`
-SDK).
+**Governance provenance (Golden Rule #1) — what IS on record vs what is NOT.**
+Two things are authorized on record: (1) the **independent-feeds task** this PR
+series serves, and (2) the operator's **2026-07-12 re-admission of Dhan as a
+sanctioned vendor** ("use both dhan and groww"), which supersedes ADR-0009 §5's
+Dhan-removal. Together these authorize the **feed track** — re-admitting Dhan
+beside Groww and BUILDING its auth adapter. What is **NOT** yet authorized is
+**production cutover**: live self-minting against a possibly-shared account, the
+SSM `PutParameter` write in production, and using Dhan data in production. That
+is GATED on the operator's **pending Dhan↔TickVault account-exclusivity
+confirmation**. No vendor claim below is derived from anything but the operator
+directive + the Phase-0 first-party evidence (`scratchpad/phase0-dhan-auth.md`,
+verified against the official `dhan-oss/DhanHQ-py` SDK).
+
+**This PR BUILDS the mint + SSM-write capability; it does NOT put it into
+production.** MERGE and any production use are HELD until the operator confirms
+Dhan is a BruteX-independent account (or that minting is isolated/safe). This ADR
+does NOT claim the operator approved self-minting against the shared-credential
+model — only that Dhan is re-admitted as a feed track and the capability is built
+behind the pre-merge exclusivity gate.
 
 ---
 
