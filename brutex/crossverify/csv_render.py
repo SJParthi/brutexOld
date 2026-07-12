@@ -3,7 +3,8 @@
 DEC-CROSSVERIFY-PRODUCER-001 §1.1/§1.2. Deterministic bytes: UTF-8, NO BOM,
 byte-exact header, LF line terminator with a trailing newline on the LAST row,
 ``csv.QUOTE_MINIMAL`` with the no-quote-ever property (no legal cell can carry
-``, " \\n \\r`` — any such cell REFUSES the file). Prices render via the ONE
+``, " \\n \\r`` — any such cell REFUSES the file; a control character in any
+cell likewise refuses — the canonical symbol-allowlist mirror). Prices render via the ONE
 2dp law ``round_money(Decimal(str(stored)))`` (ROUND_HALF_UP — lossless for
 post-snap stored values, canonical-2dp for legacy pre-snap noise floats;
 NEVER ``f"{v:.2f}"`` on the raw float, the ``bxFixed2`` IEEE half-boundary
@@ -47,6 +48,11 @@ LINE_TERMINATOR: Final[str] = "\n"
 
 #: Cell characters that would force CSV quoting — refused, never quoted.
 _FORBIDDEN_CELL_CHARS: Final[frozenset[str]] = frozenset(',"\n\r')
+
+#: Control characters (C0 block + DEL) — refused in EVERY cell, the render-
+#: side mirror of the canonical symbol allowlist (F5, round-1 security review).
+_CONTROL_CHAR_MAX: Final[int] = 0x1F
+_DEL_CHAR: Final[int] = 0x7F
 
 #: The spot instrument classes (``oi`` must be ``None`` → rendered ``""``).
 _SPOT_CLASSES: Final[frozenset[str]] = frozenset({"index_spot", "cash_spot"})
@@ -142,7 +148,9 @@ def _validate_row(row: ExportRow, *, identity: CanonicalIdentity, session: Tradi
 
 
 def _validate_cells(cells: Sequence[str], *, ts_label: str) -> None:
-    """Refuse any cell ``csv_safe`` would mutate or that would force quoting."""
+    """Refuse any cell ``csv_safe`` would mutate, that would force quoting,
+    or that carries a control character (the mirror of the canonical symbol
+    allowlist — a control char in a published byte is never legal)."""
     for cell in cells:
         if csv_safe(cell) != cell:
             raise ExportContractError(
@@ -153,6 +161,11 @@ def _validate_cells(cells: Sequence[str], *, ts_label: str) -> None:
             raise ExportContractError(
                 f"row {ts_label}: cell {cell!r} contains a CSV metacharacter — "
                 "refusing (the no-quote-ever property)"
+            )
+        if any(ord(ch) <= _CONTROL_CHAR_MAX or ord(ch) == _DEL_CHAR for ch in cell):
+            raise ExportContractError(
+                f"row {ts_label}: cell {cell!r} contains a control character — "
+                "refusing (mirrors the canonical symbol allowlist)"
             )
 
 

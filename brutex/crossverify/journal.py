@@ -19,6 +19,7 @@ save/load; the pending scan is O(lookback_days) file probes.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Final
@@ -42,6 +43,11 @@ JOURNAL_VERSION: Final[int] = 1
 
 #: A staged file mirrors the S3 key's last two components (segment/file).
 _KEY_TAIL_COMPONENTS: Final[int] = 2
+
+#: The segment-token component of a staged key must be a plain uppercase
+#: token (``IDX_I`` / ``NSE_EQ`` / …) — positive charset, so a tampered
+#: journal key can never smuggle ``..`` / control chars into a path join.
+_SEGMENT_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Z][A-Z0-9_]*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,16 +128,33 @@ def staging_path(lake_root: Path, day: date, identity: CanonicalIdentity) -> Pat
 
 
 def staging_path_for_key(lake_root: Path, day: date, key: str) -> Path:
-    """Resolve a journaled S3 *key* back to its staged file path.
+    """Resolve a journaled S3 *key* back to its staged file path, VALIDATED.
 
     The staging tree mirrors the key's LAST TWO components
-    (``<segment_token>/<symbol>.csv``). Tolerant of a malformed key (the
-    resulting path simply does not exist and the publisher counts it failed
-    — never a raise on journal junk).
+    (``<segment_token>/<symbol>.csv``). Both tail components are validated
+    BEFORE the join (round-1 hostile review — the journal is plain JSON on
+    disk, so a tampered/corrupt key must never traverse outside the staging
+    tree): the segment token must match :data:`_SEGMENT_TOKEN_PATTERN` and
+    the filename must be ``<symbol>.csv`` with *symbol* passing the canonical
+    positive allowlist
+    (:func:`brutex.crossverify.canonical.symbol_key_safe` — which refuses
+    ``.``/``..`` and every control char). A malformed key raises
+    :class:`ValueError` — the publisher counts it failed + WARNs, never a
+    crash and never a join.
     """
     parts = [part for part in key.split("/") if part]
-    tail = parts[-_KEY_TAIL_COMPONENTS:]
-    return staging_dir(lake_root, day).joinpath(*tail)
+    if len(parts) < _KEY_TAIL_COMPONENTS:
+        raise ValueError(f"journal key {key!r} has fewer than 2 path components")
+    segment, filename = parts[-_KEY_TAIL_COMPONENTS:]
+    if _SEGMENT_TOKEN_PATTERN.fullmatch(segment) is None:
+        raise ValueError(f"journal key {key!r}: unsafe segment token {segment!r}")
+    # Lazy import — journal stays a light leaf; canonical never imports journal.
+    from brutex.crossverify.canonical import symbol_key_safe
+
+    suffix = ".csv"
+    if not filename.endswith(suffix) or not symbol_key_safe(filename[: -len(suffix)]):
+        raise ValueError(f"journal key {key!r}: unsafe symbol filename {filename!r}")
+    return staging_dir(lake_root, day).joinpath(segment, filename)
 
 
 def load_journal(lake_root: Path, day: date) -> DayJournal | None:

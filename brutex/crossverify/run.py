@@ -283,27 +283,6 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
         _LOG.info("crossverify.disabled", run_id=run_id, day=config.day.isoformat())
         return _report("disabled", 0, detail="BRUTEX_CROSSVERIFY=off")
 
-    # ── B: day + session gate (never fabricates a session) ────────────────
-    from brutex.calendars.nse import HolidayDataUnavailableError, SessionType
-
-    try:
-        session = seams.session_for(config.day)
-    except HolidayDataUnavailableError as exc:
-        return _refused(f"calendar coverage exhausted for {config.day.isoformat()}: {exc}", 2)
-    if session is None:
-        _LOG.info("crossverify.skipped_non_trading", run_id=run_id, day=config.day.isoformat())
-        return _report("skipped_non_trading", 0)
-    if session.session_type is SessionType.MUHURAT:
-        # Coordinator ruling 2: Muhurat = whole-run skip, NO files, one INFO.
-        _LOG.info("crossverify.skipped_muhurat", run_id=run_id, day=config.day.isoformat())
-        return _report("skipped_muhurat", 0)
-
-    # ── C: gate presence — FAIL-CLOSED ─────────────────────────────────────
-    try:
-        classifier = seams.classifier_factory()
-    except CompletenessGateUnavailable as exc:
-        return _refused(f"completeness gate module absent — refusing to publish: {exc}", 1)
-
     # Lazy, memoised S3 client (dry-run / no-publish paths never build it).
     client_holder: list[S3PutClient] = []
 
@@ -312,7 +291,12 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             client_holder.append(seams.s3_client_factory())
         return client_holder[0]
 
-    # ── D: recovery scan — re-publish prior pending STAGED bytes (no re-gate)
+    # ── D: recovery scan — re-publish prior pending STAGED bytes (no re-gate).
+    # Deliberately BEFORE the session gate (round-1 hostile review): a
+    # weekend/holiday run must still republish a PRIOR trading day's pending
+    # keys — recovery needs no vendor pull, no session, and NO pull locks
+    # (publish is pure network + journal/staging sidecar writes, exactly like
+    # steps M/N which also run lock-free).
     if config.publish and not config.dry_run:
         for prior in scan_pending_journals(
             config.lake_root, today=config.day, lookback_days=config.catchup_days
@@ -337,6 +321,42 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                 recovered=outcome.published,
                 still_failing=outcome.failed_count,
             )
+            if not prior.pending_keys():
+                # The recovered day is fully published — its staged bytes
+                # served their purpose (the step-N cleanup, applied to the
+                # PRIOR day so staging never accumulates unbounded). A
+                # still-pending (failed-again) day's staging is KEPT.
+                import shutil
+
+                shutil.rmtree(staging_dir(config.lake_root, prior.day), ignore_errors=True)
+
+    def _skip_day(verdict: Verdict, log_event: str) -> CrossverifyReport:
+        """A non-export day's early return — honest about recovery failures."""
+        if state.publish_failed > 0:
+            return _finish(
+                _report("publish_failed", 2, detail="recovery scan left prior keys still failing")
+            )
+        _LOG.info(log_event, run_id=run_id, day=config.day.isoformat())
+        return _report(verdict, 0)
+
+    # ── B: day + session gate (never fabricates a session) ────────────────
+    from brutex.calendars.nse import HolidayDataUnavailableError, SessionType
+
+    try:
+        session = seams.session_for(config.day)
+    except HolidayDataUnavailableError as exc:
+        return _refused(f"calendar coverage exhausted for {config.day.isoformat()}: {exc}", 2)
+    if session is None:
+        return _skip_day("skipped_non_trading", "crossverify.skipped_non_trading")
+    if session.session_type is SessionType.MUHURAT:
+        # Coordinator ruling 2: Muhurat = whole-run skip, NO files, one INFO.
+        return _skip_day("skipped_muhurat", "crossverify.skipped_muhurat")
+
+    # ── C: gate presence — FAIL-CLOSED ─────────────────────────────────────
+    try:
+        classifier = seams.classifier_factory()
+    except CompletenessGateUnavailable as exc:
+        return _refused(f"completeness gate module absent — refusing to publish: {exc}", 1)
 
     # ── E: market-hours START gate (vendor-calling runs only; NEVER exempt) —
     if not (config.dry_run or config.skip_pull) and seams.market_hours_blocked():
@@ -394,6 +414,13 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                 from brutex.dashboard.pull_jobs import is_pull_halt
 
                 if is_pull_halt(exc):
+                    # INTENTIONAL double CRITICAL on a halt (here + the
+                    # prebuild/staging halt arms below): the SPECIFIC
+                    # pull-halt alert (emit_pull_halt_alert — names the halt
+                    # class + remediation) AND the one-per-run summary
+                    # (crossverify_summary on the `suspect` verdict) both
+                    # fire under DISTINCT dedupe keys — specific + summary,
+                    # never two copies of the same message.
                     seams.emit_pull_halt(exc)
                     return _suspect(f"pull halt: {type(exc).__name__}: {exc}")
                 raise

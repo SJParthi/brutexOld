@@ -167,7 +167,7 @@ def _put_with_retry(
                 delay = backoff_s[min(attempt, len(backoff_s) - 1)] if backoff_s else 0.0
                 _LOG.warning(
                     "crossverify.s3_put_retry",
-                    key=key,
+                    key=repr(key),  # embeds the vendor-derived symbol — repr()'d (#907)
                     attempt=attempt + 1,
                     error_type=type(exc).__name__,
                     delay_s=delay,
@@ -193,9 +193,11 @@ def publish_staged(
     Publish-then-journal ordering: ``mark_published`` lands strictly AFTER a
     successful PUT (a crash in between re-puts identical bytes next run —
     convergent, per-key S3 PUT atomicity). A missing staged file counts
-    failed (+ WARN, stays pending). A nonretryable error aborts the WHOLE
-    publish immediately with the remaining pending keys counted failed.
-    O(pending keys).
+    failed (+ WARN, stays pending); a MALFORMED journal key (the
+    :func:`staging_path_for_key` validation — traversal / control chars /
+    non-``.csv``) likewise counts failed + WARNs, never a join and never a
+    crash. A nonretryable error aborts the WHOLE publish immediately with
+    the remaining pending keys counted failed. O(pending keys).
     """
     pending = journal.pending_keys()
     skipped_already = len(journal.entries) - len(pending)
@@ -205,13 +207,22 @@ def publish_staged(
     aborted = False
     dirty = False
     for index, key in enumerate(pending):
-        staged = staging_path_for_key(lake_root, journal.day, key)
+        try:
+            staged = staging_path_for_key(lake_root, journal.day, key)
+        except ValueError as exc:
+            _LOG.warning(
+                "crossverify.staged_key_rejected",
+                key=repr(key),  # journal junk — repr()'d (#907)
+                error=str(exc),
+            )
+            failed.append(key)
+            continue
         try:
             body = staged.read_bytes()
         except OSError as exc:
             _LOG.warning(
                 "crossverify.staged_bytes_missing",
-                key=key,
+                key=repr(key),  # embeds the vendor-derived symbol — repr()'d (#907)
                 path=str(staged),
                 error_type=type(exc).__name__,
             )
@@ -241,7 +252,7 @@ def publish_staged(
             failed.extend(pending[index + 1 :])
             _LOG.error(
                 "crossverify.s3_publish_aborted",
-                key=key,
+                key=repr(key),  # embeds the vendor-derived symbol — repr()'d (#907)
                 error_type=type(error).__name__,
                 error=str(error),
                 remediation=(
@@ -252,7 +263,7 @@ def publish_staged(
             break
         _LOG.error(
             "crossverify.s3_put_failed",
-            key=key,
+            key=repr(key),  # embeds the vendor-derived symbol — repr()'d (#907)
             error_type=type(error).__name__,
             error=str(error),
         )

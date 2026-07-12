@@ -12,6 +12,14 @@ precedent):
 (b) METADATA scoped to exactly the NIFTY + BANKNIFTY instruments,
     ``years=[day.year]`` — a new serial month's FUT contract is enumerable
     same-day (``pull_contract_candles`` never re-enumerates);
+
+Date-type law (round-1 hostile-review BLOCKER): the two real chains type
+their windows DIFFERENTLY — ``pull_all_spot`` takes ISO **strings**
+(``str | None``) while ``pull_contract_candles`` takes ``datetime.date``
+objects (``date | None``; a string would ``TypeError`` inside its
+``_resolve_range`` ``max()``). Both shapes are computed from ONE
+``date`` pair here and pinned by real-annotation contract tests +
+an ``inspect.signature`` drift pin against the real chains.
 (c) FUTURES — the registry's FUT rows with ``expiry_date >= day``
     (the ``contract_resolver`` idiom; a CE/PE row or an expired FUT row never
     reaches the candle puller). SENSEX futures are NOT pulled (BSE
@@ -152,8 +160,11 @@ def run_pull_leg(
     spot_pull, metadata_pull, candle_pull = _resolve_pullers(
         spot_puller, metadata_puller, candle_puller
     )
-    from_date = (day - timedelta(days=lookback_days)).isoformat()
-    to_date = day.isoformat()  # EXPLICIT — the default caps at yesterday
+    from_d = day - timedelta(days=lookback_days)
+    to_d = day  # EXPLICIT — the default caps at yesterday
+    # pull_all_spot types str | None; pull_contract_candles types date | None.
+    from_date = from_d.isoformat()
+    to_date = to_d.isoformat()
     targets = _whole_universe_targets(store)
     try:
         spot_pull(
@@ -201,8 +212,8 @@ def run_pull_leg(
             dry_run=False,
             intervals=("1minute",),
             registry=registry,
-            from_date=from_date,
-            to_date=to_date,
+            from_date=from_d,  # date objects — pull_contract_candles' contract
+            to_date=to_d,
             until_clean=True,
             session_rate=session_rate,
         )
@@ -238,8 +249,12 @@ def run_settle_retry(
     was enumerated minutes ago). O(affected).
     """
     spot_pull, _metadata_pull, candle_pull = _resolve_pullers(spot_puller, None, candle_puller)
-    from_date = (day - timedelta(days=lookback_days)).isoformat()
-    to_date = day.isoformat()
+    from_d = day - timedelta(days=lookback_days)
+    to_d = day
+    # The same date-type law as run_pull_leg: strings to the spot chain,
+    # date objects to the candle chain (its _resolve_range max() is date-only).
+    from_date = from_d.isoformat()
+    to_date = to_d.isoformat()
     spot_coords = {
         (identity.exchange, identity.lake_symbol)
         for identity in affected
@@ -278,8 +293,8 @@ def run_settle_retry(
                 dry_run=False,
                 intervals=("1minute",),
                 registry=registry,
-                from_date=from_date,
-                to_date=to_date,
+                from_date=from_d,  # date objects — pull_contract_candles' contract
+                to_date=to_d,
                 until_clean=True,
                 session_rate=session_rate,
             )

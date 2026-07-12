@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
 from brutex.crossverify.canonical import (
     CLASS_CASH_SPOT,
     CLASS_FUT,
@@ -17,6 +18,7 @@ from brutex.crossverify.canonical import (
     SEGMENT_NSE_FNO,
     canonical_identity,
     s3_key,
+    symbol_key_safe,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.universe import V1_INDICES
@@ -97,6 +99,44 @@ class TestCashMapping:
 
     def test_key_unsafe_symbol_excluded(self) -> None:
         assert canonical_identity(exchange="NSE", segment="CASH", lake_symbol="A/B") is None
+
+
+class TestSymbolAllowlist:
+    """F5 (round-1 security review): symbol safety is a POSITIVE allowlist
+    (uppercase + digits + ``& - .``), never a blocklist — control chars and
+    lowercase junk refuse the identity (deny-by-default, never a crash)."""
+
+    @pytest.mark.parametrize(
+        "symbol", ["M&M", "BAJAJ-AUTO", "L&TFH", "3MINDIA", "NAM-INDIA", "M&MFIN", "J&KBANK"]
+    )
+    def test_every_legal_nse_form_accepted(self, symbol: str) -> None:
+        assert symbol_key_safe(symbol) is True
+        identity = canonical_identity(exchange="NSE", segment="CASH", lake_symbol=symbol)
+        assert identity is not None
+        assert identity.canonical_symbol == symbol
+
+    @pytest.mark.parametrize(
+        "symbol",
+        [
+            "\x1bESC",  # ESC control char
+            "A\tB",  # TAB
+            "A\x00B",  # NUL
+            "A\nB",  # newline
+            "..",  # pure-dot path token
+            ".",  # pure-dot path token
+            "reliance",  # lowercase junk
+            "A B",  # whitespace
+            "A/B",  # path separator
+            'A"B',  # CSV quote
+            "A,B",  # CSV comma
+            "",  # empty
+            "M&M ",  # padded
+        ],
+    )
+    def test_junk_symbol_refused_identity_denied(self, symbol: str) -> None:
+        assert symbol_key_safe(symbol) is False
+        # Deny-by-default disposition: the identity is refused, never a crash.
+        assert canonical_identity(exchange="NSE", segment="CASH", lake_symbol=symbol) is None
 
 
 class TestFuturesMapping:

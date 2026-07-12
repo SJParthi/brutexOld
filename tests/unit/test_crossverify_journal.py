@@ -52,11 +52,37 @@ class TestPaths:
             staging_dir(tmp_path, _DAY) / "IDX_I" / "NIFTY.csv"
         )
 
-    def test_staging_path_for_key_tolerates_malformed_key(self, tmp_path: Path) -> None:
-        # A junk journal key resolves to a (nonexistent) path — never a raise.
-        assert staging_path_for_key(tmp_path, _DAY, "solo") == (
-            staging_dir(tmp_path, _DAY) / "solo"
-        )
+    def test_staging_path_for_key_accepts_legal_nse_symbols(self, tmp_path: Path) -> None:
+        for symbol in ("M&M", "BAJAJ-AUTO", "L&TFH", "3MINDIA", "NIFTY-2026-07-30-FUT"):
+            key = f"crossverify/groww/2026-07-10/NSE_EQ/{symbol}.csv"
+            assert staging_path_for_key(tmp_path, _DAY, key) == (
+                staging_dir(tmp_path, _DAY) / "NSE_EQ" / f"{symbol}.csv"
+            )
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "solo",  # fewer than 2 components
+            "",  # empty key
+            "p/../ESCAPE.csv",  # traversal segment
+            "p/nse_eq/NIFTY.csv",  # lowercase segment token
+            "p/IDX I/NIFTY.csv",  # whitespace in segment
+            "p/IDX_I/..",  # non-.csv filename
+            "p/IDX_I/NIFTY.txt",  # wrong suffix
+            "p/IDX_I/.csv",  # empty symbol stem
+            "p/IDX_I/nifty.csv",  # lowercase symbol (F5 allowlist)
+            "p/IDX_I/NIF\x1bTY.csv",  # control char (ESC) in symbol
+            "p/IDX_I/NIF\tTY.csv",  # TAB in symbol
+            "p/IDX_I/NIF\x00TY.csv",  # NUL in symbol
+            "p/IDX_I/...csv",  # pure-dot symbol stem ".."
+            "p/IDX_I/..csv",  # pure-dot symbol stem "."
+        ],
+    )
+    def test_staging_path_for_key_rejects_malformed_key(self, tmp_path: Path, key: str) -> None:
+        # A tampered/corrupt journal key must never traverse outside the
+        # staging tree — validated BEFORE any path join (deny-by-default).
+        with pytest.raises(ValueError, match="journal key"):
+            staging_path_for_key(tmp_path, _DAY, key)
 
 
 class TestMarkAndPending:

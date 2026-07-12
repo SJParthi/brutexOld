@@ -253,6 +253,23 @@ class TestRefusals:
         with pytest.raises(ExportContractError, match="CSV metacharacter"):
             render_day_csv(identity=hostile, rows=[_row()], session=_DAY_SESSION)
 
+    @pytest.mark.parametrize("junk", ["\x1b", "\t", "\x00", "\x7f"])
+    def test_control_char_cell_refused(self, junk: str) -> None:
+        # F5 mirror (round-1 security review): a control character in ANY cell
+        # refuses the file — the canonical symbol allowlist's render-side twin
+        # (the canonical mapper already denies such identities; this is the
+        # belt for a hand-built identity / future cell source).
+        hostile = CanonicalIdentity(
+            exchange="NSE",
+            lake_segment="CASH",
+            lake_symbol=f"A{junk}B",
+            canonical_symbol=f"A{junk}B",
+            segment_token="NSE_EQ",
+            instrument_class="cash_spot",
+        )
+        with pytest.raises(ExportContractError, match="control character"):
+            render_day_csv(identity=hostile, rows=[_row()], session=_DAY_SESSION)
+
 
 class TestMuhuratSessionWindow:
     def test_muhurat_evening_rows_render_against_their_own_session(self) -> None:

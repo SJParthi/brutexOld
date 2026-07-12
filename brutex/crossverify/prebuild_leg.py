@@ -182,7 +182,7 @@ def run_prebuild_leg(
             if len(failed_names) <= MAX_FAILURE_WARNS:
                 _LOG.warning(
                     "crossverify.prebuild_symbol_failed",
-                    symbol=identity.canonical_symbol,
+                    symbol=repr(identity.canonical_symbol),  # vendor-derived — repr()'d (#907)
                     day=day.isoformat(),
                     error_type=type(exc).__name__,
                     error=str(exc),

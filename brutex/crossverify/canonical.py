@@ -53,10 +53,14 @@ EXPORT_INDEX_COORDS: Final[frozenset[tuple[str, str]]] = frozenset(
 #: fetch universe; DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 is the follow-up).
 EXPORT_FUTURES_UNDERLYINGS: Final[frozenset[str]] = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
 
-#: Characters a canonical symbol may never carry: ``/`` would mint a phantom
-#: S3 sub-prefix; the CSV metacharacters are refused again at render time
-#: (the renderer is the byte-contract tripwire — this is the key-side belt).
-_FORBIDDEN_SYMBOL_CHARS: Final[frozenset[str]] = frozenset('/,"\n\r')
+#: The POSITIVE symbol charset (round-1 hostile review — a deny-list let
+#: control chars like ESC/TAB/NUL ride into S3 keys, staged paths and log
+#: lines): uppercase letters, digits, and the three legal-NSE-name specials
+#: ``&`` (M&M) · ``-`` (BAJAJ-AUTO) · ``.`` (legacy series dots). Everything
+#: else — lowercase, whitespace, ``/``, CSV metacharacters, control chars —
+#: is refused; the renderer re-refuses metachars at render time (the
+#: byte-contract tripwire — this is the key-side belt).
+_SYMBOL_ALLOWED_CHARS: Final[frozenset[str]] = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&-.")
 
 _EQ_TOKEN_BY_EXCHANGE: Final[dict[str, str]] = {"NSE": SEGMENT_NSE_EQ, "BSE": SEGMENT_BSE_EQ}
 _FNO_TOKEN_BY_EXCHANGE: Final[dict[str, str]] = {"NSE": SEGMENT_NSE_FNO, "BSE": SEGMENT_BSE_FNO}
@@ -74,11 +78,21 @@ class CanonicalIdentity:
     instrument_class: str  # "index_spot" | "cash_spot" | "fut"
 
 
-def _symbol_key_safe(symbol: str) -> bool:
-    """``True`` iff *symbol* is non-blank, unpadded, and S3-key/CSV-cell safe."""
-    if not symbol or symbol != symbol.strip():
+def symbol_key_safe(symbol: str) -> bool:
+    """``True`` iff *symbol* is allowlist-safe for S3 keys / staged paths / cells.
+
+    Positive allowlist, deny-by-default (:data:`_SYMBOL_ALLOWED_CHARS`):
+    every legal NSE form passes (``M&M``, ``BAJAJ-AUTO``, ``L&TFH``,
+    ``3MINDIA``, ``NAM-INDIA``); anything else — empty, lowercase junk,
+    whitespace/padding, ``/``, CSV metacharacters, control chars (ESC/TAB/
+    NUL) — is refused. The pure-dot path tokens ``.`` / ``..`` are refused
+    explicitly (a dot is otherwise a legal char). Shared with the journal's
+    staged-key validation (:func:`brutex.crossverify.journal.staging_path_for_key`).
+    O(len); never raises.
+    """
+    if not symbol or symbol in (".", ".."):
         return False
-    return not any(ch in _FORBIDDEN_SYMBOL_CHARS for ch in symbol)
+    return all(ch in _SYMBOL_ALLOWED_CHARS for ch in symbol)
 
 
 def canonical_identity(
@@ -104,7 +118,7 @@ def canonical_identity(
         )
     if segment == "CASH":
         token = _EQ_TOKEN_BY_EXCHANGE.get(exchange)
-        if token is None or not _symbol_key_safe(lake_symbol):
+        if token is None or not symbol_key_safe(lake_symbol):
             return None
         return CanonicalIdentity(
             exchange=exchange,
@@ -160,4 +174,5 @@ __all__ = [
     "CanonicalIdentity",
     "canonical_identity",
     "s3_key",
+    "symbol_key_safe",
 ]

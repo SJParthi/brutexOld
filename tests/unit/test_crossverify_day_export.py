@@ -203,6 +203,93 @@ class TestReadDayBars:
         assert len(bars) == 1
 
 
+def _seed_corrupt_month(
+    lake: Path, identity: CanonicalIdentity, *, null_open: bool = False, null_volume: bool = False
+) -> None:
+    """Write a real month parquet with ONE corrupt (null-celled) stored row."""
+    target = (
+        lake
+        / "bars"
+        / identity.exchange
+        / identity.lake_segment
+        / identity.lake_symbol
+        / "1minute"
+        / f"{_DAY.year:04d}"
+        / f"{_DAY.month:02d}.parquet"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frame = pl.DataFrame(
+        {
+            "timestamp": [_minute_utc(_DAY, 9, 15)],
+            "open": [None if null_open else 100.0],
+            "high": [100.0],
+            "low": [100.0],
+            "close": [100.0],
+            "volume": [None if null_volume else 1],
+            "open_interest": [None],
+        }
+    ).with_columns(
+        pl.col("timestamp").dt.replace_time_zone(None).dt.replace_time_zone("UTC"),
+        pl.col("open").cast(pl.Float64),
+        pl.col("volume").cast(pl.Int64),
+        pl.col("open_interest").cast(pl.Int64),
+    )
+    frame.write_parquet(target)
+
+
+class TestCorruptStoredRowIsolation:
+    """F3 (round-1 contract review): ONE corrupt stored row (a null OHLC
+    cell → ``decimal.InvalidOperation``; a null volume → ``TypeError``)
+    withholds THAT symbol as ``read_error`` — the run continues, never a
+    whole-~750-symbol crash."""
+
+    def test_null_open_cell_raises_invalid_operation(self, tmp_path: Path) -> None:
+        from decimal import InvalidOperation
+
+        _seed_corrupt_month(tmp_path, _identity(), null_open=True)
+        with pytest.raises(InvalidOperation):
+            read_day_bars(
+                lake_root=tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", day=_DAY
+            )
+
+    def test_null_volume_cell_raises_type_error(self, tmp_path: Path) -> None:
+        _seed_corrupt_month(tmp_path, _identity(), null_volume=True)
+        with pytest.raises(TypeError):
+            read_day_bars(
+                lake_root=tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", day=_DAY
+            )
+
+    @pytest.mark.parametrize("corruption", ["null_open", "null_volume"])
+    def test_corrupt_row_withholds_symbol_only_run_continues(
+        self, tmp_path: Path, corruption: str
+    ) -> None:
+        corrupt = _identity()  # NIFTY carries the corrupt row
+        _seed_corrupt_month(tmp_path, corrupt, **{corruption: True})
+        healthy = _identity("CASH", "RELIANCE")  # the sibling stays healthy
+        _seed_month(tmp_path, healthy, [(_minute_utc(_DAY, 9, 15), 100.0, 1, None)])
+        reader = make_day_frame_reader(tmp_path)
+        withheld = export_symbol(
+            identity=corrupt,
+            day=_DAY,
+            session=_SESSION,
+            reader=reader,
+            classifier=ScriptedClassifier(),
+        )
+        assert withheld.disposition == "withheld"
+        assert withheld.reason == "read_error"
+        assert withheld.csv_bytes is None
+        # The run continues: the healthy sibling still publishes.
+        published = export_symbol(
+            identity=healthy,
+            day=_DAY,
+            session=_SESSION,
+            reader=reader,
+            classifier=ScriptedClassifier(default=FakeVerdict(distinct_minutes=1)),
+        )
+        assert published.disposition == "publish"
+        assert published.csv_bytes is not None
+
+
 class TestDecide:
     @pytest.mark.parametrize(
         ("instrument_class", "reason", "incomplete", "expected"),

@@ -218,7 +218,11 @@ class TestRunPullLeg:
             "NSE-NIFTY-30Jul26-FUT",
         ]
         kwargs = candles.calls[0]["kwargs"]
-        assert kwargs["to_date"] == "2026-07-10"
+        # The candle chain (pull_contract_candles) types date | None — a str
+        # here TypeErrors inside its _resolve_range max() on every real run
+        # (round-1 hostile-review BLOCKER; the spot chain takes ISO strings).
+        assert kwargs["to_date"] == date(2026, 7, 10)
+        assert kwargs["from_date"] == date(2026, 7, 3)
         assert kwargs["intervals"] == ("1minute",)
         assert kwargs["until_clean"] is True
         assert report.fut_contracts == tuple(rows)
@@ -277,6 +281,137 @@ class TestRunPullLeg:
             )
 
 
+class TestDateTypeContract:
+    """Round-1 BLOCKER regression: the two real chains type their windows
+    DIFFERENTLY — ``pull_all_spot(from_date: str | None)`` vs
+    ``pull_contract_candles(from_date: date | None)``. These stubs carry the
+    REAL annotations and assert the runtime types, so a future str/date
+    regression fails here without a live vendor."""
+
+    @staticmethod
+    def _typed_candle_stub(calls: list[dict[str, Any]]) -> Any:
+        def _stub(
+            contracts: Any,
+            *,
+            lake_root: Any,
+            dry_run: bool,
+            intervals: Any,
+            registry: Any,
+            from_date: date | None = None,
+            to_date: date | None = None,
+            session_rate: Any = None,
+            until_clean: bool = False,
+        ) -> object:
+            _ = (contracts, lake_root, dry_run, intervals, registry, session_rate, until_clean)
+            for value in (from_date, to_date):
+                assert isinstance(value, date) and not isinstance(value, str)
+                assert not isinstance(value, datetime)  # a date, never a datetime
+            calls.append({"from_date": from_date, "to_date": to_date})
+            return object()
+
+        return _stub
+
+    @staticmethod
+    def _typed_spot_stub(calls: list[dict[str, Any]]) -> Any:
+        def _stub(
+            instruments: Any,
+            *,
+            lake_root: Any,
+            dry_run: bool,
+            from_date: str | None = None,
+            to_date: str | None = None,
+            auto_retry: bool = False,
+            until_clean: bool = False,
+            floor_store: Any = None,
+            session_rate: Any = None,
+            market_closed: Any = None,
+        ) -> object:
+            _ = (
+                instruments,
+                lake_root,
+                dry_run,
+                auto_retry,
+                until_clean,
+                floor_store,
+                session_rate,
+                market_closed,
+            )
+            for value in (from_date, to_date):
+                assert isinstance(value, str) and not isinstance(value, date)
+            calls.append({"from_date": from_date, "to_date": to_date})
+            return object()
+
+        return _stub
+
+    def test_run_pull_leg_passes_dates_to_candle_leg_strings_to_spot(self, tmp_path: Path) -> None:
+        candle_calls: list[dict[str, Any]] = []
+        spot_calls: list[dict[str, Any]] = []
+        report = run_pull_leg(
+            lake_root=tmp_path,
+            day=_DAY,
+            lookback_days=_LOOKBACK,
+            store=_default_store(),  # type: ignore[arg-type]
+            registry=_default_registry(),  # type: ignore[arg-type]
+            session_rate=object(),  # type: ignore[arg-type]
+            market_closed=None,
+            spot_puller=self._typed_spot_stub(spot_calls),
+            metadata_puller=_Spy(),
+            candle_puller=self._typed_candle_stub(candle_calls),
+        )
+        assert report.futures_ok is True
+        assert spot_calls == [{"from_date": "2026-07-03", "to_date": "2026-07-10"}]
+        assert candle_calls == [{"from_date": date(2026, 7, 3), "to_date": date(2026, 7, 10)}]
+
+    def test_run_settle_retry_passes_dates_to_candle_leg(self, tmp_path: Path) -> None:
+        candle_calls: list[dict[str, Any]] = []
+        spot_calls: list[dict[str, Any]] = []
+        index = canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="NIFTY")
+        fut = canonical_identity(exchange="NSE", segment="FNO", lake_symbol="NSE-NIFTY-30Jul26-FUT")
+        assert index is not None and fut is not None
+        report = run_settle_retry(
+            lake_root=tmp_path,
+            day=_DAY,
+            lookback_days=_LOOKBACK,
+            affected=[index, fut],
+            store=_default_store(),  # type: ignore[arg-type]
+            registry=_default_registry(),  # type: ignore[arg-type]
+            session_rate=object(),  # type: ignore[arg-type]
+            market_closed=None,
+            spot_puller=self._typed_spot_stub(spot_calls),
+            candle_puller=self._typed_candle_stub(candle_calls),
+        )
+        assert report.futures_ok is True
+        assert spot_calls == [{"from_date": "2026-07-03", "to_date": "2026-07-10"}]
+        assert candle_calls == [{"from_date": date(2026, 7, 3), "to_date": date(2026, 7, 10)}]
+
+    def test_real_chain_signature_drift_pins(self) -> None:
+        # An UPSTREAM annotation drift on either real chain must fail loudly
+        # here — the leg's date-type law is derived from these signatures.
+        # (eval_str=True over the WHOLE signature would choke on the chains'
+        # TYPE_CHECKING-only names, so only the window params are evaluated.)
+        import inspect
+        import typing
+
+        from brutex.dashboard.historical_pull import pull_contract_candles
+        from brutex.dashboard.pull_controller import pull_all_spot
+
+        namespace = {"date": date, "str": str, "Optional": typing.Optional}
+
+        def _window_annotation(func: Any, param: str) -> object:
+            annotation = inspect.signature(func).parameters[param].annotation
+            if isinstance(annotation, str):
+                # The chains use `from __future__ import annotations`, so the
+                # annotation is a string; evaluate ONLY the window param under
+                # a minimal namespace (test-controlled input — S307-safe).
+                return eval(annotation, namespace)  # noqa: S307
+            return annotation
+
+        assert _window_annotation(pull_contract_candles, "from_date") == (date | None)
+        assert _window_annotation(pull_contract_candles, "to_date") == (date | None)
+        assert _window_annotation(pull_all_spot, "from_date") == (str | None)
+        assert _window_annotation(pull_all_spot, "to_date") == (str | None)
+
+
 class TestResolvePullers:
     def test_defaults_are_the_real_chains(self) -> None:
         from brutex.dashboard.historical_pull import pull_contract_candles
@@ -315,8 +450,11 @@ class TestRunSettleRetry:
             candle_puller=candles,
         )
         assert [t.symbol_name for t in spot.calls[0]["args"][0]] == ["NIFTY"]
-        assert spot.calls[0]["kwargs"]["to_date"] == "2026-07-10"
+        assert spot.calls[0]["kwargs"]["to_date"] == "2026-07-10"  # spot chain: ISO string
         assert [r.contract_symbol for r in candles.calls[0]["args"][0]] == ["NSE-NIFTY-30Jul26-FUT"]
+        # The candle chain gets date objects (the run_pull_leg date-type law).
+        assert candles.calls[0]["kwargs"]["to_date"] == date(2026, 7, 10)
+        assert candles.calls[0]["kwargs"]["from_date"] == date(2026, 7, 3)
         assert report.halted is False
         assert [r.contract_symbol for r in report.fut_contracts] == ["NSE-NIFTY-30Jul26-FUT"]
 

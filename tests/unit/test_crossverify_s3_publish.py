@@ -138,9 +138,9 @@ class TestPublishStaged:
 
     def test_nonretryable_aborts_whole_publish(self, tmp_path: Path) -> None:
         journal = _journal()
-        for name in ("a", "b", "c"):
+        for name in ("A", "B", "C"):
             _stage(tmp_path, journal, f"p/IDX_I/{name}.csv", b"x\n")
-        client = FakeS3Client(nonretryable=frozenset({"p/IDX_I/a.csv"}))
+        client = FakeS3Client(nonretryable=frozenset({"p/IDX_I/A.csv"}))
         outcome = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert outcome.aborted_nonretryable is True
         # The aborting key + every not-yet-attempted pending key count failed.
@@ -157,6 +157,24 @@ class TestPublishStaged:
         outcome = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert outcome.failed_count == len(keys)
         assert len(outcome.failed_keys) == FAILED_KEYS_CAP
+
+    def test_malformed_journal_key_counts_failed_and_continues(self, tmp_path: Path) -> None:
+        # F8: a tampered journal key (path traversal) is REJECTED by
+        # staging_path_for_key before any join — counted failed + WARNed,
+        # the valid sibling still publishes, and NOTHING outside the staging
+        # tree is ever read or created.
+        journal = _journal()
+        hostile = "p/../../ESCAPE.csv"
+        journal.mark_staged(hostile, "sha", 2)  # journal junk — never staged
+        (tmp_path / "ESCAPE.csv").write_bytes(b"outside\n")  # the traversal target
+        _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"a\n")
+        client = FakeS3Client()
+        outcome = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
+        assert outcome.published == 1
+        assert outcome.failed_count == 1
+        assert outcome.failed_keys == (hostile,)
+        assert hostile not in client.objects  # the outside bytes never left the box
+        assert journal.pending_keys() == (hostile,)
 
     def test_missing_staged_file_counts_failed_and_continues(self, tmp_path: Path) -> None:
         journal = _journal()

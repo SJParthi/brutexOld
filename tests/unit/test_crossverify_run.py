@@ -730,6 +730,54 @@ class TestRecoveryScan:
         assert report.recovered_prior == 0
         assert h.client.puts == []
 
+    def test_weekend_run_recovers_prior_pending_and_cleans_staging(self, tmp_path: Path) -> None:
+        # F6 (round-1 pipeline review): the recovery scan runs BEFORE the
+        # session gate — a weekend/holiday run still republishes a PRIOR
+        # trading day's pending staged keys (no vendor pull, no session, no
+        # pull locks needed) — and a fully-recovered day's staging dir is
+        # cleaned so staging never accumulates unbounded.
+        prior_day = _DAY - timedelta(days=2)
+        key = self._stage_prior(tmp_path, 2, "IDX_I/NIFTY.csv")
+        h = _harness(tmp_path, session=None)  # today is NOT a session
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("skipped_non_trading", 0)
+        assert report.recovered_prior == 1
+        assert key in h.client.objects
+        recovered = load_journal(tmp_path, prior_day)
+        assert recovered is not None
+        assert recovered.pending_keys() == ()
+        # The recovered prior day's staging dir is GONE (the step-N cleanup,
+        # applied to the prior day).
+        assert not staging_dir(tmp_path, prior_day).exists()
+
+    def test_weekend_run_failed_recovery_keeps_staging_exit_2(self, tmp_path: Path) -> None:
+        # The still-pending (failed-again) day's staging is KEPT for the next
+        # recovery scan, and the weekend skip never masks the failure as a
+        # cron-green skipped_non_trading.
+        prior_day = _DAY - timedelta(days=2)
+        key = self._stage_prior(tmp_path, 2, "IDX_I/NIFTY.csv")
+        client = FakeS3Client(nonretryable=frozenset({key}))
+        h = _harness(tmp_path, session=None, s3_factory=lambda: client)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        assert report.recovered_prior == 0
+        assert report.publish_failed >= 1
+        # Staged bytes retained — the next run's recovery scan needs them.
+        assert staging_dir(tmp_path, prior_day).exists()
+        recovered = load_journal(tmp_path, prior_day)
+        assert recovered is not None
+        assert recovered.pending_keys() == (key,)
+
+    def test_recovery_runs_even_when_gate_module_absent(self, tmp_path: Path) -> None:
+        # Recovery re-publishes FROZEN prior bytes — it needs no gate, so the
+        # fail-closed gate refusal (exit 1) must not block it.
+        key = self._stage_prior(tmp_path, 1, "IDX_I/NIFTY.csv")
+        h = _harness(tmp_path, gate_absent=True)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("refused", 1)
+        assert report.recovered_prior == 1
+        assert key in h.client.objects
+
 
 class TestSummaryLaw:
     @pytest.mark.parametrize(

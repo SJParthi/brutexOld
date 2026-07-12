@@ -155,13 +155,19 @@ def _read_error_types() -> tuple[type[BaseException], ...]:
     """The reader-raise classes mapped to the withheld reason ``read_error``.
 
     The COMMON unreadable-file set (:func:`movers_read_skip_errors` —
-    ``PolarsError`` + ``OSError``) plus ``ValueError`` (a malformed stored row
-    failing :class:`CandleBar` construction). A genuine code bug (any other
-    class) still propagates — never silently swallowed.
+    ``PolarsError`` + ``OSError``) plus the three malformed-STORED-ROW
+    classes the ``CandleBar`` conversion can raise (round-1 hostile review —
+    ONE corrupt row must withhold THAT symbol, never crash the whole
+    ~750-symbol run): ``ValueError`` (a malformed field), ``InvalidOperation``
+    (a NULL price cell — ``Decimal(str(None))``) and ``TypeError`` (a NULL
+    volume/oi cell — ``int(None)``). A genuine code bug (any other class)
+    still propagates — never silently swallowed.
     """
+    from decimal import InvalidOperation
+
     from brutex.dashboard.movers_resilient import movers_read_skip_errors
 
-    return (*movers_read_skip_errors(), ValueError)
+    return (*movers_read_skip_errors(), ValueError, TypeError, InvalidOperation)
 
 
 def _export_rows(bars: list[CandleBar]) -> list[ExportRow]:
@@ -249,7 +255,7 @@ def export_symbol(
     except _read_error_types() as exc:
         _LOG.warning(
             "crossverify.read_error",
-            symbol=identity.canonical_symbol,
+            symbol=repr(identity.canonical_symbol),  # vendor-derived — repr()'d (#907)
             day=day.isoformat(),
             error_type=type(exc).__name__,
             error=str(exc),
@@ -288,7 +294,7 @@ def export_symbol(
     except ExportContractError as exc:
         _LOG.warning(
             "crossverify.render_refused",
-            symbol=identity.canonical_symbol,
+            symbol=repr(identity.canonical_symbol),  # vendor-derived — repr()'d (#907)
             day=day.isoformat(),
             error=str(exc),
         )
