@@ -658,33 +658,56 @@ class TestSessionAwareForcedExit:
         assert trades[0].pnl_paisa == 60  # forced at the 16:50 bar OPEN 100.60
         assert trades[0].holding_bars == 3  # 15:25, 16:49, 16:50
 
-    def test_truncated_lake_extended_day_carries_overnight_to_next_1520(self) -> None:
-        # Review round-4 documenting pin (DEC-EXTENDED-SESSION-OUTAGE-001):
-        # TODAY'S pre-re-pull lake shape — the pre-fix ingest filter kept
-        # 2021-02-24 bars only through 15:29, so NO bar at/after the 16:50
-        # forced boundary exists that day, `_manage_position` has no day-roll
-        # close, and the position deterministically carries OVERNIGHT into
-        # 2021-02-25, exiting at latest THAT day's 15:20 forced boundary. A
-        # defensible mechanical consequence of the sanctioned 16:50 delta —
-        # pinned here as a conscious fact (remediation: the named targeted
-        # re-pull materializes the 15:30-16:59 bars and restores the same-day
-        # 16:50 exit). Pre-fix (merge-base) this scenario force-exited on the
-        # first 02-24 bar >= 15:20 instead — the pin discriminates.
+    def test_truncated_lake_extended_day_session_gap_close_no_overnight_carry(self) -> None:
+        # Review round-14 drift-reconcile pin (DEC-EXTENDED-SESSION-OUTAGE-001
+        # COMPOSED with main's DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md
+        # #1743): TODAY'S pre-re-pull lake shape — the pre-fix ingest filter
+        # kept 2021-02-24 bars only through 15:29, so NO bar at/after the 16:50
+        # forced boundary exists that day. The round-4 version of this pin
+        # documented an OVERNIGHT carry into 2021-02-25 (the walker then had no
+        # day-roll close); main's #1743 session_gap guard SUPERSEDED that — the
+        # position now closes SAME-DAY, retroactively at 2021-02-24's LAST
+        # stored bar (the 15:29 CLOSE, reason `session_gap`), and the next
+        # session's prices are never touched. Remediation unchanged: the named
+        # targeted re-pull materializes the 15:30-16:59 bars and restores the
+        # same-day 16:50 forced exit. The pin still discriminates OUR calendar
+        # delta: with the merge-base calendar (2021-02-24 REGULAR, boundary
+        # 15:20) the position force-exits at the 15:20 bar's OPEN 100.50
+        # (reason forced_1520, pnl +50) — probe-verified by swapping in the
+        # merge-base `calendars/nse.py` (this test then FAILS).
         next_day = date(2021, 2, 25)  # a regular Thursday
         bars = [
             _bar(15, 17, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # signal
-            _bar(15, 18, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # fill
-            _bar(15, 29, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # lake ends
-            _bar(9, 15, "100", "100", "100", "100", day=next_day),  # carried overnight
-            _bar(15, 20, "100.40", "101", "100", "100.60", day=next_day),  # forced
-            _bar(15, 21, "200", "200", "200", "200", day=next_day),  # never reached
+            _bar(15, 18, "100", "100", "100", "100", day=_EXTENDED_OUTAGE),  # fill @ 100.00
+            # The merge-base-calendar contrast bar: REGULAR boundary 15:20
+            # forces out HERE at OPEN 100.50; the extended session rides on.
+            _bar(15, 20, "100.50", "101", "100", "100.50", day=_EXTENDED_OUTAGE),
+            # The truncated lake's LAST stored 02-24 bar (pre-re-pull shape).
+            _bar(15, 29, "101", "101.20", "100.80", "100.80", day=_EXTENDED_OUTAGE),
+            _bar(9, 15, "200", "201", "199", "200", day=next_day),  # boundary bar
+            _bar(15, 20, "200", "201", "199", "200", day=next_day),  # never reached
         ]
-        trades = _trade_with_signal_then_ride(bars)
+        signals = [i == 0 for i in range(len(bars))]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=100_000,
+            take_profit_paisa=100_000,
+            detail_sink=sink,
+        )
         assert len(trades) == 1
         assert trades[0].entry_ts == _ts(15, 18, day=_EXTENDED_OUTAGE)
-        assert trades[0].exit_ts == _ts(15, 20, day=next_day)  # the NEXT day's 15:20
-        assert trades[0].pnl_paisa == 40  # forced at the 02-25 15:20 bar OPEN 100.40
-        assert trades[0].holding_bars == 4  # 15:18, 15:29, 09:15, 15:20
+        assert trades[0].exit_ts == _ts(15, 29, day=_EXTENDED_OUTAGE)  # SAME-day close
+        assert trades[0].pnl_paisa == 80  # 02-24 15:29 CLOSE 100.80 − entry 100.00
+        assert trades[0].holding_bars == 3  # 15:18, 15:20, 15:29 — no D+1 bar ever held
+        assert [d.exit_reason for d in sink] == ["session_gap"]
+        assert sink[0].exit_fill_paisa == 10_080  # the last stored 02-24 bar's CLOSE
+        # The 02-25 boundary bar's 199-201 range never enters MFE/MAE.
+        assert trades[0].mfe_paisa == 120  # 02-24 15:29 high 101.20
+        assert trades[0].mae_paisa == 0
 
     def test_extended_outage_neighbor_day_still_exits_at_1520(self) -> None:
         # The delta is ONE date: the identical scenario on the EVE (2021-02-23,
