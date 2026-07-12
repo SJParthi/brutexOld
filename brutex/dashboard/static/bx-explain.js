@@ -59,7 +59,7 @@ var BX_EXPLAIN = {
   mae_avg_paisa: "How far trades typically moved AGAINST you before closing (average and worst adverse excursion, rupees).",
   mfe_avg_paisa: "How far trades typically moved FOR you before closing (average and best favorable excursion, rupees).",
   max_dd_minute_path_paisa: "The worst drawdown measured on the minute-by-minute equity path — not just at trade closes.",
-  exit_mix: "How the trades ended — stop-loss, take-profit, signal flip, the 15:20 forced exit, or end of data.",
+  exit_mix: "How the trades ended — stop-loss, take-profit, signal flip, the 15:20 forced exit, end of data, or gap (gap = closed at the prior session's last stored bar because the session's data ended early — a session-tail data hole).",
   worst5_days: "The five worst trading days by P&L — the days that hurt most.",
   by_trend: "Profit split by market trend regime — did it earn only in trends, or in sideways markets too?",
   one_regime_wonder: "Flags a strategy whose profits concentrate in a single year or regime — fragile if that regime ends.",
