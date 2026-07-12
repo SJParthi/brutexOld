@@ -91,6 +91,7 @@ class AbstainReason(StrEnum):
     TIME_BUDGET_EXHAUSTED = "time_budget_exhausted"
     REGISTRY_SCHEMA_DRIFT = "registry_schema_drift"
     NON_DEFAULT_WINDOW_SHAPE = "non_default_window_shape"
+    ROUTE_ERROR = "route_error"
 
 
 #: Abstain reasons EXEMPT from the ``--abstain-budget`` + streak laws: standing

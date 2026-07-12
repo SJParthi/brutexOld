@@ -330,6 +330,17 @@ def _run_body(
 def _completeness_sub(ctx: AcceptanceContext) -> Any:
     """Engine indexes must not read failed/none on the completeness scoreboard.
 
+    The verdict is composed through the EXACT production ``/completeness``
+    inputs (``app.py`` ``_completeness_inputs``): the FNO-pruned
+    ``summarize_spot_verdict_datasets`` scan folded with the window-ledger
+    ``spot_window_rollup`` chip via ``build_spot_coverage_payload``, then scored
+    by the same ``per_symbol_completeness``. On a HEALTHY master-present lake
+    every engine index therefore reads its TRUE verdict (settled → full, etc.),
+    never a fabricated ``none`` (round-6 BLOCKER — the prior plain
+    ``summarize_spot_datasets`` dropped the ``completeness`` chip so every engine
+    index FAILed regardless of data health). A genuinely incomplete engine index
+    still reads failed/none → FAIL (the true-positive tooth).
+
     The master is opened READ-ONLY (never ``InstrumentStore.open`` — its
     migration DDL DROPs an older-schema store; review round 1 M1). A locked /
     unreadable / schema-foreign store ⇒ named ABSTAIN — never a migration,
@@ -354,7 +365,11 @@ def _completeness_sub(ctx: AcceptanceContext) -> Any:
         categorize_instruments,
         per_symbol_completeness,
     )
-    from brutex.dashboard.db_view import summarize_spot_datasets
+    from brutex.dashboard.coverage_view import build_spot_coverage_payload
+    from brutex.dashboard.db_view import (
+        spot_window_rollup,
+        summarize_spot_verdict_datasets,
+    )
 
     try:
         store = open_instrument_store_readonly(store_path)
@@ -369,7 +384,20 @@ def _completeness_sub(ctx: AcceptanceContext) -> Any:
         )
     try:
         instruments = store.list_index_equity_instruments()
-        spot_rows = summarize_spot_datasets(store.connection, ctx.lake_root)
+        # Compose the SAME enrichment the production /completeness route applies
+        # (app.py `_completeness_inputs`): the FNO-pruned verdict-interval scan
+        # folded with the window-ledger rollup chip, so `row["completeness"]`
+        # carries the settled/pending/failed authority. The prior plain
+        # `summarize_spot_datasets` returned rows with NO `completeness` key, so
+        # `_spot_dimension_verdict(None)` read `none` for EVERY engine index on
+        # a HEALTHY master-present lake — a permanent spurious FAIL contradicting
+        # the operator's own /completeness page (round-6 BLOCKER). Verify what
+        # production SHOWS; never a weaker reimplementation (the whole-slice law).
+        spot_rows = build_spot_coverage_payload(
+            summarize_spot_verdict_datasets(store.connection, ctx.lake_root),
+            spot_window_rollup(ctx.lake_root),
+        )["rows"]
+        records = list(store.list_coverage())
     except (duckdb.Error, CatalogError) as exc:
         # An older/foreign-schema store: observe-only means ABSTAIN, never DDL.
         return make_subcheck(
@@ -387,15 +415,24 @@ def _completeness_sub(ctx: AcceptanceContext) -> Any:
         is_index=lambda i: bool(getattr(i, "is_index", False)),
         is_reference=lambda i: bool(getattr(i, "reference_only", False)),
     )
-    per_symbol: dict[str, Any] = per_symbol_completeness(spot_rows, categories, [], {})
+    per_symbol: dict[str, Any] = per_symbol_completeness(spot_rows, categories, records, categories)
     engine_bad: list[str] = []
     from brutex.data.lake_invariants import ENGINE_INDEX_COORDS
 
     for _exchange, _segment, symbol in ENGINE_INDEX_COORDS:
         cell = per_symbol.get(symbol)
-        verdicts = _cell_verdict_tokens(cell)
+        # Gate the SPOT dimension ONLY. The engine brute-forces the 3 indices on
+        # SPOT (1minute → the derived TFs); their OPTIONS are REFERENCE_ONLY, so
+        # an index with no stored option data legitimately reads options
+        # ``none`` — that is not an engine-data-health defect. Walking the whole
+        # cell (incl. that options ``none``) would false-FAIL every master-present
+        # index whose options aren't materialised (round-6 BLOCKER, second
+        # vector). ``settled_partial_range``/``partial``/``full`` all PASS —
+        # reference-name partial-range is evidence, not a defect.
+        spot = cell.get("spot") if isinstance(cell, dict) else None
+        verdicts = _cell_verdict_tokens(spot)
         if any(v in {"failed", "none"} for v in verdicts):
-            engine_bad.append(f"{symbol}: {sorted(verdicts)}")
+            engine_bad.append(f"{symbol}: spot={sorted(verdicts)}")
     return make_subcheck(
         "sanity.completeness",
         Verdict.FAIL if engine_bad else Verdict.PASS,
@@ -404,7 +441,11 @@ def _completeness_sub(ctx: AcceptanceContext) -> Any:
             "engine_bad": engine_bad,
             "symbols_on_scoreboard": len(per_symbol),
         },
-        limits=["reference-name partial/settled_partial_range is evidence, not defect"],
+        limits=[
+            "gates the SPOT dimension only — an engine index's REFERENCE_ONLY "
+            "options reading 'none' is evidence, not a defect; "
+            "settled_partial_range/partial are evidence, not defect"
+        ],
         repro=_repro(ctx),
     )
 

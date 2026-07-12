@@ -14,7 +14,13 @@ from brutex.acceptance.checks import sanity
 from brutex.acceptance.model import AbstainReason, Verdict
 from brutex.acceptance.selftest import _month_file, _twin_bars
 
-from tests.fakes.acceptance_twin import DAY1, DAY2, make_ctx, make_twin
+from tests.fakes.acceptance_twin import (
+    DAY1,
+    DAY2,
+    make_ctx,
+    make_master_present_twin,
+    make_twin,
+)
 
 
 def _sub(check, sub_id: str):
@@ -221,6 +227,29 @@ class TestSanityCheck:
 
 
 class TestCompleteness:
+    def test_master_present_healthy_lake_all_pass_real_chain(self, tmp_path: Path) -> None:
+        # Round-6 BLOCKER regression (the operator's exact nightmare): a
+        # REALISTIC master-present HEALTHY lake — real 1m/derived bars, a real
+        # settled window ledger for the engine indices, a real
+        # instruments.duckdb master — drives the REAL summarize→rollup→
+        # per_symbol chain (NOT a monkeypatch). The pre-fix plain
+        # `summarize_spot_datasets` dropped the `completeness` chip so every
+        # engine index read a fabricated `none`→FAIL on EVERY master-present
+        # lake, contradicting the operator's own /completeness page. With the
+        # ledger-rollup enrichment each index reads its TRUE spot verdict and the
+        # WHOLE sanity check PASSes — the "clean twin → 0 false FAILs" claim now
+        # proven on a MASTER-PRESENT lake, matching production.
+        lake = make_master_present_twin(tmp_path)
+        check = sanity.run(make_ctx(lake))
+        completeness = _sub(check, "sanity.completeness")
+        assert completeness.verdict is Verdict.PASS, completeness.evidence
+        assert completeness.evidence["engine_bad"] == []
+        # NIFTY + BANKNIFTY are on the scoreboard (present engine indices).
+        assert completeness.evidence["symbols_on_scoreboard"] >= 2
+        # And the whole sanity check is green — no false FAIL anywhere.
+        assert check.verdict is Verdict.PASS
+        assert all(s.verdict is Verdict.PASS for s in check.sub_checks)
+
     def test_engine_rows_gate(self, tmp_path: Path) -> None:
         from brutex.data.instrument_store import InstrumentStore
 
@@ -356,18 +385,16 @@ class TestSanityEdges:
         check = sanity.run(make_ctx(lake))
         assert _sub(check, "sanity.price").verdict is Verdict.PASS
 
-    def test_engine_failed_verdict_gates(self, tmp_path: Path, monkeypatch) -> None:
-        import brutex.dashboard.completeness as comp
-        from brutex.data.instrument_store import InstrumentStore
-
-        lake = make_twin(tmp_path)
-        InstrumentStore.open(lake / "instruments.duckdb").close()
-        monkeypatch.setattr(
-            comp,
-            "per_symbol_completeness",
-            lambda *a, **k: {"NIFTY": {"one_minute": "failed"}, "TCS": {"one_minute": "partial"}},
-        )
-        check = sanity.run(make_ctx(lake))
-        completeness = _sub(check, "sanity.completeness")
+    def test_engine_failed_verdict_gates_real_chain(self, tmp_path: Path) -> None:
+        # Round-6 BLOCKER true-positive tooth — the REAL summarize→rollup→
+        # per_symbol chain over a master-present lake whose NIFTY spot window is
+        # genuinely FAILED (NOT a monkeypatch of per_symbol_completeness — the
+        # #1631 fixture-only blindspot one level up, which masked the false
+        # positive on healthy lakes). NIFTY's spot verdict reads `failed` ⇒ FAIL.
+        lake = make_master_present_twin(tmp_path, nifty_status="FAILED")
+        completeness = _sub(sanity.run(make_ctx(lake)), "sanity.completeness")
         assert completeness.verdict is Verdict.FAIL
         assert any("NIFTY" in bad for bad in completeness.evidence["engine_bad"])
+        # BANKNIFTY stayed SUCCESS ⇒ it is NOT in engine_bad (only the genuinely
+        # incomplete index is flagged, never the healthy sibling).
+        assert not any("BANKNIFTY" in bad for bad in completeness.evidence["engine_bad"])

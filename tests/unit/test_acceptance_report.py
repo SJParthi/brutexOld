@@ -318,6 +318,82 @@ class TestHumanRender:
         assert "! rate.constants: FAIL" in text
         assert "TOTALS" in text
 
+    def test_render_fail_inline_brief_and_repro(self) -> None:
+        # Round-6 legibility: a FAIL line carries an inline count/sample AND the
+        # exact per-check reproduce command — evidence must be unmissable in
+        # report.txt/stdout, not buried in report.json.
+        check = make_check(
+            "sanity",
+            [
+                make_subcheck(
+                    "sanity.completeness",
+                    Verdict.FAIL,
+                    units_checked=2,
+                    evidence={"engine_bad": ["NIFTY: spot=['failed']"], "symbols_on_scoreboard": 2},
+                    repro="brutex verify-acceptance --checks sanity --seed 2026-07-12",
+                ),
+                make_subcheck(
+                    "sanity.contiguity",
+                    Verdict.FAIL,
+                    units_checked=1,
+                    evidence={
+                        "offenders": ["NSE/INDEX/NIFTY: 2026-06-01 → 2026-06-30"],
+                        "offenders_total": 1,
+                    },
+                    repro="brutex verify-acceptance --checks sanity --seed 2026-07-12",
+                ),
+            ],
+            coverage=make_coverage(mode="sample", population=9, examined=2, seed="s"),
+        )
+        text = render_human(_report_dict([_check("unique"), check]))
+        # The engine-bad FAIL carries its index count + first sample inline.
+        assert "! sanity.completeness: FAIL — 1 engine index(es):" in text
+        assert "NIFTY: spot=['failed']" in text
+        # The offender FAIL carries its offender count + first sample inline.
+        assert "! sanity.contiguity: FAIL — 1 offender(s); e.g." in text
+        # BOTH FAILs carry the exact per-check reproduce command.
+        assert (
+            text.count("reproduce: brutex verify-acceptance --checks sanity --seed 2026-07-12") == 2
+        )
+
+    def test_fail_brief_shapes(self) -> None:
+        # Round-6 legibility helper — every evidence shape has a deterministic
+        # inline brief (or the honest empty string for a legacy/hand-built one).
+        from brutex.acceptance.report import _fail_brief
+
+        assert _fail_brief({"engine_bad": ["NIFTY: spot=['failed']"]}).startswith(
+            "1 engine index(es): "
+        )
+        assert _fail_brief({"engine_bad": []}) == ""  # empty list → falls through
+        assert _fail_brief({"offenders_total": 3, "offenders": ["a", "b"]}).startswith(
+            "3 offender(s); e.g. "
+        )
+        assert _fail_brief({"offenders_total": 2}) == "2 offender(s)"  # no sample list
+        assert _fail_brief({"offenders_total": 0, "offenders": []}) == "0 offender(s)"
+        assert _fail_brief({"failure_class": "vix_silent_empty"}) == "'vix_silent_empty'"
+        assert _fail_brief({"reason": "check_timed_out"}) == "'check_timed_out'"
+        assert _fail_brief({"reason": ""}) == ""  # empty reason → empty brief
+        assert _fail_brief({}) == ""  # no salient key → honest empty
+
+    def test_render_abstain_carries_repro(self) -> None:
+        # Round-6 legibility: prominent ABSTAINs also carry the reproduce command.
+        check = make_check(
+            "movers",
+            [
+                make_subcheck(
+                    "movers.spot",
+                    Verdict.ABSTAIN,
+                    units_checked=0,
+                    evidence={"reason": "movers route error (HTTP 400)"},
+                    abstain_reason=AbstainReason.ROUTE_ERROR,
+                    repro="brutex verify-acceptance --checks movers --seed 2026-07-12",
+                )
+            ],
+            coverage=make_coverage(mode="none", population=0, examined=0, seed="s"),
+        )
+        text = render_human(_report_dict([_check("unique"), check]))
+        assert "reproduce: brutex verify-acceptance --checks movers --seed 2026-07-12" in text
+
     def test_render_teeth_failed_headline(self) -> None:
         report = _report_dict()
         report["self_test"]["verdict"] = "TEETH_FAILED"

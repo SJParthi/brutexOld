@@ -117,10 +117,10 @@ forming branch). TWO legs stay honestly UNIT-GATE-KILLED (a robust twin
 poison is impractical, so the killer is the named unit test that drives the
 COMPOSED check against the sabotage): tf.daily's FORMING branch
 (`ist_date >= before`) is clock- AND month-boundary-dependent →
-`test_acceptance_checks_tf.py::TestDailyCompare::test_forming_day_stored_fails`
+`test_acceptance_checks_tf.py::TestTfCheck::test_forming_day_stored_fails`
 (injected clock); `pull.replan_zero`'s planner-vacuity guard is a CODE
 mutation, not data →
-`test_acceptance_checks_pull.py::TestReplan::test_lobotomized_planner_fails_vacuous`
+`test_acceptance_checks_pull.py::TestPullCheck::test_lobotomized_planner_fails_vacuous`
 (+ the positive `test_settled_fixture_replan_zero_and_tail_planned`). The
 per-leg tooth roster lives in `selftest.run_full_battery`'s docstring; every
 real check leg is either battery-toothed or named-unit-gate-killed there.

@@ -166,14 +166,21 @@ def _rank_consistent(
     return []
 
 
+#: Statuses that genuinely mean "the store-backed route has no readable master"
+#: — the acceptance client opens the master READ-ONLY and degrades to no-store
+#: when it is locked/absent (review round 1 M1), and the route then 503s.
+_MASTER_ABSENT_STATUS = 503
+
+
 def _spot_payload(
     ctx: AcceptanceContext, *, interval: str, day: str, hhmm: str | None
-) -> Any | None:
-    """One spot movers payload; ``None`` on a non-200 (locked/absent master → 503).
+) -> Any | tuple[int, str]:
+    """One spot movers payload; on a non-200 a ``(status, brief-detail)`` tuple.
 
-    The acceptance client opens the instrument master READ-ONLY and degrades
-    to no-store when it is locked (review round 1 M1) — the store-backed
-    movers route then 503s, which must map to a named ABSTAIN, never a crash.
+    A 503 means the store-backed route has no readable master (locked/absent,
+    the degraded no-store shape); ANY OTHER non-200 (a 400 from a corrupt bar,
+    a 500) is a genuine route/data error and MUST NOT be relabelled "master
+    absent" (Golden Rule #10 — round-6 F2). The caller distinguishes the two.
     """
     params: dict[str, Any] = {
         "asset": "spot",
@@ -185,7 +192,7 @@ def _spot_payload(
         params["time"] = hhmm
     response = ctx.client().get("/api/v1/movers", params=params)
     if response.status_code != HTTP_OK:
-        return None
+        return response.status_code, str(response.text)[:200]
     return response.json()
 
 
@@ -208,27 +215,37 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 
     payloads: dict[tuple[str, str | None], Any] = {}
     gated = False
-    unavailable = False
+    route_error: tuple[int, str] | None = None
     for interval, hhmm in SPOT_COORDS:
         payload = _spot_payload(ctx, interval=interval, day=day_str, hhmm=hhmm)
-        if payload is None:
-            unavailable = True
+        if isinstance(payload, tuple):
+            route_error = payload
             break
         if payload.get("gated"):
             gated = True
             break
         payloads[(interval, hhmm)] = payload
 
-    if unavailable:
+    if route_error is not None:
+        status, detail = route_error
+        if status == _MASTER_ABSENT_STATUS:
+            reason = (
+                "movers route 503 — instrument master absent or held read-write by another process"
+            )
+            abstain_reason = AbstainReason.NO_INSTRUMENT_STORE
+        else:
+            # A 400/500 is a genuine route/data error, NOT an absent master —
+            # never fabricate "master absent" (Golden Rule #10, round-6 F2).
+            # The corrupt-bar case is ALSO caught as sanity.price FAIL; here we
+            # ABSTAIN with the honest status + brief detail (no verdict slip).
+            reason = f"movers route error (HTTP {status}): {detail}"
+            abstain_reason = AbstainReason.ROUTE_ERROR
         sub = make_subcheck(
             "movers.spot",
             Verdict.ABSTAIN,
             units_checked=0,
-            evidence={
-                "reason": "movers route unavailable (non-200) — instrument master "
-                "absent or held read-write by another process"
-            },
-            abstain_reason=AbstainReason.NO_INSTRUMENT_STORE,
+            evidence={"reason": reason, "status": status},
+            abstain_reason=abstain_reason,
             repro=_repro(ctx),
         )
         coverage = make_coverage(mode="none", population=0, examined=0, seed=ctx.seed)

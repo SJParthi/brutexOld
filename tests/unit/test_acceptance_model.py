@@ -85,6 +85,9 @@ class TestSchemaTokens:
             # shape routing (fix 3) — extensions are reviewed acts.
             "registry_schema_drift",
             "non_default_window_shape",
+            # Round-6 F2 (MIGRATION.md #1756): a movers route 400/500 is a
+            # genuine route/data error, NOT an absent master (Golden Rule #10).
+            "route_error",
         }
 
 

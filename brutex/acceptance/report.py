@@ -253,6 +253,32 @@ def _render_token(value: Any) -> str:
     return "None" if value is None else repr(str(value))
 
 
+def _fail_brief(evidence: Mapping[str, Any]) -> str:
+    """One-line count + sample for a FAIL/ERROR sub, so evidence is inline.
+
+    The most salient offender count + first sample is surfaced (repr()'d — an
+    offender token can embed a vendor-influenceable dir name, MN3). ABSENT-key
+    tolerant: hand-built / legacy evidence shapes degrade to an empty brief.
+    """
+    engine_bad = evidence.get("engine_bad")
+    if isinstance(engine_bad, list) and engine_bad:
+        return f"{len(engine_bad)} engine index(es): {_render_token(engine_bad[0])}"
+    offenders = evidence.get("offenders")
+    total = evidence.get("offenders_total")
+    if isinstance(total, int):
+        brief = f"{total} offender(s)"
+        if isinstance(offenders, list) and offenders:
+            brief += f"; e.g. {_render_token(offenders[0])}"
+        return brief
+    failure = evidence.get("failure_class")
+    if isinstance(failure, str) and failure:
+        return _render_token(failure)
+    reason = evidence.get("reason")
+    if isinstance(reason, str) and reason:
+        return _render_token(reason)
+    return ""
+
+
 def render_human(report: Mapping[str, Any]) -> str:
     """The operator-facing text render — ABSTAINs FIRST, never buried."""
     lines: list[str] = []
@@ -295,6 +321,9 @@ def render_human(report: Mapping[str, Any]) -> str:
         for sub in abstains:
             tag = "structural" if sub.get("structural") else f"streak {sub.get('abstain_streak')}"
             lines.append(f"  {sub['id']:<28} ABSTAIN  {sub['abstain_reason']}  [{tag}]")
+            repro = sub.get("repro")
+            if isinstance(repro, str) and repro:
+                lines.append(f"      reproduce: {repro}")
     lines.append("")
     lines.append(f"{'CHECK':<28} {'VERDICT':<10} COVERAGE")
     for check in report["checks"]:
@@ -307,9 +336,15 @@ def render_human(report: Mapping[str, Any]) -> str:
         suffix = "" if cov["mode"] == "full" else " — NOT a full-lake claim"
         lines.append(f"{check['check_id']:<28} {check['verdict']:<10} {cov_note}{suffix}")
         for sub in check["sub_checks"]:
-            if sub["verdict"] in {"FAIL", "ERROR"}:
-                lines.append(f"  ! {sub['id']}: {sub['verdict']}")
             evidence = sub.get("evidence") or {}
+            if sub["verdict"] in {"FAIL", "ERROR"}:
+                brief = _fail_brief(evidence)
+                lines.append(
+                    f"  ! {sub['id']}: {sub['verdict']}" + (f" — {brief}" if brief else "")
+                )
+                repro = sub.get("repro")
+                if isinstance(repro, str) and repro:
+                    lines.append(f"      reproduce: {repro}")
             # Round-3 NIT (A-2): a check-level PASS with abstain-ROUTED series
             # was invisible in report.txt — surface the count on its own line.
             routed = evidence.get("non_default_shape_series")

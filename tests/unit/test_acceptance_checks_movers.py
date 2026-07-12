@@ -64,6 +64,10 @@ class _CannedResponse:
     def json(self) -> dict:
         return self._payload
 
+    @property
+    def text(self) -> str:
+        return json.dumps(self._payload, sort_keys=True)
+
     def raise_for_status(self) -> None:  # 200 by construction
         return None
 
@@ -535,6 +539,31 @@ class TestStoreUnavailableAbstain:
         spot = _sub(check, "movers.spot")
         assert spot.verdict is Verdict.ABSTAIN
         assert spot.abstain_reason is AbstainReason.NO_INSTRUMENT_STORE
+
+    def test_400_route_error_not_mislabeled_master_absent(self, tmp_path: Path) -> None:
+        # Round-6 F2 (Golden Rule #10): a 400 from the route (e.g. a corrupt bar
+        # `CandleBar: close must be in [low, high]`) is a genuine route/data
+        # error on a lake whose master is PRESENT + healthy — it must NOT be
+        # relabelled "instrument master absent". It ABSTAINs ROUTE_ERROR with the
+        # honest status + brief detail (no verdict slip — the corrupt bar is also
+        # caught as sanity.price FAIL).
+        lake = make_twin(tmp_path)
+
+        class _BadRequest:
+            def get(self, path: str, params: dict | None = None) -> Any:
+                return _CannedResponse(
+                    {"detail": "CandleBar: close (244.2) must be in [low=120.6, high=120.8]"},
+                    status_code=400,
+                )
+
+        check = movers.run(make_ctx(lake, client_factory=_BadRequest))
+        spot = _sub(check, "movers.spot")
+        assert spot.verdict is Verdict.ABSTAIN
+        assert spot.abstain_reason is AbstainReason.ROUTE_ERROR
+        assert spot.abstain_reason is not AbstainReason.NO_INSTRUMENT_STORE
+        assert spot.evidence["status"] == 400
+        assert "master" not in str(spot.evidence["reason"]).lower()
+        assert "HTTP 400" in str(spot.evidence["reason"])
 
 
 class TestCompareCellsUnits:

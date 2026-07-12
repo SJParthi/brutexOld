@@ -461,11 +461,11 @@ def run_full_battery(
       forming-day twin bar is clock- AND month-boundary-dependent (the cutoff
       is ``today`` pre-close vs ``today+1`` post-close, and a forming date can
       fall outside the ``--months`` file window), so it is unit-gate-killed by
-      ``tests/unit/test_acceptance_checks_tf.py::TestDailyCompare::
+      ``tests/unit/test_acceptance_checks_tf.py::TestTfCheck::
       test_forming_day_stored_fails`` (injected clock, deterministic).
     * ``pull.replan_zero`` (planner-vacuity guard) — a vacuous planner is a
       CODE mutation, not a data poison, so it is unit-gate-killed by
-      ``tests/unit/test_acceptance_checks_pull.py::TestReplan::
+      ``tests/unit/test_acceptance_checks_pull.py::TestPullCheck::
       test_lobotomized_planner_fails_vacuous`` (a monkeypatched always-empty
       planner ⇒ FAIL) plus the positive
       ``test_settled_fixture_replan_zero_and_tail_planned``.
