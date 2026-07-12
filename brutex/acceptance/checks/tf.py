@@ -46,10 +46,31 @@ FNO_SAMPLE_N = 6
 
 
 def _repro(ctx: AcceptanceContext) -> str:
+    """Return the ``brutex verify-acceptance`` reproduce command for this check.
+
+    Returns
+    -------
+    str
+        The CLI invocation that re-runs this check with the run seed.
+    """
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
 
 
 def _abstain_check(ctx: AcceptanceContext, reason: AbstainReason) -> CheckResult:
+    """Build an ABSTAIN ``CheckResult`` for the derived-timeframe check.
+
+    Parameters
+    ----------
+    ctx
+        The acceptance context (seed echoed into the reproduce command).
+    reason
+        The named abstain reason.
+
+    Returns
+    -------
+    CheckResult
+        A single-subcheck ABSTAIN result under ``tf.intraday``.
+    """
     sub = make_subcheck(
         "tf.intraday",
         Verdict.ABSTAIN,
@@ -81,6 +102,13 @@ def _oi_standing_abstain(ctx: AcceptanceContext) -> Any:
 
 
 def _has_interval_files(symbol_dir: Any, interval: str) -> bool:
+    """Return whether a symbol has any parquet files for an interval.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``<symbol_dir>/<interval>`` holds at least one parquet.
+    """
     root = symbol_dir / interval
     return root.is_dir() and any(root.rglob("*.parquet"))
 
@@ -235,6 +263,22 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 
 
 def _run_body(ctx: AcceptanceContext, *, plan: Any, contracts: list[str]) -> CheckResult:
+    """Run the derived-timeframe correctness check body.
+
+    Parameters
+    ----------
+    ctx
+        The acceptance context bound to the real lake.
+    plan
+        The sampling plan of coordinates to examine.
+    contracts
+        The sampled F&O contract series to include.
+
+    Returns
+    -------
+    CheckResult
+        The composed derived-timeframe check result.
+    """
     from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
     from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
 

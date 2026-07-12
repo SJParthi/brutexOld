@@ -45,17 +45,48 @@ _GRID_EPS = 1e-6
 
 
 def _repro(ctx: AcceptanceContext) -> str:
+    """Return the ``brutex verify-acceptance`` reproduce command for this check.
+
+    Returns
+    -------
+    str
+        The CLI invocation that re-runs this check with the run seed.
+    """
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
 
 
 def _read_frame(
     symbol_dir: Path, interval: str, months: set[tuple[int, int]] | None = None
 ) -> pl.DataFrame | None:
+    """Read a symbol's interval bars, optionally bounded to given months.
+
+    Parameters
+    ----------
+    symbol_dir
+        The symbol partition root.
+    interval
+        The bar interval to read.
+    months
+        Optional ``(year, month)`` set bounding which month files are read;
+        ``None`` reads all present months.
+
+    Returns
+    -------
+    pl.DataFrame | None
+        The concatenated bars frame, or ``None`` when no files match.
+    """
     frame = read_bars_frame_bounded(symbol_dir, interval, months)
     return None if frame is None or frame.height == 0 else frame
 
 
 def _with_ist(frame: pl.DataFrame) -> pl.DataFrame:
+    """Add a fixed +05:30 IST timestamp column to a UTC bars frame.
+
+    Returns
+    -------
+    pl.DataFrame
+        The input frame with an added IST-shifted timestamp column.
+    """
     ist = frame.get_column("ts_utc").dt.replace_time_zone("UTC").dt.offset_by("5h30m")
     return frame.with_columns(
         ist.dt.date().alias("ist_date"),
@@ -174,6 +205,22 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 def _run_body(
     ctx: AcceptanceContext, *, plan: Any, months: set[tuple[int, int]] | None
 ) -> CheckResult:
+    """Run the stored-data sanity battery over the sampled coordinates.
+
+    Parameters
+    ----------
+    ctx
+        The acceptance context bound to the real lake.
+    plan
+        The sampling plan of coordinates to examine.
+    months
+        Optional ``(year, month)`` bound applied to the reads.
+
+    Returns
+    -------
+    CheckResult
+        The composed sanity check result.
+    """
     from brutex.data.bad_tick import BAD_TICK_MAX_RATIO
     from brutex.data.interior_gap_detect import interior_gap_runs
     from brutex.data.price_sanity import count_price_violations

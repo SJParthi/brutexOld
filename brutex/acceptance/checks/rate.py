@@ -78,10 +78,25 @@ def tail_lines(path: Path, *, cap_bytes: int = TAIL_BYTES_CAP) -> tuple[list[str
 
 
 def _repro(ctx: AcceptanceContext) -> str:
+    """Return the ``brutex verify-acceptance`` reproduce command for this check.
+
+    Returns
+    -------
+    str
+        The CLI invocation that re-runs this check with the run seed.
+    """
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
 
 
 def _constants_sub(ctx: AcceptanceContext) -> Any:
+    """Build the subcheck pinning the Groww rate-limit constants.
+
+    Returns
+    -------
+    Any
+        A subcheck verdict over the per-minute governor and per-second
+        ceiling constants.
+    """
     from brutex.adapters.groww.constants import (
         GROWW_RATE_LIMIT_PER_MIN,
         GROWW_RATE_LIMIT_RPS_CEILING,
@@ -107,12 +122,27 @@ def _constants_sub(ctx: AcceptanceContext) -> Any:
 
 
 def _in_block_window(ist: datetime) -> bool:
+    """Return whether an IST timestamp falls inside the pull-block window.
+
+    Returns
+    -------
+    bool
+        ``True`` when the time is within ``[BLOCK_START, BLOCK_END)``.
+    """
     from brutex.calendars.market_hours import BLOCK_END, BLOCK_START
 
     return BLOCK_START <= ist.time() < BLOCK_END
 
 
 def _market_hours_sub(ctx: AcceptanceContext) -> Any:
+    """Build the subcheck asserting pull journal market-hours conformance.
+
+    Returns
+    -------
+    Any
+        A subcheck verdict over dry-run-false journal records versus the
+        NSE market-hours block window.
+    """
     from brutex.calendars.nse import is_trading_day
     from brutex.observability.pull_journal import read_journal
 
@@ -167,6 +197,13 @@ def _market_hours_sub(ctx: AcceptanceContext) -> Any:
 
 
 def _bridge_sub(ctx: AcceptanceContext) -> Any:
+    """Build the subcheck sampling the pull rate-bridge snapshot.
+
+    Returns
+    -------
+    Any
+        A subcheck verdict over the on-disk rate-bridge point sample.
+    """
     from brutex.data.rate_bridge import read_rate_snapshot
 
     snapshot = read_rate_snapshot(ctx.lake_root)
@@ -215,6 +252,14 @@ def rate_log_paths() -> list[Path]:
 
 
 def _log_window_sub(ctx: AcceptanceContext) -> Any:
+    """Build the subcheck over the rotating rate-log window trend.
+
+    Returns
+    -------
+    Any
+        A subcheck verdict over the bounded rate-log tail, abstaining when
+        no rotating log is present.
+    """
     paths = rate_log_paths()
     if not paths:
         # CASE (1): the rotating structlog sink is ABSENT ENTIRELY. Only
@@ -372,6 +417,14 @@ def _pair_bound_sub(ctx: AcceptanceContext) -> Any:
 
 
 def _per_call_history_sub(ctx: AcceptanceContext) -> Any:
+    """Build the permanent-ABSTAIN per-call-history subcheck.
+
+    Returns
+    -------
+    Any
+        A subcheck that always abstains: no per-call rate record persists,
+        so this evidence class is out of scope (F3 operator ruling).
+    """
     return make_subcheck(
         "rate.per_call_history",
         Verdict.ABSTAIN,

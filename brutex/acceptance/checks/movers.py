@@ -62,6 +62,13 @@ MONEYNESS_RE = re.compile(r"^(ATM|ITM|OTM|\?|—|ITM -[1-9]\d*|OTM \+[1-9]\d*)$"
 
 
 def _repro(ctx: AcceptanceContext) -> str:
+    """Return the ``brutex verify-acceptance`` reproduce command for this check.
+
+    Returns
+    -------
+    str
+        The CLI invocation that re-runs this check with the run seed.
+    """
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
 
 
@@ -81,6 +88,13 @@ def _months_for(day: date) -> set[tuple[int, int]]:
 
 
 def _pct_2dp(text: str) -> Fraction:
+    """Parse a percent string and round it half-up to two decimals.
+
+    Returns
+    -------
+    Fraction
+        The exact two-decimal half-up rounding of ``Fraction(text)``.
+    """
     return ind.half_up_2dp(Fraction(text))
 
 

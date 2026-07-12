@@ -77,6 +77,13 @@ PROBES: Final[tuple[tuple[str, str, dict[str, Any], float, str], ...]] = (
 
 
 def _repro(ctx: AcceptanceContext) -> str:
+    """Return the ``brutex verify-acceptance`` reproduce command for this check.
+
+    Returns
+    -------
+    str
+        The CLI invocation that re-runs this check with the run seed.
+    """
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
 
 

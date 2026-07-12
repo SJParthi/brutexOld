@@ -149,6 +149,23 @@ class RunConfig:
 
 
 def _error_check(check_id: str, exc: BaseException, *, seed: str) -> CheckResult:
+    """Build an ERROR ``CheckResult`` from an exception raised by a check.
+
+    Parameters
+    ----------
+    check_id
+        The check identifier that raised.
+    exc
+        The exception caught while running the check.
+    seed
+        The run seed, echoed into the reproduce command.
+
+    Returns
+    -------
+    CheckResult
+        A single-subcheck ERROR result carrying the exception summary and a
+        bounded traceback tail.
+    """
     tail = traceback.format_exc(limit=5)
     sub = make_subcheck(
         f"{check_id}.error",
@@ -165,6 +182,21 @@ def _error_check(check_id: str, exc: BaseException, *, seed: str) -> CheckResult
 
 
 def _budget_check(check_id: str, *, seed: str) -> CheckResult:
+    """Build an ABSTAIN ``CheckResult`` for a check skipped on budget.
+
+    Parameters
+    ----------
+    check_id
+        The check identifier that did not run.
+    seed
+        The run seed, echoed into the reproduce command.
+
+    Returns
+    -------
+    CheckResult
+        A single-subcheck ABSTAIN result with reason
+        ``TIME_BUDGET_EXHAUSTED``.
+    """
     sub = make_subcheck(
         f"{check_id}.skipped",
         Verdict.ABSTAIN,
@@ -242,6 +274,19 @@ def _run_one_check(
 
 
 def _box_block(ctx: AcceptanceContext) -> dict[str, Any]:
+    """Build the report's ``box`` provenance block.
+
+    Parameters
+    ----------
+    ctx
+        The acceptance context, queried for pull-active state.
+
+    Returns
+    -------
+    dict[str, Any]
+        Hostname, BruteX version, hardware key (or ``None`` on failure), and
+        the current pull-active flag.
+    """
     import brutex
 
     try:
@@ -329,6 +374,13 @@ def _run_with_ctx(
     started: float,
     selftest_runner: Callable[..., selftest.SelfTestResult] | None,
 ) -> tuple[int, dict[str, Any]]:
+    """Mint the run id and run the acceptance pass under the run lock.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        The process exit code and the machine report payload.
+    """
     run_id = report_mod.mint_run_id(clock())
 
     # Cross-process single-flight (round-4 fix B4-1): two overlapping runs
@@ -368,6 +420,13 @@ def _run_locked(
     started: float,
     selftest_runner: Callable[..., selftest.SelfTestResult] | None,
 ) -> tuple[int, dict[str, Any]]:
+    """Run the acceptance pass with the evidence-tree symlink refusal held.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        The process exit code and the machine report payload.
+    """
     # ONE evidence-tree symlink refusal covering EVERY write (round-3 fix
     # B-NEW-1): the round-2 guard sat at report-write time, so the audit
     # chain (and the coverage ledger's warn-only refusal) had already been
@@ -424,6 +483,13 @@ def _run_audited(
     started: float,
     selftest_runner: Callable[..., selftest.SelfTestResult] | None,
 ) -> tuple[int, dict[str, Any]]:
+    """Run the teeth self-test then the composed checks under the audit chain.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        The process exit code and the machine report payload.
+    """
     # ── teeth before trust ─────────────────────────────────────────────
     if cfg.self_test_mode == "skipped":
         teeth = selftest.skipped_selftest()

@@ -178,6 +178,13 @@ def build_twin_lake(
 def _month_file(
     root: Path, symbol: str, interval: str, day: date, *, segment: str = "INDEX"
 ) -> Path:
+    """Return the lake month-partition path for a symbol/interval/day.
+
+    Returns
+    -------
+    Path
+        The ``<root>/bars/.../<yyyy>/<mm>.parquet`` partition path.
+    """
     return (
         root
         / "bars"
@@ -266,6 +273,13 @@ def poison_preopen_bar(root: Path, *, symbol: str, day: date) -> None:
 def _twin_context(
     root: Path, *, now_utc: datetime, client_factory: Callable[[], Any] | None = None
 ) -> AcceptanceContext:
+    """Build an ``AcceptanceContext`` over a self-test twin lake.
+
+    Returns
+    -------
+    AcceptanceContext
+        A context pinned to ``root`` with the fixed self-test seed/clock.
+    """
     return AcceptanceContext(
         lake_root=root,
         seed="selftest",
@@ -277,6 +291,13 @@ def _twin_context(
 
 
 def _check_fails(check: Any) -> bool:
+    """Return whether a check result carries a FAIL verdict.
+
+    Returns
+    -------
+    bool
+        ``True`` if ``check.verdict`` is ``Verdict.FAIL``.
+    """
     return check.verdict is Verdict.FAIL
 
 
@@ -364,6 +385,13 @@ def run_smoke(*, now_utc: datetime | None = None) -> SelfTestResult:
 
 
 def _fresh_copy(clean: Path, dest_root: Path, name: str) -> Path:
+    """Copy the clean twin lake to a fresh named sibling directory.
+
+    Returns
+    -------
+    Path
+        The path of the newly copied ``dest_root/name`` lake.
+    """
     dest = dest_root / name
     shutil.copytree(clean, dest)
     return dest

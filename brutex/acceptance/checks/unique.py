@@ -46,10 +46,31 @@ FNO_SAMPLE_N = 6
 
 
 def _repro(ctx: AcceptanceContext) -> str:
+    """Return the ``brutex verify-acceptance`` reproduce command for this check.
+
+    Returns
+    -------
+    str
+        The CLI invocation that re-runs this check with the run seed.
+    """
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
 
 
 def _abstain_check(ctx: AcceptanceContext, reason: AbstainReason) -> CheckResult:
+    """Build an ABSTAIN ``CheckResult`` for the uniqueness census check.
+
+    Parameters
+    ----------
+    ctx
+        The acceptance context (seed echoed into the reproduce command).
+    reason
+        The named abstain reason.
+
+    Returns
+    -------
+    CheckResult
+        A single-subcheck ABSTAIN result under ``unique.census``.
+    """
     sub = make_subcheck(
         "unique.census",
         Verdict.ABSTAIN,
@@ -146,6 +167,26 @@ def _run_body(
     engine_contracts: list[str],
     months: set[tuple[int, int]] | None,
 ) -> CheckResult:
+    """Run the uniqueness-census check body over sampled coordinates.
+
+    Parameters
+    ----------
+    ctx
+        The acceptance context bound to the real lake.
+    plan
+        The sampling plan of coordinates to examine.
+    contracts
+        The sampled F&O contract series to include.
+    engine_contracts
+        The full-history engine contract series (always examined).
+    months
+        Optional ``(year, month)`` bound applied to the census reads.
+
+    Returns
+    -------
+    CheckResult
+        The composed uniqueness-census check result.
+    """
     from brutex.data.lake_invariants import (
         build_lake_census,
         census_to_dict,

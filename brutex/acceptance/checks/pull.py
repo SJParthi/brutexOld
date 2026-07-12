@@ -58,10 +58,31 @@ _POST_CLOSE_IST = _dt_time(16, 0)
 
 
 def _repro(ctx: AcceptanceContext) -> str:
+    """Return the ``brutex verify-acceptance`` reproduce command for this check.
+
+    Returns
+    -------
+    str
+        The CLI invocation that re-runs this check with the run seed.
+    """
     return f"brutex verify-acceptance --checks {CHECK_ID} --seed {ctx.seed}"
 
 
 def _abstain_check(ctx: AcceptanceContext, reason: AbstainReason) -> CheckResult:
+    """Build an ABSTAIN ``CheckResult`` for the pull re-plan check.
+
+    Parameters
+    ----------
+    ctx
+        The acceptance context (seed echoed into the reproduce command).
+    reason
+        The named abstain reason.
+
+    Returns
+    -------
+    CheckResult
+        A single-subcheck ABSTAIN result under ``pull.replan_zero``.
+    """
     sub = make_subcheck(
         "pull.replan_zero",
         Verdict.ABSTAIN,
@@ -75,6 +96,13 @@ def _abstain_check(ctx: AcceptanceContext, reason: AbstainReason) -> CheckResult
 
 
 def _row_key(rec: Any) -> tuple[str, str, str, str, str]:
+    """Return the identity key for a window-ledger record.
+
+    Returns
+    -------
+    tuple[str, str, str, str, str]
+        ``(market, security_id, interval, window_start, window_end)``.
+    """
     return (rec.market, rec.security_id, rec.interval, rec.window_start, rec.window_end)
 
 
@@ -255,6 +283,22 @@ def _spot_symbol_dir(lake_root: Path, symbol: str) -> Path | None:
 
 
 def _series_dir(lake_root: Path, market: str, security_id: str) -> Path | None:
+    """Resolve the lake series directory for a ledger coordinate.
+
+    Parameters
+    ----------
+    lake_root
+        The lake root directory.
+    market
+        The ledger market namespace (spot vs ``-option``/``-future``).
+    security_id
+        The instrument/contract identifier.
+
+    Returns
+    -------
+    Path | None
+        The series directory, or ``None`` when it cannot be resolved.
+    """
     if market.endswith(("-option", "-future")):
         exchange = security_id.split("-", 1)[0]
         candidate = lake_root / "bars" / exchange / "FNO" / security_id
@@ -296,6 +340,20 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 
 
 def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> CheckResult:
+    """Run the zero-vendor-call re-plan idempotence check body.
+
+    Parameters
+    ----------
+    ctx
+        The acceptance context bound to the real lake.
+    rss
+        The ``(before, after)`` RSS sample bracketing the check body.
+
+    Returns
+    -------
+    CheckResult
+        The composed pull re-plan check result.
+    """
     from brutex.calendars.nse import trading_days_between
     from brutex.data.spot_daily_resample import (
         ist_span_partition_files,

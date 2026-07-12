@@ -128,6 +128,15 @@ class _PerCallReadStore:
 
     @property
     def connection(self) -> Any:
+        """Return a private child read cursor over the shared read catalog.
+
+        Returns
+        -------
+        Any
+            A ``_LockedReadConn`` wrapping a private child cursor guarded by
+            its own ``RLock`` so an unbalanced describe leaks only this view's
+            lock, never the shared read lock.
+        """
         import threading
 
         from brutex.data.instrument_store import _LockedReadConn
@@ -140,6 +149,7 @@ class _PerCallReadStore:
         return _LockedReadConn(cursor, threading.RLock(), ensure_ready=store._ensure_not_wedged)
 
     def close(self) -> None:
+        """Close the wrapped instrument store."""
         object.__getattribute__(self, "_store").close()
 
     def __getattr__(self, name: str) -> Any:
@@ -350,6 +360,14 @@ class AcceptanceContext:
         return self._pull_active
 
     def _probe_pull_active(self) -> bool:
+        """Return whether a pull is live via the journal or a fresh lease.
+
+        Returns
+        -------
+        bool
+            ``True`` if the pull journal reports a live run or the pull-lease
+            sidecar under ``.locks`` is fresh, else ``False``.
+        """
         now = self.now_utc()
         if _journal_run_live(self.lake_root, now=now):
             return True
