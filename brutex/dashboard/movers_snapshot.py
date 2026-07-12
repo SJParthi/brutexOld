@@ -804,6 +804,21 @@ def _row_to_bar(row: Mapping[str, Any]) -> CandleBar:
     )
 
 
+def _ist_minute_of_day_expr(ts_col: str) -> pl.Expr:
+    """IST minute-of-day expression for *ts_col* (the ONE copy — CLAUDE.md §11 COMMON).
+
+    Cast to Int32 BEFORE the arithmetic — ``dt.hour()``/``dt.minute()`` are narrow
+    signed ints (Int8), so ``hour * 60`` overflows (e.g. 15*60=900 wraps to a
+    negative Int8); the cast gives the true minute-of-day. Shared by the as-of cut
+    (:func:`filter_to_ist_minute`) and the stored-freshness guard's day-max reads
+    (:func:`_max_ist_minute` — DEC-MOVERS-STORED-FRESHNESS-001).
+    """
+    import polars as pl
+
+    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
+    return ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
+
+
 def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -> pl.DataFrame:
     """Keep only *frame*'s rows whose IST minute-of-day is ``≤ cutoff_min``.
 
@@ -831,14 +846,7 @@ def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -
     ts_col
         The timestamp column name to convert + compare on.
     """
-    import polars as pl
-
-    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
-    # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
-    # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
-    # wraps to a negative Int8); the cast gives the true minute-of-day.
-    minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
-    return frame.filter(minute_of_day <= cutoff_min)
+    return frame.filter(_ist_minute_of_day_expr(ts_col) <= cutoff_min)
 
 
 def _read_cut_1m_frame(
@@ -1018,6 +1026,124 @@ def _stored_serves_cutoff(minutes: int, cutoff_min: int | None) -> bool:
     return (cutoff_min - _SESSION_OPEN_MIN + 1) % minutes == 0
 
 
+def _max_ist_minute(frame: pl.DataFrame, ts_col: str = "ts_utc") -> int:
+    """Max IST minute-of-day in *frame* (non-empty by contract)."""
+    return int(frame.select(_ist_minute_of_day_expr(ts_col).max()).item())
+
+
+def _base_day_max_minute(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
+) -> int | None:
+    """The 1-minute base's LAST minute-of-day for *day* (uncut), or ``None`` (no base).
+
+    The freshness guard's evidence read (DEC-MOVERS-STORED-FRESHNESS-001): the UNCUT
+    whole-day 1-minute frame via the shared :func:`_read_cut_1m_frame`
+    (``cutoff_min=None`` — the guard compares BOTH sides on the same whole-day
+    domain, never cut-vs-uncut). Month-bounded, O(one month).
+    """
+    base = _read_cut_1m_frame(
+        lake_root,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        day=day,
+        cutoff_min=None,
+    )
+    return None if base is None else _max_ist_minute(base)
+
+
+def _stored_day_is_fresh(
+    stored_day: pl.DataFrame, *, minutes: int, base_max_min: int | None
+) -> bool:
+    """DAY-scoped grid-aware freshness: the stored last bucket covers the base's last minute.
+
+    Stored buckets are bucket-OPEN stamped, so fresh ⇔
+    ``stored_max_open_min + minutes > base_max_min`` on the UNCUT day frames
+    (DEC-MOVERS-STORED-FRESHNESS-001 — the naive ``stored_max >= base_max`` compare
+    would false-stale EVERY fresh TF>1minute lake). ``base_max_min is None`` (no
+    1-minute evidence) ⇒ ``True`` — fail-open serve-stored: falling back would
+    return ``[]`` and DROP the row, strictly worse on a TF-only lake.
+    """
+    if base_max_min is None:
+        return True
+    return _max_ist_minute(stored_day) + minutes > base_max_min
+
+
+#: Hard cap on ``movers.stored_stale_fallback`` warnings per candidate build — a
+#: whole-lake stale prebuild (e.g. a crashed pipeline) must not flood the log with
+#: one WARN per instrument; past the cap ONE suppressed-summary event is emitted
+#: and the rest are counted. A SEPARATE state from the noncontiguous warner so
+#: neither warn family can starve the other's cap.
+_STORED_STALE_WARN_CAP: Final[int] = 20
+
+
+@dataclass(slots=True)
+class _StoredStaleWarnState:
+    """Per-candidate-build state for the capped stale-stored-fallback warner.
+
+    Function-local per ``compute_spot_candidates`` call (CLAUDE.md §4 — never
+    module-global); ``seen`` dedupes per ``(symbol, interval)``; :meth:`reset`
+    is the test seam.
+    """
+
+    emitted: int = 0
+    seen: set[tuple[str, str]] = field(default_factory=set)
+    suppressed: int = 0
+
+    def reset(self) -> None:
+        """Reset the state (test seam — a fresh build constructs a fresh state)."""
+        self.emitted = 0
+        self.seen.clear()
+        self.suppressed = 0
+
+
+def warn_stored_stale_fallback(
+    state: _StoredStaleWarnState,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    snapshot_day: date_cls,
+    stored_max_ist: str,
+    base_max_ist: str,
+) -> None:
+    """Emit ONE capped, deduped ``movers.stored_stale_fallback`` WARNING per build.
+
+    DEC-MOVERS-STORED-FRESHNESS-001. Deduped per ``(symbol, interval)`` within one
+    build; hard-capped at :data:`_STORED_STALE_WARN_CAP` per build — the first
+    past-cap event emits ONE ``movers.stored_stale_fallback_suppressed`` summary
+    (``cap=`` + ``snapshot_day=``), later ones only increment ``state.suppressed``.
+    WARNING level (the noncontiguous "data is suspect" tier): a stale partition is
+    an operator-actionable lake state — the served row itself is correct
+    post-fallback; the prebuild remains the heal.
+    """
+    key = (symbol, interval)
+    if key in state.seen:
+        return
+    state.seen.add(key)
+    if state.emitted >= _STORED_STALE_WARN_CAP:
+        state.suppressed += 1
+        if state.suppressed == 1:
+            _LOG.warning(
+                "movers.stored_stale_fallback_suppressed",
+                cap=_STORED_STALE_WARN_CAP,
+                snapshot_day=snapshot_day.isoformat(),
+            )
+        return
+    state.emitted += 1
+    _LOG.warning(
+        "movers.stored_stale_fallback",
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        interval=interval,
+        snapshot_day=snapshot_day.isoformat(),
+        stored_max_ist=stored_max_ist,
+        base_max_ist=base_max_ist,
+    )
+
+
 def _read_intraday_bars(
     lake_root: Path,
     *,
@@ -1029,6 +1155,7 @@ def _read_intraday_bars(
     minutes: int,
     cutoff_min: int | None,
     prefer_resample: bool = False,
+    stale_warn_state: _StoredStaleWarnState | None = None,
 ) -> tuple[list[CandleBar], bool]:
     """STORED-FIRST intraday day read → ``(bars, from_stored)``.
 
@@ -1077,6 +1204,30 @@ def _read_intraday_bars(
     in-process pipeline case is already gated by the process-local
     ``PrebuildGate``; this closes the cross-PROCESS half — the probe is a
     point-in-time signal, refreshed on every poll.
+
+    **Stored-freshness guard (DEC-MOVERS-STORED-FRESHNESS-001):** the FOURTH member
+    of the stored-branch decision family (*prefer_resample* /
+    :func:`_stored_serves_cutoff` / ``derive_in_progress`` / this guard). A stored
+    TF partition that predates the 1-minute base (a CLI-only pull / quarantined /
+    crashed / partial prebuild) would serve a stale LTP/volume beside fresh
+    1m-sourced turnover — so a stored day frame is served only when
+    :func:`_stored_day_is_fresh` holds: the DAY-scoped grid-aware predicate
+    ``stored_max_open_min + minutes > base_day_max_min`` on the UNCUT day frames
+    (stored buckets are bucket-OPEN stamped; both sides compared on the same
+    whole-day domain, never cut-vs-uncut). ``interval="1minute"`` is the identity
+    arm — its stored partition IS the base, so the guard pays ZERO extra reads; a
+    missing base fail-opens to serve-stored (falling back would drop the row).
+    STALE ⇒ the EXISTING :func:`_read_session_bars` fallback below — the
+    byte-equality REFERENCE path, so the served values are correct by construction
+    and only the provenance flips into ``resampled_reads`` (no new payload field —
+    the derive-lock precedent), with ONE capped ``movers.stored_stale_fallback``
+    WARNING per (symbol, interval) per build via *stale_warn_state* (``None`` — the
+    default for direct/test callers — falls back silently). Honest residual: a
+    mid-session live-edge PARTIAL last bucket whose label covers the base's last
+    minute passes the guard — a ≤(minutes−1)-minute sliver that trips the predicate
+    the moment the base extends past the bucket window, self-heals on the next
+    prebuild (latest-wins), and is in-process-covered by *prefer_resample* during
+    pulls.
     """
     if (
         not prefer_resample
@@ -1092,15 +1243,37 @@ def _read_intraday_bars(
             day=day,
         )
         if stored is not None:
-            # A bucket-final-aligned cutoff keeps exactly the fully-elapsed
-            # buckets when cut on the bucket-OPEN minute (open ≤ cutoff ⇒ the
-            # bucket's last minute ≤ cutoff, by alignment).
-            res = (
-                stored
-                if cutoff_min is None
-                else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
-            )
-            return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
+            if minutes == 1:
+                base_max: int | None = None
+                stale = False  # identity: the stored 1minute partition IS the base.
+            else:
+                base_max = _base_day_max_minute(
+                    lake_root, exchange=exchange, segment=segment, symbol=symbol, day=day
+                )
+                stale = not _stored_day_is_fresh(stored, minutes=minutes, base_max_min=base_max)
+            if not stale:
+                # A bucket-final-aligned cutoff keeps exactly the fully-elapsed
+                # buckets when cut on the bucket-OPEN minute (open ≤ cutoff ⇒ the
+                # bucket's last minute ≤ cutoff, by alignment).
+                res = (
+                    stored
+                    if cutoff_min is None
+                    else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
+                )
+                return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
+            if stale_warn_state is not None and base_max is not None:
+                # `stale ⇒ base_max is not None` by construction (the fail-open arm
+                # never reads stale) — the second conjunct is the mypy narrow.
+                warn_stored_stale_fallback(
+                    stale_warn_state,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=interval,
+                    snapshot_day=day,
+                    stored_max_ist=minute_to_hhmm(_max_ist_minute(stored)),
+                    base_max_ist=minute_to_hhmm(base_max),
+                )
     return (
         _read_session_bars(
             lake_root,
@@ -1684,6 +1857,7 @@ def compute_spot_candidates(
     resampled_reads = 0
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
+    stale_warn_state = _StoredStaleWarnState()
     expected_session_for = make_expected_session_resolver(day)
     for dataset in spot_datasets:
         try:
@@ -1709,6 +1883,7 @@ def compute_spot_candidates(
                     minutes=minutes,
                     cutoff_min=cutoff_min,
                     prefer_resample=prefer_resample,
+                    stale_warn_state=stale_warn_state,
                 )
             # Skip the prior-day 1-day read entirely when the symbol had no bars on
             # the selected day (no point computing a baseline for nothing).

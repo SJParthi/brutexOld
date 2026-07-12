@@ -33,6 +33,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import structlog.testing
 
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
@@ -349,14 +350,19 @@ def _poison_stored_5minute(lake: Path, symbol: str = "NIFTY") -> None:
 
 class TestPreferResampleUnderPull:
     def test_prefer_resample_bypasses_stale_stored_partition(self, tmp_path: Path) -> None:
-        """REGRESSION (DEC-MOVERS-GATE-PREBUILD-SCOPE-001; fail-before proven):
-        on origin/main ``compute_spot_candidates`` has no ``prefer_resample``
-        parameter (this test errors with ``TypeError``), and behaviourally the
-        aligned stored partition ALWAYS won — the ``prefer_resample=False`` arm
-        below pins exactly that old behaviour serving the POISONED stale close.
-        With ``prefer_resample=True`` (the route's pull-active switch) the read
-        bypasses the stale stored partition and reproduces the fresh 1-minute
-        resample byte-identically."""
+        """DELIBERATELY FLIPPED default arm (DEC-MOVERS-STORED-FRESHNESS-001).
+
+        Historically (DEC-MOVERS-GATE-PREBUILD-SCOPE-001) the aligned stored
+        partition ALWAYS won, so the default arm pinned the POISONED stale close
+        being served and ``prefer_resample`` was the only escape. The stored-first
+        read is now freshness-guarded: the poison (one 09:15 bucket, max-open 555;
+        555 + 5 = 560 ≤ 564 = the base's 09:24 day-max) reads STALE by the
+        day-scoped grid-aware predicate, so the DEFAULT read falls back to the
+        fresh 1-minute resample byte-identically with ONE
+        ``movers.stored_stale_fallback`` WARNING. ``prefer_resample`` remains the
+        mid-pull belt (its arm below is byte-unchanged). This flip is the
+        bugfix-reversion-check satisfier: it fails with the guard reverted, by
+        construction."""
         _seed_spot(tmp_path, "NIFTY", 20000)
         # The truth: what the fresh 1-minute data resamples to (no stored TF yet).
         reference = compute_spot_candidates(
@@ -365,11 +371,18 @@ class TestPreferResampleUnderPull:
         assert (reference.stored_reads, reference.resampled_reads) == (0, 1)
         # A STALE stored partition lands (prior pull's prebuild, poisoned close).
         _poison_stored_5minute(tmp_path)
-        stored_first = compute_spot_candidates(
-            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
-        )
-        assert (stored_first.stored_reads, stored_first.resampled_reads) == (1, 0)
-        assert stored_first.snapshots != reference.snapshots  # the stale poison is visible
+        with structlog.testing.capture_logs() as logs:
+            stored_first = compute_spot_candidates(
+                lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
+            )
+        # The freshness guard catches the stale partition — the read falls back to
+        # the 1-minute resample (provenance flips) and serves the TRUTH.
+        assert (stored_first.stored_reads, stored_first.resampled_reads) == (0, 1)
+        assert stored_first.snapshots == reference.snapshots
+        stale_events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert len(stale_events) == 1
+        assert stale_events[0]["symbol"] == "NIFTY"
+        assert stale_events[0]["interval"] == "5minute"
         # The pull-active switch: the resample wins — fresh, byte-identical to truth.
         fresh = compute_spot_candidates(
             lake_root=tmp_path,

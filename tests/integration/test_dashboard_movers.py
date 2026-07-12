@@ -948,6 +948,37 @@ class TestMoversAsofLatestDefault:
         assert default["price_gainers"][0]["ltp"] == "₹22,000.00"
         assert default["asof_through"] is None  # no explicit pick → no bucket provenance
 
+    def test_default_latest_close_identical_with_stale_stored_tf(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """DEC-MOVERS-STORED-FRESHNESS-001: the invariant holds on a STALE-stored lake.
+
+        The DEC-MOVERS-ASOF-LATEST-DEFAULT-001 pin above runs on a lake with no
+        stored TF partitions, so it could never see the stale-stored divergence: a
+        stale prebuilt 3minute partition (one 09:15 bucket, close 21111 — a crashed
+        / partial prebuild) previously SERVED that stale close on the whole-day
+        default while 1minute read 22000. The freshness guard falls back to the
+        1-minute resample, so the no-time default reads the IDENTICAL latest close
+        across every timeframe again. Fail-before: pre-guard, 3minute reads
+        ₹21,111.00.
+        """
+        _seed_finalized_day_lake(tmp_path)
+        # A STALE stored 3minute partition: one bucket-open 09:15 bar (555);
+        # 555 + 3 = 558 ≤ 929 (the base's 15:29) → stale by the day-scoped guard.
+        _write(
+            tmp_path,
+            "NIFTY",
+            "3minute",
+            [_min_bar(hour=9, minute=15, close="21111", volume=50)],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        ltps: set[str] = set()
+        for tf in ("1minute", "3minute", "5minute"):
+            body = client.get("/api/v1/movers", params={"asset": "spot", "interval": tf}).json()
+            assert body["date"] == "2024-06-13"
+            ltps.add(body["price_gainers"][0]["ltp"])
+        assert ltps == {"₹22,000.00"}, ltps  # ONE value — the stale partition never serves
+
     def test_default_intraday_echoes_latest_time_and_null_time(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
