@@ -366,10 +366,11 @@ seam neither narrows nor widens that envelope. FLIP PRECONDITION: byte
 identity is enforced only by the NON-REQUIRED parity lane — the default-ON
 flip DEC must make it required or cite a fresh green run.
 
-## 10. PR-2 shipped surface (2026-07-11 — appended when PR-2 landed on its branch, same DEC)
+## 10. PR-2 shipped surface (2026-07-11 — appended when PR-2 landed on its branch; steward-assigned its own ledger row `DEC-RUST-DATALAKE-IO-SLICE8-PR2-001`, MIGRATION.md #1771)
 
 The §3 PR-2 gate set is IMPLEMENTED on the stacked PR-2 branch (full record:
-the PR-2 draft segment of MIGRATION.md — steward-assigned row): the option
+MIGRATION.md #1771 — DEC-RUST-DATALAKE-IO-SLICE8-PR2-001, the PR-2 row under
+this roadmap DEC): the option
 writer's ALL-DEFAULTS render seam — the ENTIRE `option_parquet_writer.py`
 diff confined to `_atomic_write_parquet`'s body + one new module-level
 oracle helper `_defaults_python_render` (flag-OFF is the LITERAL legacy

@@ -47,11 +47,11 @@ crate + the default-OFF `BRUTEX_LAKE_RUST_RENDER` render seam with import/versio
 guards + burn-in autorevert; the byte-parity corpus green locally, and the 5-lens
 adversarial-review fix round folded pre-merge — the §1
 Active-branch blurb + the MIGRATION.md #1726 PR-1 segment carry the record), and
-PR-2 (the option-writer ALL-DEFAULTS render seam — same DEC, the render-PROFILE
+PR-2 (the option-writer ALL-DEFAULTS render seam — its OWN steward-assigned row
+DEC-RUST-DATALAKE-IO-SLICE8-PR2-001, MIGRATION.md #1771, the render-PROFILE
 registry on the ONE facade, the 12-case options corpus 12/12 byte-MATCH) has
 since shipped on the STACKED `claude/rust-datalake-io-slice8-pr2` branch — the
-§1 Active-branch blurb + the MIGRATION draft PR-2 segment (ledger row
-steward-assigned) carry that record.)
+§1 Active-branch blurb + MIGRATION.md #1771 carry that record.)
 Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
 the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
 pollers consolidate onto ONE BXPoll-disciplined consumer per endpoint (subscriber
@@ -2202,8 +2202,9 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-datalake-io-slice8-pr2` (**DEC-RUST-DATALAKE-IO-ROADMAP-001,
-  MIGRATION.md #PENDING-STEWARD (the PR-2 draft segment — ledger row steward-assigned)** —
+- **Active branch:** `claude/rust-datalake-io-slice8-pr2` (**DEC-RUST-DATALAKE-IO-SLICE8-PR2-001,
+  MIGRATION.md #1771 (its own steward-assigned ledger row; parent roadmap
+  DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726)** —
   PR-2 of the datalake Rust conversion roadmap (the roadmap ADR at
   `docs/adr/0019-datalake-rust-conversion-roadmap.md` §3/§10), STACKED on the PR-1
   branch's head 283247ed (the PR opens only after the PR-1 PR merges — the
@@ -2249,8 +2250,8 @@ hostile-review pass._
   NO per-write runtime witness on the options path (`raw_hash=None` by design —
   scope lock); mutation coverage NOT claimed (neither module in mutation.yml's
   mutmut paths). ADVERSARIAL-REVIEW FIX ROUND folded (2026-07-11, same branch,
-  pre-merge — 5 hostile lenses, all SHIP; the per-item record lives in the
-  MIGRATION draft PR-2 segment): the two PR-2 thread-fuzz concurrency arms
+  pre-merge — 5 hostile lenses, all SHIP; the per-item record lives in
+  MIGRATION.md #1771): the two PR-2 thread-fuzz concurrency arms
   (two-profile shared latch · past-cap novel shapes) + the narrowed facade
   docstring claim, the crate doc-comments' "untruncated" statistics gloss
   corrected to the observed 64-byte truncation default (the crate no longer
@@ -5685,8 +5686,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-datalake-io-slice8-pr2`
-  (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #PENDING-STEWARD — the
-  PR-2 draft segment, ledger row steward-assigned; PR-2 of the datalake
+  (DEC-RUST-DATALAKE-IO-SLICE8-PR2-001, MIGRATION.md #1771 — its own
+  steward-assigned ledger row; parent roadmap
+  DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726; PR-2 of the datalake
   Rust conversion roadmap, STACKED on the PR-1 branch's head 283247ed —
   the PR opens only after the PR-1 PR merges: the option writer's
   ALL-DEFAULTS render seam (`_atomic_write_parquet` → the ONE
@@ -5698,7 +5700,7 @@ hostile-review pass._
   MATCH + whole-path write/heal/merge/heal_findings ON/OFF twins + rails
   R1–R14; payoff ≈ 0 banner verbatim; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  the MIGRATION draft segment for the full blurb)
+  MIGRATION.md #1771 for the full blurb)
   Earlier: `claude/rust-datalake-io-slice8`
   (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726 — slice 8 of the
   Rust-first conversion program, the data-lake I/O layer: the panel's
