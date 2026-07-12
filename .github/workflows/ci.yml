@@ -2704,7 +2704,14 @@ jobs:
   bench:
     name: Benchmarks (O(1) NFR gates)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Budget raised 15 -> 25 (DEC-CI-SWEEP-REHEARSAL-TIMEOUT-001, #1765):
+    # a banked observation put the real bench wall-time at ~10.9 min, only
+    # ~4.1 min under the old 15-min cap (~27% headroom) — thin enough that a
+    # single shared-runner contention spike (like the R38 spike on PR #1462)
+    # could auto-cancel it. Budget-for-contention only; the O(1) ratio
+    # ceilings in tests/bench/_o1_tiers.py are UNTOUCHED (a real perf
+    # regression still fails the ratio gate, Golden Rule #10).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -3263,14 +3270,28 @@ jobs:
   # branch-protection required context, so the drift snapshot in
   # branch-protection-drift.yml is untouched. Measured 2026-07-07:
   # BOTH files together = 21 tests in ~29 s (first pass 6.9 s, resume
-  # 5.8 s, adversarial 6.9 s) on a shared-runner-class box — the
-  # 15-min timeout is generous headroom, minutes not hours (the R38
-  # "2-day run in miniature" budget claim).
+  # 5.8 s, adversarial 6.9 s) on a shared-runner-class box — minutes
+  # not hours (the R38 "2-day run in miniature" budget claim).
+  # Budget raised 15 -> 30 (DEC-CI-SWEEP-REHEARSAL-TIMEOUT-001, #1765):
+  # on PR #1462 (2026-07-11) the rehearsal's 21 tests PASSED
+  # (tuples_failed=0) but the JOB hit the old 15-min cap at 17:48. That
+  # wall-time was dominated by the job's install + the two from-source
+  # cargo Rust wheel builds (fno-math + trading-core, each with a 3x
+  # network-retry loop) — the flaky, contention-sensitive setup phases
+  # — NOT sweep compute. The sweep-compute leg has its own hard in-test
+  # ceiling `seconds_first < 300.0`
+  # (tests/integration/test_sweep_full_chain_rehearsal.py:255), which
+  # the 21 tests PASSED on #1462 — so the sweep ran in under 5 min even
+  # during the contended run, and this timeout raise CANNOT mask a
+  # sweep regression (a real slowdown trips that 300s assertion and
+  # fails the tests regardless of the job timeout). The raise gives
+  # budget for the setup/build spike; a real sweep regression is fixed
+  # in the sweep, not the timeout (Golden Rule #10).
   # ─────────────────────────────────────────────────────────────────
   sweep-rehearsal:
     name: Sweep full-chain rehearsal (R38)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
