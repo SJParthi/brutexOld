@@ -947,10 +947,37 @@ jobs:
           # backup_repo_corrupt) + the module-level emit_backup_failed_alert
           # are covered by the sibling test_notifications_sweep_alerts_backup
           # suite added to the invocation.
+          # DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1753): the two
+          # cross-verify alert methods (crossverify_summary /
+          # crossverify_refused) + the module-level emit helpers are covered
+          # by the sibling test_notifications_sweep_alerts_crossverify suite
+          # added to the invocation.
           if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
-            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_notifications_sweep_alerts_runcore.py tests/unit/test_notifications_sweep_alerts_greeks_backfill.py tests/unit/test_notifications_sweep_alerts_backup.py tests/unit/test_sweep_alerts_nightly.py
+            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_notifications_sweep_alerts_runcore.py tests/unit/test_notifications_sweep_alerts_greeks_backfill.py tests/unit/test_notifications_sweep_alerts_backup.py tests/unit/test_sweep_alerts_nightly.py tests/unit/test_notifications_sweep_alerts_crossverify.py
           else
             echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
+          fi
+          # DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1753) +
+          # DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1754) +
+          # DEC-CROSSVERIFY-DAY-DERIVE-001 (#1755): the daily TickVault
+          # cross-verify producer — every brutex/crossverify module ships at
+          # 100% line+branch STANDALONE under its dedicated unit file (the
+          # real boto3 client build is the ONE sanctioned pragma; FakeS3Client
+          # drives the publisher — boto3 stays OUT of CI).
+          if compgen -G "tests/unit/test_crossverify_config.py" > /dev/null; then
+            pytest --cov=brutex.crossverify.config       --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_config.py
+            pytest --cov=brutex.crossverify.canonical    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_canonical.py
+            pytest --cov=brutex.crossverify.csv_render   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_csv_render.py
+            pytest --cov=brutex.crossverify.gate_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_gate_seam.py
+            pytest --cov=brutex.crossverify.day_export   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_day_export.py
+            pytest --cov=brutex.crossverify.journal      --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_journal.py
+            pytest --cov=brutex.crossverify.s3_publish   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_s3_publish.py
+            pytest --cov=brutex.crossverify.pull_leg     --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_pull_leg.py
+            pytest --cov=brutex.crossverify.prebuild_leg --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_prebuild_leg.py
+            pytest --cov=brutex.crossverify.run          --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_run.py
+            pytest --cov=brutex.crossverify.schedule     --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_schedule.py
+          else
+            echo "(brutex.crossverify test files not present yet — gate inactive)"
           fi
           # DEC-TELEGRAM-WIRING-001 (2026-05-25, MIGRATION entry #238):
           # ratchet brutex.notifications.wiring (the Telegram⇄pipeline
