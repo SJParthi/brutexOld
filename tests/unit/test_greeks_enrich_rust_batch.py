@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from structlog.typing import EventDict
 
 _CE_SYMBOL = "NSE-NIFTY-25Jan24-21500-CE"
-_PE_SYMBOL = "NSE-NIFTY-25Jan24-21500-PE"
 _EXPIRY = date(2024, 1, 25)
 #: 2024-01-15 09:15 IST — ten days before expiry, a comfortably-solvable T.
 _BAR_TS = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)

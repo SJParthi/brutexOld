@@ -513,12 +513,15 @@ class TestBatchFace:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A length-lying kernel is refused by ``strict=True``, never truncated."""
-        import brutex.options.greeks as greeks_mod
 
         def _short(*_args: object) -> list[object]:
             return []
 
-        monkeypatch.setattr(greeks_mod.trading_core, "greeks_batch", _short)
+        # ``brutex.options.greeks`` binds ``import trading_core`` and resolves
+        # ``trading_core.greeks_batch`` at call time, so patching the shared
+        # wheel module object (already imported at the top of this file) hits
+        # exactly the seam the wrapper reads.
+        monkeypatch.setattr(trading_core, "greeks_batch", _short)
         with pytest.raises(ValueError, match="zip"):
             compute_greeks_batch(self._matrix()[:1])
 
