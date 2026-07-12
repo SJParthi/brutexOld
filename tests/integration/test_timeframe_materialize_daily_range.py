@@ -105,6 +105,7 @@ class TestDailyRangePrebuildWiring:
             _derive(lake)
         known = [e for e in logs if e["event"] == DAILY_RANGE_KNOWN_EVENT]
         assert [e["session_date"] for e in known] == ["2020-03-23"]
+        assert known[0]["log_level"] == "info"
         assert known[0]["reason"] == "market_wide_circuit_halt"
         warns = [e for e in logs if e["event"] == DAILY_RANGE_EVENT]
         assert [e["session_date"] for e in warns] == ["2024-01-03"]

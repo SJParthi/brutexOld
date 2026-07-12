@@ -185,6 +185,7 @@ class TestEmitExtremeDailyRanges:
             emit_extreme_daily_ranges(days, symbol="NIFTY")
         infos = [e for e in logs if e["event"] == DAILY_RANGE_KNOWN_EVENT]
         assert len(infos) == 1
+        assert infos[0]["log_level"] == "info"
         assert infos[0]["reason"] == "market_wide_circuit_halt"
         assert "no action needed" in infos[0]["remediation"]
         assert [e for e in logs if e["event"] == DAILY_RANGE_EVENT] == []
