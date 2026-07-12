@@ -197,18 +197,24 @@ def test_auto_grow_covers_persisted_and_respects_the_wall_or_raises(
         grown = _auto_grow_capacity(capacity, persisted, fpr)
     except SweepCacheCapacityError:
         # The raise arm fires ONLY when a genuine grow was needed and its
-        # sizing busts the wall — re-derived independently here.
-        assert persisted > capacity
+        # sizing busts the wall — re-derived independently here. The exact
+        # ``persisted == capacity`` boundary joins the FAIL_CLOSED arm
+        # (DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001).
+        assert persisted >= capacity
         would_grow = max(math.ceil(persisted * 1.25), math.ceil(capacity * 1.25))
         assert _compute_m_bytes(would_grow, fpr) > MAX_BLOOM_BYTES
     else:
         assert grown >= persisted
-        if persisted <= capacity:
+        if persisted < capacity:
             assert grown == capacity  # identity arm — byte-identical behaviour.
         else:
-            # C6 fix: the grow leaves HEADROOM above *persisted* (25%) so a
-            # resumed sweep records NEW tuples, not just rebuilds — the old
-            # ``max(persisted, …)`` sized to exactly *persisted* (zero headroom).
+            # C6 fix + the exact-boundary fix (DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001):
+            # the grow leaves HEADROOM above *persisted* (25%) so a resumed
+            # sweep records NEW tuples, not just rebuilds — the old
+            # ``max(persisted, …)`` sized to exactly *persisted* (zero headroom),
+            # and the old ``<=`` identity arm let ``persisted == capacity`` open
+            # a FULL Bloom. ``grown > persisted`` holds at the boundary too
+            # (ceil(1 × 1.25) = 2).
             assert grown == max(math.ceil(persisted * 1.25), math.ceil(capacity * 1.25))
             assert grown > persisted
             assert _compute_m_bytes(grown, fpr) <= MAX_BLOOM_BYTES

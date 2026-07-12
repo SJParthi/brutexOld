@@ -98,7 +98,9 @@ class SweepCacheCapacityError(SweepCacheError):
     """The persisted L2 exact-store cannot be faithfully mirrored into an L1 Bloom.
 
     Since the STEP-1 bounded auto-grow (DEC-ENGINE-MISC-PACK-001), a resume whose
-    persisted digest count exceeds the configured ``bloom_capacity`` is first
+    persisted digest count reaches or exceeds the configured ``bloom_capacity``
+    (the exact ``persisted == capacity`` boundary included —
+    DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001) is first
     RESIZED via :func:`_auto_grow_capacity` — ``max(ceil(persisted × 1.25),
     ceil(capacity × 1.25))`` — provided the grown bit array still fits the
     :data:`brutex.orchestrator.bloom.MAX_BLOOM_BYTES` 16 GiB hardware-envelope
@@ -207,8 +209,12 @@ def _auto_grow_capacity(configured_capacity: int, persisted: int, fpr_target: fl
     overflow. STEP 1 grows the capacity AUTOMATICALLY — but only inside the
     hardware envelope:
 
-    * ``persisted <= configured_capacity`` → the configured capacity,
-      byte-identical behaviour (no grow, no log);
+    * ``persisted < configured_capacity`` → the configured capacity,
+      byte-identical behaviour (no grow, no log); the EXACT boundary
+      ``persisted == configured_capacity`` GROWS — a Bloom rebuilt to exactly
+      its capacity is FULL, so the first new ``record_digest`` would trip
+      :class:`BloomCapacityExceeded` (the #1714 residue this closes,
+      DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001);
     * otherwise → ``grown = max(ceil(persisted × 1.25),
       ceil(configured_capacity × 1.25))`` — the ``ceil(persisted × 1.25)`` arm
       leaves HEADROOM ABOVE *persisted* (25%) so the resume rebuild fills the
@@ -247,14 +253,16 @@ def _auto_grow_capacity(configured_capacity: int, persisted: int, fpr_target: fl
     -------
     int
         The effective capacity to build the resume Bloom with — always
-        ``>= persisted``.
+        strictly ``> persisted`` (the identity arm requires
+        ``persisted < configured_capacity``; the grow arm leaves 25% headroom;
+        DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001).
 
     Raises
     ------
     SweepCacheCapacityError
         When the grown capacity's bit array would exceed the 16 GiB wall.
     """
-    if persisted <= configured_capacity:
+    if persisted < configured_capacity:
         return configured_capacity
     # Imported lazily — bloom pulls the runtime-only fastbloom_rs wheel; this
     # module must stay importable without it (same rationale as the resolvers).
@@ -469,8 +477,11 @@ class SweepCache:
 
         **STEP-1 bounded auto-grow (DEC-ENGINE-MISC-PACK-001):** the exact store
         is opened FIRST and the Bloom capacity is pre-sized from its persisted
-        count via :func:`_auto_grow_capacity` — a resume holding MORE digests
-        than the configured ``bloom_capacity`` auto-grows to
+        count via :func:`_auto_grow_capacity` — a resume holding AS MANY OR MORE
+        digests than the configured ``bloom_capacity`` (the exact
+        ``persisted == capacity`` boundary included,
+        DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001 — a Bloom rebuilt to exactly its
+        capacity is FULL, so the first new record would trip it) auto-grows to
         ``max(ceil(persisted × 1.25), ceil(capacity × 1.25))`` (one loud
         ``sweep_cache.bloom_auto_grow`` event) — HEADROOM above *persisted* so
         the resumed sweep can record NEW tuples, not just rebuild — instead of
@@ -478,7 +489,8 @@ class SweepCache:
         the grown bit array fits the 16 GiB
         :data:`~brutex.orchestrator.bloom.MAX_BLOOM_BYTES` wall; above the wall
         the FAIL_CLOSED refusal stays, naming the sharded / mmap'd Bloom
-        follow-up. A within-capacity resume is byte-identical to before.
+        follow-up. A strictly-within-capacity (``persisted < capacity``) resume
+        is byte-identical to before.
 
         Parameters
         ----------
@@ -552,8 +564,10 @@ class SweepCache:
         rather than tripping the Bloom's own :class:`BloomCapacityExceeded`
         part-way through the rebuild (which would leave a partially-populated
         Bloom). Since the STEP-1 auto-grow (DEC-ENGINE-MISC-PACK-001) :meth:`open`
-        pre-sizes ``bloom_capacity >= persisted`` via :func:`_auto_grow_capacity`,
-        so this guard is DEFENCE-IN-DEPTH — unreachable from :meth:`open`, kept
+        pre-sizes the capacity via :func:`_auto_grow_capacity` — strictly
+        ``> persisted`` whenever the store is non-empty (the exact boundary
+        grows too, DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001) — so this guard is
+        DEFENCE-IN-DEPTH — unreachable from :meth:`open`, kept
         as the invariant check for any direct caller.
         """
         persisted = len(exact)

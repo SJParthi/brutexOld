@@ -529,8 +529,38 @@ def test_resumed_over_capacity_records_more_than_one_new_tuple(tmp_path: Path) -
             assert resumed.seen(new_mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
 
 
+def test_resume_at_exact_capacity_boundary_records_new_tuple(tmp_path: Path) -> None:
+    """DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001: ``persisted == bloom_capacity`` must
+    NOT wedge the first new record.
+
+    FAILS pre-fix: the identity arm returned ``capacity == persisted``, the
+    rebuild filled the Bloom to exactly capacity, and the first new
+    ``record`` raised ``BloomCapacityExceeded`` AFTER the exact-first LMDB
+    write — aborting the run once per boundary (self-healing only via the N+1
+    restart). PASSES post-fix: the boundary flows into the EXISTING #1714
+    grow arm (25% headroom, one loud event).
+    """
+    root = tmp_path / "c"
+    with SweepCache.open(root, bloom_capacity=1000) as first:
+        for mask in range(5):
+            assert first.record(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
+    with capture_logs() as logs, SweepCache.open(root, bloom_capacity=5) as resumed:
+        for mask in range(5):  # the resume-dedup guarantee stays intact
+            assert resumed.seen(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
+        # The wedge itself, probed FIRST so the pre-fix failure IS the raise:
+        # the FIRST new record must proceed, not trip BloomCapacityExceeded.
+        assert resumed.record(100, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
+        assert resumed.seen(100, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
+        assert resumed._bloom.capacity == 7  # ceil(5 × 1.25)
+    grows = [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
+    assert len(grows) == 1
+    assert grows[0]["persisted"] == 5
+    assert grows[0]["configured_capacity"] == 5
+    assert grows[0]["grown_capacity"] == 7
+
+
 def test_resume_within_capacity_never_grows_and_never_logs(tmp_path: Path) -> None:
-    """A ``persisted <= capacity`` resume is byte-identical: no grow, no log."""
+    """A ``persisted < capacity`` resume is byte-identical: no grow, no log."""
     root = tmp_path / "c"
     with SweepCache.open(root, bloom_capacity=1000) as first:
         for mask in range(5):
@@ -687,11 +717,46 @@ class TestAutoGrowCapacity:
     """The STEP-1 pure grow decision (`_auto_grow_capacity`, DEC-ENGINE-MISC-PACK-001)."""
 
     def test_within_capacity_is_identity(self) -> None:
-        """``persisted <= capacity`` returns the configured knob unchanged."""
+        """``persisted < capacity`` returns the configured knob unchanged.
+
+        ``(1000, 999)`` is the tightest identity case; the exact
+        ``persisted == capacity`` boundary moved to
+        :meth:`test_exact_boundary_grows_with_headroom`
+        (DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001 — the old ``(1000, 1000)`` identity
+        row froze an instance of the zero-headroom bug class this class's own
+        ``test_grow_takes_max_of_persisted_and_ratio`` docstring condemns).
+        """
         with capture_logs() as logs:
             assert _auto_grow_capacity(1000, 0, 1e-7) == 1000
-            assert _auto_grow_capacity(1000, 1000, 1e-7) == 1000
+            assert _auto_grow_capacity(1000, 999, 1e-7) == 1000
         assert not logs  # no grow, no log — byte-identical behaviour.
+
+    def test_exact_boundary_grows_with_headroom(self) -> None:
+        """``persisted == capacity`` is ZERO headroom — the wedge — so it GROWS.
+
+        A Bloom rebuilt to exactly its capacity is FULL: the first new
+        ``record_digest`` would trip ``BloomCapacityExceeded``. The boundary
+        now rides the EXISTING grow arm (DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001).
+        """
+        with capture_logs() as logs:
+            assert _auto_grow_capacity(1000, 1000, 1e-7) == 1250  # ceil(1000 × 1.25)
+        grows = [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
+        assert len(grows) == 1
+
+    def test_exact_boundary_above_wall_fails_closed(self) -> None:
+        """The 16 GiB wall refusal covers the exact boundary too (Golden Rule #5).
+
+        The ONE disclosed behavior delta beyond the fix: a WALL-ADJACENT
+        exact-boundary resume (capacity so large that ``ceil(N×1.25)`` busts
+        the 16 GiB wall — at 1e-7 FPR within 25% of ~4×10⁹ digests; production
+        default 5×10⁶) that is a fully-done-grid REPLAY (zero new records)
+        COMPLETES today but REFUSES AT OPEN post-fix with the #1714
+        ``SweepCacheCapacityError`` naming the honest remedies — the consistent
+        FAIL_CLOSED posture (the clamp-to-largest-under-wall alternative is a
+        silent-partial-headroom mode this codebase has repeatedly refused).
+        """
+        with pytest.raises(SweepCacheCapacityError, match="MAX_BLOOM_BYTES"):
+            _auto_grow_capacity(_OVER_WALL_PERSISTED, _OVER_WALL_PERSISTED, 1e-7)
 
     def test_grow_takes_max_of_persisted_and_ratio(self) -> None:
         """``grown = max(ceil(persisted × 1.25), ceil(capacity × 1.25))`` — both arms.
