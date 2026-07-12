@@ -297,7 +297,10 @@ def run(ctx: AcceptanceContext) -> CheckResult:
 
 def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> CheckResult:
     from brutex.calendars.nse import trading_days_between
-    from brutex.data.spot_daily_resample import ist_span_partition_files
+    from brutex.data.spot_daily_resample import (
+        ist_span_partition_files,
+        ist_span_partition_months,
+    )
     from brutex.data.window_ledger import SETTLED_STATUSES, WindowLedger
 
     rss_before, rss_after = rss
@@ -533,10 +536,20 @@ def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> 
         base = series_dir / rec.interval
         ws = date.fromisoformat(rec.window_start)
         we = date.fromisoformat(rec.window_end)
-        candidates = ist_span_partition_files(base, ws, max(ws, we - timedelta(days=1)))
+        # Round-4 fix (B4-2): the ledger window is ALREADY half-open
+        # ``[ws, we)`` — exactly the span contract of
+        # ``ist_span_partition_files``. The old ``max(ws, we − 1day)`` end
+        # treated ``we`` as inclusive, so a production 1-day window
+        # ``[d, d+1)`` (the nightly incremental norm) probed the EMPTY span
+        # ``[d, d)`` → candidates ``[]`` → a healthy settled SUCCESS row read
+        # ``missing`` (exit 3 on a healthy lake) AND battery poisons 6-8 rode
+        # the false positive. A degenerate ``we <= ws`` row still probes at
+        # least ``ws``'s own month (a corrupt span is judged, never skipped).
+        candidates = ist_span_partition_files(base, ws, max(we, ws + timedelta(days=1)))
         probed += 1
         if not any(Path(c).is_file() for c in candidates):
-            missing.append(f"{'|'.join(_row_key(rec))}: expected {candidates[:2]}")
+            expected = ist_span_partition_months(ws, max(we, ws + timedelta(days=1)))
+            missing.append(f"{'|'.join(_row_key(rec))}: no stored month file for {expected[:3]}")
     presence_sub = make_subcheck(
         "pull.partition_presence",
         Verdict.FAIL if missing else Verdict.PASS,

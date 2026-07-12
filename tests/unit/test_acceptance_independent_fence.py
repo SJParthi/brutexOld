@@ -14,6 +14,7 @@ import re
 import sys
 from pathlib import Path
 
+import brutex.acceptance as acceptance_pkg
 import brutex.acceptance.independent as independent_mod
 
 FENCED = Path(independent_mod.__file__)
@@ -81,3 +82,84 @@ class TestIndependentFence:
         offenders = [module for module, _names in _imports(tree) if module.startswith("brutex")]
         assert offenders == ["brutex.dashboard.movers_snapshot"]
         assert offenders[0] not in ALLOWED_BRUTEX_MODULES
+
+
+# ── the PACKAGE-WIDE zero-vendor-call pin (round-4 C-F2) ─────────────────
+#
+# The runbook + rate.py claim "ZERO vendor calls, ever (AST-pinned)"; until
+# this test the ONLY AST pin was the independent.py fence above (scope:
+# independent.py's own imports). This pin makes the package-wide claim
+# mechanical: the ONLY brutex.adapters.* imports anywhere in
+# brutex/acceptance/ are the sanctioned PLANNING/CONSTANTS surfaces below —
+# never a client / pool / live-client construction, never the SDK.
+
+ACCEPTANCE_ROOT = Path(acceptance_pkg.__file__).parent
+
+#: The sanctioned adapters surfaces: pure planning math + frozen constants.
+ALLOWED_ADAPTER_IMPORTS: dict[str, set[str] | None] = {
+    # None = any name from the module is fine (constants / pure planners).
+    "brutex.adapters.groww.constants": None,
+    "brutex.adapters.groww.contract_bounds": None,
+    "brutex.adapters.groww.chunks": None,
+    # option_ingest also holds the fetch spine — ONLY the pure planner may
+    # be imported from it.
+    "brutex.adapters.groww.option_ingest": {"plan_contract_windows"},
+    # Typed contract dataclasses — data shapes, no I/O.
+    "brutex.adapters.protocol": None,
+}
+
+#: Vendor-client construction surfaces that must NEVER appear in the package.
+FORBIDDEN_TOKENS = (
+    "GrowwAPI",
+    "GrowwClient",
+    "ClientPool",
+    "build_live_client",
+    "build_live_pool",
+    "get_historical_candles",
+)
+
+
+class TestAcceptanceZeroVendorCallPin:
+    def _package_files(self) -> list[Path]:
+        files = sorted(ACCEPTANCE_ROOT.rglob("*.py"))
+        assert len(files) >= 15  # the package really was walked
+        return files
+
+    def test_only_sanctioned_adapter_imports(self) -> None:
+        for file in self._package_files():
+            tree = ast.parse(file.read_text(encoding="utf-8"))
+            for module, names in _imports(tree):
+                if not module.startswith("brutex.adapters"):
+                    continue
+                assert module in ALLOWED_ADAPTER_IMPORTS, (
+                    f"zero-vendor-call pin broken: {file.name} imports {module}"
+                )
+                allowed_names = ALLOWED_ADAPTER_IMPORTS[module]
+                assert names, f"zero-vendor-call pin broken: bare 'import {module}' in {file.name}"
+                if allowed_names is not None:
+                    for name in names:
+                        assert name in allowed_names, (
+                            f"zero-vendor-call pin broken: {file.name} imports "
+                            f"{name!r} from {module} (allowed: {sorted(allowed_names)})"
+                        )
+
+    def test_no_vendor_client_tokens_anywhere(self) -> None:
+        for file in self._package_files():
+            source = file.read_text(encoding="utf-8")
+            for token in FORBIDDEN_TOKENS:
+                assert token not in source, (
+                    f"zero-vendor-call pin broken: {token!r} appears in {file.name}"
+                )
+
+    def test_vendor_pin_is_load_bearing(self) -> None:
+        # Self-check: a synthetic client import IS refused by the walker law.
+        tree = ast.parse("from brutex.adapters.groww.client import GrowwClient\n")
+        offenders = [
+            module
+            for module, _names in _imports(tree)
+            if module.startswith("brutex.adapters") and module not in ALLOWED_ADAPTER_IMPORTS
+        ]
+        assert offenders == ["brutex.adapters.groww.client"]
+        # And a non-sanctioned NAME from a sanctioned module is refused too.
+        allowed = ALLOWED_ADAPTER_IMPORTS["brutex.adapters.groww.option_ingest"]
+        assert allowed is not None and "run_groww_option_ingest" not in allowed

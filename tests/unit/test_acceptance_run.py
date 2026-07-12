@@ -240,6 +240,65 @@ class TestChainAcrossRuns:
         )
         assert oi["abstain_streak"] == 2
 
+    def test_subset_run_carries_absent_subcheck_streaks_forward(self, tmp_path: Path) -> None:
+        # Round-4 fix (B4-4) fails-before regression: a --checks subset run
+        # wrote a report whose sub-check index lacked every other check, so
+        # the NEXT full run read streak 1 where the prior full run showed a
+        # higher streak — the streak-≥3 ⇒ exit-4 law was suppressible
+        # indefinitely by interleaved subset runs.
+        def _oi_streak(report: dict) -> int:
+            return next(
+                sub["abstain_streak"]
+                for check in report["checks"]
+                for sub in check["sub_checks"]
+                if sub["id"] == "tf.oi"
+            )
+
+        lake = make_twin(tmp_path)
+        _code, first = _run(_cfg(lake))
+        assert _oi_streak(first) == 1
+        # The interleaved SUBSET run (tf absent) must carry tf.oi forward.
+        _code, subset = _run(_cfg(lake, checks=("unique",)))
+        assert subset["streak_carry"]["tf.oi"]["abstain_streak"] == 1
+        _code, third = _run(_cfg(lake))
+        assert _oi_streak(third) == 2  # pre-fix: reset to 1
+
+    def test_teeth_failed_run_carries_streaks_forward(self, tmp_path: Path) -> None:
+        # A TEETH_FAILED run withholds checks (checks: []) — its report must
+        # still carry every prior streak verbatim (B4-4).
+        lake = make_twin(tmp_path)
+        _code, _first = _run(_cfg(lake))
+        code, withheld = _run(_cfg(lake), selftest_runner=lambda **k: FAILED)
+        assert code == 2
+        assert withheld["checks"] == []
+        assert withheld["streak_carry"]["tf.oi"]["abstain_streak"] == 1
+        _code, third = _run(_cfg(lake))
+        oi = next(
+            sub for check in third["checks"] for sub in check["sub_checks"] if sub["id"] == "tf.oi"
+        )
+        assert oi["abstain_streak"] == 2
+
+    def test_streak_law_escalates_through_interleaved_subset_runs(self, tmp_path: Path) -> None:
+        # The exit-4 law itself bites through an interleave: three pull
+        # NO_LEDGER abstains (non-structural) with a unique-only subset run
+        # in between still reach streak ≥3 ⇒ exit 4.
+        lake = make_twin(tmp_path)
+        code1, _r1 = _run(_cfg(lake, checks=("pull",)))
+        code2, _r2 = _run(_cfg(lake, checks=("pull",)))
+        _code, _subset = _run(_cfg(lake, checks=("unique",)))
+        code4, fourth = _run(_cfg(lake, checks=("pull",)))
+        # ONE non-structural abstain sits inside the default budget (3), so
+        # runs 1-2 stay green — only the streak-≥3 law can trip exit 4.
+        assert (code1, code2) == (0, 0)
+        replan = next(
+            sub
+            for check in fourth["checks"]
+            for sub in check["sub_checks"]
+            if sub["id"] == "pull.replan_zero"
+        )
+        assert replan["abstain_streak"] == 3  # pre-fix: the subset run reset it
+        assert code4 == 4  # streak ≥3 ⇒ exit 4 (model.py:36-38 law)
+
     def test_out_dir_override_is_off_chain(self, tmp_path: Path) -> None:
         # Round-3 fix (C-F3): an --out run must NOT dangle LATEST — the
         # pointer previously named a run id absent under <lake>/acceptance,
@@ -284,6 +343,125 @@ class TestEvidenceTreeSymlinkRefusal:
         assert "symlink" in report["error"]
         # NOTHING written through the link — no audit/, no report, no ledger.
         assert list(target.iterdir()) == []
+
+    def test_symlinked_audit_child_dir_refused(self, tmp_path: Path) -> None:
+        # Round-4 fix (A-F1) fails-before regression (the refuter's
+        # ``sym_inner`` repro): the round-3 guard covered only the TOP
+        # <lake>/acceptance dir — a symlinked CHILD acceptance/audit dir was
+        # written THROUGH (exit 0, the hash chain landed in the attacker
+        # dir, no in-lake chain, no refusal).
+        lake = make_twin(tmp_path)
+        target = tmp_path / "attacker_audit"
+        target.mkdir()
+        (lake / "acceptance").mkdir()
+        (lake / "acceptance" / "audit").symlink_to(target)
+        code, report = _run(_cfg(lake))
+        assert code == 2
+        assert "symlink" in report["error"]
+        assert list(target.iterdir()) == []  # nothing through the link
+
+    def test_symlinked_audit_chain_file_refused(self, tmp_path: Path) -> None:
+        # The fixed-path chain FILE itself is the third plantable link.
+        lake = make_twin(tmp_path)
+        target = tmp_path / "attacker_chain.jsonl"
+        target.write_text("", encoding="utf-8")
+        audit_dir = lake / "acceptance" / "audit"
+        audit_dir.mkdir(parents=True)
+        (audit_dir / "acceptance.jsonl").symlink_to(target)
+        code, report = _run(_cfg(lake))
+        assert code == 2
+        assert "symlink" in report["error"]
+        assert target.read_text(encoding="utf-8") == ""  # never appended through
+
+
+class TestSingleFlightLock:
+    """Round-4 fix (B4-1): concurrent runs corrupted the audit hash chain.
+
+    Two overlapping ``verify-acceptance`` runs interleaved appends into the
+    ONE single-writer ``acceptance.jsonl`` (``SweepAuditWriter``), corrupting
+    the chain PERMANENTLY (``brutex audit verify`` failed forever after).
+    The second run must REFUSE loudly, naming the holder, SUSPECT exit 2.
+    """
+
+    def test_contended_run_refused_names_holder(self, tmp_path: Path) -> None:
+        import fcntl
+        import os
+
+        from brutex.acceptance.run import acceptance_lock_path
+
+        lake = make_twin(tmp_path)
+        lock_path = acceptance_lock_path(lake)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.write(fd, b"acceptance:peer-run pid=999 host=peerbox")
+            code, report = _run(_cfg(lake))
+        finally:
+            os.close(fd)
+        assert code == 2
+        assert "another verify-acceptance run" in report["error"]
+        assert "acceptance:peer-run" in report["error"]  # the holder is NAMED
+        # NOTHING was written while refused — no audit chain, no report dir.
+        assert not (lake / "acceptance").exists()
+
+    def test_contended_run_refused_without_holder_note(self, tmp_path: Path) -> None:
+        import fcntl
+        import os
+
+        from brutex.acceptance.run import acceptance_lock_path
+
+        lake = make_twin(tmp_path)
+        lock_path = acceptance_lock_path(lake)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, report = _run(_cfg(lake))
+        finally:
+            os.close(fd)
+        assert code == 2
+        assert "another verify-acceptance run" in report["error"]
+        assert "holder" not in report["error"]  # empty note → no holder suffix
+
+    def test_lock_released_after_run_and_chain_verifies(self, tmp_path: Path) -> None:
+        # Sequential runs re-acquire cleanly and the chain stays verifiable —
+        # the lock never wedges the nightly.
+        from brutex.audit_verify import verify_audit_file
+
+        lake = make_twin(tmp_path)
+        code1, _r1 = _run(_cfg(lake, checks=("unique",)))
+        code2, _r2 = _run(_cfg(lake, checks=("unique",)))
+        assert (code1, code2) == (0, 0)
+        result = verify_audit_file(report_mod.audit_path(lake))
+        assert result.entry_count == 6  # 2 x (start + 1 check + complete)
+
+    def test_flock_oserror_closes_fd_and_is_suspect(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A non-contention flock failure (e.g. a filesystem without flock)
+        # must close the fd and surface as the SUSPECT lock-unavailable arm.
+        import brutex.acceptance.run as run_mod
+
+        def _boom(fd: int, op: int) -> None:
+            raise OSError("flock unsupported on this volume")
+
+        lake = make_twin(tmp_path)  # built BEFORE the patch (writer flocks too)
+        monkeypatch.setattr(run_mod.fcntl, "flock", _boom)
+        code, report = _run(_cfg(lake))
+        assert code == 2
+        assert "lock unavailable" in report["error"]
+
+    def test_lock_unavailable_is_suspect(self, tmp_path: Path) -> None:
+        # The lock path exists as a DIRECTORY → os.open cannot create it →
+        # SUSPECT exit 2, never a raw traceback.
+        from brutex.acceptance.run import acceptance_lock_path
+
+        lake = make_twin(tmp_path)
+        acceptance_lock_path(lake).mkdir(parents=True)
+        code, report = _run(_cfg(lake))
+        assert code == 2
+        assert "lock unavailable" in report["error"]
 
 
 class TestReportWriteFailureLoud:

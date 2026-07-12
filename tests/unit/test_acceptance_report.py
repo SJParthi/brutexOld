@@ -234,6 +234,31 @@ class TestPreviousChain:
         assert streak_for("new.sub", Verdict.ABSTAIN, prev) == 1
         assert streak_for("unique.census", Verdict.PASS, prev) == 0
 
+    def test_previous_index_reads_streak_carry_block(self) -> None:
+        # Round-4 fix (B4-4): sub-checks absent from the previous run (a
+        # --checks subset / TEETH_FAILED report) index via its streak_carry
+        # block; that run's OWN sub_checks overlay the carry.
+        previous = _report_dict([_check("unique", Verdict.ABSTAIN)])
+        previous["streak_carry"] = {
+            "pull.replan_zero": {"verdict": "ABSTAIN", "abstain_streak": 3},
+            "unique.census": {"verdict": "PASS", "abstain_streak": 0},  # overlaid
+            "junk": "not-a-mapping",  # tolerated, skipped
+        }
+        index = previous_subcheck_index(previous)
+        assert index["pull.replan_zero"] == ("ABSTAIN", 3)
+        # The run's own sub_checks WIN over the carry cell.
+        assert index["unique.census"][0] == "ABSTAIN"
+        assert "junk" not in index
+
+    def test_streak_carry_block_union_law(self) -> None:
+        # Prior cells ride through unchanged; this run's sub-checks overwrite.
+        from brutex.acceptance.report import streak_carry_block
+
+        prev = {"pull.replan_zero": ("ABSTAIN", 3), "unique.census": ("PASS", 0)}
+        block = streak_carry_block(prev, [_check("unique", Verdict.ABSTAIN)])
+        assert block["pull.replan_zero"] == {"verdict": "ABSTAIN", "abstain_streak": 3}
+        assert block["unique.census"]["verdict"] == "ABSTAIN"  # overwritten
+
 
 class TestDeltas:
     def test_none_previous(self) -> None:

@@ -19,7 +19,10 @@ from tests.fakes.acceptance_twin import DAY1, DAY2, make_ctx, make_twin
 def _row(**overrides: object) -> tuple:
     from brutex.data.window_ledger import WindowLedgerRecord
 
-    base = {
+    # dict[str, object] — round-4 C-F1: the narrower inferred value type made
+    # ``base.update(overrides)`` a pyright reportCallIssue (2 new errors vs
+    # origin/main under pyright 1.1.411).
+    base: dict[str, object] = {
         "market": "groww",
         "security_id": "NIFTY",
         "interval": "1minute",
@@ -139,6 +142,71 @@ class TestPullCheck:
         assert presence.verdict is Verdict.FAIL
         assert presence.evidence["missing"] == 1
         assert "NIFTY" in presence.evidence["missing_keys"][0]
+
+    def test_one_day_window_presence_passes(self, tmp_path: Path) -> None:
+        # Round-4 fix (B4-2) fails-before regression: a production 1-day
+        # settled SUCCESS window [d, d+1) — the NIGHTLY INCREMENTAL norm —
+        # previously fed the half-open span helper an EMPTY span
+        # ([d, d) via the old `we − 1day` end), so a HEALTHY lake read
+        # `missing` → pull FAIL → run exit 3.
+        lake = make_twin(tmp_path)
+        one_day = _row(
+            window_start=DAY2.isoformat(),
+            window_end=(DAY2 + timedelta(days=1)).isoformat(),
+            bars=31,
+            bars_net_new=31,
+        )
+        _save(lake, [one_day])
+        check = pull.run(make_ctx(lake))
+        presence = _sub(check, "pull.partition_presence")
+        assert presence.verdict is Verdict.PASS
+        assert presence.evidence["missing"] == 0
+
+    def test_one_day_window_deleted_file_still_fails(self, tmp_path: Path) -> None:
+        # The silent-loss tooth stays real for the 1-day shape: delete the
+        # backing month file and the SAME row must FAIL.
+        lake = make_twin(tmp_path)
+        one_day = _row(
+            window_start=DAY2.isoformat(),
+            window_end=(DAY2 + timedelta(days=1)).isoformat(),
+        )
+        _save(lake, [one_day])
+        _month_file(lake, "NIFTY", "1minute", DAY2).unlink()
+        check = pull.run(make_ctx(lake))
+        presence = _sub(check, "pull.partition_presence")
+        assert presence.verdict is Verdict.FAIL
+        assert "no stored month file" in presence.evidence["missing_keys"][0]
+
+    def test_one_day_row_net_new_violation_via_real_comparator(self, tmp_path: Path) -> None:
+        # Round-4 B4-2 knock-on: battery poisons 6-7 seed 1-day rows, so
+        # their detection previously RODE the presence false positive. On
+        # the fixed span the presence leg PASSes and the violation is caught
+        # by the REAL net_new comparator — the sub-level split pinned here
+        # is what kills an unconditional-PASS net_new_law sabotage.
+        lake = make_twin(tmp_path)
+        bad = _row(
+            window_start=DAY2.isoformat(),
+            window_end=(DAY2 + timedelta(days=1)).isoformat(),
+            bars=3,
+            bars_net_new=7,
+        )
+        _save(lake, [bad])
+        check = pull.run(make_ctx(lake))
+        assert _sub(check, "pull.partition_presence").verdict is Verdict.PASS
+        assert _sub(check, "pull.net_new_law").verdict is Verdict.FAIL
+
+    def test_multiday_window_probes_last_covered_month(self, tmp_path: Path) -> None:
+        # A window whose LAST covered day is the only one with a stored
+        # month file: [DAY1-40 → DAY2+1) covers June AND July 2026 — the
+        # twin stores July only; the padded month walk must find it.
+        lake = make_twin(tmp_path)
+        wide = _row(
+            window_start=(DAY1 - timedelta(days=40)).isoformat(),
+            window_end=(DAY2 + timedelta(days=1)).isoformat(),
+        )
+        _save(lake, [wide])
+        check = pull.run(make_ctx(lake))
+        assert _sub(check, "pull.partition_presence").verdict is Verdict.PASS
 
     def test_whole_series_dir_missing_fails(self, tmp_path: Path) -> None:
         lake = make_twin(tmp_path)

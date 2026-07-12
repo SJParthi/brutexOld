@@ -130,13 +130,17 @@ def build_twin_lake(
     *,
     days: tuple[date, date],
     symbols: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "INDIAVIX"),
+    stock_symbols: tuple[str, ...] = (),
 ) -> None:
     """Build the tiny twin lake with the REAL writers + real resamplers.
 
     Per symbol: two sessions of 1-minute bars, the derived ``5minute``
     partition (production ``resample_1m_to_tf``) and the derived ``1day``
     partition (production ``resample_1m_to_daily``) — all landed through
-    ``ParquetWriter``.
+    ``ParquetWriter``. *stock_symbols* land under the ``CASH`` segment —
+    NON-engine coordinates, so the battery can prove the census leg has a
+    tooth of its OWN (round-4 B4-3; default empty keeps every existing twin
+    byte-identical).
     """
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.spot_daily_resample import frame_to_candle_bars, resample_1m_to_daily
@@ -144,18 +148,20 @@ def build_twin_lake(
     from brutex.data.tf_resampler import resample_1m_to_tf
 
     writer = ParquetWriter(lake_root=root)
-    for offset, symbol in enumerate(symbols):
+    cells = [(symbol, "INDEX") for symbol in symbols]
+    cells.extend((symbol, "CASH") for symbol in stock_symbols)
+    for offset, (symbol, segment) in enumerate(cells):
         # One write per session day — bars may span calendar months and the
         # writer (correctly) refuses a multi-partition batch.
         for day_index, day in enumerate(days):
             writer.write(
                 exchange="NSE",
-                segment="INDEX",
+                segment=segment,
                 symbol=symbol,
                 interval="1minute",
                 bars=_twin_bars(day, base=100.0 + offset * 50 + day_index * 10),
             )
-        symbol_dir = root / "bars" / "NSE" / "INDEX" / symbol
+        symbol_dir = root / "bars" / "NSE" / segment / symbol
         df_1m = read_lake_bars_frame(symbol_dir, "1minute")
         df_5m = resample_1m_to_tf(df_1m, 5)
         _write_grouped(
@@ -163,17 +169,20 @@ def build_twin_lake(
             symbol=symbol,
             interval="5minute",
             bars=frame_to_candle_bars(df_5m, absent_open_interest=None),
+            segment=segment,
         )
         daily = resample_1m_to_daily(df_1m, before=days[1] + timedelta(days=1))
-        _write_grouped(writer, symbol=symbol, interval="1day", bars=daily)
+        _write_grouped(writer, symbol=symbol, interval="1day", bars=daily, segment=segment)
 
 
-def _month_file(root: Path, symbol: str, interval: str, day: date) -> Path:
+def _month_file(
+    root: Path, symbol: str, interval: str, day: date, *, segment: str = "INDEX"
+) -> Path:
     return (
         root
         / "bars"
         / "NSE"
-        / "INDEX"
+        / segment
         / symbol
         / interval
         / f"{day.year:04d}"
@@ -181,9 +190,9 @@ def _month_file(root: Path, symbol: str, interval: str, day: date) -> Path:
     )
 
 
-def poison_duplicate_row(root: Path, *, symbol: str, day: date) -> None:
+def poison_duplicate_row(root: Path, *, symbol: str, day: date, segment: str = "INDEX") -> None:
     """S1 — append a duplicate-timestamp row (surgical edit on writer output)."""
-    path = _month_file(root, symbol, "1minute", day)
+    path = _month_file(root, symbol, "1minute", day, segment=segment)
     frame = pl.read_parquet(path, glob=False)
     pl.concat([frame, frame.head(1)]).write_parquet(path)
 
@@ -364,7 +373,23 @@ def run_full_battery(
     *,
     now_utc: datetime | None = None,
 ) -> SelfTestResult:
-    """The FULL battery (~14 poisons) — CI mandatory, ``--self-test`` on demand."""
+    """The FULL battery (17 poisons) — CI mandatory, ``--self-test`` on demand.
+
+    The battery twin additionally carries ONE non-engine CASH symbol
+    (round-4 B4-3) so the census leg and the engine leg each have a tooth of
+    their OWN: poison 16 is detectable ONLY by ``unique.census`` (a
+    non-engine dup — an always-PASS census sabotage is MISSED) and poison 17
+    ONLY by ``unique.engine`` (an out-of-months-bound engine dup — an
+    always-clean engine sabotage is MISSED). Scope honesty: the ``movers``
+    teeth (smoke S3, battery 3/15) drive the COMPARATOR SEAM directly, never
+    the composed ``movers_check.run`` wiring — the designated killer for a
+    comparator-discard wiring sabotage is the unit gate
+    (``tests/unit/test_acceptance_checks_movers.py::TestMoversRealWire::
+    test_tamper_tooth_volume_cell`` — it drives the COMPOSED ``movers.run``
+    against a mutated real wire and fails under the sabotage, measured),
+    disclosed here rather than paying an instrument-master +
+    in-process-app twin per battery run.
+    """
     import tempfile
 
     from brutex.acceptance.checks import movers as movers_check
@@ -382,7 +407,9 @@ def run_full_battery(
     with tempfile.TemporaryDirectory(prefix="brutex-acceptance-battery-") as tmp:
         base = Path(tmp)
         clean = base / "clean"
-        build_twin_lake(clean, days=days)
+        # ONE non-engine CASH symbol joins the battery twin (round-4 B4-3) —
+        # poisons 16/17 need coordinates only ONE of the two unique legs sees.
+        build_twin_lake(clean, days=days, stock_symbols=("RELIANCE",))
         ctx_clean = _twin_context(clean, now_utc=now)
         false_fails = sum(
             1
@@ -601,6 +628,53 @@ def run_full_battery(
             return movers_check.contiguity_stamp_mismatch(page, holed, day=days[1]) is not None
 
         scenario("prevclose_hole_unstamped", "comparator must flag a missing hole stamp", _p15)
+
+        # 16: a dup on a NON-engine sampled symbol — census-ONLY detectable
+        # (round-4 B4-3: an unconditional-PASS census sabotage previously
+        # survived the battery because every dup poison sat on an ENGINE
+        # coordinate the engine leg caught anyway).
+        def _p16(root: Path) -> bool:
+            poison_duplicate_row(root, symbol="RELIANCE", day=days[1], segment="CASH")
+            check = unique_check.run(_twin_context(root, now_utc=now))
+            subs = {s.id: s for s in check.sub_checks}
+            return (
+                subs["unique.census"].verdict is Verdict.FAIL
+                and subs["unique.engine"].verdict is Verdict.PASS
+            )
+
+        scenario(
+            "census_nonengine_dup",
+            "unique.census ALONE must FAIL a non-engine dup (engine leg stays PASS)",
+            _p16,
+        )
+
+        # 17: a dup in an OLD month on an ENGINE coordinate — engine-ONLY
+        # detectable (the month-bounded census cannot see it; the full-history
+        # engine leg must — an always-clean engine sabotage is MISSED here).
+        def _p17(root: Path) -> bool:
+            from brutex.data.parquet_writer import ParquetWriter
+
+            old_day = days[0] - timedelta(days=240)
+            ParquetWriter(lake_root=root).write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="1minute",
+                bars=_twin_bars(old_day, base=95.0),
+            )
+            poison_duplicate_row(root, symbol="NIFTY", day=old_day)
+            check = unique_check.run(_twin_context(root, now_utc=now))
+            subs = {s.id: s for s in check.sub_checks}
+            return (
+                subs["unique.engine"].verdict is Verdict.FAIL
+                and subs["unique.census"].verdict is Verdict.PASS
+            )
+
+        scenario(
+            "engine_oldmonth_dup",
+            "unique.engine ALONE must FAIL an out-of-months-bound engine dup",
+            _p17,
+        )
 
     detected = sum(1 for o in outcomes if o.detected)
     verdict = (

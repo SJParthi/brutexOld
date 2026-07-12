@@ -144,17 +144,51 @@ def previous_subcheck_index(
     """``{sub_check_id: (verdict, abstain_streak)}`` from a previous report.
 
     A foreign-schema previous report indexes as EMPTY (the delta reader refuses
-    it; deltas ship ``null`` with a disclosed reason).
+    it; deltas ship ``null`` with a disclosed reason). Round-4 fix (B4-4): the
+    previous report's ``streak_carry`` block (sub-checks that did NOT run in
+    that run, carried forward verbatim) seeds the index FIRST, then that run's
+    own ``sub_checks`` overlay it — so a ``--checks`` subset run or a
+    TEETH_FAILED run (``checks: []``) between two full runs no longer resets
+    every absent sub-check's abstain streak to 1 (the streak-≥3 ⇒ exit-4 law
+    was silently suppressible by interleaved subset runs).
     """
     if previous is None or previous.get("schema") != SCHEMA_VERSION:
         return {}
     out: dict[str, tuple[str, int]] = {}
+    carry = previous.get("streak_carry")
+    if isinstance(carry, Mapping):
+        for sub_id, cell in carry.items():
+            if isinstance(cell, Mapping):
+                out[str(sub_id)] = (
+                    str(cell.get("verdict")),
+                    int(cell.get("abstain_streak", 0)),
+                )
     for check in previous.get("checks", []):
         for sub in check.get("sub_checks", []):
             out[str(sub.get("id"))] = (
                 str(sub.get("verdict")),
                 int(sub.get("abstain_streak", 0)),
             )
+    return out
+
+
+def streak_carry_block(
+    prev_index: Mapping[str, tuple[str, int]], checks: Sequence[CheckResult]
+) -> dict[str, dict[str, Any]]:
+    """The report's ``streak_carry`` block: prior index ∪ this run's sub-checks.
+
+    Every sub-check the chain has ever seen keeps a ``(verdict,
+    abstain_streak)`` cell — sub-checks ABSENT from this run (subset /
+    TEETH_FAILED) ride through UNCHANGED, sub-checks that ran overwrite their
+    cell with this run's stamped values (B4-4).
+    """
+    out: dict[str, dict[str, Any]] = {
+        sub_id: {"verdict": verdict, "abstain_streak": streak}
+        for sub_id, (verdict, streak) in prev_index.items()
+    }
+    for check in checks:
+        for sub in check.sub_checks:
+            out[sub.id] = {"verdict": str(sub.verdict), "abstain_streak": sub.abstain_streak}
     return out
 
 

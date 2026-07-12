@@ -9,6 +9,9 @@ real-lake verdicts. A report write / audit failure is itself SUSPECT.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import os
 import socket
 import time
 import traceback
@@ -40,6 +43,79 @@ from brutex.acceptance.model import (
 )
 
 _LOG = structlog.get_logger(__name__)
+
+#: The acceptance run's OWN single-flight lock file name under ``.locks/``.
+ACCEPTANCE_SINGLEFLIGHT_LOCK_NAME = "acceptance_singleflight.lock"
+
+
+def acceptance_lock_path(lake_root: Path) -> Path:
+    """``<lake_root>/.locks/acceptance_singleflight.lock`` (never created here).
+
+    Deliberately OUTSIDE ``<lake>/acceptance/`` so the lock is usable even
+    when the evidence tree itself is refused (symlink) — the house
+    ``.locks/`` sidecar dir the pull/nightly locks share.
+    """
+    return lake_root / ".locks" / ACCEPTANCE_SINGLEFLIGHT_LOCK_NAME
+
+
+class AcceptanceLockHeldError(RuntimeError):
+    """A second concurrent ``verify-acceptance`` run was refused (B4-1)."""
+
+    def __init__(self, lock_path: Path, holder: str) -> None:
+        suffix = f" (holder: {holder})" if holder else ""
+        super().__init__(
+            "another verify-acceptance run is already writing this lake's "
+            f"acceptance evidence (single-flight lock held at {lock_path}){suffix}; "
+            "refusing to fork the audit hash chain"
+        )
+
+
+@dataclass
+class _AcceptanceRunLock:
+    """The acceptance run's cross-process single-flight flock (round-4 B4-1).
+
+    The ``_flock_singleflight`` shape (:mod:`brutex.adapters.groww.\
+pull_singleflight` — the pull/nightly/backup precedent): non-blocking
+    exclusive ``flock`` on a stable sidecar file, kernel-released on fd
+    close / process death (no pid files, no stale-lock state). Two
+    overlapping runs previously interleaved appends into the ONE
+    ``acceptance.jsonl`` hash chain (``SweepAuditWriter`` is single-writer),
+    corrupting it PERMANENTLY — every later ``brutex audit verify`` failed
+    and the next run resumed from the torn tail. The second run now REFUSES
+    loudly (SUSPECT, exit 2 — documented in the runbook §4) naming the
+    holder note the first run wrote.
+    """
+
+    fd: int
+
+    @classmethod
+    def acquire(cls, lake_root: Path, *, holder_note: str) -> _AcceptanceRunLock:
+        """Take the lock or raise (contention → :class:`AcceptanceLockHeldError`)."""
+        path = acceptance_lock_path(lake_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # 0o600 — owner-only private coordination sidecar (house convention).
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            holder = ""
+            with contextlib.suppress(OSError):
+                holder = path.read_text(encoding="utf-8").strip()
+            os.close(fd)
+            raise AcceptanceLockHeldError(path, holder) from exc
+        except BaseException:
+            os.close(fd)
+            raise
+        with contextlib.suppress(OSError):
+            # Best-effort holder note for the contended peer's refusal line
+            # (advisory only — a write failure never blocks the acquired lock).
+            os.ftruncate(fd, 0)
+            os.write(fd, holder_note.encode("utf-8"))
+        return cls(fd=fd)
+
+    def release(self) -> None:
+        """Close the fd — the kernel drops the advisory lock in the same step."""
+        os.close(self.fd)
 
 
 @dataclass
@@ -183,19 +259,65 @@ def _run_with_ctx(
 ) -> tuple[int, dict[str, Any]]:
     run_id = report_mod.mint_run_id(clock())
 
+    # Cross-process single-flight (round-4 fix B4-1): two overlapping runs
+    # interleaved appends into the ONE acceptance.jsonl hash chain and
+    # corrupted it PERMANENTLY. The second run refuses loudly (SUSPECT,
+    # exit 2) naming the holder.
+    holder_note = f"acceptance:{run_id} pid={os.getpid()} host={socket.gethostname()}"
+    try:
+        lock = _AcceptanceRunLock.acquire(cfg.lake_root, holder_note=holder_note)
+    except AcceptanceLockHeldError as exc:
+        _LOG.error("acceptance.singleflight_refused", error=str(exc))
+        return 2, {"error": str(exc), "run_id": run_id}
+    except OSError as exc:
+        _LOG.error("acceptance.singleflight_unavailable", error=str(exc))
+        return 2, {"error": f"acceptance single-flight lock unavailable: {exc}", "run_id": run_id}
+    try:
+        return _run_locked(
+            cfg,
+            ctx,
+            run_id=run_id,
+            clock=clock,
+            seed_mode=seed_mode,
+            started=started,
+            selftest_runner=selftest_runner,
+        )
+    finally:
+        lock.release()
+
+
+def _run_locked(
+    cfg: RunConfig,
+    ctx: AcceptanceContext,
+    *,
+    run_id: str,
+    clock: Callable[[], datetime],
+    seed_mode: str,
+    started: float,
+    selftest_runner: Callable[..., selftest.SelfTestResult] | None,
+) -> tuple[int, dict[str, Any]]:
     # ONE evidence-tree symlink refusal covering EVERY write (round-3 fix
     # B-NEW-1): the round-2 guard sat at report-write time, so the audit
     # chain (and the coverage ledger's warn-only refusal) had already been
     # reached with <lake>/acceptance a symlink — the audit JSONL was written
     # THROUGH the link into the target dir. Hoisted here, BEFORE any write
     # (house .quarantine precedent — refuse the whole run loudly, SUSPECT).
+    # Round-4 fix (A-F1): the refusal covers every FIXED, predictable child
+    # path the run writes THROUGH too — a symlinked <lake>/acceptance/audit
+    # dir (or the chain file itself) previously redirected the hash-chained
+    # audit JSONL off-lake while the top-level guard read clean. The
+    # <run_id> dir is nonce-named (unplantable) and LATEST / the coverage
+    # ledger are atomic os.replace targets (the link is REPLACED, never
+    # followed), so the fixed write-THROUGH set is exactly these three.
     base = report_mod.acceptance_dir(cfg.lake_root)
-    if base.is_symlink():
-        _LOG.error("acceptance.evidence_tree_symlink_refused", path=str(base))
-        return 2, {
-            "error": f"{base} is a symlink — refusing to write the evidence tree through it",
-            "run_id": run_id,
-        }
+    audit_file = report_mod.audit_path(cfg.lake_root)
+    for probe in (base, audit_file.parent, audit_file):
+        if probe.is_symlink():
+            _LOG.error("acceptance.evidence_tree_symlink_refused", path=str(probe))
+            return 2, {
+                "error": f"{probe} is a symlink — refusing to write the evidence tree through it",
+                "run_id": run_id,
+            }
 
     audit: report_mod.AcceptanceAudit | None
     try:
@@ -295,6 +417,13 @@ def _run_audited(
         )
     checks = stamped
 
+    # Round-4 fix (B4-4): sub-checks that did NOT run this run (a --checks
+    # subset, or a TEETH_FAILED run's withheld checks) carry their previous
+    # (verdict, streak) forward VERBATIM — an interleaved subset/teeth-failed
+    # run can no longer silently reset every other sub-check's abstain
+    # streak and suppress the streak-≥3 ⇒ exit-4 law indefinitely.
+    streak_carry = report_mod.streak_carry_block(prev_index, checks)
+
     time_truncated = any(
         sub.abstain_reason is AbstainReason.TIME_BUDGET_EXHAUSTED
         for check in checks
@@ -360,6 +489,7 @@ def _run_audited(
         "self_test": teeth.to_dict(),
         "overall": overall.to_dict(),
         "checks": [c.to_dict() for c in checks],
+        "streak_carry": streak_carry,
         "totals": totals_for(checks),
         "coverage_ledger": ledger_summary,
         "previous": (

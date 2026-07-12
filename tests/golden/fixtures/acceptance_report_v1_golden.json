@@ -395,6 +395,56 @@
   "poisons_planted": 0,
   "verdict": "TEETH_SKIPPED"
  },
+ "streak_carry": {
+  "pull.replan_zero": {
+   "abstain_streak": 1,
+   "verdict": "ABSTAIN"
+  },
+  "rate.bridge_snapshot": {
+   "abstain_streak": 1,
+   "verdict": "ABSTAIN"
+  },
+  "rate.constants": {
+   "abstain_streak": 0,
+   "verdict": "PASS"
+  },
+  "rate.log_window": {
+   "abstain_streak": 1,
+   "verdict": "ABSTAIN"
+  },
+  "rate.market_hours": {
+   "abstain_streak": 1,
+   "verdict": "ABSTAIN"
+  },
+  "rate.pair_bound": {
+   "abstain_streak": 1,
+   "verdict": "ABSTAIN"
+  },
+  "rate.per_call_history": {
+   "abstain_streak": 1,
+   "verdict": "ABSTAIN"
+  },
+  "tf.daily": {
+   "abstain_streak": 0,
+   "verdict": "PASS"
+  },
+  "tf.intraday": {
+   "abstain_streak": 0,
+   "verdict": "PASS"
+  },
+  "tf.oi": {
+   "abstain_streak": 1,
+   "verdict": "ABSTAIN"
+  },
+  "unique.census": {
+   "abstain_streak": 0,
+   "verdict": "PASS"
+  },
+  "unique.engine": {
+   "abstain_streak": 0,
+   "verdict": "PASS"
+  }
+ },
  "totals": {
   "abstain": 7,
   "error": 0,

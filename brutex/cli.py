@@ -1783,7 +1783,8 @@ def build_parser() -> argparse.ArgumentParser:
             "latency over the REAL lake, with PASS/FAIL/ABSTAIN(named) "
             "verdicts, a gating teeth smoke and a frozen evidence report "
             "under <lake>/acceptance/. Exit: 0 clean, 1 usage, 2 SUSPECT "
-            "(teeth/internal), 3 findings, 4 inconclusive"
+            "(teeth/internal/concurrent-run lock refusal), 3 findings, "
+            "4 inconclusive"
         ),
     )
     verify_acc.add_argument(
@@ -1803,7 +1804,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lift sampling + month bounds everywhere (cost warning printed first)",
     )
     verify_acc.add_argument(
-        "--sample", type=int, default=12, help="Sampled datasets beyond the engine set"
+        "--sample",
+        type=int,
+        default=12,
+        help=(
+            "Sampled SPOT datasets beyond the engine set (the F&O contract "
+            "fill stays a FIXED seed-rotated 6/run — --full lifts both)"
+        ),
     )
     verify_acc.add_argument(
         "--seed",
@@ -7701,7 +7708,10 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
     report / exit logic lives in the 100%-gated ``brutex/acceptance/``
     package; this shim only resolves flags, prints the human table and maps
     the returned exit code (0 clean / 1 usage / 2 SUSPECT / 3 findings /
-    4 inconclusive — the verify-family vocabulary).
+    4 inconclusive — the verify-family vocabulary). A SECOND concurrent run
+    against the same lake is REFUSED by the acceptance single-flight flock
+    (round-4 B4-1 — overlapping runs corrupted the audit hash chain) and
+    exits 2 (SUSPECT) naming the holder.
     """
     import json
 
@@ -7777,6 +7787,13 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
     exit_code, report = run_acceptance(cfg)
     if "error" in report:
         print(f"[brutex] verify-acceptance SUSPECT: {report['error']}", file=sys.stderr)
+        if json_out:
+            # Round-4 NIT (B4-5): the machine contract holds on EVERY exit —
+            # an early-SUSPECT path (symlink refusal, single-flight lock
+            # refusal, audit-open failure) previously emitted ZERO stdout
+            # bytes, so `--json | jq` died on empty input. The error report
+            # is a minimal valid JSON object ({"error": ..., "run_id": ...}).
+            print(json.dumps(report, indent=1, sort_keys=True))
         return exit_code
     if "report_write_error" in report:
         # Round-3 fix (C-F4): a report-write failure was near-silent
