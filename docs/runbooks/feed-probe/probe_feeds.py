@@ -12,9 +12,11 @@ DhanHQ (``/charts/intraday``, ``IDX_I`` index segment):
         candles;
     (b) whether INDIA VIX (``IDX_I`` / securityId 21) serves intraday candles
         at all on a recent date;
-    (c) the headless PIN+TOTP mint preconditions -- if no access token is
-        supplied but client-id + PIN + TOTP secret are, attempt the mint ONCE
-        and report only its SHAPE (never the token);
+    (c) READ-ONLY auth: the probe REQUIRES a provided ``DHAN_ACCESS_TOKEN``
+        (the SSM-read token TickVault minted) and FAILS LOUD if absent -- it
+        NEVER mints (a ``generateAccessToken`` against the shared production
+        Dhan account rotates the single active token and kills TickVault's
+        live feed);
     (e) whether SENSEX on ``IDX_I`` (the BSE-index spot row) serves 1-minute
         candles -- covered by the recent window plus a mid-2022 (June) anchor
         in the backward floor march;
@@ -44,8 +46,9 @@ Hard guarantees (see the module-level HARD REQUIREMENTS map at the bottom):
 * NO secret is ever printed, logged, or written. Credentials come ONLY from
   environment variables. Every emitted string passes through :class:`Redactor`,
   which scrubs each registered secret substring to ``***redacted***``.
-* READ-ONLY. Only GET historical / POST charts (read) endpoints, plus the ONE
-  optional token mint. Never an order/trade/modify/IP-write endpoint.
+* READ-ONLY. Only GET historical / POST charts (read) endpoints. NEVER a token
+  mint (``generateAccessToken``), order, trade, modify, or IP-write endpoint --
+  the access token MUST be provided (SSM-read; TickVault owns the lifecycle).
 * Rate-safe: token-bucket pacing at <= 5 r/s (Dhan) / <= 3 r/s (Kite) and a
   bounded total call budget. 401/403/429 are reported, not spam-retried.
 * Zero pip installs -- Python standard library only. TOTP is hand-rolled
@@ -61,11 +64,8 @@ and ZERO network calls. See ``feed-probe.md`` for the operator runbook.
 from __future__ import annotations
 
 import argparse
-import base64
 import csv
 import datetime as dt
-import hashlib
-import hmac
 import json
 import os
 import sys
@@ -82,7 +82,6 @@ from typing import Any
 
 KIT_VERSION = "1.0.0"
 
-DHAN_AUTH_BASE = "https://auth.dhan.co"
 DHAN_API_BASE = "https://api.dhan.co/v2"
 DHAN_SCRIP_MASTER_CSV = "https://images.dhan.co/api-data/api-scrip-master.csv"
 DHAN_INDEX_SEGMENT = "IDX_I"  # ONE shared index segment for NSE + BSE indices.
@@ -106,7 +105,6 @@ STATUS_TRANSPORT_ERROR = 0
 
 # Small tuning constants.
 MIN_SECRET_LEN = 4  # shorter values are not scrubbed (would corrupt text).
-MIN_TOKEN_LEN = 20  # a mint response field shorter than this is not a token.
 MAX_NOTE_CHARS = 200  # cap on any recorded response/error snippet.
 AUTH_FAIL_LIMIT = 2  # short-circuit a vendor after this many 401/403s.
 RATE_LIMIT_BACKOFF_S = 2.0  # single polite pause after a 429 (no retry).
@@ -259,57 +257,6 @@ class Redactor:
             if secret in cleaned:
                 cleaned = cleaned.replace(secret, REDACTED)
         return cleaned
-
-
-# --------------------------------------------------------------------------- #
-# RFC 6238 TOTP (hand-rolled, HMAC-SHA1, 6 digits, 30 s step)
-# --------------------------------------------------------------------------- #
-
-
-def totp_now(secret_b32: str, *, digits: int = 6, period: int = 30, at: float | None = None) -> str:
-    """Compute the current RFC 6238 TOTP from a base32 shared secret.
-
-    Parameters
-    ----------
-    secret_b32:
-        The base32-encoded TOTP shared secret (spaces/padding tolerated).
-    digits:
-        Number of output digits (default 6).
-    period:
-        Time step in seconds (default 30).
-    at:
-        Unix time to compute for; defaults to ``time.time()``.
-
-    Returns
-    -------
-    str
-        The zero-padded one-time password.
-
-    Raises
-    ------
-    ValueError
-        If the secret is not valid base32.
-    """
-    now = time.time() if at is None else at
-    counter = int(now // period)
-    key = base64.b32decode(_normalise_b32(secret_b32))
-    msg = counter.to_bytes(8, "big")
-    digest = hmac.new(key, msg, hashlib.sha1).digest()
-    offset = digest[-1] & 0x0F
-    binary = (
-        (digest[offset] & 0x7F) << 24
-        | (digest[offset + 1] & 0xFF) << 16
-        | (digest[offset + 2] & 0xFF) << 8
-        | (digest[offset + 3] & 0xFF)
-    )
-    return str(binary % (10**digits)).zfill(digits)
-
-
-def _normalise_b32(secret_b32: str) -> str:
-    """Upper-case, strip spaces, and pad a base32 secret to a multiple of 8."""
-    cleaned = secret_b32.strip().replace(" ", "").upper()
-    pad = (-len(cleaned)) % 8
-    return cleaned + ("=" * pad)
 
 
 # --------------------------------------------------------------------------- #
@@ -738,137 +685,6 @@ def confirm_dhan_security_ids(
             record.verdict = f"MISMATCH (hardcoded {expected} not among csv ids {sorted(found)})"
         records.append(record)
     return records
-
-
-# --------------------------------------------------------------------------- #
-# Dhan: PIN + TOTP headless mint (optional; reports SHAPE only)
-# --------------------------------------------------------------------------- #
-
-
-def _register_token_like(raw: str, redactor: Redactor) -> None:
-    """Register every token-shaped run in ``raw`` as a secret (redaction net only).
-
-    Defence-in-depth for the mint's unexpected-shape path: any base32/64- or
-    JWT-shaped run longer than a real token is registered so the final evidence
-    scrub masks it even if it were ever emitted. This only REGISTERS (for
-    scrubbing) -- it never returns a value nor decides the access token, so it
-    cannot mis-identify ordinary prose as the token.
-    """
-    run: list[str] = []
-    for ch in raw:
-        if ch.isalnum() or ch in "._-+/=":
-            run.append(ch)
-            continue
-        if len(run) > MIN_TOKEN_LEN:
-            redactor.register("".join(run))
-        run = []
-    if len(run) > MIN_TOKEN_LEN:
-        redactor.register("".join(run))
-
-
-def _find_token(obj: Any) -> str | None:
-    """Recursively find a token-like string in a JSON response (never printed)."""
-    if isinstance(obj, dict):
-        for key, val in obj.items():
-            if isinstance(val, str) and "token" in key.lower() and len(val) > MIN_TOKEN_LEN:
-                return val
-            nested = _find_token(val)
-            if nested:
-                return nested
-    elif isinstance(obj, list):
-        for item in obj:
-            nested = _find_token(item)
-            if nested:
-                return nested
-    return None
-
-
-def dhan_mint_token(
-    client_id: str, pin: str, totp_secret: str, redactor: Redactor, pacer: Pacer, budget: CallBudget
-) -> tuple[str | None, ProbeRecord]:
-    """Attempt the headless PIN+TOTP mint ONCE and report only its shape.
-
-    Replicates the official SDK shape exactly: ``POST`` to
-    ``auth.dhan.co/app/generateAccessToken`` with ``dhanClientId``, ``pin``,
-    ``totp`` as query params and an empty body. The PIN, TOTP secret, computed
-    TOTP, client-id, and any minted token are registered as secrets, and the
-    evidence records only the endpoint, redacted param names, status, and
-    response key shape -- never the token itself.
-
-    Parameters
-    ----------
-    client_id, pin, totp_secret:
-        Dhan client id, 6-digit PIN, and base32 TOTP secret (all secret).
-    redactor, pacer, budget:
-        Shared scrubber, pacer, and budget.
-
-    Returns
-    -------
-    tuple[str | None, ProbeRecord]
-        The in-memory access token (or ``None``), and the redacted record.
-    """
-    redactor.register(client_id)
-    redactor.register(pin)
-    redactor.register(totp_secret)
-    endpoint = f"POST {DHAN_AUTH_BASE}/app/generateAccessToken"
-    summary = {
-        "dhanClientId": REDACTED,
-        "pin": REDACTED,
-        "totp": "***computed (redacted)***",
-    }
-    record = ProbeRecord(
-        vendor="dhan",
-        name="pin_totp_mint",
-        endpoint=endpoint,
-        request_summary=summary,
-        http_status=None,
-        verdict="NOT_ATTEMPTED",
-    )
-
-    try:
-        code = totp_now(totp_secret)
-    except (ValueError, TypeError) as exc:  # binascii.Error subclasses ValueError
-        record.verdict = "MINT_FAILED (bad TOTP secret)"
-        record.notes.append(redactor.scrub(f"totp error: {exc!r}"))
-        return None, record
-    redactor.register(code)
-
-    if not budget.spend():
-        record.verdict = "SKIPPED (call budget exhausted)"
-        return None, record
-
-    query = urllib.parse.urlencode({"dhanClientId": client_id, "pin": pin, "totp": code})
-    url = f"{DHAN_AUTH_BASE}/app/generateAccessToken?{query}"
-    pacer.wait()
-    status, parsed, raw = http_json(
-        "POST", url, {"Accept": "application/json"}, body=b"", redactor=redactor
-    )
-    record.http_status = status
-
-    # Register EVERY token-shaped run in the body as a secret BEFORE any note is
-    # built, so the final evidence scrub can never leak a token that arrived in
-    # an unexpected (non-dict) shape ``_find_token`` skips.
-    _register_token_like(raw, redactor)
-    token = _find_token(parsed) if parsed is not None else None
-    if token:
-        redactor.register(token)
-    if status == HTTP_OK and token:
-        record.verdict = "MINT_OK (accessToken received)"
-    elif status == HTTP_OK:
-        record.verdict = "MINT_200_NO_TOKEN (unexpected shape)"
-    elif status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
-        record.verdict = f"MINT_DENIED ({status}: bad PIN/TOTP or 2FA/entitlement)"
-    else:
-        record.verdict = f"MINT_FAILED (status {status})"
-
-    # The mint body may hold the raw access token, so its CONTENT is never
-    # written to the evidence file -- only the top-level key names (a documented
-    # dict response is safe) or, on any other shape, a content-free descriptor.
-    if isinstance(parsed, dict):
-        record.notes.append("response keys: " + redactor.scrub(", ".join(sorted(parsed.keys()))))
-    else:
-        record.notes.append(f"response non-dict (type={type(parsed).__name__}, len={len(raw)})")
-    return token, record
 
 
 # --------------------------------------------------------------------------- #
@@ -1307,12 +1123,8 @@ def run_dhan(
     records: list[ProbeRecord] = []
     client_id = os.environ.get("DHAN_CLIENT_ID")
     token = os.environ.get("DHAN_ACCESS_TOKEN")
-    pin = os.environ.get("DHAN_PIN")
-    totp_secret = os.environ.get("DHAN_TOTP_SECRET")
     redactor.register(client_id)
     redactor.register(token)
-    redactor.register(pin)
-    redactor.register(totp_secret)
 
     # Public scrip-master resolution runs regardless of auth. Parse the CSV ONCE
     # and feed BOTH the resolver and the ID-confirm step (goal g).
@@ -1332,16 +1144,19 @@ def run_dhan(
         for rec in confirm_recs:
             _log(f"  - {rec.name}: {rec.verdict}")
 
-    # Token: prefer env; else headless mint (goal c).
+    # Token: READ-ONLY, never minted. This probe REQUIRES a provided
+    # DHAN_ACCESS_TOKEN (the SSM-read token TickVault minted) — it never runs
+    # generateAccessToken (a mint against the shared production Dhan account
+    # would rotate the single active token and INVALIDATE TickVault's live
+    # feed). Absent → fail loud, intraday probes SKIPPED (the scrip-master
+    # ID-confirm above needs no token and already ran).
     if token:
-        _log("[dhan] using DHAN_ACCESS_TOKEN from env")
-    elif client_id and pin and totp_secret:
-        _log("[dhan] no access token; attempting one PIN+TOTP mint…")
-        token, mint_rec = dhan_mint_token(client_id, pin, totp_secret, redactor, pacer, budget)
-        records.append(mint_rec)
-        _log(f"  -> {mint_rec.verdict}")
+        _log("[dhan] using DHAN_ACCESS_TOKEN from env (SSM-read; never minted here)")
     else:
-        _log("[dhan] no access token and incomplete mint creds -- intraday probes SKIPPED")
+        _log(
+            "[dhan] no Dhan access token provided — provision it via TickVault's "
+            "minter into SSM; this probe never mints. Intraday probes SKIPPED."
+        )
 
     if not token:
         for name in resolved:
@@ -1638,8 +1453,8 @@ def print_plan() -> None:
         "(or UNCONFIRMED-CSV-UNREACHABLE); skip with --no-scrip-confirm"
     )
     _emit(
-        "  0b. POST /app/generateAccessToken  (ONLY if no token + PIN+TOTP "
-        "present; shape reported, token never printed)"
+        "  0b. auth: DHAN_ACCESS_TOKEN REQUIRED (SSM-read; TickVault owns the "
+        "lifecycle) -- this probe NEVER mints; absent -> intraday probes SKIPPED"
     )
     for name, sid, conf in DHAN_INDICES:
         _emit(f"  * {name} (fallback securityId={sid} [{conf}]):")
@@ -1789,14 +1604,15 @@ def main(argv: list[str] | None = None) -> int:
 #                               only from os.environ; write_evidence final scrub.
 #   2. Read-only             -> only fetch_scrip_master (GET), dhan_intraday_probe
 #                               + dhan_rollingoption_probe (POST /charts read),
-#                               kite_historical_probe (GET), and the one
-#                               dhan_mint_token POST; no order/trade/modify surface.
+#                               and kite_historical_probe (GET). NO token mint
+#                               (generateAccessToken) and no order/trade/modify
+#                               surface -- the Dhan access token MUST be provided
+#                               (SSM-read; never minted here).
 #                               confirm_dhan_security_ids issues NO call (reuses the
 #                               one scrip-master GET) -- goal g, needs no creds.
 #   3. Rate-safe + budgeted  -> Pacer (5 r/s Dhan, 3 r/s Kite), CallBudget,
 #                               single 429 backoff, >=2 auth-failure short-circuit.
-#   4. Zero pip-install      -> stdlib imports only; totp_now hand-rolled; no
-#                               brutex import anywhere.
+#   4. Zero pip-install      -> stdlib imports only; no brutex import anywhere.
 #   5. Committable evidence  -> build_evidence / write_evidence (JSON or MD),
 #                               per-probe redacted summary + status + count +
 #                               first/last ts + verdict; print_human_summary.
@@ -1805,8 +1621,8 @@ def main(argv: list[str] | None = None) -> int:
 #   7. Exact doc'd shapes    -> dhan_intraday_probe body fields + IDX_I/INDEX;
 #                               dhan_rollingoption_probe body copied field-for-field
 #                               from the SDK expired_options_data (incl. the SDK's
-#                               body-injected dhanClientId); dhan_mint_token query
-#                               params; kite GET path + Authorization/X-Kite-Version
+#                               body-injected dhanClientId);
+#                               kite GET path + Authorization/X-Kite-Version
 #                               headers; ids from the live scrip master w/ fallback;
 #                               confirm_dhan_security_ids reads the documented compact
 #                               columns (SEM_SMST_SECURITY_ID / SEM_INSTRUMENT_NAME /

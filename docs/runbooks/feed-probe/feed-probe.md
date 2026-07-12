@@ -11,8 +11,10 @@ must be pinned from a machine that _can_ reach them:
    may _not_ reach BruteX's `2020-01-01` floor. This settles it empirically.
 2. **(Dhan b)** does INDIA VIX serve intraday candles **at all** (`IDX_I` /
    securityId 21) on a recent date?
-3. **(Dhan c)** does the headless **PIN + TOTP** token mint work for this account
-   (preconditions: is 2FA/TOTP enabled? is the Data API subscribed?)?
+3. **(Dhan c)** read-only auth: does the **provided** access token reach the
+   Data API (is the Data API subscribed)? The probe **never mints** a token — it
+   REQUIRES a `DHAN_ACCESS_TOKEN` (the SSM-read token TickVault minted) and fails
+   loud if absent (see the ⚠️ warning below).
 4. **(Dhan e)** does **SENSEX on `IDX_I`** (the BSE-index _spot_ row, securityId 51)
    serve 1-minute candles — settled by the recent window **plus a mid-2022 (June)
    anchor** added to the backward floor march, so it is checked off the January
@@ -58,28 +60,30 @@ The tool is one stdlib-only script — `probe_feeds.py` — plus this runbook. N
   month, auto-renewing every 30 days, **free if ≥ 25 trades were executed in the
   last 30 days**. Without it, historical calls return `403 Forbidden` (the probe
   reports this as `FORBIDDEN (403 …)`, it does not crash).
-* Either a **current access token** (24-hour lifetime; resets daily), _or_ the
-  **PIN + TOTP** credentials so the probe can mint one headlessly (goal c). For
-  the mint the account must have **TOTP-based 2FA enabled** and the PIN set.
+* A **current access token** (the 24-hour Data-API JWT). **This probe NEVER
+  mints one** — you must PROVIDE it (see the warning below).
 * Static-IP whitelisting is **not** required for read/data APIs (only for order
   placement), so the data probe needs no IP setup.
+
+> ⚠️ **NEVER mint against the shared production Dhan account.** BruteX is a
+> strictly read-only consumer of the SAME Dhan Data-API token TickVault mints
+> and actively uses. Running `generateAccessToken` (a mint) rotates that single
+> active token and **INVALIDATES TickVault's live feed.** This probe therefore
+> has **no mint path**: it REQUIRES a provided `DHAN_ACCESS_TOKEN` (the SSM-read
+> token — provision it via TickVault's minter into SSM) and **fails loud** if
+> absent with `no Dhan access token provided …; this probe never mints`.
 
 Environment variables (set the ones you have):
 
 | Variable | Meaning |
 | --- | --- |
 | `DHAN_CLIENT_ID` | Your numeric Dhan client id. |
-| `DHAN_ACCESS_TOKEN` | A current access token. **If set, the mint is skipped.** |
-| `DHAN_PIN` | 6-digit login PIN (only needed to mint). |
-| `DHAN_TOTP_SECRET` | Base32 TOTP shared secret (only needed to mint). |
+| `DHAN_ACCESS_TOKEN` | A current 24-h Data-API access token (SSM-read; TickVault owns the lifecycle). **Required for the intraday probes.** |
 
-If `DHAN_ACCESS_TOKEN` is absent but `DHAN_CLIENT_ID` + `DHAN_PIN` +
-`DHAN_TOTP_SECRET` are all present, the probe attempts **one** PIN+TOTP mint and
-reports only its _shape_ (never the token). With neither a token nor complete
-mint creds, the Dhan **intraday** probes are marked `SKIPPED (no token)` — but
-the public scrip-master securityId **resolution and ID-confirm (goal g) still
-run**, so a Dhan run with **no credentials at all** still verifies the three
-hardcoded engine securityIds against the public CSV.
+If `DHAN_ACCESS_TOKEN` is absent the Dhan **intraday** probes are marked
+`SKIPPED (no token)` — but the public scrip-master securityId **resolution and
+ID-confirm (goal g) still run**, so a Dhan run with **no token at all** still
+verifies the three hardcoded engine securityIds against the public CSV.
 
 ### Zerodha Kite (skip if you only want the Dhan probe)
 
@@ -114,7 +118,7 @@ python3 docs/runbooks/feed-probe/probe_feeds.py --dry-run
 Run both vendors (default), writing a committable JSON transcript:
 
 ```bash
-export DHAN_CLIENT_ID=... DHAN_PIN=... DHAN_TOTP_SECRET=...   # or DHAN_ACCESS_TOKEN=...
+export DHAN_CLIENT_ID=... DHAN_ACCESS_TOKEN=...   # access token: SSM-read, never minted here
 export KITE_API_KEY=... KITE_ACCESS_TOKEN=...
 python3 docs/runbooks/feed-probe/probe_feeds.py \
     --evidence-out ./feed-probe-evidence.json
@@ -124,8 +128,8 @@ python3 docs/runbooks/feed-probe/probe_feeds.py \
 probe (scrip-master id resolution, the intraday floor march incl. SENSEX/BSE and
 the June-2022 anchor, INDIA VIX, and the `/charts/rollingoption` options-capability
 probe) and skips Kite automatically. For the intraday **and** rollingoption reads
-you only need `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` — **read-only, no PIN/TOTP**
-(PIN/TOTP are only for the optional headless token _mint_):
+you only need `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` — **read-only**; the probe
+never mints, so no PIN / TOTP is ever used (provision the token via TickVault):
 
 ```bash
 export DHAN_CLIENT_ID=...        # numeric client id (sent as the client-id header)
@@ -136,7 +140,7 @@ python3 docs/runbooks/feed-probe/probe_feeds.py --dhan \
 
 **No-creds ID-confirm (goal g only):** the scrip-master ID-confirm needs no
 credentials, so even with zero env vars set a Dhan run confirms the three
-hardcoded engine securityIds against the public CSV (the intraday/options/mint
+hardcoded engine securityIds against the public CSV (the intraday/options
 probes report `SKIPPED (no token)`):
 
 ```bash
@@ -186,10 +190,6 @@ interval `1`):
   `recent` **and** `2022-06`, so a positive `CANDLES` on the `SENSEX @ recent` /
   `SENSEX @ 2022-06` rows confirms Dhan serves **BSE index 1-minute** off the
   January grid too.
-* `pin_totp_mint` — the headless mint attempt (**goal c**): `MINT_OK`,
-  `MINT_DENIED (401/403 …)` (bad PIN/TOTP, or 2FA/entitlement not set up), or
-  `MINT_FAILED`. Only the response _shape_ is recorded.
-
 **Dhan scrip-master ID-confirm** (public `api-scrip-master.csv`, **goal g** — the
 honesty gate; runs by default, needs **no creds**, `--no-scrip-confirm` to skip):
 
@@ -271,11 +271,10 @@ itself), and a one-word **verdict**:
 | `UNCONFIRMED-CSV-UNREACHABLE` | (scrip-confirm) the public CSV could not be fetched (host egress-blocked); **non-fatal** — the intraday probes still settle servability, the ids are just not confirmed this run. |
 | `EMPTY (200, zero candles)` | Endpoint OK but genuinely no data for that window/instrument. |
 | `HTTP_200_UNRECOGNIZED_SHAPE` | 200 OK but the body did not match a known candle shape (vendor key drift). The redacted body is in the note — **not** proof of "no data". |
-| `UNAUTHORIZED (401 …)` | Token invalid or expired — re-mint / re-login (Dhan; Kite uses 403 for this). |
+| `UNAUTHORIZED (401 …)` | Token invalid or expired — re-provision the token from SSM (Dhan; never mint here — Kite uses 403 for this). |
 | `FORBIDDEN (403 …)` | Kite: token invalid/expired (`error_type=TokenException`, surfaced in the verdict) or entitlement. Dhan: Data-API not subscribed. |
 | `RATE_LIMITED (429)` | Hit the rate cap (the probe already paces below it). |
 | `TRANSPORT_ERROR` | Network/DNS/timeout — host unreachable from this machine. |
-| `MINT_OK` / `MINT_DENIED` / `MINT_FAILED` | Headless PIN+TOTP mint outcome. |
 | `SKIPPED (...)` | No creds / no token / budget spent / after auth failures. |
 
 To answer the gates:
@@ -289,7 +288,10 @@ To answer the gates:
   windows are `EMPTY` but 2023/recent are `CANDLES`, the "last 5 years" rolling
   policy is confirmed and Dhan intraday does **not** reach the `2020-01-01` floor.
 * **Dhan VIX (b):** the `INDIA VIX … @ recent` row — `CANDLES` = served.
-* **Dhan mint (c):** the `pin_totp_mint` row's verdict + `response keys` note.
+* **Dhan auth (c):** a non-`SKIPPED` intraday row (any `CANDLES` / `EMPTY` /
+  `401` verdict) proves the **provided** token reached the Data API — the probe
+  never mints, so a `SKIPPED (no token)` here means you did not supply
+  `DHAN_ACCESS_TOKEN`.
 * **Dhan SENSEX/BSE spot (e):** the `SENSEX @ recent` and `SENSEX @ 2022-06` rows
   — `CANDLES` on either settles that Dhan serves BSE index 1-minute.
 * **Dhan rollingoption (f):** the two `rollingoption: … ATM CALL WEEK` rows —
@@ -309,12 +311,14 @@ the file you passed to `--evidence-out`.
 * Secrets are read **only** from environment variables — never a flag, file, or
   prompt.
 * Every string that is printed or written passes through a redactor seeded with
-  the client id, PIN, TOTP secret, computed TOTP, minted/supplied access token,
-  api key, and Kite access token, so an accidental echo (even inside a vendor
-  error body or URL) is masked to `***redacted***`.
+  the client id, the supplied access token, the api key, and the Kite access
+  token, so an accidental echo (even inside a vendor error body or URL) is
+  masked to `***redacted***`.
 * The tool is strictly **read-only**: it calls only the public scrip-master CSV
-  (GET), the historical/intraday/rollingoption **read** endpoints (all
-  `POST /charts/*` reads), and the one optional token mint. The scrip-master
+  (GET) and the historical/intraday/rollingoption **read** endpoints (all
+  `POST /charts/*` reads). It **NEVER mints** a token (`generateAccessToken`) —
+  the Dhan access token must be supplied (SSM-read; TickVault owns the
+  lifecycle) — and issues no order/trade/modify call. The scrip-master
   **ID-confirm (goal g)** issues **no** network call of its own — it re-parses the
   one CSV already fetched — and the public CSV carries no secret. It never touches
   an order, trade, modify, or IP-write endpoint. The `/charts/rollingoption` body
