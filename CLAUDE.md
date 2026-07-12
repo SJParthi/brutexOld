@@ -2364,7 +2364,7 @@ hostile-review pass._
   `decision.wait()` on a lake-limiter token — the wait runs under a TOTAL budget across re-plan
   iterations (`BRUTEX_SUMMARY_COLD_WAIT_S`, default 60 s = 2× the observed 27-30 s legitimate mid-pull
   cold scan; fail-SAFE via the COMMON `resolve_env_seconds`, resolved ONCE at construction — the hit arm
-  gains zero instructions), a blown budget ARMS a per-owner-Event fail-fast latch (the budget is paid
+  gains no env read, no clock read, no lock: one local None initialisation only), a blown budget ARMS a per-owner-Event fail-fast latch (the budget is paid
   by AT MOST the waiters already parked when it first expires — each runs out its own deadline, the
   latch is checked at loop entry; sequentially exactly ONE — and every later cold poll raises
   instantly in O(1), so stacked 4-15 s pollers' token pressure is bounded to ONE budget window, never
@@ -2379,8 +2379,10 @@ hostile-review pass._
   nothing) and silently on its abort. FIVE app.py route arms
   (the per-route `_store_outage_response` precedent — an app-level exception handler has zero in-repo
   precedent, REJECTED): /coverage/spot · /completeness/scoreboard · scoreboard.csv (text/plain) ·
-  /universe/completeness (beside its store-outage arm) · /coverage/options each map the timeout to the
-  NEW `_summary_warming_response(kind)` honest **503** `error_type="summary_scan_pending"` — a truly
+  /universe/completeness (beside its store-outage arm) · /coverage/options each map the timeout to an
+  honest **503** — the four JSON routes via the NEW `_summary_warming_response(kind)` body
+  `error_type="summary_scan_pending"`; scoreboard.csv bypasses the helper with its own text/plain 503
+  body (no `error_type` marker — a CSV consumer gets no JSON envelope) — a truly
   cold kind has NOTHING last-known, so a labeled empty 200 would fabricate an empty lake (Golden Rule
   #1); byte-STABLE degrade bodies (skip-render poller discipline), pollers already self-recover from
   non-ok ticks — zero JS edits. ZERO new threads on BUG-1 (bounded `Event.wait` on the waiter's own

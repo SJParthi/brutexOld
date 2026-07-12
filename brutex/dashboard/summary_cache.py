@@ -123,10 +123,11 @@ COLD_WAIT_BUDGET_ENV: Final[str] = "BRUTEX_SUMMARY_COLD_WAIT_S"
 #: guarantee-audit BUG-1). The observed legitimate worst is the 27-30 s
 #: mid-pull full-lake completeness scan (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001),
 #: so 60 s is 2× headroom — the store-guard "GENEROUS: only a genuine hang can
-#: exhaust it" doctrine; with the owner-Event latch, generosity costs exactly
-#: ONE waiter thread per wedged owner. The budget is TOTAL across the re-plan
-#: loop (a crash-looping owner chain consumes one budget, never one per
-#: takeover).
+#: exhaust it" doctrine; with the owner-Event latch, generosity costs at most
+#: the already-in-flight waiter threads for one budget window per wedged owner
+#: (sequentially: exactly ONE) — every later cold poll fails fast. The budget
+#: is TOTAL across the re-plan loop (a crash-looping owner chain consumes one
+#: budget, never one per takeover).
 COLD_WAIT_BUDGET_S: Final[float] = 60.0
 
 
