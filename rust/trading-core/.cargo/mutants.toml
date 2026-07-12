@@ -10,9 +10,14 @@
 # run-identity stamping surfaces: spec.rs (StrategySpec::canonical_bytes, LE
 # field encoding) and python.rs (spec_canonical_bytes_impl + the *_impl/check_*
 # boundary logic).
-# 627 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
+# 693 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from this
 # dir with this config in place — the count also proves the `features` key parses
-# under cargo-mutants 27.1.0): evaluator.rs 238 + python.rs 376 + spec.rs 13.
+# under cargo-mutants 27.1.0): evaluator.rs 238 + python.rs 388 + spec.rs 13 +
+# stage1a_batch.rs 54 (DEC-STAGE1A-RUST-BATCH-001 — the batch module joins the
+# scope below; python.rs grew +12 for the batch wrapper AFTER its pdc read was
+# made operator-free in the round-5 refuter fix, dropping the 4 former
+# arithmetic mutants; re-measured, not projected). The 2026-07-08 measurement
+# read 627 (evaluator.rs 238 + python.rs 376 + spec.rs 13).
 # The 2026-07-07 measurement read 619 (python.rs 368); the race-6 merge
 # (1bb34cc8) then folded main's python.rs swing-getter additions
 # (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 — `last_swing_high`/

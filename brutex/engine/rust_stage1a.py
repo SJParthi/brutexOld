@@ -115,7 +115,13 @@ _SELF_CHECK_REMAINING: Final[list[int]] = [SELF_CHECK_BUILDS]
 # ``# pragma: no mutate`` (the DEC-MUTATION-RUNTIME-001 rate_limiter.py
 # precedent): mutmut's ``str | None`` → ``str & None`` ANNOTATION mutant is
 # unkillable by any behavioral test under ``from __future__ import
-# annotations`` (module-level annotations are never evaluated).
+# annotations`` (module-level annotations are never evaluated). Disclosed
+# co-skip (the pragma removes EVERY mutant on the line): the ``= [None]`` →
+# ``= None`` VALUE mutant leaves the catalog too — it was KILLED in the
+# round-4 61-mutant run before the pragma landed (the autouse
+# ``_fresh_seam_state`` reset indexes the cell, so ``None[0]`` raises
+# ``TypeError`` in effectively every covering test), so no live teeth are
+# lost.
 _KERNEL_DISABLED_REASON: Final[list[str | None]] = [None]  # pragma: no mutate
 
 
