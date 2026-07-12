@@ -36,8 +36,8 @@ def test_index_symbol_sets() -> None:
     assert "INDIAVIX" not in constants.DHAN_ENGINE_INDEX_SYMBOLS
 
 
-def test_fallback_security_ids_are_the_in_repo_verified_values() -> None:
-    assert constants.DHAN_FALLBACK_SECURITY_IDS == {
+def test_index_security_ids_are_the_in_repo_verified_values() -> None:
+    assert constants.DHAN_INDEX_SECURITY_IDS == {
         "NIFTY": 13,
         "BANKNIFTY": 25,
         "SENSEX": 51,

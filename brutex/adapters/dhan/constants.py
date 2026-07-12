@@ -84,17 +84,12 @@ DHAN_COVERAGE_MARKET: Final[str] = "dhan"
 DHAN_FEED_ID: Final[str] = "dhan"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Scrip-master + securityId resolution (VERIFIED-live approach; ids in-repo-verified)
+# securityId resolution — hardcoded verified-pending map (probe kit is the ID cross-check)
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: The compact scrip-master CSV the SDK resolves securityIds from (SDK
-#: ``_security.py`` constant). Body host is egress-blocked in-sandbox — the id map
-#: is resolved at runtime from this CSV in production, with the fallback map below.
-SCRIP_MASTER_URL: Final[str] = "https://images.dhan.co/api-data/api-scrip-master.csv"
-
 #: The three ENGINE index symbols (brute-force scope) + INDIA VIX (REFERENCE_ONLY).
-#: The canonical BruteX symbol keys; the scrip master / fallback map resolves each to
-#: its Dhan ``securityId`` on the shared ``IDX_I`` segment.
+#: The canonical BruteX symbol keys; the hardcoded map resolves each to its Dhan
+#: ``securityId`` on the shared ``IDX_I`` segment.
 NIFTY_SYMBOL: Final[str] = "NIFTY"
 BANKNIFTY_SYMBOL: Final[str] = "BANKNIFTY"
 SENSEX_SYMBOL: Final[str] = "SENSEX"
@@ -115,12 +110,15 @@ DHAN_SPOT_INDEX_SYMBOLS: Final[tuple[str, ...]] = (
     INDIAVIX_SYMBOL,
 )
 
-#: Fallback ``{symbol → securityId}`` used ONLY when the live scrip-master resolution
-#: is unavailable. NIFTY 13 is official (SDK README ``security_id=13``); the others
-#: are in-repo-verified (MIGRATION #87/#72 + TickVault CSV-pins): BANKNIFTY 25,
-#: SENSEX 51, INDIA VIX 21 (NOT 26 — a known third-party mirror error). A symbol
-#: ABSENT from both the live CSV and this map is loud-skipped (never a blind id).
-DHAN_FALLBACK_SECURITY_IDS: Final[dict[str, int]] = {
+#: The hardcoded verified-PENDING ``{symbol → securityId}`` map — the SINGLE source of
+#: truth (no runtime live-CSV loader; coordinator ruling). NIFTY 13 is official (SDK
+#: README ``security_id=13``); the others are in-repo-verified (MIGRATION #87/#72 +
+#: TickVault CSV-pins): BANKNIFTY 25, SENSEX 51, INDIA VIX 21 (NOT 26 — a known
+#: third-party mirror error). The read-only probe kit
+#: (``docs/runbooks/feed-probe/probe_feeds.py``) is the ONE-TIME cross-check that
+#: confirms each id against the public compact scrip-master CSV. A symbol ABSENT from
+#: this map is loud-skipped (never a blind id, Golden Rule #1).
+DHAN_INDEX_SECURITY_IDS: Final[dict[str, int]] = {
     NIFTY_SYMBOL: 13,
     BANKNIFTY_SYMBOL: 25,
     SENSEX_SYMBOL: 51,
@@ -188,10 +186,10 @@ __all__ = [
     "DHAN_ENGINE_INDEX_SYMBOLS",
     "DHAN_ERR_AUTHORIZATION",
     "DHAN_ERR_INVALID_AUTH",
-    "DHAN_FALLBACK_SECURITY_IDS",
     "DHAN_FEED_ID",
     "DHAN_FETCH_INTERVAL",
     "DHAN_HISTORY_FLOOR",
+    "DHAN_INDEX_SECURITY_IDS",
     "DHAN_INTERVAL_1MIN",
     "DHAN_INTRADAY_WINDOW_DAYS",
     "DHAN_RATE_LIMIT_PER_MIN",
@@ -207,7 +205,6 @@ __all__ = [
     "NATIVE_TIMEZONE",
     "NIFTY_SERVABILITY_UNVERIFIED",
     "NIFTY_SYMBOL",
-    "SCRIP_MASTER_URL",
     "SEGMENT_INDEX",
     "SENSEX_SERVABILITY_UNVERIFIED",
     "SENSEX_SYMBOL",
