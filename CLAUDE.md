@@ -44,6 +44,20 @@ DEC-CROSSVERIFY-PREEMPT-002 (true preemption — job-cancel dependency).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change; the per-item record lives ONLY in the §1 Active-branch blurb +
 MIGRATION.md #1753 — this header carries the pointer, never the story.)
+Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
+MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
+the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
+past the adaptive floor the discovery / windows / ledger / tables caches
+serve the LAST-KNOWN payload instantly and refresh in at most ONE tokenless
+background revalidator per key (newest-wins store guard; payloads
+byte-identical, pinned); the /db spot-cascade walk PRUNES the F&O contract
+tree at descent; six db.html loaders become self-recovering with
+keep-last-good; NEW `observability/loop_watchdog.py` turns event-loop
+silence into WARN/CRITICAL alerts (`SweepAlerter.loop_stalled`). READ-side
+dashboard + observability only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no lake/schema/scope/vocab/rate change; touched modules 100% line+branch;
+the per-round record lives in the §1 Active-branch blurb + MIGRATION.md
+#1751 — this header carries the one-line summary, never the story).
 Earlier: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
 #1685 — Slice 0 of the Rust sweep-core conversion: a behavior-identical
 FOLD/COMBINE decomposition of the metric body in `brutex/metrics/compute.py`
@@ -2429,9 +2443,49 @@ hostile-review pass._
   missing attribute + the per-symbol `gate_signature_drift` withhold on a classify `TypeError` (never a
   mid-run crash), the sha256-operand killing test (same-length different-bytes tamper; the operand-drop
   mutant applied + verified killed by exactly the new test), and the PR-body/#1753 stale-count + deadman-claim
-  honesty refresh (whole-crossverify 1253 stmts / 320 branches / 0 missed; 410 package tests). ENGINE
+  honesty refresh (whole-crossverify 1257 stmts / 320 branches / 0 missed; 414 package tests). ROUND-4 POLISH
+  folded (same branch, pre-open — the per-finding record lives in MIGRATION.md #1753): P1 the mid-day/pre-open
+  honesty split (a mid-day fire is the SILENT `deferred_market_hours` exit 0, a pre-open fire is the
+  withhold-CRITICAL — runbook + schedule.py docstring + #1753 aligned) · P2 the gate-seam enum-VALUE-drift fold
+  into the typed withhold path · P3 `NoCredentialsError` classified nonretryable (whole-publish abort naming the
+  IAM runbook) · P4 the step-M provenance killing test pin. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean,
   `mypy --strict` clean, pyright 0 new; `node --check` clean on the touched template's inline scripts.)
+  Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
+  the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
+  `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
+  IMMEDIATELY while a pull is active (or a revalidator is in flight) and refreshes in AT MOST ONE tokenless
+  background daemon per key (zero lake/AnyIO tokens; NEWEST-WINS store guard — a revalidator result landing after a
+  later store is SKIPPED, store-order not numeric because the counts generations are sha256 digests; every stale
+  serve logged); adopters = the three discovery memos (fno-cascade / db-datasets / spot-cascade) + **(G4)** the
+  window-payload COUNTS + PAGE caches + the `_LEDGER_READ_CACHE` records/rollup families + **(G4t)** the
+  previously-UNCACHED `GET /api/v1/db/tables` `table_summary` sweep (master_revision-digest-keyed SWR memo;
+  fresh-compute payload byte-identity-pinned vs the pre-cache route) — so /universe pull-progress,
+  /coverage/windows, the /db window-ledger grid and the /db tables list all serve last-known instantly past-floor
+  mid-pull; **(G2)** the /db SPOT-cascade build prunes the F&O contract tree at walk descent
+  (`exclude_segments={FNO}` — the walk-flatness bench-pinned; a corrupt FNO dir can no longer break the SPOT
+  picker); **(G3, the client half)** SIX db.html loaders become self-recovering with keep-last-good (a failed poll
+  never clobbers a rendered grid); **(G5)** NEW `brutex/observability/loop_watchdog.py` — a 1 s event-loop
+  heartbeat + monitor daemon (pure injectable-clock `check_once` state machine; WARN ≥5 s / CRITICAL ≥30 s → NEW
+  best-effort `SweepAlerter.loop_stalled`, the `pull_halted` twin; /metrics gauge + counter; `build_app`
+  lifespan-wired, `None` = zero threads; `cli.cmd_dashboard` binding behind `BRUTEX_LOOP_WATCHDOG` default ON,
+  junk fails loud). REVIEW FOLDS: the r1 BLOCKER (SWR revalidators shared ONE `_LockedReadConn` view — NEW
+  `_LockedReadConn.cursor()` mints a fresh view per revalidator over the SAME serialized read lock, isolating all
+  FIVE conn-bound computes; cross-thread `_held` corruption + the leaked-lock freeze killed), the r7 MAJOR (the
+  tables probe degrade catches the wedge latch's `CatalogError` via `_TABLES_PROBE_FAULT_TYPES` — a wedged store
+  answers the honest 0-counts 200, never a 500), and the r8 probe→compute TOCTOU (NEW
+  `table_summary(raise_on_fault=True)` + exported `TABLE_SUMMARY_FAULT_TYPES` — the cached strict compute raises
+  out of `get_or_compute`, so NOTHING is stored on either degrade arm; a healthy-probe-then-wedge can no longer
+  cache all-zero counts under the pre-wedge token). FAILS-BEFORE anchors (operator's live 31-min heavy-pull run):
+  `/api/v1/db/candles/datasets` ZERO completions in the entire log; `/api/v1/coverage/windows` 221 serves then
+  ZERO once the options leg churned the ledger; `/api/v1/universe/pull-progress` ≥154 s silent. HONEST residuals:
+  a cold FIRST-ever fill still pays one blocking compute on the single-flight (every SWR family); ≤1 zombie
+  revalidator per key on a wedged volume (the #999 no-kill stance); wire-level EMIT-ON-STALE staleness keys +
+  the G6 L2-heal `per_file_pause` throttle DEFERRED. READ-side dashboard + observability only — ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; ZERO
+  new routes; `movers_cache.py` + `loop_watchdog.py` + `sweep_alerts.py` + `db_view.py` +
+  `instrument_store.py` 100% line+branch on their ci.yml-exact gates; touched `app.py`/`cli.py` lines covered;
+  ruff/ruff-format clean, `mypy --strict` clean, pyright 0 new vs the base.)
   Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
   of the Rust sweep-core conversion: a BEHAVIOR-IDENTICAL fold/combine decomposition of the metric body in
   `brutex/metrics/compute.py` — NEW frozen `TradeFolds` (17 fields, the exact per-trade fold intermediates) +
@@ -6033,6 +6087,17 @@ hostile-review pass._
   stage, options-excluding pull); BSE_EQ/BSE_FNO structural-only;
   SENSEX-futures ingest + true preemption = named follow-up DECs; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/pull-contention-feed-decoupled`
+  (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
+  dashboard pull-contention / feed-resilience slice: SWR serve-last-known on
+  the discovery / windows / ledger / tables caches (tokenless background
+  revalidators + newest-wins guard, payloads byte-identical pinned), the
+  FNO-pruned /db spot-cascade walk, six self-recovering db.html loaders with
+  keep-last-good, and the event-loop watchdog (`loop_watchdog` +
+  `SweepAlerter.loop_stalled`); the r1 `_LockedReadConn.cursor()` BLOCKER +
+  r7 wedge-degrade MAJOR + r8 probe→compute TOCTOU folds; READ-side
+  dashboard + observability only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
   Earlier: `claude/sweep-core-slice0`
   (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685 — Slice 0 of the Rust
   sweep-core conversion: the behavior-identical fold/combine decomposition of

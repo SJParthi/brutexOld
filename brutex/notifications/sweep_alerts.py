@@ -813,6 +813,47 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def loop_stalled(self, *, stalled_s: float, threshold_s: float) -> bool:
+        """Alert that the dashboard EVENT LOOP is stalled (CRITICAL).
+
+        Fired by :class:`brutex.observability.loop_watchdog.LoopWatchdog` on the
+        CRITICAL edge — the loop's 1 s heartbeat has not beaten for
+        *stalled_s* ≥ *threshold_s* (30 s = the rate widget's own operator-visible
+        ``STALE_RED_MS`` line), so NO dashboard route is being served
+        (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the 2026-07-11 incident's
+        36 minutes of total poll silence become a named, real-time alert instead
+        of a client-side "STALE … retrying" mystery). Observe-only — the watchdog
+        remediates NOTHING; the operator checks for a blocking on-loop read /
+        GIL-heavy phase (or restarts the dashboard on current main).
+
+        Mirrors :meth:`pull_halted`: best-effort, fire-and-forget, silent no-op
+        when Telegram is disabled (the default). ``PHASE_BLOCKED`` carries a 0.0
+        notifier dedupe window, so the ``dedupe_key`` is identification /
+        defence-in-depth only — the REAL coalescing is upstream: the watchdog's
+        state machine fires the CRITICAL edge once per stall episode and
+        re-alerts at most once per its ``realert_every_s`` (300 s) while the
+        stall persists.
+
+        Parameters
+        ----------
+        stalled_s
+            The measured heartbeat lag at the alert (seconds).
+        threshold_s
+            The CRITICAL threshold that was crossed (seconds).
+        """
+        message = escape_markdown_v2(
+            f"🛑 Dashboard event loop STALLED for {stalled_s:.1f}s "
+            f"(threshold {threshold_s:.0f}s). No dashboard route is being served — "
+            "check for a blocking on-loop read or a GIL-heavy phase; the watchdog "
+            "observes only, nothing is remediated automatically."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key="loop-stalled",
+        )
+
     def nightly_summary(
         self,
         *,
