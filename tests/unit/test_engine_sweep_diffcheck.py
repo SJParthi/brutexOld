@@ -1,9 +1,10 @@
 """Unit tests — :mod:`brutex.engine.sweep_diffcheck` (R45 differential spot-check).
 
 Rule-by-rule hand fixtures for the naive reference simulator (entry /
-same-session gate / forced exit / SL-TP touch + SL-first tie / AT_LEVEL
-fills / MFE-MAE / end-of-data), the deterministic sampler pins, the
-tristate + fail-loud env resolution, the AST import-ban pin, the
+same-session gate / session-gap boundary close / forced exit / SL-TP
+touch + SL-first tie / AT_LEVEL fills / MFE-MAE / end-of-data), the
+deterministic sampler pins, the tristate + fail-loud env resolution, the
+AST import-ban pin, the
 deliberately-BROKEN reference clone ⇒ SUSPECT teeth test, and the
 never-adopt pin (design D-11 / I-4).
 """
@@ -45,6 +46,7 @@ from structlog.testing import capture_logs
 TRACEABILITY: dict[str, tuple[str, ...]] = {
     "test_r45_entry_fills_next_bar_open": ("R45",),
     "test_r45_overnight_gap_entry_is_dropped": ("R45",),
+    "test_r45_session_gap_closes_at_prior_session_last_bar": ("R45",),
     "test_r45_forced_exit_overrides_everything": ("R45",),
     "test_r45_sl_tp_touch_and_sl_first_tie": ("R45",),
     "test_r45_end_of_data_closes_at_last_close": ("R45",),
@@ -415,6 +417,72 @@ class TestReferenceSimulateRules:
         assert len(trades) == 1
         assert trades[0].entry_idx == 2
         assert trades[0].entry_paisa == 10_100
+
+    def test_r45_session_gap_closes_at_prior_session_last_bar(self) -> None:
+        """(A2): an open position closes at the PRIOR session's last bar.
+
+        The boundary bar is NEVER managed — its wild range would trip the
+        SL (and fold huge excursions) if it were; the reference must close
+        FIRST at the day-1 last bar's CLOSE/ts/idx under ``session_gap``
+        (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743 — the
+        session-boundary law re-derived spec-side for the R45 reference).
+        """
+        day1 = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST Tue
+        day2 = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 09:15 IST Wed
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=day1),  # arm
+            _bar(1, 10_010, 10_030, 10_005, 10_020, anchor=day1),  # entry + day-1 LAST
+            _bar(0, 9_000, 12_000, 8_000, 9_500, anchor=day2),  # boundary (wild)
+            _bar(1, 9_500, 9_500, 9_500, 9_500, anchor=day2),
+        ]
+        trades = reference_simulate(
+            bars,
+            [True, False, False, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=50,  # would fill stop_loss at 9_960 IF the boundary bar were managed
+            tp_paisa=None,
+        )
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade.exit_reason == "session_gap"
+        assert trade.entry_idx == 1
+        assert trade.exit_idx == 1  # the day-1 last stored bar, NOT the boundary bar
+        assert trade.exit_ts == bars[1].timestamp
+        assert trade.exit_paisa == 10_020  # day-1 last CLOSE — the finish() pricing
+        assert trade.pnl_paisa == 10
+        assert trade.holding_bars == 1
+        # NO excursion fold from the boundary bar (day-1 evidence only).
+        assert trade.mfe_paisa == 20  # bar1 high 10_030 − entry 10_010
+        assert trade.mae_paisa == 5  # entry 10_010 − bar1 low 10_005
+
+    def test_session_gap_boundary_bar_never_arms_next_bar_fills(self) -> None:
+        """The boundary bar's own signal never arms; earliest re-arm i+1, fill i+2."""
+        day1 = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST Tue
+        day2 = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 09:15 IST Wed
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=day1),  # arm
+            _bar(1, 10_000, 10_000, 10_000, 10_000, anchor=day1),  # entry + day-1 LAST
+            _bar(0, 10_100, 10_100, 10_100, 10_100, anchor=day2),  # boundary: fires, no arm
+            _bar(1, 10_100, 10_100, 10_100, 10_100, anchor=day2),  # re-arm (i+1)
+            _bar(2, 10_150, 10_150, 10_150, 10_150, anchor=day2),  # fill (i+2)
+        ]
+        trades = reference_simulate(
+            bars,
+            [True, False, True, True, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=None,
+            tp_paisa=None,
+        )
+        assert len(trades) == 2
+        assert trades[0].exit_reason == "session_gap"
+        assert trades[0].exit_idx == 1
+        # The boundary bar (idx 2) armed nothing — the second trade fills at
+        # idx 4 off the idx-3 arm, never at idx 3 off the boundary's signal.
+        assert trades[1].entry_idx == 4
+        assert trades[1].entry_paisa == 10_150
+        assert trades[1].exit_reason == "end_of_data"
 
     def test_in_coverage_non_session_date_uses_default_boundary(self) -> None:
         """A Saturday (in-coverage, no session) falls back to the 15:20 default."""
