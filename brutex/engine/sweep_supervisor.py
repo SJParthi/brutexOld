@@ -394,7 +394,7 @@ def grid_identity(grid: SweepGridConfig) -> str:
         The 64-char lowercase BLAKE3 hex digest of the grid identity.
     """
     canonical = json.dumps(_grid_descriptor(grid), sort_keys=True, separators=(",", ":"))
-    return blake3.blake3(canonical.encode("utf-8")).hexdigest()
+    return str(blake3.blake3(canonical.encode("utf-8")).hexdigest())
 
 
 def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, Any]:
