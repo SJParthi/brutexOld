@@ -7229,13 +7229,35 @@ def _build_window_payload_duckdb(
         # written by `append_ledger_delta` with the full 14-column schema (writer-pinned), so
         # the residual union NULL-fill is `bars_net_new`-only on a base that predates that
         # optional column — equal to the Python fold's honest ``None``, never fed to ``int()``.
-        available = {
-            str(col[0])
-            for col in (
-                conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
-                or []
-            )
-        }
+        # ISOLATED cursor + close (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+        # deadlock fix): this description-only probe was the LAST remaining
+        # statement on the request's SHARED ``_LockedReadConn`` view — with no
+        # fetch and no close it left the store read RLock HELD by the request's
+        # worker thread at request end (pre-round-1 the later counts/page
+        # statements on the SAME shared view rebalanced it via ``execute``'s
+        # leading ``_release()``; the round-1 per-compute ``cursor()`` isolation
+        # moved them off the shared view, so nothing rebalanced), and the NEXT
+        # request dispatched to a DIFFERENT worker thread deadlocked forever on
+        # ``_lock.acquire()`` (reproduced: the CI unit-gate hang at
+        # test_windows_ledger_fast_path_through_real_connection; py-spy-traced
+        # to the instrument_store ``_LockedReadConn.execute`` acquire). The
+        # probe now follows the same ``_compute_cursor``/``_close_cursor``
+        # discipline as every other statement in this function — its view
+        # releases the lock in the ``finally`` even on the legacy-shape raise
+        # below.
+        probe = _compute_cursor(conn)
+        try:
+            available = {
+                str(col[0])
+                for col in (
+                    probe.execute(
+                        "SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]
+                    ).description
+                    or []
+                )
+            }
+        finally:
+            _close_cursor(probe, conn)
         if not {"empty_streak", "in_pull_fetches"}.issubset(available):
             raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
     counts_since: dict[str, dict[str, int]] | None = None
