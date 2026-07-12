@@ -400,8 +400,17 @@
         '/strategy?run_id=' + encodeURIComponent(state.runId) +
         '&rank=' + encodeURIComponent(tr.getAttribute('data-rank') || '1');
     });
+    // ~200 ms trailing-edge debounce on the eight filter inputs
+    // (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the
+    // v29.html/movers.html debounce precedent): a typing burst coalesces
+    // into ONE render instead of a full filter+sort+render per keystroke.
+    var renderDebounceTimer = null;
+    function renderDebounced() {
+      clearTimeout(renderDebounceTimer);
+      renderDebounceTimer = setTimeout(render, 200);
+    }
     ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
-      byId(id).addEventListener('input', render);
+      byId(id).addEventListener('input', renderDebounced);
     });
     byId('scShowAll').addEventListener('click', function () {
       state.showAll = true;

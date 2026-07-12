@@ -127,13 +127,20 @@ jobs:
     # pairing it with TODAY'S compute count, and was ~2.4x low on the loop
     # modules). Mutant counts measured on THIS tree via mutmut 2.5.1
     # list_mutations (method validated against two real run logs: audit
-    # 243/243 pre-round-2, rate_common 360/360 pre-round-3): pass 1 = 258;
+    # 243/243 pre-round-2, rate_common 360/360 pre-round-3): pass 1 = 284
+    # (re-measured 2026-07-11 — the -003-era 258 predated the #1617
+    # gate_reasons block growing ranking/__init__.py to 161; confirmed by a
+    # FULL local pass-1 run under the widened 3-file runner: 284 executed /
+    # 0 survived — DEC-RANKING-MUTATION-ZERO-SURVIVOR-001, MIGRATION #1750;
+    # the added runner file costs ~+0.25 s/mutant LOCAL — baseline
+    # 0.88 s/144 tests -> 1.13 s/177 — bounded ~+1-3 min on this pass at CI
+    # pace, inside the margin below);
     # compute.py = 354; remaining 8 loop modules = 932 (state 58 + retry 77 +
     # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
     # parser 33 + spec 91).
     # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
     # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
-    # Nominal: (258 + 354 + 932) x ~2.3 s ~= 59 min; + rate_common 369
+    # Nominal: (284 + 354 + 932) x ~2.3 s ~= 60 min; + rate_common 369
     # (post-round-3: the 9 dropped slot pragmas return 9 mutants to the gate)
     # at an ASSUMED 5-7 s CI baseline (local 2.5-3.4 s x an assumed 2x
     # shared-GHA factor — the rehearsal never reached rate_common, so its CI
@@ -143,8 +150,8 @@ jobs:
     # MIN of the two preflight-measured baselines, capped 30 s -> ~1-3.5 min
     # across the admitted regime); + the TWO ~2-10 s preflight baseline runs
     # (~4-20 s total; two samples + min per fixer round 4 R4-2).
-    # Total ~= 94-106 min nominal at that band -> an HONEST 14-26 min margin
-    # under 120 (>= ~35 min if rate_common paces like its siblings — and the
+    # Total ~= 95-107 min nominal at that band -> an HONEST 13-25 min margin
+    # under 120 (>= ~34 min if rate_common paces like its siblings — and the
     # measured-baseline wrap sizing makes a sibling-pace baseline a
     # first-class admitted regime, NOT a preflight red). A ~20%
     # shared-runner bad day on the worst end CROSSES the 120-min kill —
@@ -154,7 +161,7 @@ jobs:
     # edit that needs no new machinery. Admitted-regime honesty (R4-3): the
     # preflight's [1200, 20000] ms band is CLASSIFIER arithmetic, not a
     # budget guarantee — a rate_common baseline >= ~9.5-10 s (369 x ~10 s
-    # ~= 61 min on top of the ~59 min loop-module nominal) already crosses
+    # ~= 61 min on top of the ~60 min loop-module nominal) already crosses
     # the 120-min kill from INSIDE the admitted band; the failure is LOUD
     # (budget kill -> cancelled -> cause-aware issue) and the same
     # >100-min split dial is the remedy.
@@ -168,11 +175,11 @@ jobs:
       # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention, cf.
       # doctor-daily.yml): never persist the job token into .git/config while
       # later steps execute a broad third-party build surface.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -190,7 +197,7 @@ jobs:
         # fails before a single mutant is checked (DEC-MUTATION-GATE-RANKING-001).
         run: pip install -e ".[dev,data,ui]" "mutmut>=2.5,<3.0"
       - name: Install Rust toolchain (for the PyO3 wheels)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the wheel build up to 3
@@ -248,12 +255,22 @@ jobs:
           #    (compute.py [Sharpe/moments] — formerly the remaining
           #    ranking-math ratchet, MIGRATION #590 — is now in the
           #    per-module loop below, DEC-MUTATION-GATE-COMPUTE-001.)
+          #    tests/unit/test_ranking_gate_reasons.py MUST stay in this
+          #    runner list (DEC-RANKING-MUTATION-ZERO-SURVIVOR-001,
+          #    MIGRATION #1750): the gate_reasons wire-token/door block
+          #    (DEC-SWEEP-RESULTS-DEPTH-001 #1617) is tested ONLY by that
+          #    dedicated file, so the 2026-07-11 scheduled run redded with
+          #    26 survivors — all in that block — because the runner never
+          #    executed its tests. The hypothesis property twin
+          #    (tests/property/test_ranking_gate_reasons_property.py) stays
+          #    a CI-suite-only gate — deliberately NOT in this runner
+          #    (per-mutant runtime + randomized-verdict determinism).
           #
           # Tests on these already hit 100% line coverage; mutmut verifies that
           # the coverage is *meaningful* (the tests detect a behaviour change).
           mutmut run \
             --paths-to-mutate brutex/metrics/deflated_sharpe.py,brutex/ranking/__init__.py,brutex/ranking/overfit.py \
-            --runner "sh -c 'pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py -x -q --no-header || exit 1'" \
+            --runner "sh -c 'pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py tests/unit/test_ranking_gate_reasons.py -x -q --no-header || exit 1'" \
             --simple-output
           mutmut results | tee mutmut-results-math.txt
           if grep -qE "^[0-9]+" mutmut-results-math.txt; then
@@ -542,7 +559,7 @@ jobs:
         # this step had uploaded NOTHING ever ("No files were found" on every
         # live run) until the flag was set.
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: mutmut-cache
           path: ".mutmut-cache*"
@@ -572,7 +589,7 @@ jobs:
         # dedup race — unlike the Rust matrices, whose filers moved to the
         # fan-in mutation-verdict job).
         if: (failure() || cancelled()) && github.event_name != 'workflow_dispatch'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             // Cause-NEUTRAL title (DEC-MUTATION-RUNTIME-003 fixer round): the old
@@ -634,15 +651,15 @@ jobs:
       # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention): this
       # job inherits the read-only workflow token AND never needs git auth after
       # checkout, while cargo-mutants executes hundreds of third-party builds.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust/fno-math -> target
           shared-key: "mutation-fno-math"
@@ -661,7 +678,7 @@ jobs:
         # An unpinned `latest` could silently flip those mutants to MISSED and
         # red the gate with a mislabelled cause; version bumps are DELIBERATE
         # (mirrors the pinned RUST_VERSION above).
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
@@ -696,7 +713,7 @@ jobs:
             --release
       - name: Upload cargo-mutants report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cargo-mutants-report-fno-math-shard-${{ matrix.shard }}
           path: rust/fno-math/cargo-mutants.out
@@ -733,15 +750,15 @@ jobs:
         working-directory: rust/trading-core
     steps:
       # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust/trading-core -> target
           shared-key: "mutation-trading-core"
@@ -751,7 +768,7 @@ jobs:
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin (the 229-UNVIABLE python.rs
         # PyResult-alias measurement + shard budgets are 27.1.0-specific).
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
@@ -794,7 +811,7 @@ jobs:
             --release
       - name: Upload cargo-mutants report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cargo-mutants-report-trading-core-shard-${{ matrix.shard }}
           path: rust/trading-core/cargo-mutants.out
@@ -836,7 +853,7 @@ jobs:
     steps:
       - name: Open GitHub issue — fno-math gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result) && github.event_name != 'workflow_dispatch'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const outcome = '${{ needs.rust-mutation.result }}';
@@ -857,7 +874,7 @@ jobs:
             });
       - name: Open GitHub issue — trading-core gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-trading-core.result) && github.event_name != 'workflow_dispatch'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const outcome = '${{ needs.rust-mutation-trading-core.result }}';
@@ -882,7 +899,7 @@ jobs:
           && needs.python-mutation.result == 'success'
           && needs.rust-mutation.result == 'success'
           && needs.rust-mutation-trading-core.result == 'success'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             // Zero-click lifecycle (CLAUDE.md §2 Rule 11 AUTOMATED). Close ONLY:

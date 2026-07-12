@@ -156,6 +156,63 @@ _MAX_KERNEL_PRICE_PAISA: Final[int] = (2**63 - 1) // 8
 #: the seam routes to the pure-Python oracle.
 _U128_MASK: Final[int] = (1 << MAX_VOCAB_BITS) - 1
 
+#: Cap on ``trade_sim.session_tail_hole`` WARNs per kernel-input derivation
+#: (DEC-TRADESIM-OPEN-SESSION-GUARD-001) — everything past the cap rolls into
+#: ONE ``trade_sim.session_tail_hole_suppressed`` summary (the house
+#: preopen.prev_close_noncontiguous capped-warn precedent). Mask-independent
+#: by construction: the detection runs ONCE per tuple at derivation, never
+#: per mask and never inside the walker's ``_close`` (the
+#: DEC-SWEEP-LOG-VOLUME-GUARD-001 #1630 posture).
+_TAIL_HOLE_WARN_CAP: Final[int] = 20
+
+
+def _warn_session_tail_holes(forced: Sequence[bool], session_days: Sequence[int]) -> None:
+    """WARN once per session-tail data hole in the window (capped, mask-independent).
+
+    A *session-tail hole* is a maximal run of consecutive bars sharing one
+    session ordinal that (i) is NOT the window's final session and (ii)
+    contains NO bar with ``forced=True`` — exactly the shape on which the
+    walker's (A2) open-position session guard fires a ``session_gap`` close
+    (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the session's stored bars ended
+    before any forced-exit-window bar, so a position opened in it can only
+    close retroactively at its last stored bar. The FINAL session is exempt —
+    an incomplete final session is the ordinary end-of-window shape the
+    ``end_of_data`` close already names honestly.
+
+    Emits at most :data:`_TAIL_HOLE_WARN_CAP` ``trade_sim.session_tail_hole``
+    WARNs (fields: ``session`` — the ISO date from the ordinal — and ``bars``,
+    the session's stored-bar count) plus ONE
+    ``trade_sim.session_tail_hole_suppressed`` summary carrying the total when
+    the cap is exceeded. One O(N_bars) pass, paid at the already-O(N_bars)
+    derivation. The pure-Python re-sim paths (capture / cascade / robustness /
+    CLI) deliberately get no WARN — the ``exits_session_gap`` aggregate
+    counter is their persistent signal; data-hole ALERTING stays owned by the
+    #1031 detectors.
+    """
+    holes: list[tuple[int, int]] = []
+    run_start = 0
+    n = len(session_days)
+    for i in range(1, n + 1):
+        if i < n and session_days[i] == session_days[run_start]:
+            continue
+        # A maximal run [run_start, i) just ended. The FINAL run (i == n) is
+        # exempt; a prior run with no forced bar is a session-tail hole.
+        if i < n and not any(forced[run_start:i]):
+            holes.append((session_days[run_start], i - run_start))
+        run_start = i
+    for ordinal, bar_count in holes[:_TAIL_HOLE_WARN_CAP]:
+        _LOG.warning(
+            "trade_sim.session_tail_hole",
+            session=date.fromordinal(ordinal).isoformat(),
+            bars=bar_count,
+        )
+    if len(holes) > _TAIL_HOLE_WARN_CAP:
+        _LOG.warning(
+            "trade_sim.session_tail_hole_suppressed",
+            total=len(holes),
+            shown=_TAIL_HOLE_WARN_CAP,
+        )
+
 
 def _construction_fallback_reason(
     bar_bits: Sequence[int],
@@ -453,9 +510,19 @@ class ResidentTradeSim:
         uses — threaded to the kernel so a pending entry armed on a session's
         last stored bar is DROPPED at the next session's open instead of
         filling ~18h stale across the overnight gap (R2-OC-2; mirrors the
-        walker's ``_pending_entry_day`` gate bit-for-bit). Bar ``i``'s session
-        derives from bar ``i``'s own timestamp — knowable at bar ``i`` (P-06:
-        no look-ahead).
+        walker's ``_pending_entry_day`` gate bit-for-bit) AND so an open
+        position never survives a session-date change (the ``session_gap``
+        close, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the same ordinals feed
+        the kernel's open-position guard, zero new FFI inputs). Bar ``i``'s
+        session derives from bar ``i``'s own timestamp — knowable at bar ``i``
+        (P-06: no look-ahead).
+
+        Observability (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the derivation
+        ends with ONE mask-independent capped sweep over the derived columns —
+        :func:`_warn_session_tail_holes` — naming every non-final session
+        whose stored bars never reach a forced-exit bar (the exact shape the
+        guard will fire on), so a session-tail data hole is loud once per
+        derivation, never once per mask.
         """
         forced: list[bool] = []
         session_days: list[int] = []
@@ -472,6 +539,7 @@ class ResidentTradeSim:
                 )
             forced.append(is_forced_exit_bar(ts_ist.time(), self._tf_minutes, cache_seconds))
             session_days.append(bar_day.toordinal())
+        _warn_session_tail_holes(forced, session_days)
         open_p = [_price_to_paisa(bar.open) for bar in self._bars]
         high_p = [_price_to_paisa(bar.high) for bar in self._bars]
         low_p = [_price_to_paisa(bar.low) for bar in self._bars]
