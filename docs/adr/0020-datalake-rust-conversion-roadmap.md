@@ -1,4 +1,4 @@
-# ADR-0019 — Rust conversion ROADMAP for the data-lake I/O layer (operator override: Rust everywhere, byte-identity gated)
+# ADR-0020 — Rust conversion ROADMAP for the data-lake I/O layer (operator override: Rust everywhere, byte-identity gated)
 
 **Decision ID:** `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md entry #1726)
 **Date:** 2026-07-11

@@ -125,7 +125,7 @@ KERNELS = _discover_maturin_kernels()
 # Registration REQUIRES a documented reason — an unregistered new crate that
 # nothing imports still fails test_kernel_is_imported_by_brutex loudly.
 OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
-    # DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726 PR-1 / ADR-0019):
+    # DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726 PR-1 / ADR-0020):
     # brutex_lake is the default-OFF lake render crate. It is consumed ONLY
     # through the import-guarded facade brutex/data/lake_rust_render.py
     # (`importlib.import_module("brutex_lake")` inside the guard — an absent

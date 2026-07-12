@@ -1,4 +1,4 @@
-# brutex-lake — the data-lake Rust render seam (ADR-0019 PR-1)
+# brutex-lake — the data-lake Rust render seam (ADR-0020 PR-1)
 
 `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1726). This crate re-hosts
 the ONE bars-writer parquet render seam
@@ -9,7 +9,7 @@ see the ATOMIC-pin table below), so its output is **bit-identical** to the wheel
 `DataFrame.write_parquet(use_pyarrow=False)` under the writer's options
 (zstd level 3, `row_group_size=100_000`, statistics off).
 
-## Honesty banner (mandatory, per ADR-0019 §0)
+## Honesty banner (mandatory, per ADR-0020 §0)
 
 **Expected payoff ≈ 0 — conversion is for uniformity, not speed.** The
 encoder this crate links IS the same Rust code the Python wheel already runs;

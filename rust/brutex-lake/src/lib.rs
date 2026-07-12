@@ -1,4 +1,4 @@
-//! # brutex-lake — the data-lake Rust render seam (ADR-0019, PR-1)
+//! # brutex-lake — the data-lake Rust render seam (ADR-0020, PR-1)
 //!
 //! DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Re-hosts the ONE
 //! bars-writer parquet render (`brutex/data/parquet_writer.py::_render_bytes`
@@ -65,7 +65,7 @@
 //!   layout matches the single-chunk frame the Python writer builds from
 //!   per-column lists (spike-proven byte-relevant discipline).
 //!
-//! ## The ATOMIC pin (ADR-0019 §7 hazards 1 + 2)
+//! ## The ATOMIC pin (ADR-0020 §7 hazards 1 + 2)
 //!
 //! [`PINNED_POLARS_PY_VERSION`] is the single source for "which wheel this
 //! crate byte-matches"; every manifest polars git dependency is REV-pinned
@@ -123,7 +123,7 @@ pub const PINNED_POLARS_GIT_REV: &str = "0df0c25d4db895ec8cad773bedc4e98400e3135
 /// 0.13.3 / zstd-safe 7.2.4 / zstd-sys 2.0.16+zstd.1.5.7 — byte-equal to the
 /// wheel's own lock at the pinned tag). `compression="zstd", level=3` bytes
 /// depend on this library's version: a silent bump on either side is a
-/// different-compressed-bytes hazard (ADR-0019 §7 hazard 2), so
+/// different-compressed-bytes hazard (ADR-0020 §7 hazard 2), so
 /// `linked_libzstd_matches_pin` (cargo test) fails LOUD when the lock drifts.
 pub const PINNED_LIBZSTD_VERSION: &str = "1.5.7";
 

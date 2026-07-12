@@ -1,4 +1,4 @@
-# Runbook — the lake Rust-render version lockstep (ADR-0019 PR-1)
+# Runbook — the lake Rust-render version lockstep (ADR-0020 PR-1)
 
 **Decision:** `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1726) ·
 **Surfaces:** `rust/brutex-lake/` (crate) · `brutex/data/lake_rust_render.py`
@@ -30,12 +30,12 @@ them as directional; each one DISCLOSES a cost, never a speedup.
 | GIL during the engaged render | RELEASED (`Python::detach` — the review-round fold; the wheel's own `write_parquet` releases it too), so an engaged render no longer serializes sibling writer/dashboard threads. Pre-fold builds of the crate held it for the full ~12.5 ms render | MEASURED semantics (code), no timing claim |
 | Thread-pool footprint | the crate is a SEPARATE polars build with its OWN global rayon pool beside the wheel's — an engaged process carries up to 2× polars threads on N cores (both pools read `POLARS_MAX_THREADS` independently; the env var bounds each, it does not de-duplicate them) — a further reason the engaged default stays OFF | MODELED (structural) |
 | Burn-in (first 16 engaged renders/process + once per NEW schema shape) | 2× render cost, bounded, amortised-nil — AND, because the caller holds the partition's cross-process flock around the render, those renders hold that flock ~2-3× longer (a concurrent CLI-fetch process waiting on the SAME partition waits with them; bounded to the burn-in window) | MODELED |
-| Payoff | **≈ 0 — uniformity, not speed** (the engaged path is a small measured SLOWDOWN; the crate links the same encoder the wheel runs) | MEASURED/MODELED per ADR-0019 §0/§4 |
+| Payoff | **≈ 0 — uniformity, not speed** (the engaged path is a small measured SLOWDOWN; the crate links the same encoder the wheel runs) | MEASURED/MODELED per ADR-0020 §0/§4 |
 
 ## 1. The ATOMIC pin — three legs that move together
 
 1. **Python wheel**: the installed `polars` version (repo pyproject
-   range-pins `>=1.0,<2.0` with no lockfile — ADR-0019 F4 — so the installed
+   range-pins `>=1.0,<2.0` with no lockfile — ADR-0020 F4 — so the installed
    version is environment truth, not a manifest fact).
 2. **Crate rev**: every polars git dependency in
    `rust/brutex-lake/Cargo.toml` REV-pinned at the exact commit the
@@ -127,7 +127,7 @@ see §4). A healthy engagement logs exactly one
   wheel with a different bundled libzstd, a patched distro wheel, a
   transitive encode-path crate drifting past our lock) — it may require
   extending the pinned set, and it is exactly the hazard the priced
-  `DEC-LAKE-EXACT-PIN-001` fallback exists for (ADR-0019 §3 LAST-MILE).
+  `DEC-LAKE-EXACT-PIN-001` fallback exists for (ADR-0020 §3 LAST-MILE).
   Do NOT paper over it by regenerating expectations: the Python bytes are
   the contract.
 * **A wheel version with NO matching `py-*` tag** (yanked/renamed) → stay

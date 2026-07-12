@@ -1,4 +1,4 @@
-"""Rust-vs-Python parquet byte-parity corpus (ADR-0019 PR-1 — the core gate).
+"""Rust-vs-Python parquet byte-parity corpus (ADR-0020 PR-1 — the core gate).
 
 DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Regenerates the
 slice-8 spike's 5-case corpus (plus the review-round all-null-overlay case)

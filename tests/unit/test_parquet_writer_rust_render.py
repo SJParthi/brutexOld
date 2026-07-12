@@ -1,4 +1,4 @@
-"""Wiring tests for the ``_render_bytes`` Rust-render seam (ADR-0019 PR-1).
+"""Wiring tests for the ``_render_bytes`` Rust-render seam (ADR-0020 PR-1).
 
 DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Crate-FREE: a fake
 ``brutex_lake`` module (implemented ON TOP of the installed Python polars, so

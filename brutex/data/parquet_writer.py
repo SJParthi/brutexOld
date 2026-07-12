@@ -1868,7 +1868,7 @@ class ParquetWriter:
                 )
                 return bio.getvalue()
 
-            # ADR-0019 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): the OPTIONAL
+            # ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): the OPTIONAL
             # Rust render seam — default OFF; when BRUTEX_LAKE_RUST_RENDER is
             # truthy the frame crosses to the version-lockstepped brutex_lake
             # crate as uncompressed Arrow IPC, guarded by the facade's three
@@ -1910,7 +1910,7 @@ class ParquetWriter:
 def _ipc_bytes(df: pl.DataFrame) -> bytes:
     """Serialise *df* to UNCOMPRESSED Arrow IPC bytes — the Rust-render handoff.
 
-    ADR-0019 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): when the
+    ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): when the
     ``BRUTEX_LAKE_RUST_RENDER`` seam is engaged, the ALREADY-BUILT render
     frame crosses the FFI as Arrow IPC (the spike-proven handoff — the crate
     ``rechunk``s after the read so the memory layout matches the

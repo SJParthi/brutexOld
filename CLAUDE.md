@@ -22,13 +22,13 @@ _Last updated: 2026-07-11 (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726 
 slice 8 of the Rust-first conversion program (the data-lake I/O layer: 16 `brutex/data/`
 modules + `brutex/feed/resampler.py`): the panel's keep-Python verdict was
 OPERATOR-OVERRIDDEN to Rust-everywhere — a byte-identity-gated CONVERSION ROADMAP is
-adopted (ADR-0019, `docs/adr/0019-datalake-rust-conversion-roadmap.md`), DOCS-ONLY in
+adopted (ADR-0020, `docs/adr/0020-datalake-rust-conversion-roadmap.md`), DOCS-ONLY in
 this commit. Honesty banner kept MANDATORY verbatim: "expected payoff ≈ 0 — conversion
 is for uniformity, not speed" (IO-bound glue over native engines; the two Python
 hotspots that ever mattered were already vectorized in-place, #1023/#1313). Mechanism:
 the port calls polars' NATIVE Rust API — the same encoder family the Python path
 already invokes (`use_pyarrow=False`) — so parity is achievable by construction IFF the
-crate↔wheel lockstep holds, and the empirical spike PROVED it (ADR-0019 §1:
+crate↔wheel lockstep holds, and the empirical spike PROVED it (ADR-0020 §1:
 FEASIBLE-BY-LOCKSTEP — a polars `py-1.42.1` crate build byte-matched the installed
 wheel on the full 5-case corpus through the REAL `_render_bytes`; production carries
 the wheel==tag==zstd atomic pin + the fail-closed version guard — wheel ≠ pin ⇒ the
@@ -2202,14 +2202,14 @@ hostile-review pass._
   layer: 16 `brutex/data/` modules + `brutex/feed/resampler.py`, 17 total): the panel
   protocol (6 readers → 3 designers → judge) rendered keep-Python; the operator
   OVERRODE to Rust-everywhere, and a byte-identity-gated CONVERSION ROADMAP is adopted
-  (ADR-0019) — DOCS-ONLY in this commit, zero code ships. Honesty banner MANDATORY
+  (ADR-0020) — DOCS-ONLY in this commit, zero code ships. Honesty banner MANDATORY
   verbatim: "expected payoff ≈ 0 — conversion is for uniformity, not speed" (the two
   Python hotspots that ever mattered were already vectorized in-place —
   DEC-LAKE-WRITE-VECTORIZE-001 #1023 MEASURED 1.78×, DEC-PREBUILD-GIL-VECTORIZE-001
   #1313; the residue is statx/fsync/encoder-bound). Mechanism: the port calls polars'
   NATIVE Rust API — the same encoder family the Python render already invokes — so
   parity is achievable by construction IFF the crate↔wheel lockstep holds — and the
-  empirical spike PROVED it (ADR-0019 §1, 2026-07-11: FEASIBLE-BY-LOCKSTEP — a Rust
+  empirical spike PROVED it (ADR-0020 §1, 2026-07-11: FEASIBLE-BY-LOCKSTEP — a Rust
   polars build at git tag `py-1.42.1` reproduced the installed wheel's parquet bytes
   bit-identically on all 5 corpus cases through the REAL `_render_bytes`, debug AND
   release, thread-count invariant; the port must mirror 1.42.1's streaming-engine
@@ -2266,7 +2266,7 @@ hostile-review pass._
   100% line+branch standalone; `parquet_writer.py` 100% on its full matched suite;
   cargo fmt/clippy/test green. ADVERSARIAL-REVIEW FIX ROUND folded (2026-07-11,
   same branch, pre-merge — 5 hostile lenses; the per-item record lives in the
-  MIGRATION.md #1726 PR-1 segment + ADR-0019 §9): foreign/broken-crate
+  MIGRATION.md #1726 PR-1 segment + ADR-0020 §9): foreign/broken-crate
   fail-closed hardening (API-surface import guard, `crate_metadata_error` +
   `crate_panic`/BaseException-belt latches, `AttributeError` in the degrade set),
   the crate's result construction moved inside the panic boundary + the render
@@ -5627,7 +5627,7 @@ hostile-review pass._
   (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726 — slice 8 of the
   Rust-first conversion program, the data-lake I/O layer: the panel's
   keep-Python verdict OPERATOR-OVERRIDDEN to Rust-everywhere; the
-  byte-identity-gated conversion roadmap is adopted as ADR-0019, and
+  byte-identity-gated conversion roadmap is adopted as ADR-0020, and
   **PR-1 is SHIPPED on this branch** — the `parquet_writer` render seam
   re-hosted on the NEW `rust/brutex-lake` crate (polars REV-pinned
   `0df0c25d…` = the commit `py-1.42.1` pointed at, zstd trio via the
