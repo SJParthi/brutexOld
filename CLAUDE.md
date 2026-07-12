@@ -22,7 +22,7 @@ _Last updated: 2026-07-12 (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md
 #1760a — the dashboard underlying-key READ-honesty pack (ONE umbrella entry;
 the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 / DEC-MOVERS-STORED-FRESHNESS-001
 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001 resolve via the #1760b–#1760d companion
-headers), REFUTER ROUNDS 1 + 2 folded: the /universe mapping-integrity compare
+headers), REFUTER ROUNDS 1 + 2 + 3 folded: the /universe mapping-integrity compare
 keyed through the COMMON F&O underlying-forms resolver via an injected
 plain-data `key_forms` map (hyphenated names' attempted-and-zero silent-vanish
 alarm live; the writer's KEYING byte-untouched — the writer file gains only the
@@ -36,7 +36,9 @@ interval) per the #1649a precedent; the round-2 month-edge fold widens
 `read_stored_day_frame` to probe the PRIOR UTC month's file for sub-05:30-IST
 bucket labels on the 1st of an IST month — a fresh month-edge lake now serves
 its COMPLETE stored frame instead of a permanent false-stale WARN or main's
-silent bucket drop; fresh lakes byte-identical, pinned; daily arm = named
+silent bucket drop; fresh lakes byte-identical, pinned; the round-3 fold gates
+the probe `day > date.min` — the `0001-01-01` OverflowError 500 closed,
+route-pinned; daily arm = named
 follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying` made
 total for the blank-symbol degenerate (IndexError → self-key; blank rows
 skipped + counted at the kind-map AND the metadata grid — the round-1-falsified
@@ -2433,7 +2435,15 @@ hostile-review pass._
   the disclosed base-absent fail-open, serving stored silently; the DAILY arm + the
   stale default-DATE (movers_warm) stay OPEN — named follow-up
   DEC-MOVERS-DAILY-FRESHNESS-001, an explicit partial delivery of the team memory's
-  two-arm scope. **(c — DEC-FNO-UNDERLYING-EMPTY-GUARD-001, BUG-3)** `primary_fno_underlying` made TOTAL
+  two-arm scope. REFUTER ROUND 3 folded (1 reproduced MINOR, R3-N1): the probe's
+  `day - timedelta(days=1)` raised OverflowError for the ONE well-formed ISO date
+  `0001-01-01` (= date.min — accepted by `parse_snapshot_date`, which 400s only
+  MALFORMED dates), escaping the per-symbol `movers_read_skip_errors()` isolation
+  and 500ing the route on any derived TF (pre-probe code served the honest empty
+  200) — closed with the `day > date.min` FOURTH probe conjunct (no prior day ⇒ no
+  prior-month file, definitionally inapplicable; the explicit gate over a blanket
+  except) + predicate/read and route-level 200 regressions, both proven failing
+  with the gate reverted. **(c — DEC-FNO-UNDERLYING-EMPTY-GUARD-001, BUG-3)** `primary_fno_underlying` made TOTAL
   for str input (guarantee-audit): the literal `""` returned IndexError — falsifying its
   own "Never empty" docstring — and ONE blank-symbol EQ row (parser-retained in the
   universe) poisoned EVERY whole-map consumer; now `forms[0] if forms else spot_symbol`
@@ -6092,7 +6102,7 @@ hostile-review pass._
   companion headers for the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 /
   DEC-MOVERS-STORED-FRESHNESS-001 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001;
   consolidated from the pre-merge #1751–#1753 after main's PR #1488 took
-  #1751), REFUTER ROUNDS 1 + 2 folded: the /universe mapping-integrity compare
+  #1751), REFUTER ROUNDS 1 + 2 + 3 folded: the /universe mapping-integrity compare
   keyed through the COMMON F&O underlying-forms resolver via the injected
   plain-data `key_forms` map (the writer's KEYING byte-untouched — the writer
   file gains only the sub-(c) blank-row isolation; default-None
@@ -6106,7 +6116,9 @@ hostile-review pass._
   deliberately FLIPPED; the round-2 month-edge fold probes the PRIOR UTC
   month's file for sub-05:30-IST bucket labels on the 1st of an IST month —
   a fresh month-edge lake serves its COMPLETE stored frame, never a permanent
-  false-stale WARN or main's silent bucket drop; daily arm = named follow-up
+  false-stale WARN or main's silent bucket drop; the round-3 fold gates the
+  probe `day > date.min` — the `0001-01-01` OverflowError 500 closed,
+  route-pinned; daily arm = named follow-up
   DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying` made total
   for the blank-symbol degenerate (IndexError → self-key; blank rows skipped
   + counted at the kind-map AND the metadata grid — the round-1-falsified
