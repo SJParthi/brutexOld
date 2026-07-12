@@ -733,20 +733,31 @@ def _selection_identity_fragment(grid: SweepGridConfig) -> dict[str, int] | None
 
 
 def grid_gate_provenance(grid: SweepGridConfig) -> str | None:
-    """Return *grid*'s canonical gate+selection provenance token, or ``None`` at defaults.
+    """Return *grid*'s canonical GATE-CONFIG serving-provenance token, or ``None`` at defaults.
 
-    The ONE write-side seam of DEC-SWEEP-SERVING-GATE-PROVENANCE-001: composes
-    :func:`brutex.engine.sweep_identity.gate_provenance_token` over EXACTLY the
-    two fragments :func:`_tuple_digest` folds into the store ADDRESS
-    (:func:`~brutex.engine.sweep_identity._gate_config_fragment` +
-    :func:`_selection_identity_fragment`), so the token persisted on the rows /
-    the store schema and the address digest derive from one source of truth
-    and can never disagree. ``None`` — an ungated default-selection grid —
-    keeps every row + store byte-identical to the pre-column format.
+    The ONE write-side seam of DEC-SWEEP-SERVING-GATE-PROVENANCE-001. This is the
+    SERVING carrier — the token persisted on the rows / the store schema and
+    hashed by :func:`brutex.dashboard.sweep_results_view.gate_coordinate_of` into
+    the leaderboard serving COORDINATE. It is scoped to the GATE CONFIG ONLY
+    (:func:`~brutex.engine.sweep_identity._gate_config_fragment` — overfit /
+    Stage-3, the knobs that change what the rows MEAN); the SELECTION knobs
+    (``top_k`` / ``min_hits`` / ``max_combos``) are DELIBERATELY excluded
+    (``selection=None``) because they are a display / which-finalists concern,
+    not a what-rows-mean concern — a ``--top``-only light run therefore carries
+    NO gate coordinate (is "ungated"), so a zero-survivor gated re-run's 0-row
+    sentinel serves the honest empty set instead of mis-folding the stale
+    baseline rows (the CLI-default 0-row-misfold, closed here).
+
+    SEPARABLE from the store ADDRESS: :func:`_tuple_digest` STILL folds
+    :func:`_selection_identity_fragment` directly into the Parquet /
+    completion-sentinel filename (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001,
+    #1336), so a changed ``top_k`` still re-keys the on-disk store — only the
+    serving carrier drops the selection leg. ``None`` — an ungated grid — keeps
+    every row + store byte-identical to the pre-column format.
     """
     return gate_provenance_token(
         gate_config=_gate_config_fragment(grid),
-        selection=_selection_identity_fragment(grid),
+        selection=None,
     )
 
 

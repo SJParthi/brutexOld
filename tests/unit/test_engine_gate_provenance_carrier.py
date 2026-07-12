@@ -156,11 +156,28 @@ class TestGridGateProvenance:
         )
         assert token is not None and "gate_config" in token
 
-    def test_selection_grid_matches_fragments(self) -> None:
-        """A non-default top_k re-keys the token via the selection fragment."""
+    def test_selection_only_grid_carries_no_serving_token(self) -> None:
+        """A non-default top_k alone does NOT gate the SERVING carrier (ungated).
+
+        DEC-SWEEP-SERVING-GATE-PROVENANCE-001 scopes ``grid_gate_provenance`` to
+        the GATE CONFIG only, so a ``--top``-only light run carries NO serving
+        provenance and is "ungated" — the CLI-default 0-row-misfold closer. The
+        store ADDRESS is SEPARABLE: :func:`_tuple_digest` STILL folds the
+        selection fragment, so the on-disk Parquet path re-keys on top_k (#1336
+        intact). Both pins live here so the decoupling is enforced together.
+        """
         grid = _grid(top_k=7)
-        token = grid_gate_provenance(grid)
-        assert token == '{"selection":{"top_k":7}}'
+        # Serving carrier: selection-only ⇒ ungated (no token, no column).
+        assert grid_gate_provenance(grid) is None
+        # Store address: selection STILL re-keys the Parquet path (#1336).
+        from brutex.engine.sweep_orchestrator import _tuple_digest, tuple_store_path
+
+        default_grid = _grid()
+        tuple_ = _tuple()
+        assert _tuple_digest(tuple_, grid) != _tuple_digest(tuple_, default_grid)
+        assert tuple_store_path(Path("/r"), tuple_, grid) != tuple_store_path(
+            Path("/r"), tuple_, default_grid
+        )
 
     def test_to_run_config_threads_token(self) -> None:
         """``SweepTuple.to_run_config`` stamps the grid token on the run config."""

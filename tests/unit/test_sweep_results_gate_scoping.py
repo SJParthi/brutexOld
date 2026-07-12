@@ -273,22 +273,30 @@ class TestCoexistenceFolding:
         assert len(payload["gate_coordinates"]) == 3
 
     def test_zero_row_foreign_config_misattribution_boundary(self, tmp_path: Path) -> None:
-        """BOUNDARY PIN (documented honest limit — DEC-SWEEP-SERVING-GATE-
-        PROVENANCE-001, MIGRATION.md #1758): a 0-row gated store written by a
-        DIFFERENT config B is MIS-ATTRIBUTED to the lone populated config A.
+        """BOUNDARY PIN (the sole remaining honest residual — DEC-SWEEP-SERVING-
+        GATE-PROVENANCE-001, MIGRATION.md #1758): TWO genuinely-DIFFERENT OVERFIT
+        configs on one root, one producing a 0-row sentinel that mis-folds.
 
-        Config B's token is unrecoverable from a 0-row store's bytes (the
-        conditional column carries schema PRESENCE only — no row carries the
-        token), so the store reads the ``"gated"`` sentinel; the |K| == 1
-        coexistence rule then FOLDS that sentinel into the single known config
-        A. This pins the CURRENT deterministic behaviour: config B's honest
-        empty set silently merges under config A's coordinate — the ledger's
-        0-row token-unrecoverable honest limit (broader than the two-all-0-row
-        -configs merge also disclosed there), deliberately NOT fixed here (a
-        v2 carrier that persists the token at 0 rows is the named follow-up).
+        Config B (a distinct overfit gate — ``_TOKEN_B``, NOT a ``--top``
+        selection knob) ran and persisted ZERO survivors. Its token is
+        unrecoverable from a 0-row store's bytes (the conditional column carries
+        schema PRESENCE only — no row carries the token), so the store reads the
+        ``"gated"`` sentinel; the |K| == 1 coexistence rule then FOLDS that
+        sentinel into the single known populated overfit config A. So config B's
+        honest empty set silently merges under config A's coordinate.
+
+        This is now the RARE two-different-overfit-configs edge, NOT the former
+        CLI-default (light ``--top``) shape — that far-more-common instance is
+        CLOSED by scoping ``grid_gate_provenance`` to the gate config only
+        (:class:`TestCliDefaultZeroRowServesEmpty`): a ``--top``-only baseline is
+        now "ungated", so a zero-survivor gated re-run serves the honest empty
+        set instead of the stale baseline rows. The residual here requires two
+        SEPARATE institutional overfit gates on one root — a genuinely rare
+        operator shape, deliberately NOT fixed here (a v2 carrier that persists
+        the token at 0 rows is the named follow-up).
         """
         _write_store(tmp_path, "a_g.parquet", [_row(1, gate_provenance=_TOKEN_A, sharpe=0.9)])
-        # Config B ran and persisted ZERO survivors: token B never hits a row.
+        # Overfit config B ran and persisted ZERO survivors: token B never hits a row.
         _write_store(tmp_path, "b_zero.parquet", [], gate_provenance=_TOKEN_B)
         payload = build_sweep_leaderboard(tmp_path).to_dict()
         # The FOLD: B's sentinel vanished into A's coordinate — |K| == 1.
@@ -309,6 +317,86 @@ class TestCoexistenceFolding:
         _write_store(tmp_path, "e_u.parquet", [])
         scan = load_sweep_scan(tmp_path)
         assert scan.gate_coordinates == (GATE_COORDINATE_UNGATED,)
+
+
+class TestCliDefaultZeroRowServesEmpty:
+    """The CLI-default 0-row-misfold, CLOSED (DEC-SWEEP-SERVING-GATE-PROVENANCE-001)."""
+
+    def test_top_only_baseline_then_zero_survivor_gated_serves_empty(self, tmp_path: Path) -> None:
+        """A ``--top``-only baseline + a zero-survivor gated re-run → honest empty set.
+
+        The exact CLI-default shape: the operator runs a light ``sweep-all --top 20``
+        (overfit OFF), then re-runs it gated (overfit ON, high ``dsr_min``) which
+        survives ZERO combos. Because :func:`grid_gate_provenance` is scoped to the
+        GATE CONFIG only, the ``--top``-only baseline carries NO serving token → it
+        is "ungated", so the known-gated set is EMPTY (|K| == 0); the gated 0-row
+        sentinel therefore serves the honest EMPTY set (case-2), NOT the stale
+        baseline rows.
+
+        DISCRIMINATION: this REPRODUCES the misfold if the seam is reverted. With
+        ``selection=_selection_identity_fragment(grid)`` restored, the baseline's
+        token becomes ``{"selection":{"top_k":20}}`` — a KNOWN populated gate:
+        coordinate (|K| == 1) — and the |K| == 1 fold serves the stale baseline
+        rows, failing the ``rows == []`` / sentinel assertions below.
+        """
+        from brutex.engine.sweep_orchestrator import (
+            SweepGridConfig,
+            Timeframe,
+            grid_gate_provenance,
+        )
+        from brutex.ranking import OverfitGateConfig
+        from brutex.strategies.types import Side
+
+        def _grid(**overrides: object) -> SweepGridConfig:
+            base: dict[str, object] = {
+                "instruments": ("NIFTY",),
+                "timeframes": (Timeframe("5m", 5),),
+                "directions": (Side.BUY,),
+                "condition_bits": (0, 1),
+                "k_values": (1,),
+                "stop_losses": (None,),
+                "take_profits": (None,),
+                "proximities": (None,),
+                "mode": "A",
+                "data_snapshot_hash": "c" * 64,
+                "indicator_version": "iv-test",
+                "code_commit_sha": "d" * 40,
+            }
+            base.update(overrides)
+            return SweepGridConfig(**base)  # type: ignore[arg-type]
+
+        # The light CLI baseline: --top 20, overfit OFF. Each finalist row is
+        # stamped with grid_gate_provenance(grid) exactly as a REAL sweep does
+        # (ranked_combo_to_result_row → the per-row token). Scoped to the gate
+        # config, that token is None ⇒ the rows read as UNGATED.
+        baseline_grid = _grid(top_k=20)
+        baseline_token = grid_gate_provenance(baseline_grid)
+        _write_store(
+            tmp_path,
+            "a_baseline.parquet",
+            [
+                _row(1, gate_provenance=baseline_token, sharpe=0.1),
+                _row(2, gate_provenance=baseline_token, sharpe=0.2),
+            ],
+            gate_provenance=baseline_token,
+        )
+
+        # The gated re-run: same --top 20, overfit ON, high dsr_min ⇒ ZERO survivors.
+        gated_grid = _grid(top_k=20, overfit=OverfitGateConfig(dsr_min=0.99))
+        gated_token = grid_gate_provenance(gated_grid)
+        assert gated_token is not None and "gate_config" in gated_token
+        _write_store(tmp_path, "z_gated_zero.parquet", [], gate_provenance=gated_token)
+
+        payload = build_sweep_leaderboard(tmp_path).to_dict()
+        # Case 2 (empty): the stale baseline rows are ABSENT — the honest empty set.
+        assert payload["rows"] == []
+        assert payload["gate_coordinate"] == GATE_COORDINATE_SENTINEL
+        assert payload["gate_coordinates"] == [
+            GATE_COORDINATE_SENTINEL,
+            GATE_COORDINATE_UNGATED,
+        ]
+        assert payload["mixed_gate_coordinates"] is False
+        assert payload["available"] is True  # stores exist — honest empty, not blank
 
 
 class TestGateTrialsContext:
