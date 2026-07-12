@@ -39,7 +39,8 @@ existing `None` no-signal contract, the /db seed is SUPPRESSED on a timeout
 zombie self-clears on the volume's release. Healthy-path stat COUNTS + bytes
 unchanged (parity-pinned); write-side hooks byte-untouched (already under the
 90 s spine guard); the movers_cache sibling wait is the named follow-up
-DEC-DASHBOARD-COLD-IO-DEADLINE-002 (behind PR #1488). READ-side dashboard +
+DEC-DASHBOARD-COLD-IO-DEADLINE-002 (PR #1488 LANDED 2026-07-12 —
+this branch is rebased over it; the follow-up is unblocked). READ-side dashboard +
 ONE data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item
 record lives in the §1 Active-branch blurb + MIGRATION.md #1761.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
@@ -2432,7 +2433,8 @@ hostile-review pass._
   `tests/unit/test_dashboard_cold_degrade_routes.py`; `stat_deadline.py` + `summary_cache.py` +
   `lake_stats_manifest.py` 100.00% line+branch on their gates. NAMED follow-up
   DEC-DASHBOARD-COLD-IO-DEADLINE-002: the `MoversSnapshotCache` sibling cold wait (movers_cache.py —
-  PR #1488 rewrites that module's very cold path; the mechanism ports 1:1 once it settles). READ-side
+  PR #1488's SWR rewrite of that module's very cold path LANDED 2026-07-12 and this branch is
+  rebased over it; the mechanism ports 1:1 onto the landed shape). READ-side
   dashboard + ONE new data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; ruff/ruff-format clean, `mypy --strict` clean, pyright at the
   pre-change baseline.)
