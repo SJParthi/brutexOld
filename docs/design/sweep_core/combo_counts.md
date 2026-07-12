@@ -31,8 +31,9 @@ components brute-forced, polynomial product):
 | **Σ k≤6** | **56,049,057** | **45,246,240** | 19.3% |
 
 (A conflict-pruned mask costs only enumeration + the pair test — measured
-2.66 µs today on the Python spine, ~57 ns in the Slice-1 ranged kernel; it
-never reaches the prefilter count or the walk.)
+2.66 µs today on the Python spine, ~57 ns in the Slice-1 ranged kernel at
+the n_bars=0 FFI floor — ≈1.3–1.5× higher at deep windows, §3.2 rows 2/2a;
+it never reaches the prefilter count or the walk.)
 
 ## 2. Tuple multiplier
 
@@ -94,7 +95,8 @@ measured directly, 0.001 s vs 0.238 s for the identical 34,220-mask range
 | # | constant | measured value | how |
 |---|---|---|---|
 | 1 | `c` — Python spine, enumerate+prune per enumerated mask | **2.66 µs** | C(60,5) = 5,461,512 masks: 14.527 s (`iter_masks_k_of_bits` + `has_conflict`) |
-| 2 | `c` — ranged kernel, steady state (shadow burned in) | **56.8 ns** (**46.9×**) | same segment: 0.310 s through `enum_prefilter_via_kernel` |
+| 2 | `c` — ranged kernel, steady state (shadow burned in), at the **n_bars=0 FFI floor** | **56.8 ns** (**46.9×**) | same segment: 0.310 s through `enum_prefilter_via_kernel` over an EMPTY substrate — the min-hits-blind cells charging bills 0 cells/mask, so every range holds the full 2^20-mask cap (~6 FFI calls); the segment's BEST case, not a deep-window rate (row 2a) |
+| 2a | `c` — ranged kernel at a DEEP window (round-5 honesty remeasure, 2026-07-12, same-process pair) | **≈1.3–1.5× row 2** — same-run 72.8 ns (51.0×) @ n_bars=0 vs 109.2 ns (34.0×) @ 555,000 zero-bars | the kernel's min-hits-blind charging ends each range after ~max_work_cells/n_bars masks (~484/call at 555k bars under the default 2^28 cells → ~11.3k FFI calls vs ~6), inflating the effective per-mask rate; the term stays seconds-scale either way (§3.4) |
 | 3 | short-circuit law teeth | min_hits=0: **0.001 s**; min_hits=1: 0.238 s | k=3, 34,220 masks, n_bars=93,750 — the =0 arm provably pays no counts |
 | 4 | `coeff_count` — fused per-mask hits count, k=3 | **0.077 ns/(mask·bar)** | (min_hits=1 − min_hits=0) ÷ (32,733 cf × 93,750 bars) |
 | 5 | `coeff_count` — k=5 | **0.125 ns/(mask·bar)** | C(16,5) subset, 2,984 cf × 93,750 bars — ≈ 0.025 ns per plane·bar, scaling with k |
@@ -132,8 +134,9 @@ All 8 cells byte-identical stores. The end-to-end ratios sit at 0.90–1.07×
 because at n=16 bits the enumeration term is microscopic (≤4,368 masks)
 against the kept-mask trade/finalist work — the HONEST reading is
 "byte-identity + no regression at sub-grid scale", NOT an end-to-end
-speedup claim. The enumeration lever itself is row 2's 46.9×, which becomes
-material only at full-vocabulary mask counts (§3.4).
+speedup claim. The enumeration lever itself is row 2's 46.9× (the n_bars=0
+FFI floor; ≈34–39× effective at a deep 1-minute window, row 2a), which
+becomes material only at full-vocabulary mask counts (§3.4).
 
 ### 3.4 Bottom-up projections (8 workers, ideal split — §4 caveat 1 applies)
 
@@ -148,6 +151,12 @@ these rows describe the non-apriori arm the kernel serves):
 | B, k≤6 | 7.062 B | 39 min | 50 s |
 | C, k≤5 (378 tuples) | 2.262 B | 12.5 min | 16 s |
 | C, k≤6 | 21.19 B | 2.0 h | 2.5 min |
+
+The kernel column applies row 2's n_bars=0 FFI-floor rate; a deep 1-minute
+window's effective enumerate+prune rate is ≈1.3–1.5× higher (row 2a's
+range-shrinkage remeasure), so read the kernel column ×1.3–1.5 for
+1-minute-heavy grids — still seconds-to-minutes scale, and the §3.4
+dominance conclusion (term 3 at `top=1000`) is unchanged.
 
 **Term-2 — the fused per-mask hits count (unchanged by Slice 1 in
 asymptotic shape; re-homed in-kernel at a measured 2–3× cheaper
@@ -218,7 +227,12 @@ budget with `f_trade≈1` unless the grid drops the floor.
    `coeff_count × n_bars` per conflict-free mask (measured 0.077–0.125
    ns/(mask·bar) on this branch's kernel, §3.2 rows 4–5; the batch-FFI path
    carried 0.257) — ~43–69 µs/mask at the 1-minute TF's ~555k-bar 2020→2026
-   window — and the walk ~1.28 ns/bar per KEPT mask. A flat per-combo
+   window — and the walk ~1.28 ns/bar per KEPT mask. The enumerate+prune
+   term's EFFECTIVE FFI-amortized rate is n_bars-sensitive too (round-5
+   honesty fold — it is NOT flat): the kernel's min-hits-blind cells
+   charging shrinks each range to ~max_work_cells/n_bars masks, measured
+   ≈1.3–1.5× per-mask inflation at a ~555k-bar window vs the n_bars=0
+   floor (§3.2 row 2a). A flat per-combo
    constant is therefore optimistic for 1m/2m/3m/5m tuples and conservative
    for the higher TFs; §3.4's per-TF rows replace the withdrawn flat table.
 3. **Non-per-combo overheads that do NOT shrink with the per-combo constant**

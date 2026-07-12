@@ -115,3 +115,46 @@ class TestDominanceClaimPin:
         norm = " ".join(doc_text.split())
         assert "CORRECTED (review round 1, 2026-07-11)" in norm
         assert "×1000 unit slip" in norm
+
+
+class TestEnumSegmentProvenancePin:
+    """Round-5 review MINOR: the flagship 56.8 ns (46.9×) enum-segment rate is
+    an n_bars=0 measurement (empty substrate ⇒ the kernel's min-hits-blind
+    cells charging bills 0 cells/mask ⇒ max 2^20-mask ranges — the FFI floor).
+    A real deep window shrinks each range to ~max_work_cells/n_bars masks and
+    inflates the effective per-mask rate ≈1.3–1.5×. The doc must (a) qualify
+    row 2 with that provenance, (b) carry the deep-window remeasure (row 2a),
+    and (c) state in §4 caveat 2 that the enumerate+prune term is ALSO
+    n_bars-sensitive — the pre-fix caveat confined n_bars sensitivity to the
+    count term and the walk. Golden Rule #10.
+    """
+
+    def test_row2_carries_the_nbars0_ffi_floor_qualifier(self, doc_text: str) -> None:
+        row = _table_row(doc_text, "| 2 | `c` — ranged kernel")
+        assert "56.8 ns" in row and "46.9×" in row
+        assert "n_bars=0 FFI floor" in row, (
+            "the flagship 56.8 ns row must name its n_bars=0 provenance — an "
+            "unqualified best-case figure is the round-5 defect returning"
+        )
+
+    def test_row2a_deep_window_remeasure_present_and_consistent(self, doc_text: str) -> None:
+        row = _table_row(doc_text, "| 2a | `c` — ranged kernel at a DEEP window")
+        # Same-process pair: the stated inflation band must bracket the
+        # stated measurements' own ratio (109.2 / 72.8 = 1.50).
+        assert "72.8 ns" in row and "109.2 ns" in row
+        assert "≈1.3–1.5×" in row
+        assert 1.3 <= 109.2 / 72.8 <= 1.5 + 1e-9
+        # The masks-per-call figure must equal the charging-rule recompute:
+        # a range ends after the mask that crosses max_work_cells (default
+        # 2^28) at n_bars=555,000 → floor(2^28/555,000) + 1 = 484.
+        assert 2**28 // 555_000 + 1 == 484
+        assert "~484/call" in row
+
+    def test_term1_table_names_the_floor_rate_it_projects_with(self, doc_text: str) -> None:
+        norm = " ".join(doc_text.split())
+        assert "The kernel column applies row 2's n_bars=0 FFI-floor rate" in norm
+
+    def test_caveat2_names_the_enum_terms_nbars_sensitivity(self, doc_text: str) -> None:
+        norm = " ".join(doc_text.split())
+        assert "The enumerate+prune term's EFFECTIVE FFI-amortized rate is n_bars-sensitive" in norm
+        assert "min-hits-blind cells charging shrinks each range" in norm

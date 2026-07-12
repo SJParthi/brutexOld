@@ -156,26 +156,50 @@ def _densities(bars: list[CandleBar], k: int) -> tuple[float, float, float, int,
 
 
 def _segment_ab() -> None:
-    """The enum-SEGMENT A/B at the production C(60,5) shape (no trade sim)."""
+    """The enum-SEGMENT A/B at the production C(60,5) shape (no trade sim).
+
+    Measured at TWO substrate depths (round-5 review honesty fold —
+    Golden Rule #10): ``n_bars=0`` is the FFI FLOOR — an empty substrate
+    makes the kernel's min-hits-BLIND cells charging bill 0 cells/mask, so
+    every range holds the full 2^20-mask cap (~6 FFI calls for C(60,5)) —
+    while a REAL deep window shrinks each kernel range to
+    ``~max_work_cells/n_bars`` masks (the in-kernel charging rule: ~484
+    masks/call at 555k bars under the default 2^28 cells → ~11.3k FFI
+    calls), inflating the effective per-mask rate ≈1.3–1.5×. Quote BOTH:
+    the n_bars=0 figure is the segment's best case; the deep-window figure
+    is what a production 1-minute tuple's enumerate+prune term actually
+    pays. combo_counts.md §3.2 rows 2/2a carry the pair.
+    """
     bits = list(range(60))
     t0 = time.perf_counter()
     py = [m for m in iter_masks_k_of_bits(bits, 5) if not has_conflict(m)]
     t_py = time.perf_counter() - t0
     os.environ["BRUTEX_SWEEP_RUST_ENUM"] = "1"
-    reset_enum_self_check_for_tests(masks_remaining=0)  # steady state (no shadow)
-    reset_observability_memo_for_tests()
-    t0 = time.perf_counter()
-    result = enum_prefilter_via_kernel(
-        bits, 5, min_hits=0, bar_bits=[], count_hits=lambda m: [0] * len(m), digest_path=True
-    )
-    t_rust = time.perf_counter() - t0
+    arms: list[tuple[str, list[int]]] = [
+        ("n_bars=0 FFI floor", []),
+        ("n_bars=555,000 deep window (zero bars)", [0] * 555_000),
+    ]
+    for label, bar_bits in arms:
+        reset_enum_self_check_for_tests(masks_remaining=0)  # steady state (no shadow)
+        reset_observability_memo_for_tests()
+        t0 = time.perf_counter()
+        result = enum_prefilter_via_kernel(
+            bits,
+            5,
+            min_hits=0,
+            bar_bits=bar_bits,
+            count_hits=lambda m: [0] * len(m),
+            digest_path=True,
+        )
+        t_rust = time.perf_counter() - t0
+        assert result is not None
+        assert result.kept == py
+        print(
+            f"ENUM SEGMENT C(60,5)=5,461,512 min_hits=0 [{label}]: "
+            f"python {t_py:.3f}s | kernel(ranged, steady) {t_rust:.3f}s | "
+            f"ratio {t_py / t_rust:.1f}x"
+        )
     os.environ.pop("BRUTEX_SWEEP_RUST_ENUM", None)
-    assert result is not None
-    assert result.kept == py
-    print(
-        f"ENUM SEGMENT C(60,5)=5,461,512 min_hits=0: python {t_py:.3f}s | "
-        f"kernel(ranged, steady) {t_rust:.3f}s | ratio {t_py / t_rust:.1f}x"
-    )
 
 
 def main() -> None:
