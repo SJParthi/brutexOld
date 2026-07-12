@@ -120,8 +120,11 @@ def _dashboard_sources() -> list[Path]:
 def _observed_counter() -> Counter[tuple[str, str]]:
     observed: Counter[tuple[str, str]] = Counter()
     for path in _dashboard_sources():
+        # Keyed by dashboard-RELATIVE path (flat tree today, so == basename) —
+        # a future dashboard/<subdir>/app.py can never alias the top-level key.
+        rel = path.relative_to(_DASHBOARD).as_posix()
         for enclosing, _ in _bare_threadpool_calls(path.read_text(encoding="utf-8")):
-            observed[(path.name, enclosing)] += 1
+            observed[(rel, enclosing)] += 1
     return observed
 
 

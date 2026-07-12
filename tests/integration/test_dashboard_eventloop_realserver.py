@@ -779,9 +779,11 @@ def test_wedged_equity_and_launch_offloads_share_the_lake_limiter(
     wiring (one family converted) or launch minting its OWN second LakeOffload
     reads 44 concurrent wedges and fails. Pre-fix (both families bare) this
     test FAILS — verified 2026-07-12 with the production files reverted to the
-    branch base: the /api/v1/pull/rate probe starved at a measured 5522 ms
-    (> the 2.5 s budget) and held_peak measured 40 — the default pool's exact
-    size (transcript in the PR body).
+    branch base: the shipped test fails FIRST at the starved /api/v1/pull/rate
+    probe — a measured 5522 ms (> the 2.5 s budget) — before reaching the
+    held_peak check; held_peak == 40 (the default pool's exact size) was
+    measured by the same wedge run's diagnostic probe-less variant (transcript
+    + evidence capture in the PR body).
 
     Budgets are generous for CI noise: the probes get 2.5 s against a 6 s
     stall — an unambiguous separation either way.

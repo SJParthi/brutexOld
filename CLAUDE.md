@@ -2329,15 +2329,16 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/lake-limiter-equity-launch` (**DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1751** —
-  the R3-MAJOR lake-limiter completion: GET /api/v1/oneclick/equity (app.py:7815 —
-  the #1665 merge-seam straggler, the ONLY oneclick route still on the bare
-  default pool) joins its six siblings on `await _run_lake(_resolve)`, and
+  the R3-MAJOR lake-limiter completion: GET /api/v1/oneclick/equity (pre-fix
+  app.py:7815, now :7818 — the #1665 merge-seam straggler, the ONLY oneclick
+  route still on the bare default pool) joins its six siblings on
+  `await _run_lake(_resolve)`, and
   `register_launch_routes` gains the kw-only injection seam
   `run_lake: Callable[..., Awaitable[Any]] | None = None` (None → the
   lazily-imported default-pool `run_in_threadpool`, byte-identical for direct
-  callers — the existing ~20 launch route tests pass UNMODIFIED; app.py:8699
-  passes the app's `_run_lake`; no-fastapi-at-import contract + one-way import
-  direction preserved) so ALL THREE /api/v1/launch/* offloads
+  callers — the existing ~20 launch route tests pass UNMODIFIED; app.py:8702
+  (pre-fix :8699) passes the app's `_run_lake`; no-fastapi-at-import contract +
+  one-way import direction preserved) so ALL THREE /api/v1/launch/* offloads
   (`build_launch_state` · `run_preconditions` · `launch_sweep` — 21 partition
   dir stats + disk_usage + the `<lake>/sweeps/.launch/` pidfile + the launch.log
   tail + the POST's flock/atomic writes, ALL lake I/O) ride the 32-token
@@ -2345,7 +2346,9 @@ hostile-review pass._
   44-request realserver starvation regression (22 equity + 22 launch/state
   wedged → exactly ≤32 enter the SHARED limiter, /pull/rate + /state answer
   < 2.5 s vs the 6 s stall; fails-before MEASURED on the reverted files —
-  /pull/rate starved 5522 ms, held_peak 40 = the default pool's exact size;
+  the shipped test fails FIRST at the starved /pull/rate probe (5522 ms);
+  held_peak 40 = the default pool's exact size, measured by the same wedge
+  run's diagnostic probe-less variant;
   `held_peak <= 32` also kills a partial wiring or a second minted limiter);
   counting-LakeOffload dispatch pins via the `build_app(lake_offload=)` seam
   (equity `_resolve` positive + the api_pull_rate stays-default negative twin);
@@ -2357,13 +2360,15 @@ hostile-review pass._
   api_preopen_zip · api_logs), importer-set belt {app.py, launch_button.py},
   anti-vacuousness + detector teeth per the #1492-G3 idiom — the guaranteed
   reversion-gate kill, pure ast, no importorskip). The stale app.py:7405
-  section comment reconciled to name `_run_lake`. HONEST: ISOLATION not a
+  section comment reconciled to name `_run_lake` (the wording at :7409).
+  HONEST: ISOLATION not a
   deadline — a wedged worker stays wedged until the volume recovers and a
   client abort never cancels the offload (the token is held to thread
   completion); the AST pin cannot see an aliased call (disclosed residual,
   owned by the behavioral pins); the launch POST queues FIFO on the lake
-  limiter under an outage (it queued on the default pool before); app.py:7953's
-  log tail stays DELIBERATELY default-pool (~/.brutex/logs LOCAL disk).
+  limiter under an outage (it queued on the default pool before); app.py:7956's
+  log tail (pre-fix :7953) stays DELIBERATELY default-pool (~/.brutex/logs
+  LOCAL disk).
   READ-ONLY dashboard liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   zero wire/payload change on healthy lakes; launch_button.py 100% line+branch
   on the discovery gate's stem suite; app.py rides the whole-package floor.)
