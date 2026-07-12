@@ -215,6 +215,15 @@ def default_dhan_rolling_option_pull(
     :func:`build_dhan_rolling_option_adapter` — the SOLE ``# pragma: no cover``, needing
     real AWS SSM + the ``dhanhq`` SDK), and runs the rolling ingest into ``feeds/dhan/``.
 
+    **Dry-run is HONEST (§5 / Golden Rule #1).** When ``request.dry_run`` is set the seam
+    short-circuits AFTER planning the pure cartesian: it does **NOT** build the real
+    adapter (no AWS SSM / ``dhanhq`` SDK) and issues **NO** vendor call, so the
+    :class:`DhanRollingOptionPullReport` ``dry_run`` docstring's "no vendor call — honestly
+    writes nothing real" is literally true. The returned report carries the planned keys
+    with ZERO outcomes (``total_bars=0``, ``failed_windows=0``), so the route payload reads
+    "would pull ``keys_planned`` keys over ``[start, end)``; no vendor call, nothing
+    written". *adapter_factory* is never invoked on this path.
+
     The enumerate → build → ingest orchestration is fully fake-driven: a test injects
     *adapter_factory* (a fake-client adapter) over a temp lake root, so this whole seam
     is covered offline; only the real adapter build stays uncovered.
@@ -227,13 +236,26 @@ def default_dhan_rolling_option_pull(
         The controller pace hook threaded into the rolling spine.
     adapter_factory
         Builds the rolling-ATM :class:`RollingOptionAdapter` (default the real
-        SSM/``dhanhq`` build).
+        SSM/``dhanhq`` build). Never called on the ``dry_run`` path.
     band
         The ATM strike-band half-width (default 10 → the 1008-key cartesian).
     max_rounds
         The bounded retry-round budget for the rolling spine.
     """
     keys = enumerate_rolling_option_keys(band=band)
+    if request.dry_run:
+        # HONEST offline pass: plan the pure cartesian ONLY — no adapter build, no
+        # vendor call, no write (Golden Rule #1). Zero outcomes ⇒ total_bars=0,
+        # failed_windows=0; the planned keys carry the "would pull N keys" count.
+        dry_ingest = RollingOptionIngestReport(outcomes=(), keys=tuple(keys))
+        _LOG.info(
+            "dhan.rolling_option.pull_dry_run",
+            keys=len(keys),
+            start=request.start.isoformat(),
+            end=request.end.isoformat(),
+            dry_run=True,
+        )
+        return DhanRollingOptionPullReport(ingest=dry_ingest, dry_run=True)
     adapter = adapter_factory()
     ingest = run_dhan_rolling_option_pull(
         lake_root=request.lake_root,

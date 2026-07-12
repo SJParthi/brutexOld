@@ -111,7 +111,7 @@ def test_default_pull_seam_is_fake_driven(tmp_path: Path) -> None:
 def test_default_pull_seam_paces(tmp_path: Path) -> None:
     ticks: list[int] = []
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2024, 6, 1), end=date(2024, 6, 8), dry_run=True
+        lake_root=tmp_path, start=date(2024, 6, 1), end=date(2024, 6, 8), dry_run=False
     )
     report = default_dhan_rolling_option_pull(
         request,
@@ -120,7 +120,46 @@ def test_default_pull_seam_paces(tmp_path: Path) -> None:
         band=0,
     )
     assert ticks, "the injected pace hook was threaded into the rolling spine"
+    assert report.dry_run is False
+
+
+def test_default_pull_dry_run_builds_no_adapter_and_calls_no_vendor(tmp_path: Path) -> None:
+    """HONEST dry-run: no adapter build, no vendor call, no write — Golden Rule #1."""
+    built: list[RollingOptionAdapter] = []
+    client = _FakeClient(_PAYLOAD)
+    ticks: list[int] = []
+
+    def _spy_factory() -> RollingOptionAdapter:
+        adapter = RollingOptionAdapter(client=client)
+        built.append(adapter)
+        return adapter
+
+    request = DhanPullRequest(
+        lake_root=tmp_path, start=date(2024, 6, 1), end=date(2024, 6, 8), dry_run=True
+    )
+    report = default_dhan_rolling_option_pull(
+        request,
+        pace=lambda: ticks.append(1),
+        adapter_factory=_spy_factory,
+        band=0,
+    )
+    # The adapter_factory was NEVER invoked, and NO vendor call was issued.
+    assert built == []
+    assert client.calls == 0
+    assert ticks == []  # the spine never ran, so pace never fired
+    # An HONEST report: dry_run true, keys planned, zero bars, zero failures.
     assert report.dry_run is True
+    assert report.keys_planned == len(enumerate_rolling_option_keys(band=0))
+    assert report.total_bars == 0
+    assert report.failed_windows == 0
+    assert report.ingest.outcomes == ()
+    # Nothing written to the lake.
+    assert not (tmp_path / "feeds").exists()
+    # The route payload is honest too.
+    payload = report.to_dict()
+    assert payload["dry_run"] is True
+    assert payload["total_bars"] == 0
+    assert payload["keys_planned"] == report.keys_planned
 
 
 # ── report to_dict + HONESTY (rolling-ATM, never per-contract) ─────────────────

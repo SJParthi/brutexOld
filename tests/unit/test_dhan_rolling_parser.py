@@ -214,6 +214,25 @@ def test_resolve_expiry_derived() -> None:
     assert calls == [(date(2024, 6, 3), "MONTH", 1)]
 
 
+def test_resolve_expiry_deriver_abstains_maps_to_unresolved() -> None:
+    """A deriver that returns ``None`` (abstains) yields ``unresolved`` with a ``None``
+    date — never a ``derived`` label without a real expiry (Golden Rule #1)."""
+
+    def deriver(_bar_date: date, _flag: str, _code: int) -> date | None:
+        return None  # no NSE-calendar answer for this bar
+
+    d, src = _resolve_expiry(
+        timestamp=datetime(2024, 6, 3, 3, 45, tzinfo=UTC),
+        vendor_expiry_raw=None,
+        has_vendor_column=False,
+        expiry_flag="WEEK",
+        expiry_code=3,
+        derive_expiry=deriver,
+    )
+    assert d is None
+    assert src == RESOLVED_EXPIRY_SOURCE_UNRESOLVED
+
+
 def test_resolve_expiry_unresolved_when_no_echo_no_deriver() -> None:
     d, src = _resolve_expiry(
         timestamp=datetime(2024, 6, 3, 3, 45, tzinfo=UTC),

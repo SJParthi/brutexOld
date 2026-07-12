@@ -118,7 +118,7 @@ DHAN_ROLLING_OPTIONS_COLUMNS: Final[tuple[FnoCandleColumn, ...]] = (
         "string",
         "bar",
         True,
-        "``echoed`` (vendor supplied the expiry) / ``derived`` (NSE-calendar) / ``unresolved`` "
+        "``vendor`` (vendor supplied the expiry) / ``derived`` (NSE-calendar) / ``unresolved`` "
         "(honestly unknown — never fabricated).",
     ),
     # ── nullable Greeks overlay (served-vs-solved; DEC-DHAN-ROLLING-OPTIONS-001 §3) ──

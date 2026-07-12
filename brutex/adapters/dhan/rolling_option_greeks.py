@@ -39,7 +39,8 @@ IV Dhan never serves — a documented limit). The driver here is SEQUENTIAL — 
 spawn-pool parallelism of the Groww driver is a deferred follow-up (an injected
 seam forces the Groww driver sequential too); at 1-minute option-bar volumes the
 kernel solve dominates, so this is a correctness pass, never a throughput claim.
-Not wired into a route/CLI this pass — the surface is a later step (§5).
+Not wired into a ROUTE this pass (the CLI ``enrich-greeks --feed dhan`` arm wires
+:func:`run_dhan_rolling_greeks_pass`); the dashboard route surface is a later step (§5).
 """
 
 from __future__ import annotations
@@ -426,6 +427,12 @@ def enrich_rolling_option_bars(
         stored_pid = row.get("greeks_provenance_id")
         if isinstance(stored_pid, int):
             stored = unpack_greeks_provenance(stored_pid)
+            # CORRECTNESS DEPENDENCY: the reuse gate compares the served-vs-solved
+            # REGIME bit (``iv_source``), not the raw served-IV value. This is sound
+            # ONLY because the raw rolling writer is KEEP-FIRST (RollingOptionWriter —
+            # served_iv/strike/spot are immutable on re-pull). If that writer ever
+            # moved to latest-wins, a CORRECTED served IV under unchanged spot/rate
+            # would keep the same regime bit and silently reuse a STALE Greek.
             if (
                 (stored_pid & INPUTS_MASK) == current_inputs
                 and stored.status == STATUS_OK

@@ -247,13 +247,20 @@ def _resolve_expiry(
     """Resolve one bar's ``(resolved_expiry_date, resolved_expiry_source)``.
 
     Vendor echo (when the ``expiry`` column is present) wins; else an injected
-    deriver; else the honest ``unresolved`` state (date ``None``).
+    deriver (whose ABSTAIN — a ``None`` return — also falls to ``unresolved``, so a
+    ``derived`` label always carries a real date); else the honest ``unresolved``
+    state (date ``None``).
     """
     if has_vendor_column:
         return _parse_vendor_expiry(vendor_expiry_raw), RESOLVED_EXPIRY_SOURCE_VENDOR
     if derive_expiry is not None:
         bar_date_ist = timestamp.astimezone(_IST).date()
-        return derive_expiry(bar_date_ist, expiry_flag, expiry_code), RESOLVED_EXPIRY_SOURCE_DERIVED
+        derived = derive_expiry(bar_date_ist, expiry_flag, expiry_code)
+        if derived is not None:
+            return derived, RESOLVED_EXPIRY_SOURCE_DERIVED
+        # The deriver ABSTAINED (no NSE-calendar answer) — honest ``unresolved`` with a
+        # ``None`` date, never a ``derived`` label without a real expiry.
+        return None, RESOLVED_EXPIRY_SOURCE_UNRESOLVED
     return None, RESOLVED_EXPIRY_SOURCE_UNRESOLVED
 
 

@@ -171,8 +171,10 @@ DHAN_ROLLING_HISTORY_FLOOR: Final[date | None] = None
 
 #: The operator's REQUESTED reachable-today start (research-supported PARTIAL). A
 #: recorded marker ONLY — deliberately NOT the honest floor authority
-#: (:data:`DHAN_ROLLING_HISTORY_FLOOR` is ``None`` and drives planning). Never
-#: read by a decision branch (AST-pinned).
+#: (:data:`DHAN_ROLLING_HISTORY_FLOOR` is ``None`` and drives planning). Surfaced as
+#: the adapter's ``earliest_history`` CAPABILITY (a display/metadata field), so it is
+#: NOT one of the AST-pinned decision-branch sentinels; no PLANNING branch reads it —
+#: planning gates on the ``None`` floor above.
 DHAN_ROLLING_HISTORY_FLOOR_REQUESTED: Final[date] = date(2022, 6, 1)
 
 #: Whole-track rolling servability (the DH-905 gate) — UNVERIFIED until a
