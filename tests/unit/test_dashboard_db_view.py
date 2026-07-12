@@ -32,6 +32,7 @@ from brutex.adapters.groww.constants import (
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.db_view import (
     KNOWN_TABLES,
+    TABLE_SUMMARY_FAULT_TYPES,
     WINDOW_PHASES,
     _build_window_payload_duckdb,
     _json_safe,
@@ -52,6 +53,7 @@ from brutex.dashboard.db_view import (
     window_status_label,
 )
 from brutex.dashboard.movers_cache import MoversSnapshotCache
+from brutex.data.errors import CatalogError
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.instrument_store import Instrument, InstrumentStore
 from brutex.data.session import IST
@@ -182,6 +184,53 @@ def test_table_summary_tolerates_missing_table(tmp_path: Path) -> None:
     assert by_name["instrument_runs"] == 0
     # the other tables still report normally
     assert by_name["schema_meta"] >= 1
+
+
+def test_table_summary_default_flag_parity_and_strict_reraises(tmp_path: Path) -> None:
+    """Default vs explicit ``raise_on_fault=False`` are identical (the kw-only
+    default keeps every existing caller byte-identical), and strict mode
+    RE-RAISES the store fault (``duckdb.Error`` — a dropped table) the default
+    folds to 0 — the round-8 probe→compute TOCTOU root fix."""
+    store = _open_empty(tmp_path)
+    store.connection.execute("DROP TABLE instrument_runs")
+    default = table_summary(store.connection)
+    explicit = table_summary(store.connection, raise_on_fault=False)
+    assert explicit == default
+    assert {r["table"]: r["row_count"] for r in default}["instrument_runs"] == 0
+    with pytest.raises(duckdb.Error):
+        table_summary(store.connection, raise_on_fault=True)
+
+
+def test_table_summary_strict_reraises_wedge_catalog_error() -> None:
+    """The DEC-STORE-WRITE-DEADLINE-001 wedge latch's ``CatalogError`` (a
+    ``DataLakeError``, NOT a ``duckdb.Error``) re-raises under strict mode
+    instead of folding into a cacheable all-zero summary — the exact round-8
+    wedge-after-probe poison class. ``CatalogError`` is also pinned as a
+    :data:`TABLE_SUMMARY_FAULT_TYPES` member here."""
+
+    class _Wedged:
+        def execute(self, _sql: str) -> object:
+            raise CatalogError("store wedged: abandoned coverage write")
+
+    assert CatalogError in TABLE_SUMMARY_FAULT_TYPES
+    assert all(r["row_count"] == 0 for r in table_summary(_Wedged()))  # default folds
+    with pytest.raises(CatalogError, match="wedged"):
+        table_summary(_Wedged(), raise_on_fault=True)
+
+
+def test_table_summary_non_fault_exception_folds_in_both_modes() -> None:
+    """An exception OUTSIDE :data:`TABLE_SUMMARY_FAULT_TYPES` still folds to 0
+    even under strict mode — the never-a-500 posture for unexpected defect
+    classes is unchanged by the round-8 flag."""
+
+    class _Broken:
+        def execute(self, _sql: str) -> object:
+            raise RuntimeError("unexpected defect class")
+
+    for flag in (False, True):
+        rows = table_summary(_Broken(), raise_on_fault=flag)
+        assert [r["table"] for r in rows] == list(KNOWN_TABLES)
+        assert all(r["row_count"] == 0 for r in rows)
 
 
 # ── sample_rows ──────────────────────────────────────────────────────

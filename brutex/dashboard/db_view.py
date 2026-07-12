@@ -74,7 +74,7 @@ from brutex.config.hardware_envelope import memory_budget_bytes
 from brutex.dashboard.movers_cache import MoversSnapshotCache, revision_generation
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import CatalogError, LakeWriteHalt
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
@@ -632,19 +632,51 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def table_summary(conn: Any) -> list[dict[str, Any]]:
+#: The :func:`table_summary` strict-mode (``raise_on_fault=True``) re-raise
+#: set: the store fault types (``duckdb.Error`` / ``OSError`` — the
+#: ``universe_cache.STORE_FAULT_TYPES`` members, a wedged volume / unreachable
+#: DuckDB / a dropped table on a foreign DB) PLUS
+#: :class:`~brutex.data.errors.CatalogError`, because the
+#: DEC-STORE-WRITE-DEADLINE-001 wedge latch (``_ensure_not_wedged`` on the
+#: store read view's ``execute``) raises CatalogError — a ``DataLakeError``,
+#: NOT a ``duckdb.Error``. MUST stay member-equal to the ``/api/v1/db/tables``
+#: route's ``_TABLES_PROBE_FAULT_TYPES`` (set-equality pinned in
+#: ``test_dashboard_pull_contention_routes.py``) so a strict-mode raise is
+#: ALWAYS caught by that route's uncached degrade arm — never a 500
+#: (round-8 review MINOR: the probe→compute TOCTOU).
+TABLE_SUMMARY_FAULT_TYPES: Final[tuple[type[BaseException], ...]] = (
+    CatalogError,
+    duckdb.Error,
+    OSError,
+)
+
+
+def table_summary(conn: Any, *, raise_on_fault: bool = False) -> list[dict[str, Any]]:
     """Return ``[{"table", "row_count"}]`` for every known table.
 
-    Runs one ``SELECT COUNT(*)`` per table in :data:`KNOWN_TABLES`. A
-    table that is missing (a partially-initialised or foreign DB) is
-    tolerated and reported with ``row_count == 0`` rather than raising,
-    so a fresh/empty store renders cleanly.
+    Runs one ``SELECT COUNT(*)`` per table in :data:`KNOWN_TABLES`. By
+    default a table that is missing (a partially-initialised or foreign
+    DB) — or any other per-table read fault — is tolerated and reported
+    with ``row_count == 0`` rather than raising, so a fresh/empty store
+    renders cleanly.
 
     Parameters
     ----------
     conn
         A DuckDB connection — typically
         :attr:`brutex.data.instrument_store.InstrumentStore.connection`.
+    raise_on_fault
+        ``True`` re-raises a :data:`TABLE_SUMMARY_FAULT_TYPES` member (a
+        store fault OR the DEC-STORE-WRITE-DEADLINE-001 wedge latch's
+        ``CatalogError``) instead of folding it into a 0-count — the
+        strict form the ``/api/v1/db/tables`` CACHED compute uses, so a
+        store that wedges AFTER a healthy freshness probe (the round-8
+        probe→compute TOCTOU) raises out of ``get_or_compute`` and a
+        wedge-degraded all-zero summary is NEVER stored under the
+        healthy pre-wedge token. Any exception OUTSIDE that fault set
+        still folds to 0 in BOTH modes (the never-a-500 posture is
+        unchanged for unexpected defect classes). Default ``False`` —
+        every existing caller byte-identical.
 
     Returns
     -------
@@ -657,6 +689,10 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
         # name is a hardcoded allowlist literal, never caller input.
         try:
             row = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()  # noqa: S608  # nosec B608 - name is a hardcoded KNOWN_TABLES literal, never caller input
+        except TABLE_SUMMARY_FAULT_TYPES:
+            if raise_on_fault:
+                raise
+            count = 0
         except Exception:
             count = 0
         else:
@@ -7951,6 +7987,7 @@ __all__ = [
     "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
     "SPOT_VERDICT_INTERVALS",
+    "TABLE_SUMMARY_FAULT_TYPES",
     "WINDOW_PHASES",
     "build_phase_progress",
     "build_window_payload",

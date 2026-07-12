@@ -363,12 +363,14 @@ class _ParkedTableSummary:
     def arm(self) -> None:
         self._park = True
 
-    def __call__(self, conn: Any) -> Any:
+    def __call__(self, conn: Any, **kwargs: Any) -> Any:
+        # Forwards the round-8 kw-only `raise_on_fault` flag (the route's
+        # CACHED compute passes True; the degrade arm passes nothing).
         self.calls += 1
         if self._park:
             self.entered.set()
             assert self.release.wait(timeout=_FOLD_HOLD_S)
-        return self._real(conn)
+        return self._real(conn, **kwargs)
 
 
 class TestDbTablesServesLastKnown:
@@ -453,9 +455,9 @@ class TestDbTablesServesLastKnown:
         counted = {"n": 0}
         real = app_module.table_summary
 
-        def _spy(conn: Any) -> Any:
+        def _spy(conn: Any, **kwargs: Any) -> Any:
             counted["n"] += 1
-            return real(conn)
+            return real(conn, **kwargs)
 
         monkeypatch.setattr(app_module, "table_summary", _spy)
         app = build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)
@@ -482,9 +484,9 @@ class TestDbTablesServesLastKnown:
         counted = {"n": 0}
         real = app_module.table_summary
 
-        def _spy(conn: Any) -> Any:
+        def _spy(conn: Any, **kwargs: Any) -> Any:
             counted["n"] += 1
-            return real(conn)
+            return real(conn, **kwargs)
 
         def _raise(_store: Any) -> Any:
             raise OSError("probe outage")
@@ -546,3 +548,78 @@ class TestDbTablesServesLastKnown:
             healed = {r["table"]: r["row_count"] for r in recovered.json()["tables"]}
             assert healed["instruments"] == 1
             assert healed["schema_meta"] >= 1
+
+    def test_tables_wedge_after_probe_toctou_never_caches_zero_counts(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILS-BEFORE (round-8 review MINOR — the probe→compute TOCTOU):
+        with the freshness probe HEALTHY, a store that wedged in the
+        probe→compute window made ``table_summary`` swallow the wedge
+        latch's per-table ``CatalogError`` into all-zero counts, and
+        ``get_or_compute`` CACHED those zeros under the healthy pre-wedge
+        token — served as stale zeros until an unrelated token move (a
+        wedge self-heal bumps nothing). Now the CACHED compute is the
+        raising ``raise_on_fault=True`` form: the wedged request answers
+        the SAME direct uncached 0-count degrade body as the round-7 wedge
+        pin, NOTHING lands in the tables cache (size 0 asserted), and the
+        healed store computes the REAL counts on the very next open at the
+        SAME token."""
+        _load_master(store, "r-toctou")
+        captured: list[Any] = []
+        real_cls = app_module.MoversSnapshotCache
+
+        def _capture(*args: Any, **kwargs: Any) -> Any:
+            inst = real_cls(*args, **kwargs)
+            # The tables cache is the ONE SWR-flagged capacity-8 instance.
+            if kwargs.get("capacity") == 8 and kwargs.get("stale_while_revalidate"):
+                captured.append(inst)
+            return inst
+
+        monkeypatch.setattr(app_module, "MoversSnapshotCache", _capture)
+        app = build_app(DashboardState(), instrument_store=store)
+        assert len(captured) == 1
+        tables_cache = captured[0]
+        guard = store._write_guard  # pyright: ignore[reportPrivateUsage]
+        real_probe = app_module.master_revision
+        arm = {"v": True}
+
+        def _probe_then_wedge(s: Any) -> Any:
+            token = real_probe(s)  # the HEALTHY probe succeeds first…
+            if arm["v"]:
+                arm["v"] = False  # one-shot: the wedge latches AFTER the probe
+                guard._active = object()  # pyright: ignore[reportPrivateUsage]
+            return token
+
+        monkeypatch.setattr(app_module, "master_revision", _probe_then_wedge)
+        with TestClient(app) as client:
+            try:
+                # Today's exact wedged direct-sweep body (the round-7 pin shape).
+                guard._active = object()  # pyright: ignore[reportPrivateUsage]
+                expected = JSONResponse({"tables": db_view.table_summary(store.connection)}).body
+                guard._active = None  # pyright: ignore[reportPrivateUsage]
+                resp = client.get("/api/v1/db/tables")
+                assert resp.status_code == 200  # never a 500 in the TOCTOU window
+                assert resp.content == expected  # the same uncached degrade body
+                assert tables_cache.size() == 0, (
+                    "a wedge-degraded 0-count summary was STORED under the "
+                    "healthy pre-wedge token (the round-8 TOCTOU poison)"
+                )
+            finally:
+                guard._active = None  # pyright: ignore[reportPrivateUsage]
+            # Healed store, SAME token (no master move, no generation bump):
+            # the next open must COMPUTE the real counts, never serve zeros.
+            recovered = client.get("/api/v1/db/tables")
+            assert recovered.status_code == 200
+            healed = {r["table"]: r["row_count"] for r in recovered.json()["tables"]}
+            assert healed["instruments"] == 1
+            assert healed["schema_meta"] >= 1
+            assert tables_cache.size() == 1  # the REAL counts landed post-heal
+
+    def test_tables_fault_sets_member_equal(self) -> None:
+        """The route's probe/degrade catch set and the strict sweep's raise
+        set MUST stay member-equal — a strict-mode raise the route clause
+        cannot catch would 500 where the law is the uncached degrade
+        (the round-8 drift pin)."""
+        assert set(
+            app_module._TABLES_PROBE_FAULT_TYPES  # pyright: ignore[reportPrivateUsage]
+        ) == set(db_view.TABLE_SUMMARY_FAULT_TYPES)

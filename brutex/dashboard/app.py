@@ -8163,12 +8163,16 @@ def build_app(
         recomputes, and a past-floor mid-pull open serves the LAST-KNOWN
         counts instantly (logged ``movers_cache.stale_served``) while at most
         ONE tokenless background daemon revalidates — the fresh-compute
-        payload is byte-identical to the pre-cache route (pinned). A
-        freshness-probe fault — a store fault (``STORE_FAULT_TYPES``) OR the
-        DEC-STORE-WRITE-DEADLINE-001 wedge latch's ``CatalogError`` — degrades
-        to today's exact pre-cache path: one direct UNCACHED sweep
-        (``table_summary`` maps a faulted/wedged connection to honest
-        0-counts per table — never a 500, nothing cached).
+        payload is byte-identical to the pre-cache route (pinned). The
+        CACHED compute runs ``table_summary(..., raise_on_fault=True)``, so
+        a fault is NEVER stored: a probe fault (``_TABLES_PROBE_FAULT_TYPES``
+        — the store fault types + the DEC-STORE-WRITE-DEADLINE-001 wedge
+        latch's ``CatalogError``) OR the SAME fault striking AFTER a healthy
+        probe (the round-8 probe→compute TOCTOU — the strict compute raises
+        out of ``get_or_compute``, which caches nothing on a raise) degrades
+        to today's exact pre-cache path: one direct UNCACHED default-form
+        sweep (honest 0-counts on a faulted/wedged connection — never a 500,
+        nothing cached on EITHER degrade arm).
         """
         store = _require_store()
 
@@ -8185,23 +8189,35 @@ def build_app(
             """
 
             def _compute() -> list[dict[str, Any]]:
-                return table_summary(store.connection)
+                # STRICT sweep (round-8 review MINOR — the probe→compute
+                # TOCTOU): a store fault / the wedge latch's CatalogError
+                # striking AFTER the healthy probe RAISES here instead of
+                # folding to all-zero counts, so `get_or_compute` can never
+                # store a wedge-degraded summary under the healthy pre-wedge
+                # token (a raising compute caches NOTHING and releases the
+                # single-flight — the pinned movers_cache law,
+                # test_movers_cache.py::TestComputeRaises
+                # ::test_exception_propagates_and_nothing_cached).
+                return table_summary(store.connection, raise_on_fault=True)
 
             try:
                 gen = _summary_cache.generation
                 count, latest = master_revision(store)
+                return _db_tables_cache.get_or_compute(
+                    db_tables_key,
+                    generation=revision_generation(f"gen={gen}|m={count}:{latest}"),
+                    compute=_compute,
+                )
             except _TABLES_PROBE_FAULT_TYPES:
-                # Probe outage OR a WEDGED store (the CatalogError member —
-                # see _TABLES_PROBE_FAULT_TYPES) → the exact pre-cache
-                # posture, byte-for-byte: one direct uncached sweep (honest
-                # 0-counts on a faulted/wedged conn — table_summary never
-                # raises there), nothing cached.
-                return _compute()
-            return _db_tables_cache.get_or_compute(
-                db_tables_key,
-                generation=revision_generation(f"gen={gen}|m={count}:{latest}"),
-                compute=_compute,
-            )
+                # Probe outage OR a WEDGED/faulted store — surfacing at the
+                # probe OR mid-compute (the round-8 TOCTOU window; the strict
+                # compute's raise set TABLE_SUMMARY_FAULT_TYPES is
+                # member-equal to this clause, drift-pinned) → the exact
+                # pre-cache posture, byte-for-byte: one direct uncached
+                # DEFAULT-form sweep (honest 0-counts on a faulted/wedged
+                # conn — the fold-to-zero arm never raises there), nothing
+                # cached.
+                return table_summary(store.connection)
 
         tables = await _run_lake(_tables)
         return JSONResponse({"tables": tables})
