@@ -514,11 +514,28 @@ function countUp(el, target) {
   requestAnimationFrame(tick);
 }
 
+/* The sidebar TABLES-list loader — self-recovering since the pull-contention
+   slice (the operator-evidenced arm: a mid-pull 12 s timeout painted the dead
+   "offline — couldn't reach the server" card and never recovered). Every
+   user-driven (re)load — boot, the Refresh button, the sidebar ↻ Retry —
+   supersedes any pending tables retry chain + resets its backoff; the fetch
+   unit below re-runs itself on the shared capped-backoff driver.
+   bxOfflineHtml + BXUI.fetchWithTimeout are SHARED helpers and stay untouched
+   — the recovery lives entirely at this call site. */
 async function loadTables() {
-  try {
-    const r = await bxFetch("/api/v1/db/tables");
-    if (!r.ok) { tablesEl.innerHTML = '<h3>Tables</h3>' + bxErrorHtml("error " + r.status); return; }
-    const body = await r.json();
+  dbTblGen += 1;
+  dbDiscOk("db-tables");
+  await dbFetchTables();
+}
+async function dbFetchTables() {
+  const gen = dbTblGen;
+  const body = await dbFetchJsonBounded("/api/v1/db/tables");
+  if (bxDiscStale(gen, dbTblGen)) return;   /* a stale late response never repaints */
+  if (body === null) { dbTblFail(); return; }
+  dbDiscOk("db-tables");
+  renderTablesSidebar(body);
+}
+function renderTablesSidebar(body) {
     const tables = body.tables || [];
     counts = {};
     tables.forEach(t => { counts[t.table] = t.row_count; });
@@ -595,9 +612,39 @@ async function loadTables() {
     else if (mode === "registry") markRegistry(rstate.kind);
     else if (mode === "ledger") markLedger("window_ledger");
     else if (selected) markSelected(selected);
-  } catch (e) {
-    tablesEl.innerHTML = '<h3>Tables</h3>' + bxOfflineHtml(e);
+}
+
+/* The sidebar tables-list failure sink. KEEP-LAST-GOOD: a failed REFRESH
+   leaves the existing sidebar rows rendered + clickable and appends a status
+   line (createElement + textContent); only a first-ever load (no rows yet)
+   renders the error card — ONCE — then updates only its retained .hint text
+   per tick. The auto-retry never gives up; the card's ↻ Retry still forces an
+   immediate attempt (the delegated listener below → loadTables → gen bump). */
+function dbTblFail() {
+  const delay = dbDiscRetry("db-tables", dbFetchTables, dbTblGenNow);
+  const attempt = dbDiscFails["db-tables"];
+  if (tablesEl.querySelector(".tbl")) {
+    dbTblStatusLine(bxDiscLastGoodNote("the tables list", delay));
+    return;
   }
+  let hint = tablesEl.querySelector(".bx-state .hint");
+  if (!hint) {
+    tablesEl.innerHTML = '<h3>Tables</h3>' + bxErrorHtml("couldn't load the tables list");
+    hint = tablesEl.querySelector(".bx-state .hint");
+  }
+  if (hint) hint.textContent = bxDiscRetryHint(delay, attempt);
+}
+/* The keep-last-good status line under the still-usable sidebar rows (the
+   next successful rebuild naturally drops it). */
+function dbTblStatusLine(text) {
+  let line = document.getElementById("dbTblStatus");
+  if (!line) {
+    line = document.createElement("div");
+    line.id = "dbTblStatus";
+    line.className = "hint";
+    tablesEl.appendChild(line);
+  }
+  line.textContent = text;
 }
 
 /* Delegated Retry for the sidebar's error/offline cards (never re-attached). */
@@ -1145,6 +1192,10 @@ function fnoLabel(d) {
 async function selectCandles(kind) {
   mode = "candles";
   selected = null;
+  /* A mode/tab entry (and the manual ↻ Retry via rerunCurrent) supersedes any
+     pending discovery retry chain + resets its backoff (the shared dbDiscGen
+     guard — the universe.html gbPollGen idiom). */
+  dbDiscBump();
   /* Switching between the spot lake and the expired-options lake resets the
      per-lake view (selected dataset / page) so the two dedicated rows never
      leak each other's pager position. */
@@ -1157,24 +1208,182 @@ async function selectCandles(kind) {
   /* F&O uses the lazy symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001);
      SPOT uses the symbol→interval cascade (DEC-DB-SPOT-CASCADE-001) — both O(1)
      tiny payloads, not a flat thousand/750-row dropdown. Only the expired-options
-     lake keeps the flat dataset dropdown below. */
+     lake keeps the flat dataset dropdown below (loadOptionDatasets). */
   if (isFno) { await loadFnoCascade(); return; }
   if (!isOpt) { await loadSpotCascade(); return; }
-  try {
-    const r = await bxFetch("/api/v1/db/candles/datasets");
-    /* An HTTP error is an ERROR, never a fake "no data yet" empty (Golden Rule #1). */
-    if (!r.ok) { renderCandleView(null, "error " + r.status); return; }
-    const body = await r.json();
-    /* Only the expired-options lake reaches here (spot + F&O returned early to their
-       cascades) — tag each so buildCandleUrl() picks the option query route. */
-    cstate.datasets = (body.options || []).map(d => ({ kind: "option", ...d }));
-    if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
-    if (cstate.datasets.length) runCandleQuery(false);
-    else renderCandleView(null, null, { kind: "empty",
-      text: "No expired-option data yet — pull an instrument's options on /universe first." });
-  } catch (e) {
-    dataEl.innerHTML = bxOfflineHtml(e);
+  await loadOptionDatasets();
+}
+
+/* ── Self-recovering discovery loaders (the #1529 DEC-PULL-UI-STALENESS-001
+   posture applied to the /db discovery fetches) ──
+   Every discovery arm (spot cascade · F&O underlyings/expiries/contracts ·
+   expired-options datasets · the sidebar TABLES list) RECOVERS on its own: a
+   failed fetch schedules a
+   capped-exponential auto-retry (3 s→30 s, NEVER gives up) instead of the old
+   one-shot dead error card; a hidden tab fires ZERO fetches (the tick defers to
+   ONE visibilitychange catch-up); and a shared generation counter (the
+   universe.html gbPollGen idiom) makes a superseded chain self-cancel so a
+   stale late response never repaints a newer view. Copy: with NO usable
+   last-good list the honest error card renders ONCE and only its retained
+   .hint text updates per tick (textContent — ZERO new innerHTML sinks); with a
+   last-good list the picker STAYS rendered + usable and a small status line
+   (createElement + textContent) says so. The manual ↻ Retry stays and forces
+   an immediate attempt (rerunCurrent → selectCandles → dbDiscBump). */
+let dbDiscGen = 0;   /* data-pane discovery chains (the five cascade/dataset arms) */
+let dbTblGen = 0;    /* sidebar tables-list chain — INDEPENDENT: a candle-pane
+                        selection change must never cancel the sidebar's recovery */
+function dbDiscGenNow() { return dbDiscGen; }
+function dbTblGenNow() { return dbTblGen; }
+const DB_DISC_DATA_LABELS = ["spot-symbols", "fno-underlyings", "fno-expiries",
+  "fno-contracts", "option-datasets"];
+const dbDiscFails = Object.create(null);   /* label → consecutive failure count */
+const dbDiscVis = Object.create(null);     /* label → latest hidden-tab deferred {run, gen, genFn} */
+let dbDiscVisArmed = false;
+
+/* Pure capped-exponential backoff (node-goldened): 3s→6s→12s→24s→30s cap. */
+function bxDiscBackoff(n) { return Math.min(3000 * Math.pow(2, n), 30000); }
+/* Pure supersede law (node-goldened): a chain scheduled at `scheduledGen` is
+   stale once the live generation moved — its tick / late response must no-op. */
+function bxDiscStale(scheduledGen, currentGen) { return scheduledGen !== currentGen; }
+/* Pure keep-last-good merge (node-goldened): a FAILED refresh (fresh === null/
+   undefined) keeps the previous usable list; a successful refresh — including a
+   genuinely EMPTY one — replaces it (an honest empty is data, not a failure). */
+function bxDiscKeepLast(freshList, prevList) {
+  return (freshList === null || freshList === undefined) ? (prevList || []) : freshList;
+}
+/* Pure retry-copy builders (node-goldened). The countdown text is set once at
+   schedule time — no per-second ticker. */
+function bxDiscRetryHint(delayMs, attempt) {
+  return "the server may be busy (a pull/prebuild may be running) — retrying in "
+    + Math.round(delayMs / 1000) + "s (attempt " + attempt + ")";
+}
+function bxDiscLastGoodNote(what, delayMs) {
+  return "couldn't refresh " + what + " — showing the last-loaded list · retrying in "
+    + Math.round(delayMs / 1000) + "s";
+}
+
+/* A user action on the candle pane (tab/mode entry, a cascade selection
+   change, the manual ↻ Retry) supersedes every pending DATA-pane retry chain
+   and resets its backoff; the sidebar tables chain (dbTblGen) is untouched. */
+function dbDiscBump() {
+  dbDiscGen += 1;
+  DB_DISC_DATA_LABELS.forEach(k => { delete dbDiscFails[k]; });
+  return dbDiscGen;
+}
+function dbDiscOk(label) { delete dbDiscFails[label]; }
+
+/* Schedule the next auto-retry tick for a failed arm; returns the delay used.
+   A hidden tab fires ZERO fetches — the tick defers to ONE visibilitychange
+   catch-up per label (latest-wins) so a background tab never polls (#1623
+   discipline). `genFn` reads the arm's LIVE generation at fire time, so a
+   superseded chain self-cancels. */
+function dbDiscRetry(label, run, genFn) {
+  const gen = genFn();
+  const n = dbDiscFails[label] || 0;
+  dbDiscFails[label] = n + 1;
+  const delay = bxDiscBackoff(n);
+  setTimeout(() => {
+    if (bxDiscStale(gen, genFn())) return;        /* superseded — self-cancel */
+    if (document.hidden) { dbDiscArmVis(label, run, gen, genFn); return; }
+    run();
+  }, delay);
+  return delay;
+}
+function dbDiscArmVis(label, run, gen, genFn) {
+  dbDiscVis[label] = { run: run, gen: gen, genFn: genFn };
+  if (dbDiscVisArmed) return;
+  dbDiscVisArmed = true;
+  document.addEventListener("visibilitychange", dbDiscOnVis);
+}
+function dbDiscOnVis() {
+  if (document.hidden) return;
+  document.removeEventListener("visibilitychange", dbDiscOnVis);
+  dbDiscVisArmed = false;
+  for (const label in dbDiscVis) {
+    const v = dbDiscVis[label];
+    delete dbDiscVis[label];
+    if (v && !bxDiscStale(v.gen, v.genFn())) v.run();
   }
+}
+
+/* Failure sink for every discovery arm: schedule the retry, then paint the
+   honest state. `lastGoodRepaint` non-null ⇒ a usable last-good list exists —
+   re-render the picker from it + the status line; null ⇒ render the error card
+   ONCE through the EXISTING renderCandleView error arm (no new innerHTML sink)
+   and update only its retained .hint text on later ticks. */
+function dbDiscFail(label, errText, what, run, lastGoodRepaint) {
+  const delay = dbDiscRetry(label, run, dbDiscGenNow);
+  const attempt = dbDiscFails[label];
+  if (lastGoodRepaint) {
+    lastGoodRepaint();
+    dbDiscStatusLine(bxDiscLastGoodNote(what, delay));
+    return;
+  }
+  let hint = dataEl.querySelector(".bx-state.error .hint");
+  if (!hint) {
+    renderCandleView(null, errText);   /* render-once — the existing error card */
+    hint = dataEl.querySelector(".bx-state.error .hint");
+  }
+  if (hint) hint.textContent = bxDiscRetryHint(delay, attempt);
+}
+/* The keep-last-good status line under the still-usable picker (createElement +
+   textContent only; the next successful full render naturally drops it). */
+function dbDiscStatusLine(text) {
+  let line = document.getElementById("dbDiscStatus");
+  if (!line) {
+    line = document.createElement("div");
+    line.id = "dbDiscStatus";
+    line.className = "hint";
+    dataEl.appendChild(line);
+  }
+  line.textContent = text;
+}
+
+/* Bounded THROUGH the body read (the universe.html gbFetchJson / #1720
+   fetchTextBounded discipline): BXUI.fetchWithTimeout (bx-ui.js) clears its
+   abort timer as soon as the HEADERS resolve, so a headers-then-stalled-body
+   response would hang `await r.json()` forever — nothing thrown, no retry
+   scheduled, the discovery chain wedged. This helper keeps ONE deadline armed
+   across fetch AND the body read; every failure shape (timeout, non-ok,
+   rejection, malformed body) collapses to null for the retry path. */
+async function dbFetchJsonBounded(url) {
+  const ms = 12000;   /* the sibling pages' client deadline (bx-ui.js) */
+  const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, ms);
+  try {
+    const r = await fetch(url, ctrl ? { signal: ctrl.signal } : {});
+    if (!r.ok) return null;
+    /* timer deliberately still armed through the body read */
+    return await r.json();
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* The expired-options flat-dropdown datasets arm — the fifth discovery loader
+   on the shared self-recovering driver. */
+async function loadOptionDatasets() {
+  const gen = dbDiscGen;
+  const body = await dbFetchJsonBounded("/api/v1/db/candles/datasets");
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  if (body === null) {
+    /* KEEP-LAST-GOOD: a failed refresh leaves the existing dropdown usable. */
+    const keep = bxDiscKeepLast(null, cstate.datasets);
+    dbDiscFail("option-datasets", "couldn't load the expired-option datasets",
+      "the dataset list", loadOptionDatasets,
+      keep.length ? () => renderCandleView(null, null, { kind: "prompt", text: "pick a dataset" }) : null);
+    return;
+  }
+  dbDiscOk("option-datasets");
+  /* Only the expired-options lake reaches here (spot + F&O run their own
+     cascades) — tag each so buildCandleUrl() picks the option query route. */
+  cstate.datasets = (body.options || []).map(d => ({ kind: "option", ...d }));
+  if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
+  if (cstate.datasets.length) runCandleQuery(false);
+  else renderCandleView(null, null, { kind: "empty",
+    text: "No expired-option data yet — pull an instrument's options on /universe first." });
 }
 
 /* ── F&O symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001) ──
@@ -1182,17 +1391,31 @@ async function selectCandles(kind) {
    build the (interval) dataset descriptors so curDataset()/buildCandleUrl() work
    exactly as for spot — the cascade is purely the picker, the query path is shared. */
 async function _fnoFetch(url) {
-  try { const r = await bxFetch(url); return r.ok ? await r.json() : null; }
-  catch (e) { return null; }
+  /* The null-collapsing contract is UNCHANGED (timeout / non-ok / malformed
+     body / rejection → null); the fetch itself is now BOUNDED through the
+     body read via dbFetchJsonBounded (see the self-recovering driver above). */
+  return dbFetchJsonBounded(url);
 }
 async function loadFnoCascade() {
+  const gen = dbDiscGen;
   const body = await _fnoFetch("/api/v1/db/fno/underlyings");
-  cstate.fno = { unds: (body && body.underlyings) || [],
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  /* KEEP-LAST-GOOD (the fails-before clobber): the fresh list is adopted only
+     BELOW the null check — a failed refresh (500 / offline / timeout) schedules
+     an auto-retry and leaves the existing picker usable, never clobbering it
+     with [] (the old shape assigned `cstate.fno = { unds: … || [] }` FIRST). */
+  if (body === null) {
+    const keep = bxDiscKeepLast(null, cstate.fno.unds);
+    cstate.fno.unds = keep;
+    dbDiscFail("fno-underlyings", "couldn't load the F&O underlyings",
+      "the F&O underlyings", loadFnoCascade,
+      keep.length ? () => renderCandleView(null, null, { kind: "prompt", text: "pick an underlying → expiry → contract" }) : null);
+    return;
+  }
+  dbDiscOk("fno-underlyings");
+  cstate.fno = { unds: bxDiscKeepLast(body.underlyings || [], cstate.fno.unds),
                  und: "", exps: [], exp: "", counts: [], cons: [], con: "" };
   cstate.datasets = []; cstate.key = null;
-  /* A failed fetch (500 / offline / timeout) is an ERROR card with Retry —
-     never the false "No F&O candle data yet" empty (Golden Rule #1). */
-  if (body === null) { renderCandleView(null, "couldn't load the F&O underlyings"); return; }
   if (!cstate.fno.unds.length) {
     renderCandleView(null, null, { kind: "empty",
       text: "No F&O candle data yet — pull an instrument's futures/options history on /universe first." });
@@ -1201,27 +1424,51 @@ async function loadFnoCascade() {
   renderCandleView(null, null, { kind: "prompt", text: "pick an underlying → expiry → contract" });
 }
 async function onFnoUnderlyingChange(und) {
+  /* A selection change supersedes any pending retry chain (dbDiscGen bump);
+     the pre-fetch state reset below is a legitimate selection change (kept) —
+     the retryable unit re-fetches for the CURRENT selection on failure. */
+  dbDiscBump();
   cstate.fno.und = und; cstate.fno.exp = ""; cstate.fno.exps = []; cstate.fno.counts = [];
   cstate.fno.con = ""; cstate.fno.cons = []; cstate.datasets = []; cstate.key = null;
-  if (und) {
-    const body = await _fnoFetch("/api/v1/db/fno/expiries?underlying=" + encodeURIComponent(und));
-    if (body === null) { renderCandleView(null, "couldn't load the expiries"); return; }
-    cstate.fno.exps = (body && body.expiries) || [];
-    /* Per-expiry "listed N with data M" rows, aligned with `expiries`
-       (DEC-DB-UX-PACK-001 Feature 6). */
-    cstate.fno.counts = (body && body.expiry_counts) || [];
+  if (!und) { renderCandleView(null, null, { kind: "prompt", text: "pick an expiry" }); return; }
+  await dbFetchFnoExpiries();
+}
+async function dbFetchFnoExpiries() {
+  const gen = dbDiscGen;
+  const body = await _fnoFetch("/api/v1/db/fno/expiries?underlying=" + encodeURIComponent(cstate.fno.und));
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  if (body === null) {
+    dbDiscFail("fno-expiries", "couldn't load the expiries", "the expiries",
+      dbFetchFnoExpiries, null);
+    return;
   }
+  dbDiscOk("fno-expiries");
+  cstate.fno.exps = (body && body.expiries) || [];
+  /* Per-expiry "listed N with data M" rows, aligned with `expiries`
+     (DEC-DB-UX-PACK-001 Feature 6). */
+  cstate.fno.counts = (body && body.expiry_counts) || [];
   renderCandleView(null, null, { kind: "prompt", text: "pick an expiry" });
 }
 async function onFnoExpiryChange(exp) {
+  /* A selection change supersedes any pending retry chain (dbDiscGen bump). */
+  dbDiscBump();
   cstate.fno.exp = exp; cstate.fno.con = ""; cstate.fno.cons = [];
   cstate.datasets = []; cstate.key = null;
-  if (exp) {
-    const body = await _fnoFetch("/api/v1/db/fno/contracts?underlying="
-      + encodeURIComponent(cstate.fno.und) + "&expiry=" + encodeURIComponent(exp));
-    if (body === null) { renderCandleView(null, "couldn't load the contracts"); return; }
-    cstate.fno.cons = (body && body.contracts) || [];
+  if (!exp) { renderCandleView(null, null, { kind: "prompt", text: "pick a contract" }); return; }
+  await dbFetchFnoContracts();
+}
+async function dbFetchFnoContracts() {
+  const gen = dbDiscGen;
+  const body = await _fnoFetch("/api/v1/db/fno/contracts?underlying="
+    + encodeURIComponent(cstate.fno.und) + "&expiry=" + encodeURIComponent(cstate.fno.exp));
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  if (body === null) {
+    dbDiscFail("fno-contracts", "couldn't load the contracts", "the contracts",
+      dbFetchFnoContracts, null);
+    return;
   }
+  dbDiscOk("fno-contracts");
+  cstate.fno.cons = (body && body.contracts) || [];
   renderCandleView(null, null, { kind: "prompt", text: "pick a contract" });
 }
 /* A contract carries its available intervals; materialise ONE fno dataset
@@ -1256,12 +1503,24 @@ function onFnoContractChange(symbol, prefInterval) {
    exchanges' same-named symbols never alias. */
 function _spotKey(s) { return [s.exchange, s.segment, s.symbol].join("|"); }
 async function loadSpotCascade() {
+  const gen = dbDiscGen;
   const body = await _fnoFetch("/api/v1/db/spot/symbols");
-  cstate.spot = { syms: (body && body.symbols) || [], sym: "" };
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  /* KEEP-LAST-GOOD (the fails-before clobber): the fresh list is adopted only
+     BELOW the null check — a failed refresh (500 / offline / timeout) schedules
+     an auto-retry and leaves the existing picker usable, never clobbering it
+     with [] (the old shape assigned `cstate.spot = { syms: … || [] }` FIRST). */
+  if (body === null) {
+    const keep = bxDiscKeepLast(null, cstate.spot.syms);
+    cstate.spot = { syms: keep, sym: cstate.spot.sym || "" };
+    dbDiscFail("spot-symbols", "couldn't load the spot symbols",
+      "the symbol list", loadSpotCascade,
+      keep.length ? () => renderCandleView(null, null, { kind: "prompt", text: "pick a symbol → interval" }) : null);
+    return;
+  }
+  dbDiscOk("spot-symbols");
+  cstate.spot = { syms: bxDiscKeepLast(body.symbols || [], cstate.spot.syms), sym: "" };
   cstate.datasets = []; cstate.key = null;
-  /* A failed fetch is an ERROR card with Retry — never the false "No spot
-     candle data yet" empty (Golden Rule #1). */
-  if (body === null) { renderCandleView(null, "couldn't load the spot symbols"); return; }
   if (!cstate.spot.syms.length) {
     renderCandleView(null, null, { kind: "empty",
       text: "No spot candle data yet — pull an instrument's timeframes on /universe first." });
