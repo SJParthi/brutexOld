@@ -9,6 +9,7 @@ of the timing the caller reports.
 from __future__ import annotations
 
 import dataclasses
+import threading
 from collections.abc import Callable
 
 import pytest
@@ -1388,3 +1389,187 @@ class TestLast429SentinelInvariants:
         clock.advance(1.0)
         b.acquire()  # recovery gate: now - (-inf) = +inf >= upshift_recovery → open
         assert b.current_rps() == b.initial_rps
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RATE-SLEEP-OUTSIDE-LOCK-001 — the retry-loop sleep runs with the
+# bucket lock RELEASED (compute-under-lock / sleep-outside-lock /
+# re-check, the DEC-GROWW-GOVERNOR-ATOMIC-001 idiom). Every test here is
+# Event-gated + deterministic: pre-fix the parked sleeper PROVABLY holds
+# ``_lock`` until released (it cannot wake before ``release`` is set), so
+# a probe's bounded wait fails on every run; post-fix the probe acquires
+# an uncontended lock in microseconds. No wall-clock comparison anywhere.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _GateSleep:
+    """Injected sleep: call #1 (the pre-existing outside-lock sleep) returns
+    instantly; call #2 (the retry-loop sleep) parks on an Event and signals
+    arrival; calls #3+ return instantly (drains the <=16 cap loop fast)."""
+
+    def __init__(self) -> None:
+        self.in_retry_sleep = threading.Event()
+        self.release = threading.Event()
+        self.durations: list[float] = []
+        self._calls = 0
+
+    def __call__(self, seconds: float) -> None:
+        self._calls += 1
+        self.durations.append(seconds)
+        if self._calls != 2:
+            return
+        self.in_retry_sleep.set()
+        assert self.release.wait(5.0), "test bug: retry sleeper never released"
+
+
+def _parked_bucket(
+    probe_clock: Callable[[], float],
+) -> tuple[AdaptiveTokenBucket, _GateSleep, threading.Thread, list[float]]:
+    """start_empty + a non-advancing clock ⇒ acquire() reaches the retry-loop sleep."""
+    gate = _GateSleep()
+    bucket = AdaptiveTokenBucket(
+        initial_rps=5.0,
+        downshift_rps=2.5,
+        burst=1,
+        start_empty=True,
+        clock=probe_clock,
+        sleep=gate,
+    )
+    results: list[float] = []
+    t = threading.Thread(target=lambda: results.append(bucket.acquire()), daemon=True)
+    t.start()
+    assert gate.in_retry_sleep.wait(5.0)
+    return bucket, gate, t, results
+
+
+class TestNoSleepUnderLock:
+    """DEC-RATE-SLEEP-OUTSIDE-LOCK-001: no sleep ever runs under ``_lock``."""
+
+    @pytest.mark.parametrize("probe_name", ["current_rps", "available_tokens", "set_rate"])
+    def test_retry_sleep_releases_the_lock(self, probe_name: str) -> None:
+        """The fail-before regression: a probe completes while a sleeper is parked.
+
+        Pre-fix the retry-loop sleep ran INSIDE ``with self._lock:``, so the
+        parked worker held the lock for the whole window and every probe
+        blocked (``completed`` False deterministically — the sleeper cannot
+        wake until ``release`` is set, strictly after the wait). Post-fix the
+        probe acquires a free lock in microseconds.
+        """
+        bucket, gate, t, _results = _parked_bucket(lambda: 1000.0)
+        done = threading.Event()
+
+        def probe() -> None:
+            if probe_name == "set_rate":
+                bucket.set_rate(4.0)
+            else:
+                getattr(bucket, probe_name)()
+            done.set()
+
+        threading.Thread(target=probe, daemon=True).start()
+        completed = done.wait(0.5)
+        gate.release.set()  # unblock either way — no hung test on failure
+        t.join(timeout=5.0)
+        assert not t.is_alive()  # frozen clock ⇒ the cap force-grant terminates it
+        assert completed, f"{probe_name}() blocked behind the retry-loop sleep"
+
+    def test_peer_steal_forces_re_check_never_negative(self) -> None:
+        """Atomic (re-check, consume): a peer takes the refilled token mid-sleep.
+
+        The peer acquire runs on a join-bounded daemon thread so a regression
+        (lock held across the sleep) FAILS the completed-flag assert instead
+        of hanging the suite. The sleeper must then loop once more and take
+        the NEXT token — 2 acquires of exactly 2 refilled tokens, ending at
+        exactly 0.0: no overshoot, no negative balance.
+        """
+        now = {"t": 1000.0}
+        bucket, gate, t, results = _parked_bucket(lambda: now["t"])
+        now["t"] += 0.2  # refill exactly ONE token at 5 r/s
+        peer_result: list[float] = []
+        peer_done = threading.Event()
+
+        def _peer() -> None:
+            peer_result.append(bucket.acquire())
+            peer_done.set()
+
+        peer = threading.Thread(target=_peer, daemon=True)
+        peer.start()
+        peer_completed = peer_done.wait(5.0)
+        assert peer_completed, "peer acquire() blocked behind the parked retry sleeper"
+        assert peer_result == [0.0]  # the peer consumed the refilled token, no wait
+        now["t"] += 0.2  # one more token for the sleeper
+        gate.release.set()
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+        assert results and results[0] >= 0.0
+        assert bucket.available_tokens() == 0.0  # 2 consumed of exactly 2 refilled — atomic
+        assert len(gate.durations) == 2  # first sleep + ONE retry sleep
+
+    def test_set_rate_mid_sleep_governs_next_wait(self) -> None:
+        """A ``set_rate`` landing mid-sleep governs the NEXT wait computation.
+
+        ``more_wait`` is recomputed from the CURRENT ``_current_rps`` inside
+        the lock each iteration (never hoisted): after ``set_rate(0.5)``
+        completes while the worker is parked (itself the fix), the first
+        post-wake retry wait is exactly ``(1.0 - 0) / 0.5 = 2.0`` s
+        (``set_rate`` drained to 0 tokens; the frozen clock refills 0).
+        """
+        bucket, gate, t, _results = _parked_bucket(lambda: 1000.0)
+        bucket.set_rate(0.5)  # completes while parked — the fix itself
+        gate.release.set()  # wake; re-check under the re-acquired lock
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+        assert gate.durations[2] == 2.0
+
+    def test_frozen_clock_cap_sleep_count_and_wait_exact(self) -> None:
+        """Exact sleep-count cap pin: ``1 + _ACQUIRE_LOOP_CAP`` sleeps (17).
+
+        Verified identical pre/post-fix (the release/re-acquire changes no
+        arithmetic) — an off-by-one cap-mutant killer. The accrued wait is
+        the byte-exact sum of every performed sleep (the P-18 accounting law)
+        and the fail-OPEN force-grant's token is consumed, leaving 0.0.
+        """
+        calls: list[float] = []
+        bucket = AdaptiveTokenBucket(
+            initial_rps=5.0,
+            downshift_rps=2.5,
+            burst=1,
+            start_empty=True,
+            clock=lambda: 1000.0,
+            sleep=calls.append,
+        )
+        wait = bucket.acquire()
+        assert len(calls) == 1 + _ACQUIRE_LOOP_CAP  # 17 sleeps total
+        assert wait == pytest.approx(sum(calls))  # wait accrues once per performed sleep
+        assert bucket.available_tokens() == 0.0  # the force-granted token was consumed
+
+    def test_raising_sleep_unwinds_with_lock_free_and_no_token(self) -> None:
+        """An exception from the retry sleep unwinds with the lock FREE.
+
+        The ``finally`` re-acquires so the enclosing ``with`` stays balanced;
+        the raise propagates, no token is consumed/fabricated, and a
+        follow-up ``current_rps()`` returns immediately (lock free) — this
+        also exercises the ``finally`` re-acquire arm on the raising path.
+        """
+
+        class _Boom(Exception):
+            pass
+
+        seen = {"n": 0}
+
+        def boom_sleep(_s: float) -> None:
+            seen["n"] += 1
+            if seen["n"] == 2:
+                raise _Boom
+
+        bucket = AdaptiveTokenBucket(
+            initial_rps=5.0,
+            downshift_rps=2.5,
+            burst=1,
+            start_empty=True,
+            clock=lambda: 1000.0,
+            sleep=boom_sleep,
+        )
+        with pytest.raises(_Boom):
+            bucket.acquire()
+        assert bucket.available_tokens() == 0.0  # nothing consumed / fabricated
+        assert bucket.current_rps() == 5.0  # the lock is free — this returns

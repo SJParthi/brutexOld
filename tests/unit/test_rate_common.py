@@ -2513,3 +2513,144 @@ class TestInLockExceptionSlotSafety:
 
         monkeypatch.setattr(ctl, "_handle_clock_gap_locked", _raise)
         self._assert_propagates_clean(ctl, ctl._maybe_log_snapshot)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RATE-SLEEP-OUTSIDE-LOCK-001 companion — the transitive controller
+# thaw: pre-fix, a worker parked in the BUCKET's retry sleep held the
+# bucket lock, so a step-down's `set_rate` (called UNDER the controller
+# lock) blocked — freezing every other worker's pace()/snapshot() too.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _GateSleep:
+    """Injected sleep (twin of the rate_limiter suite's): call #1 (the
+    bucket's first outside-lock sleep) returns instantly; call #2 (the
+    retry-loop sleep) parks on an Event and signals arrival; calls #3+
+    return instantly (drains the bounded cap loop fast)."""
+
+    def __init__(self) -> None:
+        self.in_retry_sleep = threading.Event()
+        self.release = threading.Event()
+        self._calls = 0
+
+    def __call__(self, _seconds: float) -> None:
+        self._calls += 1
+        if self._calls != 2:
+            return
+        self.in_retry_sleep.set()
+        assert self.release.wait(5.0), "test bug: retry sleeper never released"
+
+
+def test_snapshot_not_blocked_by_bucket_retry_sleep() -> None:
+    """snapshot() completes while a paced worker sleeps in the bucket retry loop.
+
+    The production-critical transitive-freeze pin: worker 1's ``pace()`` parks
+    in the bucket's retry-loop sleep; worker 2 fires ``on_rate_limit()``
+    ``STEP_DOWN_HITS`` times — the step-down's ``set_rate`` blocks on the
+    BUCKET lock pre-fix WHILE HOLDING the controller lock, so worker 3's
+    ``snapshot()`` (controller lock) froze too. Post-fix both complete in
+    microseconds while the sleeper stays parked. Deterministic both ways:
+    pre-fix the sleeper provably holds the bucket lock until released.
+    """
+    gate = _GateSleep()
+    ctl = RateController(clock=lambda: 1000.0, sleep=gate, ceiling_rps=5.0)
+
+    worker_done = threading.Event()
+
+    def _pace() -> None:
+        ctl.pace()
+        worker_done.set()
+
+    worker = threading.Thread(target=_pace, daemon=True)
+    worker.start()
+    assert gate.in_retry_sleep.wait(5.0)
+
+    stepper_done = threading.Event()
+
+    def _step_down() -> None:
+        for _ in range(STEP_DOWN_HITS):
+            ctl.on_rate_limit()
+        stepper_done.set()
+
+    stepper = threading.Thread(target=_step_down, daemon=True)
+    stepper.start()
+    stepped = stepper_done.wait(0.5)
+
+    snap_done = threading.Event()
+
+    def _snapshot() -> None:
+        ctl.snapshot()
+        snap_done.set()
+
+    snapper = threading.Thread(target=_snapshot, daemon=True)
+    snapper.start()
+    snapped = snap_done.wait(0.5)
+
+    gate.release.set()
+    worker.join(5.0)
+    stepper.join(5.0)
+    snapper.join(5.0)
+    assert not worker.is_alive()  # the parked pace() terminated (bounded cap loop)
+    assert worker_done.is_set()
+    assert stepped, "on_rate_limit() step-down blocked behind the bucket retry sleep"
+    assert snapped, "snapshot() blocked behind on_rate_limit behind the retry sleeper"
+
+
+class TestGovernorLoopCapClockSafety:
+    """guarantee-audit BUG-6 (test-only pins): the per-minute governor's fail-OPEN
+    loop cap (_GOVERNOR_LOOP_CAP=64, pace() Gate 1) is a deliberate never-deadlock
+    posture mirroring the bucket's _ACQUIRE_LOOP_CAP — UNREACHABLE under any clock
+    that advances during sleep (production: time.monotonic + time.sleep), and
+    reachable ONLY under a pathological non-advancing injected clock + no-op sleep.
+    Both arms pinned; the governor code + every VALUE byte-untouched."""
+
+    def test_advancing_clock_never_exceeds_per_min_cap(self) -> None:
+        # (a) production-safe arm: deterministic advancing clock whose sleep
+        # advances it (the suite's standard idiom). Stress well past the cap:
+        # 35 admissions at ceiling_per_min=10 — the rolling-60s law holds on
+        # EVERY admission and the fail-open path is never needed.
+        clock = {"t": 1000.0}
+
+        def now() -> float:
+            return clock["t"]
+
+        def sleep(s: float) -> None:
+            clock["t"] += s
+
+        ctl = RateController(clock=now, sleep=sleep, ceiling_rps=1000.0, ceiling_per_min=10)
+        stamps: list[float] = []
+        for _ in range(35):
+            ctl.pace()
+            recent = ctl.snapshot()["recent_minute"]
+            assert isinstance(recent, int)
+            assert recent <= 10  # never beyond the cap
+            stamps.append(now())
+        for i in range(len(stamps) - 10):  # belt: any 11 admissions
+            assert stamps[i + 10] - stamps[i] >= 60.0 - 0.01  # span >= one window
+
+    def test_fail_open_reachable_only_under_frozen_clock_noop_sleep(self) -> None:
+        # (b) pin the EXISTING fail-open behavior explicitly as the bounded
+        # never-deadlock posture under the production-unreachable clock shape:
+        # frozen clock + no-op sleep, cap=3 → paces 4..5 spin exactly
+        # _GOVERNOR_LOOP_CAP futile sleeps then fail OPEN and append — pace()
+        # TERMINATES (never spins forever) and the deque honestly exceeds the cap.
+        sleeps = {"n": 0}
+
+        def noop_sleep(_s: float) -> None:
+            sleeps["n"] += 1
+
+        ctl = RateController(
+            clock=lambda: 1000.0, sleep=noop_sleep, ceiling_rps=1000.0, ceiling_per_min=3
+        )
+        for _ in range(5):
+            ctl.pace()  # terminates via BOTH fail-opens
+        snap = ctl.snapshot()
+        assert snap["recent_minute"] == 5  # 2 fail-open admissions past cap=3
+        assert snap["ceiling_per_min"] == 3
+        # the cap bounded the spin: each fail-open pace slept the governor loop
+        # exactly _GOVERNOR_LOOP_CAP times (+ the bucket's own bounded retries) —
+        # assert traversal happened AND stayed bounded, without coupling to
+        # bucket internals:
+        assert sleeps["n"] >= _GOVERNOR_LOOP_CAP  # the cap loop ran
+        assert sleeps["n"] <= 5 * (_GOVERNOR_LOOP_CAP + 25)  # and was bounded

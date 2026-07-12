@@ -952,7 +952,9 @@ class RateController:
         1. **Per-minute governor** (only when ``ceiling_per_min`` is set) — a HARD
            ceiling on the issue count inside any rolling :data:`PER_MIN_WINDOW`. It
            runs its own compute-under-lock / sleep-outside-lock / re-check loop,
-           mirroring :meth:`AdaptiveTokenBucket.acquire` (CLAUDE.md §11 COMMON). When a
+           mirroring :meth:`AdaptiveTokenBucket.acquire` (CLAUDE.md §11 COMMON —
+           since DEC-RATE-SLEEP-OUTSIDE-LOCK-001 the bucket's OWN retry loop runs
+           the same discipline, so the mirror is exact). When a
            worker observes a free slot it RESERVES it (appends its issue instant) in the
            SAME lock acquisition — so the ``(check, reserve)`` is atomic and N concurrent
            workers can never all pass one free slot — no overshoot (DEC-GROWW-GOVERNOR
@@ -1158,7 +1160,9 @@ class RateController:
         atomic O(1) critical section, so two workers reporting a 429 at once can
         never double-step or corrupt the deque. The ``set_rate`` mutation happens
         under the lock but only re-stamps the bucket's in-memory rate/token state
-        (no I/O / sleep), keeping the single shared token stream intact. Field
+        (no I/O / sleep — and the bucket itself never sleeps while holding ITS
+        lock, DEC-RATE-SLEEP-OUTSIDE-LOCK-001, so this call is genuinely O(1)),
+        keeping the single shared token stream intact. Field
         values are captured at the decision point; telemetry is emitted
         post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
@@ -1261,7 +1265,9 @@ class RateController:
         Thread-safe: the record → window-evict → maybe-step-down is one atomic
         O(1) critical section, so concurrent workers reporting a stall can never
         double-step. The ``set_rate`` mutation only re-stamps the one bucket's
-        in-memory rate/token state (no I/O / sleep under the lock). Field values
+        in-memory rate/token state (no I/O / sleep under the lock — the bucket
+        never sleeps while holding ITS lock either,
+        DEC-RATE-SLEEP-OUTSIDE-LOCK-001). Field values
         are captured at the decision point; telemetry is emitted post-release
         (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
@@ -1313,7 +1319,9 @@ class RateController:
         """Record a clean call; step **up** 1 r/s after a sustained clean window — O(1).
 
         Thread-safe: the recover-up check + the ``set_rate`` mutation are one
-        atomic O(1) critical section (no I/O / sleep under the lock). Stale 429
+        atomic O(1) critical section (no I/O / sleep under the lock — the bucket
+        itself never sleeps while holding ITS lock either,
+        DEC-RATE-SLEEP-OUTSIDE-LOCK-001, so ``set_rate`` cannot block here). Stale 429
         hits AND timeouts (older than :data:`STEP_DOWN_WINDOW`) are evicted here, so
         a storm that pinned the rate at the floor — where ``on_rate_limit``'s
         step-down branch, the only OTHER place ``_hits`` is cleared, can no longer

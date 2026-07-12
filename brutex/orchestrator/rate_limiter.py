@@ -121,6 +121,10 @@ _LEGACY_HARD_CAP_RPS: Final[float] = 5.0
 #: Under injected fake clocks, round-off errors can occasionally leave
 #: the token count at ``0.9999…`` indefinitely — this bound guarantees
 #: the loop terminates after at most 16 iterations even in that case.
+#: Post-DEC-RATE-SLEEP-OUTSIDE-LOCK-001 it ALSO bounds wake/re-test
+#: contention loops (a woken sleeper can lose its token to a peer) —
+#: fail-OPEN, the same posture as ``_GOVERNOR_LOOP_CAP`` /
+#: ``_SMOOTH_LOOP_CAP`` in ``brutex/adapters/rate_common.py``.
 _ACQUIRE_LOOP_CAP: Final[int] = 16
 
 
@@ -284,8 +288,11 @@ class AdaptiveTokenBucket:
         Never drops the call — callers always get through.
 
         Thread-safe. If multiple threads call ``acquire`` at once they
-        serialize through the internal lock, which is what we want —
-        token bucket semantics.
+        serialize through the internal lock for O(1) state work only —
+        ALL sleeps (both the first wait and the retry loop's) run with
+        the lock released (DEC-RATE-SLEEP-OUTSIDE-LOCK-001) — which is
+        what we want: token bucket semantics without a sleeper freezing
+        the observability/`set_rate` readers.
         """
         with self._lock:
             self._maybe_upshift_locked()
@@ -300,32 +307,59 @@ class AdaptiveTokenBucket:
 
         if wait_seconds > 0.0:
             # Release the lock while sleeping so other threads can still
-            # check upshift status. After waking, re-enter and consume.
+            # read stats / step the rate. BOTH sleeps in this method (this
+            # first one and the retry loop's below) run with the lock
+            # RELEASED (DEC-RATE-SLEEP-OUTSIDE-LOCK-001).
             self.sleep(wait_seconds)
             with self._lock:
                 self._refill_locked()
-                # Guaranteed at least 1.0 after the sleep unless downshift
-                # happened concurrently, in which case loop once more.
-                # Use a small epsilon to absorb float arithmetic drift so
-                # `tokens == 0.9999…` doesn't trigger an infinite micro-wait
-                # loop.
+                # NOT guaranteed >= 1.0 after the sleep: a concurrent
+                # set_rate/downshift drains the bucket, and (post-fix) a
+                # peer may consume the token we waited for while we slept
+                # unlocked — in either case loop once more: compute-under-
+                # lock / sleep-outside-lock / re-check, the
+                # DEC-GROWW-GOVERNOR-ATOMIC-001 idiom (CLAUDE.md §11
+                # COMMON; mirrors RateController.pace() Gate 1). Use a
+                # small epsilon to absorb float arithmetic drift so
+                # `tokens == 0.9999…` doesn't trigger an infinite
+                # micro-wait loop.
                 eps = 1e-9
                 iterations = 0
                 while self._tokens < 1.0 - eps:
                     iterations += 1
                     if iterations > _ACQUIRE_LOOP_CAP:
-                        # Safety net — in the fake-clock world, round-off
-                        # should converge in 1-2 iterations; 16 is a hard
-                        # cap so tests can't deadlock on us.
+                        # Safety net — bounds BOTH fake-clock round-off AND
+                        # (post-fix) wake/re-test contention loops; fails
+                        # OPEN like _GOVERNOR_LOOP_CAP/_SMOOTH_LOOP_CAP.
                         self._tokens = 1.0
                         # ``# pragma: no mutate`` (DEC-MUTATION-RUNTIME-001):
-                        # ``_tokens`` was just set to 1.0, so the loop guard
-                        # ``_tokens < 1.0 - eps`` is statically False — mutmut's
-                        # ``break`` → ``continue`` re-tests the guard and exits
-                        # identically. Provably equivalent.
+                        # ``_tokens`` was just set to 1.0 UNDER the lock and
+                        # the lock is held through the guard re-test (the
+                        # release below only spans the sleep), so the loop
+                        # guard ``_tokens < 1.0 - eps`` is statically False —
+                        # mutmut's ``break`` → ``continue`` re-tests the
+                        # guard and exits identically. Provably equivalent.
                         break  # pragma: no mutate
                     more_wait = max((1.0 - self._tokens) / self._current_rps, eps)
-                    self.sleep(more_wait)
+                    # Sleep with the lock RELEASED (DEC-RATE-SLEEP-OUTSIDE-
+                    # LOCK-001): holding it across this sleep froze
+                    # current_rps()/set_rate()/record_*() — and,
+                    # transitively, the WHOLE RateController (its
+                    # on_rate_limit/on_timeout/on_success call set_rate
+                    # under the CONTROLLER lock) — for up to a full
+                    # 1/current_rps (measured 190-200 ms at 5 r/s). The
+                    # finally re-acquires even if sleep raises, so the
+                    # enclosing `with` stays balanced; the loop guard then
+                    # re-tests tokens under the lock, so the (re-check,
+                    # consume) stays atomic — a peer may legitimately take
+                    # the token we waited for (bounded by
+                    # _ACQUIRE_LOOP_CAP, fail-OPEN — the governor's
+                    # accepted contention posture).
+                    self._lock.release()
+                    try:
+                        self.sleep(more_wait)
+                    finally:
+                        self._lock.acquire()
                     self._refill_locked()
                     wait_seconds += more_wait
                 self._tokens -= 1.0
@@ -413,6 +447,10 @@ class AdaptiveTokenBucket:
 
     def set_rate(self, new_rps: float) -> None:
         """Atomically change the steady-state rate on this LIVE bucket — O(1).
+
+        (O(1) holds even while another worker waits in :meth:`acquire`'s retry
+        loop — the bucket never sleeps while holding its lock,
+        DEC-RATE-SLEEP-OUTSIDE-LOCK-001.)
 
         The :class:`RateController`'s step ladder (5→4→3 down / 3→4→5 up) calls this
         so a rate change mutates the ONE shared bucket IN PLACE instead of swapping in
