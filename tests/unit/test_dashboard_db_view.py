@@ -1529,6 +1529,21 @@ class TestWindowStatusLabel:
     def test_failed_reads_will_repull(self) -> None:
         assert window_status_label("FAILED", 0) == "FAILED (will re-pull)"
 
+    def test_window_status_label_today_incomplete_failed_wording(self) -> None:
+        """DEC-PULL-TODAY-COMPLETENESS-GATE-001: a covers-today window demoted
+        because the vendor has not settled TODAY yet reads the honest deferral
+        wording — a time-transient re-pull, never an error / never a data hole."""
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        assert window_status_label("FAILED", 0, TODAY_INCOMPLETE) == (
+            "today's session not yet settled by vendor (will re-pull)"
+        )
+        # The (structurally unreachable) SKIPPED arm is covered defensively by
+        # DEMOTED_SETTLE_REASONS membership — never "vendor confirmed no trades".
+        assert window_status_label("SKIPPED", 1, TODAY_INCOMPLETE) == (
+            f"completeness gap accepted ({TODAY_INCOMPLETE}, 1 flagged attempt(s)) — settled"
+        )
+
     def test_success_is_the_bare_status(self) -> None:
         assert window_status_label("SUCCESS", 0) == "SUCCESS"
 

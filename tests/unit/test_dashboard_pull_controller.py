@@ -3861,3 +3861,109 @@ class TestSharedLedgerSeam:
                 now=_BULK_NOW,
             )
         assert captured and captured[-1] is first
+
+
+class TestTodayCompletenessGateArming:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001: both dashboard spot arm sites resolve the
+    env kill switch ONCE per pull and thread the flag — live pull only (a dry-run
+    threads ``False``, the ``detect_completeness_gaps`` gating pattern). The bulk
+    ``pull_all_spot`` phase — which never armed ``detect_completeness_gaps`` — IS
+    wired (the gate rides its OWN parameter)."""
+
+    def test_pull_all_spot_arms_today_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert captured
+        assert all(flag is True for flag in captured)
+
+    def test_pull_all_spot_dry_run_threads_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        # Junk env MUST NOT crash a dry-run: the resolve is short-circuited away
+        # (dry-run ⇒ False without touching the env).
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert captured
+        assert all(flag is False for flag in captured)
+
+    def test_pull_candles_arms_today_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest", _spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert captured
+        assert all(flag is True for flag in captured)
+
+    def test_pull_candles_kill_switch_off_threads_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "0")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest", _spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert captured
+        assert all(flag is False for flag in captured)
