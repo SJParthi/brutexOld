@@ -601,6 +601,205 @@ class TestDualExchangeStaleWarns:
         ]
 
 
+# ── month-edge: prior-UTC-month-filed bucket labels (REFUTER ROUND 2 B2) ──
+
+#: Monday, a real NSE trading day, the 1st of an IST month — the ONLY day
+#: shape on which a sub-05:30-IST bucket label crosses the UTC month FILE
+#: boundary (DEC-MOVERS-STORED-FRESHNESS-001 round-2 fold).
+_EDGE_DAY = date(2024, 7, 1)
+
+
+def _seed_month_edge_lake(lake: Path) -> ParquetWriter:
+    """The refuter-B2 month-edge producer chain, production writers only.
+
+    Base 1m for IST day 2024-07-01 (1st of the month) holds a stray 09:00
+    pre-open bar (the acknowledged legacy stored shape —
+    DEC-DAILY-OPEN-PREDICATE-ALIGN-001's "stray pre-09:15 first bar") plus
+    normal 09:15..09:19 session bars; the REAL prebuild materialises the
+    derived TFs. The 09:00 bar's 4hour bucket label is 05:15 IST — the SAME
+    IST day but 23:45 UTC of June 30 — so the prebuild itself files that
+    bucket under ``4hour/2024/06.parquet`` (the PRIOR UTC month's file).
+    """
+    writer = ParquetWriter(lake_root=lake)
+    bars = [_bar(day=_EDGE_DAY, hour=9, minute=0, close="20000", volume=7)] + [
+        _bar(day=_EDGE_DAY, hour=9, minute=15 + i, close=str(20010 + i * 10), volume=100 + i)
+        for i in range(5)
+    ]
+    writer.write(exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=bars)
+    result = materialize_lake_timeframes(
+        lake_root=lake, exchange="NSE", segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT
+    )
+    assert result.total_bars > 0  # the prebuild really wrote the stored TFs.
+    # The producer shape proof: the 4hour partition spans BOTH month files.
+    fourh = lake / "bars" / "NSE" / "INDEX" / "NIFTY" / "4hour"
+    files = sorted(p.relative_to(fourh).as_posix() for p in fourh.rglob("*.parquet"))
+    assert files == ["2024/06.parquet", "2024/07.parquet"]
+    return writer
+
+
+class TestMonthEdgeBucketRouting:
+    def test_fresh_month_edge_lake_serves_stored_complete_no_warn(self, tmp_path: Path) -> None:
+        """attack_b2_monthedge port: a GENUINELY FRESH month-edge lake serves stored.
+
+        Fails pre-fix TWICE over: (a) `read_stored_day_frame` (month-bounded
+        only) missed the prior-month-filed 05:15-IST bucket — 1 row instead of
+        2 (the pre-existing silent-drop read-completeness bug: pre-guard, on
+        main, the bucket-MISSING frame was served silently); (b) the
+        verify-equality guard then read the just-prebuilt partition as STALE —
+        a permanent false-stale WARN per build that re-running the prebuild
+        could never heal (the prebuild itself produces the routing).
+        """
+        from brutex.dashboard.movers_snapshot import _read_intraday_bars, _read_session_bars
+
+        _seed_month_edge_lake(tmp_path)
+        stored = read_stored_day_frame(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="4hour",
+            day=_EDGE_DAY,
+        )
+        assert stored is not None
+        # BOTH buckets — the June-filed 05:15-IST label (23:45 UTC Jun 30) AND
+        # the 09:15 session bucket (03:45 UTC Jul 1) — sorted, day-scoped.
+        assert stored.get_column("ts_utc").to_list() == [
+            datetime(2024, 6, 30, 23, 45, tzinfo=UTC),
+            datetime(2024, 7, 1, 3, 45, tzinfo=UTC),
+        ]
+        bars, from_stored = _read_intraday_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="4hour",
+            day=_EDGE_DAY,
+            minutes=240,
+            cutoff_min=None,
+        )
+        reference = _read_session_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            day=_EDGE_DAY,
+            minutes=240,
+            cutoff_min=None,
+        )
+        assert from_stored is True
+        assert bars == reference
+        assert len(bars) == 2  # the complete frame — never the bucket-dropped 1.
+        # Full compute path: stored provenance, snapshots == the resample
+        # reference, ZERO stale warns on a genuinely fresh lake.
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="4hour", date=_EDGE_DAY.isoformat(), time=""
+            )
+            ref_cands = compute_spot_candidates(
+                lake_root=tmp_path,
+                interval="4hour",
+                date=_EDGE_DAY.isoformat(),
+                time="",
+                prefer_resample=True,
+            )
+        assert (cands.stored_reads, cands.resampled_reads) == (1, 0)
+        assert cands.snapshots == ref_cands.snapshots
+        assert [e for e in logs if e["event"].startswith("movers.stored_stale")] == []
+
+    def test_stale_prior_month_filed_bucket_still_caught(self, tmp_path: Path) -> None:
+        """A genuinely STALE prior-month-filed bucket still reads stale post-widening.
+
+        The 09:00 stray bar is healed AWAY from the 1-minute base (production
+        ``heal_partition``) with NO re-prebuild: the stored 4hour partition
+        still holds the June-filed 05:15-IST bucket the base no longer
+        supports. The widened read SURFACES that bucket, the equality guard
+        reads STALE, and the fallback serves the base-derived truth + ONE warn
+        — the widening must never blind the guard to prior-month-filed
+        staleness (pre-widening this shape compared two bucket-blind frames
+        and served stored silently with no signal of the orphaned bucket).
+        """
+        writer = _seed_month_edge_lake(tmp_path)
+        stray_ts = datetime(2024, 7, 1, 3, 30, tzinfo=UTC)  # 09:00 IST.
+        dest = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "07.parquet"
+        result = writer.heal_partition(
+            dest, remove_timestamps={stray_ts}, quarantine_to=tmp_path / ".quarantine" / "edge"
+        )
+        assert result.dropped_removed == 1
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="4hour", date=_EDGE_DAY.isoformat(), time=""
+            )
+            ref_cands = compute_spot_candidates(
+                lake_root=tmp_path,
+                interval="4hour",
+                date=_EDGE_DAY.isoformat(),
+                time="",
+                prefer_resample=True,
+            )
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 1)
+        assert cands.snapshots == ref_cands.snapshots  # base-derived truth served.
+        stale_events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert len(stale_events) == 1
+        assert (stale_events[0]["exchange"], stale_events[0]["symbol"]) == ("NSE", "NIFTY")
+
+    def test_prior_month_probe_fires_only_on_qualifying_coordinates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The probe condition, spy-pinned: healthy-path read-count UNCHANGED.
+
+        ``read_day_month_frame`` is spied in the ``movers_stored_read``
+        namespace (the probe's OWN reference — the month read inside
+        ``lake_day_glob.read_day_intraday_frame`` uses lake_day_glob's and is
+        deliberately NOT counted): a non-1st day / the 1minute interval / a
+        session-exempt symbol each fire ZERO probes; a 1st-of-month derived-TF
+        session-filtered read fires EXACTLY ONE, aimed at the prior month —
+        and degrades cleanly when the prior month's file is absent.
+        """
+        import brutex.dashboard.movers_stored_read as msr
+
+        _seed_month_edge_lake(tmp_path)
+        calls: list[date] = []
+        real = msr.read_day_month_frame
+
+        def spy(base: Path, day: date) -> object:
+            calls.append(day)
+            return real(base, day)
+
+        monkeypatch.setattr(msr, "read_day_month_frame", spy)
+
+        def read(*, interval: str, day: date, symbol: str = "NIFTY") -> object:
+            return read_stored_day_frame(
+                tmp_path,
+                exchange="NSE",
+                segment="INDEX",
+                symbol=symbol,
+                interval=interval,
+                day=day,
+            )
+
+        # (a) non-1st day, derived TF — ZERO probes (the healthy path).
+        assert read(interval="5minute", day=_DAY) is None  # no June session seeded.
+        assert calls == []
+        # (b) 1st of month, 1minute — ZERO probes (bar times never pre-05:30).
+        frame_1m = read(interval="1minute", day=_EDGE_DAY)
+        assert frame_1m is not None and frame_1m.height == 6
+        assert calls == []
+        # (c) 1st of month, derived TF, session-EXEMPT — ZERO probes (the
+        # whole-partition read already spans every month file).
+        assert read(interval="4hour", day=_EDGE_DAY, symbol="GIFTNIFTY") is None
+        assert calls == []
+        # (d) 1st of month, derived TF, session-filtered — EXACTLY ONE probe,
+        # aimed at the prior month (2024-06-30 → 06.parquet), rows served.
+        frame_4h = read(interval="4hour", day=_EDGE_DAY)
+        assert frame_4h is not None and frame_4h.height == 2
+        assert calls == [date(2024, 6, 30)]
+        # (e) qualifying read whose PRIOR month file is ABSENT (2minute labels
+        # never left July here) — one more probe, clean month-only serve.
+        frame_2m = read(interval="2minute", day=_EDGE_DAY)
+        assert frame_2m is not None and frame_2m.height > 0
+        assert calls == [date(2024, 6, 30), date(2024, 6, 30)]
+
+
 # ── read_stored_day_frame edges ───────────────────────────────────────────
 
 

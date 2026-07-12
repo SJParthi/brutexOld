@@ -1051,10 +1051,12 @@ def _stored_day_is_fresh(
     blind to any stored/base divergence NOT at the day tail — the #1031
     interior-hole-heal producer chain (holey 1m pull → prebuild → hole re-pull
     with no re-prebuild) served a stale volume/LTP silently. Equality SUBSUMES it:
-    ANY divergence — interior hole, truncated first bucket, tail growth, base
-    TRUNCATION (the review R7-M2 reverse-staleness class, now caught too), value
-    drift, a planted future bucket — reads STALE and the caller falls back to the
-    byte-equality reference resample.
+    ANY divergence — interior hole, truncated first bucket, tail growth, PARTIAL
+    base truncation (the review R7-M2 reverse-staleness class — caught whenever
+    at least one base row survives; TOTAL day truncation leaves NO base rows and
+    rides the disclosed base-absent fail-open below, serving stored UNVERIFIED —
+    REFUTER ROUND 2 N2 wording), value drift, a planted future bucket — reads
+    STALE and the caller falls back to the byte-equality reference resample.
 
     ``base_day is None`` (no 1-minute evidence) ⇒ ``True`` — the fail-open
     serve-stored arm: falling back would return ``[]`` and DROP the row, strictly
@@ -1124,7 +1126,10 @@ def warn_stored_stale_fallback(
     (``cap=`` + ``snapshot_day=``), later ones only increment ``state.suppressed``.
     WARNING level (the noncontiguous "data is suspect" tier): a stale partition is
     an operator-actionable lake state — the served row itself is correct
-    post-fallback; the prebuild remains the heal.
+    post-fallback; for a genuinely STALE partition the prebuild remains the heal.
+    A session-EXEMPT symbol's prior-IST-date label artifact (see
+    :func:`_read_intraday_bars` — REFUTER ROUND 2 N1) is NOT healable by a
+    re-prebuild and re-warns once per build, bounded by this dedupe + cap.
     """
     key = (exchange, symbol, interval)
     if key in state.seen:
@@ -1236,14 +1241,28 @@ def _read_intraday_bars(
     build via *stale_warn_state* (``None`` — the default for direct/test callers —
     falls back silently). Guard cost per stored-served TF>1minute candidate: the
     one month-bounded uncut 1-minute day read + an in-memory ≤session-size
-    resample + a vectorized frame compare. Honest disclosure: a session-EXEMPT
-    symbol (GIFT ~21h) whose pre-01:15-IST bars misfile a coarse-TF (≥2hour)
-    bucket onto the prior IST date — a PRE-EXISTING labeling artifact of the
-    fixed 09:15-anchored grid — now reads stale and serves the base-derived
-    resample + one WARN instead of the stored day slice (the honest direction:
-    the fallback IS what a never-prebuilt lake serves); an NSE/BSE
-    session-filtered spot symbol can never hit it (no bars before 01:15 IST —
-    the earliest label for a stray 09:00 pre-open bar is 05:15, same IST day).
+    resample + a vectorized frame compare. Honest disclosure (REFUTER ROUND 2
+    N1 — the round-1 "≥2hour" set was an executed UNDERCOUNT): a session-EXEMPT
+    symbol (GIFT ~21h) whose early bars misfile a bucket onto the prior IST
+    date reads stale and serves the base-derived resample + one WARN per build
+    instead of the stored day slice (the honest direction: the fallback IS what
+    a never-prebuilt lake serves; NOT healable by a re-prebuild — the label
+    sits on the prior IST date, outside this day read on BOTH sides). The
+    misfiling law: a bar at IST minute-of-day mm < (555 mod minutes) labels the
+    prior IST date, so any TF with 555 % minutes ≠ 0 is exposed — executed:
+    pre-00:15 bars already misfile 10minute/30minute/1hour buckets, pre-01:15
+    reaches 2hour/4hour (a PRE-EXISTING labeling artifact of the fixed
+    09:15-anchored grid; NSE/BSE session-filtered bars are all ≥ ~09:00 IST =
+    mm 540 ≥ every 555-mod rung, so they never misfile the IST date). The
+    NSE/BSE month-EDGE shape (REFUTER ROUND 2 defect B2) is separate and now
+    READ-COMPLETE: a stray 09:00 pre-open bar's 4hour label 05:15 IST shares
+    the IST date but maps to the prior UTC day, so on the 1st of an IST month
+    the prebuild files that bucket under the PRIOR UTC month's parquet —
+    :func:`~brutex.dashboard.movers_stored_read.read_stored_day_frame` probes
+    the prior month's file exactly then, so a genuinely fresh month-edge lake
+    serves its COMPLETE stored frame with zero warns (pre-fix: a permanent
+    false-stale WARN the prebuild could never heal, and — pre-guard, on main —
+    a silently bucket-dropped serve).
     """
     if (
         not prefer_resample
