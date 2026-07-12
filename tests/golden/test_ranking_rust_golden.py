@@ -12,10 +12,13 @@ ranked-JSON literal ``0.7927106202284727`` — MUST be reproduced with
 * The ENGAGEMENT assertions are two-arm (the design's host-probe law): the
   (a)-class families (gates, order) are pow-free and must engage with zero
   divergence everywhere; the (b*) composite family must engage with zero
-  divergence on a pow-identity host (the M4-Pro merge-precondition arm —
-  ``tests.fakes.pow_identity``) and may instead autorevert LOUDLY on a
-  non-identity host (measured live on this repo's glibc build container) —
-  never silently, never with a wire delta.
+  divergence on a pow-identity host (``tests.fakes.pow_identity`` — NO
+  measured host currently qualifies: the production M4-Pro itself measured
+  non-identity, verify-m4pro run 29194011032, coordinator-ruled 2026-07-12,
+  MIGRATION.md #1731 amendment) and may instead autorevert LOUDLY on a
+  non-identity host (this repo's glibc build container AND the M4-Pro's
+  Apple libm, both measured) — never silently, never with a wire delta; the
+  oracle-served posture is the ruled PERMANENT one.
 """
 
 from __future__ import annotations
@@ -78,16 +81,21 @@ def test_flag_on_reproduces_the_byte_frozen_overfit_golden(
 def test_flag_on_composite_engages_cleanly_on_a_pow_identity_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """THE strong (b*) leg — the PR-1 merge precondition arm: on a host
-    whose libm satisfies the modeled identities (the production M4-Pro
-    probe target) the composite family engages with ZERO divergence.
-    Skipped loudly elsewhere (the host-probe test carries the ERROR-level
-    visibility for that arm)."""
+    """THE strong (b*) leg — identity-host-only arm: on a host whose libm
+    satisfies the modeled identities the composite family engages with ZERO
+    divergence. The production M4-Pro itself measured NON-identity
+    (verify-m4pro run 29194011032, coordinator-ruled 2026-07-12), so this
+    leg SKIPS there by design — oracle-served is the ruled permanent
+    posture (MIGRATION.md #1731 amendment). Skipped loudly elsewhere too
+    (the host-probe test carries the ERROR-level visibility)."""
     if not pow_identity_holds():
         pytest.skip(
             "non-identity host libm (see test_pow_host_probe) — the always-on "
-            "differential serves oracle bits here; the zero-divergence leg is "
-            "adjudicated on the M4-Pro."
+            "differential serves oracle bits here; every measured host so far "
+            "(glibc build container AND the production M4-Pro, run "
+            "29194011032) is non-identity, so oracle-served is the permanent "
+            "posture (DEC-RANKING-POWF-ONHOST-001 is the deferred on-host "
+            "powf follow-up)."
         )
     monkeypatch.setenv(RANKING_RUST_ENV, "1")
     with capture_logs() as logs:

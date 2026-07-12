@@ -100,9 +100,10 @@ def _assert_reverts_are_expected_or_loud_b_star(
     with genuine column variance rides the ``_zscores`` pow sites, so its
     (b*) bit-agreement is host-dependent by design; ship-the-oracle keeps the
     wire byte-identical either way, pinned by each caller's OFF-arm equality).
-    On an identity host (the M4-Pro merge-precondition target) any unexpected
-    autorevert FAILS — the pre-fix strength is preserved where it was ever
-    honestly claimable.
+    On an identity host (none measured so far — the production M4-Pro itself
+    measured non-identity, verify-m4pro run 29194011032, coordinator-ruled
+    2026-07-12) any unexpected autorevert FAILS — the pre-fix strength is
+    preserved where it was ever honestly claimable.
     """
     reverted = [e for e in logs if e["event"] == "rust_parity.autoreverted"]
     deterministic = [e["family"] for e in reverted if e["family"] not in _B_STAR_FAMILIES]

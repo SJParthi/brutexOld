@@ -19,9 +19,18 @@ container: the identity FAILS — 61 ``pow(x,2)`` + 65 ``pow(x,0.5)``
 bit-mismatches over the 80,015 samples (an earlier, larger exploratory
 200k-sample sweep that first caught the divergence is superseded by the
 shipped probe's own figures — round-4 review honesty fix). On such hosts
-the (b*) families serve oracle bits per call and MAY latch; on identity
-hosts (the production M4-Pro's macOS libm is the merge-precondition probe
-target) the kernels are expected bit-identical.
+the (b*) families serve oracle bits per call and MAY latch; on an identity
+host the kernels are expected bit-identical.
+
+MEASURED 2026-07-12 (coordinator-ruled amendment — MIGRATION.md #1731): the
+production M4-Pro is NOT a pow-identity host either. verify-m4pro actions
+run 29194011032 measured its Apple libm at 91 ``pow(x,2)`` + 123
+``pow(x,0.5)`` bit-mismatches over the same 80,015-sample probe, so the
+(b*) rows serve the Python oracle per call on EVERY measured host including
+the reference hardware; the raw-kernel-bit-identity leg is documented as
+not achievable there (the on-host ``powf`` transliteration alternative is
+the deferred named follow-up DEC-RANKING-POWF-ONHOST-001 — no ledger entry
+minted yet).
 """
 
 from __future__ import annotations

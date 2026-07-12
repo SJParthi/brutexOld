@@ -142,10 +142,13 @@ jobs:
           mypy --strict --platform linux brutex
           pyright brutex
 
-      # This step is the M4-Pro pow-identity evidence for the (b*) ranking rows
-      # (DEC-RANKING-RUST-001); on an identity host these hard-assert, on a
-      # non-identity host they skip loudly.
-      - name: "Pow-identity host probe (merge-evidence, PR #1478 precondition)"
+      # This step is the M4-Pro pow-identity host census for the (b*) ranking
+      # rows (DEC-RANKING-RUST-001, MIGRATION.md #1731 amendment): run
+      # 29194011032 MEASURED this host non-identity (91+123/80,015,
+      # coordinator-ruled 2026-07-12), so the strong legs skip loudly here by
+      # design and the (b*) rows serve the Python oracle per call — this step
+      # keeps the census evidence visible on every run.
+      - name: "Pow-identity host probe (host census — measured non-identity, run 29194011032)"
         run: |
           . .venv/bin/activate
           pytest tests/unit/test_pow_host_probe.py tests/golden/test_ranking_rust_golden.py tests/golden/test_ranking_parity_corpus.py -v -rA -p no:cacheprovider

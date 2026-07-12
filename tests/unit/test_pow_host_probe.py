@@ -1,4 +1,4 @@
-"""The M4 pow-identity HOST PROBE (slice-4 PR-1 merge-gate test).
+"""The pow-identity HOST PROBE (slice-4 PR-1 host-adjudication test).
 
 Adjudicates the two MODELED identities the Rust ranking kernels rest on —
 ``x ** 2 == x * x`` and ``x ** 0.5 == math.sqrt(x)`` (CPython routes both
@@ -8,16 +8,22 @@ deterministic ``x * x`` / ``f64::sqrt``) — over the deterministic
 
 The two-arm law (the slice-4 design §3.4):
 
-* **Identity host** (the production M4-Pro is the explicit merge
-  precondition target): the probe asserts HARD — zero mismatches.
-* **Non-identity host** (e.g. glibc, where libm ``pow`` is ~1-ulp accurate,
-  NOT correctly rounded — measured live on this repo's build container):
+* **Identity host**: the probe asserts HARD — zero mismatches. NO measured
+  host currently qualifies: the production M4-Pro itself MEASURED
+  non-identity (91 + 123 mismatches per 80,015 samples, verify-m4pro
+  actions run 29194011032, coordinator-ruled 2026-07-12 — the MIGRATION.md
+  #1731 amendment).
+* **Non-identity host** (glibc — measured live on this repo's build
+  container — AND the production M4-Pro's Apple libm, per the run above):
   the probe SKIPS with the mismatch counts in the skip reason after
   emitting one ERROR-level structlog event — loud, never a silent
   assumption, and never a red gate on a host where the runtime is already
   protected by the ALWAYS-ON per-call differential (ship-the-oracle +
   autorevert; :mod:`brutex.engine.rust_parity_core`). Correctness is
-  intact there; only the one-language-consistency payoff is unrealized.
+  intact there; only the one-language-consistency payoff is unrealized —
+  the ruled PERMANENT posture: the (b*) rows serve the Python oracle per
+  call on every host, and the on-host ``powf`` transliteration alternative
+  is the deferred named follow-up DEC-RANKING-POWF-ONHOST-001.
 """
 
 from __future__ import annotations
@@ -62,8 +68,10 @@ def test_pow_identity_probe_two_arm_verdict() -> None:
         f"mismatches over {verdict.samples} samples) — the (b*) ranking rows "
         "serve the Python oracle per call on this host (always-on "
         "differential); the strong bit-identity legs are gated off. The "
-        "PR-1 merge precondition is this probe GREEN on the production "
-        "M4-Pro."
+        "production M4-Pro itself measured non-identity (run 29194011032, "
+        "coordinator-ruled 2026-07-12) — oracle-served is the permanent "
+        "posture; on-host powf is the deferred DEC-RANKING-POWF-ONHOST-001 "
+        "follow-up."
     )
 
 
@@ -121,8 +129,9 @@ def test_odd_exponent_sqrt_identity_gated_on_identity_hosts() -> None:
     ``sqrt(2**odd)`` is irrational, so ``x ** 0.5 == math.sqrt(x)`` on
     these points is exactly the modeled (b*) identity — host-dependent by
     the two-arm law, asserted HARD only where the probe says the identity
-    holds (the production M4-Pro merge-precondition target) and skipped
-    LOUDLY elsewhere, mirroring the randomized legs above.
+    holds (NO measured host so far: the glibc build container AND the
+    production M4-Pro both measured non-identity — run 29194011032) and
+    skipped LOUDLY elsewhere, mirroring the randomized legs above.
     """
     if not pow_identity_holds():
         pytest.skip(

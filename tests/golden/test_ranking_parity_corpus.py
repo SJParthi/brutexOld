@@ -244,9 +244,10 @@ def test_direct_kernel_census_can_observe_a_kernel_divergence(
     stand-ins that are agree/disagree BY CONSTRUCTION on every host: one
     returning the Python oracle's exact bits (census must read ``1``) and
     its last-ULP perturbation (census must flip to ``0``). The REAL
-    kernel's agreement stays a hard assertion on identity hosts (the
-    M4-Pro merge-precondition probe target), per the pow-probe gating
-    idiom of the golden legs.
+    kernel's agreement stays a hard assertion on identity hosts — NO
+    measured host currently qualifies (the production M4-Pro measured
+    non-identity, verify-m4pro run 29194011032, coordinator-ruled
+    2026-07-12) — per the pow-probe gating idiom of the golden legs.
     """
     candidates = [
         (1, make_result_metrics(sharpe_ratio=1.0)),
@@ -254,7 +255,8 @@ def test_direct_kernel_census_can_observe_a_kernel_divergence(
         (3, make_result_metrics(sharpe_ratio=3.0)),
     ]
     if pow_identity_holds():
-        # Identity host (the M4-Pro merge target): the REAL kernel must
+        # Identity host (none measured so far — the M4-Pro measured
+        # non-identity, run 29194011032): the REAL kernel must
         # bit-agree — hard, no coincidence involved.
         assert _direct_kernel_census(candidates, None) == {"composite_kernel_bit_agree": 1}
 

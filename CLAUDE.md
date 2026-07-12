@@ -41,10 +41,14 @@ row, or a redo comparison, on ANY host, on ANY call). TWO live-caught
 corrections: CPython ≥ 3.12's NEUMAIER-compensated builtin `sum()`
 (gh-100425) transliterated token-for-token as `py_float_sum` (the
 naive-fold transcription was one ulp off on all-equal columns — every z
-flipped ±1.0), and the glibc pow-identity failure ABSORBED (61 + 65
-mismatches per 80,015 samples MEASURED on the build container's libm; the
-host-probe GREEN on the production M4-Pro is the explicit MERGE
-precondition for the ON-arm golden leg, coordinator-tracked). The K2 seam
+flipped ±1.0), and the pow-identity failure ABSORBED (61 + 65 mismatches per
+80,015 samples MEASURED on the build container's glibc; the production
+M4-Pro then MEASURED non-identity TOO — 91 + 123 mismatches per 80,015,
+verify-m4pro run 29194011032, coordinator-ruled 2026-07-12 — so the (b\*)
+rows serve the Python oracle per call on ALL hosts, the
+raw-kernel-bit-identity leg is NOT achievable on the reference hardware,
+and the on-host powf transliteration is the DEFERRED named follow-up
+DEC-RANKING-POWF-ONHOST-001). The K2 seam
 HONORED — ZERO `brutex/metrics/` edits, nothing on the
 `_fold_trades → TradeFolds → combine_metrics_from_folds →
 _compute_metrics_impl` chain; `metrics.rs` + `rust_metrics.py`
@@ -2371,9 +2375,17 @@ hostile-review pass._
   ±1.0, a 0.1-scale composite shift); (2) the glibc pow-identity failure ABSORBED — the build container's libm
   MEASURED 61 `pow(x,2)==x*x` + 65 `pow(x,0.5)==sqrt(x)` violations per 80,015 samples
   (`tests/unit/test_pow_host_probe.py`; the shared verdict helper `tests/fakes/pow_identity.py` gates every strong
-  (b\*) leg), so the always-on differential serves oracle bits on such hosts by design — **the probe GREEN on the
-  production M4-Pro (macOS libm) is the explicit MERGE precondition for the ON-arm golden leg,
-  coordinator-tracked**. The K2 seam HONORED: ZERO `brutex/metrics/` edits — nothing on or near the
+  (b\*) leg), so the always-on differential serves oracle bits on such hosts by design — **and the production M4-Pro
+  MEASUREMENT then REFUTED the identity assumption too (coordinator-ruled amendment 2026-07-12, MIGRATION.md #1731):
+  verify-m4pro actions run 29194011032 on the M4-Pro's Apple libm measured 91 `pow(x,2)` + 123 `pow(x,0.5)`
+  bit-mismatches per 80,015 samples — NOT a pow-identity host; the three strong (b\*) legs SKIPPED by design on that
+  run while the parity corpus + the unconditional wire law + ON==OFF + the frozen-bytes golden ALL PASSED there
+  (25,319 passed). PERMANENT POSTURE (supersedes the prior probe-GREEN merge-precondition clause): the (b\*) rows
+  serve the Python oracle per call on ALL hosts (measured 1.29× per-finalist differential cost); stored/ranked
+  values stay bit-identical to Python by construction; the raw-kernel-bit-identity leg is NOT achievable on the
+  reference hardware — documented, never claimed; the on-host powf transliteration alternative is DEFERRED as the
+  named follow-up DEC-RANKING-POWF-ONHOST-001 (a deliberate future decision — no ledger entry minted)**. The K2 seam
+  HONORED: ZERO `brutex/metrics/` edits — nothing on or near the
   `_fold_trades → TradeFolds → combine_metrics_from_folds → _compute_metrics_impl` chain; `metrics.rs` +
   `rust_metrics.py` byte-untouched (numeric semantics FROZEN until K2 merges). GATES (real numbers): flag-ON golden
   legs reproduce the byte-frozen overfit leaderboard + the ranked-JSON `0.7927106202284727` + DSR
@@ -5971,8 +5983,11 @@ hostile-review pass._
   surfaces — classes (a)/(b)/(b\*) with the ALWAYS-ON ship-the-oracle
   differential + per-family autorevert on the NEW COMMON
   `brutex/engine/rust_parity_core.py`; two live-caught corrections
-  (CPython≥3.12 Neumaier `py_float_sum`; the glibc pow-identity failure
-  absorbed — the M4-Pro host-probe green is the merge precondition); K2 seam
+  (CPython≥3.12 Neumaier `py_float_sum`; the pow-identity failure absorbed —
+  glibc AND the production M4-Pro BOTH measured non-identity (verify-m4pro
+  run 29194011032, coordinator-ruled 2026-07-12), so the (b\*) rows serve
+  the Python oracle per call on every host; on-host powf = the deferred
+  follow-up DEC-RANKING-POWF-ONHOST-001); K2 seam
   honored (zero `brutex/metrics/` edits); payoff honestly UNKNOWN
   (consistency, not speed); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line — see §1 + MIGRATION.md #1731 for the
