@@ -31,9 +31,13 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import structlog.testing
+
+if TYPE_CHECKING:
+    import polars as pl
 
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
@@ -761,13 +765,13 @@ class TestMonthEdgeBucketRouting:
         calls: list[date] = []
         real = msr.read_day_month_frame
 
-        def spy(base: Path, day: date) -> object:
+        def spy(base: Path, day: date) -> pl.DataFrame | None:
             calls.append(day)
             return real(base, day)
 
         monkeypatch.setattr(msr, "read_day_month_frame", spy)
 
-        def read(*, interval: str, day: date, symbol: str = "NIFTY") -> object:
+        def read(*, interval: str, day: date, symbol: str = "NIFTY") -> pl.DataFrame | None:
             return read_stored_day_frame(
                 tmp_path,
                 exchange="NSE",
