@@ -245,22 +245,29 @@ def mint_access_token(
         totp = totp_minter(creds.totp_secret)
         secrets = (creds.client_id, creds.pin, creds.totp_secret, totp)
         url = _build_mint_url(creds, totp)
+        # The raw transport object is classified INSIDE the handler but the typed error is
+        # RAISED OUTSIDE it — so the raw urllib object (whose repr embeds the secret-bearing
+        # mint URL) is never retained on the typed error's ``__context__`` either (not just
+        # ``__cause__``). Secret safety is paramount: the raw object never escapes the module.
+        typed_error: DhanAuthError | None = None
+        payload: Mapping[str, Any] = {}
         try:
             payload = active_transport.request_json(
                 "POST", url, headers={}, timeout_s=DHAN_AUTH_HTTP_TIMEOUT_S
             )
-        except Exception as exc:  # pylint: disable=broad-exception-caught — classified + scrubbed below; raw never escapes
-            typed = _classify_transport_error(exc, secrets)
-            if not is_retryable_auth(typed) or attempt == attempts - 1:
+        except Exception as exc:  # pylint: disable=broad-exception-caught — classified + scrubbed; raw never escapes
+            typed_error = _classify_transport_error(exc, secrets)
+        if typed_error is not None:
+            if not is_retryable_auth(typed_error) or attempt == attempts - 1:
                 _LOG.error(
                     "dhan.token.mint_failed",
                     attempt=attempt + 1,
-                    retryable=is_retryable_auth(typed),
-                    error_type=type(typed).__name__,
+                    retryable=is_retryable_auth(typed_error),
+                    error_type=type(typed_error).__name__,
                 )
-                raise typed from None
+                raise typed_error from None
             _LOG.warning(
-                "dhan.token.mint_retry", attempt=attempt + 1, error_type=type(typed).__name__
+                "dhan.token.mint_retry", attempt=attempt + 1, error_type=type(typed_error).__name__
             )
             sleeper(_issuance_backoff(attempt))
             continue
@@ -298,14 +305,20 @@ def renew_access_token(
     active_transport = transport if transport is not None else _real_transport()
     url = f"{DHAN_API_BASE}{DHAN_RENEW_PATH}"
     headers = {DHAN_TOKEN_HEADER: token, DHAN_CLIENT_ID_HEADER: client_id}
+    # Classify inside the handler, RAISE outside it — the raw transport object is never
+    # retained on ``__context__`` (secret hygiene, see ``mint_access_token``).
+    renew_error: DhanTokenRenewError | None = None
+    payload: Mapping[str, Any] = {}
     try:
         payload = active_transport.request_json(
             "GET", url, headers=headers, timeout_s=DHAN_AUTH_HTTP_TIMEOUT_S
         )
-    except Exception as exc:  # pylint: disable=broad-exception-caught — scrubbed below; raw never escapes
-        raise DhanTokenRenewError(
+    except Exception as exc:  # pylint: disable=broad-exception-caught — scrubbed; raw never escapes
+        renew_error = DhanTokenRenewError(
             f"Dhan RenewToken failed: {exc}", secrets=(token, client_id)
-        ) from None
+        )
+    if renew_error is not None:
+        raise renew_error from None
     new_token = _extract_token(payload)
     if new_token is None:
         raise DhanTokenRenewError(
