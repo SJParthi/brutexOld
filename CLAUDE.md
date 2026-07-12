@@ -2351,7 +2351,12 @@ hostile-review pass._
   151/66 size figure dropped + negative-pinned — per-fix record in MIGRATION.md #1738). REAL-DATA TWIN-RUN packaging
   (coordinator ruling 2026-07-11 — a MERGE GATE pending real-lake execution on the operator box):
   `scripts/ci/rust_enum_twin_run.sh` (lake-READ-ONLY, scratch roots, PASS/FAIL + hash manifests for the PR
-  body, refuses a pre-set flag, macOS bash-3.2-safe) + the `rust-enum-twin-run.yml` M4-Pro dispatch job;
+  body, refuses a pre-set flag, macOS bash-3.2-safe; REVIEW ROUND 2 fold — the PASS additionally requires
+  the ENGAGEMENT gate: each arm's output tees to a log and the ON arm must show `sweep_rust_enum.engaged`
+  with ZERO fallback/autorevert/refusal markers, so a stale-wheel full-fallback run or a shadow-caught
+  autoreverted kernel bug can never print a vacuous/masked byte-identity PASS — stub-CLI-pinned by
+  `TestTwinRunEngagementGate`; plus the "measured 0.257" → carried provenance reword in `rust_enum.py`,
+  source-pinned; per-fix record in MIGRATION.md #1738) + the `rust-enum-twin-run.yml` M4-Pro dispatch job;
   operator fallback: `bash scripts/ci/rust_enum_twin_run.sh <lake-root>`. MUTATION: enum_kernel 782 raw →
   204 after the exclude_re dropping ONLY the 578 provably-UNVIABLE whole-fn `-> PyResult` constructor
   guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the #1597
