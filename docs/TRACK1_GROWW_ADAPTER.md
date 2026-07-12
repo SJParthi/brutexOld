@@ -77,7 +77,7 @@ on 401 / GrowwAPIAuthenticationException → regenerate TOTP → refresh access_
 on 3rd consecutive auth failure → CRITICAL Telegram alert + halt fetcher
 ```
 
-Mirrors the prior-broker `auth.py:60` `REQUIRED_FILE_MODE = 0o600` pattern (file removed in DEC-VENDOR-PIVOT-001 wipe; see MIGRATION.md entry #247).
+Mirrors the prior-broker `brutex/adapters/groww/auth.py:60` `REQUIRED_FILE_MODE = 0o600` pattern (file removed in DEC-VENDOR-PIVOT-001 wipe; see MIGRATION.md entry #247).
 
 ---
 

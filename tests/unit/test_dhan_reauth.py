@@ -7,6 +7,7 @@ and ensure_token — all with fakes and a tmp advisory-lock path (no real home w
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -117,9 +118,13 @@ def _inject_totp(monkeypatch: pytest.MonkeyPatch) -> None:
 
     real_mint = auth_mod.mint_access_token
 
-    def _mint(creds, *, transport=None, clock=None):  # type: ignore[no-untyped-def]
+    def _mint(creds, *, transport=None, clock: Callable[[], datetime] | None = None):  # type: ignore[no-untyped-def]
         return real_mint(
-            creds, transport=transport, totp_minter=_totp, clock=clock, sleeper=lambda _s: None
+            creds,
+            transport=transport,
+            totp_minter=_totp,
+            clock=cast("Callable[[], datetime]", clock),
+            sleeper=lambda _s: None,
         )
 
     monkeypatch.setattr(reauth_mod, "mint_access_token", _mint)
