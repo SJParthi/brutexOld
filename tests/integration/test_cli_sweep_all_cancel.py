@@ -112,6 +112,25 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path, **overri
     return cli.cmd_sweep_all(**kwargs)
 
 
+def _durable_exit_status(results_root: Path) -> dict[str, Any]:
+    """Read the run's ONE durable ``runs/<run_id>/exit-status.json`` artifact.
+
+    Scoped-review round 2 (teeth): the four ``core.set_exit_code(
+    EXIT_SWEEP_CANCELLED)`` stamps in ``cmd_sweep_all`` were mutant-survivable
+    — the process return code was asserted but the DURABLE artifact (what a
+    resume / the G5 progress enrichment reads) never was, so deleting a stamp
+    line left every test green while the artifact read a fabricated
+    ``exit_code: 0``.
+    """
+    import json
+
+    docs = sorted((results_root / "runs").glob("*/exit-status.json"))
+    assert len(docs) == 1, f"expected exactly one run artifact, got {docs}"
+    parsed = json.loads(docs[0].read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    return parsed
+
+
 def _poison_stage3(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail LOUDLY if the post-grid stage3 pass runs (the cancel must skip it)."""
     from brutex.engine import stage3_wire
@@ -186,6 +205,10 @@ def test_mid_run_cancel_exits_7_consumes_sidecar_and_skips_post_grid(
     assert not cancel_sidecar_path(results_root).exists()
     # The clean summary line never printed (the cancel returned before it).
     assert "sweep-all done" not in out
+    # DURABLE teeth (scoped-review round 2): the grid-verdict cancel stamp
+    # (`core.set_exit_code(EXIT_SWEEP_CANCELLED)`) must land in the run's
+    # exit-status artifact — deleting the stamp line leaves a fabricated 0.
+    assert _durable_exit_status(results_root)["exit_code"] == cli.EXIT_SWEEP_CANCELLED
 
 
 def test_parallel_run_publishes_the_progress_bridge(
@@ -284,6 +307,11 @@ def test_post_grid_cancel_skips_the_remaining_tail_passes(
     assert parsed["state"] == "cancelled"
     assert parsed["running"] is False
     assert "post-grid pass" in parsed["detail"] and "skipped" in parsed["detail"]
+    # DURABLE teeth (scoped-review round 2): the tail-cancel stamp
+    # (`core.set_exit_code(EXIT_SWEEP_CANCELLED)` at the options-sim boundary
+    # probe) must land in the run's exit-status artifact — deleting the stamp
+    # line leaves a fabricated 0 while the process still returns 7.
+    assert _durable_exit_status(results_root)["exit_code"] == cli.EXIT_SWEEP_CANCELLED
 
 
 def test_cancel_after_last_tail_probe_clears_orphan_sidecar_at_run_end(

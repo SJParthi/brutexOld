@@ -7111,6 +7111,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     ingest_audit=ingest_audit,
                     guards=guards,
                     workers=workers,
+                    # Cooperative cancel probe (DEC-JOB-COOPERATIVE-CANCEL-001):
+                    # consulted at the parent-side dispatch gate — a Stop drains
+                    # in-flight tuples then stops dispatching.
                     should_stop=_should_stop,
                     stall_seconds=stall_policy.timeout_seconds,
                     # core.on_progress SUBSUMES the DEC-JOB-COOPERATIVE-CANCEL-001
@@ -7168,10 +7171,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
                 )
-            # DEC-SWEEP-UNKILLABLE-CORE-001: fold the grid summary into the
-            # run-core manifest FIRST (pure count recording — honest for a
-            # cancelled grid too), before the cancel verdict below can
-            # early-return.
             core.grid_done(result)
             # ── COOPERATIVE cancel verdict (DEC-JOB-COOPERATIVE-CANCEL-001) ──
             # The grid stopped at a tuple boundary on the operator's request:
@@ -7185,9 +7184,13 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # re-cancelled by the stale request. Non-zero exit — a cron leg
             # never mistakes a cancelled sweep for a clean one; cancel takes
             # precedence over the tuples_failed exit (both stay visible in
-            # the summary + audit).
+            # the summary + audit). core.grid_done runs FIRST (the grid's
+            # manifest fold is real work that happened); the recorded exit
+            # code rides core.set_exit_code so the run-core's durable
+            # exit-status stamp carries the honest 7, not a fabricated 0.
             if result.cancelled:
                 clear_cancel(out_root)
+                core.set_exit_code(EXIT_SWEEP_CANCELLED)
                 print(
                     "[brutex] sweep-all: CANCELLED at operator request — post-grid "
                     "passes skipped (stage3/options-sim/cascade/results-depth); "
@@ -7277,6 +7280,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # (fix round 4 — the post-grid tail was previously cancel-blind while
         # the /api/v1/sweep/cancel route kept acking {"cancelling": true}.)
         if _tail_cancelled("options-sim"):
+            core.set_exit_code(EXIT_SWEEP_CANCELLED)
             return EXIT_SWEEP_CANCELLED
 
         # Automatic options-sim on the winners (DEC-OPTIONS-EXECUTOR-001), zero-touch +
@@ -7297,6 +7301,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
         # ── COOPERATIVE cancel probe: options-sim → cascade boundary (fix round 4) ──
         if _tail_cancelled("cascade"):
+            core.set_exit_code(EXIT_SWEEP_CANCELLED)
             return EXIT_SWEEP_CANCELLED
 
         # ── AUTOMATIC Stage-4 cascade on the top-K winners (DEC-CASCADE-WIRE-001) ──
@@ -7382,6 +7387,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
         # ── COOPERATIVE cancel probe: cascade → results-depth boundary (fix round 4) ──
         if _tail_cancelled("results-depth"):
+            core.set_exit_code(EXIT_SWEEP_CANCELLED)
             return EXIT_SWEEP_CANCELLED
 
         # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──

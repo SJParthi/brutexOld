@@ -1356,8 +1356,12 @@ class ParallelGridDriver:
         # slot on a clean run — never a leading evaluated=0 tick). The
         # dashboard's Stop button still shows before a heavy first tuple
         # completes (the #1608 arithmetic): on the production path the
-        # run-core's G4 reset-at-launch writes the `running=True` baseline to
-        # the progress bridge at core ENTER, before this driver runs.
+        # run-core's G4 launch baseline stamps BOTH `wall_time_utc` AND
+        # PROGRESS_WALL_TIME_KEY from ONE `_wall()` tick at core ENTER
+        # (9aabba52), so `progress_bridge_stale` reads the just-launched run
+        # LIVE before this driver runs — pinned by the real-payload
+        # regressions test_launch_baseline_is_fresh_bridge_evidence_not_stale
+        # + test_fresh_run_core_launch_baseline_reads_running.
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_START,
             subject=self._subject,
