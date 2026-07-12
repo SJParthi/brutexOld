@@ -497,6 +497,15 @@ function bxFunnelProvenance(source, runId) {
     }
   }
 
+  /* Toggle one CSS class on every [data-oc=key] node (the r1_cascade
+     red-badge tooth — DEC-RESULTS-CASCADE-VERDICT-JOIN-001). */
+  function setOcClass(key, cls, on) {
+    var nodes = document.querySelectorAll('[data-oc="' + key.replace(/[^a-z0-9_-]/gi, "") + '"]');
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].classList.toggle(cls, !!on);
+    }
+  }
+
   /* Signed rupee display for an integer-paisa amount — EXACT via the shared
      bx-explain.js integer converter (never float math); a non-safe-int
      reads the honest em-dash, never a fabricated figure. */
@@ -775,6 +784,15 @@ function bxFunnelProvenance(source, runId) {
     setOc("r1_sharpe", metricText(m.sharpe));
     setOc("r1_dsr", metricText(m.dsr));
     setOc("r1_cpcv", metricText(m.cpcv_pass_pct));
+    /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
+       status_text is SERVER-built (oneclick_view.cascade_status_text via the
+       artifact bridge; no verdict prose is ever composed here — a missing/
+       pre-change artifact reads the honest "—"), and a FAIL paints the red
+       .oc-cascade-fail badge so a cascade-FAILED rank-1 is never silently
+       green (flagged, never re-ranked/hidden). */
+    var casc = row.cascade && typeof row.cascade === "object" ? row.cascade : null;
+    setOc("r1_cascade", casc && casc.status_text ? String(casc.status_text) : "—");
+    setOcClass("r1_cascade", "oc-cascade-fail", !!(casc && casc.status === "fail"));
     setOc("r1_trades", metricText(m.trades));
     setOc("r1_vix_band", vixBandText(row.vix_band));
     /* Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown +

@@ -470,3 +470,151 @@ class TestEngineWriterThroughRoutes:
         assert payload["status"] == "corrupt"
         assert payload["row_count"] == 0
         assert "schema_version" in payload["detail"]
+
+
+class TestCascadeJoinWriterToWire:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the REAL cascade → join → writer →
+    display-reader → route chain (never a hand-forged cascade object)."""
+
+    @staticmethod
+    def _real_join(sweep_id: str) -> Any:
+        """A REAL join: run_stage4_cascade → wire dict → build_cascade_join."""
+        import numpy as np
+        import numpy.typing as npt
+        from brutex.engine.cascade_join import build_cascade_join
+        from brutex.engine.cascade_wire import CascadeWireReport, wire_report_to_dict
+        from brutex.metrics.cascade import CandidateInput, CascadeConfig, run_stage4_cascade
+
+        def _null_exit(_positions: npt.NDArray[np.intp]) -> float:
+            return 0.0
+
+        rng = np.random.default_rng(11)
+        lb_returns = tuple((rng.standard_normal(40) * 0.05 + 0.2).tolist())
+
+        def _cand(cid: str, *, total_trades: int) -> CandidateInput:
+            return CandidateInput(
+                candidate_id=cid,
+                sharpe_ratio=2.0,
+                sortino_ratio=2.4,
+                calmar_ratio=1.6,
+                profit_factor=1.8,
+                win_rate=0.55,
+                win_loss_ratio=2.5,
+                recovery_factor=2.1,
+                max_drawdown_pct=12.0,
+                max_consecutive_losses=4,
+                total_trades=total_trades,
+                training_sharpe=0.1,
+                training_max_drawdown=5.0,
+                skew=0.0,
+                kurtosis=3.0,
+                returns=tuple((np.random.default_rng(3).standard_normal(32) + 1.0).tolist()),
+                lockbox_returns=lb_returns,
+                lockbox_days=tuple(range(40)),
+                mc_n_bars=400,
+                mc_n_entries=20,
+                mc_evaluate=_null_exit,
+            )
+
+        config = CascadeConfig(
+            seed=7,
+            n_resamples=200,
+            dsr_min=0.0,
+            cpcv_min_pass_rate=0.0,
+            cpcv_n_groups=4,
+            cpcv_n_test_groups=2,
+            pbo_max=1.0,
+            pbo_n_splits=8,
+            wfo_min_pass_rate=0.0,
+            wfo_train_size=10,
+            wfo_test_size=6,
+            wfo_step=6,
+            lockbox_min_trades=4,
+            lockbox_default_window_days=5,
+            mc_n_permutations=100,
+        )
+        # run_id_of(1) FAILS the hard gates (10 trades); run_id_of(2) passes.
+        report = run_stage4_cascade(
+            [_cand(run_id_of(1), total_trades=10), _cand(run_id_of(2), total_trades=600)],
+            config,
+        )
+        wire = CascadeWireReport(sweep_id=sweep_id, groups=(("NIFTY", "1minute", report),))
+        return build_cascade_join(wire_report_to_dict(wire))
+
+    def test_rank1_fail_reaches_every_wire_surface(self, tmp_path: Path) -> None:
+        from brutex.dashboard import oneclick_artifacts as oc_mod
+
+        lake = tmp_path / "lake"
+        join = self._real_join(_GRID_RUN_ID)
+        candidates = [
+            make_candidate(
+                1,
+                fingerprint="fp01" + "0" * 60,
+                row_overrides={"max_drawdown_pct": 5.0},
+            ),
+            make_candidate(
+                2,
+                fingerprint="fp02" + "0" * 60,
+                row_overrides={"max_drawdown_pct": 15.0},
+            ),
+        ]
+        families = TwinFamilies(
+            family_by_run_id={run_id_of(n): run_id_of(n) for n in (1, 2)},
+            members_by_family={run_id_of(n): (run_id_of(n),) for n in (1, 2)},
+        )
+        artifact = build_top100(
+            candidates,
+            run_id=_GRID_RUN_ID,
+            preset="min_dd_first",
+            families=families,
+            counts=PoolCounts(
+                stores=1, excluded_no_aggs=0, zero_trade_excluded=0, parity_excluded=0
+            ),
+            data_snapshot_hashes=["a" * 64],
+            baselines={},
+            cascade_join=join,
+        )
+        _write_engine_artifact(lake, artifact)
+        # The display reader stamps the server-built status_text.
+        result = oc_mod.load_top100(lake / "sweep_runs" / _GRID_RUN_ID)
+        assert result.status == "ok", result.detail
+        assert result.cascade_join is not None
+        assert result.cascade_join["state"] == "joined"
+        rows = {row["run_id"]: row for row in result.rows}
+        # rank-1 (min dd) is the CASCADE-FAILED candidate — flagged, not hidden.
+        assert result.rows[0]["run_id"] == run_id_of(1)
+        fail = rows[run_id_of(1)]["cascade"]
+        assert fail["status"] == "fail"
+        assert fail["rejected_at"] == "hard_gates"
+        assert fail["status_text"] == "FAIL @ hard_gates"
+        ok = rows[run_id_of(2)]["cascade"]
+        assert ok["status"] in {"pass", "provisional_pass"}
+        assert ok["cpcv_pass_rate"] is not None
+        assert rows[run_id_of(2)]["metrics"]["cpcv_pass_pct"] == (ok["cpcv_pass_rate"] * 100.0)
+        # …and the route serves the same truth on the wire.
+        client = TestCascadeJoinWriterToWire._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok"
+        assert payload["cascade_join"]["state"] == "joined"
+        wire_rows = {row["run_id"]: row for row in payload["rows"]}
+        assert wire_rows[run_id_of(1)]["cascade"]["status_text"] == "FAIL @ hard_gates"
+        assert wire_rows[run_id_of(2)]["metrics"]["cpcv_pass_pct"] == (ok["cpcv_pass_rate"] * 100.0)
+
+    _client = staticmethod(TestEngineWriterThroughRoutes._client)
+
+    def test_frozen_pre_change_fixture_serves_dashes_on_the_wire(self, tmp_path: Path) -> None:
+        """The back-compat oracle end-to-end: a PRE-change artifact serves with
+        NO cascade keys (the clients render '—'), never corrupt."""
+        import shutil
+
+        fixtures = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
+        run_id = "grid" + "0" * 60
+        lake = tmp_path / "lake"
+        (lake / "sweep_runs").mkdir(parents=True)
+        shutil.copytree(fixtures / "top100_pre_cascade_v1" / run_id, lake / "sweep_runs" / run_id)
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={run_id}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        assert payload["cascade_join"] is None
+        assert all("cascade" not in row for row in payload["rows"])
+        assert all("cpcv_pass_pct" not in row["metrics"] for row in payload["rows"])
